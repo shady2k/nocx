@@ -69,6 +69,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shady2k/nocx/internal/emulator"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -1157,6 +1159,16 @@ var (
 	// cap decides how much of an output is worth keeping, this decides what a
 	// caller may make the store hold whatever any setting says.
 	ErrArtifactTooLarge = errors.New("content: artifact exceeds the per-artifact ceiling")
+	// ErrBlockRowsDiscontinuous is what an append answers when its FromRow
+	// is neither the next row nor a jump the delivery's own LostRows count
+	// accounts for — a replay from behind the cursor, or a hole nobody
+	// named. The caller had the rows; a silent gap in a command's output is
+	// the one wrong answer a restored block cannot show.
+	ErrBlockRowsDiscontinuous = errors.New("content: block rows: append does not continue the block")
+	// ErrBlockNotOpen is what an append answers when the entry carries no
+	// open block rows artifact: the keep decision refused it, or the block
+	// is already sealed. Either way there is nowhere for the rows to go.
+	ErrBlockNotOpen = errors.New("content: block rows: no open block on this entry")
 )
 
 // MaxArtifactBytes is that ceiling. Four times the per-command cap's default,
@@ -1200,6 +1212,72 @@ type CaptureOutput struct {
 	// starts.
 	Seq  int
 	Body []byte
+}
+
+// MediaBlockRows is the stored form of a streamed block's output
+// (nocx-2v80t.3.7): JSON Lines, one row of the screen frame's cell
+// vocabulary per line (contracts/ledger.blockRows.schema.json — the row
+// shape session.frame declares, self-describing per line so a stored block
+// survives without the frame it arrived in). It is a media type of its own
+// and not a convention over application/json because the database closes
+// this vocabulary, and a body a reader parses line by line is not a single
+// JSON value.
+const MediaBlockRows MediaType = "application/x-nocx-rows"
+
+// OpenBlockOutput opens the block a streamed command writes into, at the
+// command's authenticated start — BEFORE any row exists, because the whole
+// point is that a command whose output may not be kept never has a first
+// chunk to refuse. The three rules CaptureOutput applies at capture time
+// answer here, once per command: output retention off, a sensitive entry
+// and a critical environment all return ("", nil) and NOTHING is written —
+// not an empty artifact, not a first chunk. An ordinary command's artifact
+// row is created open, and its id is the caller's own: untrusted, the same
+// idempotency key CaptureOutput takes, so a replayed open finds the block
+// it already wrote and the same id naming a different block is
+// ErrIDConflict.
+type OpenBlockOutput struct {
+	// EntryID is the command's entry — the row the authenticated start
+	// opened. Required; unknown is ErrNoSuchEntry.
+	EntryID string
+	// ArtifactID is the block's id, minted by the coordinator. Required.
+	ArtifactID string
+}
+
+// AppendBlockRows is one delivery of rows that left the screen, in order.
+// FromRow is the absolute index Rows[0] departed at — rows ever departed in
+// the session, not rows in this block — so the store can tell "the next
+// rows" from "a jump": a delivery that starts behind the cursor is a replay
+// and ErrBlockRowsDiscontinuous refuses it, and one that starts ahead must
+// carry the count of rows the emulator pruned in the gap, or the same
+// refusal. LostRows is that count, and the block carries it to its summary.
+type AppendBlockRows struct {
+	EntryID    string
+	ArtifactID string
+	FromRow    uint64
+	LostRows   uint64
+	// Rows are the departed rows in order, in the emulator's own shape. The
+	// store encodes them; a caller that serialized them first would be a
+	// second owner of the stored vocabulary.
+	Rows []emulator.Row
+}
+
+// CloseBlockRows seals the block: the end marker's rows are already in (the
+// caller appends them like any other delivery), the cap's dropped-row count
+// is derived from what the chunks actually hold, and the summary records it
+// beside the lost-row count. Idempotent: a replayed close returns the first
+// summary; an append after a close is ErrBlockNotOpen.
+type CloseBlockRows struct {
+	EntryID    string
+	ArtifactID string
+}
+
+// BlockRowsSummary is what closing a block learned. DroppedRows is how many
+// rows the per-command cap took — derived from the chunks, never
+// accumulated, so it cannot drift from them; LostRows is what the emulator
+// pruned before the coordinator could read it, which no cap chose.
+type BlockRowsSummary struct {
+	DroppedRows uint64
+	LostRows    uint64
 }
 
 // AppendArtifact creates one artifact of a BLOCK, with its capture
@@ -1850,6 +1928,22 @@ type LedgerRepository interface {
 	// bare nil would leave the caller sending the rest of a body nobody is
 	// storing.
 	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
+	// OpenBlockOutput opens the block a streamed command writes into, at the
+	// command's authenticated start, and answers the ONE keep decision the
+	// whole stream hangs on: ("", nil) means the command keeps its row and
+	// keeps no body — the same three rules CaptureOutput answers at capture
+	// time, applied before anything exists to refuse. The returned id is the
+	// caller's own, idempotent on replay, ErrIDConflict when the same id
+	// names a different block.
+	OpenBlockOutput(ctx context.Context, in OpenBlockOutput) (string, error)
+	// AppendBlockRows appends one delivery of departed rows to the block's
+	// body, in order, under the per-command cap: the head and the tail are
+	// kept, the middle is dropped, and the drop is counted for the close.
+	AppendBlockRows(ctx context.Context, in AppendBlockRows) error
+	// CloseBlockRows seals the block and returns its summary: how many rows
+	// the cap dropped (derived from the chunks that are actually there) and
+	// how many the emulator lost before they could be read.
+	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

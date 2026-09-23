@@ -129,17 +129,18 @@ import {
   type CommandStatus,
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
-import { captureBlock } from './capture-client'
 import {
   answerTextForEntry,
   answerTextForTurn,
   arrangedByCause,
+  blockRowsForEntry,
   blocksForPane,
   restoredBody,
   toolResultForEntry,
   type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { paintStoredRows } from './scrollback/block-rows'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
@@ -1338,6 +1339,8 @@ export class TerminalContent extends BasePaneContent {
   private _awaitsIntegration = false
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** Backend block-row notification subscriptions for the current pane. */
+  private _blockRowsUnsubs: Array<() => void> = []
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -2453,6 +2456,14 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
+        paintStoredRows: (block, rows) => {
+          const fit = this._cellFit
+          const metric = fit !== null && fit.begin() ? metricOf(fit) : null
+          paintStoredRows(block, rows, {
+            metric,
+            palette: fromITheme(getCurrentTheme()),
+          })
+        },
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         // The copy path is handed a TURN's entry id (blocks.ts reaches it
         // only for a block whose kind is `ask`), and a turn's answer is its
@@ -4358,6 +4369,8 @@ export class TerminalContent extends BasePaneContent {
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
     ++this._bindGeneration
+    for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
+    this._blockRowsUnsubs = []
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4430,6 +4443,21 @@ export class TerminalContent extends BasePaneContent {
       })
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
+    const refreshBlockRows = (params: unknown): void => {
+      if (typeof params !== 'object' || params === null) return
+      if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
+        return
+      const entryId = params.entryId
+      void blockRowsForEntry(this.client, entryId).then((rows) => {
+        if (rows !== null && !this._disposed) {
+          this.scrollback?.blockManager.applyStoredRows(entryId, rows)
+        }
+      })
+    }
+    this._blockRowsUnsubs.push(
+      this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
+      this.client.dispatcher.subscribe('block.closed', refreshBlockRows),
+    )
     const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
 
     if (signal.aborted) {
@@ -5502,6 +5530,13 @@ export class TerminalContent extends BasePaneContent {
       this.scrollback?.scrollbackInner ?? document.createElement('div')
     const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
     const snapshotStore = this.scrollback.snapshotStore
+    const fit = this._cellFit
+    const metric = fit !== null && fit.begin() ? metricOf(fit) : null
+    const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
+      const rows = bodies.get(entryId)?.rows
+      if (rows) paintStoredRows(el, rows, { metric, palette: snapshot })
+      return el
+    }
     /** One page row as the facts a restored block is built from. */
     const factsOf = (b: (typeof blocks)[number]) => ({
       command: b.command,
@@ -5513,6 +5548,7 @@ export class TerminalContent extends BasePaneContent {
       exitCode: b.exitCode,
       status: b.status,
       body: bodies.get(b.entryId)?.body ?? null,
+      rows: bodies.get(b.entryId)?.rows,
       kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
       entryId: b.entryId,
       // Who ran it, carried from the entry's OWN source column
@@ -5531,14 +5567,17 @@ export class TerminalContent extends BasePaneContent {
       const restored = bodies.get(b.entryId)
       if ((restored?.kind ?? 'command') !== 'ask') {
         els.push(
-          restoredBlock(
-            { ...factsOf(b), id: nextId() },
-            snapshot,
-            container,
-            () => {},
-            snapshotStore,
-            this.runningActions,
-            this.dumpSource ?? undefined,
+          paintRows(
+            restoredBlock(
+              { ...factsOf(b), id: nextId() },
+              snapshot,
+              container,
+              () => {},
+              snapshotStore,
+              this.runningActions,
+              this.dumpSource ?? undefined,
+            ),
+            b.entryId,
           ),
         )
         continue
@@ -5657,14 +5696,17 @@ export class TerminalContent extends BasePaneContent {
             const caused = page.get(cause.entryId)
             if (!caused || placed.has(cause.entryId)) return null
             placed.add(cause.entryId)
-            return restoredBlock(
-              { ...factsOf(caused), id: nextId() },
-              snapshot,
-              container,
-              () => {},
-              snapshotStore,
-              this.runningActions,
-              this.dumpSource ?? undefined,
+            return paintRows(
+              restoredBlock(
+                { ...factsOf(caused), id: nextId() },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+                this.runningActions,
+                this.dumpSource ?? undefined,
+              ),
+              caused.entryId,
             )
           },
           this.runningActions,
@@ -7633,6 +7675,8 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
+    this._blockRowsUnsubs = []
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8371,21 +8415,6 @@ export class TerminalContent extends BasePaneContent {
     if (blockEl.classList.contains('cmd-block-running')) {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
-    }
-    // THE BODY GOES NOW, against the entry the ack has just named
-    // (nocx-2f0f). This is past the parking check above, so the visual
-    // freeze has run and `captured` is filled; when the ack raced the fence
-    // the parked re-entry brings it back here the instant the block settles,
-    // which is the same mechanism the receipt already relies on.
-    //
-    // The field is cleared before the send, so a second entry into this
-    // method — a re-recorded block, a replayed ack — cannot capture the same
-    // block twice. Fire-and-forget by design: a capture that fails costs the
-    // body and never the block (capture-client.ts).
-    if (ack.entryId !== '' && block.captured !== undefined) {
-      const body = block.captured
-      block.captured = undefined
-      void captureBlock(this.client, ack.entryId, body)
     }
     if (ack.redactions.length > 0) {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)

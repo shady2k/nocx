@@ -20,6 +20,9 @@ import {
   setBlockWhere,
   type BlockKind,
 } from './blocks'
+import { paintStoredRows } from './block-rows'
+import type { Row, Run, Style } from '../generated/ledger.blockRows'
+import { DEFAULT_SNAPSHOT } from './serializer'
 import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
@@ -1802,7 +1805,6 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     manager = new BlockManager(inner, xtermContainer, {
       now: () => 1000,
       snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
     })
   })
 
@@ -1828,7 +1830,7 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
    *  contains ALL of it — truncation is the defect this bead exists to fix.
    *  The two halves settle at DIFFERENT times: the status flips on the
    *  completion event alone, the output boundary only when the fence lands. */
-  it('output delayed past the completion is captured in full once the fence lands', () => {
+  it('keeps the block body empty until backend rows arrive', () => {
     manager.startBlock('slow', '~', 0)
     manager.bindAttempt('att-1')
     const lines = [new BufferLine('first'), new BufferLine('second'), new BufferLine('the tail')]
@@ -1853,19 +1855,14 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     expect(block!.el.querySelector('.cmd-output')).toBeNull()
     expect(block!.endLine).toBe(0)
 
-    // The tail and the fence land together: the fence line IS the output
-    // end, and every line up to it is serialized into the block.
+    // The tail and fence establish the boundary only. The frontend does not
+    // serialize terminal rows into the block.
     manager.sightFence(FENCE_A, 2)
     expect(manager.runningBlock).toBeNull()
     expect(block!.endLine).toBe(2)
-    // The CARD carries no body — the rows stay in the terminal, which
-    // nothing clears or rebases (nocx-2v80t.3.3). The boundary's product
-    // is the durable capture: every line up to the fence, in full.
+    // Durable rows are painted only after the backend artifact notification
+    // is read.
     expect(blockOutputText(block!.el)).toBe('')
-    const captured = block!.captured
-    expect(captured?.text).toContain('first')
-    expect(captured?.text).toContain('second')
-    expect(captured?.text).toContain('the tail')
   })
 
   it('a fence with no authenticated event behind it changes nothing at all', () => {
@@ -1996,64 +1993,6 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     expect(manager.blocks).toHaveLength(0)
     expect(manager.runningBlock).toBeNull()
     expect(manager.visualFreezePending).toBe(false)
-  })
-})
-
-describe('the serialized output range vs the block creation line (nocx-4yhi)', () => {
-  // The app-owned submit opens the block BEFORE the bytes go out, so the
-  // shell's echo of the typed command lands on the creation line itself.
-  // The block's OUTPUT range therefore starts one row after it — the
-  // header already shows the command, and a body that repeats it is the
-  // defect this describe pins. Shell-originated blocks open at the cursor
-  // line at fact time, which is already past the echo: their output range
-  // starts where the block opened.
-  let manager: BlockManager
-  let inner: HTMLElement
-  let xtermContainer: HTMLElement
-
-  beforeEach(() => {
-    _resetThemeState()
-    inner = document.createElement('div')
-    xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    document.body.appendChild(inner)
-    manager = new BlockManager(inner, xtermContainer, {
-      snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
-    })
-  })
-
-  it('serializes from outputStart when the creation line carries the shell echo', () => {
-    const rec = manager.startBlock('ls', '~', 5, 6)
-    expect(rec.outputStart).toBe(6)
-    // Line 5 is the prompt line the echo lands on; 6-7 are the output.
-    const lines = [
-      new BufferLine('$ ls'),
-      new BufferLine('file1'),
-      new BufferLine('file2'),
-      new BufferLine(''),
-    ]
-    const getLine = (y: number) => lines[y - 5]
-    const frozen = manager.freezeBlock(getLine, 8, 0)
-    expect(frozen).not.toBeNull()
-    expect(blockOutputText(frozen!.el)).toBe('')
-    const text = frozen!.captured?.text ?? ''
-    expect(text).toContain('file1')
-    expect(text).toContain('file2')
-    expect(text).not.toContain('$ ls')
-  })
-
-  it('defaults the output range to the creation line — the shell-originated case', () => {
-    // The running fact lands after the echo (the user typed at the shell),
-    // so the cursor line is already past it and the block serializes from
-    // exactly where it opened.
-    const rec = manager.startBlock('pwd', '~', 7)
-    expect(rec.outputStart).toBe(7)
-    const getLine = (y: number) => (y === 7 ? new BufferLine('out1') : undefined)
-    const frozen = manager.freezeBlock(getLine, 7, 0)
-    expect(frozen).not.toBeNull()
-    expect(blockOutputText(frozen!.el)).toBe('')
-    expect(frozen!.captured?.text).toContain('out1')
   })
 })
 
@@ -2761,7 +2700,8 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       snapshotStore: freshStore(),
       sessionName,
       answerText,
-      dimensions: () => ({ cols: 100, rows: 30 }),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
     })
     return { inner, manager }
   }
@@ -3097,17 +3037,45 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     )
   })
 
-  it('a COMMAND block still copies what the terminal drew — unchanged', () => {
+  it('a COMMAND block copies backend-stored rows, not the terminal buffer', () => {
     const copied = captureClipboard()
     const { manager } = newManager(undefined, () =>
       Promise.reject(new Error('a command must never reach the ledger for its copy')),
     )
+    const style = {
+      foreground: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+      background: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+      underlineColor: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+      attributes: 0,
+      underline: 0 as const,
+    }
     manager.startBlock('echo hi', '/repo', 0)
-    const rec = manager.freezeBlock((y) => (y === 0 ? new BufferLine('hi') : undefined), 0, 0)!
+    manager.bindAttempt('entry-copy')
+    manager.applyStoredRows('entry-copy', {
+      lines: [
+        {
+          from: 0,
+          row: {
+            cells: [
+              ['h', 1, true],
+              ['i', 1, true],
+              ['\n', 1, true],
+            ],
+            runs: [[style, 3]],
+            wrap: false,
+            continuation: false,
+          },
+        },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    const rec = manager.freezeBlock(() => undefined, 0, 0)!
     clickMenuItem(rec.el, 'Copy output')
-    expect(copied[0]).toBe('hi')
+    expect(copied[0]).toBe('hi\n')
     clickMenuItem(rec.el, 'Copy all')
-    expect(copied[1]).toBe('echo hi\nhi')
+    expect(copied[1]).toBe('echo hi\nhi\n')
   })
 
   // The wrap override lives in the ⋮ menu because it is the exception: the
@@ -3270,78 +3238,6 @@ it('selectBlock is a non-toggle single-select: the id and the class move togethe
 })
 
 // ── What the freeze keeps for the store (nocx-2f0f) ───────────────────────
-describe('the visual freeze parks the durable bodies', () => {
-  let inner: HTMLElement
-  let xtermContainer: HTMLElement
-  let manager: BlockManager
-
-  beforeEach(() => {
-    _resetThemeState()
-    inner = document.createElement('div')
-    xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    document.body.appendChild(inner)
-    manager = new BlockManager(inner, xtermContainer, {
-      now: () => 1000,
-      snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
-    })
-  })
-
-  it('keeps the rows as SGR and as characters, with the grid it saw', () => {
-    manager.startBlock('echo hi', '~', 0)
-    const lines = [new BufferLine('hi', false)]
-    const rec = manager.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-    expect(rec).not.toBeNull()
-    expect(rec?.captured).toEqual({ sgr: 'hi', text: 'hi', cols: 100, rows: 30 })
-  })
-
-  it('keeps an EMPTY body for a command that printed nothing, rather than none', () => {
-    // An alt-screen program leaves no scrollback rows, and so does `true`.
-    // Nothing here tells them apart and nothing may: a classifier in the
-    // capture path is the defect the byte-stream design was withdrawn over.
-    // An empty body says "this printed nothing into the scrollback", which
-    // is true of both; NO artifact is reserved for "nothing was captured",
-    // which is a different sentence a restored block has to be able to say.
-    manager.startBlock('htop', '~', 0)
-    const rec = manager.freezeBlock(() => undefined, 0, 0)
-    expect(rec?.captured).toEqual({ sgr: '', text: '', cols: 100, rows: 30 })
-  })
-
-  it("gives each of two blocks frozen back to back its own rows and none of the other's", () => {
-    // The epic's own criterion, and the one a boundary bug shows up in.
-    // Asserted by FREEZING TWO BLOCKS, not by feeding frames: the boundary is
-    // the block's own line range, and a test that fed bytes would be testing
-    // the recognizer that was deleted rather than the rule that replaced it.
-    const lines = [new BufferLine('first output', false), new BufferLine('second output', false)]
-    const getLine = (y: number) => lines[y] ?? undefined
-
-    manager.startBlock('echo first', '~', 0)
-    const a = manager.freezeBlock(getLine, 0, 0)
-    manager.startBlock('echo second', '~', 1)
-    const b = manager.freezeBlock(getLine, 1, 1)
-
-    expect(a?.captured?.text).toBe('first output')
-    expect(a?.captured?.text).not.toContain('second')
-    expect(b?.captured?.text).toBe('second output')
-    expect(b?.captured?.text).not.toContain('first')
-  })
-
-  it('parks nothing when the caller supplies no grid, because provenance is not optional', () => {
-    const otherInner = document.createElement('div')
-    const otherXterm = document.createElement('div')
-    otherInner.appendChild(otherXterm)
-    document.body.appendChild(otherInner)
-    const noDims = new BlockManager(otherInner, otherXterm, {
-      now: () => 1000,
-      snapshotStore: freshStore(),
-    })
-    noDims.startBlock('echo hi', '~', 0)
-    const lines = [new BufferLine('hi', false)]
-    const rec = noDims.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-    expect(rec?.captured).toBeUndefined()
-  })
-})
 
 // ── a block is a block, whoever submitted it (nocx-9sqii, criterion 3) ────
 //
@@ -4455,5 +4351,73 @@ describe('setBlockWhere', () => {
     const el = document.createElement('div')
     el.className = 'cmd-block'
     expect(() => setBlockWhere(el, { branch: 'main' })).not.toThrow()
+  })
+})
+
+describe('backend-owned block rows', () => {
+  const style: Style = {
+    foreground: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    background: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    underlineColor: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    attributes: 0,
+    underline: 0,
+  }
+
+  const row = (text: string): Row => ({
+    cells: Array.from(text, (char) => [char, 1, true] as [string, 1, boolean]),
+    runs: [[style, text.length] as Run] as [Run, ...Run[]],
+    wrap: false,
+    continuation: false,
+  })
+
+  function newManager() {
+    const inner = document.createElement('div')
+    const xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, xtermContainer, {
+      snapshotStore: freshStore(),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    return { inner, manager }
+  }
+
+  it('paints streamed rows while running and replaces them as history grows', () => {
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.applyStoredRows('entry-stream', {
+      lines: [{ from: 0, row: row('first \n') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    manager.bindAttempt('entry-stream')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \n')
+
+    manager.applyStoredRows('entry-stream', {
+      lines: [
+        { from: 0, row: row('first \n') },
+        { from: 1, row: row('second\n') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+
+    const frozen = manager.freezeBlock(() => undefined, 0, 1)!
+    expect(blockOutputText(frozen.el)).toBe('first \nsecond\n')
+  })
+
+  it('does not paint terminal-buffer text when backend history is absent', () => {
+    const { manager } = newManager()
+    manager.startBlock('echo local', '/repo', 0)
+    const frozen = manager.freezeBlock(
+      (line) => (line === 0 ? new BufferLine('local') : undefined),
+      0,
+      0,
+    )!
+    expect(frozen.el.querySelector('.cmd-output')).toBeNull()
   })
 })

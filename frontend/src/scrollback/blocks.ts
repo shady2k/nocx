@@ -3,10 +3,9 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import { serializeRangeSGR, serializeRangeText } from './serializer'
-import type { CapturedBody } from '../capture-client'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
+import type { StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
@@ -632,17 +631,9 @@ export interface BlockRecord {
    *  refused for looking unfinished, and was gone for good — a captured
    *  secret with nothing offering to save it (nocx-ggha). */
   afterVisualFreeze?: () => void
-  /** What the VISUAL freeze produced for the store (nocx-2f0f): the block's
-   *  rows as SGR and as characters, with the grid the serializer saw.
-   *
-   *  PARKED HERE rather than sent, because the artifact hangs on an ENTRY
-   *  and the entry id arrives with the history.record ack — a different
-   *  event that may land before or after this freeze. Whoever sends it
-   *  clears the field, so a block cannot be captured twice.
-   *
-   *  Undefined until the visual freeze runs, and after the capture has been
-   *  handed over. */
-  captured?: CapturedBody
+  /** Rows read from the backend's block artifact. They are a paint source,
+   *  never a second client-side store of command output. */
+  storedRows?: StoredBlockRows
   /** The authenticated attempt this block is bound to (ADR-0024 §7
    *  projection): set when the running block binds to the published
    *  attempt, kept when the block freezes. Absent only for a block that
@@ -1149,7 +1140,6 @@ function buildOverflowMenu(
   answerText?: AnswerTextSource,
   dump?: DumpSource,
   running?: RunningBlockActions,
-  outputText?: string,
 ): HTMLElement {
   /** Disposes the open menu's Solid root, or null while closed. The menu is a
    *  render island: mounted on open, disposed on close (spec 2026-09-14 §6.3). */
@@ -1310,13 +1300,9 @@ function buildOverflowMenu(
         },
       )
     } else {
-      // ONE owner of "what did this block print": the DOM body when the
-      // block carries one, else the capture the freeze took at the
-      // boundary — never a second derivation of the two.
-      const outputAsText = (): string => {
-        const dom = blockOutputText(blockEl)
-        return dom !== '' ? dom : (outputText ?? '')
-      }
+      // The DOM body is the only command-output source. It is painted from
+      // backend rows and never reconstructed from the terminal input buffer.
+      const outputAsText = (): string => blockOutputText(blockEl)
       list.push(
         {
           id: 'copy-output',
@@ -1485,11 +1471,7 @@ export function createCommandBlock(
    *  selection ids remain internal and never cross this DOM seam. */
   entryId?: string,
   dump?: DumpSource,
-  /** The output AS TEXT, fixed at the freeze boundary. The card body is
-   *  what the backend sent (nocx-2v80t.3.4) and is empty until then; the
-   *  copy menu copies this capture rather than an empty body. Blocks that
-   *  carry a DOM body — answers, restored records — never reach for it. */
-  outputText?: string,
+  /** Command output is painted later from backend-owned stored rows. */
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -1544,7 +1526,7 @@ export function createCommandBlock(
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
-    const overflow = buildOverflowMenu(wrapper, command, answerText, dump, menuActions, outputText)
+    const overflow = buildOverflowMenu(wrapper, command, answerText, dump, menuActions)
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
@@ -1749,7 +1731,6 @@ export function freezeBlock(
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
   entryId?: string,
-  outputText?: string,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -1769,7 +1750,6 @@ export function freezeBlock(
     menuActions,
     entryId,
     undefined,
-    outputText,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -1844,11 +1824,8 @@ export interface BlockManagerOpts {
    *  render fence). Fires after afterVisualFreeze, so a waiter that sets
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
-  /** The terminal grid, read at freeze time. It is capture PROVENANCE
-   *  (ADR-0019 §6): the same rows serialized at a different width are a
-   *  different rendering, and a reader that cannot tell has to guess. The
-   *  manager holds no renderer, so the caller that does supplies it. */
-  dimensions?: () => { cols: number; rows: number }
+  /** Paints rows read from the backend's block artifact. */
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
   /** What a session is called TO A PERSON, for a tool block whose call named
    *  one (nocx-vnzek). The manager holds no pane list, so the caller that
    *  does supplies the tab strip's own derivation
@@ -1921,7 +1898,8 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
-  private _dimensions?: () => { cols: number; rows: number }
+  private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _pendingStoredRows = new Map<string, StoredBlockRows>()
   /** The tab strip's answer to "what is this session called to a person",
    *  handed to every tool block this manager draws (nocx-vnzek). */
   private _sessionName?: (sessionId: string) => string | null
@@ -1990,7 +1968,7 @@ export class BlockManager {
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
-    this._dimensions = opts.dimensions
+    this._paintStoredRows = opts.paintStoredRows
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
     this._dump = opts.dump
@@ -2330,12 +2308,29 @@ export class BlockManager {
     if (this._runningBlock) {
       this._runningBlock.attemptId = attemptId
       this._runningBlock.el.dataset.entryId = attemptId
+      const pending = this._pendingStoredRows.get(attemptId)
+      if (pending) {
+        this._runningBlock.storedRows = pending
+        this._pendingStoredRows.delete(attemptId)
+        this._paintStoredRows?.(this._runningBlock.el, pending)
+      }
     }
   }
 
   /** The block bound to an attempt id — running or frozen. */
   blockForAttempt(attemptId: string): BlockRecord | null {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
+  }
+
+  /** Apply the latest durable rows to the matching block. */
+  applyStoredRows(entryId: string, rows: StoredBlockRows): void {
+    const rec = this.blockForAttempt(entryId)
+    if (!rec) {
+      this._pendingStoredRows.set(entryId, rows)
+      return
+    }
+    rec.storedRows = rows
+    this._paintStoredRows?.(rec.el, rows)
   }
 
   /**
@@ -2603,29 +2598,16 @@ export class BlockManager {
   }
 
   /** The VISUAL freeze: fix the block's boundary and replace its running
-   *  element with the frozen one. The CARD no longer carries the output:
-   *  its body is what the backend sent (nocx-2v80t.3.4), and until that
-   *  lands the card is its header alone — the rows stay in the terminal,
-   *  which nothing clears or rebases (nocx-2v80t.3.3). The DURABLE bodies
-   *  still come from the rows the boundary fixes, from the same walk the
-   *  history capture has always taken: what the record stores is what the
-   *  buffer held at the boundary, not a second reading taken later. */
+   *  element with the frozen one. The block body is deliberately empty until
+   *  the backend's stored rows arrive; the client never decides what the
+   *  command printed by reading its input buffer. */
   private _freezeCard(
     rec: BlockRecord,
-    getLine: GetLineFn,
+    _getLine: GetLineFn,
     endLine: number,
     status: FrozenStatus,
   ): void {
     rec.endLine = endLine
-    const dims = this._dimensions?.()
-    if (dims) {
-      rec.captured = {
-        sgr: serializeRangeSGR(getLine, rec.outputStart, endLine),
-        text: serializeRangeText(getLine, rec.outputStart, endLine),
-        cols: dims.cols,
-        rows: dims.rows,
-      }
-    }
 
     const newEl = freezeBlock(
       rec.el,
@@ -2646,10 +2628,10 @@ export class BlockManager {
       rec.author,
       this._runningActions,
       rec.attemptId,
-      rec.captured?.text,
     )
 
     this._reown(rec.el, newEl)
+    if (rec.storedRows) this._paintStoredRows?.(newEl, rec.storedRows)
     rec.el = newEl
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
@@ -3176,6 +3158,7 @@ export class BlockManager {
     this.closeOverflowMenus()
     this._stopTicker()
     this._pendingBoundaries = []
+    this._pendingStoredRows.clear()
     this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a

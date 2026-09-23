@@ -14,10 +14,15 @@ import (
 // (libghostty-vt behind its port) driven directly: a Session ingests program
 // bytes the way the pump would, and the authenticated boundary arrives
 // through [Session.Completed] and [Session.SightFence] the way the contract
-// delivers them. The three loss causes the acceptance names each get a test,
-// and the record's bound is MEASURED at the three geometries the brief names,
-// with scrollback behind it — a bound asserted but never measured is how the
+// delivers them. The loss causes the acceptance names each get a test, and
+// the store is MEASURED at the three geometries the brief names, with
+// scrollback behind it — a bound asserted but never measured is how the
 // retired attempt shipped a record that crossed no frame (ADR-0072).
+//
+// Since nocx-2v80t.3.6 the departed rows are not here at all: they stream
+// out as they leave the screen (rowstream.go; rowstream_test.go owns the
+// stream's own tests), and the record keeps boundaries, counts and the two
+// screens.
 
 // obsSession builds a runtime over a real ghostty emulator and a harness
 // terminal: no PTY and no pump, so the test controls every ingest.
@@ -163,12 +168,6 @@ func TestLostIngestIsCountedOnTheRecordInBytes(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Cause three: the record's OWN bound. Past MaxObservationRows the oldest
-// rows go, and the count is exact — the record held them and counted what it
-// let go.
-// ---------------------------------------------------------------------------
-
 // A hole reported before the interval opened — the attach-time hole, before
 // any byte of it was ever ingested — reaches the record that opens next: the
 // count does not die in the gap, and the cause is named on the record, not
@@ -203,32 +202,55 @@ func TestAHoleBeforeTheFirstIngestIsCountedOnTheFirstRecord(t *testing.T) {
 	}
 }
 
-func TestTheRecordBoundEvictsTheOldestRowsAndCountsThem(t *testing.T) {
-	s := obsSession(t, harnessGeometry(80, 24))
+// ---------------------------------------------------------------------------
+// The record keeps no rows (nocx-2v80t.3.6): an interval that departs far
+// more than a screen streams every row out and stays lean — no bound, no
+// eviction count, no copy. Paired: the same interval's completeness reads
+// complete, because nothing was lost — the rows left, they did not vanish.
+// ---------------------------------------------------------------------------
 
-	// Six hundred lines: 577 departures on a twenty-four row screen — past
-	// MaxObservationRows, and far below the emulator's retention boundary,
-	// so the eviction is the record's own and nothing else's.
+func TestAHeavyIntervalStreamsItsRowsAndKeepsNoCopy(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	// Six hundred lines: 577 departures on a twenty-four row screen — a
+	// flood the old record's bound would have truncated, streamed whole.
 	obsFeed(t, s, 0, 600)
 
-	departed := 600 - 23
-	if departed <= MaxObservationRows {
-		t.Fatalf("the test feeds %d departures, need more than the bound %d", departed, MaxObservationRows)
+	const departed = 600 - 23
+	var streamed uint64
+	first, last := "", ""
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			t.Fatalf("a running interval streamed a %q event, want row batches only", e.kind)
+		}
+		if len(e.rows) == 0 {
+			continue
+		}
+		if got := e.from; got != streamed {
+			t.Fatalf("a batch names FromRow %d with %d rows already streamed, want %d — the index never skips", got, streamed, streamed)
+		}
+		if streamed == 0 {
+			first = streamRowText(e.rows[0])
+		}
+		last = streamRowText(e.rows[len(e.rows)-1])
+		streamed += uint64(len(e.rows)) // #nosec G115 -- len is never negative
 	}
+	if streamed != departed {
+		t.Fatalf("the stream carried %d rows, want every one of the %d departures", streamed, departed)
+	}
+	if first != "L000000" || last != fmt.Sprintf("L%06d", departed-1) {
+		t.Fatalf("the stream ran %q..%q, want L000000..L%06d, oldest first", first, last, departed-1)
+	}
+
+	// The record as it stands holds none of them: boundaries, counts,
+	// screens.
 	rec, ok := s.OpenObservation()
 	if !ok {
 		t.Fatal("the interval in flight has no record")
 	}
-	if len(rec.Departed) != MaxObservationRows {
-		t.Fatalf("the record holds %d departed rows, want exactly the bound %d", len(rec.Departed), MaxObservationRows)
-	}
-	want := uint64(departed - MaxObservationRows) // #nosec G115 -- checked above: departed past the bound
-	if rec.Loss.EvictedRows != want {
-		t.Fatalf("the record counts %d evicted rows, want %d", rec.Loss.EvictedRows, want)
-	}
-	first, last := obsRowText(rec.Departed[0]), obsRowText(rec.Departed[len(rec.Departed)-1])
-	if wantFirst, wantLast := fmt.Sprintf("L%06d", departed-MaxObservationRows), fmt.Sprintf("L%06d", departed-1); first != wantFirst || last != wantLast {
-		t.Fatalf("the bound kept %q..%q, want %q..%q — the NEWEST rows", first, last, wantFirst, wantLast)
+	if rec.Loss.RetentionFeeds != 0 || rec.Loss.RetentionFeedBytes != 0 {
+		t.Fatalf("an ordinary flood reads back retention loss %d feeds/%d bytes, want none",
+			rec.Loss.RetentionFeeds, rec.Loss.RetentionFeedBytes)
 	}
 
 	obsSeal(t, s, obsNonce(3))
@@ -236,8 +258,8 @@ func TestTheRecordBoundEvictsTheOldestRowsAndCountsThem(t *testing.T) {
 	if !ok {
 		t.Fatal("the interval sealed no record")
 	}
-	if sealed.Completeness != CompletenessEvicted {
-		t.Fatalf("a record that evicted rows reads back %v, want evicted", sealed.Completeness)
+	if sealed.Completeness != CompletenessComplete {
+		t.Fatalf("a streamed-whole interval reads back %v, want complete — rows that left were sent, not lost", sealed.Completeness)
 	}
 }
 
@@ -265,9 +287,6 @@ func TestTheSecondIntervalsOpeningIsTheFirstRecordsClosing(t *testing.T) {
 		t.Fatal("the second interval sealed no record")
 	}
 
-	if len(second.Departed) == 0 {
-		t.Fatal("the second interval departed nothing; its opening was taken after its output")
-	}
 	if got := obsRowText(second.Opening.Lines[0]); strings.Contains(got, "L000100") {
 		t.Fatalf("the second record's opening holds the second command's first output %q: it opened late", got)
 	}
@@ -311,10 +330,12 @@ func TestTheRecordStoreIsBoundedAndCountsItsEvictions(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The bound, MEASURED at the three geometries the brief names, with
-// scrollback behind the departures. The accounting is stated in the helper:
-// value shapes at unsafe.Sizeof, plus the bytes every grapheme and the slice
-// capacities carry — the memory a sealed record costs a session.
+// The store, MEASURED at the three geometries the brief names, with
+// scrollback behind the interval. The accounting is stated in the helper:
+// value shapes at unsafe.Sizeof, plus the bytes every grapheme and the
+// slice capacities carry — the memory a sealed record costs a session now
+// that it holds boundaries, counts and two screens and no rows
+// (nocx-2v80t.3.6).
 // ---------------------------------------------------------------------------
 
 func obsBytesRow(r emulator.Row) int {
@@ -339,30 +360,28 @@ func obsBytes(r ObservationRecord) int {
 	n := int(unsafe.Sizeof(r))
 	n += obsBytesScreen(r.Opening)
 	n += obsBytesScreen(r.Closing)
-	n += cap(r.Departed) * int(unsafe.Sizeof(emulator.Row{}))
-	for _, row := range r.Departed {
-		n += obsBytesRow(row)
-	}
 	return n
 }
 
-func TestTheRecordBoundIsMeasuredAtTheThreeGeometries(t *testing.T) {
+func TestTheRecordStoreIsMeasuredAtTheThreeGeometries(t *testing.T) {
 	for _, g := range []Geometry{
 		harnessGeometry(80, 24),
 		harnessGeometry(120, 40),
 		harnessGeometry(200, 50),
 	} {
-		s := obsSession(t, g)
+		s, rs := streamSession(t, g)
 
-		// Fill the record's departures to the bound — and with them the
-		// emulator's own scrollback, so the rows the record holds were
-		// read out of a buffer that had real history behind them.
+		// Fill the screen with an interval's flood — numbered lines with
+		// real scrollback behind them — so both screens the record keeps
+		// were read out of a buffer that had real history behind it, and
+		// so the measurement answers for a record that watched a real
+		// command run.
 		fed := 0
-		for s.observation == nil || len(s.observation.Departed) < MaxObservationRows {
+		for s.observation == nil || s.departedRows < 600 {
 			obsFeed(t, s, fed, 100)
 			fed += 100
 			if fed > 100_000 {
-				t.Fatal("the record never reached its bound; the drain is losing rows")
+				t.Fatal("the interval never departed; the drain is losing rows")
 			}
 		}
 		obsSeal(t, s, obsNonce(9))
@@ -370,20 +389,23 @@ func TestTheRecordBoundIsMeasuredAtTheThreeGeometries(t *testing.T) {
 		if !ok {
 			t.Fatalf("%dx%d: the interval sealed no record", g.Cols, g.Rows)
 		}
-		if len(rec.Departed) != MaxObservationRows {
-			t.Fatalf("%dx%d: the record holds %d rows, want the bound", g.Cols, g.Rows, len(rec.Departed))
+		var streamed uint64
+		for _, e := range rs.snapshot() {
+			streamed += uint64(len(e.rows)) // #nosec G115 -- len is never negative
+		}
+		if streamed != s.departedRows {
+			t.Fatalf("%dx%d: the stream carried %d rows, want the session's %d", g.Cols, g.Rows, streamed, s.departedRows)
 		}
 		size := obsBytes(rec)
-		t.Logf("%dx%d with scrollback: sealed record at the bound is %d rows departed, %d bytes (%d KiB)",
-			g.Cols, g.Rows, len(rec.Departed), size, size>>10)
+		t.Logf("%dx%d after a flood: sealed record is %d bytes (%d KiB), stream carried %d rows",
+			g.Cols, g.Rows, size, size>>10, streamed)
 
-		// The number the commit states: the worst case the bound allows —
-		// departures full, both screens carried, every cell a dense
-		// grapheme — stays under 4 MiB a record, so a full store of
-		// [MaxObservations] records stays under 32 MiB a session even at
-		// the largest geometry the product sizes.
+		// The number the commit states: a record is two screens and the
+		// counts — under 4 MiB a record at every shipped geometry, so a
+		// full store of [MaxObservations] records stays under 32 MiB a
+		// session even at the largest geometry the product sizes.
 		if size > 4<<20 {
-			t.Fatalf("%dx%d: a record at the bound measures %d bytes, past the 4 MiB ceiling", g.Cols, g.Rows, size)
+			t.Fatalf("%dx%d: a sealed record measures %d bytes, past the 4 MiB ceiling", g.Cols, g.Rows, size)
 		}
 		if store := size * MaxObservations; store > 32<<20 {
 			t.Fatalf("%dx%d: a full store measures %d bytes, past the 32 MiB ceiling", g.Cols, g.Rows, store)

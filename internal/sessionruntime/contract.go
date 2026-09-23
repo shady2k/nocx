@@ -541,26 +541,15 @@ const (
 	// nothing but its own expiry. Settled meetings (complete, expired) give
 	// up their slot to the oldest first: they are record, not authority.
 	MaxPendingRendezvous = 8
-	// MaxObservationRows is the most departed rows one observation record
-	// keeps of one interval ([ObservationRecord.Departed]). Past it the
-	// OLDEST rows go — the newest are the ones a reader of a running or a
-	// finished command still wants — and what was dropped is counted in
-	// [ObservationLoss.EvictedRows], never silent: the bound may shorten
-	// what a record holds, it may not lie about it. MEASURED at the bound
-	// with dense full-width rows (TestTheRecordBoundIsMeasuredAtTheThree-
-	// Geometries): 993,161 bytes a record at 80x24, 1,634,297 at 120x40,
-	// 2,870,207 at 200x50 — the number a store of these records costs a
-	// session is a number this constant decides, not one memory pressure
-	// discovers.
-	MaxObservationRows = 256
 	// MaxObservations is the most sealed records one session's store holds.
 	// Beyond it the oldest records go, first out, and
 	// [Session.ObservationsEvicted] counts them: a record that is gone must
-	// not look like a command that never ran. Together with
-	// [MaxObservationRows] this bounds the record of a session's intervals
-	// to a number somebody can check, the way every bound in this file is a
-	// number rather than a policy statement: eight records at the measured
-	// worst case is ~7.6 MiB at 80x24, ~12.5 at 120x40, ~21.9 at 200x50.
+	// not look like a command that never ran. Since nocx-2v80t.3.6 a record
+	// holds boundaries, counts and two screens — the departed rows stream
+	// out and the helper keeps no copy — so the bound costs eight records'
+	// worth of screens at a cost MEASURED in
+	// TestTheRecordStoreIsMeasuredAtTheThreeGeometries, a number rather
+	// than a policy statement.
 	MaxObservations = 8
 )
 

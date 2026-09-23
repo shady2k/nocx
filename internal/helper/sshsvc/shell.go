@@ -355,9 +355,12 @@ func (c *ShellChannel) Stderr() io.Reader { return c.stderr }
 // Write sends bytes to the far shell's input.
 func (c *ShellChannel) Write(p []byte) (int, error) { return c.stdin.Write(p) }
 
-// Resize sends RFC 4254 §6.7's window-change request. Pixel dimensions are not
-// carried: nothing on the helper protocol has cell metrics today, which is the
-// same state the local pty path is in (session/ptyTerminal.Resize).
+// Resize sends RFC 4254 §6.7's window-change request. Pixel dimensions are
+// not carried: the protocol's window-change HAS pixel fields, but
+// x/crypto/ssh's Session.WindowChange exposes only the cell counts, and
+// inventing a raw request beside it would be a second way to say one thing.
+// The client's cell metrics travel to this session's committed geometry
+// instead (session.cellGeometry), which is what the published frames serve.
 func (c *ShellChannel) Resize(cols, rows uint16) error {
 	if err := c.sess.WindowChange(int(rows), int(cols)); err != nil {
 		return fmt.Errorf("ssh: window-change: %w", err)

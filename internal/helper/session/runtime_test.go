@@ -394,6 +394,29 @@ func TestResizeReachesThePtyAndTheScreenTogether(t *testing.T) {
 	}
 }
 
+// awaitIngest waits until the pump has ingested the first n scripted bytes.
+// The window's written offset advances AFTER Session.Ingest returns for a
+// chunk (the owner's pump: Ingest, then win.write), so reaching n is the
+// observable that the emulator has TAKEN those bytes — a mode-set among
+// them — and not merely that the pump has read them. ARM BEFORE CHECKING,
+// for the reason lease_serialization_test.go records; the hang limit is
+// the only clock, as everywhere else in this file.
+func awaitIngest(t *testing.T, hs *hostSession, n int) {
+	t.Helper()
+	for {
+		ch := hs.win.changed()
+		// #nosec G115 -- n is a script length, never negative.
+		if _, written := hs.win.span(); written >= proto.StreamOffset(n) {
+			return
+		}
+		select {
+		case <-ch:
+		case <-time.After(hangLimit):
+			t.Fatalf("the pump never ingested the scripted bytes: wanted %d", n)
+		}
+	}
+}
+
 // TestAResizeCarriesTheCellMetricsToTheCommitAndTheFrame (nocx-zg3k3.2.9):
 // the size a client reports — cells plus the WHOLE text area in pixels,
 // TIOCSWINSZ's own units — reaches the PTY as those pixels and the commit as
@@ -491,6 +514,16 @@ func TestAZoomAtTheSameGridIsACommitTheFrameCarries(t *testing.T) {
 func TestTheInBandSizeReportCarriesTheCommittedPixels(t *testing.T) {
 	proc := newScriptedProcess("\x1b[?2048h")
 	svc, hs := spawnScripted(t, proc, 0)
+
+	awaitIngest(t, hs, len("\x1b[?2048h"))
+
+	// Enabling the mode is itself answered: the terminal reports the size it
+	// is already running at — the spawn's 80x24, whose cell metric nobody
+	// has measured, so the pixel fields are zeros. The report was delivered
+	// inside the ingest awaitIngest waited on, so this read is ordered.
+	if got, want := string(proc.awaitWrite(t)), "\x1b[48;24;80;0;0t"; got != want {
+		t.Fatalf("the mode-set's own size report reached the program as %q, want %q", got, want)
+	}
 
 	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
 		Session: hs.id, Cols: 100, Rows: 30, XPixel: 800, YPixel: 600,

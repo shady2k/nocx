@@ -2081,6 +2081,7 @@ func New(opts ...Option) (*App, error) {
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
 	localOpener.publishScreen = tp.PublishScreenFrame
+	localOpener.blockRows = tp
 	// The prompt seam a helper's keyboard-interactive challenge needs is the
 	// transport's own connection-password ask — the same one the coordinator's
 	// dial path uses, so a helper's question and a dial's question raise one
@@ -2996,7 +2997,7 @@ func (a *App) Start(ctx context.Context) error {
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
-			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame,
+			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
@@ -3095,6 +3096,7 @@ func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struc
 				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
 				local: a.localHelper, timeout: vaultSealedRetryAttempt,
 				publishScreen: a.Transport.PublishScreenFrame,
+				blockRows:     a.Transport,
 			},
 			content.DefaultUnreconciledRetention, a.slogger)
 		for _, inv := range a.helperRegistry.inventories() {

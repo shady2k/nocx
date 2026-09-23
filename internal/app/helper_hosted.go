@@ -71,7 +71,11 @@ type hostedSpawn struct {
 	// built without a transport — and registers no observer rather than
 	// dropping frames nobody asked for.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
-	log           *slog.Logger
+	// blockRows is the streamed block output's transport half
+	// (helper_block_rows.go): the rows that leave the screen and each
+	// command's end become the command's block in history. Nil wires nothing.
+	blockRows blockRowsSink
+	log       *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -271,13 +275,20 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		})
 	}
 
+	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
+	// adopt, like the screen drain, so no row the runtime streams from its
+	// first output is dropped at a door nobody opened yet.
+	stopBlockRows := bindBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached)
+
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {
+		stopBlockRows()
 		_ = attached.Close()
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
+	bindDownlinkToSession(sess, stopBlockRows)
 	if stopDownlink != nil {
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
 		// the delivery context ends when it does.

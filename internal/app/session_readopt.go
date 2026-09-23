@@ -175,6 +175,10 @@ type readoptPass struct {
 	// snapshots, and without this registration they would land at a client
 	// that forwards them nowhere. Nil is a legitimate wiring.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	// blockRows is the streamed block output's transport half, the same seam
+	// the fresh-open path carries: a restored pane's runtime goes on streaming
+	// the rows that leave its screen (helper_block_rows.go). Nil wires nothing.
+	blockRows blockRowsSink
 }
 
 var _ sessionReadopter = (*readoptPass)(nil)
@@ -714,8 +718,12 @@ func (rp *readoptPass) readopt(
 			return transport.HostedSessionOpen{}, fmt.Errorf(
 				"another nocx already holds the keyboard of this session on %s", reattachTarget(p))
 		}
+		// THE STREAMED BLOCK OUTPUT, restored-pane half (nocx-2v80t.3.7):
+		// registered before the adopt, like the screen drain above.
+		stopBlockRows := bindBlockRows(ctx, rp.blockRows, sid, attached)
 		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
+			stopBlockRows()
 			_ = attached.Close()
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
@@ -723,6 +731,7 @@ func (rp *readoptPass) readopt(
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
 		// again, and the downlink the adoption built ends when it does.
 		adoption.endWithSession(sess)
+		bindDownlinkToSession(sess, stopBlockRows)
 		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
 		// records it (helper_git.go's openFarHelper, helper_local.go's
 		// OpenHosted) — and it must be, because a re-adopted session's own

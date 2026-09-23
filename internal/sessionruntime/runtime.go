@@ -243,6 +243,17 @@ type Session struct {
 	ingestWork uint64
 	ingestLost uint64
 
+	// The observation record (nocx-zg3k3.5.2): observation is the interval
+	// in flight — its opening screen, the departures drained into it at
+	// every ingest, the losses it has counted; observations are the records
+	// authenticated boundaries have sealed, oldest first, bounded by
+	// [MaxObservations] with the evictions counted in observationsEvicted.
+	// All three are guarded by mu, like everything else here, and the reads
+	// that hand records out live in observation.go.
+	observation         *observationOpen
+	observations        []ObservationRecord
+	observationsEvicted uint64
+
 	// bufferInstance, bufferActive and bufferSeen are ScreenIdentity's own
 	// bookkeeping (nocx-6q1uh.4, digest.go's ScreenIdentity doc): the
 	// emulator's [emulator.Terminal.Screen] answers only which buffer is
@@ -1039,6 +1050,10 @@ func (s *Session) Ingest(b []byte) error {
 		return ErrIngestTooLarge
 	}
 	s.ingestWork += uint64(len(b))
+	// The interval in flight opens BEFORE the feed that triggered it is
+	// applied, so its opening screen is the screen the interval began on and
+	// carries none of the output that opened it (observation.go).
+	s.openObservationLocked()
 
 	replies, err := s.emulator.Ingest(b)
 	if err != nil {
@@ -1055,6 +1070,10 @@ func (s *Session) Ingest(b []byte) error {
 	// consumer either way. An effect dropped because a reply could not be
 	// delivered is a bell that rings nowhere and is never reported as lost.
 	replyErr := s.deliverReplyLocked(replies)
+	// The departure report is drained BEFORE the effects are read, because
+	// one of them may carry the fence that seals this record: a feed's own
+	// departures belong to the interval that feed belongs to (observation.go).
+	s.drainObservationLocked(len(b))
 	for _, e := range s.emulator.Effects() {
 		if e.Kind == emulator.EffectFence {
 			// The join: a fence the emulator drained LOCATES the
@@ -1123,6 +1142,13 @@ func (s *Session) ReportHole(lost uint64) error {
 	// hole the carrier reported is output this session never saw: it belongs
 	// in the same number for the same reason.
 	s.ingestLost += lost
+	// The record in flight counts the hole beside the session: bytes that
+	// never reached the emulator never became rows, so bytes are the honest
+	// unit here and the session's completeness above is what the record's own
+	// claim will fold down from (observation.go).
+	if s.observation != nil {
+		s.observation.Loss.IngestLostBytes += lost
+	}
 	s.completeness = CompletenessLostIngest
 	s.tick()
 	return nil
@@ -1171,6 +1197,11 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 			e.State = RendezvousComplete
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The authenticated boundary just closed: the interval in
+			// flight seals, and the record it seals opens the next one
+			// (observation.go). Under the same lock the join holds, so the
+			// closing screen and the departures are one instant.
+			s.sealObservationLocked(nonce)
 		}
 		return
 	}
@@ -1277,6 +1308,9 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 			e.PinnedSource = append([]byte(nil), source...)
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
+			// The join at the sighting: same boundary, same seal, whichever
+			// half arrived last (observation.go).
+			s.sealObservationLocked(nonce)
 			return nil
 		case RendezvousAwaitingAuthenticated:
 			// The same fence seen again refreshes the locate: the freshest

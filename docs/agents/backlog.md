@@ -1,8 +1,8 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.19.0 on 2026-09-21 by its setup task, "The backlog tooling here matches shady2k-skills
-0.19.0 and is proved from main" (nocx-q8yjf.8). The protocol itself ships with the skills
+0.22.0 on 2026-09-23 by its setup task, "The backlog tooling here matches shady2k-skills
+0.22.0 and is proved from main" (nocx-xtf0b). The protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
@@ -84,6 +84,13 @@ decompositions, and that work now gets its own task.
 
 - **Revert:** git keeps the reverted subject in quotes, ids included, so it links to the
   same tasks.
+- **Container, here and in the dependency rule, are two different words.** This check
+  refuses any id that is somebody's parent, whatever became of the children: a decomposed
+  task never becomes nameable by a commit again, and the work gets its own leaf. The
+  backlog gate's `nonleaf-dependency` reads it the other way since 0.22.0 — a parent whose
+  children have all closed is a leaf again and may carry an edge, because what remains is
+  in the issue itself. Neither was relaxed towards the other; they answer different
+  questions.
 - **Merge:** a merge naming nothing is linked by the commits it brings in (between its
   first parent and itself). Each of those is checked on its own too. GitHub's
   "Merge pull request #N" passes this way, not as an exemption. A merge that brings in
@@ -120,8 +127,8 @@ keeps every later change.
 - **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs),
   [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.19.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.19.0`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.22.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.22.0`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -230,7 +237,11 @@ guide`, `br <command> --help`.
 
 **Where the model and `br ready` differ.** Measured 2026-09-18 and still true: `br ready`
 also hides a leaf whose ANCESTOR is blocked or deferred, which the normalized model does
-not derive. Nothing `br ready` lists is missing from the model. The model keeps status and
+not derive. Nothing `br ready` lists is missing from the model. It lists one thing the
+model calls a container, though: an open parent whose type is not `epic` — measured
+2026-09-23, `nocx-q8yjf` is a `chore` with two live children and `br ready` offers it as
+takeable work. `-t epic` cannot filter it out and `-t task -t bug` only hides it by
+accident, so a container of any other type has to be read before it is taken. The model keeps status and
 edges as stored; a queue is `br ready`'s job.
 
 ## Open

@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.19.0';
+export const RULES_VERSION = '0.22.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
@@ -13,6 +13,18 @@ const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
 export const digest = (x) => createHash('sha256').update(JSON.stringify(canonical(x))).digest('hex');
 const same = (a, b) => digest(a) === digest(b);
 const ref = (capability, requirement) => `${capability}/${requirement}`;
+
+// What an approval binds to: what the change COMMITS TO — its kind, its scope,
+// the requirements it moves and what it promises to leave alone. The rest of
+// the record is the agent's own working: the reasoning, which check covers
+// which requirement, the task ids, the title. Digesting the whole record made
+// an approval that could not exist until the record was finished and died on
+// every later edit, so the one thing the preflight batch could never hold was
+// the one thing that stopped the run.
+export const decided = (change) => ({
+  kind: change.kind, intent: change.intent, outOfScope: change.outOfScope,
+  deltas: change.deltas, preserves: change.preserves,
+});
 const present = (s) => s.trim().length > 0 && !/\b(TODO|TBD|TKTK)\b|\[NEEDS CLARIFICATION|<[^>]+>/i.test(s);
 
 // Closed schemas catch misspelled fields and wrong types before evaluating rules.
@@ -216,7 +228,7 @@ export function checkDocuments(model, policy, evidence = null) {
 
   // Receipt verification belongs to the protected runner, not a field the author sets.
   if (policy.requireApproval) {
-    check('missing-approval', !evidence?.approvals.some((a) => a.changeDigest === digest(change)
+    check('missing-approval', !evidence?.approvals.some((a) => a.changeDigest === digest(decided(change))
       && present(a.reference)), 'change');
   }
   if (model.phase === 'acceptance' || model.phase === 'close') {
@@ -236,6 +248,9 @@ export function fixtureCases() {
   const fixtures = JSON.parse(readFileSync(join(here, 'fixtures/documents.json'), 'utf8'));
   return fixtures.cases.map((c) => {
     const input = structuredClone(fixtures.valid);
+    // 'pristine' records the approval as it would have been given BEFORE the
+    // patches: the only way to ask whether an edit voids it.
+    const approved = c.receipts === 'pristine' ? structuredClone(fixtures.valid) : input;
     for (const patch of c.patches) {
       const parts = patch.path.split('/');
       let owner = input;
@@ -245,8 +260,9 @@ export function fixtureCases() {
     }
     // Fixtures may request fresh receipts, never production inputs.
     if (c.receipts) {
-      input.evidence.policyDigest = digest(input.policy);
-      input.evidence.approvals = [{ changeDigest: digest(input.model.change), reference: 'fixture:approval' }];
+      input.evidence.policyDigest = digest(approved.policy);
+      input.evidence.approvals = approved.model.change
+        ? [{ changeDigest: digest(decided(approved.model.change)), reference: 'fixture:approval' }] : [];
     }
     return { ...c, ...input };
   });

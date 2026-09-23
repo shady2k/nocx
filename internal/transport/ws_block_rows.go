@@ -82,6 +82,19 @@ type blockStream struct {
 	// fences are the completions that arrived before their end did: fence
 	// hex → attempt id, kept so the end marker can still be matched.
 	fences map[session.ID]map[string]string
+	// confirmers are the helper-facing watermarks. A deferred open uses the
+	// same callback once its rows have actually reached the store.
+	confirmers map[session.ID]func(uint64)
+	// waiting names an authenticated attempt whose ledger row has not become
+	// durable yet. Rows arriving in this interval must not be acknowledged.
+	waiting  map[session.ID]string
+	pending  map[session.ID][]pendingRows
+	flushing map[session.ID]bool
+	opening  map[session.ID]bool
+	// pendingCloses are authenticated ends held behind a deferred append.
+	// They are drained only after every pending row reaches the store.
+	pendingCloses map[session.ID][]pendingEnd
+	closing       map[session.ID]bool
 }
 
 type openBlock struct {
@@ -89,6 +102,12 @@ type openBlock struct {
 	entry      string
 	artifactID string
 	kept       bool
+}
+
+type pendingRows struct {
+	from uint64
+	lost uint64
+	rows []emulator.Row
 }
 
 type pendingEnd struct {
@@ -113,16 +132,41 @@ type blockClosedParams struct {
 // AttachBlockRows registers a session's helper rows callbacks as this
 // stream's source. Without a source the stream is inert — see the header.
 func (s *WSServer) AttachBlockRows(sid session.ID) {
-	s.blockStream.attach(sid)
+	s.blockStream.attach(sid, nil)
 }
 
-func (bs *blockStream) attach(sid session.ID) {
+// AttachBlockRowsWithConfirmation additionally gives deferred rows a way to
+// advance the helper's watermark after the bind retry has persisted them.
+func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64)) {
+	s.blockStream.attach(sid, confirm)
+}
+
+func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
 	if bs.sources == nil {
 		bs.sources = make(map[session.ID]struct{})
 	}
+	if bs.confirmers == nil {
+		bs.confirmers = make(map[session.ID]func(uint64))
+	}
+	if bs.waiting == nil {
+		bs.waiting = make(map[session.ID]string)
+	}
+	if bs.pending == nil {
+		bs.pending = make(map[session.ID][]pendingRows)
+	}
+	if bs.flushing == nil {
+		bs.flushing = make(map[session.ID]bool)
+	}
+	if bs.pendingCloses == nil {
+		bs.pendingCloses = make(map[session.ID][]pendingEnd)
+	}
+	if bs.closing == nil {
+		bs.closing = make(map[session.ID]bool)
+	}
 	bs.sources[sid] = struct{}{}
+	bs.confirmers[sid] = confirm
 }
 
 // DetachBlockRows ends a session's streaming: every still-open block is
@@ -141,6 +185,13 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	delete(bs.current, sid)
 	delete(bs.ends, sid)
 	delete(bs.fences, sid)
+	delete(bs.confirmers, sid)
+	delete(bs.waiting, sid)
+	delete(bs.pending, sid)
+	delete(bs.flushing, sid)
+	delete(bs.opening, sid)
+	delete(bs.pendingCloses, sid)
+	delete(bs.closing, sid)
 	bs.mu.Unlock()
 	for _, b := range opens {
 		if !b.kept {
@@ -177,6 +228,32 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
 	block := bs.current[sid]
+	waiting := bs.waiting[sid]
+	flushing := bs.flushing[sid]
+	pending := len(bs.pending[sid]) > 0
+	closing := bs.closing[sid]
+	if sourced && pending && !flushing && waiting == "" && !closing && block != nil {
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{
+			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+		})
+		toFlush := bs.pending[sid]
+		delete(bs.pending, sid)
+		bs.flushing[sid] = true
+		confirm := bs.confirmers[sid]
+		bs.mu.Unlock()
+		bs.flushPendingRows(s, sid, block, toFlush, confirm)
+		return 0, false
+	}
+	if sourced && (flushing || waiting != "" || pending || closing) {
+		if bs.pending == nil {
+			bs.pending = make(map[session.ID][]pendingRows)
+		}
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{
+			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+		})
+		bs.mu.Unlock()
+		return 0, false
+	}
 	bs.mu.Unlock()
 	if !sourced {
 		return 0, false
@@ -241,9 +318,23 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 }
 
 // closeBlockRows appends the closing rows and seals the block an interval
-// leaves behind, then says so. A refused command's interval does the
-// registry work and sends nothing — nothing grew, so nothing closed.
+// leaves behind, then says so. A deferred append owns the interval until it
+// finishes; the close is parked rather than racing the append.
 func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
+		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
+			nonce: hexNonce, endRow: endRow, closing: append([]emulator.Row(nil), closing...),
+		})
+		bs.mu.Unlock()
+		return
+	}
+	bs.mu.Unlock()
+	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce)
+}
+
+func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) {
 	bs := s.blockStream
 	bs.mu.Lock()
 	block := bs.open[sid][attempt]
@@ -326,20 +417,52 @@ func (bs *blockStream) attemptFact(s *WSServer, f lifecyclepub.Fact) {
 // caller has already resolved to its session — the submit path's own shape.
 func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt string) {
 	bs.mu.Lock()
-	if bs.open[sid][attempt] != nil {
+	if waiting := bs.waiting[sid]; waiting != "" && waiting != attempt {
 		bs.mu.Unlock()
 		return
 	}
-	bs.mu.Unlock()
-	store := s.blockStore()
-	if store == nil {
+	if bs.opening[sid] {
+		bs.mu.Unlock()
 		return
 	}
-	// The id is the stream's own — the store treats it as the untrusted
-	// idempotency key it is.
+	if existing := bs.open[sid][attempt]; existing != nil {
+		if bs.flushing[sid] {
+			bs.mu.Unlock()
+			return
+		}
+		pending := bs.pending[sid]
+		delete(bs.pending, sid)
+		confirm := bs.confirmers[sid]
+		if len(pending) > 0 {
+			bs.flushing[sid] = true
+		}
+		bs.mu.Unlock()
+		if len(pending) > 0 {
+			bs.flushPendingRows(s, sid, existing, pending, confirm)
+		}
+		return
+	}
+	if bs.waiting == nil {
+		bs.waiting = make(map[session.ID]string)
+	}
+	if bs.opening == nil {
+		bs.opening = make(map[session.ID]bool)
+	}
+	// Reserve before the store call: rows can arrive while OPEN is blocked,
+	// and a second OPEN fact must not start a competing attempt.
+	bs.waiting[sid] = attempt
+	bs.opening[sid] = true
+	bs.mu.Unlock()
+
+	store := s.blockStore()
+	if store == nil {
+		bs.clearOpening(sid)
+		return
+	}
 	v7, mintErr := uuid.NewV7()
 	if mintErr != nil {
 		s.log.Warn("block rows artifact id mint failed", "session", sid, "entry", attempt, "error", mintErr)
+		bs.clearOpening(sid)
 		return
 	}
 	artifactID := v7.String()
@@ -351,17 +474,14 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	})
 	if err != nil {
 		if !errors.Is(err, content.ErrNoSuchEntry) {
-			// History off answers ErrNoSuchEntry (no row was recorded) and
-			// is a refusal, not a failure; anything else is worth hearing.
 			s.log.Warn("block rows open failed", "session", sid, "entry", attempt, "error", err)
 		}
+		bs.clearOpening(sid)
+		// Keep waiting reserved. The ledger.bind retry owns the next open.
 		return
 	}
-	// An empty id is the keep decision's refusal: history's settings
-	// answered before anything was written, and the refusal is remembered
-	// so the rows that follow are confirmed and dropped, never stored.
+
 	bs.mu.Lock()
-	defer bs.mu.Unlock()
 	if bs.open == nil {
 		bs.open = make(map[session.ID]map[string]*openBlock)
 	}
@@ -374,6 +494,107 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	b := &openBlock{attempt: attempt, entry: attempt, artifactID: openArtifact, kept: openArtifact != ""}
 	bs.open[sid][attempt] = b
 	bs.current[sid] = b
+	delete(bs.opening, sid)
+	if bs.waiting[sid] == attempt {
+		delete(bs.waiting, sid)
+	}
+	pending := bs.pending[sid]
+	delete(bs.pending, sid)
+	confirm := bs.confirmers[sid]
+	if len(pending) > 0 {
+		bs.flushing[sid] = true
+	}
+	bs.mu.Unlock()
+	if len(pending) > 0 {
+		bs.flushPendingRows(s, sid, b, pending, confirm)
+	}
+}
+
+func (bs *blockStream) clearOpening(sid session.ID) {
+	bs.mu.Lock()
+	delete(bs.opening, sid)
+	bs.mu.Unlock()
+}
+
+func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {
+	if !block.kept {
+		for _, delivery := range pending {
+			confirmPendingRows(confirm, delivery)
+		}
+		bs.finishPendingRows(sid)
+		bs.drainPendingCloses(s, sid, block.attempt)
+		return
+	}
+	store := s.blockStore()
+	if store == nil {
+		bs.requeuePendingRows(sid, pending)
+		return
+	}
+	// Owner: this stream, on behalf of the helper's attached session.
+	// Closing event: each successful append or the session detach.
+	for i, delivery := range pending {
+		if err := store.AppendBlockRows(context.Background(), content.AppendBlockRows{
+			EntryID: block.entry, ArtifactID: block.artifactID,
+			FromRow: delivery.from, LostRows: delivery.lost, Rows: delivery.rows,
+		}); err != nil {
+			s.log.Warn("deferred block rows append failed", "session", sid, "entry", block.entry, "error", err)
+			bs.requeuePendingRows(sid, pending[i:])
+			return
+		}
+		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+			EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
+		})
+		confirmPendingRows(confirm, delivery)
+	}
+	bs.mu.Lock()
+	next := bs.pending[sid]
+	delete(bs.pending, sid)
+	if len(next) == 0 {
+		bs.flushing[sid] = false
+		bs.mu.Unlock()
+		bs.drainPendingCloses(s, sid, block.attempt)
+		return
+	}
+	bs.mu.Unlock()
+	bs.flushPendingRows(s, sid, block, next, confirm)
+}
+
+func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID, attempt string) {
+	for {
+		bs.mu.Lock()
+		closes := bs.pendingCloses[sid]
+		delete(bs.pendingCloses, sid)
+		if len(closes) == 0 {
+			delete(bs.closing, sid)
+			bs.mu.Unlock()
+			return
+		}
+		bs.closing[sid] = true
+		bs.mu.Unlock()
+		for _, end := range closes {
+			s.closeBlockRowsNow(sid, attempt, end.endRow, end.closing, end.nonce)
+		}
+	}
+}
+
+func confirmPendingRows(confirm func(uint64), delivery pendingRows) {
+	if confirm != nil {
+		confirm(delivery.from + uint64(len(delivery.rows)) - 1) //nolint:gosec // a row count, not a byte count
+	}
+}
+
+func (bs *blockStream) finishPendingRows(sid session.ID) {
+	bs.mu.Lock()
+	delete(bs.pending, sid)
+	bs.flushing[sid] = false
+	bs.mu.Unlock()
+}
+
+func (bs *blockStream) requeuePendingRows(sid session.ID, pending []pendingRows) {
+	bs.mu.Lock()
+	bs.pending[sid] = append(pending, bs.pending[sid]...)
+	bs.flushing[sid] = false
+	bs.mu.Unlock()
 }
 
 // publishFence records a completion's fence for the end marker that has not

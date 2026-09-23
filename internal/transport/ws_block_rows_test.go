@@ -121,9 +121,9 @@ func streamRows(t *testing.T, db content.ContentDB, entryID string) []struct {
 	return out
 }
 
-// THE STREAMED APPEND. Rows that leave the screen while a command runs land
-// on the command's block, in order, acknowledged as written — and the entry
-// they land on is the attempt id the authenticated start named.
+// The opposite event order is also load-bearing: ledger submit/start and the
+// authenticated OPEN complete before the helper offers rows, so delivery
+// appends immediately to the already-selected block.
 func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
@@ -147,6 +147,104 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 		}
 		if kept[i].Text != want {
 			t.Fatalf("row %d reads %q, want %q", i, kept[i].Text, want)
+		}
+	}
+}
+
+// If the authenticated open fact beats ledger persistence, rows must stay
+// unacknowledged until the bind retry opens the durable block. The helper has
+// no separate copy after confirmation, so acknowledging this interval while
+// current is nil would lose it permanently.
+func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	var confirmed []uint64
+	e.ws.AttachBlockRowsWithConfirmation(session.ID(sid), func(upTo uint64) {
+		confirmed = append(confirmed, upTo)
+	})
+
+	const command = "printf before-bind"
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), command), 42))
+	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), got.ID)
+	e.ws.blockStream.mu.Lock()
+	current := e.ws.blockStream.current[session.ID(sid)]
+	waiting := e.ws.blockStream.waiting[session.ID(sid)]
+	e.ws.blockStream.mu.Unlock()
+	if current != nil || waiting != got.ID {
+		t.Fatalf("pre-bind open state = current:%v waiting:%q, want no block and waiting for %q", current != nil, waiting, got.ID)
+	}
+
+	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("before-bind"),
+	})
+	if confirm {
+		t.Fatalf("pre-bind rows were acknowledged through %d; the helper cannot replay them", written)
+	}
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleStartEvt(nil, command)))
+
+	kept := streamRows(t, db, got.ID)
+	if len(kept) != 1 || kept[0].Text != "before-bind" {
+		t.Fatalf("bind retry stored rows = %+v, want the held pre-bind row", kept)
+	}
+	if len(confirmed) != 1 || confirmed[0] != 0 {
+		t.Fatalf("deferred confirmation = %v, want [0]", confirmed)
+	}
+}
+
+// An authenticated end can resolve while the bind retry is flushing rows.
+// The close must park behind that flush, or the artifact can seal before the
+// deferred rows reach the store.
+func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf deferred")
+
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("seed")}); !confirm {
+		t.Fatal("seed row was not confirmed")
+	}
+	existing := streamRows(t, db, attempt)
+	from := existing[len(existing)-1].From + 1
+	e.ws.blockStream.mu.Lock()
+	block := e.ws.blockStream.current[session.ID(sid)]
+	pending := []pendingRows{{from: from, rows: []emulator.Row{aStreamRow("deferred")}}}
+	e.ws.blockStream.pending[session.ID(sid)] = pending
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	e.ws.blockStream.mu.Unlock()
+
+	e.ws.closeBlockRows(session.ID(sid), attempt, from+1, []emulator.Row{aStreamRow("closing")}, "deferred-close")
+	e.ws.blockStream.mu.Lock()
+	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
+	stillOpen := e.ws.blockStream.open[session.ID(sid)][attempt] != nil
+	e.ws.blockStream.mu.Unlock()
+	if parked != 1 || !stillOpen {
+		t.Fatalf("close gate state = parked:%d open:%v, want parked:1 open:true", parked, stillOpen)
+	}
+	e.ws.blockStream.mu.Lock()
+	delete(e.ws.blockStream.pending, session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+
+	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
+	kept := streamRows(t, db, attempt)
+	if len(kept) != 3 || kept[0].Text != "seed" || kept[1].Text != "deferred" || kept[2].Text != "closing" {
+		t.Fatalf("flush-before-close rows = %+v, want seed, deferred, closing", kept)
+	}
+	row, err := db.Ledger().Entry(context.Background(), attempt)
+	if err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	for _, ex := range row.Executions {
+		for _, artifact := range ex.Artifacts {
+			if artifact.MediaType != content.MediaBlockRows {
+				continue
+			}
+			stored, err := db.Ledger().Artifact(context.Background(), artifact.ID)
+			if err != nil {
+				t.Fatalf("Artifact: %v", err)
+			}
+			if stored.State != content.ArtifactSealed {
+				t.Fatalf("deferred block state = %q, want sealed", stored.State)
+			}
 		}
 	}
 }
@@ -285,6 +383,23 @@ func TestBlockRowsStream_IsInertWithoutASource(t *testing.T) {
 	}
 	if _, confirm := e.ws.BlockRowsArrived(lifecycleSessionOf(t, e), 0, 0, []emulator.Row{aStreamRow("x")}); confirm {
 		t.Fatal("rows were confirmed with no source attached")
+	}
+}
+
+// Rows outside an authenticated attempt are prompt scroll, not the next
+// command's output. They keep the original drop-and-confirm outcome.
+func TestBlockRowsArrived_NoAttemptRowsAreConfirmedAndDropped(t *testing.T) {
+	e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 7, 0, []emulator.Row{aStreamRow("prompt")})
+	if !confirm || written != 7 {
+		t.Fatalf("no-attempt rows ack = (%d, %v), want (7, true)", written, confirm)
+	}
+	e.ws.blockStream.mu.Lock()
+	defer e.ws.blockStream.mu.Unlock()
+	if len(e.ws.blockStream.pending[session.ID(sid)]) != 0 {
+		t.Fatal("no-attempt rows were retained for a future command")
 	}
 }
 

@@ -64,12 +64,15 @@ type blockRGB struct {
 }
 
 // encodeBlockRowsLine renders one departed row as one stored line, newline
-// terminated. Every line parses on its own; a body is the concatenation of
-// its lines and is read back in seq order.
+// terminated. Trailing default blank cells are omitted: unlike a live frame,
+// a stored row does not need to carry the terminal rectangle's untouched tail.
+// Keep one cell for an entirely blank or empty row so the row remains a valid,
+// styled line and the existing one-or-more run contract stays intact.
 func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
+	cells := trimStoredTrailingCells(row.Cells)
 	line := blockRowsLine{From: from, Row: blockRow{
-		Cells:        make([][3]any, 0, len(row.Cells)),
-		Runs:         make([][2]any, 0, len(row.Cells)),
+		Cells:        make([][3]any, 0, len(cells)),
+		Runs:         make([][2]any, 0, len(cells)),
 		Wrap:         row.Wrap,
 		Continuation: row.Continuation,
 	}}
@@ -82,7 +85,7 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 		line.Row.Runs = append(line.Row.Runs, [2]any{encodeBlockStyle(runStyle), runLength})
 		runLength = 0
 	}
-	for _, cell := range row.Cells {
+	for _, cell := range cells {
 		line.Row.Cells = append(line.Row.Cells, [3]any{cell.Grapheme, int(cell.Width), cell.HasText})
 		if runLength > 0 && cell.Style == runStyle {
 			runLength++
@@ -98,6 +101,24 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 		return nil, fmt.Errorf("content: block rows: marshal row %d: %w", from, err)
 	}
 	return append(raw, '\n'), nil
+}
+
+func trimStoredTrailingCells(cells []emulator.Cell) []emulator.Cell {
+	if len(cells) == 0 {
+		return []emulator.Cell{{Width: emulator.WidthNarrow}}
+	}
+	end := len(cells)
+	for end > 1 && isDefaultBlankCell(cells[end-1]) {
+		end--
+	}
+	return cells[:end]
+}
+
+func isDefaultBlankCell(cell emulator.Cell) bool {
+	return cell.Grapheme == "" &&
+		!cell.HasText &&
+		cell.Width == emulator.WidthNarrow &&
+		cell.Style == (emulator.Style{})
 }
 
 func encodeBlockStyle(style emulator.Style) blockStyle {

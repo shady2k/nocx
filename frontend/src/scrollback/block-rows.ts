@@ -1,5 +1,5 @@
 import type { SessionFrame } from '../generated/session.frame'
-import type { LedgerBlockRowsLine } from '../generated/ledger.blockRows'
+import type { Cell, LedgerBlockRowsLine, Row, Run, Style } from '../generated/ledger.blockRows'
 import { createCellModel } from '../cell-model'
 import { paintRow } from '../painter/paint-row'
 import type { RunMetric } from './run-geometry'
@@ -73,21 +73,84 @@ export function parseStoredBlockRows(
   }
 }
 
+function defaultStyle(): Style {
+  return {
+    foreground: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    background: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    underlineColor: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+    attributes: 0,
+    underline: 0,
+  }
+}
+
+function isDefaultStyle(style: Style): boolean {
+  return (
+    style.attributes === 0 &&
+    style.underline === 0 &&
+    style.foreground.kind === 0 &&
+    style.foreground.palette === 0 &&
+    style.foreground.rgb.r === 0 &&
+    style.foreground.rgb.g === 0 &&
+    style.foreground.rgb.b === 0 &&
+    style.background.kind === 0 &&
+    style.background.palette === 0 &&
+    style.background.rgb.r === 0 &&
+    style.background.rgb.g === 0 &&
+    style.background.rgb.b === 0 &&
+    style.underlineColor.kind === 0 &&
+    style.underlineColor.palette === 0 &&
+    style.underlineColor.rgb.r === 0 &&
+    style.underlineColor.rgb.g === 0 &&
+    style.underlineColor.rgb.b === 0
+  )
+}
+
+function nonEmptyRuns(runs: readonly Run[]): [Run, ...Run[]] {
+  if (runs.length === 0) {
+    throw new Error('stored row has no style runs')
+  }
+  return runs.map(([style, length]) => [style, length] as Run) as [Run, ...Run[]]
+}
+
+function padStoredRow(row: Row, width: number): Row {
+  const missing = width - row.cells.length
+  if (missing <= 0) return row
+
+  const cells: Cell[] = [...row.cells]
+  for (let i = 0; i < missing; i++) cells.push(['', 1, false])
+
+  const runs = nonEmptyRuns(row.runs)
+  const last = runs[runs.length - 1]
+  if (last !== undefined && isDefaultStyle(last[0])) {
+    last[1] += missing
+  } else {
+    runs.push([defaultStyle(), missing])
+  }
+  return { ...row, cells, runs }
+}
+
+function normalizeStoredRows(lines: readonly LedgerBlockRowsLine[]): LedgerBlockRowsLine[] {
+  const width = Math.max(...lines.map((line) => line.row.cells.length))
+  if (width === 0) return []
+  return lines.map((line) => ({ ...line, row: padStoredRow(line.row, width) }))
+}
+
 function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   if (lines.length === 0) return null
-  const cols = lines[0].row.cells.length
-  if (cols === 0 || lines.some((line) => line.row.cells.length !== cols)) return null
+  const normalized = normalizeStoredRows(lines)
+  if (normalized.length === 0) return null
+  const cols = normalized[0].row.cells.length
   const frame: SessionFrame = {
     revision: 1,
     geometry: {
       cols,
-      rows: lines.length,
+      rows: normalized.length,
       cellWidthPx: 1,
       cellHeightPx: 1,
       revision: 1,
     },
     cursor: { x: 0, y: 0, visible: false },
-    rows: lines.map((line) => line.row),
+    rows: normalized.map((line) => line.row),
   }
   const result = createCellModel().apply(frame)
   return result.ok ? result.snapshot : null

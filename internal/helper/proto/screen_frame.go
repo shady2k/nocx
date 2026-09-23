@@ -16,34 +16,21 @@ package proto
 //	bytes 48..    payload        one session.frame document (whole, or the
 //	                            part of one this frame carries)
 //
-// It is SessionFrame's layout reduced to what a screen frame needs, and the
-// differences from it are all deliberate:
-//
-//   - The identity is the HOST SESSION's id plus the SUBSCRIBER it is for,
-//     and nothing here is minted: a screen is the screen OF a session, the
-//     wire already names that session, and a helper-minted screen id would
-//     be a second name for a named thing. A subscriber id is carried for
-//     the reason SessionFrame carries one, and it is sharper here: what
-//     each reader of a session's screen is owed genuinely differs — a
-//     mid-session attacher is owed one snapshot at the current revision
-//     while an established reader is owed the stream — so a frame has to
-//     say which reader it is for.
-//   - There is NO lease epoch. SessionFrame's header says its epoch is zero
-//     on helper→coordinator frames, where there is nothing to authorize;
-//     a screen frame only ever flows that way, so the field is left out
-//     rather than carried as a permanent zero. A reader of the two layouts
-//     side by side should see that the difference is deliberate.
-//   - The REVISION is in the header, not only inside the payload: a
-//     receiver must be able to order, drop and reassemble without parsing
-//     JSON, and the whole delivery design is revision-relative.
+// It is SessionFrame's layout reduced to what a screen frame needs. The
+// differences from it are all deliberate, and their reasons are argued once
+// in ADR-0073
+// (docs/decisions/0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md):
+// the identity is the HOST SESSION's id plus the SUBSCRIBER it is for and
+// nothing here is minted; there is NO lease epoch, because nothing is
+// authorized helper-to-coordinator; and the REVISION rides in the header so
+// a receiver orders, drops and reassembles without parsing JSON.
 //
 // # Oversize: parts at the carrier, never in the contract
 //
 // The house's first answer to "this payload does not fit one wire frame" is
-// ChunkedResult plus TypeChunk frames. It was considered and does not fit:
-// ChunkedResult is the sentinel a RESPONSE carries, and a published screen
-// frame has no response to carry it — the mechanism is bound to the
-// request/response envelope, not to a published plane. So this type owns its
+// ChunkedResult plus TypeChunk frames. It was considered and does not fit —
+// it is bound to the request/response envelope, and a published screen frame
+// has no Response; the whole argument is ADR-0073's. So this type owns its
 // own continuation, the way channel_frame.go owns its own layout and derives
 // its own bound from MaxFrameBytes: a frame above MaxScreenDataPayloadBytes
 // leaves the sender as parts ([SplitScreenDataFrame]), each part within the

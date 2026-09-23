@@ -71,13 +71,14 @@ const (
 	// frame. Recognising it is what makes that one dropped stream.
 	TypeChannelData FrameType = 12
 	// TypeScreenFrame carries the session's screen — the full snapshot the
-	// session runtime publishes per revision — keyed by the host session id
-	// and the subscriber it is for, the revision in its header, on its own
-	// plane rather than as a second meaning for TypeSessionData: JSON screen
-	// frames fed into the raw PTY carrier would corrupt the byte stream
-	// every downstream consumer reads, and the two are routed by different
-	// services off different fields. See screen_frame.go for the layout and
-	// the carrier-side reassembly of an oversize frame's parts.
+	// session runtime publishes per revision — on its own plane rather than
+	// as a second meaning for TypeSessionData. Its identity, header and
+	// continuation are decided in ADR-0073, cited with its full path in
+	// screen_frame.go. What stays local here is why the byte is allocated
+	// before any producer ships: the decoder resyncs THROUGH an unknown
+	// type byte one byte at a time, so a generation that did not know this
+	// type would resync through a live screen stream rather than dropping
+	// one frame. See screen_frame.go for the layout.
 	TypeScreenFrame FrameType = 13
 )
 

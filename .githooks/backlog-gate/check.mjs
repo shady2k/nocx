@@ -77,6 +77,15 @@ const CRITERION_MARKERS = [
 
 const LIVE = (s) => ['open', 'active', 'submitted', 'implemented'].includes(s);
 
+// What an edge may not name. An epic is one by its kind; a parent is one while
+// work is still open under it, because an edge onto it would serialize that
+// work behind something it never needed. A leaf whose sub-task has closed is a
+// leaf again: what remains is in the issue itself, so an edge onto it is as
+// concrete as an edge ever was, and refusing it leaves the prerequisite in
+// prose that nothing queries.
+const isContainer = (m, i) =>
+  !!i && (i.type === 'epic' || (m.children.get(i.id) || []).some((c) => LIVE(m.by.get(c)?.status)));
+
 // ---------------------------------------------------------------- model
 
 function index(backlog) {
@@ -267,7 +276,7 @@ const CHECKS = [
     id: 'finding-budget',
     severity: 'error',
     why: 'Bugs and debt found mid-milestone go to the front one at a time, each reasonable, and push the feature out by a fortnight nobody decided on. The charter declares how many the milestone absorbs.',
-    fix: 'Defer the finding, or ask the owner to replace named planned work and explicitly adjust the finding budget in config and the charter decision. Deferring planned work alone does not change this count.',
+    fix: 'The ways that do the work are the owner\'s to give: displace named planned work and raise the budget in config and the charter decision, open the next milestone for it, or hold it knowingly with a review date. Deferring it yourself to make the number fit, dropping its milestone label or narrowing it shrinks the count instead, and leaves a record saying the fault is not there. A repair a required check forced on the way to a merge is not intake at all: file it under the work whose merge it blocked, with no finding label. Deferring planned work alone does not change this count.',
     run: (m, cfg) => {
       if (cfg.findingBudget == null) return [];
       const marks = cfg.findingLabels || [];
@@ -312,10 +321,9 @@ const CHECKS = [
     id: 'nonleaf-dependency',
     severity: 'error',
     why: 'Blocking entire containers hides the concrete prerequisite and serializes unrelated work.',
-    fix: 'Place the dependency on the actual consuming and producing leaves, with the result or conflict it represents.',
+    fix: 'Point it at the leaf whose result releases it, with the result or conflict it represents. Where a whole outcome is awaited, that leaf is the one putting the awaited thing in the person\'s hands; where it does not exist yet, write it first as that outcome\'s acceptance and point at it. Leaving the prerequisite in a comment instead is not the cheaper answer: what ready does not read, the next run does not know.',
     run: (m) => m.issues.filter((i) => LIVE(i.status)).flatMap((i) =>
-      (i.blockedBy || []).filter((id) => i.type === 'epic' || m.children.has(i.id) ||
-        m.by.get(id)?.type === 'epic' || m.children.has(id))
+      (i.blockedBy || []).filter((id) => isContainer(m, i) || isContainer(m, m.by.get(id)))
         .map((id) => ({ id: i.id, ref: id, note: 'dependency uses a container rather than a leaf' }))),
   },
   {
@@ -376,7 +384,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.19.0';
+const RULES_VERSION = '0.22.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 

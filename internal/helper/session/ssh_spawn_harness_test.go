@@ -1139,8 +1139,9 @@ func newExitWatcher() *exitWatcher {
 	return &exitWatcher{woken: make(chan struct{}, 8), livenessW: make(chan struct{}, 32)}
 }
 
-func (w *exitWatcher) SendSessionData(proto.SessionFrame) error   { return nil }
-func (w *exitWatcher) SendLifecycleData(proto.SessionFrame) error { return nil }
+func (w *exitWatcher) SendSessionData(proto.SessionFrame) error    { return nil }
+func (w *exitWatcher) SendLifecycleData(proto.SessionFrame) error  { return nil }
+func (w *exitWatcher) SendScreenFrame(proto.ScreenDataFrame) error { return nil }
 func (w *exitWatcher) SendNotification(n proto.Notification) error {
 	if n.Service != proto.ServiceSession {
 		return nil

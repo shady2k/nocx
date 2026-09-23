@@ -34,7 +34,8 @@ const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
-import type { PaneIdentity } from './terminal-content'
+import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import type { Row, SessionFrame, Style } from './generated/session.frame'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
@@ -15395,6 +15396,135 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
         'the restored block still reads unknown after its completion replayed',
       ).toBe('Exit 7')
     } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane receives the screen plane into its cell model (nocx-zg3k3.2.8)
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane holds ONE cell model, fed by the session's screen frames; nothing
+// paints from it and xterm keeps the byte path. These tests read the model
+// only through the seam an e2e spec reads — window.__nocxPaneScreen() over
+// the ACTIVE pane — so the unit layer asserts the same surface the e2e
+// layer drives, not a private field.
+
+const SCREEN_COLOR = { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } }
+const SCREEN_COLS = 40
+const SCREEN_ROWS = 4
+
+/** One valid frame at `revision` whose first rows carry `lines`, padded to
+ *  a full rectangle — the shape the backend publishes and the model's
+ *  intake accepts. */
+function screenFrame(revision: number, lines: string[]): SessionFrame {
+  const style: Style = {
+    foreground: { ...SCREEN_COLOR, kind: 1 as const, palette: 7 },
+    background: SCREEN_COLOR,
+    underlineColor: SCREEN_COLOR,
+    attributes: 0,
+    underline: 0,
+  }
+  const blankRow: Row = {
+    cells: Array.from({ length: SCREEN_COLS }, () => ['', 1, false] as [string, 1, boolean]),
+    runs: [[style, SCREEN_COLS] as [typeof style, number]],
+    wrap: false,
+    continuation: false,
+  }
+  const rows: Row[] = lines.map((text): Row => ({
+    cells: Array.from({ length: SCREEN_COLS }, (_, c) => {
+      const ch = text[c] ?? ''
+      return [ch, 1, ch !== ''] as [string, 1, boolean]
+    }),
+    runs: [[style, SCREEN_COLS] as [typeof style, number]],
+    wrap: false,
+    continuation: false,
+  }))
+  while (rows.length < SCREEN_ROWS) rows.push(blankRow)
+  return {
+    revision,
+    geometry: {
+      cols: SCREEN_COLS,
+      rows: SCREEN_ROWS,
+      cellWidthPx: 8,
+      cellHeightPx: 16,
+      revision,
+    },
+    cursor: { x: 0, y: 0, visible: true },
+    rows,
+  }
+}
+
+function paneScreen(): PaneScreenReading | null {
+  const host = window as unknown as { __nocxPaneScreen?: () => PaneScreenReading | null }
+  return host.__nocxPaneScreen?.() ?? null
+}
+
+describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8)', () => {
+  it('a valid frame advances the model the active pane reads, paired with a refused stale one', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+
+      // Before any frame: the model holds no revision and names no rows.
+      expect(paneScreen()).toEqual({ revision: null, rows: [] })
+
+      session.fireScreenFrame(screenFrame(3, ['PROMPT$ ls', 'NOCX-MARKER-1']))
+      const reading = paneScreen()
+      expect(reading?.revision).toBe(3)
+      expect(reading?.rows[0]).toBe('PROMPT$ ls')
+      expect(reading?.rows[1]).toContain('NOCX-MARKER-1')
+
+      // THE REFUSAL, paired: a stale frame neither throws out of the
+      // socket handler nor moves the model, and the refusal is logged with
+      // the model's own vocabulary.
+      expect(() => session.fireScreenFrame(screenFrame(2, ['stale']))).not.toThrow()
+      expect(paneScreen()?.revision).toBe(3)
+      const refusalLine = debug.mock.calls.find((c) =>
+        String(c[0]).includes('screen frame refused'),
+      )
+      expect(refusalLine).toBeDefined()
+      expect(String(refusalLine?.[0])).toContain('stale-revision')
+
+      // …and the pane is where the seam looked for it: not active, not read.
+      tab.pane.classList.remove('active')
+      expect(paneScreen()).toBeNull()
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('a document that is not a frame at all is dropped without throwing out of the handler', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+
+      session.fireScreenFrame(screenFrame(1, ['before']))
+      // A document with no frame shape — apply throws inside it, and the
+      // handler catches rather than tearing down the socket.
+      const notAFrame = { nonsense: true } as unknown as SessionFrame
+      expect(() => session.fireScreenFrame(notAFrame)).not.toThrow()
+
+      expect(paneScreen()?.revision).toBe(1)
+      const dropLine = debug.mock.calls.find((c) => String(c[0]).includes('could not be applied'))
+      expect(dropLine).toBeDefined()
+    } finally {
+      debug.mockRestore()
       teardown()
     }
   })

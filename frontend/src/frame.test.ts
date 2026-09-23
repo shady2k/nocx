@@ -3,6 +3,7 @@ import {
   FRAME_HEADER_SIZE,
   FRAME_VERSION,
   MSG_TYPE_DATA,
+  MSG_TYPE_METADATA,
   decodeFrame,
   encodeFrame,
   hexToBytes,
@@ -78,7 +79,9 @@ describe('decodeFrame', () => {
   })
 
   // Drop-and-warn, never throw: a malformed frame must not tear down the
-  // connection (internal/transport/frame.go, "Forward-compat").
+  // connection (internal/transport/frame.go, "Forward-compat"). A msg-type
+  // neither side has agreed on is forward-compat territory — dropped the
+  // same way, so an older client ignores a newer plane instead of choking.
   it.each([
     ['a frame shorter than the header', bytes(FRAME_VERSION, MSG_TYPE_DATA, 0x00)],
     [
@@ -86,14 +89,33 @@ describe('decodeFrame', () => {
       new Uint8Array([0x99, MSG_TYPE_DATA, ...new Array<number>(16).fill(0)]).buffer,
     ],
     [
-      'a metadata msg-type (reserved for Phase 2)',
-      new Uint8Array([FRAME_VERSION, 0x02, ...new Array<number>(16).fill(0)]).buffer,
+      'an unknown msg-type',
+      new Uint8Array([FRAME_VERSION, 0x99, ...new Array<number>(16).fill(0)]).buffer,
     ],
   ])('drops %s', (_label, input) => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     expect(decodeFrame(input)).toBeNull()
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
+  })
+
+  // The screen plane rides msg-type 0x02 (internal/transport/screen.go): a
+  // whole session.frame document, never PTY bytes. decodeFrame's job ends at
+  // the header — it carries the msg-type up and lets the demux decide where
+  // the payload goes.
+  it('decodes a metadata frame carrying its msg-type', () => {
+    const payload = new TextEncoder().encode('{"revision":1}')
+    const decoded = decodeFrame(encodeFrame(SID, payload, MSG_TYPE_METADATA))
+
+    expect(decoded).not.toBeNull()
+    expect(decoded?.msgType).toBe(MSG_TYPE_METADATA)
+    expect(decoded?.sessionId).toBe(SID)
+    expect(new TextDecoder().decode(decoded?.payload)).toBe('{"revision":1}')
+  })
+
+  it('carries the byte path msg-type so the demux can tell the planes apart', () => {
+    const decoded = decodeFrame(encodeFrame(SID, new TextEncoder().encode('hi')))
+    expect(decoded?.msgType).toBe(MSG_TYPE_DATA)
   })
 
   it('accepts a header-only frame as an empty payload', () => {

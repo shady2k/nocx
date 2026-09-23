@@ -1,8 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { SessionHandle, WSClient } from './ipc'
-import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
+import {
+  FRAME_HEADER_SIZE,
+  FRAME_VERSION,
+  MSG_TYPE_DATA,
+  MSG_TYPE_METADATA,
+  encodeFrame,
+} from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
 import type { SessionLiveness } from './generated/session.liveness'
 
@@ -480,6 +486,118 @@ describe('inbound data', () => {
     socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('ok')))
 
     expect(seen.join('')).toBe('ok')
+  })
+})
+
+// The screen plane (msg-type 0x02) is NOT the byte path: a frame is one whole
+// session.frame document, and counting it into the replay offset or acking it
+// would corrupt AD-9 accounting with bytes nobody wrote.
+describe('screen frames (msg-type 0x02)', () => {
+  let consoleDebug: MockInstance<typeof console.debug>
+
+  beforeEach(() => {
+    consoleDebug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+  })
+
+  afterEach(() => {
+    consoleDebug.mockRestore()
+  })
+
+  function offsetOf(client: WSClient, sid: string): number {
+    // `sessions` is private. The offset-tracking describes below read the
+    // same map the same way; this is the one helper for this describe.
+    const sessions = Reflect.get(client, 'sessions') as Map<string, { offset: number }>
+    return sessions.get(sid)?.offset ?? -1
+  }
+
+  it('routes a screen frame to its own session, parsed once', async () => {
+    const { sessionA, sessionB, ws } = await twoSessions()
+    const seenA: unknown[] = []
+    const seenB: unknown[] = []
+    sessionA.onScreenFrame((f) => seenA.push(f))
+    sessionB.onScreenFrame((f) => seenB.push(f))
+
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":7}'), MSG_TYPE_METADATA),
+    )
+
+    expect(seenA).toEqual([{ revision: 7 }])
+    expect(seenB).toEqual([])
+  })
+
+  // The paired assertion: the interleaving proves the planes are accounted
+  // separately — the offset ends at exactly the 0x01 byte count, and the ack
+  // that eventually fires names that same count.
+  it('interleaved with byte frames, leaves offset and acks at the 0x01 byte count', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, session, ws } = await connectedSession()
+      const seen: string[] = []
+      session.onData((d) => seen.push(d))
+      const frames: unknown[] = []
+      session.onScreenFrame((f) => frames.push(f))
+
+      ws.deliverBinary(
+        encodeFrame(SID, new TextEncoder().encode('{"revision":1}'), MSG_TYPE_METADATA),
+      )
+      ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+      ws.deliverBinary(
+        encodeFrame(SID, new TextEncoder().encode('{"revision":2}'), MSG_TYPE_METADATA),
+      )
+
+      expect(seen).toEqual(['abc'])
+      expect(frames).toEqual([{ revision: 1 }, { revision: 2 }])
+      expect(offsetOf(client, session.sessionId)).toBe(3)
+
+      vi.advanceTimersByTime(ACK_INTERVAL_MS)
+      const acks = ws.requests().filter((r) => r.method === 'ack')
+      expect(acks).toHaveLength(1)
+      expect(acks[0].params).toMatchObject({ sessionId: session.sessionId, offset: 3 })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a screen frame alone never schedules an ack', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, session, ws } = await connectedSession()
+      session.onScreenFrame(() => undefined)
+
+      ws.deliverBinary(
+        encodeFrame(SID, new TextEncoder().encode('{"revision":1}'), MSG_TYPE_METADATA),
+      )
+      vi.advanceTimersByTime(ACK_INTERVAL_MS * 3)
+
+      expect(ws.requests().filter((r) => r.method === 'ack')).toHaveLength(0)
+      expect(offsetOf(client, session.sessionId)).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a screen frame for a session the client does not hold, with one debug line', async () => {
+    const { ws } = await connectedSession()
+
+    expect(() =>
+      ws.deliverBinary(
+        encodeFrame(OTHER_SID, new TextEncoder().encode('{"revision":1}'), MSG_TYPE_METADATA),
+      ),
+    ).not.toThrow()
+
+    const drops = consoleDebug.mock.calls.filter((c) => String(c[0]).includes('unknown session'))
+    expect(drops).toHaveLength(1)
+  })
+
+  it('drops a screen frame whose payload is not a frame document, without throwing', async () => {
+    const { session, ws } = await connectedSession()
+    const frames: unknown[] = []
+    session.onScreenFrame((f) => frames.push(f))
+
+    expect(() =>
+      ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('not json'), MSG_TYPE_METADATA)),
+    ).not.toThrow()
+    expect(frames).toEqual([])
   })
 })
 

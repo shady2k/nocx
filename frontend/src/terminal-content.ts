@@ -145,7 +145,7 @@ import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -204,6 +204,18 @@ import type { SessionFrame } from './generated/session.frame'
 export interface PaneScreenReading {
   revision: number | null
   rows: string[]
+  /** The frame's committed geometry — the per-cell metric the client's own
+   *  pixel-to-cell mapping reads. Null while no revision is installed. */
+  geometry: {
+    cols: number
+    rows: number
+    cellWidthPx: number
+    cellHeightPx: number
+  } | null
+  /** What THIS client last reported for this session, or null before its
+   *  first send. The e2e compares the frame's committed metric against the
+   *  decode of the report that produced it (nocx-zg3k3.2.9). */
+  reported: SessionSize | null
 }
 
 const paneScreenReaders = new Map<string, () => PaneScreenReading>()
@@ -222,14 +234,22 @@ function installPaneScreenSeam(): void {
   if (!host.__nocxPaneScreen) host.__nocxPaneScreen = readActivePaneScreen
 }
 
-/** Flatten one model snapshot to the seam's reading. A model with no
- *  installed revision reads as nulls, never as an empty lie. */
-function readPaneScreen(model: CellModel): PaneScreenReading {
+/** Flatten one model snapshot to the seam's reading, beside what this
+ *  window last reported. A model with no installed revision reads as
+ *  nulls, never as an empty lie. */
+function readPaneScreen(model: CellModel, reported: SessionSize | null): PaneScreenReading {
   const snapshot = model.current()
-  if (snapshot === null) return { revision: null, rows: [] }
+  if (snapshot === null) return { revision: null, rows: [], geometry: null, reported }
   return {
     revision: snapshot.revision,
     rows: snapshot.rows.map((row) => row.cells.map((cell) => cell.grapheme).join('')),
+    geometry: {
+      cols: snapshot.geometry.cols,
+      rows: snapshot.geometry.rows,
+      cellWidthPx: snapshot.geometry.cellWidthPx,
+      cellHeightPx: snapshot.geometry.cellHeightPx,
+    },
+    reported,
   }
 }
 
@@ -2234,19 +2254,22 @@ export class TerminalContent extends BasePaneContent {
    * resolves false (no layout store, or a create the backend refused) and
    * the open goes out exactly as it did before this bead, unanchored.
    */
-  private async openRequestedSession(): Promise<SessionHandle> {
+  private async openRequestedSession(renderer: TerminalRenderer): Promise<SessionHandle> {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, anchor)
+      return this.client.openSession(this._reportedSize(renderer), anchor)
     }
     if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)
+      return this.client.openSSHSession(
+        this._reportedSize(renderer),
+        this.sshOpts.profileId,
+        anchor,
+      )
     }
     return this.client.openSSHSessionByHost(
-      this.cols,
-      this.rows,
+      this._reportedSize(renderer),
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
@@ -2292,10 +2315,13 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {
+  private async openSessionWithHostKeyRecovery(
+    signal: AbortSignal,
+    renderer: TerminalRenderer,
+  ): Promise<SessionHandle> {
     for (;;) {
       try {
-        return await this.openRequestedSession()
+        return await this.openRequestedSession(renderer)
       } catch (err) {
         // The connect-time ask (ADR-0069) is checked FIRST: its shape is a
         // superset of the plain host-key failure — it carries the same
@@ -3952,27 +3978,20 @@ export class TerminalContent extends BasePaneContent {
         this.cols = cols
         this.rows = rows
         // A grid this window BORROWED is not a measurement this window made
-        // (nocx-eidfb.3). xterm reports every grid change the same way
-        // whoever caused it, and reporting this one back would be the window
-        // claiming a size it never measured — which under nocx-eidfb.2 is a
-        // claim on the session, made on behalf of the client that actually
-        // chose it.
-        if (this.sessionGrid) return
-        clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => {
-          // A resize makes the shell redraw its prompt, and that redraw arrives
-          // on `session.onData` looking exactly like output the user has not
-          // seen. It is not: we asked for it. Switching the strip from vertical
-          // to horizontal resizes every pane at once, so every inactive tab lit
-          // its activity indicator for something the user did to the WINDOW
-          // rather than to any tab (nocx-6w4z).
-          this.echoUntil = Date.now() + RESIZE_ECHO_MS
-          // this.session, never the one captured when the pane mounted: a
-          // reconnect replaces the handle underneath this callback, and a
-          // resize sent to the session that died would size nothing while
-          // the live shell kept the geometry of a window that has moved on.
-          this.session?.sendResize(cols, rows)
-        }, RESIZE_SETTLE_MS)
+        // (nocx-eidfb.3) — _scheduleResizeReport skips it — and what is
+        // reported is computed when the settle timer fires, never captured.
+        this._scheduleResizeReport()
+      })
+
+      // A ZOOM IS A RESIZE (nocx-zg3k3.2.9). onResize fires only when the
+      // grid moves, so a zoom that leaves cols and rows alone — the very
+      // case the acceptance names — would never be reported and the frames
+      // would keep the old metric. onCellDimsChange fires wherever the cell
+      // metric may have moved (mount, grid resize, device-pixel-ratio
+      // change); the client's own sendResize dedupe is on the WHOLE report,
+      // so a dims change that produced no new report sends nothing.
+      renderer.onCellDimsChange(() => {
+        this._scheduleResizeReport()
       })
 
       this.renderer = renderer
@@ -4349,7 +4368,7 @@ export class TerminalContent extends BasePaneContent {
       })
     })
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
-    const session = await this.openSessionWithHostKeyRecovery(signal)
+    const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
 
     if (signal.aborted) {
       session.close()
@@ -4545,7 +4564,7 @@ export class TerminalContent extends BasePaneContent {
     const cellModel = createCellModel()
     this._cellModel = cellModel
     installPaneScreenSeam()
-    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel))
+    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
       const model = this._cellModel
       if (model === null) return
@@ -4929,6 +4948,72 @@ export class TerminalContent extends BasePaneContent {
     this.sessionGrid = null
     const area = this.scrollback?.scrollbackArea
     if (area) delete area.dataset.gridOwner
+  }
+
+  /**
+   * The size report this window would send now: the grid the renderer last
+   * fitted, plus the cell metric in the wire's own unit — the WHOLE text
+   * area in DEVICE pixels, cols × the renderer's device cell
+   * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
+   * unit, the helper's cellGeometry decodes it, and nothing else converts).
+   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
+   * cell — it is the unit where the metric is exact, and the one a
+   * rounding step cannot drift (review round 1). One shape at every door —
+   * open, attach, resize (SessionSize).
+   *
+   * The renderer is a parameter because the OPEN reports before this
+   * window's renderer field exists: _bindSession runs while `renderer` is
+   * still a local, and the report it sends must come from THAT renderer,
+   * not from a field that is null for another hundred lines. Everything
+   * after the bind reads the field.
+   *
+   * Zeros while the renderer has not measured the cell yet: the report
+   * every pane sent before nocx-zg3k3.2.9, and still the honest one before
+   * first layout — an unmeasured session stays unmeasured rather than
+   * inventing a metric.
+   *
+   * Every send door (the open, the settle timer) computes the report HERE,
+   * at the moment it sends, so what this window last produced for sending
+   * is what this method last returned — the fact the pane-screen seam
+   * publishes as `reported`.
+   */
+  private _lastReport: SessionSize | null = null
+
+  private _reportedSize(renderer: TerminalRenderer | null = this.renderer): SessionSize {
+    const dims = renderer?.deviceCellDims() ?? null
+    const report = {
+      cols: this.cols,
+      rows: this.rows,
+      xpixel: dims !== null ? this.cols * dims.width : 0,
+      ypixel: dims !== null ? this.rows * dims.height : 0,
+    }
+    this._lastReport = report
+    return report
+  }
+
+  /**
+   * The one debounced report path. The report is computed when the timer
+   * FIRES, not when it is armed, so the settle window always sends what is
+   * true at the end of it; the session handle is read at the same moment,
+   * never captured — a reconnect replaces the handle underneath this
+   * callback, and a resize sent to the session that died would size
+   * nothing. A grid this window BORROWED is not a measurement this window
+   * made (nocx-eidfb.3): the schedule is skipped entirely.
+   */
+  private _scheduleResizeReport(): void {
+    if (this.sessionGrid) return
+    clearTimeout(this.resizeTimer)
+    this.resizeTimer = window.setTimeout(() => {
+      // A resize makes the shell redraw its prompt, and that redraw arrives
+      // on `session.onData` looking exactly like output the user has not
+      // seen. It is not: we asked for it. Switching the strip from vertical
+      // to horizontal resizes every pane at once, so every inactive tab lit
+      // its activity indicator for something the user did to the WINDOW
+      // rather than to any tab (nocx-6w4z). A DEDUPED report sent nothing,
+      // so it opens no echo window either — output then is output.
+      const sent = this.session?.sendResize(this._reportedSize()) ?? false
+      if (sent) this.echoUntil = Date.now() + RESIZE_ECHO_MS
+    }, RESIZE_SETTLE_MS)
   }
 
   /**

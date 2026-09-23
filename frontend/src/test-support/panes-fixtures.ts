@@ -307,6 +307,10 @@ export function createRendererMock(): RendererMock {
     cellHeight: 16,
     viewportTopLine: 0,
     cellWidth: 8,
+    // The device cell the committed metric travels in (review round 1):
+    // dpr-1 identity with the CSS cell above, so existing expectations
+    // hold; a test about a dense display overrides this mock.
+    deviceCellDims: vi.fn(() => ({ width: 8, height: 16 })),
     onCellDimsChange: vi.fn(),
     onScroll: vi.fn(),
     onRender: vi.fn(),

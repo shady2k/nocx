@@ -8,8 +8,7 @@
 // each at two zoom levels, because a zoom is a new committed geometry.
 
 // @vitest-environment jsdom
-
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { DEFAULT_SNAPSHOT } from '../scrollback/serializer'
 import type { RunMetric } from '../scrollback/run-geometry'
 import { createCellPainter } from './painter'
@@ -175,5 +174,48 @@ describe('pixel to cell and back at two zoom levels', () => {
   it('answers nothing before a snapshot is applied', () => {
     const { mapping } = mounted(8)
     expect(mapping()).toBeNull()
+  })
+})
+
+// THE COMMITTED METRIC IS DEVICE PIXELS (review round 1, nocx-zg3k3.2.9).
+// xterm builds its CSS cell FROM an integer device cell (css = device /
+// dpr), so the frame's metric is exact in device pixels and fractional in
+// CSS on a dense display. The mapping converts with the ONE helper both
+// consumers share — at dpr 1 it is the identity, so every earlier test
+// here is unchanged.
+describe('the committed metric is device pixels', () => {
+  it('divides the device cell by the ratio: 17px at dpr 2 maps at 8.5 CSS px', () => {
+    vi.stubGlobal('devicePixelRatio', 2)
+    try {
+      const { painter, mapping } = mounted(8.5)
+      painter.apply(
+        snapshotOf(
+          frameOf(1, [INKY_ROW, INKY_ROW], undefined, {
+            cols: 4,
+            rows: 2,
+            cellWidthPx: 17,
+            cellHeightPx: 34,
+          }),
+        ),
+      )
+      const m = mapping()
+      if (m === null) throw new Error('no mapping after apply')
+      // Cell (1, 1): its rectangle starts at device x 17 → CSS 8.5, and its
+      // row at device y 34 → CSS 17 — both axes through the one division.
+      expect(m.cellToPixel(1, 1)).toEqual({ x: 8.5, y: 17 })
+      // A pixel inside the second CSS column maps back to its cell.
+      expect(m.pixelToCell(12, 5)?.col).toBe(1)
+      expect(m.pixelToCell(12, 5)?.row).toBe(0)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('is the identity at dpr 1: the committed device cell IS the CSS cell', () => {
+    const { painter, mapping } = mounted(8)
+    painter.apply(snapshotOf(frameOf(1, [INKY_ROW], undefined, ZOOM1)))
+    const m = mapping()
+    if (m === null) throw new Error('no mapping after apply')
+    expect(m.cellToPixel(1, 0)).toEqual({ x: 8, y: 0 })
   })
 })

@@ -738,7 +738,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		// request's context is not threaded: the commit is two ioctls and a
 		// write on fds this process owns, and there is no partial state for a
 		// cancellation to leave behind.
-		if err := hs.resize(p.Cols, p.Rows); err != nil {
+		if err := hs.resize(p.Cols, p.Rows, p.XPixel, p.YPixel); err != nil {
 			return nil, err
 		}
 		return proto.ResizeResult{}, nil
@@ -889,6 +889,8 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		Env:       p.Env,
 		Cols:      cols,
 		Rows:      rows,
+		XPixel:    p.XPixel,
+		YPixel:    p.YPixel,
 		Lifecycle: p.Lifecycle,
 		// The pane's tool endpoint is THIS request's and never this daemon's:
 		// the endpoint socket is keyed by the generation, so several
@@ -922,7 +924,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1099,7 +1101,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1173,6 +1175,11 @@ type spawnShape struct {
 	key       string
 	cols      uint16
 	rows      uint16
+	// xpixel/ypixel are the client's cell metrics in TIOCSWINSZ's whole-area
+	// units, zero meaning unmeasured. They reach the one decode,
+	// cellGeometry, in finishSpawn.
+	xpixel    uint16
+	ypixel    uint16
 	bound     int64
 	reserved  int64
 	lifecycle *proto.LifecycleLaunch
@@ -1201,7 +1208,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		s.budget -= shape.reserved
 		s.mu.Unlock()
 	}
-	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, s.rendezvousExpiry, s.rendezvousExpireAfter)
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, shape.xpixel, shape.ypixel, s.rendezvousExpiry, s.rendezvousExpireAfter)
 	if err != nil {
 		// Nothing has been read from this process and nothing has been
 		// registered, so the spawn has produced nothing: end it rather than

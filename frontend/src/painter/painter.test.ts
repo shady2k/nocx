@@ -10,7 +10,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
 import { DEFAULT_SNAPSHOT, serializeLine } from '../scrollback/serializer'
 import { lineWith } from '../scrollback/test-helpers'
@@ -207,6 +207,37 @@ describe('the cursor overlay', () => {
     expect(cursor.style.top).toBe(`${p.y}px`)
     expect(cursor.style.width).toBe('8px')
     expect(cursor.style.height).toBe('20px')
+  })
+
+  it('sizes the cursor in CSS pixels on a dense display: device 17x34 at dpr 2 is 8.5x17', () => {
+    vi.stubGlobal('devicePixelRatio', 2)
+    try {
+      const { painter, surface } = mount(() => null)
+      painter.apply(
+        snapshotOf(
+          frameOf(
+            1,
+            cols(4),
+            { x: 1, y: 2, visible: true },
+            {
+              cols: 4,
+              rows: 3,
+              cellWidthPx: 17,
+              cellHeightPx: 34,
+            },
+          ),
+        ),
+      )
+      const cursor = surface.querySelector('.term-grid-cursor')
+      if (!(cursor instanceof HTMLElement)) throw new Error('no cursor overlay')
+      expect(cursor.hidden).toBe(false)
+      // The committed metric is DEVICE pixels; the cursor paints in CSS,
+      // through the one conversion the mapping uses.
+      expect(cursor.style.width).toBe('8.5px')
+      expect(cursor.style.height).toBe('17px')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('moves without moving any text: unchanged rows keep their DOM', () => {

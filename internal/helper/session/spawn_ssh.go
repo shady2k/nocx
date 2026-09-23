@@ -428,10 +428,13 @@ func (p *sshProcess) Write(b []byte) (int, error) {
 
 // Resize applies one committed size to the far pty.
 //
-// Pixel dimensions are ignored, and that is the honest value rather than a
-// placeholder: nothing on the wire between the coordinator and this helper
-// carries cell metrics today, which is the same state the local pty path is in
-// (ptyTerminal.Resize).
+// The pixel dimensions are DISCARDED, and that is the honest value rather
+// than a placeholder: the helper wire carries the client's cell metrics
+// since nocx-zg3k3.2.9 and the session's committed geometry holds them —
+// what the published frames serve — but the far side's window-change
+// request has no pixel fields to put them in (x/crypto/ssh sends none),
+// so the far pty keeps running pixel-less and answers its own programs'
+// size questions from the cells alone.
 func (p *sshProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 	return p.ch.Resize(cols, rows)
 }

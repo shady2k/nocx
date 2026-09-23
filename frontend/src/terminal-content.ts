@@ -145,7 +145,7 @@ import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -2239,14 +2239,13 @@ export class TerminalContent extends BasePaneContent {
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, anchor)
+      return this.client.openSession(this._reportedSize(), anchor)
     }
     if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)
+      return this.client.openSSHSession(this._reportedSize(), this.sshOpts.profileId, anchor)
     }
     return this.client.openSSHSessionByHost(
-      this.cols,
-      this.rows,
+      this._reportedSize(),
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
@@ -3952,27 +3951,20 @@ export class TerminalContent extends BasePaneContent {
         this.cols = cols
         this.rows = rows
         // A grid this window BORROWED is not a measurement this window made
-        // (nocx-eidfb.3). xterm reports every grid change the same way
-        // whoever caused it, and reporting this one back would be the window
-        // claiming a size it never measured — which under nocx-eidfb.2 is a
-        // claim on the session, made on behalf of the client that actually
-        // chose it.
-        if (this.sessionGrid) return
-        clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => {
-          // A resize makes the shell redraw its prompt, and that redraw arrives
-          // on `session.onData` looking exactly like output the user has not
-          // seen. It is not: we asked for it. Switching the strip from vertical
-          // to horizontal resizes every pane at once, so every inactive tab lit
-          // its activity indicator for something the user did to the WINDOW
-          // rather than to any tab (nocx-6w4z).
-          this.echoUntil = Date.now() + RESIZE_ECHO_MS
-          // this.session, never the one captured when the pane mounted: a
-          // reconnect replaces the handle underneath this callback, and a
-          // resize sent to the session that died would size nothing while
-          // the live shell kept the geometry of a window that has moved on.
-          this.session?.sendResize(cols, rows)
-        }, RESIZE_SETTLE_MS)
+        // (nocx-eidfb.3) — _scheduleResizeReport skips it — and what is
+        // reported is computed when the settle timer fires, never captured.
+        this._scheduleResizeReport()
+      })
+
+      // A ZOOM IS A RESIZE (nocx-zg3k3.2.9). onResize fires only when the
+      // grid moves, so a zoom that leaves cols and rows alone — the very
+      // case the acceptance names — would never be reported and the frames
+      // would keep the old metric. onCellDimsChange fires wherever the cell
+      // metric may have moved (mount, grid resize, device-pixel-ratio
+      // change); the client's own sendResize dedupe is on the WHOLE report,
+      // so a dims change that produced no new report sends nothing.
+      renderer.onCellDimsChange(() => {
+        this._scheduleResizeReport()
       })
 
       this.renderer = renderer
@@ -4929,6 +4921,54 @@ export class TerminalContent extends BasePaneContent {
     this.sessionGrid = null
     const area = this.scrollback?.scrollbackArea
     if (area) delete area.dataset.gridOwner
+  }
+
+  /**
+   * The size report this window would send now: the grid the renderer last
+   * fitted, plus the cell metric in the wire's own unit — the WHOLE text
+   * area in pixels, cols × cellWidth (TIOCSWINSZ; internal/session/size.go
+   * states the unit, the helper's cellGeometry decodes it, and nothing else
+   * converts). One shape at every door — open, attach, resize (SessionSize).
+   *
+   * Zeros while the renderer has not measured the cell yet: the report
+   * every pane sent before nocx-zg3k3.2.9, and still the honest one before
+   * first layout — an unmeasured session stays unmeasured rather than
+   * inventing a metric.
+   */
+  private _reportedSize(): SessionSize {
+    const w = this.renderer?.cellWidth ?? 0
+    const h = this.renderer?.cellHeight ?? 0
+    return {
+      cols: this.cols,
+      rows: this.rows,
+      xpixel: w > 0 ? Math.round(this.cols * w) : 0,
+      ypixel: h > 0 ? Math.round(this.rows * h) : 0,
+    }
+  }
+
+  /**
+   * The one debounced report path. The report is computed when the timer
+   * FIRES, not when it is armed, so the settle window always sends what is
+   * true at the end of it; the session handle is read at the same moment,
+   * never captured — a reconnect replaces the handle underneath this
+   * callback, and a resize sent to the session that died would size
+   * nothing. A grid this window BORROWED is not a measurement this window
+   * made (nocx-eidfb.3): the schedule is skipped entirely.
+   */
+  private _scheduleResizeReport(): void {
+    if (this.sessionGrid) return
+    clearTimeout(this.resizeTimer)
+    this.resizeTimer = window.setTimeout(() => {
+      // A resize makes the shell redraw its prompt, and that redraw arrives
+      // on `session.onData` looking exactly like output the user has not
+      // seen. It is not: we asked for it. Switching the strip from vertical
+      // to horizontal resizes every pane at once, so every inactive tab lit
+      // its activity indicator for something the user did to the WINDOW
+      // rather than to any tab (nocx-6w4z). A DEDUPED report sent nothing,
+      // so it opens no echo window either — output then is output.
+      const sent = this.session?.sendResize(this._reportedSize()) ?? false
+      if (sent) this.echoUntil = Date.now() + RESIZE_ECHO_MS
+    }, RESIZE_SETTLE_MS)
   }
 
   /**

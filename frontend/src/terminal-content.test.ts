@@ -396,7 +396,12 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       expect(session.sendResize).not.toHaveBeenCalled()
       vi.advanceTimersByTime(80)
       expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize).toHaveBeenCalledWith(90, 28)
+      expect(session.sendResize).toHaveBeenCalledWith({
+        cols: 90,
+        rows: 28,
+        xpixel: 720,
+        ypixel: 448,
+      })
     } finally {
       teardown?.()
       vi.useRealTimers()
@@ -760,9 +765,9 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     try {
       expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
       // First attempt: no override, since nothing has been answered yet.
-      expect(openSSHSessionByHost.mock.calls[0][5]).toBeUndefined()
+      expect(openSSHSessionByHost.mock.calls[0][4]).toBeUndefined()
       // Retry: the method just chosen rides this open alone.
-      expect(openSSHSessionByHost.mock.calls[1][5]).toBe('script')
+      expect(openSSHSessionByHost.mock.calls[1][4]).toBe('script')
     } finally {
       teardown()
     }
@@ -8584,7 +8589,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
     const { teardown } = await mounting
     try {
       expect(client.openSession).toHaveBeenCalledTimes(1)
-      expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: PANE })
+      expect(client.openSession.mock.calls[0][1]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }
@@ -8602,7 +8607,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
     )
     try {
       expect(client.openSession).toHaveBeenCalledTimes(1)
-      expect(client.openSession.mock.calls[0][2]).toEqual({})
+      expect(client.openSession.mock.calls[0][1]).toEqual({})
     } finally {
       teardown()
     }
@@ -8619,7 +8624,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
       client,
     )
     try {
-      expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: PANE })
+      expect(client.openSSHSession.mock.calls[0][2]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }
@@ -8636,7 +8641,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
       client,
     )
     try {
-      expect(client.openSSHSessionByHost.mock.calls[0][4]).toEqual({ paneId: PANE })
+      expect(client.openSSHSessionByHost.mock.calls[0][3]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }
@@ -15105,7 +15110,12 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
         content.viewportChanged({ width: 800, height: 400 })
         rendererOf(content)._fireResize(100, 30)
         vi.advanceTimersByTime(10_000)
-        expect(session.sendResize).toHaveBeenCalledWith(100, 30)
+        expect(session.sendResize).toHaveBeenCalledWith({
+          cols: 100,
+          rows: 30,
+          xpixel: 800,
+          ypixel: 480,
+        })
       } finally {
         vi.useRealTimers()
       }

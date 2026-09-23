@@ -44,7 +44,7 @@ async function connectedSession(): Promise<{
   await Promise.resolve()
   socket().serverAccepts()
 
-  const opening = client.openSession(80, 24)
+  const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
   const openID = socket().requests()[0].id
   socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const session = await opening
@@ -63,13 +63,13 @@ async function twoSessions(): Promise<{
   await Promise.resolve()
   socket().serverAccepts()
 
-  const openingA = client.openSession(80, 24)
+  const openingA = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
   const reqsAfterA = socket().requests()
   const idA = reqsAfterA[reqsAfterA.length - 1].id
   socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const sessionA = await openingA
 
-  const openingB = client.openSession(80, 24)
+  const openingB = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
   const reqsAfterB = socket().requests()
   const idB = reqsAfterB.find((r) => r.method === 'open' && r.id !== idA)!.id
   socket().deliverText({
@@ -166,7 +166,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    void client.openSession(132, 43)
+    void client.openSession({ cols: 132, rows: 43, xpixel: 0, ypixel: 0 })
     const [req] = socket().requests()
 
     expect(req.method).toBe('open')
@@ -185,9 +185,12 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    void client.openSession(80, 24)
-    void client.openSSHSession(80, 24, 'ssh:test:1')
-    void client.openSSHSessionByHost(80, 24, 'pi@192.168.0.93')
+    void client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+    void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
+    void client.openSSHSessionByHost(
+      { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+      'pi@192.168.0.93',
+    )
 
     for (const req of socket().requests()) {
       expect(req.params).not.toHaveProperty('enhanced')
@@ -214,7 +217,7 @@ describe('openSession', () => {
 
     it('carries it on a local open', async () => {
       const client = await connected()
-      void client.openSession(132, 43, { paneId: PANE })
+      void client.openSession({ cols: 132, rows: 43, xpixel: 0, ypixel: 0 }, { paneId: PANE })
       expect(socket().requests()[0].params).toEqual({
         cols: 132,
         rows: 43,
@@ -226,7 +229,9 @@ describe('openSession', () => {
 
     it('carries it on a profile ssh open', async () => {
       const client = await connected()
-      void client.openSSHSession(80, 24, 'ssh:test:1', { paneId: PANE })
+      void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1', {
+        paneId: PANE,
+      })
       expect(socket().requests()[0].params).toEqual({
         cols: 80,
         rows: 24,
@@ -240,7 +245,12 @@ describe('openSession', () => {
 
     it('carries it on a direct-host ssh open — an ssh tab is a pane too', async () => {
       const client = await connected()
-      void client.openSSHSessionByHost(80, 24, '192.168.0.93', 'pi', { paneId: PANE })
+      void client.openSSHSessionByHost(
+        { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+        '192.168.0.93',
+        'pi',
+        { paneId: PANE },
+      )
       expect(socket().requests()[0].params).toEqual({
         cols: 80,
         rows: 24,
@@ -259,9 +269,13 @@ describe('openSession', () => {
     // comes OFF the params rather than riding along blank.
     it('omits the key entirely when there is no pane row, on all three openers', async () => {
       const client = await connected()
-      void client.openSession(80, 24)
-      void client.openSSHSession(80, 24, 'ssh:test:1')
-      void client.openSSHSessionByHost(80, 24, '192.168.0.93', 'pi')
+      void client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+      void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
+      void client.openSSHSessionByHost(
+        { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+        '192.168.0.93',
+        'pi',
+      )
 
       const requests = socket().requests()
       expect(requests).toHaveLength(3)
@@ -280,7 +294,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const openID = socket().requests()[0].id
     socket().deliverText({
       jsonrpc: '2.0',
@@ -302,7 +316,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const id = socket().requests()[0].id
     socket().deliverText({
       jsonrpc: '2.0',
@@ -319,7 +333,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const id = socket().requests()[0].id
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: 'not-a-session-id' } })
 
@@ -332,7 +346,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     socket().serverHangsUp()
 
     await expect(opening).rejects.toThrow('ws closed')
@@ -345,7 +359,9 @@ describe('openSession', () => {
     socket().serverAccepts()
 
     let settled = false
-    const opening = client.openSession(80, 24).finally(() => (settled = true))
+    const opening = client
+      .openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+      .finally(() => (settled = true))
     const id = socket().requests()[0].id ?? 0
     socket().deliverText({
       jsonrpc: '2.0',
@@ -366,7 +382,7 @@ describe('openSession', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     expect(() => socket().deliverText('}{ not json')).not.toThrow()
 
     const id = socket().requests()[0].id
@@ -460,7 +476,7 @@ describe('inbound data', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     socket().deliverText({
       jsonrpc: '2.0',
       id: socket().requests()[0].id,
@@ -475,7 +491,7 @@ describe('inbound data', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const reopening = client.openSession(80, 24)
+    const reopening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
@@ -722,10 +738,32 @@ describe('inputStalled notification', () => {
 describe('sendResize', () => {
   it('sends the new grid size for the open session', async () => {
     const { session, ws } = await connectedSession()
-    session.sendResize(100, 30)
+    session.sendResize({ cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
 
     const resize = ws.requests().find((r) => r.method === 'resize')
     expect(resize?.params).toEqual({ sessionId: SID, cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
+  })
+
+  // A ZOOM IS A RESIZE (nocx-zg3k3.2.9): a different cell metric at the same
+  // cols and rows must still reach the backend, so the dedupe is on the
+  // WHOLE report and never on the grid alone. The pair: the same metric
+  // twice commits nothing new — the second identical report sends nothing.
+  it('sends a zoom at the same grid, and nothing for a repeated metric', async () => {
+    const { session, ws } = await connectedSession()
+    const resizes = () => ws.requests().filter((r) => r.method === 'resize')
+
+    session.sendResize({ cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 800, ypixel: 480 })
+    expect(resizes()).toHaveLength(1)
+    expect(resizes()[0].params).toEqual({
+      sessionId: SID,
+      cols: OPEN_COLS,
+      rows: OPEN_ROWS,
+      xpixel: 800,
+      ypixel: 480,
+    })
+
+    session.sendResize({ cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 800, ypixel: 480 })
+    expect(resizes()).toHaveLength(1)
   })
 })
 
@@ -968,7 +1006,7 @@ describe('reconnect and reattach', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const opening = client.openSession(80, 24)
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const openID = socket().requests()[0].id
     socket().deliverText({
       jsonrpc: '2.0',
@@ -1067,7 +1105,7 @@ describe('reconnect and reattach', () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
-    session.sendResize(132, 43)
+    session.sendResize({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
@@ -1079,7 +1117,7 @@ describe('reconnect and reattach', () => {
 
     const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
     expect(attaches).toHaveLength(1)
-    expect(attaches[0].params).toMatchObject({ cols: 132, rows: 43 })
+    expect(attaches[0].params).toMatchObject({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
   })
 
   it('sends attach with the last received byte offset', async () => {
@@ -1280,7 +1318,7 @@ describe('reconnect and reattach', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const openingA = client.openSession(80, 24)
+    const openingA = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
@@ -1291,7 +1329,7 @@ describe('reconnect and reattach', () => {
     })
     await openingA
 
-    const openingB = client.openSession(80, 24)
+    const openingB = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
     socket().deliverText({
@@ -1326,7 +1364,7 @@ describe('reconnect and reattach', () => {
     await Promise.resolve()
     socket().serverAccepts()
 
-    const openingA = client.openSession(80, 24)
+    const openingA = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
@@ -1337,7 +1375,7 @@ describe('reconnect and reattach', () => {
     })
     await openingA
 
-    const openingB = client.openSession(80, 24)
+    const openingB = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
     socket().deliverText({

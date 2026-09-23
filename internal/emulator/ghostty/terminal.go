@@ -854,14 +854,6 @@ func (t *terminal) historyRow(y int) (emulator.Row, error) {
 	return emulator.Row{Cells: out, Wrap: bool(wrap), Continuation: bool(cont)}, nil
 }
 
-// gridResolutions reports the bridge's running total of grid-reference
-// resolutions — every ghostty_terminal_grid_ref this shim has issued. Tests
-// read it: the one-per-row cost of a history range is a property no reading
-// of the code can establish, so the count is the evidence.
-func gridResolutions() uint64 {
-	return uint64(C.nocxGridResolveCount())
-}
-
 func (t *terminal) EncodeKey(ev emulator.KeyEvent) ([]byte, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

@@ -14,6 +14,8 @@
     "cwd",
     "cols",
     "rows",
+    "xpixel",
+    "ypixel",
     "windowBytes",
     "desiredMode"
   ],
@@ -45,6 +47,18 @@
     },
     "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "xpixel": {
+      "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in pixels (cols × cell width). 0 means the client has not measured itself yet. It reaches the helper's runtime geometry — what the published frames carry — and not the far pty, whose window-change carries no pixel fields at all.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "ypixel": {
+      "description": "The whole text area's height in pixels (rows × cell height), or 0 when unmeasured. Same decode rule as xpixel.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
     "windowBytes": {
       "description": "The requested bound on this session's output window, clamped by the helper exactly as `spawn`'s is: the cost is spent on somebody else's machine, so the helper keeps the last word, and what the session actually got is reported in the launch record.",
       "type": "integer",

@@ -1036,10 +1036,11 @@ func (a *AttachedSession) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (a *AttachedSession) Resize(ctx context.Context, cols, rows, _, _ uint16) error {
+func (a *AttachedSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
 	return a.client.Call(ctx, proto.ServiceSession, proto.OpResize, proto.ResizeParams{
 		Session: proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
 		Cols:    cols, Rows: rows,
+		XPixel: xpixel, YPixel: ypixel,
 	}, nil)
 }
 

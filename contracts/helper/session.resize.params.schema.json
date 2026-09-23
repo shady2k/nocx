@@ -5,12 +5,24 @@
   "description": "Params of the helper session service's resize op. The size is a property of the PTY and the PTY is the helper's, so this is not a lifecycle verb and carries no attachment: any attached caller may state the size it is rendering at. It is keyed by the durable session handle, like every other op that names a session.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["session", "cols", "rows"],
+  "required": ["session", "cols", "rows", "xpixel", "ypixel"],
   "properties": {
     "session": {
       "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
     },
     "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
-    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 }
+    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "xpixel": {
+      "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in pixels (cols × cell width). 0 means the client has not measured itself yet. The helper decodes it into the per-cell metric the runtime commits, at exactly one boundary (nocx-zg3k3.2.9).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "ypixel": {
+      "description": "The whole text area's height in pixels (rows × cell height), or 0 when unmeasured. Same decode rule as xpixel.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
   }
 }

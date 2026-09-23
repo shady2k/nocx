@@ -50,9 +50,8 @@ type scriptedProcess struct {
 	done     chan struct{}
 	written  chan []byte
 	closeOne sync.Once
-
-	mu      sync.Mutex
-	resizes [][2]uint16
+	resizes  [][4]uint16
+	mu       sync.Mutex
 }
 
 func newScriptedProcess(script string) *scriptedProcess {
@@ -95,10 +94,10 @@ func (p *scriptedProcess) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (p *scriptedProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
+func (p *scriptedProcess) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.resizes = append(p.resizes, [2]uint16{cols, rows})
+	p.resizes = append(p.resizes, [4]uint16{cols, rows, xpixel, ypixel})
 	return nil
 }
 
@@ -134,12 +133,12 @@ func (p *scriptedProcess) awaitWrite(t *testing.T) []byte {
 	}
 }
 
-// lastResize is the size the PTY was last asked to take.
-func (p *scriptedProcess) lastResize() ([2]uint16, bool) {
+// lastResize is the size — cells and pixels — the PTY was last asked to take.
+func (p *scriptedProcess) lastResize() ([4]uint16, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.resizes) == 0 {
-		return [2]uint16{}, false
+		return [4]uint16{}, false
 	}
 	return p.resizes[len(p.resizes)-1], true
 }
@@ -226,7 +225,7 @@ func callOp[T any](t *testing.T, svc *Service, op string, params any) T {
 // write a reply to.
 func pumpRuntime(t *testing.T, proc Process) *sessionruntime.Session {
 	t.Helper()
-	rt, screen, err := newSessionRuntime(defaultScreen, proc, "00000000000000000000000000000000", 80, 24, 0, nil)
+	rt, screen, err := newSessionRuntime(defaultScreen, proc, "00000000000000000000000000000000", 80, 24, 0, 0, 0, nil)
 	if err != nil {
 		t.Fatalf("build the session runtime: %v", err)
 	}
@@ -362,8 +361,8 @@ func TestResizeReachesThePtyAndTheScreenTogether(t *testing.T) {
 	if !ok {
 		t.Fatal("the geometry commit never reached the PTY")
 	}
-	if size != [2]uint16{100, 30} {
-		t.Fatalf("the PTY took %dx%d, want 100x30", size[0], size[1])
+	if size != [4]uint16{100, 30, 0, 0} {
+		t.Fatalf("the PTY took %dx%d at %dx%d px, want 100x30 at 0x0 (no cell metric was reported)", size[0], size[1], size[2], size[3])
 	}
 
 	screenSize, err := hs.screen.Geometry()
@@ -387,11 +386,127 @@ func TestResizeReachesThePtyAndTheScreenTogether(t *testing.T) {
 	if _, err := svc.Call(context.Background(), proto.OpResize, raw); err == nil {
 		t.Fatal("a zero-column resize was accepted")
 	}
-	if size, _ := proc.lastResize(); size != [2]uint16{100, 30} {
+	if size, _ := proc.lastResize(); size != [4]uint16{100, 30, 0, 0} {
 		t.Fatalf("the refused resize reached the PTY: %v", size)
 	}
 	if commit := hs.runtime.Geometry(); commit.Geometry.Cols != 100 {
 		t.Fatalf("a refused commit moved the size to %+v", commit.Geometry)
+	}
+}
+
+// TestAResizeCarriesTheCellMetricsToTheCommitAndTheFrame (nocx-zg3k3.2.9):
+// the size a client reports — cells plus the WHOLE text area in pixels,
+// TIOCSWINSZ's own units — reaches the PTY as those pixels and the commit as
+// a PER-CELL metric, and the frame the commit publishes carries the per-cell
+// values, which is what the client's one pixel-to-cell mapping reads.
+func TestAResizeCarriesTheCellMetricsToTheCommitAndTheFrame(t *testing.T) {
+	proc := newScriptedProcess("")
+	svc, hs := spawnScripted(t, proc, 0)
+
+	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
+		Session: hs.id,
+		Cols:    100,
+		Rows:    30,
+		XPixel:  800,
+		YPixel:  600,
+	})
+
+	size, ok := proc.lastResize()
+	if !ok {
+		t.Fatal("the geometry commit never reached the PTY")
+	}
+	if size != [4]uint16{100, 30, 800, 600} {
+		t.Fatalf("the PTY took %dx%d at %dx%d px, want 100x30 at 800x600", size[0], size[1], size[2], size[3])
+	}
+	commit := hs.runtime.Geometry()
+	if commit.Geometry.CellWidthPx != 8 || commit.Geometry.CellHeightPx != 20 {
+		t.Fatalf("the commit in force carries per-cell %dx%d px, want 8x20",
+			commit.Geometry.CellWidthPx, commit.Geometry.CellHeightPx)
+	}
+
+	// The published frame carries the same per-cell metric. The consumer is
+	// attached AFTER the commit, so the frame it is handed as its baseline is
+	// the one this commit published.
+	sub := hs.runtime.Attach()
+	t.Cleanup(func() { hs.runtime.Detach(sub) })
+	frames := sub.Take()
+	if len(frames) == 0 {
+		t.Fatal("the commit published no frame")
+	}
+	var published struct {
+		Geometry struct {
+			CellWidthPx  int `json:"cellWidthPx"`
+			CellHeightPx int `json:"cellHeightPx"`
+		} `json:"geometry"`
+	}
+	if err := json.Unmarshal(frames[len(frames)-1].Bytes, &published); err != nil {
+		t.Fatalf("the published frame did not decode: %v", err)
+	}
+	if published.Geometry.CellWidthPx != 8 || published.Geometry.CellHeightPx != 20 {
+		t.Fatalf("the published frame carries per-cell %dx%d px, want 8x20",
+			published.Geometry.CellWidthPx, published.Geometry.CellHeightPx)
+	}
+}
+
+// TestAZoomAtTheSameGridIsACommitTheFrameCarries (nocx-zg3k3.2.9): a
+// different cell metric at the SAME cols and rows is a resize the runtime
+// commits — a zoom must not be dropped as a no-op anywhere that compares
+// only cells. The revision moves, the PTY takes the new pixels, and the
+// frame carries the new metric.
+func TestAZoomAtTheSameGridIsACommitTheFrameCarries(t *testing.T) {
+	proc := newScriptedProcess("")
+	svc, hs := spawnScripted(t, proc, 0)
+
+	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
+		Session: hs.id, Cols: 100, Rows: 30, XPixel: 800, YPixel: 600,
+	})
+	before := hs.runtime.Geometry()
+
+	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
+		Session: hs.id, Cols: 100, Rows: 30, XPixel: 1000, YPixel: 750,
+	})
+
+	after := hs.runtime.Geometry()
+	if after.Geometry.Cols != 100 || after.Geometry.Rows != 30 {
+		t.Fatalf("the zoom moved the grid to %dx%d, want 100x30", after.Geometry.Cols, after.Geometry.Rows)
+	}
+	if after.Revision <= before.Revision {
+		t.Fatalf("the zoom did not open a commit: revision %d after %d", after.Revision, before.Revision)
+	}
+	if after.Geometry.CellWidthPx != 10 || after.Geometry.CellHeightPx != 25 {
+		t.Fatalf("the commit in force carries per-cell %dx%d px, want 10x25",
+			after.Geometry.CellWidthPx, after.Geometry.CellHeightPx)
+	}
+	if size, _ := proc.lastResize(); size != [4]uint16{100, 30, 1000, 750} {
+		t.Fatalf("the PTY took %dx%d at %dx%d px, want 100x30 at 1000x750", size[0], size[1], size[2], size[3])
+	}
+}
+
+// TestTheInBandSizeReportCarriesTheCommittedPixels (nocx-zg3k3.2.9): a
+// program that enabled mode 2048 is told the size its terminal took, and the
+// report now carries the committed cell pixels rather than zeroes — the
+// answer a program reading its own cell size from XTWINOPS sees. Paired: a
+// session whose cell metric nobody has measured (zeros on the wire) reports
+// zeros, exactly as it does today.
+func TestTheInBandSizeReportCarriesTheCommittedPixels(t *testing.T) {
+	proc := newScriptedProcess("\x1b[?2048h")
+	svc, hs := spawnScripted(t, proc, 0)
+
+	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
+		Session: hs.id, Cols: 100, Rows: 30, XPixel: 800, YPixel: 600,
+	})
+
+	// rows; cols; height px; width px — the shape mode 2048 defines, derived
+	// by the terminal from the per-cell metric the commit gave it.
+	if got, want := string(proc.awaitWrite(t)), "\x1b[48;30;100;600;800t"; got != want {
+		t.Fatalf("the in-band size report reached the program as %q, want %q", got, want)
+	}
+
+	callOp[proto.ResizeResult](t, svc, proto.OpResize, proto.ResizeParams{
+		Session: hs.id, Cols: 100, Rows: 30,
+	})
+	if got, want := string(proc.awaitWrite(t)), "\x1b[48;30;100;0;0t"; got != want {
+		t.Fatalf("the report for an unmeasured session reached the program as %q, want %q", got, want)
 	}
 }
 

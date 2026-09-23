@@ -665,6 +665,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		res, err = spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 			return c.Spawn(ctx, proto.SpawnParams{
 				Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows,
+				XPixel: cfg.XPixel, YPixel: cfg.YPixel,
 				Lifecycle:      life,
 				IdempotencyKey: claim,
 				// THIS backend's own tool endpoint, carried per pane
@@ -916,6 +917,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		DesiredMode: proto.SSHMode(cfg.Remote.DesiredMode),
 		Cols:        cfg.Cols,
 		Rows:        cfg.Rows,
+		XPixel:      cfg.XPixel,
+		YPixel:      cfg.YPixel,
 		// NO Cwd, and the absence is the wire's rule rather than an omission:
 		// this generation cannot move a far login shell, so `spawn-ssh` refuses a
 		// non-empty cwd by name instead of accepting a value nothing acts on. The

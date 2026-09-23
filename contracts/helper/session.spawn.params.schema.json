@@ -5,7 +5,7 @@
   "description": "Params of the helper session service's spawn op: start a shell under a new PTY on the host. There is NO command and NO argv here, and that is the shape being frozen rather than an omission — the host's registration path refuses any op whose params carry a free-form string list, because an input reaches a command line. Which shell runs is the helper's composition-root decision (its login-shell resolution), so a remote caller names the environment a session starts in and never the program it starts.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["workspace", "cwd", "cols", "rows", "windowBytes"],
+  "required": ["workspace", "cwd", "cols", "rows", "xpixel", "ypixel", "windowBytes"],
   "properties": {
     "workspace": {
       "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/workspaceId"
@@ -21,6 +21,18 @@
     },
     "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
     "rows": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "xpixel": {
+      "description": "The client's cell metric in TIOCSWINSZ's own units: the WHOLE text area's width in pixels (cols × cell width). 0 means the client has not measured itself yet; the helper decodes it into the per-cell metric the runtime commits, at exactly one boundary (nocx-zg3k3.2.9).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "ypixel": {
+      "description": "The whole text area's height in pixels (rows × cell height), or 0 when unmeasured. Same decode rule as xpixel.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
     "windowBytes": {
       "description": "The requested bound on this session's output window. The coordinator decides and the helper applies, clamped to the helper's own floor, ceiling and aggregate budget — the cost is spent on somebody else's machine, so the helper keeps the last word. 0 means the helper's default. What the session actually got is reported back in the launch record, because a silently ignored setting is the degrade the product must never hide.",
       "type": "integer",

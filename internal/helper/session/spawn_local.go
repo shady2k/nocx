@@ -147,6 +147,11 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		Env:     envSlice(req.Env),
 		Cols:    req.Cols,
 		Rows:    req.Rows,
+		// TIOCSWINSZ's own units — the whole text area — exactly what the
+		// wire carried here; the per-cell decode is cellGeometry's, at the
+		// runtime, not the pty start's business.
+		XPixel: req.XPixel,
+		YPixel: req.YPixel,
 	}
 	var launch shellintegration.LocalLaunch
 	var lifecycleParent, lifecycleChild *os.File

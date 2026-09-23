@@ -72,6 +72,13 @@ type SpawnRequest struct {
 	Env       map[string]string
 	Cols      uint16
 	Rows      uint16
+	// XPixel/YPixel are the client's cell metrics in TIOCSWINSZ's own units
+	// — the WHOLE text area in pixels — and zero means the client has not
+	// measured itself yet. They reach the pty's winsize at spawn; the
+	// per-cell metric the runtime commits is decoded at the one boundary,
+	// cellGeometry.
+	XPixel    uint16
+	YPixel    uint16
 	Lifecycle *proto.LifecycleLaunch
 	// AgentToolToken is the bearer that admits this pane's far agent, minted by
 	// the coordinator that asked for the pane (nocx-50w7p.16 for the ssh route,
@@ -1098,14 +1105,8 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 // for one is owed — reaches the PTY through the SAME writer, because
 // repairLocked and CommitGeometry hand it to Session.Commit's ReplySink,
 // which is this owner.
-func (s *hostSession) resize(cols, rows uint16) error {
-	g := sessionruntime.Geometry{
-		Cols: int(cols),
-		Rows: int(rows),
-		// No cell metrics cross the wire today; see ptyTerminal.Resize.
-		CellWidthPx:  0,
-		CellHeightPx: 0,
-	}
+func (s *hostSession) resize(cols, rows, xpixel, ypixel uint16) error {
+	g := cellGeometry(cols, rows, xpixel, ypixel)
 	done, submitErr := s.owner.submit(ownerItem{kind: itemResize, resize: &g})
 	if submitErr != nil {
 		return submitErr

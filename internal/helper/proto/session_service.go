@@ -294,9 +294,16 @@ type SpawnParams struct {
 	// caller can smuggle argv through it, and a duplicate key is impossible
 	// rather than last-wins.
 	Env map[string]string `json:"env,omitempty"`
-	// Cols and Rows are the initial window size.
-	Cols uint16 `json:"cols"`
-	Rows uint16 `json:"rows"`
+	// Cols and Rows are the initial window size. XPixel and YPixel are the
+	// client's cell metrics in TIOCSWINSZ's own units — the WHOLE text area
+	// in pixels (cols × cell width, rows × cell height) — and zero means the
+	// client has not measured itself yet. The helper decodes them into the
+	// per-cell metric the runtime commits, at exactly one boundary
+	// (internal/helper/session.cellGeometry).
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 	// WindowBytes is the bound on this session's output window (D8). The
 	// coordinator decides and the helper applies, clamped to the helper's own
 	// floor, ceiling and aggregate budget — and the session keeps the bound it
@@ -500,9 +507,16 @@ type SSHSpawnParams struct {
 	// `cwd` key for a remote session for the same reason: this helper resolved
 	// no directory, so it reports none.
 	Cwd string `json:"cwd"`
-	// Cols and Rows are the size the channel's pty is requested at.
-	Cols uint16 `json:"cols"`
-	Rows uint16 `json:"rows"`
+	// Cols and Rows are the size the channel's pty is requested at. XPixel
+	// and YPixel are the client's cell metrics in TIOCSWINSZ's whole-area
+	// units, and zero means not measured. They reach the helper's runtime
+	// geometry — what the published frames carry — and not the far pty,
+	// whose window-change carries no pixel fields at all (x/crypto/ssh has
+	// none to send).
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 	// WindowBytes is the bound on this session's output window, clamped by the
 	// helper exactly as SpawnParams' is. Zero means the helper's default.
 	WindowBytes int64 `json:"windowBytes"`
@@ -1074,11 +1088,16 @@ type SessionLiveness struct {
 // decoder has to special-case.
 type AckResult struct{}
 
-// ResizeParams sets one session's window size.
+// ResizeParams sets one session's window size. XPixel and YPixel carry the
+// client's cell metrics in TIOCSWINSZ's whole-text-area units, and zero
+// means not measured — the session keeps running with no cell metric rather
+// than inventing one.
 type ResizeParams struct {
 	Session HostSessionID `json:"session"`
 	Cols    uint16        `json:"cols"`
 	Rows    uint16        `json:"rows"`
+	XPixel  uint16        `json:"xpixel"`
+	YPixel  uint16        `json:"ypixel"`
 }
 
 // ResizeResult is deliberately empty: the answer to "did the resize land" is

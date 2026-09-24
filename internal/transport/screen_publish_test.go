@@ -20,10 +20,19 @@ import (
 // step 8 owes.
 
 // captureSocket accepts every write and keeps it, so the test can decode
-// what the publish seam actually put on the wire.
+// what the publish seam actually put on the wire. cond broadcasts on every
+// write, so a waiter blocks on the frame count actually changing rather than
+// polling it on a timer (AGENTS.md: "a test may not depend on timing").
 type captureSocket struct {
 	mu     sync.Mutex
+	cond   *sync.Cond
 	frames []outbound.Frame
+}
+
+func newCaptureSocket() *captureSocket {
+	s := &captureSocket{}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
 func (s *captureSocket) ReadMessage() (int, []byte, error) { return 0, nil, fmt.Errorf("no reads") }
@@ -33,6 +42,7 @@ func (s *captureSocket) Close() error                      { return nil }
 func (s *captureSocket) WriteMessage(msgType int, data []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer s.cond.Broadcast()
 	s.frames = append(s.frames, outbound.Frame{MsgType: msgType, Data: append([]byte(nil), data...)})
 	return nil
 }
@@ -52,7 +62,7 @@ func newScreenPublishFixture(t *testing.T) (*WSServer, session.ID, [16]byte, *ws
 	if err != nil {
 		t.Fatalf("id to bytes: %v", err)
 	}
-	sock := &captureSocket{}
+	sock := newCaptureSocket()
 	rx := ws.getOrCreateRx(sid)
 	if rx == nil {
 		t.Fatal("the server would not make a ring")
@@ -63,23 +73,32 @@ func newScreenPublishFixture(t *testing.T) (*WSServer, session.ID, [16]byte, *ws
 	return ws, sid, sidBytes, wconn, sock
 }
 
+// awaitCapturedFrames waits on the SOCKET'S OWN frame count actually
+// reaching n — cond.Wait blocks until sock.WriteMessage broadcasts, so there
+// is nothing here to poll on a timer (stage review nocx-2v80t.3.15, finding
+// 12). The deadline is a safety net for a run that never arrives, not the
+// wait itself: an AfterFunc wakes the waiter once it passes, the same way an
+// absolute read deadline ends a blocked socket read elsewhere in this
+// package (ws_inbox_test.go's awaitFrame).
 func awaitCapturedFrames(t *testing.T, sock *captureSocket, n int) []outbound.Frame {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for {
+	timer := time.AfterFunc(time.Until(deadline), func() {
 		sock.mu.Lock()
-		got := len(sock.frames)
+		sock.cond.Broadcast()
 		sock.mu.Unlock()
-		if got >= n {
-			sock.mu.Lock()
-			defer sock.mu.Unlock()
-			return sock.frames
+	})
+	defer timer.Stop()
+
+	sock.mu.Lock()
+	defer sock.mu.Unlock()
+	for len(sock.frames) < n {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("only %d of %d frames reached the subscriber's socket", len(sock.frames), n)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d frames reached the subscriber's socket", got, n)
-		}
-		time.Sleep(5 * time.Millisecond)
+		sock.cond.Wait()
 	}
+	return append([]outbound.Frame(nil), sock.frames...)
 }
 
 func TestPublishScreenFrame_ReachesTheAttachedSubscriber(t *testing.T) {

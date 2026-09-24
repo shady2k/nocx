@@ -731,3 +731,119 @@ func TestLifecycleCompletion_RaisesAttestedBlockFinished(t *testing.T) {
 		t.Fatalf("event title = %q, want false failed", event.Title)
 	}
 }
+
+// TestLifecycleUnknownOnRootDomain_SuppressesBlockFinished is the coordinator's
+// decision for nocx-2v80t.3.22 ("one fact, one notification"): a session that
+// dies mid-command used to raise BOTH the session's own "ended" notification
+// and a "<command> finished" for the attempt its own death left unknown — the
+// bell read 2 for one death. The root domain (no parent) is the session's own
+// shell; once IT loses its transport there is nothing left on the lane to run
+// anything, and monitorExit's own KindSessionEnded already names the fact.
+func TestLifecycleUnknownOnRootDomain_SuppressesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "sleep 1000"), 41))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 1000")))
+
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+
+	// The ledger still closes the row as unknown — this bug is about the
+	// NOTIFICATION, never about losing the record of what happened.
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished {
+			t.Fatalf("root domain's own transport loss raised %+v; the session's own "+
+				"end already says the command stopped (nocx-2v80t.3.22)", ev)
+		}
+	}
+}
+
+// TestLifecycleUnknownOnRootDomain_DomainClosedAlsoSuppressesBlockFinished
+// drives the ACTUAL mechanism measured on 2026-09-25 against a real shell: a
+// process dying mid-command (`exit 1`, a signal, a crash) runs the shell
+// integration's own EXIT trap first (nocx.bash's __nocx_exit_cleanup), which
+// sends domain_closed over the still-open side channel before the process's
+// own exit closes it — "stream ordering guarantees it precedes EOF"
+// (lifecyclechannel/adapter.go). So the attempt goes Unknown through the
+// kernel's ordinary domain-close path, never through TransportLost at all,
+// and the suppression has to hold for this path too.
+func TestLifecycleUnknownOnRootDomain_DomainClosedAlsoSuppressesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "while true; do sleep 1; done; exit 1"), 41))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2,
+		lifecycleStartEvt(nil, "while true; do sleep 1; done; exit 1")))
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{},
+	}))
+
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished {
+			t.Fatalf("the shell's own exit-trap domain_closed raised %+v; monitorExit's "+
+				"session.ended already names the same death (nocx-2v80t.3.22)", ev)
+		}
+	}
+}
+
+// TestLifecycleUnknownOnNestedDomain_StillRaisesBlockFinished is the other
+// half of the same decision: an ssh hop whose connection drops leaves the
+// PARENT shell running the lane — the session lives on, per nocx-ictcq — so
+// the command's own "finished" notification is the only word anybody gets
+// that it stopped, and it must still be raised.
+func TestLifecycleUnknownOnNestedDomain_StillRaisesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+
+	if err := pub.BindTransport("T2", noopPort{}); err != nil {
+		t.Fatalf("BindTransport T2: %v", err)
+	}
+	h2, err := pub.RequestDomain(lane, &h.Domain, "T2")
+	if err != nil {
+		t.Fatalf("RequestDomain nested: %v", err)
+	}
+	// The parent yields the lane before the child can establish (kernel.go's
+	// applyHello: a child's parent must be DomainSuspended) — exactly what a
+	// real `ssh` command does to its own local domain once the far shell
+	// takes the terminal.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h2, e.conn)
+
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h2.Domain), "sleep 1000"), 41))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 2, lifecycleStartEvt(nil, "sleep 1000")))
+
+	if err := pub.TransportLost("T2"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	found := false
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished && ev.SessionID == sid {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a nested domain's transport loss raised no block.finished for session %q "+
+			"(events=%+v); the session lives on and this is the only word anyone gets that "+
+			"the command stopped (nocx-ictcq)", sid, raiser.captured())
+	}
+}

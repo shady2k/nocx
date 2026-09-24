@@ -299,9 +299,64 @@ func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
 		fact.Attempt.State = lifecyclepub.AttemptUnknown
 	}
 	if recorded := s.syncLifecycleLedger(fact); recorded != nil {
-		s.raiseLifecycleBlockFinished(*recorded, fact)
-		s.publishHistoryRecorded(fact, *recorded)
+		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {
+			s.raiseLifecycleBlockFinished(*recorded, fact)
+		}
+		// STASHED, not sent: this report runs before the lane's own
+		// completing fact (transitionsBelow's ordering in Ingest), and a
+		// renderer that read this receipt first still holds the attempt
+		// open — the receipt then attaches to no finished block and is
+		// dropped for good (nocx-2v80t.3.22). PublishLifecycle flushes it
+		// right after sending the fact that names this same attempt done.
+		s.stashHistoryRecorded(id, *recorded)
 	}
+}
+
+// stashHistoryRecorded holds one completed attempt's history.recorded data
+// for PublishLifecycle to deliver, so the wire never carries the receipt
+// ahead of the fact that tells the renderer the attempt it names is done.
+func (s *WSServer) stashHistoryRecorded(id lifecycle.AttemptID, data historyRecordedData) {
+	s.lifecycleMu.Lock()
+	if s.pendingHistoryReceipts == nil {
+		s.pendingHistoryReceipts = make(map[lifecycle.AttemptID]historyRecordedData)
+	}
+	s.pendingHistoryReceipts[id] = data
+	s.lifecycleMu.Unlock()
+}
+
+// takeStashedHistoryRecorded takes and clears the stashed receipt for id, if
+// any. Taking rather than peeking keeps a lane that publishes the same
+// attempt id twice (a replay) from resending a receipt already delivered.
+func (s *WSServer) takeStashedHistoryRecorded(id lifecycle.AttemptID) (historyRecordedData, bool) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	data, ok := s.pendingHistoryReceipts[id]
+	if ok {
+		delete(s.pendingHistoryReceipts, id)
+	}
+	return data, ok
+}
+
+// unknownAttemptImpliesSessionEnd reports whether an attempt going Unknown on
+// THIS domain is the session itself ending, rather than a nested integration
+// alone being lost (the coordinator's decision for nocx-2v80t.3.22, one fact
+// one notification). The lane's ROOT domain (no parent) is the session's own
+// shell — a local pty, or whatever process it started directly. Once that
+// domain closes there is nothing left on the lane to run the command, and
+// the session's own end is what monitorExit already raises
+// (notify.KindSessionEnded, ws.go); a second "<command> finished" would say
+// the same fact twice, and it does — measured 2026-09-25, a background tab
+// whose shell died mid-command (`exit 1`) raised both, reading "2" on the
+// bell for one death. A NESTED domain going Unknown (an ssh hop whose
+// transport dropped) leaves the parent shell running the lane, so the
+// session lives on and the command's own notification is the only word
+// anybody gets that it stopped — exactly the case nocx-ictcq wants kept.
+func (s *WSServer) unknownAttemptImpliesSessionEnd(domain lifecycle.DomainID) bool {
+	if s.lifecyclePub == nil {
+		return false
+	}
+	dom, ok := s.lifecyclePub.Domain(domain)
+	return ok && dom.Parent == nil
 }
 
 // PublishLifecycle routes one published fact to the lane's session's current
@@ -393,9 +448,6 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
 	}
-	if recorded != nil {
-		s.historyRecordedNotification(wconn, state, *recorded)
-	}
 	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
 		s.openRecovery(sid, f)
 	}
@@ -418,6 +470,16 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		SignalDelivery: s.signalDeliveryFor(f),
 		Fact:           f,
 	}
+	// THIS FACT BEFORE ITS OWN RECEIPT (nocx-2v80t.3.22): history.recorded
+	// names the attempt this fact is the one to report as done, and a
+	// renderer that reads the receipt first still has the attempt open in
+	// its own kernel — the receipt then has no finished block to attach to
+	// and is dropped for good, never retried. Measured against a real echo
+	// of a command carrying a credential: the receipt reached the socket
+	// every time before the fact naming its completion did, and the block
+	// never got its capture-offer chip. Sending the fact first costs
+	// nothing else it did not already cost — the receipt is still the very
+	// next write on this connection.
 	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
 		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
 		return
@@ -428,6 +490,18 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// same (nocx-n14oo.8's reasoning, for the other half).
 	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
 		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
+	if recorded != nil {
+		s.historyRecordedNotification(wconn, state, *recorded)
+	} else if f.Attempt != nil {
+		// publishClosedAttemptHistory (transitionsBelow, run before this
+		// fact by Ingest) is usually the one that actually closed the
+		// ledger row for this attempt's completion, which is why syncing it
+		// again HERE answers nil — its receipt is waiting in the stash for
+		// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
+		if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
+			s.historyRecordedNotification(wconn, state, stashed)
+		}
+	}
 }
 
 // raiseLifecycleBlockFinished raises the attested completion event for the

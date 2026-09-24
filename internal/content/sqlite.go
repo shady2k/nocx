@@ -477,7 +477,7 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
-const schemaVersion = 20
+const schemaVersion = 21
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -1092,6 +1092,36 @@ CREATE TABLE IF NOT EXISTS worker_checkouts (
   last_used_at INTEGER NOT NULL,
   PRIMARY KEY (repo_key, path)
 ) STRICT;
+
+-- A clear boundary (nocx-2v80t.3.17): the record NEVER deletes an entry
+-- (nocx-zg3k3.10.3's owner decision), so this table holds a CURSOR a reader
+-- applies rather than a mark on every entry it hides. One row per erase the
+-- coordinator sighted: entries at or before ingest_seq, within the same
+-- pane, are hidden from an ordinary read until something explicitly reveals
+-- them (future work, not this table's to decide) — the reveal floor
+-- nocx-zg3k3.10.3's own paging is meant to build on, which is why kind is a
+-- column and not this table's whole name: a later boundary kind fits the
+-- same shape.
+--
+-- pane_id is nullable and ON DELETE SET NULL for the same reason
+-- entries.pane_id is: a closed pane's boundary still describes what a
+-- session did, even once nothing can be restored through it. session_id is
+-- provenance only, exactly as entries.session_id is — which pipe sighted
+-- the erase, null once that pipe is gone — and is never what a reader
+-- filters by, because a session dies with the backend while a pane's
+-- restore must not.
+CREATE TABLE IF NOT EXISTS clear_boundaries (
+  id          TEXT PRIMARY KEY,           -- backend-minted UUIDv7
+  pane_id     TEXT REFERENCES panes(id) ON DELETE SET NULL,
+  session_id  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  ingest_seq  INTEGER NOT NULL,           -- entries at or before this, in pane_id, are hidden by default
+  kind        TEXT NOT NULL CHECK (kind IN ('clear')),
+  created_at  INTEGER NOT NULL
+) STRICT;
+-- A pane's restore reads its newest boundary and nothing older than it
+-- matters to an ordinary read, exactly the access pattern entries_by_pane
+-- already serves.
+CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL;
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this

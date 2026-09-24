@@ -1273,6 +1273,40 @@ type BlockRowsSummary struct {
 	LostRows    uint64
 }
 
+// RecordClearBoundary is the coordinator sighting the program erase its own
+// saved lines inside an authenticated interval (nocx-2v80t.3.17): ED3, or a
+// full reset, either of which the emulator's own state already destroyed
+// (internal/emulator/ghostty's noteDepartedLocked) rather than something
+// this store infers from bytes. SessionID is the session that sighted it —
+// provenance, exactly as AppendBlockRows' rows belong to a session before
+// they belong to a block — and the store resolves the pane a boundary
+// actually bounds from it: entries carry both edges (design §6.1) and a
+// boundary follows the same rule, because a session-only boundary could
+// never be found again from the durable side restore reads through.
+type RecordClearBoundary struct {
+	SessionID string
+}
+
+// ClearBoundaryRecorded is what recording one answered: the boundary's own
+// id, the pane it bounds (nil when the session had no pane bound — the
+// boundary is still recorded, for provenance, but an ordinary read has
+// nothing to apply it against until a pane exists), and the cursor itself.
+//
+// IngestSeq is the highest ingest_seq among this pane's entries that had
+// already SEALED (phase = 'closed') at the instant of the sighting — never
+// the session's newest entry outright, because the command whose own output
+// triggered the erase (`clear` itself, ordinarily) already has an open entry
+// by the time its output runs, and a boundary that bounded its own command
+// would hide the very block reporting the clear. The record never deletes
+// (nocx-zg3k3.10.3's decision): this is a CURSOR a reader applies, not a
+// mark on the entries themselves, and revealing past it is a later
+// question this type does not answer.
+type ClearBoundaryRecorded struct {
+	ID        string
+	PaneID    *string
+	IngestSeq int64
+}
+
 // AppendArtifact creates one artifact of a BLOCK, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
 // never one BLOB.
@@ -1931,6 +1965,12 @@ type LedgerRepository interface {
 	// the cap dropped (derived from the chunks that are actually there) and
 	// how many the emulator lost before they could be read.
 	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
+	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
+	// an ordinary read applies rather than a mark on every entry it hides
+	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:
+	// every sighting is a real event and gets its own row, the way every
+	// other fact this store records does.
+	RecordClearBoundary(ctx context.Context, in RecordClearBoundary) (ClearBoundaryRecorded, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

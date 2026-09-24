@@ -207,6 +207,55 @@ func (s *Session) openObservationLocked() {
 	s.observation = o
 }
 
+// suppressBoundaryScreenLocked declines to stream the rows the interval sealed
+// last already handed over as its closing screen.
+//
+// The window is that boundary's screen, and it is matched BY CONTENT rather
+// than by position, because a geometry commit can land between the boundary and
+// the rows that leave next: a pane that SHRINKS pushes the screen's top row
+// into history WITHOUT it departing (the port's rule — a pushed row is not a
+// departure), so the first row that leaves is not the window's first row.
+// Matching only the head is what this used to do, and a commit therefore killed
+// the whole window on its first comparison: the closing screen the block before
+// already holds was streamed again into the block after it, 26 and 27 rows at a
+// time on the e2e, and deterministically in
+// TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit.
+//
+// A row that matches an entry consumes THAT entry — a row leaves once — and the
+// entries before it STAY: they are rows a commit pushed off the screen, and one
+// may still come back (a later growth pulls history back in) and leave, in
+// which case it is suppressed like any other row of the boundary's screen. The
+// window is cleared by the first arriving row that matches nothing in it, which
+// is the first row of the next command's own output: that is what keeps a
+// window from swallowing output that merely LOOKS like the boundary's screen,
+// and a prompt row repeats all session long.
+//
+// The caller has already established that the interval in flight is the one
+// that follows the boundary, and that the feed was not struck: a struck feed
+// suppresses nothing, because the hole it names rides the batch that follows.
+func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.Row {
+	kept := rows[:0]
+	for i, row := range rows {
+		at := -1
+		for j := range s.pendingScreen {
+			if sameScreenRow(row, s.pendingScreen[j]) {
+				at = j
+				break
+			}
+		}
+		if at < 0 {
+			// The boundary's screen is done: from here on, what leaves the
+			// screen is the next command's own output.
+			kept = append(kept, rows[i:]...)
+			s.pendingScreen = nil
+			return kept
+		}
+		s.pendingScreen = append(s.pendingScreen[:at], s.pendingScreen[at+1:]...)
+		s.suppressedScreenRows++
+	}
+	return kept
+}
+
 // drainObservationLocked moves the emulator's departure report OUT, to the
 // session's row stream (nocx-2v80t.3.6). It runs under the session lock
 // after every ingest, before the effects that may carry the fence that seals
@@ -254,12 +303,8 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 	// (nocx-2v80t.3.9). A struck feed suppresses nothing: the hole it names
 	// rides the batch that follows it, and a batch withheld whole would
 	// swallow that marker.
-	if lost == 0 && len(s.pendingScreen) > 0 {
-		for len(rows) > 0 && len(s.pendingScreen) > 0 && sameScreenRow(rows[0], s.pendingScreen[0]) {
-			rows = rows[1:]
-			s.pendingScreen = s.pendingScreen[1:]
-			s.suppressedScreenRows++
-		}
+	if lost == 0 {
+		rows = s.suppressBoundaryScreenLocked(rows)
 	}
 	if len(rows) == 0 && lost == 0 {
 		// A struck feed with an empty report still carries its marker: a

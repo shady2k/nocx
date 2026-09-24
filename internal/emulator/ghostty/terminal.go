@@ -334,10 +334,13 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 			g.Cols, g.Rows, g.CellWidthPx, g.CellHeightPx)
 	}
 	// The depth either side of the resize is the debt: a taller screen fills
-	// itself out of history — the depth shrinks by exactly the rows it took —
-	// and those rows must not be reported as departures when they leave the
-	// screen a second time.
-	before, _ := t.scrollbackLocked()
+	// itself out of history — the depth shrinks by the rows it took — and
+	// those rows must not be reported as departures when they leave the
+	// screen a second time. BOTH readings must be the same buffer's, and the
+	// debt may only be what the refill could have put back.
+	before, beforeErr := t.scrollbackLocked()
+	beforeScreen, beforeScreenErr := t.screenLocked()
+	beforeRows := t.geom.Rows
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		// The geometry in force is the one the library refused to leave, so
@@ -353,8 +356,40 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	if after, aerr := t.scrollbackLocked(); aerr == nil {
 		if screen, serr := t.screenLocked(); serr == nil {
 			base := &t.sb[sbIndex(screen)]
-			if base.valid && before > after {
-				base.owed += before - after
+			// A REFILL is the only thing that may owe departures: the screen
+			// gained rows and took them out of history, and those rows were
+			// reported when they first left. The difference of two buffers'
+			// depths measures nothing, so a screen that is not the one the
+			// reading was taken on owes nothing; and the debt is capped by
+			// what the reflow could put back — the rows the screen gained.
+			// A larger shrink of the depth is not a refill (a rewrap of
+			// history's own line breaks, an erase, a switch), and charging it
+			// would swallow a command's own departures: the frozen count that
+			// hands one command's rows to the next block (nocx-2v80t.3.9).
+			sameBuffer := beforeErr == nil && beforeScreenErr == nil && screen == beforeScreen
+			switch grew := g.Rows - beforeRows; {
+			case !base.valid || !sameBuffer:
+			case grew > 0 && before > after:
+				// The screen grew and took its new rows out of history: the
+				// depth shrank by what the refill pulled back, and each of
+				// those rows was reported when it first left. A refill can
+				// only return the rows the screen gained.
+				base.owed += min(before-after, grew)
+			case grew < 0 && after > before:
+				// The screen shrank and reflowed its top rows INTO history:
+				// they are not on the screen any more, so none of them can
+				// leave it again, and the debt they were part of is paid off
+				// by the reflow that took them. Without this the debt
+				// outlives what the refill put back and eats real departures
+				// — a command's whole output read as already reported
+				// (nocx-2v80t.3.9).
+				base.owed -= min(base.owed, after-before)
+			}
+			// A debt larger than the screen it sits on is not a refill at
+			// all: at most the screen's own rows can be rows that were
+			// already reported and are on it again.
+			if base.owed > g.Rows {
+				base.owed = g.Rows
 			}
 		}
 	}
@@ -538,8 +573,14 @@ func (t *terminal) rebaselineLocked() {
 		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
 		return
 	}
+	// The debt SURVIVES a re-baseline. It is a fact about rows that are on the
+	// screen and have already been reported as departed; re-seeding the count
+	// does not un-report them, and zeroing it here is how a row comes back
+	// reported twice — the reflowed row's second leave reads as new output
+	// because the next growth had no debt to pay (nocx-2v80t.3.9).
+	owed := t.sb[sbIndex(screen)].owed
 	t.sb = [2]sbBaseline{}
-	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true}
+	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true, owed: owed}
 }
 
 // sbIndex maps a screen to its baseline slot.

@@ -4,9 +4,10 @@ package assistant
 // granted, and read a WINDOW of one.
 //
 // WHY THEY EXIST. In nocx a finished command's rows LEAVE the xterm grid at
-// the block freeze and the DOM owns them — the renderer's clearViewport says
-// it in as many words: "the grid only ever holds the running command's rows,
-// and the DOM owns the scrollback". So readScreen, which reads the grid,
+// the block's end marker — the runtime streams departed rows the moment
+// they leave the screen and keeps no copy of them, and the block a
+// coordinator stores from that stream is what a restore reads back
+// (ADR-0074, nocx-2v80t.3.6/.7). So readScreen, which reads the grid,
 // answers a screenful of empty lines for everything that has already
 // finished, which is everything the person is looking at. A run asked "what
 // command did I run?" over a screen full of `df` output read 33 empty rows
@@ -15,12 +16,15 @@ package assistant
 // WHERE THE TEXT COMES FROM, and this is the decision the bead asked to be
 // made explicitly: the LEDGER, not the renderer. ADR-0019 decision 1 is one
 // authoritative ledger with disposable projections, and the DOM scrollback
-// is a projection of it — history.record owns the row and the rows artifact
-// owns streamed command output. Reading the record is reading what the
-// backend put there rather than asking the renderer to re-derive it. It needs
-// no renderer round trip, so it has no timeout and no "the tab is gone" hang;
-// it survives a closed tab; and it reuses the query, paging and artifact read
-// that already exist instead of growing a second block enumeration.
+// is a projection of it — the command is opened by lifecycle.submitAttempt
+// and closed by the authenticated shell completion, and the rows artifact
+// owns the streamed output in between (history.record was the write path
+// before the lifecycle cutover and is no longer a client operation). Reading
+// the record is reading what the backend put there rather than asking the
+// renderer to re-derive it. It needs no renderer round trip, so it has no
+// timeout and no "the tab is gone" hang; it survives a closed tab; and it
+// reuses the query, paging and artifact read that already exist instead of
+// growing a second block enumeration.
 //
 // What that costs is named on the return rather than hidden: a block whose
 // body the store never kept (history off, output retention off, a sensitive

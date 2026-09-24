@@ -20,7 +20,8 @@
     "summary": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The rows artifact's payload sidecar (ledger.get carries it as the artifact's payload). While the block is open it also carries the writer's own cursor and reservation; the fields a READER sees are the two loss counts, written once at close. Absent keys are zero facts, not unknown ones: a block with neither key lost nothing and dropped nothing.",
+      "required": [],
+      "description": "The rows artifact's payload sidecar (ledger.get carries it as the artifact's payload). While the block is open it also carries the writer's own cursor and reservation; the fields a READER sees are the two loss counts, written once at close. Absent keys are zero facts, not unknown ones: a block with neither key lost nothing and dropped nothing — which is why `required` is deliberately empty rather than missing (contracts/README.md: additionalProperties:false plus an explicit required, even an empty one, is what makes a schema exact instead of theatre).",
       "properties": {
         "droppedRows": {
           "type": "integer",

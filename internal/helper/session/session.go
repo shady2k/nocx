@@ -398,21 +398,39 @@ type hostSession struct {
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
 	attachments map[proto.AttachmentID]*attachment
-	// rowCh is the row bridge's hand-off: the runtime's RowStream pushes
-	// one emission per drained feed, the pump below writes them to the wire.
-	// Bounded, because a bridge that kept every emission would be the copy
-	// of departed rows the owner's decision forbids (rows.go).
-	rowCh chan rowEmission
+	// rowMu, rowQueue and rowQueuedBatches are the row bridge's hand-off
+	// (rows.go): the runtime's RowStream appends one emission per drained
+	// feed under rowMu — an append never blocks the caller, unlike a full
+	// channel's send — and the pump below drains them in the same order.
+	// rowQueuedBatches counts the queued emissions that are NOT an
+	// interval's end marker, and is what enqueueRowEmission bounds: an end
+	// marker always appends, whatever the count, because a dropped end
+	// marker leaves the coordinator's block open forever (nocx-2v80t.3.15).
+	// A dropped row batch is counted into rowsLostPending instead, which
+	// the next row batch actually delivered carries as its own LostRows —
+	// the drop is never silent.
+	rowMu            sync.Mutex
+	rowQueue         []rowEmission
+	rowQueuedBatches int
+	// rowWake wakes the pump when the queue was empty and a new emission
+	// arrived; capacity 1, because a pending wake means "the queue is
+	// non-empty" and coalesces the same way a watermark does — the pump
+	// drains to empty before waiting on it again, so a coalesced wake
+	// never loses an emission.
+	rowWake chan struct{}
 	// rowsDone ends the pump; rowsConfirmed is the coordinator's
-	// acknowledged "written up to here" mark and rowsDropped counts what
-	// the bridge could not carry (rows.go).
-	rowsDone      chan struct{}
-	rowsConfirmed uint64
-	rowsDropped   atomic.Uint64
-	writer        *proto.SubscriberID
-	writerAtt     proto.AttachmentID
-	epoch         proto.LeaseEpoch
-	exit          *proto.SessionExitStatus
+	// acknowledged "written up to here" mark; rowsDropped counts the
+	// BATCHES the bridge could not queue, and rowsLostPending is the exact
+	// row count they carried, still owed to the next row batch that reaches
+	// the wire (rows.go).
+	rowsDone        chan struct{}
+	rowsConfirmed   uint64
+	rowsDropped     atomic.Uint64
+	rowsLostPending atomic.Uint64
+	writer          *proto.SubscriberID
+	writerAtt       proto.AttachmentID
+	epoch           proto.LeaseEpoch
+	exit            *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while

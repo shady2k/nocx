@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/helper/session.output-rows.schema.json",
   "title": "HelperSessionOutputRows",
-  "description": "One batch of the rows that left a session's screen, streamed from the helper the moment they left it (nocx-2v80t.3.6). The owner's decision gives the helper no copy of departed rows — ghostty's own scrollback is the buffer — so this document is the only place the rows go. The rows ride in the frame contract's row vocabulary (cells as [grapheme, width, hasText] tuples, styles as per-row runs), encoded by the runtime's own row encoder, so what a coordinator stores from the stream and what it paints live are one shape. Every row is carried exactly once, in stream order; a batch names the absolute index its first row holds, counting every row the session has ever seen depart, so the order is checkable rather than trusted.",
+  "description": "One batch of the rows that left a session's screen, streamed from the helper the moment they left it (nocx-2v80t.3.6). The owner's decision gives the helper no copy of departed rows — ghostty's own scrollback is the buffer — so this document is the only place the rows go. The rows ride in the frame contract's row vocabulary (nocx-zg3k3.2.12: a row as its text in column order, a sparse list of the positions whose codepoint count or column footprint departs from the default, and style runs measured in columns), encoded by the runtime's own row encoder, so what a coordinator stores from the stream and what it paints live are one shape. Every row is carried exactly once, in stream order; a batch names the absolute index its first row holds, counting every row the session has ever seen depart, so the order is checkable rather than trusted.",
   "type": "object",
   "additionalProperties": false,
   "required": ["fromRow", "lostRows", "rows"],
@@ -13,7 +13,7 @@
       "minimum": 0
     },
     "lostRows": {
-      "description": "The count of FEEDS the emulator struck immediately before this batch's first row, and never a count of rows: the ABI carries no departure counter, and a prune inside a feed mixes with that feed's own departures in one depth reading, so the rows a prune took are unknowable by contract. An ordinary feed carries none; one struck feed reads as one. A spelling that named lost rows would be a manufactured count.",
+      "description": "Two sources add into one count, and both keep this batch's FromRow minus the row count after the delivery before it exact — never a gap the coordinator has to invent a reason for (a discontinuous FromRow whose lostRows does not measure the gap precisely is refused, content.AppendBlockRows). The first is the FEEDS the emulator struck immediately before this batch's first row: the ABI carries no departure counter, and a prune inside a feed mixes with that feed's own departures in one depth reading, so the rows a prune took are unknowable by contract — one struck feed reads as one, a deliberately symbolic count rather than a manufactured row estimate. The second is an exact row count: rows the session's own bridge had to drop before they ever reached a batch, because the wire had fallen a whole queue behind (nocx-2v80t.3.15) — the runtime's own row index still advanced past them, so this is what tells the coordinator precisely how many, never a silent hole. An ordinary batch, with a keeping-up wire and no struck feed, carries none.",
       "type": "integer",
       "minimum": 0
     },

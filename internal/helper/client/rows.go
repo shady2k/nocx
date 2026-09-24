@@ -27,12 +27,16 @@ import (
 )
 
 // OutputRows is one batch of the rows that left a session's screen, oldest
-// first, exactly as the runtime handed them over. FromRow is the absolute
+// first, exactly as the helper handed them over. FromRow is the absolute
 // index of Rows[0]: the count of rows the session had seen depart before
-// this batch, whether or not a consumer was bound when they did. LostRows
-// counts the FEEDS the emulator struck immediately before FromRow — never
-// rows, because the ABI cannot count pruned rows (the helper contract spells
-// the whole argument out); an ordinary batch carries none.
+// this batch, whether or not a consumer was bound when they did. LostRows is
+// the exact gap between FromRow and the row count after the delivery before
+// it: the FEEDS the emulator struck immediately before FromRow (a symbolic
+// one per struck feed — the ABI cannot count the rows a prune actually took;
+// the helper contract spells the whole argument out) plus any rows the
+// helper's own bridge had to drop under backpressure before this batch ever
+// left it (an exact row count there, nocx-2v80t.3.15). An ordinary batch,
+// with a keeping-up wire and no struck feed, carries none.
 type OutputRows struct {
 	FromRow  uint64
 	Rows     []emulator.Row

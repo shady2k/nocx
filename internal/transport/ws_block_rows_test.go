@@ -34,6 +34,30 @@ func aStreamRow(text string) emulator.Row {
 	return row
 }
 
+type closeFailureBlockStore struct {
+	ledger     content.LedgerRepository
+	fail       bool
+	appendFail bool
+}
+
+func (s *closeFailureBlockStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
+	return s.ledger.OpenBlockOutput(ctx, in)
+}
+
+func (s *closeFailureBlockStore) AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error {
+	if s.appendFail {
+		return fmt.Errorf("injected block append failure")
+	}
+	return s.ledger.AppendBlockRows(ctx, in)
+}
+
+func (s *closeFailureBlockStore) CloseBlockRows(ctx context.Context, in content.CloseBlockRows) (content.BlockRowsSummary, error) {
+	if s.fail {
+		return content.BlockRowsSummary{}, fmt.Errorf("injected block close failure")
+	}
+	return s.ledger.CloseBlockRows(ctx, in)
+}
+
 func blockRowsBody(t *testing.T, db content.ContentDB, entryID string) string {
 	t.Helper()
 	row, err := db.Ledger().Entry(context.Background(), entryID)
@@ -176,6 +200,188 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
+// A shell can submit the next command before the helper has delivered the
+// previous interval's queued rows. Those rows must remain with the interval
+// that emitted them until its end marker opens the next block.
+func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x61)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-departed")}); !confirm {
+		t.Fatal("the first interval's delayed row was not confirmed")
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")})
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second-departed")}); !confirm {
+		t.Fatal("the second interval's row was not confirmed")
+	}
+
+	firstRows := streamRows(t, db, first)
+	if len(firstRows) != 2 || firstRows[0].Text != "first-departed" || firstRows[1].Text != "first-final" {
+		t.Fatalf("first block rows = %+v, want its two rows", firstRows)
+	}
+	secondRows := streamRows(t, db, second)
+	if len(secondRows) != 1 || secondRows[0].Text != "second-departed" {
+		t.Fatalf("second block rows = %+v, want its one row", secondRows)
+	}
+}
+
+// A queued block's authenticated completion can beat the prior interval's
+// ordered end marker. Its close must wait with the queued block, otherwise the
+// prior interval loses the current destination before its own end arrives.
+func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x71)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	secondFence := lifecycleFence(0x72)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil)
+	e.ws.blockStream.mu.Lock()
+	current := e.ws.blockStream.current[session.ID(sid)]
+	queuedEndCount := len(e.ws.blockStream.queuedEnds[session.ID(sid)])
+	e.ws.blockStream.mu.Unlock()
+	if current == nil {
+		t.Fatal("queued end removed the current block")
+	}
+	if current.attempt != first {
+		t.Fatalf("queued end replaced current block with %q, want %q", current.attempt, first)
+	}
+	if queuedEndCount != 1 {
+		t.Fatalf("queued end count = %d, want 1", queuedEndCount)
+	}
+
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, nil)
+	assertBlockSealed(t, db, first)
+	assertBlockSealed(t, db, second)
+}
+
+func TestBlockRowsPendingRowsSplitAtPriorEnd(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x81)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	secondFence := lifecycleFence(0x82)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	e.ws.blockStream.mu.Unlock()
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-tail")}); confirm {
+		t.Fatal("rows queued behind a flush were acknowledged early")
+	}
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second-row")}); confirm {
+		t.Fatal("next-interval rows queued behind a flush were acknowledged early")
+	}
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = false
+	e.ws.blockStream.mu.Unlock()
+
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")})
+
+	firstRows := streamRows(t, db, first)
+	if len(firstRows) != 2 || firstRows[0].Text != "first-tail" || firstRows[1].Text != "first-final" {
+		t.Fatalf("first block rows = %+v, want exactly its two rows", firstRows)
+	}
+	secondRows := streamRows(t, db, second)
+	if len(secondRows) != 1 || secondRows[0].Text != "second-row" {
+		t.Fatalf("second block rows = %+v, want exactly its one row", secondRows)
+	}
+	assertBlockSealed(t, db, first)
+	assertBlockSealed(t, db, second)
+}
+
+func TestBlockRowsCloseFailureRetainsCurrentForRetry(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	failing := &closeFailureBlockStore{ledger: db.Ledger(), fail: true}
+	e.ws.blockRowsStore = failing
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x91)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	secondFence := lifecycleFence(0x92)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil)
+	e.ws.blockStream.mu.Lock()
+	current := e.ws.blockStream.current[session.ID(sid)]
+	queued := e.ws.blockStream.queued[session.ID(sid)]
+	pending := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
+	_, fenceRetained := e.ws.blockStream.fences[session.ID(sid)][fmt.Sprintf("%x", firstFence)]
+	e.ws.blockStream.mu.Unlock()
+	if current == nil || current.attempt != first {
+		t.Fatalf("current after failed close = %+v, want %q", current, first)
+	}
+	if queued != second {
+		t.Fatalf("queued after failed close = %q, want %q", queued, second)
+	}
+	if pending != 1 || !fenceRetained {
+		t.Fatalf("failed close recovery state = pending %d, fence retained %v; want 1, true", pending, fenceRetained)
+	}
+
+	failing.fail = false
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil)
+	assertBlockSealed(t, db, first)
+	assertBlockSealed(t, db, second)
+	e.ws.blockStream.mu.Lock()
+	finalCurrent := e.ws.blockStream.current[session.ID(sid)]
+	finalPending := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
+	e.ws.blockStream.mu.Unlock()
+	if finalCurrent != nil || finalPending != 0 {
+		t.Fatalf("close retry left state: current=%+v pending=%d", finalCurrent, finalPending)
+	}
+}
+
+func TestBlockRowsClosingAppendFailureRetainsCurrentForRetry(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	failing := &closeFailureBlockStore{ledger: db.Ledger(), appendFail: true}
+	e.ws.blockRowsStore = failing
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x93)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	secondFence := lifecycleFence(0x94)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")})
+	e.ws.blockStream.mu.Lock()
+	current := e.ws.blockStream.current[session.ID(sid)]
+	pending := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
+	e.ws.blockStream.mu.Unlock()
+	if current == nil || current.attempt != first || pending != 1 {
+		t.Fatalf("append failure state = current=%+v pending=%d; want first and one retry", current, pending)
+	}
+
+	failing.appendFail = false
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil)
+	assertBlockSealed(t, db, first)
+	assertBlockSealed(t, db, second)
+}
+
 // If the authenticated open fact beats ledger persistence, rows must stay
 // unacknowledged until the bind retry opens the durable block. The helper has
 // no separate copy after confirmation, so acknowledging this interval while
@@ -284,7 +490,8 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}); !confirm {
 		t.Fatal("first row was not confirmed")
 	}
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, lifecycleFence(0x41))))
+	firstFence := lifecycleFence(0x41)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
 
@@ -311,6 +518,8 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	e.ws.blockStream.mu.Unlock()
 	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), firstBlock, pending, nil)
 
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")})
+	assertBlockSealed(t, db, first)
 	assertBlockSealed(t, db, second)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, lifecycleFence(0x42))))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecyclePromptEvt()))

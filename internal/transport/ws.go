@@ -625,6 +625,10 @@ type WSServer struct {
 	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+	// blockRowsStore is the narrow rows-store seam. Production normally derives
+	// it from contentDB; tests can inject failure behavior without replacing
+	// the rest of ContentDB.
+	blockRowsStore blockOutputStore
 	// skillChecks is where skills.audit files what a model concluded, once
 	// it has answered (ws_skill_audit.go). When nil, an audit still returns
 	// its report and says stored:"no" — a store failure or a missing store

@@ -5,15 +5,30 @@ package session
 // they leave the screen, under its own lock; this bridge is the RowStream,
 // and its whole job is to move each hand-off to the wire without ever
 // blocking the ingest that produced it and without keeping a copy — the
-// owner's decision gives the helper no second buffer, so what the pump
-// cannot deliver when the time comes is dropped, counted and logged rather
-// than queued somewhere the design forbids.
+// owner's decision gives the helper no second buffer, so a ROW BATCH the
+// pump cannot carry when the time comes is dropped, counted and folded into
+// the LostRows of whichever row batch reaches the wire next.
+//
+// An END MARKER is never one of those drops (nocx-2v80t.3.15, the stage
+// review's blocker): a dropped end marker would leave the coordinator's
+// block open forever, with nothing left in the stream that could ever close
+// it, so enqueueRowEmission always queues one, whatever the queue holds. The
+// queue is therefore a plain FIFO guarded by a mutex rather than a bounded
+// channel — an append never blocks, so the runtime's lock is never held
+// waiting on a slow pump — and only ROW BATCHES are bounded and droppable;
+// an end marker's append is unconditional.
 //
 // Order is the invariant the bridge exists to keep: the runtime emits rows
-// and end markers in stream order, the hand-off channel preserves it, and
-// one pump per session writes the frames. A row can never be attributed to
-// the wrong interval, because nothing between the runtime and the wire
-// reorders.
+// and end markers in stream order, one FIFO queue preserves it exactly as
+// produced, and one pump per session writes the frames in the order it
+// dequeues them. A row can never be attributed to the wrong interval,
+// because nothing between the runtime and the wire reorders, and a dropped
+// row batch cannot open a gap the next delivery does not name: the runtime's
+// own FromRow already advanced past what was dropped, so the drop is
+// reported as an EXACT LostRows count on the next row batch actually sent,
+// never invented and never rounded (ws_block_rows.go's discontinuity check
+// is exact about it — content.AppendBlockRows refuses a FromRow gap whose
+// LostRows does not measure it precisely).
 
 import (
 	"encoding/hex"
@@ -34,6 +49,12 @@ import (
 // is still carried: a struck feed with no readable rows is a marker that
 // must reach the coordinator, so the bound bounds only the split.
 const rowsPerFrame = 32
+
+// maxQueuedRowBatches bounds the FIFO's row batches (never its end markers):
+// the same depth the channel this replaces carried, so a queue this deep
+// behind a wedged pump is still the bridge falling a whole queue behind, not
+// a new threshold.
+const maxQueuedRowBatches = 256
 
 // rowEmission is one hand-off from the runtime: a row batch or an
 // interval's end marker. The rows are the runtime's gift — freshly copied
@@ -61,22 +82,63 @@ func (b *rowBridge) IntervalEnd(nonce sessionruntime.FenceNonce, endRow uint64, 
 	b.hs.enqueueRowEmission(rowEmission{end: true, nonce: nonce, from: endRow, closing: closing})
 }
 
-// enqueueRowEmission hands one emission to the pump, or drops it when the
-// pump has fallen a whole queue behind. Dropping is the honest answer to a
-// wedged wire — blocking would stall the PTY's ingest under the runtime's
-// lock, and keeping a copy is what the owner's decision forbids — and it is
-// a COUNTED answer, because a row that silently vanished would be a block
-// that lies. The count is what the epic's next step (the resend that reads
-// the scrollback against the confirmed-written mark) reconciles; a drop
-// never repairs itself.
+// enqueueRowEmission appends one emission to the FIFO, or — for a ROW BATCH
+// only, and only past maxQueuedRowBatches — drops it. Dropping is the honest
+// answer to a wedged wire: blocking would stall the PTY's ingest under the
+// runtime's lock, and keeping a copy is what the owner's decision forbids.
+// It is a COUNTED and RECONCILED answer, never a silent one: the exact
+// number of rows this batch carried joins rowsLostPending, which the next
+// row batch actually delivered reports as its own LostRows (deliverRowEmission),
+// so the coordinator sees precisely the gap the drop opened rather than a
+// FromRow that jumped for no stated reason.
+//
+// An END MARKER never takes this path: it always appends, because the
+// bound exists to shed load, and shedding the one frame that closes a
+// command's block would leave that block open forever with nothing left in
+// the stream that could ever close it (nocx-2v80t.3.15). The append itself
+// cannot block — it is a mutex-guarded slice append, not an I/O wait — so
+// exempting it costs the ingest nothing.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
-	select {
-	case s.rowCh <- em:
-	default:
+	s.rowMu.Lock()
+	if !em.end && s.rowQueuedBatches >= maxQueuedRowBatches {
+		s.rowMu.Unlock()
 		s.rowsDropped.Add(1)
+		s.rowsLostPending.Add(uint64(len(em.rows))) //nolint:gosec // a row count, not a byte count
 		s.log.Warn("session rows not streamed: the bridge queue is full",
-			"session", s.id.Session, "fromRow", em.from, "droppedTotal", s.rowsDropped.Load())
+			"session", s.id.Session, "fromRow", em.from, "rowsDropped", len(em.rows),
+			"droppedBatchesTotal", s.rowsDropped.Load())
+		return
 	}
+	s.rowQueue = append(s.rowQueue, em)
+	if !em.end {
+		s.rowQueuedBatches++
+	}
+	s.rowMu.Unlock()
+	// A buffered wake of one: a pending signal already says "the queue is
+	// non-empty", so a second one while it is still unread would say
+	// nothing more — the pump drains to empty before it waits on this
+	// channel again, so a coalesced wake never leaves an emission unseen.
+	select {
+	case s.rowWake <- struct{}{}:
+	default:
+	}
+}
+
+// dequeueRowEmission pops the FIFO's head, or answers false with nothing
+// queued.
+func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	if len(s.rowQueue) == 0 {
+		return rowEmission{}, false
+	}
+	em := s.rowQueue[0]
+	s.rowQueue[0] = rowEmission{}
+	s.rowQueue = s.rowQueue[1:]
+	if !em.end {
+		s.rowQueuedBatches--
+	}
+	return em, true
 }
 
 // serveRows is the bridge's one pump. It writes each emission to every
@@ -87,9 +149,12 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 // buffer, and the mark the eventual resend reads starts at zero.
 func (s *hostSession) serveRows() {
 	for {
-		select {
-		case em := <-s.rowCh:
+		if em, ok := s.dequeueRowEmission(); ok {
 			s.deliverRowEmission(em)
+			continue
+		}
+		select {
+		case <-s.rowWake:
 		case <-s.rowsDone:
 			return
 		}
@@ -131,7 +196,15 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		}
 		return
 	}
-	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: em.lost}
+	// LostRows carries two facts folded into one count, both exact: the
+	// runtime's own em.lost (a struck feed immediately before em.from) and
+	// whatever the bridge itself dropped since the last row batch it
+	// actually delivered (rowsLostPending, swapped and cleared here so a
+	// drop is reported exactly once, on the very next delivery). Both name
+	// the same gap — rows the coordinator's FromRow arithmetic must account
+	// for or refuse the delivery as discontinuous — so they add.
+	lost := em.lost + s.rowsLostPending.Swap(0)
+	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: lost}
 	for start := 0; start <= len(em.rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
 		if stop > len(em.rows) {
@@ -163,6 +236,14 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 			return
 		}
 		doc.FromRow += uint64(stop - start) // #nosec G115 -- slice arithmetic, never negative
+		// The gap LostRows states sits immediately before em.from — the
+		// batch's own first row — and belongs to the FIRST split frame
+		// alone; a later frame of the SAME batch starts exactly where the
+		// one before it left off, with no gap of its own, so it must not
+		// keep repeating the first frame's count (that would claim the same
+		// loss again for every split and fail the coordinator's exact
+		// FromRow-minus-LostRows check).
+		doc.LostRows = 0
 	}
 }
 

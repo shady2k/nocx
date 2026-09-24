@@ -85,7 +85,7 @@ func rowsBridgeSession(t *testing.T, cols, rows int) (*hostSession, *sessionrunt
 		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		now:      time.Now,
 		subs:     make(map[proto.SubscriberID]*subscriber),
-		rowCh:    make(chan rowEmission, 256),
+		rowWake:  make(chan struct{}, 1),
 		rowsDone: make(chan struct{}),
 	}
 	sink := &rowsSink{}

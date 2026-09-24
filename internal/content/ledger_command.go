@@ -4,8 +4,23 @@ package content
 //
 // THE CUTOVER, IN ONE METHOD. command_history held "a command and what it
 // printed" and stored no output at all; the lifecycle path now owns normal
-// command history. This method remains for a completed command that has no
+// command history. This method was kept for a completed command that has no
 // authenticated lifecycle attempt.
+//
+// ITS PRODUCTION CALLER, TODAY: none. Every command this backend actually
+// records — a shell command (lifecycle.submitAttempt → the authenticated
+// completion) and an assistant/tool command (internal/assistant's own
+// Submit → StartExecution → FinishExecution, attempt_dispatch.go and
+// kernel.go) — has an authenticated lifecycle attempt and never reaches
+// here. `deadcode -whylive` on sqliteContent.RecordCompleted answers
+// "reachable only through reflection" (stage review nocx-2v80t.3.15, finding
+// 5): the interface method is exercised only by this package's, transport's
+// and capability's own tests, as their fixture-seeding shortcut for "a
+// command that already finished" — 53 call sites across 17 test files, none
+// of them testing THIS method's own behaviour beyond a handful in
+// ledger_command_test.go. Removing it is therefore a rewrite of every one of
+// those fixtures onto Submit/StartExecution/FinishExecution, not a small
+// change, and belongs to a bead of its own rather than to a review-fix pass.
 //
 // # Why a completed command is one transaction and not three calls
 //
@@ -23,7 +38,8 @@ package content
 //
 // A lifecycle submit carries AttemptID and updates the already-open row,
 // returning its id. RecordCompleted remains for callers that have no
-// authenticated lifecycle attempt.
+// authenticated lifecycle attempt — a shape nothing in this codebase
+// currently has (see above).
 
 import (
 	"context"

@@ -323,7 +323,20 @@ func TestARowsStreamReachesTheCoordinatorInOrderThenTheEnd(t *testing.T) {
 	}
 
 	// The confirmed-written mark: everything received is confirmed, and a
-	// mark ahead of what departed is refused.
+	// mark ahead of what departed is refused. ConfirmWritten builds exactly
+	// this proto.ConfirmRowsParams and sends it over this same real socket
+	// (rows.go) — validated here against its own contract, the check
+	// finding 4 (nocx-2v80t.3.15) found missing: nothing had ever checked
+	// ConfirmRowsParams against session.confirm-rows.params.schema.json.
+	confirmParams := proto.ConfirmRowsParams{
+		Subscriber: "0123456789abcdef0123456789abcdef",
+		Session:    spawned.Entry.Session,
+		UpToRow:    end.EndRow,
+	}
+	confirmSchema := loadHelperSchema(t, "session.confirm-rows.params.schema.json")
+	if err := validateHelperJSON(confirmSchema, mustMarshal(t, confirmParams)); err != nil {
+		t.Fatalf("the confirm-rows params this test sends do not satisfy the contract: %v", err)
+	}
 	if err := attached.ConfirmWritten(context.Background(), end.EndRow); err != nil {
 		t.Fatalf("confirm written through %d: %v", end.EndRow, err)
 	}

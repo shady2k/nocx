@@ -104,8 +104,15 @@ GhosttyResult nocxStyleAt(const GhosttyGridRef *ref, nocxStyleFacts *out);
  * blank cells that fill most rows — and the grapheme cluster as UTF-8,
  * appended to the caller's row-wide buffer with the offset and length
  * recorded on the cell. GHOSTTY_OUT_OF_SPACE means the row overflowed that
- * buffer; the caller retries the whole call on a larger one, because the
- * traversal writes no partial state.
+ * buffer; the caller retries the whole call on a larger one. The traversal
+ * DOES write partial state before that overflow — out_cells[0..x-1] already
+ * hold correctly computed facts, and the buffer already holds their
+ * grapheme bytes, for the columns read before column x's append failed —
+ * but nothing in this ABI ever reads it: `used` starts at zero on every
+ * call, so a retry recomputes every column from x=0 and overwrites it, and
+ * the caller (terminal.go's historyRow) never inspects out_cells or the
+ * buffer except after GHOSTTY_SUCCESS. So the partial state left by a
+ * failed attempt is real but unobserved — never resumed, never read.
  *
  * The soft-wrap pair travels with the row: the flags live on the line, and
  * the reference at column 0 is the line.

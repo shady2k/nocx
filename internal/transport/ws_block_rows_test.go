@@ -767,6 +767,49 @@ func TestBlockIntervalEnded_SealsWhenTheCompletionArrivedFirst(t *testing.T) {
 	}
 }
 
+// TestBlockGrewAndClosed_OverTheWireConformsToContract is the stage review's
+// finding 4 (nocx-2v80t.3.15): block.grew and block.closed were only ever
+// awaited by their method name (isNotification), never validated against
+// their own schemas — a field the handler stopped sending, or renamed, would
+// have gone unnoticed by every existing test. This drives the same
+// authenticated close as the test above and validates the params the two
+// notifications ACTUALLY carried, off the real socket (AGENTS.md rule 5's
+// third check), rather than a payload built by the test.
+func TestBlockGrewAndClosed_OverTheWireConformsToContract(t *testing.T) {
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+
+	fence := lifecycleFence(0x47)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+
+	deadline := time.Now().Add(wantWithin)
+	grewMsg, err := awaitFrame(e.conn, deadline, isNotification("block.grew"))
+	if err != nil {
+		t.Fatalf("no block.grew reached the subscriber: %v", err)
+	}
+	grewFrame, ok := decodeFrame(grewMsg)
+	if !ok {
+		t.Fatalf("block.grew frame did not decode: %s", grewMsg)
+	}
+	validateJSON(t, loadSchema(t, "block.grew.schema.json"), grewFrame.Params, "block.grew params (real socket)")
+
+	closedMsg, err := awaitFrame(e.conn, deadline, isNotification("block.closed"))
+	if err != nil {
+		t.Fatalf("no block.closed reached the subscriber: %v", err)
+	}
+	closedFrame, ok := decodeFrame(closedMsg)
+	if !ok {
+		t.Fatalf("block.closed frame did not decode: %s", closedMsg)
+	}
+	validateJSON(t, loadSchema(t, "block.closed.schema.json"), closedFrame.Params, "block.closed params (real socket)")
+}
+
 // THE END, end marker first — the order ADR-0024 decision 7 says is real.
 // The fence has not been seen yet, so the end waits (bounded) for its
 // completion, and the completion resolves it: one meeting, either order.

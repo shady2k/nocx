@@ -180,10 +180,19 @@ func encodeRowsPlaneFrame(session, subscriber [16]byte, rowIndex uint64, payload
 }
 
 // OutputRowsDoc is one batch of departed rows as the document declares it:
-// the absolute index of the first row, the struck-feed count immediately
-// before it, and the rows themselves in the frame contract's row vocabulary.
-// Rows rides pre-encoded: the vocabulary has ONE Go encoder
-// (sessionruntime.EncodeRows) and this document carries its bytes unchanged.
+// the absolute index of the first row, the rows themselves in the frame
+// contract's own text+marks+runs vocabulary (nocx-zg3k3.2.12), and LostRows
+// — an exact accounting of the gap this batch's FromRow leaves against the
+// row count after the delivery before it, never a manufactured guess. Two
+// sources add into that one count: the FEEDS the emulator struck immediately
+// before this batch's first row (a symbolic one per struck feed — the ABI
+// carries no departure counter, so the rows a prune took are unknowable by
+// contract), and rows the session's own bridge had to drop under
+// backpressure before they ever reached a batch (an exact row count, the
+// runtime's row index having already advanced past them; rows.go,
+// nocx-2v80t.3.15). Rows rides pre-encoded: the vocabulary has ONE Go
+// encoder (sessionruntime.EncodeRows) and this document carries its bytes
+// unchanged.
 type OutputRowsDoc struct {
 	FromRow  uint64          `json:"fromRow"`
 	LostRows uint64          `json:"lostRows"`

@@ -1280,7 +1280,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
-		rowCh:           make(chan rowEmission, 256),
+		rowWake:         make(chan struct{}, 1),
 		rowsDone:        make(chan struct{}),
 	}
 	// The book's tokens report themselves under this session's id — minted

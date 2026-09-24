@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 )
@@ -66,19 +65,6 @@ type Config struct {
 	// reply with none bound refuses loudly (see deliverReplyLocked) rather
 	// than discarding the program's answer.
 	Replies ReplySink
-	// RendezvousExpiry is the bounded missing-fence wait (design §6.4): how
-	// long a rendezvous left with one half missing stays pending before the
-	// runtime calls its own [Session.ExpireRendezvous]. The number is free
-	// to change; the POLICY is not, and zero means no timer — the contract
-	// drives [Session.ExpireRendezvous] itself, as a call, and the
-	// composition root (internal/helper/session) states the production
-	// interval out loud rather than a default assuming it.
-	RendezvousExpiry time.Duration
-	// ExpireAfter schedules the wait. Nil means time.AfterFunc; a test
-	// hands its own and fires the trigger itself, because a test may not
-	// depend on timing (AGENTS.md) — the wait must be observable as a
-	// STATE, never as a duration.
-	ExpireAfter func(d time.Duration, f func()) (stop func() bool)
 }
 
 // Allowance is the delivery allowance consumer queues draw on, keyed by the
@@ -207,22 +193,6 @@ type Session struct {
 
 	completeness Completeness
 
-	// expireDur and expireAfter are the bounded rendezvous waits' wiring
-	// (Config.RendezvousExpiry): the seam a test injects its own trigger
-	// through, because a wait must be observable as a STATE, never a
-	// duration. Each pending meeting arms its OWN wait (rendezvousEntry.stop
-	// holds the cancel handle); both fields are guarded by mu, and a timer's
-	// callback takes mu again by entering [Session.expireBy].
-	expireDur   time.Duration
-	expireAfter func(d time.Duration, f func()) (stop func() bool)
-	// expireSeq is the generation space for every armed wait: it is bumped
-	// each time a timer is actually scheduled, and a callback whose
-	// generation its entry no longer carries does nothing. A one-shot timer
-	// can fire while its stop is being replaced — Stop returns false and the
-	// callback runs anyway — so the disarm alone cannot make this safe; the
-	// check must be under mu at the moment of transitioning.
-	expireSeq uint64
-
 	allowance *Allowance
 	// consumers are the subscribers attached to this session, in attach order.
 	consumers []*subscriber
@@ -337,10 +307,6 @@ func New(cfg Config) (*Session, error) {
 	if allowance == nil {
 		allowance = NewAllowance()
 	}
-	after := cfg.ExpireAfter
-	if after == nil {
-		after = defaultExpireAfter
-	}
 	return &Session{
 		inc:          cfg.Incarnation,
 		avail:        AvailabilityAvailable,
@@ -353,8 +319,6 @@ func New(cfg Config) (*Session, error) {
 		completeness: cfg.Completeness,
 		allowance:    allowance,
 		replies:      cfg.Replies,
-		expireDur:    cfg.RendezvousExpiry,
-		expireAfter:  after,
 	}, nil
 }
 
@@ -1192,18 +1156,15 @@ func (s *Session) ReportHole(lost uint64) error {
 
 // --------------------------------------------------------------- rendezvous
 
-// rendezvousEntry is one tracked meeting: its record, and the bounded wait
-// armed while it is pending. The wait is observable as a STATE (the entry's
-// own trigger through [Config.ExpireAfter], fired into [Session.expireBy]),
-// never as a duration; its generation ([Session.expireSeq]) is what makes a
-// stale trigger harmless.
+// rendezvousEntry is one tracked meeting: its record, and — when a fence
+// sighted it with nothing authenticated behind it — the boundary capture
+// that sighting took. No wait is armed on it and no timer exists in the
+// rendezvous at all (nocx-2v80t.3.9): a meeting left with one half missing
+// is settled by an EVENT — the next interval's start, a second completion,
+// or the session's end (observation.go) — or by the contract's own call to
+// [Session.ExpireRendezvous], never by a duration elapsing.
 type rendezvousEntry struct {
 	Rendezvous
-	// stop cancels this entry's own wait. Nil once the entry is settled or
-	// when no expiry policy is configured.
-	stop func() bool
-	// seq is the generation the wait was armed under.
-	seq uint64
 	// captured is what a PARKING sighting took at the fence's instant: the
 	// interval record's content up to the fence, and the screen as the fence
 	// sat on it. The boundary is where the fence sits in the byte stream, so
@@ -1232,15 +1193,20 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if s.avail != AvailabilityAvailable || at != s.inc {
 		return
 	}
+	// One of the events that settles a parked interval: a completion for a
+	// DIFFERENT nonce means the interval before it is done and its fence's
+	// sighting never arrived, so that record seals here, with no closing
+	// screen and no fence (observation.go). A completion for the parked
+	// nonce is that very interval's own join and settles nothing.
+	s.settlePendingLocked(nonce)
 	if e := s.rendezvous[nonce]; e != nil {
 		// The meeting is already tracked. Only a parked sighting with THIS
 		// nonce is the half this completion closes; a duplicate completion,
 		// or one arriving after the meeting settled, is the same event
 		// again and changes nothing — a sighting may authorise nothing, and
-		// neither may a late second half reopen what a bounded wait
+		// neither may a late second half reopen what the event settle
 		// honestly closed.
 		if e.State == RendezvousAwaitingAuthenticated {
-			s.disarmEntryLocked(e)
 			e.State = RendezvousComplete
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
@@ -1258,11 +1224,21 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 		}
 		return
 	}
-	s.admitRendezvousLocked(&rendezvousEntry{Rendezvous: Rendezvous{
+	// A completion with no meeting parked: admit it as the authenticated
+	// half waiting for its sighting. The screen is deliberately not read
+	// here — the next command may already have printed — so the interval
+	// parks in the observation and its seal waits for the fence's sighting,
+	// which is in the ordered stream and arrives in the ordinary case. It is
+	// settled by an event, never a timer (nocx-2v80t.3.9).
+	parked := &rendezvousEntry{Rendezvous: Rendezvous{
 		State: RendezvousAwaitingSighting,
 		Nonce: nonce,
 		At:    at,
-	}}, true)
+	}}
+	if !s.admitRendezvousLocked(parked, true) {
+		return
+	}
+	s.parkObservationLocked(nonce)
 }
 
 // admitRendezvousLocked inserts a new meeting into the set, keeping it within
@@ -1308,23 +1284,28 @@ func (s *Session) admitRendezvousLocked(e *rendezvousEntry, authenticated bool) 
 	s.rendezvous[e.Nonce] = e
 	s.rendezvousOrder = append(s.rendezvousOrder, e.Nonce)
 	s.rendezvousLatest, s.rendezvousHasLatest = e.Nonce, true
-	s.armExpiryLocked(e)
 	s.tick()
 	return true
 }
 
-// evictRendezvousLocked removes the OLDEST meeting satisfying keep, stopping
-// its wait first, and answers whether one was found.
+// evictRendezvousLocked removes the OLDEST meeting satisfying keep and
+// answers whether one was found.
 //
 // It is called only from [Session.admitRendezvousLocked], and only to make
 // room for a meeting that is inserted immediately afterwards — so if the
 // evicted meeting was the one rendezvousLatest named, the insert re-points
 // the window before the lock is released. The window can never dangle here,
 // and Rendezvous can never answer idle about a set that is not empty.
+//
+// An eviction is an event like the ones that settle a parked interval
+// (observation.go): an authenticated completion whose fence never arrived has
+// an interval in flight PARKED on it, and dropping the meeting without
+// settling that record would leak a record nothing could seal afterwards. So
+// the settle runs here, after the meeting is out of the set, for the same
+// reason the next interval's start and the session's end settle it.
 func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 	for i, nonce := range s.rendezvousOrder {
 		if e := s.rendezvous[nonce]; e != nil && keep(e) {
-			s.disarmEntryLocked(e)
 			if e.captured != nil {
 				// Evicted before it authenticated: its capture was never a
 				// boundary either, and goes back the same way (observation.go).
@@ -1333,6 +1314,7 @@ func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 			}
 			delete(s.rendezvous, nonce)
 			s.rendezvousOrder = append(s.rendezvousOrder[:i], s.rendezvousOrder[i+1:]...)
+			s.settleParkedLocked(nonce)
 			return true
 		}
 	}
@@ -1357,11 +1339,16 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	// A fence's sighting is an interval's start as much as a join: the fence
+	// belongs to the command that just ended, so a sighting for a different
+	// nonce than the parked one means the parked interval's own fence never
+	// arrived and its record seals here (observation.go). A sighting for the
+	// parked nonce IS that interval's join and settles nothing.
+	s.settlePendingLocked(nonce)
 	if e := s.rendezvous[nonce]; e != nil {
 		switch e.State {
 		case RendezvousAwaitingSighting:
 			// The matching sighting is the half that was missing.
-			s.disarmEntryLocked(e)
 			e.State = RendezvousComplete
 			e.SightedAt = s.rev
 			e.PinnedSource = append([]byte(nil), source...)
@@ -1441,75 +1428,30 @@ func fenceNonceOf(body []byte) (FenceNonce, bool) {
 	return nonce, true
 }
 
-// defaultExpireAfter is the production scheduler: time.AfterFunc behind the
-// seam [Config.ExpireAfter] names.
-func defaultExpireAfter(d time.Duration, f func()) (stop func() bool) {
-	t := time.AfterFunc(d, f)
-	return t.Stop
-}
-
-// armExpiryLocked arms ONE entry's bounded wait: a timer exists exactly while
-// its meeting is pending, and the moment the meeting settles its own timer is
-// disarmed. It runs under mu; the trigger it schedules does NOT hold mu,
-// because its whole body is [Session.expireBy], which takes the lock itself.
-func (s *Session) armExpiryLocked(e *rendezvousEntry) {
-	if s.expireDur <= 0 || !e.pending() {
-		return
-	}
-	s.expireSeq++
-	e.seq = s.expireSeq
-	nonce, seq := e.Nonce, e.seq
-	e.stop = s.expireAfter(s.expireDur, func() { s.expireBy(nonce, seq) })
-}
-
-// disarmEntryLocked cancels one entry's wait, if one is armed.
-func (s *Session) disarmEntryLocked(e *rendezvousEntry) {
-	if e.stop != nil {
-		e.stop()
-		e.stop = nil
-	}
-}
-
-// expireBy is a timer callback's entry. Stop cannot retract a callback that
-// is already running or already dequeued, so the callback re-checks, under
-// mu, that the entry still exists and still carries the generation the wait
-// was armed under: a superseded or settled meeting expires nothing. (After
-// [Fail] the same guard holds through [live]: a session that is gone expires
-// nothing.)
-func (s *Session) expireBy(nonce FenceNonce, seq uint64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e := s.rendezvous[nonce]
-	if e == nil || e.seq != seq {
-		return
-	}
-	_ = s.expireRendezvousLocked(nonce)
-}
-
-// ExpireRendezvous is the bounded wait elapsing for the meeting the nonce
-// names. It is a call and not a timer, so the contract can exercise it
-// without depending on a duration. An AUTHENTICATED interval whose fence
-// never arrived may still be worth keeping; it may not be described as the
-// command's complete output. A sighted fence with nothing authenticated
-// behind it expires into nothing at all.
+// ExpireRendezvous settles the meeting the nonce names, as the event that
+// stands in for a fence's sighting that never arrived. It is a CALL and not
+// a wait — no timer exists anywhere in the rendezvous (nocx-2v80t.3.9) — so
+// the contract exercises the settle without depending on a duration. An
+// AUTHENTICATED interval whose fence never arrived may still be worth
+// keeping; it may not be described as the command's complete output. A
+// sighted fence with nothing authenticated behind it settles into nothing at
+// all.
+//
+// The two pending states are not the same thing and do not settle the same
+// way. AwaitingSighting is an AUTHENTICATED completion whose fence never
+// arrived: the interval in flight is parked on it, its record seals with NO
+// closing screen at the count the completion measured
+// (settleParkedLocked, observation.go), and completeness becomes
+// [CompletenessNoFence] because an authenticated boundary went unmet.
+// AwaitingAuthenticated is a sighting with NOTHING authenticated behind it:
+// it authorised nothing while it waited (ADR-0024 decision 1), so settling it
+// drops the pinned source, returns the capture it took, and changes NOTHING
+// ELSE — not completeness, not write authority. Unauthenticated output can
+// therefore never revoke the person's ability to type, for however long the
+// session lives.
 func (s *Session) ExpireRendezvous(nonce FenceNonce) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.expireRendezvousLocked(nonce)
-}
-
-// expireRendezvousLocked is [Session.ExpireRendezvous] with the lock held.
-//
-// The two pending states are not the same thing and do not expire the same
-// way. AwaitingSighting is an AUTHENTICATED completion whose fence never
-// arrived: the interval really has no trustworthy boundary, so completeness
-// becomes [CompletenessNoFence] and the write gate refuses. AwaitingAuthenticated
-// is a sighting with NOTHING authenticated behind it: it authorised nothing
-// while it waited (ADR-0024 decision 1), so expiring it drops the pinned
-// source and changes NOTHING ELSE — not completeness, not write authority.
-// Unauthenticated output can therefore never revoke the person's ability to
-// type, for however long the session lives.
-func (s *Session) expireRendezvousLocked(nonce FenceNonce) error {
 	if err := s.live(); err != nil {
 		return err
 	}
@@ -1517,19 +1459,38 @@ func (s *Session) expireRendezvousLocked(nonce FenceNonce) error {
 	if e == nil || !e.pending() {
 		return ErrNoRendezvous
 	}
-	awaitingSighting := e.State == RendezvousAwaitingSighting
-	s.disarmEntryLocked(e)
+	if e.State == RendezvousAwaitingSighting {
+		// The interval in flight may be PARKED on this meeting, and then the
+		// settle is the record's too: the meeting reads expired, completeness
+		// goes no-fence, and the record seals with no closing screen at the
+		// count the completion measured (settleParkedLocked, observation.go).
+		if s.settleParkedLocked(nonce) {
+			s.tick()
+			return nil
+		}
+		// Nothing is parked under this nonce: the settle is the state alone.
+		// The authenticated boundary still went unmet, so the session's own
+		// claim about its stream is no longer complete, and no record is
+		// invented for an interval that was never parked.
+		e.State = RendezvousExpired
+		e.PinnedSource = nil
+		if s.completeness == CompletenessComplete {
+			s.completeness = CompletenessNoFence
+		}
+		s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+		s.tick()
+		return nil
+	}
+	// A sighting with NOTHING authenticated behind it authorised nothing
+	// while it waited (ADR-0024 decision 1), so settling it drops the pinned
+	// source and returns the capture it took — and changes NOTHING ELSE, not
+	// completeness and not write authority. Unauthenticated output can never
+	// revoke the person's ability to type, for however long the session lives.
 	e.State = RendezvousExpired
 	e.PinnedSource = nil
 	if e.captured != nil {
-		// The sighting nobody authenticated was never a boundary: the
-		// output it fenced returns to the interval in flight and the split
-		// un-does itself (observation.go).
 		s.returnObservationCaptureLocked(e.captured)
 		e.captured = nil
-	}
-	if awaitingSighting && s.completeness == CompletenessComplete {
-		s.completeness = CompletenessNoFence
 	}
 	s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 	s.tick()
@@ -1545,6 +1506,12 @@ func (s *Session) expireRendezvousLocked(nonce FenceNonce) error {
 func (s *Session) Fail(cause string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The session's end is one of the events that settles a parked interval
+	// (observation.go): a completion whose fence never arrived leaves a
+	// record nothing else could seal, and this is the last event there is.
+	// It runs before the refusal below so that a second Fail is not the
+	// reason a parked record leaks.
+	s.settlePendingLocked(FenceNonce{})
 	if s.avail == AvailabilityUnavailable {
 		return ErrUnavailable
 	}
@@ -1557,9 +1524,6 @@ func (s *Session) Fail(cause string) error {
 	}
 	s.queue = nil
 	s.control = Control{Holder: Principal{}, Epoch: s.control.Epoch + 1}
-	for _, e := range s.rendezvous {
-		s.disarmEntryLocked(e)
-	}
 	s.tick()
 	return nil
 }

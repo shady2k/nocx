@@ -52,11 +52,20 @@ func obsSession(t *testing.T, g Geometry) *Session {
 func obsSeal(t *testing.T, s *Session, nonce FenceNonce) {
 	t.Helper()
 	s.Completed(s.Incarnation(), nonce, 0)
-	if err := s.SightFence(nonce, []byte("fence-source")); err != nil {
-		t.Fatalf("sight the fence that joins the boundary: %v", err)
-	}
+	s.SightFenceBoundary(t, nonce)
 	if got := s.RendezvousFor(nonce).State; got != RendezvousComplete {
 		t.Fatalf("the boundary reads %s, want complete", rendezvousStateName(got))
+	}
+}
+
+// SightFenceBoundary is one fence sighting, the test's spelling of the join.
+// The completion may park the interval (the screen is never read at the
+// completion); the sighting is what carries the boundary and seals it, so
+// every harness caller lands both halves.
+func (s *Session) SightFenceBoundary(t *testing.T, nonce FenceNonce) {
+	t.Helper()
+	if err := s.SightFence(nonce, []byte("fence-source")); err != nil {
+		t.Fatalf("sight the fence that joins the boundary: %v", err)
 	}
 }
 

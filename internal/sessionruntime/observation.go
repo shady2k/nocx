@@ -118,6 +118,19 @@ type observationOpen struct {
 	Opened  Revision
 	Opening ObservationScreen
 	Loss    ObservationLoss
+	// EndRow is the departure count an interval parked at its completion
+	// carried: the boundary of its own streamed rows. Only a parked interval
+	// sets it; the end marker that finally settles it carries exactly this
+	// count and no closing screen (the screen is never read at the
+	// completion).
+	EndRow uint64
+	// Nonce is set only on an interval that authenticated COMPLETE but whose
+	// fence's sighting has not arrived: the screen is NOT read at the
+	// completion (the next command's rows may already be printed), so its
+	// seal waits for the sighting that carries the boundary. Settled by an
+	// event, never a timer: the next interval's start or the session's end
+	// seals it without a closing screen (sealPendingWithoutScreenLocked).
+	Nonce FenceNonce
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -275,15 +288,34 @@ func observationCompleteness(session Completeness, loss ObservationLoss) Complet
 	return c
 }
 
-// sealObservationLocked closes the interval at an authenticated boundary: the
-// meeting whose two halves JUST joined. The closing screen is read under the
-// same lock the join holds, so the record's two ends are instants. The end
-// marker follows every row the interval streamed, carrying the screen at the
-// boundary; the record that closes opens the next one on the screen it
-// closed on — what the boundary holds is exactly where the next record's
-// story starts — and a command that produced no output at all still leaves a
-// record: the interval ran, the boundary arrived, and the record opens and
-// closes on the same screen with nothing departed.
+// sealObservationLocked closes the interval in flight at the SIGHTING that
+// just joined its meeting — the half that arrives in the ordered stream. The
+// closing screen is the boundary's own: the screen as the fence sat on it.
+// It is never a screen read at the authentication: the completion is on a
+// different carrier and may win the race by whole feeds, and a screen read at
+// it would name rows the next command had already printed (measured in the
+// e2e: a block carrying the next command's rows at the head of the interval
+// before it, nocx-2v80t.3.9).
+//
+// Two shapes meet here. When the fence was sighted FIRST the boundary is that
+// sighting's capture — the screen taken at the fence in one instant with the
+// count, carried whole by splitObservationAtFenceLocked — and the join seals
+// the capture rather than re-reading anything (sealObservationFromCaptureLocked).
+// When the COMPLETION arrived first the interval in flight was parked with no
+// screen read at all (parkObservationLocked), and this join is the event that
+// seals it: the screen read now is the screen the fence is sitting on, at the
+// instant of the sighting's own ingest, before any byte of the next command's
+// output has been fed.
+//
+// The parked interval's other ending is an EVENT, never a timer: when the
+// fence's sighting never arrives at all, the next interval's start or the
+// session's end seals it with no closing screen
+// (sealPendingWithoutScreenLocked), and the block's `output may be
+// incomplete` carries what that honestly means.
+//
+// A command that produced no output at all still leaves a record: the
+// interval ran, the boundary arrived, and the record opens and closes on the
+// same screen with nothing departed.
 func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	o := s.observation
 	if o == nil {
@@ -302,8 +334,8 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 		Closing:      ObservationScreen{},
 		Loss:         o.Loss,
 	}
-	if closing, ok := s.takeObservationScreenLocked(); ok {
-		rec.Closing = closing
+	if scr, ok := s.takeObservationScreenLocked(); ok {
+		rec.Closing = scr
 	}
 	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(rec.Closing))
 	s.emitIntervalEndLocked(nonce, s.departedRows, boundaryRowsThatLeave(rec.Closing))
@@ -311,6 +343,117 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
 	s.storeSealedObservationLocked(rec)
+}
+
+// parkObservationLocked parks the interval in flight at its AUTHENTICATED
+// completion, before any sighting: the screen is deliberately not read (the
+// next command may already have printed), the boundary is the count the
+// interval departed to, and the seal waits for the fence's sighting — which
+// is in the ordered stream and arrives in the ordinary case. At most one
+// interval is parked, and it is settled by an event, never a timer: the next
+// interval's start, or the session's end (nocx-2v80t.3.9).
+func (s *Session) parkObservationLocked(nonce FenceNonce) {
+	o := s.observation
+	if o == nil {
+		return
+	}
+	if o.Nonce != (FenceNonce{}) && o.Nonce == nonce {
+		// A duplicate completion must not refresh the parked boundary: the
+		// interval's own end row is the count it had departed to when its
+		// completion first arrived, and a second copy of the same event
+		// changes nothing.
+		return
+	}
+	s.observation = &observationOpen{
+		Opened:  o.Opened,
+		Opening: o.Opening,
+		Loss:    o.Loss,
+		Nonce:   nonce,
+		EndRow:  s.departedRows,
+	}
+}
+
+// sealPendingWithoutScreenLocked settles an interval that authenticated
+// complete but whose fence's sighting never arrived. It is settled by an
+// EVENT, never a timer: the next interval's start, or the session's end.
+//
+// Its end marker carries the row count the interval departed to — the rows
+// that streamed before the boundary are the interval's own — and NO closing
+// screen: the screen was not read at the completion, and a screen read now
+// would name rows the next command had already printed (nocx-2v80t.3.9). The
+// record says its fence never arrived: the settle degrades the session's
+// completeness to [CompletenessNoFence] before sealing, so the record's own
+// Completeness reads no-fence — the block's "output may be incomplete" —
+// while the rows the interval did stream stand in its summary. The parked
+// record is evidence of what the command printed up to its own end, and its
+// Completeness rides the record's own losses.
+func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *observationOpen) {
+	rec := ObservationRecord{
+		Nonce:        nonce,
+		At:           s.inc,
+		Opened:       parked.Opened,
+		Sealed:       s.rev,
+		Completeness: observationCompleteness(s.completeness, parked.Loss),
+		Opening:      parked.Opening,
+		Closing:      ObservationScreen{},
+		Loss:         parked.Loss,
+	}
+	s.pendingScreen = nil
+	s.emitIntervalEndLocked(nonce, parked.EndRow, nil)
+	// The next record opens on the screen read at the settle event — one
+	// read under the lock, at the event's instant — never on the parked
+	// interval's Opening: the parked opening predates the boundary's own
+	// output, and the screen as it stands at the event is the earliest
+	// instant the next interval can honestly be said to begin on.
+	next := &observationOpen{Opened: rec.Sealed}
+	if scr, ok := s.takeObservationScreenLocked(); ok {
+		next.Opening = scr
+	}
+	s.observation = next
+	s.storeSealedObservationLocked(rec)
+}
+
+// settlePendingLocked settles the interval that is parked waiting for its
+// fence's sighting, if there is one, and answers whether it settled one. It
+// is the event the review's no-timer rule asks for: the next interval's
+// start, or the session's end, is what closes an interval whose sighting
+// never arrived (nocx-2v80t.3.9).
+//
+// The arriving nonce is what makes the call safe at every event: a sighting
+// or a completion for the PARKED nonce is the parked interval's own join,
+// not a lost sighting, and settles nothing — the no-op the join relies on.
+// The zero nonce means the session itself is ending, which settles whatever
+// is parked.
+func (s *Session) settlePendingLocked(arriving FenceNonce) bool {
+	parked := s.observation
+	if parked == nil || parked.Nonce == (FenceNonce{}) || parked.Nonce == arriving {
+		return false
+	}
+	return s.settleParkedLocked(parked.Nonce)
+}
+
+// settleParkedLocked settles the interval parked with the nonce: its
+// authenticated completion arrived and its fence's sighting never will. The
+// meeting is marked [RendezvousExpired] — settled, still record — the
+// session's completeness degrades to [CompletenessNoFence] because an
+// authenticated boundary went unmet, and the parked record seals with NO
+// closing screen at its parked EndRow (sealPendingWithoutScreenLocked). It
+// does not tick: every caller is an event that ticks for its own change.
+func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
+	parked := s.observation
+	if parked == nil || parked.Nonce != nonce {
+		return false
+	}
+	if e := s.rendezvous[nonce]; e != nil && e.pending() {
+		e.State = RendezvousExpired
+		e.PinnedSource = nil
+		s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
+	}
+	if s.completeness == CompletenessComplete {
+		s.completeness = CompletenessNoFence
+	}
+	s.sealPendingWithoutScreenLocked(nonce, parked)
+	return true
 }
 
 // sameScreenRow is whether two rows are the same row of the screen: every

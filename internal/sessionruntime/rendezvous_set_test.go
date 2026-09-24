@@ -74,8 +74,7 @@ func mustRefuseCommit(t *testing.T, s *Session, ctrl Control, key byte) {
 // open), at the expiry (meeting expired, pin dropped, completeness untouched)
 // and after it (commit still accepted).
 func TestAForgedFenceExpiryLeavesCompletenessAndWriteAuthorityAlone(t *testing.T) {
-	sched := &expiryScheduler{}
-	s, _, _ := realRuntime(t, withExpiry(sched))
+	s, _, _ := realRuntime(t)
 	nonce := fenceNonceFromString(t, setForgedHex)
 	ctrl := grantPerson(t, s)
 
@@ -92,12 +91,13 @@ func TestAForgedFenceExpiryLeavesCompletenessAndWriteAuthorityAlone(t *testing.T
 	}
 	mustCommit(t, s, ctrl, 'l')
 
-	// AT: the bounded wait elapses. The pin is dropped and nothing else
-	// changes.
-	sched.fire()
+	// AT: the settle. The pin is dropped and nothing else changes.
+	if err := s.ExpireRendezvous(nonce); err != nil {
+		t.Fatalf("settle the meeting whose fence never arrived: %v", err)
+	}
 	rv := s.RendezvousFor(nonce)
 	if rv.State != RendezvousExpired {
-		t.Fatalf("the unbacked meeting is %s after its wait elapsed, want expired", rendezvousStateName(rv.State))
+		t.Fatalf("the unbacked meeting is %s after it was settled, want expired", rendezvousStateName(rv.State))
 	}
 	if len(rv.PinnedSource) != 0 {
 		t.Fatalf("the expired sighting still pins %q, want nothing pinned", rv.PinnedSource)
@@ -115,8 +115,7 @@ func TestAForgedFenceExpiryLeavesCompletenessAndWriteAuthorityAlone(t *testing.T
 // interval is the authenticated half's, and it must still be NoFence — with
 // the write gate refusing — once the fix above exists.
 func TestAnAuthenticatedCompletionWhoseFenceNeverArrivesStillEndsNoFence(t *testing.T) {
-	sched := &expiryScheduler{}
-	s, _, _ := realRuntime(t, withExpiry(sched))
+	s, _, _ := realRuntime(t)
 	nonce := fenceNonceFromString(t, setANoncedHex)
 	ctrl := grantPerson(t, s)
 
@@ -128,10 +127,12 @@ func TestAnAuthenticatedCompletionWhoseFenceNeverArrivesStillEndsNoFence(t *test
 		t.Fatalf("a parked completion moved completeness to %v, want unchanged complete", got)
 	}
 
-	sched.fire()
+	if err := s.ExpireRendezvous(nonce); err != nil {
+		t.Fatalf("settle the meeting whose fence never arrived: %v", err)
+	}
 
 	if got := s.RendezvousFor(nonce).State; got != RendezvousExpired {
-		t.Fatalf("the meeting is %s after its wait elapsed, want expired", rendezvousStateName(got))
+		t.Fatalf("the meeting is %s after it was settled, want expired", rendezvousStateName(got))
 	}
 	if got := s.Completeness(); got != CompletenessNoFence {
 		t.Fatalf("an authenticated completion whose fence never arrived left completeness %v, want no-fence", got)
@@ -324,8 +325,7 @@ func TestAtTheBoundAForgedFenceIsRefusedAndTheAuthenticatedChannelSurvives(t *te
 // authority — the oldest one gives up its slot to a new sighting, so a
 // session that runs commands one after another never wedges at the bound.
 func TestTheBoundRecyclesSettledMeetings(t *testing.T) {
-	sched := &expiryScheduler{}
-	s, _, _ := realRuntime(t, withExpiry(sched))
+	s, _, _ := realRuntime(t)
 
 	// Fill the set exactly: MaxPendingRendezvous forged fences, each with
 	// its own wait.
@@ -338,11 +338,13 @@ func TestTheBoundRecyclesSettledMeetings(t *testing.T) {
 		nonces = append(nonces, nonce)
 	}
 
-	// The oldest expires: its meeting is settled, and the slot it held is
+	// The oldest settles: its meeting is expired, and the slot it held is
 	// record now, not authority.
-	sched.fireAt(0)
+	if err := s.ExpireRendezvous(nonces[0]); err != nil {
+		t.Fatalf("settle the oldest meeting: %v", err)
+	}
 	if got := s.RendezvousFor(nonces[0]).State; got != RendezvousExpired {
-		t.Fatalf("the oldest meeting is %s after its wait elapsed, want expired", rendezvousStateName(got))
+		t.Fatalf("the oldest meeting is %s after it was settled, want expired", rendezvousStateName(got))
 	}
 
 	// A new sighting is admitted, taking the settled meeting's place; the
@@ -368,45 +370,53 @@ func TestTheBoundRecyclesSettledMeetings(t *testing.T) {
 	}
 }
 
-// TestEachMeetingCarriesItsOwnWait: two pending meetings — one backed by an
-// authenticated completion, one forged — each hold a wait of their own.
-// Expiring the forged one degrades nothing; expiring the authenticated one
-// does; and a stale trigger whose meeting has already settled expires nothing.
-func TestEachMeetingCarriesItsOwnWait(t *testing.T) {
-	sched := &expiryScheduler{}
-	s, _, _ := realRuntime(t, withExpiry(sched))
+// TestEachMeetingSettlesOnItsOwnCall: two pending meetings — one backed by an
+// authenticated completion, one forged — settle one at a time and neither
+// carries the other's. Settling the forged one degrades nothing and returns
+// its capture; settling the authenticated one degrades completeness and seals
+// its parked record; and a settle aimed at an already settled meeting settles
+// nothing further.
+func TestEachMeetingSettlesOnItsOwnCall(t *testing.T) {
+	s, _, _ := realRuntime(t)
 	auth := fenceNonceFromString(t, setANoncedHex)
 	forged := fenceNonceFromString(t, setForgedHex)
 
 	if err := s.SightFence(forged, []byte("forged")); err != nil {
 		t.Fatalf("sight the forged fence: %v", err)
-	} // arms trigger 0
-	s.Completed(s.Incarnation(), auth, 0) // arms trigger 1
+	}
+	s.Completed(s.Incarnation(), auth, 0)
 
-	sched.fireAt(0)
+	if err := s.ExpireRendezvous(forged); err != nil {
+		t.Fatalf("settle the forged meeting: %v", err)
+	}
 	if got := s.RendezvousFor(forged).State; got != RendezvousExpired {
-		t.Fatalf("the forged meeting is %s after ITS wait fired, want expired", rendezvousStateName(got))
+		t.Fatalf("the forged meeting is %s after ITS settle, want expired", rendezvousStateName(got))
 	}
 	if got := s.Completeness(); got != CompletenessComplete {
-		t.Fatalf("expiring the forged meeting moved completeness to %v, want unchanged", got)
+		t.Fatalf("settling the forged meeting moved completeness to %v, want unchanged", got)
 	}
 	if got := s.RendezvousFor(auth).State; got != RendezvousAwaitingSighting {
-		t.Fatalf("the authenticated meeting is %s, want still parked: the waits are per meeting", rendezvousStateName(got))
+		t.Fatalf("the authenticated meeting is %s, want still parked: the settles are per meeting", rendezvousStateName(got))
 	}
 
-	// The forged meeting's trigger, stale now that its meeting has settled,
-	// spends nothing further.
-	sched.fireAt(0)
+	// The same meeting again: already settled, so the call settles nothing —
+	// the state that makes an event settle idempotent where a re-armed timer
+	// needed a generation check.
+	if err := s.ExpireRendezvous(forged); err != ErrNoRendezvous {
+		t.Fatalf("settling an already settled meeting returned %v, want %v", err, ErrNoRendezvous)
+	}
 	if got := s.RendezvousFor(auth).State; got != RendezvousAwaitingSighting {
-		t.Fatalf("a stale trigger moved the authenticated meeting to %s", rendezvousStateName(got))
+		t.Fatalf("a repeated settle moved the authenticated meeting to %s", rendezvousStateName(got))
 	}
 
-	sched.fireAt(1)
+	if err := s.ExpireRendezvous(auth); err != nil {
+		t.Fatalf("settle the authenticated meeting: %v", err)
+	}
 	if got := s.RendezvousFor(auth).State; got != RendezvousExpired {
-		t.Fatalf("the authenticated meeting is %s after ITS wait fired, want expired", rendezvousStateName(got))
+		t.Fatalf("the authenticated meeting is %s after ITS settle, want expired", rendezvousStateName(got))
 	}
 	if got := s.Completeness(); got != CompletenessNoFence {
-		t.Fatalf("expiring the authenticated meeting left completeness %v, want no-fence", got)
+		t.Fatalf("settling the authenticated meeting left completeness %v, want no-fence", got)
 	}
 }
 

@@ -382,35 +382,83 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 // case is the two tests above: a boundary that arrives seals exactly one.
 // ---------------------------------------------------------------------------
 
-// obsNoFenceProgram prints and parks: the completion arrives, the fence never
-// does, and the bounded wait expires (the test drives the expiry as a call —
-// a wait may not depend on timing).
+// obsNoFenceProgram prints and blocks: the completion arrives, the fence
+// never does, and the settle is what closes the interval (nocx-2v80t.3.9).
 var obsNoFenceProgram = rawPreamble + `
 printf '` + obsLines(0, 40) + `'
 readhex 1 >/dev/null
 printf 'OBS-DONE\n'
 `
 
-func TestAnExpiredAuthenticatedBoundarySealsNothing(t *testing.T) {
-	p := startProgram(t, obsNoFenceProgram, harnessGeometry(80, 24))
+// TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord: the
+// completion arrived and the fence's sighting never will. The settle seals the
+// interval's record — at the row count the completion measured and with NO
+// closing screen, because the screen is read at a SIGHTING and there was none
+// — and it says so: the meeting reads expired and the record reads no-fence,
+// which is the block's "output may be incomplete". The retired bounded wait
+// sealed nothing here and left the interval in flight running on, which is the
+// defect REVIEW-4 names: an expiry on a duration is itself the defect.
+func TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord(t *testing.T) {
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsNoFenceProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
+
+	// The command's output is ingested before the completion arrives, and the
+	// program is then blocked: the interval in flight is real, and its rows
+	// have already streamed.
+	p.wait("L000039")
 
 	// The authenticated half arrives; its fence never will.
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
-	if err := p.s.ExpireRendezvous(nonce); err != nil {
-		t.Fatalf("expire the meeting whose fence never came: %v", err)
-	}
-	if got := p.s.RendezvousFor(nonce).State; got != RendezvousExpired {
-		t.Fatalf("the expired meeting reads %v, want expired", rendezvousStateName(got))
+	if got := p.s.RendezvousFor(nonce).State; got != RendezvousAwaitingSighting {
+		t.Fatalf("after the authenticated completion the meeting reads %s, want awaiting-sighting", rendezvousStateName(got))
 	}
 
-	// Nothing sealed: the interval has no authenticated boundary, and a
-	// record closed on one would dress an unbounded wait up as a boundary.
+	// A completion is not a boundary: the screen is taken at the sighting, so
+	// nothing is sealed while the sighting is still missing.
 	if recs := p.s.Observations(); len(recs) != 0 {
-		t.Fatalf("an expired boundary sealed %d records, want none", len(recs))
+		t.Fatalf("a completion with no sighting sealed %d records, want none", len(recs))
 	}
 	if _, ok := p.s.ObservationFor(nonce); ok {
-		t.Fatal("a record is keyed by a nonce whose meeting expired")
+		t.Fatal("a record is keyed before the sighting that would seal it")
+	}
+
+	// The settle: a call here, the next interval's start or the session's end
+	// in production. The interval's own end marker stops at the count the
+	// completion measured; no screen is claimed.
+	if err := p.s.ExpireRendezvous(nonce); err != nil {
+		t.Fatalf("settle the meeting whose fence never came: %v", err)
+	}
+	if got := p.s.RendezvousFor(nonce).State; got != RendezvousExpired {
+		t.Fatalf("the settled meeting reads %s, want expired", rendezvousStateName(got))
+	}
+
+	rec, ok := p.s.ObservationFor(nonce)
+	if !ok {
+		t.Fatal("the settled interval sealed no record")
+	}
+	if len(rec.Closing.Lines) != 0 {
+		t.Fatalf("the settled record carries %d closing rows, want none: its boundary was never sighted", len(rec.Closing.Lines))
+	}
+	if rec.Completeness != CompletenessNoFence {
+		t.Fatalf("the settled record reads back %v, want no-fence", rec.Completeness)
+	}
+
+	// The stream says the same thing: forty lines on twenty-four rows leave
+	// seventeen, all of them this command's own, and the end marker carries no
+	// closing screen.
+	in, end, _, streamed := streamedInterval(rs)
+	if !streamed {
+		t.Fatal("the settled interval streamed no end marker")
+	}
+	if len(end.closing) != 0 {
+		t.Fatalf("the settled end marker carries %d closing rows, want none", len(end.closing))
+	}
+	if len(in) != 17 || in[0] != "L000000" || in[16] != "L000016" {
+		t.Fatalf("the interval streamed %d rows %q..%q, want the 17 L000000..L000016", len(in), in[0], in[len(in)-1])
+	}
+	if end.endRow != 17 {
+		t.Fatalf("the settled end marker stops at row %d, want the 17 the completion measured", end.endRow)
 	}
 }
 

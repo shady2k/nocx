@@ -1,7 +1,8 @@
 package content
 
-// The stored vocabulary's guard rails (nocx-2v80t.3.7). Three tests, each
-// covering one way two encoders drift apart:
+// The stored vocabulary's guard rails (nocx-2v80t.3.7, nocx-zg3k3.2.12).
+// Four tests, each covering one way two encoders drift apart, plus the
+// size measurement the compaction task was done for:
 //
 //  1. the DTO conforms to the contract — what the store writes is what the
 //     schema declares (AGENTS.md rule 5's Go half);
@@ -11,7 +12,9 @@ package content
 //  3. the CROSS-ENCODER check: the same emulator rows through this store's
 //     encoder and through sessionruntime's frame encoder produce the same
 //     row object — one vocabulary, two halves, zero drift a test cannot
-//     see.
+//     see;
+//  4. the size a plain 18-character row stores at, before and after
+//     nocx-zg3k3.2.12's shape.
 
 import (
 	"bytes"
@@ -51,8 +54,10 @@ func loadBlockRowsSchema(t *testing.T, ref string) *jsonschema.Schema {
 }
 
 // aStyledRow exercises every field the vocabulary carries: narrow and wide
-// clusters with their spacer, blank and hasText-less cells, a palette colour
-// beside an RGB one, and two styles so the runs actually run.
+// clusters with their spacer, a cell whose grapheme is non-empty but
+// HasText is false (the encoder must still read it as blank — the two are
+// different facts, per emulator.Cell's own doc), a palette colour beside an
+// RGB one, and two styles so the runs actually run.
 func aStyledRow() emulator.Row {
 	base := emulator.Style{}
 	accent := emulator.Style{
@@ -139,7 +144,7 @@ func TestBlockRowsVocabulary_IsTheFrameVocabularyVerbatim(t *testing.T) {
 		}
 		return string(out)
 	}
-	for _, def := range []string{"row", "cell", "run", "style", "color"} {
+	for _, def := range []string{"row", "mark", "run", "style", "color"} {
 		f, ok := frame[def]
 		if !ok {
 			t.Fatalf("session.frame.schema.json carries no $defs/%s", def)
@@ -165,7 +170,7 @@ func TestBlockRowsEncoder_MatchesTheFrameEncoderOnTheSameRows(t *testing.T) {
 	snap := sessionruntime.Snapshot{
 		Revision: 1,
 		Geometry: sessionruntime.GeometryCommit{
-			Geometry: emulator.Geometry{Cols: 8, Rows: 2, CellWidthPx: 8, CellHeightPx: 16},
+			Geometry: emulator.Geometry{Cols: 21, Rows: 2, CellWidthPx: 8, CellHeightPx: 16},
 			Revision: 1,
 		},
 		Rows: rows,
@@ -230,12 +235,13 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode plain tail: %v", decodeErr)
 	}
-	if got := len(parsed.Row.Cells); got != 5 {
-		t.Fatalf("plain row stored %d cells, want 5", got)
+	if got := parsed.Row.Text; got != "hello" {
+		t.Fatalf("plain row text = %q, want %q", got, "hello")
 	}
-	if got := parsed.Row.Runs[0][1]; got != float64(5) {
-		t.Fatalf("plain row run length = %v, want 5", got)
+	if len(parsed.Row.Runs) != 0 {
+		t.Fatalf("plain row carries runs = %v, want omitted (implicit default)", parsed.Row.Runs)
 	}
+
 	styled := emulator.Cell{
 		Width: emulator.WidthNarrow,
 		Style: emulator.Style{
@@ -259,8 +265,17 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode styled tail: %v", decodeErr)
 	}
-	if got := len(parsed.Row.Cells); got != 150 {
-		t.Fatalf("styled row stored %d cells, want 150", got)
+	// "hello" (5 positions with text) + 144 default-narrow blanks + 1 styled
+	// blank = 150 positions; a blank contributes nothing to text (codepoints
+	// 0), so every one of the 145 blanks is its own mark.
+	if got := parsed.Row.Text; got != "hello" {
+		t.Fatalf("styled row text = %q, want %q (blanks contribute no text)", got, "hello")
+	}
+	if got := len(parsed.Row.Marks); got != 145 {
+		t.Fatalf("styled row marks = %d entries, want 145 (one per blank position)", got)
+	}
+	if len(parsed.Row.Runs) != 2 {
+		t.Fatalf("styled row runs = %v, want 2 (the default stretch, then the styled cell)", parsed.Row.Runs)
 	}
 	if got := parsed.Row.Runs[len(parsed.Row.Runs)-1][1]; got != float64(1) {
 		t.Fatalf("styled trailing run length = %v, want 1", got)
@@ -274,12 +289,14 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if decodeErr := json.Unmarshal(line, &styledWire); decodeErr != nil {
 		t.Fatalf("decode styled runs: %v", decodeErr)
 	}
-	var gotStyle blockStyle
-	if decodeErr := json.Unmarshal(styledWire.Row.Runs[len(styledWire.Row.Runs)-1][0], &gotStyle); decodeErr != nil {
-		t.Fatalf("decode styled run style: %v", decodeErr)
+	lastStyle := styledWire.Row.Runs[len(styledWire.Row.Runs)-1][0]
+	var tuple [5]int
+	if decodeErr := json.Unmarshal(lastStyle, &tuple); decodeErr != nil {
+		t.Fatalf("styled trailing run style is not a 5-tuple: %v (%s)", decodeErr, lastStyle)
 	}
-	if gotStyle.Background.RGB != (blockRGB{R: 1, G: 2, B: 3}) {
-		t.Fatalf("styled trailing cell background = %+v, want RGB(1,2,3)", gotStyle.Background.RGB)
+	wantBackground := 257 + (1<<16 | 2<<8 | 3)
+	if tuple[1] != wantBackground {
+		t.Fatalf("styled trailing cell background packed = %v, want RGB(1,2,3) packed as %d", tuple[1], wantBackground)
 	}
 
 	blank := emulator.Row{Cells: make([]emulator.Cell, 150)}
@@ -294,11 +311,11 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode all-blank row: %v", decodeErr)
 	}
-	if got := len(parsed.Row.Cells); got != 1 {
-		t.Fatalf("all-blank row stored %d cells, want 1", got)
+	if parsed.Row.Text != "" {
+		t.Fatalf("all-blank row text = %q, want empty", parsed.Row.Text)
 	}
-	if got := len(parsed.Row.Runs); got != 1 || parsed.Row.Runs[0][1] != float64(1) {
-		t.Fatalf("all-blank row runs = %v, want one run of length 1", parsed.Row.Runs)
+	if len(parsed.Row.Runs) != 0 || len(parsed.Row.Marks) != 0 {
+		t.Fatalf("all-blank row carries runs=%v marks=%v, want both omitted", parsed.Row.Runs, parsed.Row.Marks)
 	}
 
 	line, err = encodeBlockRowsLine(0, emulator.Row{})
@@ -309,8 +326,8 @@ func TestBlockRowsEncoder_TrimsDefaultTrailingCellsButKeepsStyledBlank(t *testin
 	if decodeErr := json.Unmarshal(line, &parsed); decodeErr != nil {
 		t.Fatalf("decode empty row: %v", decodeErr)
 	}
-	if got := len(parsed.Row.Cells); got != 1 {
-		t.Fatalf("empty row stored %d cells, want 1", got)
+	if parsed.Row.Text != "" {
+		t.Fatalf("empty row text = %q, want empty", parsed.Row.Text)
 	}
 }
 
@@ -347,5 +364,27 @@ func TestBlockRowsLine_EveryLineParsesAlone(t *testing.T) {
 		if parsed.From != uint64(i) { //nolint:gosec // a row index, not a byte count
 			t.Fatalf("line %d carries from=%d", i, parsed.From)
 		}
+	}
+}
+
+// TestBlockRowsLine_PlainRowStoresUnderThreeTimesItsText is the measured
+// acceptance bound (nocx-zg3k3.2.12): an 18-character row with no styling
+// and no wide or combining cluster stores at under 3x its own text length,
+// where the PRIOR shape (a [grapheme, width, hasText] tuple per column plus
+// a named-field style object) measured 542 B for the same row — about 30x.
+func TestBlockRowsLine_PlainRowStoresUnderThreeTimesItsText(t *testing.T) {
+	const text = "18 characters here"
+	if len(text) != 18 {
+		t.Fatalf("test fixture text is %d bytes, want 18", len(text))
+	}
+	line, err := encodeBlockRowsLine(0, aTextRowForEncoder(text))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	stored := len(bytes.TrimSuffix(line, []byte{'\n'}))
+	t.Logf("18-character plain row: %d bytes stored (%.2fx its text; the pre-nocx-zg3k3.2.12 shape measured 542 B, ~30x)",
+		stored, float64(stored)/float64(len(text)))
+	if stored >= 3*len(text) {
+		t.Errorf("stored %d bytes for an 18-character plain row, want under %d (3x its text)", stored, 3*len(text))
 	}
 }

@@ -55,14 +55,15 @@ func textOfRows(t *testing.T, led content.LedgerRepository, artifactID string) s
 }
 
 // storedBlockRows reads a stored block back the way a client does: one JSON
-// line per row, each parsed into the frame vocabulary, each row's text
-// rejoined from its cells (spacers skipped). This is the reader the schema
-// declares, not a substring grep — a cell-per-grapheme row never carries a
-// contiguous string.
+// line per row, each parsed into the frame vocabulary. The rows this test
+// file builds (aTextRow) are one narrow hasText cell per grapheme with no
+// wide or blank cell anywhere, so the wire's own `text` field IS the row's
+// text already — nothing here needs to rejoin cells or consult `marks`,
+// which is the compact shape's own point.
 type storedBlockLine struct {
 	From uint64 `json:"from"`
 	Row  struct {
-		Cells [][3]any `json:"cells"`
+		Text string `json:"text"`
 	} `json:"row"`
 }
 
@@ -84,15 +85,10 @@ func storedBlockRows(t *testing.T, led content.LedgerRepository, artifactID stri
 		if err := json.Unmarshal([]byte(line), &parsed); err != nil {
 			t.Fatalf("parse stored line: %v\nline: %s", err, line)
 		}
-		var text strings.Builder
-		for _, cell := range parsed.Row.Cells {
-			grapheme, _ := cell[0].(string)
-			text.WriteString(grapheme)
-		}
 		out = append(out, struct {
 			From uint64
 			Text string
-		}{parsed.From, text.String()})
+		}{parsed.From, parsed.Row.Text})
 	}
 	return out
 }

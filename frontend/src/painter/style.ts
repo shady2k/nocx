@@ -16,7 +16,7 @@
 // and the frozen path keeps its own converter because it reads cells, not
 // frames.
 
-import type { Color, Style } from '../generated/session.frame'
+import type { ModelColor as Color, ModelStyle as Style } from '../cell-model'
 import type { FitFace } from '../scrollback/cell-fit'
 import { paletteToRGB, type TerminalSnapshot } from '../scrollback/serializer'
 

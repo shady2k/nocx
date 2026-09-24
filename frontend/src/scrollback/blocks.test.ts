@@ -21,7 +21,8 @@ import {
   type BlockKind,
 } from './blocks'
 import { paintStoredRows } from './block-rows'
-import type { Row, Run, Style } from '../generated/ledger.blockRows'
+import type { Row } from '../generated/ledger.blockRows'
+import { wireRowOf, type CellSpec } from '../painter/fixtures'
 import { DEFAULT_SNAPSHOT } from './serializer'
 import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
@@ -3042,29 +3043,17 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     const { manager } = newManager(undefined, () =>
       Promise.reject(new Error('a command must never reach the ledger for its copy')),
     )
-    const style = {
-      foreground: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-      background: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-      underlineColor: { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-      attributes: 0,
-      underline: 0 as const,
-    }
     manager.startBlock('echo hi', '/repo', 0)
     manager.bindAttempt('entry-copy')
     manager.applyStoredRows('entry-copy', {
       lines: [
         {
           from: 0,
-          row: {
-            cells: [
-              ['h', 1, true],
-              ['i', 1, true],
-              ['\n', 1, true],
-            ],
-            runs: [[style, 3]],
-            wrap: false,
-            continuation: false,
-          },
+          row: wireRowOf([
+            ['h', 1, true],
+            ['i', 1, true],
+            ['\n', 1, true],
+          ]),
         },
       ],
       droppedRows: 0,
@@ -4355,20 +4344,8 @@ describe('setBlockWhere', () => {
 })
 
 describe('backend-owned block rows', () => {
-  const style: Style = {
-    foreground: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    background: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    underlineColor: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    attributes: 0,
-    underline: 0,
-  }
-
-  const row = (text: string): Row => ({
-    cells: Array.from(text, (char) => [char, 1, true] as [string, 1, boolean]),
-    runs: [[style, text.length] as Run] as [Run, ...Run[]],
-    wrap: false,
-    continuation: false,
-  })
+  const row = (text: string): Row =>
+    wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec))
 
   function newManager() {
     const inner = document.createElement('div')

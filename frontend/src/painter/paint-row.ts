@@ -20,8 +20,7 @@
 // createElement and textContent — terminal output is untrusted, so no
 // painter of it goes through innerHTML the way the string serializer must.
 
-import type { Style } from '../generated/session.frame'
-import type { ScreenSnapshot } from '../cell-model'
+import type { ModelStyle as Style, ScreenSnapshot } from '../cell-model'
 import { runsOf, type GeometryRun, type GridCell, type RunMetric } from '../scrollback/run-geometry'
 import type { TerminalSnapshot } from '../scrollback/serializer'
 import { faceOf, resolveInk, styleEquals } from './style'

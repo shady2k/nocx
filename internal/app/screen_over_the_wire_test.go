@@ -132,16 +132,16 @@ func nextScreenFrame(t *testing.T, conn *websocket.Conn) transport.Frame {
 
 // draw runs one printf through the pane's shell — real output from a real
 // program on a real PTY.
-// screenText flattens one published frame's cells into the text it shows.
-// The wire's cells are positional tuples, so the marker the program drew is
-// never a contiguous substring of the payload — the letters ride inside
-// per-cell arrays — and the assertion reads the document the way the
-// renderer will, rather than grepping bytes that cannot occur.
+// screenText flattens one published frame's rows into the text they show.
+// A row's own `text` (nocx-zg3k3.2.12) already is that flattened text — one
+// grapheme per surviving position, spacers and blanks contributing nothing —
+// so the marker the program drew IS a contiguous substring of it, unlike
+// the [grapheme, width, hasText]-per-column shape this replaced.
 func screenText(t *testing.T, payload []byte) string {
 	t.Helper()
 	var doc struct {
 		Rows []struct {
-			Cells [][]any `json:"cells"`
+			Text string `json:"text"`
 		} `json:"rows"`
 	}
 	if err := json.Unmarshal(payload, &doc); err != nil {
@@ -149,13 +149,7 @@ func screenText(t *testing.T, payload []byte) string {
 	}
 	var b strings.Builder
 	for _, row := range doc.Rows {
-		for _, cell := range row.Cells {
-			if len(cell) > 0 {
-				if g, ok := cell[0].(string); ok {
-					b.WriteString(g)
-				}
-			}
-		}
+		b.WriteString(row.Text)
 		b.WriteString("\n")
 	}
 	return b.String()

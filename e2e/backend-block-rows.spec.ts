@@ -67,16 +67,16 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
     const body = (await wire.call('ledger.artifact', { id: rowsArtifact?.id })) as {
       body: string
     }
+    // A row's own `text` (nocx-zg3k3.2.12) already is the flattened line —
+    // one grapheme per surviving position, spacers and blanks contributing
+    // nothing — and these marker rows carry no wide or blank cell, so it is
+    // a plain substring rather than something rebuilt from a per-column
+    // [grapheme, width, hasText] tuple array.
     const storedRows = body.body
       .split('\n')
       .filter(Boolean)
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            row: { cells: Array<[string, ...unknown[]]> }
-          },
-      )
-      .map((line) => line.row.cells.map(([grapheme]) => grapheme).join(''))
+      .map((line) => JSON.parse(line) as { row: { text: string } })
+      .map((line) => line.row.text)
     const markerPattern = new RegExp(`^ROWS-${nonce}-\\d{3}$`)
     const storedMarkers = storedRows.filter((row) => markerPattern.test(row))
     expect(storedMarkers).toHaveLength(markers.length)

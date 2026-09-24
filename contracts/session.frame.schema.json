@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://nocx.local/contracts/session.frame.schema.json",
   "title": "SessionFrame",
-  "description": "One full screen of cells, as the session runtime already holds it — the shape the client will paint instead of parsing terminal bytes (nocx-zg3k3.2.1). Every name and semantic here is taken from the Go types the frame is read from: Snapshot (internal/sessionruntime/contract.go) for revision, rows, cursor and committed geometry, and emulator.Row, Cell, Style, Color, Cursor, Width (internal/emulator/emulator.go) for the cells themselves. Nothing sends this yet; the task that makes the runtime send a frame inherits this declaration rather than coining a second one. A cell-shaped wire format already exists — contracts/helper/identities.schema.json $defs screenCell and screenFrame, the FROZEN coordinator-to-helper ABI — and it was considered and does not fit: it carries no style and no has-text fact, so a cell painted with a background and no text loses both; its rows carry no wrap/continuation, which is what lets a scrollback renderer join the physical lines of one logical line; and its width vocabulary is 0-2, while emulator.Width is a five-value enumeration whose spacer head the helper ABI has no spelling for. Extending a frozen ABI for a renderer need was the wrong direction, so this schema declares the renderer's own vocabulary once, from the same Go source the helper's was derived from. SHAPE (nocx-zg3k3.2.6): a style is shared across a run of adjacent cells rather than repeated per cell, and a cell rides as a positional tuple [grapheme, width, hasText] rather than a named-field object. Both were forced by measurement, recorded 2026-09-22 against a realistic dense screen (prompt, coloured output, truecolour banner, CJK wide clusters, ZWJ emoji, cell-fit-boxed glyph, inverse status bar): with the original per-cell style object a frame was 521,989 B at 80x24, 1,303,538 B at 120x40 and 2,713,770 B at 200x50 — over the 256 KiB lifecycle bound (internal/lifecycle/protocol.go MaxFrameBytes) at EVERY geometry and over the 1 MiB helper bound (internal/helper/proto/frame.go MaxFrameBytes) at 120x40 and 200x50. Cells as named-field objects with per-row style runs still measured 444,433 B at 200x50 — the bare per-cell payload alone busts the lifecycle bound — so the tuple form is what makes the rectangle fit: 35,967 B, 81,124 B and 152,937 B at the three geometries. Two run shapes were measured: runs-per-row (each row carries its styles as [style, length] runs alongside its cells) and a frame-level style table (the frame carries styles: [Style, ...], each run an index into it). The frame table is smaller — 28,541 / 67,121 / 135,423 B, an 11.5-20.6% saving — but both shapes sit 40-70% below the binding bound at every geometry, so the saving buys nothing the bound does not already give, and it costs every row its self-description: a row stored for scrollback would decode only against the frame-level table it rode in with, and one wrong index corrupts the whole frame instead of one run. Runs-per-row was taken. This schema declares the draft-07 dialect because positional tuples are how draft-07 spells a fixed-shape array (items as a schema list, additionalItems: false) — the same declaration agent.dump.schema.json already carries — and the type generator (json-schema-to-typescript) emits tuple types only for that spelling.",
+  "description": "One full screen of cells, as the session runtime already holds it — the shape the client will paint instead of parsing terminal bytes (nocx-zg3k3.2.1). Every name and semantic here is taken from the Go types the frame is read from: Snapshot (internal/sessionruntime/contract.go) for revision, rows, cursor and committed geometry, and emulator.Row, Cell, Style, Color, Cursor, Width (internal/emulator/emulator.go) for the cells themselves. A cell-shaped wire format already exists — contracts/helper/identities.schema.json $defs screenCell and screenFrame, the FROZEN coordinator-to-helper ABI — and it was considered and does not fit: it carries no style and no has-text fact, so a cell painted with a background and no text loses both; its rows carry no wrap/continuation, which is what lets a scrollback renderer join the physical lines of one logical line; and its width vocabulary is 0-2, while emulator.Width is a five-value enumeration whose spacer head the helper ABI has no spelling for. Extending a frozen ABI for a renderer need was the wrong direction, so this schema declares the renderer's own vocabulary once, from the same Go source the helper's was derived from. SHAPE (nocx-zg3k3.2.12, superseding nocx-zg3k3.2.6's per-column tuple): a row rides as its TEXT — the clusters in column order, the spacer after a wide cluster not repeated — a sparse list of the positions whose codepoint count or column footprint departs from the default (one codepoint, one column), and style runs measured in columns; a trailing run of ordinary default blank cells is not sent, implied by the row's own (shorter) length against the frame's geometry. Measured 2026-09-22 against a realistic dense screen (prompt, coloured output, truecolour banner, CJK wide clusters, ZWJ emoji, cell-fit-boxed glyph, inverse status bar) under the PRIOR per-column-tuple shape: with a per-cell style object a frame was 521,989 B at 80x24, 1,303,538 B at 120x40 and 2,713,770 B at 200x50 — over the 256 KiB lifecycle bound (internal/lifecycle/protocol.go MaxFrameBytes) at EVERY geometry and over the 1 MiB helper bound (internal/helper/proto/frame.go MaxFrameBytes) at 120x40 and 200x50; cells as named-field objects with per-row style runs still measured 444,433 B at 200x50; a [grapheme, width, hasText] positional tuple per column brought that to 35,967 / 81,124 / 152,937 B, comfortably under both bounds — but an 18-character row on that shape still stored at 542 B once trimmed, ~30x its own text, because a row still carried one entry per COLUMN (blanks included) and a style rode as a five-field named object (220 B for the all-default style alone) even where nothing needed one. This record's shape removes both costs: an 18-character plain row (no styling, no wide or combining cluster) now stores at the size internal/content/block_rows_encode_test.go measures, under 3x its own text, and internal/sessionruntime/frame_test.go's TestFrameSizeAtRealGeometry re-measures the three geometries under this shape. A style now rides as the bare integer 0 (the zero value, by far the common case) or a 5-element tuple [foreground, background, underlineColor, attributes, underline] with each colour packed into one integer (0 default, 1-256 a palette index plus one, 257+ a packed RGB triple); a row whose runs would be exactly one default-style run covering its whole explicit width omits `runs` entirely, and a row with no cluster departing from (one codepoint, one column) omits `marks` entirely — a receiver treats either absence as its stated default. This schema declares the draft-07 dialect because positional tuples are how draft-07 spells a fixed-shape array (items as a schema list, additionalItems: false) — the same declaration agent.dump.schema.json already carries — and the type generator (json-schema-to-typescript) emits tuple types only for that spelling.",
   "type": "object",
   "additionalProperties": false,
   "required": ["revision", "geometry", "cursor", "rows"],
@@ -16,7 +16,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["cols", "rows", "cellWidthPx", "cellHeightPx", "revision"],
-      "description": "The committed geometry (sessionruntime.GeometryCommit, emulator.Geometry): a size the PTY and the emulator BOTH took, and the geometry every cell of this frame was read at. The pixel size travels because it is not decoration — the emulator answers a program's own size queries from it, so a frame without it forces the receiver to invent a cell size. A rows array whose length is not this rows count, or a row whose cells are not this cols long, is malformed at the source.",
+      "description": "The committed geometry (sessionruntime.GeometryCommit, emulator.Geometry): a size the PTY and the emulator BOTH took, and the geometry every cell of this frame was read at. The pixel size travels because it is not decoration — the emulator answers a program's own size queries from it, so a frame without it forces the receiver to invent a cell size. A rows array whose length is not this rows count is malformed at the source; a row's OWN explicit content may be shorter than cols (a trailing run of default blanks is implied, not sent) but never longer.",
       "properties": {
         "cols": {
           "type": "integer",
@@ -31,7 +31,7 @@
         "cellWidthPx": {
           "type": "integer",
           "minimum": 0,
-          "description": "One cell's width in DEVICE pixels \u2014 the integer cell the client's renderer rasterises at, and the unit in which the metric is exact (css = device / dpr, the derivation xterm itself uses). A CSS-pixel consumer divides by its display's ratio; a program asking its terminal's size is answered in physical pixels, as native terminals report on high-density screens (review round 1, nocx-zg3k3.2.9)."
+          "description": "One cell's width in DEVICE pixels — the integer cell the client's renderer rasterises at, and the unit in which the metric is exact (css = device / dpr, the derivation xterm itself uses). A CSS-pixel consumer divides by its display's ratio; a program asking its terminal's size is answered in physical pixels, as native terminals report on high-density screens (review round 1, nocx-zg3k3.2.9)."
         },
         "cellHeightPx": {
           "type": "integer",
@@ -69,7 +69,7 @@
     },
     "rows": {
       "type": "array",
-      "description": "Every row of the active screen (Snapshot.Rows), in order, as the emulator holds it: a RECTANGLE and not trimmed text — the array is geometry.rows long and every row's cells is geometry.cols long, so a receiver can index a column without knowing where a program stopped writing.",
+      "description": "Every row of the active screen (Snapshot.Rows), in order, as the emulator holds it: the array is geometry.rows long, and each row's OWN explicit content is at most geometry.cols columns — a receiver pads a shorter row with the default style to reach cols, since a trailing run of default blanks is implied rather than sent.",
       "items": { "$ref": "#/$defs/row" }
     }
   },
@@ -77,49 +77,54 @@
     "row": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cells", "runs", "wrap", "continuation"],
-      "description": "One physical line of the screen (emulator.Row). Its styles ride as runs — maximal adjacent stretches of one style — not per cell: the runs are adjacent, in order, and partition the row's cells exactly (the sum of run lengths is cells' length), so a receiver walks runs in parallel with cells, reading each cell's style from the run that covers it. A row stays self-describing: it decodes against nothing outside itself, which is what lets a stored row (scrollback) survive without the frame it arrived in.",
+      "required": ["text"],
+      "description": "One physical line of the screen (emulator.Row), in the compact text+marks+runs shape (nocx-zg3k3.2.12). A POSITION is one surviving column-owning entry once the spacer that follows a wide cluster is folded away — text and marks are indexed by position. A COLUMN is the grid's own unit — runs are measured in columns, and a wide cluster is one position but two columns. `text`, `marks` and `runs` together decode against nothing outside themselves (self-describing), which is what lets a stored row (scrollback) survive without the frame it arrived in; the ONLY external fact a receiver needs is geometry.cols, to pad the implied trailing default blanks a shorter row does not carry.",
       "properties": {
-        "cells": {
+        "text": {
+          "type": "string",
+          "description": "The row's clusters, in column order, concatenated: one grapheme per surviving position (a wide cluster's spacer is not repeated, and a position with no text — Cell.HasText false — contributes nothing, an empty string). A receiver splits this back into per-position graphemes using `marks`' codepoint counts (default one codepoint per position) and Unicode CODEPOINTS as the unit — Go's []rune and JavaScript's Array.from agree on that unit without either re-deriving cluster boundaries the runtime already decided (ADR-0065). A trailing run of ordinary default blank positions is not represented here at all: the row's explicit position count (derived from this string's length and `marks`) may be less than geometry.cols, and the remainder is implied."
+        },
+        "marks": {
           "type": "array",
-          "description": "One entry per column, including the spacers of wide clusters and the blank cells of trailing space (emulator.Row.Cells): geometry.cols long, every row, every frame. A receiver that wants text skips the spacer cells rather than receiving a shorter array. Each cell is the positional tuple [grapheme, width, hasText] — the genuinely per-cell facts; the style that used to be a fourth field here is the thing a run shares across adjacent cells.",
-          "items": { "$ref": "#/$defs/cell" }
+          "description": "The sparse positions whose codepoint count or column footprint is not the default (one codepoint, one column): [position, codepoints, width] triples, position 0-based into the surviving-position sequence `text` encodes. codepoints is the position's grapheme length in Unicode codepoints — 0 for a cell with no text (Cell.HasText false; its grapheme is the empty string), 2 or more for a cluster built of several codepoints (a combining mark, a ZWJ sequence). width is the cell's column footprint (Cell.Width, emulator.Width): 2 wide (the position occupies this column and the next, whose own spacer contributes no position of its own) or 4 spacerHead (the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered) — 1 narrow is the default and never appears here, and 3 spacerTail never appears here because a spacer is not a position at all in this vocabulary, only the extra column its preceding wide cluster's mark declares. Absent (or a position it does not name) means (1, 1): one codepoint, one column. A malformed row (a mark whose codepoints exceeds what `text` has left, or two marks for the same position) is malformed at the source.",
+          "items": { "$ref": "#/$defs/mark" }
         },
         "runs": {
           "type": "array",
-          "description": "The styles of this row as [style, length] tuples, each covering that many consecutive cells starting where the previous run ended. Maximal by construction: two adjacent runs never carry the same style, or the sender would have merged them. A malformed row (runs whose lengths do not sum to the cells length) is malformed at the source.",
-          "items": { "$ref": "#/$defs/run" },
-          "minItems": 1
+          "description": "The styles of this row as [style, length] tuples, length measured in COLUMNS (a wide cluster's synthesised spacer column counts, and carries the SAME style its cluster's run covers it with — the two are read independently at the source and a run is who says whether they in fact agree). Each run covers that many consecutive columns starting where the previous run ended, and the lengths sum to the row's own explicit column count (positions, plus one more for every wide-marked position) — never geometry.cols, which a shorter row does not reach. Maximal by construction: two adjacent runs never carry the same style, or the sender would have merged them. Absent means the implicit single run: the row's whole explicit width, in the default style (the bare integer 0) — the shortcut a fully unstyled row, or the unstyled remainder of an otherwise-trimmed one, takes. A malformed row (present runs whose lengths do not sum to the explicit column count) is malformed at the source.",
+          "items": { "$ref": "#/$defs/run" }
         },
         "wrap": {
           "type": "boolean",
-          "description": "The row is not the last physical line of its logical line: a program's output wrapped here. Together with continuation this is what lets a receiver join the physical lines of one logical line without losing a hard newline."
+          "description": "The row is not the last physical line of its logical line: a program's output wrapped here. Together with continuation this is what lets a receiver join the physical lines of one logical line without losing a hard newline. Absent means false."
         },
         "continuation": {
           "type": "boolean",
-          "description": "The row continues the logical line of the row above it. Wrap and continuation are not each other's negation: the last row of a wrapped sequence has wrap false and continuation true, and the row before it has wrap true and continuation false."
+          "description": "The row continues the logical line of the row above it. Wrap and continuation are not each other's negation: the last row of a wrapped sequence has wrap false and continuation true, and the row before it has wrap true and continuation false. Absent means false."
         }
       }
     },
-    "cell": {
+    "mark": {
       "type": "array",
       "minItems": 3,
       "maxItems": 3,
       "additionalItems": false,
-      "description": "One grid position, copied out of the emulator (emulator.Cell), as the positional tuple [grapheme, width, hasText]: position 0 the whole cluster, position 1 its column footprint, position 2 whether it carries text. Positional, not named, because at thousands of cells a frame the field-name bytes are the payload — measured 2026-09-22, named-field cells with shared runs still bust the 256 KiB lifecycle bound at 200x50 (444,433 B) while this tuple form fits (152,937 B). The style is not here: it is the thing a run shares across adjacent cells.",
+      "description": "One position whose codepoint count or column width departs from the default (1, 1): [position, codepoints, width].",
       "items": [
         {
-          "type": "string",
-          "description": "The whole cluster — the base codepoint followed by every combining codepoint the terminal assembled into it — and not one rune (Cell.Grapheme). Empty for a blank cell or a continuation column. A receiver that wants a character takes this; one that wants a position takes the column index, because width says how many columns this cell occupies and the next cell may be its spacer."
+          "type": "integer",
+          "minimum": 0,
+          "description": "The 0-based position this mark names, in the surviving-position sequence `text` encodes (spacers excluded)."
         },
         {
           "type": "integer",
-          "enum": [0, 1, 2, 3, 4],
-          "description": "The cell's column footprint (Cell.Width, emulator.Width) — the thing a renderer must have right and the thing a font measurement must never be asked about. The enumeration mirrors the Go constants exactly: 0 unknown, the zero value of a cell that was never read and one a committed frame does not carry; 1 narrow, one column; 2 wide, two columns, the cell after it the continuation; 3 spacerTail, the second column of a wide cluster, not rendered because the cluster to its left already covered it; 4 spacerHead, the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered."
+          "minimum": 0,
+          "description": "The position's grapheme length in Unicode codepoints: 0 for a cell with no text, 2 or more for a multi-codepoint cluster."
         },
         {
-          "type": "boolean",
-          "description": "Separate from grapheme being empty because the two are different facts (Cell.HasText): a cell can carry a background colour and no text, and a renderer must paint the first and not the second."
+          "type": "integer",
+          "enum": [1, 2, 4],
+          "description": "The cell's column footprint (Cell.Width, emulator.Width): 1 narrow (present only when codepoints alone departs from the default), 2 wide — the cluster occupies this column and the next, whose spacer is not its own position — or 4 spacerHead, the column a wide cluster would have needed at the end of a soft-wrapped line, carrying no text and not rendered. 3 spacerTail never appears: a spacer is not a position in this vocabulary."
         }
       ]
     },
@@ -128,67 +133,48 @@
       "minItems": 2,
       "maxItems": 2,
       "additionalItems": false,
-      "description": "One maximal stretch of adjacent cells that share one style: [style, length], the style first and the number of cells it covers second. Length is at least 1 — a run that covered nothing would be sender noise, and two adjacent runs are never the same style.",
+      "description": "One maximal stretch of adjacent columns that share one style: [style, length], the style first and the number of columns it covers second. Length is at least 1 — a run that covered nothing would be sender noise, and two adjacent runs are never the same style.",
       "items": [
         { "$ref": "#/$defs/style" },
         {
           "type": "integer",
           "minimum": 1,
-          "description": "How many consecutive cells of the row this run's style covers, starting where the previous run ended. The row's run lengths sum to its cells length."
+          "description": "How many consecutive columns of the row this run's style covers, starting where the previous run ended."
         }
       ]
     },
     "style": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["foreground", "background", "underlineColor", "attributes", "underline"],
-      "description": "The complete visual style of one cell (emulator.Style), shared across a run of adjacent cells rather than repeated per cell — the 2026-09-12 design's measured expectation is frame traffic at about 1.04x raw output, which is unreachable while a style object rides every cell.",
-      "properties": {
-        "foreground": { "$ref": "#/$defs/color" },
-        "background": { "$ref": "#/$defs/color" },
-        "underlineColor": { "$ref": "#/$defs/color" },
-        "attributes": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 255,
-          "description": "The on/off text decorations as one bitset (emulator.Attributes, uint16) — a bitset rather than eight booleans because that is how they are compared, stored and sent, and because the set is closed: a terminal has these eight and no ninth. Bit 0 bold, 1 italic, 2 faint, 3 blink, 4 inverse, 5 invisible, 6 strikethrough, 7 overline."
-        },
-        "underline": {
-          "type": "integer",
-          "enum": [0, 1, 2, 3, 4, 5],
-          "description": "The shape of the underline decoration, which SGR 4:0-4:5 can choose and which is not a boolean (emulator.Underline). 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed."
+      "description": "The complete visual style of one run (emulator.Style), shared across every column the run covers rather than repeated per cell. Either the bare integer 0 — every field is the zero value, the terminal's own default colours, no attributes, no underline, by far the common case for plain output — or the 5-element tuple [foreground, background, underlineColor, attributes, underline] when anything departs from that.",
+      "oneOf": [
+        { "const": 0 },
+        {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "additionalItems": false,
+          "items": [
+            { "$ref": "#/$defs/color" },
+            { "$ref": "#/$defs/color" },
+            { "$ref": "#/$defs/color" },
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 255,
+              "description": "The on/off text decorations as one bitset (emulator.Attributes, uint16) — a bitset rather than eight booleans because that is how they are compared, stored and sent, and because the set is closed: a terminal has these eight and no ninth. Bit 0 bold, 1 italic, 2 faint, 3 blink, 4 inverse, 5 invisible, 6 strikethrough, 7 overline."
+            },
+            {
+              "type": "integer",
+              "enum": [0, 1, 2, 3, 4, 5],
+              "description": "The shape of the underline decoration, which SGR 4:0-4:5 can choose and which is not a boolean (emulator.Underline). 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed."
+            }
+          ]
         }
-      }
+      ]
     },
     "color": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "palette", "rgb"],
-      "description": "One style colour, in whichever of the three shapes it is in (emulator.Color). The distinction is load-bearing rather than decorative: a palette index means 'this theme's colour N' and repaints when the theme changes, an RGB value means 'exactly this' and does not, and a default colour means the theme's own choice for the role. The fields not named by kind are meaningless and ride the wire zeroed, exactly as the Go struct holds them; a receiver reads a colour through its kind.",
-      "properties": {
-        "kind": {
-          "type": "integer",
-          "enum": [0, 1, 2],
-          "description": "Which of the three shapes this colour is in (emulator.ColorKind). 0 default, the terminal's own colour for the role and the zero value an unstyled cell holds; 1 palette, an index into the terminal's 256-colour palette; 2 rgb, an exact colour."
-        },
-        "palette": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 255,
-          "description": "The palette index, meaningful when kind is 1."
-        },
-        "rgb": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["r", "g", "b"],
-          "description": "An exact colour, one byte per channel (emulator.RGB), meaningful when kind is 2.",
-          "properties": {
-            "r": { "type": "integer", "minimum": 0, "maximum": 255 },
-            "g": { "type": "integer", "minimum": 0, "maximum": 255 },
-            "b": { "type": "integer", "minimum": 0, "maximum": 255 }
-          }
-        }
-      }
+      "type": "integer",
+      "minimum": 0,
+      "description": "One style colour, packed into a single integer (emulator.Color) rather than a named-field object — the distinction between a palette index, an exact RGB value and the terminal's own default is load-bearing (a palette index repaints when the theme changes, RGB does not), but at a run per style change spelling it as three ranges of one integer costs nothing a receiver cannot undo cheaply. 0 is the terminal's own default colour for the role (emulator.ColorDefault, the zero value an unstyled style holds). 1 through 256 is a palette index plus one (emulator.ColorPalette, the index is the value minus one) — shifted up because 0 is taken by default. 257 and above is an exact colour (emulator.ColorRGB): subtract 257 and read the low 24 bits as r<<16 | g<<8 | b, one byte per channel."
     }
   }
 }

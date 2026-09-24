@@ -11,7 +11,6 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, vi } from 'vitest'
-import type { SessionFrame } from '../generated/session.frame'
 import { DEFAULT_SNAPSHOT, serializeLine } from '../scrollback/serializer'
 import { lineWith } from '../scrollback/test-helpers'
 import type { RunMetric } from '../scrollback/run-geometry'
@@ -137,12 +136,11 @@ describe('rows and runs', () => {
     const painted = styleOf({ background: { kind: 2, palette: 0, rgb: { r: 20, g: 30, b: 40 } } })
     const frame = frameOf(1, [
       [
-        ['a', 1, true],
-        ['', 1, false],
-        ['', 1, false],
+        ['a', 1, true, painted],
+        ['', 1, false, painted],
+        ['', 1, false, painted],
       ],
     ])
-    frame.rows[0].runs = [[painted, 3]] as SessionFrame['rows'][number]['runs']
     painter.apply(snapshotOf(frame))
     const row = liveRow(surface)
     const span = row.firstElementChild

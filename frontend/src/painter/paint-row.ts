@@ -21,6 +21,7 @@
 // painter of it goes through innerHTML the way the string serializer must.
 
 import type { ModelStyle as Style, ScreenSnapshot } from '../cell-model'
+import type { FitCandidate } from '../scrollback/cell-fit'
 import { runsOf, type GeometryRun, type GridCell, type RunMetric } from '../scrollback/run-geometry'
 import type { TerminalSnapshot } from '../scrollback/serializer'
 import { faceOf, resolveInk, styleEquals } from './style'
@@ -28,6 +29,23 @@ import { faceOf, resolveInk, styleEquals } from './style'
 export interface PaintRowOptions {
   readonly metric: RunMetric | null
   readonly palette: TerminalSnapshot
+}
+
+/** Cell-fit's batch step, rule "ALL WRITES, THEN ALL READS" (cell-fit.ts's
+ *  header): every cell a caller is ABOUT to paint, in the same shape and
+ *  through the same `faceOf` that `paintRow` itself will query `boxOf`
+ *  with, so a candidate warmed here is the exact key `runsOf` looks up
+ *  later. A blank cell is never a candidate — it carries no ink to measure,
+ *  and `faceOf` would only manufacture a key nothing ever reads. */
+export function fitCandidatesOf(rows: Iterable<ScreenSnapshot['rows'][number]>): FitCandidate[] {
+  const out: FitCandidate[] = []
+  for (const row of rows) {
+    for (const cell of row.cells) {
+      if (!cell.hasText) continue
+      out.push({ chars: cell.grapheme, width: cell.span, face: faceOf(cell.style) })
+    }
+  }
+  return out
 }
 
 export function paintRow(

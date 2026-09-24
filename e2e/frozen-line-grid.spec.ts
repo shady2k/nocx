@@ -68,7 +68,7 @@ async function rowShape(page: Page, marker: string): Promise<RowShape> {
     const block = Array.from(document.querySelectorAll('.cmd-block')).find((b) =>
       (b.textContent ?? '').includes(m),
     )
-    const row = block?.querySelector<HTMLElement>('.cmd-output > .term-line')
+    const row = block?.querySelector<HTMLElement>('.cmd-output > .term-grid-row')
     const out = row?.parentElement
     if (!row || !out) return empty
 
@@ -239,7 +239,7 @@ test('the ink of a glyph wider than its cell is scaled to fit inside it', async 
     const block = Array.from(document.querySelectorAll('.cmd-block')).find((b) =>
       (b.textContent ?? '').includes(m),
     )
-    const box = block?.querySelector<HTMLElement>('.cmd-output > .term-line .term-cell')
+    const box = block?.querySelector<HTMLElement>('.cmd-output > .term-grid-row .term-cell')
     if (!box) return null
     const ink = box.querySelector<HTMLElement>('.term-cell-ink')
     if (!ink) return { fit: Number.NaN, boxWidth: box.getBoundingClientRect().width, inkWidth: -1 }
@@ -311,7 +311,7 @@ test('a full-width row does not fold while output wrapping is on', async ({ page
       const b = Array.from(document.querySelectorAll('.cmd-block')).find((el) =>
         (el.textContent ?? '').includes(m),
       )
-      const row = b?.querySelector<HTMLElement>('.cmd-output > .term-line')
+      const row = b?.querySelector<HTMLElement>('.cmd-output > .term-grid-row')
       if (!row) return -1
       const range = document.createRange()
       range.selectNodeContents(row)
@@ -402,7 +402,7 @@ test('selecting a row with boxes copies the row', async ({ page }) => {
     const b = Array.from(document.querySelectorAll('.cmd-block')).find((el) =>
       (el.textContent ?? '').includes(m),
     )
-    const row = b!.querySelector<HTMLElement>('.cmd-output > .term-line')!
+    const row = b!.querySelector<HTMLElement>('.cmd-output > .term-grid-row')!
     const range = document.createRange()
     range.selectNodeContents(row)
     const sel = window.getSelection()!

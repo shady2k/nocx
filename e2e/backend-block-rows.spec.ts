@@ -77,11 +77,11 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { row: { text: string } })
       .map((line) => line.row.text)
-    const markerPattern = new RegExp(`^ROWS-${nonce}-\\d{3}$`)
-    const storedMarkers = storedRows.filter((row) => markerPattern.test(row))
-    expect(storedMarkers).toHaveLength(markers.length)
-    expect(new Set(storedMarkers).size).toBe(markers.length)
-    expect(storedMarkers).toEqual(markers)
+    // The stored rows are EXACTLY the 300 markers — the shell's echo of the
+    // command line and the next prompt are not painted as output either
+    // (nocx-2v80t.3.12), so this is not a filtered subset check: any extra
+    // row at either end fails it.
+    expect(storedRows).toEqual(markers)
   } finally {
     wire.close()
   }

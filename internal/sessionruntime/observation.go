@@ -222,6 +222,14 @@ func (s *Session) openObservationLocked() {
 type pendingBoundaryRow struct {
 	Row   emulator.Row
 	Track emulator.RowTrack
+	// Cursor marks the entry captured at the boundary's own cursor position —
+	// the LAST of the window, since boundaryRowsThatLeave ends there. It is
+	// the one row a shell can extend WITHOUT a preceding newline, so once
+	// every other entry has left (matched) or ceased (purged), this one may
+	// still be rewritten in place — the new prompt, or an app-submitted
+	// command's own echo, printed over what the fence saw as blank — before
+	// it finally departs (nocx-2v80t.3.12; see suppressBoundaryScreenLocked).
+	Cursor bool
 }
 
 // alive answers whether the physical row a pendingBoundaryRow names can still
@@ -337,6 +345,23 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 				at = j
 				break
 			}
+		}
+		if at < 0 && len(s.pendingScreen) == 1 && s.pendingScreen[0].Cursor {
+			// The one entry left is the boundary's own cursor row (see
+			// pendingBoundaryRow.Cursor): every other entry has already
+			// either matched and left, or ceased and been purged, so this
+			// is the LAST resort, never the first. It is matched by
+			// IDENTITY — it is simply whichever entry survives to be the
+			// window's sole member — and never by content, because content
+			// is exactly what it may no longer carry: a shell can only
+			// extend the cursor's own row without a preceding newline, so
+			// the next prompt or an app-submitted command's own echo lands
+			// there before the row finally departs, reading nothing like
+			// the blank (or partial) line the fence saw (nocx-2v80t.3.12).
+			// A row a shell writes anywhere else first needs a newline,
+			// which makes it a brand-new row this window never named, so
+			// the wildcard can never reach past this one entry.
+			at = 0
 		}
 		if at < 0 {
 			if !s.pendingEntered {
@@ -509,7 +534,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 		rec.Closing = scr
 	}
 	s.expectBoundaryScreenLocked(rec.Closing)
-	s.emitIntervalEndLocked(nonce, s.departedRows, boundaryRowsThatLeave(rec.Closing))
+	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing))
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
@@ -736,7 +761,7 @@ func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
 		if err != nil {
 			track = nil
 		}
-		pending[i] = pendingBoundaryRow{Row: row, Track: track}
+		pending[i] = pendingBoundaryRow{Row: row, Track: track, Cursor: i == len(rows)-1}
 	}
 	s.pendingScreen = pending
 	s.pendingScreenGeom = screen.Geometry
@@ -820,6 +845,36 @@ func boundaryRowsThatLeave(scr ObservationScreen) []emulator.Row {
 		end = len(scr.Lines)
 	}
 	return scr.Lines[:end]
+}
+
+// closingRowsForStream is the rows a boundary's own end marker actually
+// carries — boundaryRowsThatLeave, minus a trailing entry this interval
+// never wrote a single grapheme to (nocx-2v80t.3.12). The LAST of those rows
+// sits at the cursor's own position, the one place a shell can still extend
+// without a preceding newline: the next prompt, or an app-submitted
+// command's own echoed line, both land there before that row finally
+// departs (suppressBoundaryScreenLocked's Cursor wildcard is what catches
+// either one on its way out, by identity, once it does). A cursor row this
+// interval genuinely wrote into — its last output line with no trailing
+// newline — is kept: the cut is on ABSENCE at the instant the fence sat
+// there, never on what the row happens to read once something else writes
+// into it, and a command whose entire output is one blank line still keeps
+// that line, because it occupies the row BEFORE the cursor's own, not this
+// one.
+//
+// This trims only what the interval's OWN closing append claims as its
+// output; the suppression window (expectBoundaryScreenLocked) still installs
+// the untrimmed rows, because the cursor's placeholder must still be
+// recognised — and suppressed — when something else departs there next.
+func closingRowsForStream(scr ObservationScreen) []emulator.Row {
+	rows := boundaryRowsThatLeave(scr)
+	if len(rows) == 0 {
+		return rows
+	}
+	if visibleRowText(rows[len(rows)-1]) == "" {
+		return rows[:len(rows)-1]
+	}
+	return rows
 }
 
 // emitIntervalEndLocked hands the row stream one interval's end marker: the
@@ -914,7 +969,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Loss:         cap.Loss,
 	}
 	s.expectBoundaryScreenLocked(cap.Closing)
-	s.emitIntervalEndLocked(nonce, cap.EndRow, boundaryRowsThatLeave(cap.Closing))
+	s.emitIntervalEndLocked(nonce, cap.EndRow, closingRowsForStream(cap.Closing))
 	s.storeSealedObservationLocked(rec)
 }
 

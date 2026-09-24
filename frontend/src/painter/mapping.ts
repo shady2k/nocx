@@ -45,12 +45,23 @@ export function createMapping(snapshot: ScreenSnapshot): PixelMapping {
   const pitch = devicePxToCssPx(snapshot.geometry.cellHeightPx, dpr)
   const cols = snapshot.geometry.cols
   const rows = snapshot.geometry.rows
+  // An unmeasured pane (nocx-zg3k3.2.9): every frame carries a zero cell
+  // pixel metric until the client's own measurement is committed, and cols/
+  // rows are real while cellWidthPx/cellHeightPx are not. Left to the
+  // arithmetic below, a zero pitch or cellWidth divides x/y at
+  // pixelToCell(0, 0) into NaN, which is neither < 0 nor >= rows/cols and so
+  // slips the bounds check silently; cellToPixel meanwhile multiplies and
+  // answers every cell with the same {x:0,y:0} instead of refusing. A
+  // legitimate "not measured yet" state must read as null, not as a
+  // coordinate nobody asked for.
+  const measured = cellWidth > 0 && pitch > 0
   return {
     cellToPixel(col: number, row: number): PixelPoint | null {
-      if (col < 0 || col >= cols || row < 0 || row >= rows) return null
+      if (!measured || col < 0 || col >= cols || row < 0 || row >= rows) return null
       return { x: col * cellWidth, y: row * pitch }
     },
     pixelToCell(x: number, y: number): CellPosition | null {
+      if (!measured) return null
       const row = Math.floor(y / pitch)
       if (row < 0 || row >= rows) return null
       const col = Math.floor(x / cellWidth)

@@ -252,6 +252,10 @@ type Sink interface {
 	// SendIntervalEnd writes one end marker: one interval's boundary, after
 	// every row that belongs to it, on the same ordered carrier.
 	SendIntervalEnd(proto.IntervalEndFrame) error
+	// SendClearBoundary writes one sighted erase-saved-lines
+	// (nocx-2v80t.3.17), on the same ordered carrier as the rows and the
+	// end markers, in the position it occurred.
+	SendClearBoundary(proto.ClearBoundaryFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,

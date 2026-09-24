@@ -28,6 +28,7 @@ import (
 // a row batch's FromRow and its decoded LostRows, or an end marker's EndRow.
 type recordedDelivery struct {
 	end      bool
+	clear    bool
 	fromRow  uint64
 	lostRows uint64
 }
@@ -71,6 +72,13 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 func (s *orderedStallingSink) SendIntervalEnd(f proto.IntervalEndFrame) error {
 	s.mu.Lock()
 	s.log = append(s.log, recordedDelivery{end: true, fromRow: f.EndRow})
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *orderedStallingSink) SendClearBoundary(proto.ClearBoundaryFrame) error {
+	s.mu.Lock()
+	s.log = append(s.log, recordedDelivery{clear: true})
 	s.mu.Unlock()
 	return nil
 }

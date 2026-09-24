@@ -56,12 +56,13 @@ const rowsPerFrame = 32
 // a new threshold.
 const maxQueuedRowBatches = 256
 
-// rowEmission is one hand-off from the runtime: a row batch or an
-// interval's end marker. The rows are the runtime's gift — freshly copied
-// by the emulator's report, owned by whoever takes them next — so the pump
-// marshals them OFF the runtime's lock.
+// rowEmission is one hand-off from the runtime: a row batch, an interval's
+// end marker, or a sighted clear boundary. The rows are the runtime's gift —
+// freshly copied by the emulator's report, owned by whoever takes them next
+// — so the pump marshals them OFF the runtime's lock.
 type rowEmission struct {
 	end     bool
+	clear   bool
 	nonce   sessionruntime.FenceNonce
 	from    uint64
 	lost    uint64
@@ -69,7 +70,7 @@ type rowEmission struct {
 	closing []emulator.Row
 }
 
-// rowBridge is the session's sessionruntime.RowStream. BOTH methods are
+// rowBridge is the session's sessionruntime.RowStream. All three methods are
 // called with the runtime's lock held: they must not block, must not call
 // back into the runtime, and do nothing here but hand off.
 type rowBridge struct{ hs *hostSession }
@@ -82,6 +83,14 @@ func (b *rowBridge) IntervalEnd(nonce sessionruntime.FenceNonce, endRow uint64, 
 	b.hs.enqueueRowEmission(rowEmission{end: true, nonce: nonce, from: endRow, closing: closing})
 }
 
+// ClearBoundary hands off one sighted erase-saved-lines (nocx-2v80t.3.17), on
+// the same FIFO the rows and the end markers travel, so it reaches the wire
+// in the position it occurred and can never be attributed to the wrong side
+// of a row.
+func (b *rowBridge) ClearBoundary() {
+	b.hs.enqueueRowEmission(rowEmission{clear: true})
+}
+
 // enqueueRowEmission appends one emission to the FIFO, or — for a ROW BATCH
 // only, and only past maxQueuedRowBatches — drops it. Dropping is the honest
 // answer to a wedged wire: blocking would stall the PTY's ingest under the
@@ -92,15 +101,18 @@ func (b *rowBridge) IntervalEnd(nonce sessionruntime.FenceNonce, endRow uint64, 
 // so the coordinator sees precisely the gap the drop opened rather than a
 // FromRow that jumped for no stated reason.
 //
-// An END MARKER never takes this path: it always appends, because the
-// bound exists to shed load, and shedding the one frame that closes a
-// command's block would leave that block open forever with nothing left in
-// the stream that could ever close it (nocx-2v80t.3.15). The append itself
-// cannot block — it is a mutex-guarded slice append, not an I/O wait — so
-// exempting it costs the ingest nothing.
+// An END MARKER, and a CLEAR BOUNDARY beside it, never take this path: they
+// always append, because the bound exists to shed load, and shedding the one
+// frame that closes a command's block — or the one frame recording that its
+// saved lines were erased — would either leave that block open forever with
+// nothing left in the stream that could ever close it (nocx-2v80t.3.15), or
+// leave a real erase unrecorded, which the record-never-deletes design
+// (nocx-zg3k3.10.3) makes the ONLY chance to hide what it bounds. Neither
+// append can block — it is a mutex-guarded slice append, not an I/O wait —
+// so exempting them costs the ingest nothing.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	s.rowMu.Lock()
-	if !em.end && s.rowQueuedBatches >= maxQueuedRowBatches {
+	if !em.end && !em.clear && s.rowQueuedBatches >= maxQueuedRowBatches {
 		s.rowMu.Unlock()
 		s.rowsDropped.Add(1)
 		s.rowsLostPending.Add(uint64(len(em.rows))) //nolint:gosec // a row count, not a byte count
@@ -110,7 +122,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		return
 	}
 	s.rowQueue = append(s.rowQueue, em)
-	if !em.end {
+	if !em.end && !em.clear {
 		s.rowQueuedBatches++
 	}
 	s.rowMu.Unlock()
@@ -135,7 +147,7 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 	em := s.rowQueue[0]
 	s.rowQueue[0] = rowEmission{}
 	s.rowQueue = s.rowQueue[1:]
-	if !em.end {
+	if !em.end && !em.clear {
 		s.rowQueuedBatches--
 	}
 	return em, true
@@ -166,6 +178,25 @@ func (s *hostSession) serveRows() {
 // dying, and releaseConnection does the teardown — one dead reader must not
 // take the others' frames with it.
 func (s *hostSession) deliverRowEmission(em rowEmission) {
+	if em.clear {
+		payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
+		if err != nil {
+			s.log.Warn("session clear boundary not encodable", "session", s.id.Session, "err", err)
+			return
+		}
+		s.mu.Lock()
+		subs := s.subscribersLocked()
+		s.mu.Unlock()
+		for _, sub := range subs {
+			if err := sub.sink.SendClearBoundary(proto.ClearBoundaryFrame{
+				Session: s.raw, Subscriber: sub.raw, Payload: payload,
+			}); err != nil {
+				s.log.Warn("session clear boundary not delivered", "session", s.id.Session,
+					"subscriber", sub.id, "err", err)
+			}
+		}
+		return
+	}
 	if em.end {
 		closing, err := encodedRowsOrNothing(em.closing)
 		if err != nil {

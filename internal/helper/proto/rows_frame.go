@@ -72,6 +72,14 @@ const (
 	// row that belongs to it, carrying the screen as the boundary sat on
 	// it.
 	TypeIntervalEnd FrameType = 15
+	// TypeClearBoundary carries one sighted erase-saved-lines
+	// (nocx-2v80t.3.17), on the same ordered carrier and in the position
+	// it occurred: a consumer that reads this plane in order can never
+	// attribute it to the wrong side of a row. It names no row index and
+	// no document — unlike a rows batch or an end marker the fact needs
+	// neither, because the store resolves what it bounds from the
+	// session id alone (content.RecordClearBoundary).
+	TypeClearBoundary FrameType = 16
 )
 
 // OutputRowsFrameHeaderLen is 16 (session) + 16 (subscriber) + 8 (row
@@ -197,6 +205,56 @@ type OutputRowsDoc struct {
 	FromRow  uint64          `json:"fromRow"`
 	LostRows uint64          `json:"lostRows"`
 	Rows     json.RawMessage `json:"rows"`
+}
+
+// ClearBoundaryFrameHeaderLen is 16 (session) + 16 (subscriber): this plane
+// carries no row index, unlike its two siblings above — the store resolves
+// what the boundary bounds from the session id alone
+// (content.RecordClearBoundary), never from a position on this wire.
+const ClearBoundaryFrameHeaderLen = 32
+
+// ClearBoundaryFrame is one decoded clear-boundary sighting, for one
+// subscriber of one session.
+type ClearBoundaryFrame struct {
+	Session    [16]byte
+	Subscriber [16]byte
+	Payload    []byte
+}
+
+// DecodeClearBoundaryFrame reads one clear-boundary frame payload.
+func DecodeClearBoundaryFrame(payload []byte) (ClearBoundaryFrame, error) {
+	if len(payload) < ClearBoundaryFrameHeaderLen {
+		return ClearBoundaryFrame{}, ErrOutputRowsFrameTooShort
+	}
+	var f ClearBoundaryFrame
+	copy(f.Session[:], payload[0:16])
+	copy(f.Subscriber[:], payload[16:32])
+	f.Payload = append([]byte(nil), payload[ClearBoundaryFrameHeaderLen:]...)
+	return f, nil
+}
+
+// EncodeClearBoundaryFrame builds one clear-boundary frame payload. The same
+// bound and the same refusal as the rows frame: the producer bounds its
+// documents by construction.
+func EncodeClearBoundaryFrame(f ClearBoundaryFrame) ([]byte, error) {
+	if len(f.Payload) > MaxOutputRowsPayloadBytes {
+		return nil, ErrOutputRowsFrameTooLarge
+	}
+	out := make([]byte, ClearBoundaryFrameHeaderLen+len(f.Payload))
+	copy(out[0:16], f.Session[:])
+	copy(out[16:32], f.Subscriber[:])
+	copy(out[ClearBoundaryFrameHeaderLen:], f.Payload)
+	return out, nil
+}
+
+// ClearBoundaryDoc is one sighted clear boundary as the document declares
+// it: Kind is a closed discriminator, "clear" today and reserved so a later
+// boundary kind (nocx-zg3k3.10.3's own paging) fits the same shape without
+// widening this one. It carries no cursor: the store resolves what THIS
+// boundary bounds from the session id alone (content.RecordClearBoundary),
+// never from a position on this wire.
+type ClearBoundaryDoc struct {
+	Kind string `json:"kind"`
 }
 
 // IntervalEndDoc closes one interval: the boundary's meeting as 64 lowercase

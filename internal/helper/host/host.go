@@ -263,6 +263,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.rowsData(ctx, payload)
 	case proto.TypeIntervalEnd:
 		h.intervalEndData(ctx, payload)
+	case proto.TypeClearBoundary:
+		h.clearBoundaryData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -407,6 +409,30 @@ func (h *Host) intervalEndData(ctx context.Context, payload []byte) {
 	h.log.Warn("interval end dropped: the helper does not consume end markers",
 		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
 		"endRow", f.EndRow, "bytes", len(f.Payload))
+}
+
+// SendClearBoundary writes one clear-boundary frame: one sighted
+// erase-saved-lines (nocx-2v80t.3.17), on the same ordered carrier as the
+// rows and the end markers. The wire and its writer mutex are the host's,
+// for the same reason SendOutputRows lives here.
+func (h *Host) SendClearBoundary(f proto.ClearBoundaryFrame) error {
+	raw, err := proto.EncodeClearBoundaryFrame(f)
+	if err != nil {
+		return err
+	}
+	return h.write(proto.TypeClearBoundary, raw)
+}
+
+// clearBoundaryData handles an inbound clear-boundary frame, for the reason
+// rowsData does: the wire's direction runs the other way.
+func (h *Host) clearBoundaryData(ctx context.Context, payload []byte) {
+	f, err := proto.DecodeClearBoundaryFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed clear boundary frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("clear boundary dropped: the helper does not consume clear boundaries",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 }
 
 // SendLifecycleData writes raw lifecycle bytes on their dedicated carrier tag.

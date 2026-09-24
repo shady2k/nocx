@@ -12,6 +12,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -119,6 +120,30 @@ func streamRows(t *testing.T, db content.ContentDB, entryID string) []struct {
 		}{loose.From, text.String()})
 	}
 	return out
+}
+
+func assertBlockSealed(t *testing.T, db content.ContentDB, entryID string) {
+	t.Helper()
+	row, err := db.Ledger().Entry(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("Entry(%s): %v", entryID, err)
+	}
+	for _, ex := range row.Executions {
+		for _, artifact := range ex.Artifacts {
+			if artifact.MediaType != content.MediaBlockRows {
+				continue
+			}
+			stored, err := db.Ledger().Artifact(context.Background(), artifact.ID)
+			if err != nil {
+				t.Fatalf("Artifact(%s): %v", artifact.ID, err)
+			}
+			if stored.State != content.ArtifactSealed {
+				t.Fatalf("block %s state = %q, want sealed", entryID, stored.State)
+			}
+			return
+		}
+	}
+	t.Fatalf("entry %s has no block rows artifact", entryID)
 }
 
 // The opposite event order is also load-bearing: ledger submit/start and the
@@ -246,6 +271,64 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 				t.Fatalf("deferred block state = %q, want sealed", stored.State)
 			}
 		}
+	}
+}
+
+// A newer command can end while an older block is flushing deferred rows. The
+// close belongs to the newer attempt, not to the block whose append happened to
+// drain the gate.
+func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first")}); !confirm {
+		t.Fatal("first row was not confirmed")
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, lifecycleFence(0x41))))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+
+	e.ws.blockStream.mu.Lock()
+	firstBlock := e.ws.blockStream.open[session.ID(sid)][first]
+	pending := []pendingRows{{from: 1, rows: []emulator.Row{aStreamRow("deferred")}}}
+	e.ws.blockStream.pending[session.ID(sid)] = pending
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	e.ws.blockStream.mu.Unlock()
+	if firstBlock == nil {
+		t.Fatal("first block was not open")
+	}
+
+	e.ws.closeBlockRows(session.ID(sid), second, 2, []emulator.Row{aStreamRow("second-final")}, "second-close")
+	e.ws.blockStream.mu.Lock()
+	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
+	e.ws.blockStream.mu.Unlock()
+	if parked != 1 {
+		t.Fatalf("newer close parked = %d, want 1", parked)
+	}
+
+	e.ws.blockStream.mu.Lock()
+	delete(e.ws.blockStream.pending, session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), firstBlock, pending, nil)
+
+	assertBlockSealed(t, db, second)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, lifecycleFence(0x42))))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecyclePromptEvt()))
+
+	nextSeq := uint64(8)
+	for i := 3; i <= 30; i++ {
+		attempt := startsACommand(t, e, pub, lane, h, nextSeq, fmt.Sprintf("printf command-%02d", i))
+		if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow(fmt.Sprintf("command-%02d", i))}); !confirm {
+			t.Fatalf("command %d row was not confirmed", i)
+		}
+		fence := lifecycleFence(byte(i))
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, nextSeq+1, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final")})
+		assertBlockSealed(t, db, attempt)
+		if i < 30 {
+			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, nextSeq+2, lifecyclePromptEvt()))
+		}
+		nextSeq += 3
 	}
 }
 

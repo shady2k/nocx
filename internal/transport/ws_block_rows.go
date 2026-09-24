@@ -111,6 +111,7 @@ type pendingRows struct {
 }
 
 type pendingEnd struct {
+	attempt string
 	nonce   string // hex, the completion's own spelling
 	endRow  uint64
 	closing []emulator.Row
@@ -325,7 +326,8 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 	bs.mu.Lock()
 	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
 		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
-			nonce: hexNonce, endRow: endRow, closing: append([]emulator.Row(nil), closing...),
+			attempt: attempt, nonce: hexNonce, endRow: endRow,
+			closing: append([]emulator.Row(nil), closing...),
 		})
 		bs.mu.Unlock()
 		return
@@ -522,7 +524,7 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 			confirmPendingRows(confirm, delivery)
 		}
 		bs.finishPendingRows(sid)
-		bs.drainPendingCloses(s, sid, block.attempt)
+		bs.drainPendingCloses(s, sid)
 		return
 	}
 	store := s.blockStore()
@@ -552,14 +554,14 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 	if len(next) == 0 {
 		bs.flushing[sid] = false
 		bs.mu.Unlock()
-		bs.drainPendingCloses(s, sid, block.attempt)
+		bs.drainPendingCloses(s, sid)
 		return
 	}
 	bs.mu.Unlock()
 	bs.flushPendingRows(s, sid, block, next, confirm)
 }
 
-func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID, attempt string) {
+func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 	for {
 		bs.mu.Lock()
 		closes := bs.pendingCloses[sid]
@@ -572,7 +574,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID, attempt s
 		bs.closing[sid] = true
 		bs.mu.Unlock()
 		for _, end := range closes {
-			s.closeBlockRowsNow(sid, attempt, end.endRow, end.closing, end.nonce)
+			s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce)
 		}
 	}
 }

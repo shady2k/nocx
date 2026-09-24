@@ -259,6 +259,22 @@ type Session struct {
 	// watching — and never loses the indices: departedRows keeps counting
 	// (rowstream.go).
 	rowStream RowStream
+	// pendingScreen are the rows of the interval sealed last that were still
+	// on the screen at its boundary. They leave the screen later — during the
+	// next command, as its output pushes them off — and the emulator reports
+	// them as departures when they do. The interval's block already holds
+	// them as its closing screen, so the stream must not carry them a second
+	// time: the identity of the next reported row against the head of this
+	// list is what tells a row leaving the screen again from the next
+	// command's own output. Held only until the first row that is not one of
+	// them (the screen has been rewritten, so the boundary's rows are gone),
+	// and bounded by the geometry. Nil after the first mismatch.
+	pendingScreen []emulator.Row
+	// suppressedScreenRows counts the rows the stream declined to carry a
+	// second time because they were the interval before's closing screen
+	// leaving the screen again. A count, because a consumer must be able to
+	// tell "nothing left the screen" from "rows were held back".
+	suppressedScreenRows uint64
 	// departedRows is how many departed rows this session has READ off the
 	// emulator's report, in the order it read them. It is the absolute
 	// index space the stream's FromRow and endRow name rows by — the

@@ -84,6 +84,20 @@ type blockStream struct {
 	// prior current interval promoted it. They cannot close the queued block
 	// early: its own rows still have to follow the prior interval's end.
 	queuedEnds map[session.ID][]pendingEnd
+	// closedThrough is the first absolute row not already owned by a
+	// completed interval. Replayed rows below it stay confirmed but cannot
+	// enter the following block.
+	closedThrough map[session.ID]uint64
+	// beyond are the rows that streamed AFTER an interval's end marker but
+	// BEFORE the authenticated completion that names its fence. The fence
+	// and the rows travel on different carriers (ADR-0024 decision 7), so
+	// this window is ordinary: the end marker's own EndRow is the boundary
+	// the moment it arrives, and a row at or above it belongs to the
+	// interval that follows, never to the block the ended interval closes
+	// over. beyondThrough is the exclusive end of what beyond holds, so a
+	// delivery below it is the same rows arriving again.
+	beyond        map[session.ID][]pendingRows
+	beyondThrough map[session.ID]uint64
 	// ends are interval ends parked until their completion publishes the
 	// fence that names them.
 	ends map[session.ID][]pendingEnd
@@ -123,6 +137,48 @@ type pendingEnd struct {
 	nonce   string // hex, the completion's own spelling
 	endRow  uint64
 	closing []emulator.Row
+}
+
+// parkedBoundary is the boundary an interval end marker has already stated
+// while its fence is still on its way: the earliest EndRow among the ends
+// parked for their completions. Rows at and above it streamed after that
+// boundary and belong to the interval that follows. Derived from the parked
+// ends rather than stored, so it cannot drift from them.
+func (bs *blockStream) parkedBoundary(sid session.ID) (uint64, bool) {
+	var bound uint64
+	found := false
+	for _, end := range bs.ends[sid] {
+		if !found || end.endRow < bound {
+			bound, found = end.endRow, true
+		}
+	}
+	return bound, found
+}
+
+// mergePendingRows joins two index-ordered deliveries into one, keeping the
+// order: the store appends a block's rows in order and refuses a delivery
+// that starts anywhere but its own cursor, so the queue a flush reads is
+// ordered by the absolute row each delivery begins at.
+func mergePendingRows(a, b []pendingRows) []pendingRows {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	merged := make([]pendingRows, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].from <= b[j].from {
+			merged = append(merged, a[i])
+			i++
+			continue
+		}
+		merged = append(merged, b[j])
+		j++
+	}
+	merged = append(merged, a[i:]...)
+	return append(merged, b[j:]...)
 }
 
 // splitPendingRowsAt separates deliveries at an interval's absolute end row.
@@ -219,6 +275,15 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 	if bs.pending == nil {
 		bs.pending = make(map[session.ID][]pendingRows)
 	}
+	if bs.closedThrough == nil {
+		bs.closedThrough = make(map[session.ID]uint64)
+	}
+	if bs.beyond == nil {
+		bs.beyond = make(map[session.ID][]pendingRows)
+	}
+	if bs.beyondThrough == nil {
+		bs.beyondThrough = make(map[session.ID]uint64)
+	}
 	if bs.flushing == nil {
 		bs.flushing = make(map[session.ID]bool)
 	}
@@ -243,6 +308,9 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	bs.mu.Lock()
 	opens := bs.open[sid]
+	delete(bs.closedThrough, sid)
+	delete(bs.beyond, sid)
+	delete(bs.beyondThrough, sid)
 	delete(bs.sources, sid)
 	delete(bs.open, sid)
 	delete(bs.current, sid)
@@ -293,6 +361,52 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
 	block := bs.current[sid]
+	if sourced {
+		if closed := bs.closedThrough[sid]; fromRow < closed {
+			skip := closed - fromRow
+			if skip >= uint64(len(rows)) {
+				bs.mu.Unlock()
+				return closed, true
+			}
+			rows = rows[skip:]
+			fromRow = closed
+			lost = 0
+		}
+		// The interval's end marker may have arrived without the completion
+		// that names its fence. Its EndRow is the boundary either way, and
+		// anything at or above it streamed after the boundary: it is held for
+		// the interval that follows rather than appended to the one that is
+		// closing over it.
+		if block != nil {
+			if bound, parked := bs.parkedBoundary(sid); parked {
+				if held := bs.beyondThrough[sid]; fromRow < held {
+					skip := held - fromRow
+					if skip >= uint64(len(rows)) {
+						bs.mu.Unlock()
+						return 0, false
+					}
+					rows = rows[skip:]
+					fromRow = held
+					lost = 0
+				}
+				if fromRow+uint64(len(rows)) > bound { //nolint:gosec // a row count, not a byte count
+					before, after := splitPendingRowsAt([]pendingRows{{from: fromRow, lost: lost, rows: rows}}, bound)
+					if len(after) == 1 {
+						bs.beyond[sid] = append(bs.beyond[sid], after...)
+						held := after[len(after)-1]
+						bs.beyondThrough[sid] = held.from + uint64(len(held.rows)) //nolint:gosec // a row count, not a byte count
+					}
+					if len(before) == 0 {
+						// The whole delivery is past the boundary: it is held,
+						// so the mark must not claim it is written.
+						bs.mu.Unlock()
+						return 0, false
+					}
+					fromRow, lost, rows = before[0].from, before[0].lost, before[0].rows
+				}
+			}
+		}
+	}
 	waiting := bs.waiting[sid]
 	flushing := bs.flushing[sid]
 	pending := len(bs.pending[sid]) > 0
@@ -339,9 +453,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	if !sourced {
 		return 0, false
 	}
-	last := fromRow + uint64(len(rows)) - 1 //nolint:gosec // a row count, not a byte count
+	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
 	if block == nil || !block.kept {
-		return last, true
+		return writtenUpTo, true
 	}
 	store := s.blockStore()
 	if store == nil {
@@ -362,7 +476,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
 		EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
 	})
-	return last, true
+	return writtenUpTo, true
 }
 
 // BlockIntervalEnded delivers the session's interval end: the end marker's
@@ -470,6 +584,14 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			delete(bs.queued, sid)
 		}
 		delete(bs.closing, sid)
+		// The rows held past this interval's boundary belong to the interval
+		// that follows: they join the queue the next block's flush reads, in
+		// index order, and the hold's mark goes with them.
+		if held := bs.beyond[sid]; len(held) > 0 {
+			delete(bs.beyond, sid)
+			delete(bs.beyondThrough, sid)
+			bs.pending[sid] = mergePendingRows(bs.pending[sid], held)
+		}
 		ends := bs.pendingCloses[sid]
 		kept := ends[:0]
 		for _, end := range ends {
@@ -535,6 +657,18 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		fail()
 		return false
 	}
+	// The block owns its own departed rows: [begin, endRow). Its closing
+	// screen is appended at [endRow, endRow+len(closing)) — the tail the
+	// block displays — and the RUNTIME owns those rows from here: it holds
+	// the screen it emitted and never streams it again, so no delivery for
+	// the next interval carries them (rowstream.go). What remains this
+	// coordinator's to refuse is a delivery below the closed interval's own
+	// boundary: the past arriving again.
+	bs.mu.Lock()
+	if endRow > bs.closedThrough[sid] {
+		bs.closedThrough[sid] = endRow
+	}
+	bs.mu.Unlock()
 	finish()
 	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
 	promote()
@@ -793,7 +927,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 
 func confirmPendingRows(confirm func(uint64), delivery pendingRows) {
 	if confirm != nil {
-		confirm(delivery.from + uint64(len(delivery.rows)) - 1) //nolint:gosec // a row count, not a byte count
+		confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
 	}
 }
 

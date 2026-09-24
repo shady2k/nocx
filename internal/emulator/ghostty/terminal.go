@@ -193,6 +193,15 @@ type terminal struct {
 type sbBaseline struct {
 	rows  int
 	valid bool
+	// owed is how many rows a reflow moved back INTO the screen out of the
+	// scrollback. A taller screen is refilled from history, and those rows
+	// were reported as departures the first time they left; when the screen
+	// scrolls them off again the depth grows by the same rows, which is the
+	// SAME leave and not a new one. The port's rule is explicit — "a resize
+	// reflows the screen rather than scrolling it, so reflowed rows are not
+	// departures" — so the debt is paid before any growth is reported, and a
+	// consumer's absolute row space never sees a row twice.
+	owed int
 }
 
 var (
@@ -324,6 +333,11 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 		return nil, fmt.Errorf("ghostty: %w: %dx%d cells, %dx%d px", emulator.ErrOutOfRange,
 			g.Cols, g.Rows, g.CellWidthPx, g.CellHeightPx)
 	}
+	// The depth either side of the resize is the debt: a taller screen fills
+	// itself out of history — the depth shrinks by exactly the rows it took —
+	// and those rows must not be reported as departures when they leave the
+	// screen a second time.
+	before, _ := t.scrollbackLocked()
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		// The geometry in force is the one the library refused to leave, so
@@ -336,6 +350,14 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	// it reshapes did not leave the screen, so the departure baseline is
 	// taken again rather than let a reflowed count read as departures.
 	t.rebaselineLocked()
+	if after, aerr := t.scrollbackLocked(); aerr == nil {
+		if screen, serr := t.screenLocked(); serr == nil {
+			base := &t.sb[sbIndex(screen)]
+			if base.valid && before > after {
+				base.owed += before - after
+			}
+		}
+	}
 	return t.takeReplies(), nil
 }
 
@@ -423,7 +445,18 @@ func (t *terminal) noteDepartedLocked() {
 	}
 	if base.valid {
 		if d := h - base.rows; d > 0 {
-			t.captureDepartedLocked(h-d, h)
+			// The growth a reflow's rows make when they leave a second time
+			// is not a departure: they are already reported, and their debt
+			// is paid first. Only what is left after it is new output
+			// leaving, and those are the newest rows of the growth.
+			fresh := d
+			if fresh > base.owed {
+				fresh -= base.owed
+				base.owed = 0
+				t.captureDepartedLocked(h-fresh, h)
+			} else {
+				base.owed -= fresh
+			}
 		} else if d < 0 && h > 0 {
 			// The depth shrank while rows were still retained: the
 			// library's retention budget pruned whole pages inside this

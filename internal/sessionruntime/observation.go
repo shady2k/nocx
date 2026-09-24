@@ -222,6 +222,30 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 	if len(rows) == 0 && lost == 0 {
 		return
 	}
+	// The interval sealed last left a screen behind, and its rows leave the
+	// screen during the command that follows — reported as departures, at
+	// their own pace. The block holds them as its closing screen already, so
+	// they are not streamed again: a reported row that still equals the head
+	// of what the boundary left is that row leaving, and everything after the
+	// first row that is not one of them is the next command's own output.
+	// The window is cleared at the first row that is not one of them, so a
+	// cleared or rewritten screen cannot suppress the next command's rows
+	// (nocx-2v80t.3.9). A struck feed suppresses nothing: the hole it names
+	// rides the batch that follows it, and a batch withheld whole would
+	// swallow that marker.
+	if lost == 0 && len(s.pendingScreen) > 0 {
+		for len(rows) > 0 && len(s.pendingScreen) > 0 && sameScreenRow(rows[0], s.pendingScreen[0]) {
+			rows = rows[1:]
+			s.pendingScreen = s.pendingScreen[1:]
+			s.suppressedScreenRows++
+		}
+	}
+	if len(rows) == 0 && lost == 0 {
+		// A struck feed with an empty report still carries its marker: a
+		// batch withheld whole would swallow the hole it names.
+		return
+	}
+	s.pendingScreen = nil
 	from := s.departedRows
 	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
 	if rs := s.rowStream; rs != nil {
@@ -281,11 +305,67 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if closing, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = closing
 	}
-	s.emitIntervalEndLocked(nonce, s.departedRows, rec.Closing.Lines)
+	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(rec.Closing))
+	s.emitIntervalEndLocked(nonce, s.departedRows, boundaryRowsThatLeave(rec.Closing))
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
 	s.storeSealedObservationLocked(rec)
+}
+
+// sameScreenRow is whether two rows are the same row of the screen: every
+// cell's grapheme, footprint and hasText, and the row's own wrap flags. The
+// styles are not part of it on purpose: a re-departing screen row comes back
+// out of the scrollback with the cells it had, and a strict style comparison
+// would miss it on a theme change, while a false match costs at most one
+// suppressed row — a row that arrived at the position the boundary's screen
+// occupies, which is the ambiguity the block's closing screen already
+// absorbs (nocx-2v80t.3.9).
+func sameScreenRow(a, b emulator.Row) bool {
+	if a.Wrap != b.Wrap || a.Continuation != b.Continuation || len(a.Cells) != len(b.Cells) {
+		return false
+	}
+	for i := range a.Cells {
+		if a.Cells[i] != b.Cells[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// SuppressedScreenRows is how many rows the runtime declined to stream a
+// second time because they were the interval before's closing screen leaving
+// it again — rows a block already holds. A count, so "nothing left the
+// screen" and "rows were suppressed" are never confused.
+func (s *Session) SuppressedScreenRows() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.suppressedScreenRows
+}
+
+// boundaryRowsThatLeave is the rows of a boundary screen that are going to
+// leave it: the rows at and above the cursor, in order. Everything below the
+// cursor is written over in place by the next command's output and never
+// departs, so a consumer that took the whole screen for the interval's tail
+// would claim absolute rows no departure ever fills — and eat that command's
+// own first rows instead (nocx-2v80t.3.9). A screen the alternate buffer owns
+// leaves nothing at all: a full-screen program's rows never enter the
+// scrollback, which is the same reason nothing departs while it holds the
+// pane.
+//
+// The record keeps the WHOLE screen — this trims what the end marker carries,
+// because only that is a claim about rows that are going to leave — and the
+// two are read at one instant with the interval's departure count
+// (TestTheClosingScreenCarriesTheRowsThatLeaveNext).
+func boundaryRowsThatLeave(scr ObservationScreen) []emulator.Row {
+	if scr.AltScreen || len(scr.Lines) == 0 {
+		return nil
+	}
+	end := scr.Cursor.Y + 1
+	if end <= 0 || end > len(scr.Lines) {
+		end = len(scr.Lines)
+	}
+	return scr.Lines[:end]
 }
 
 // emitIntervalEndLocked hands the row stream one interval's end marker: the
@@ -379,7 +459,8 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Closing:      cap.Closing,
 		Loss:         cap.Loss,
 	}
-	s.emitIntervalEndLocked(nonce, cap.EndRow, cap.Closing.Lines)
+	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(cap.Closing))
+	s.emitIntervalEndLocked(nonce, cap.EndRow, boundaryRowsThatLeave(cap.Closing))
 	s.storeSealedObservationLocked(rec)
 }
 

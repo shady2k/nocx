@@ -276,12 +276,16 @@ test.describe('command editor (nocx-4ff)', () => {
     await page.keyboard.press('Enter')
 
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 5000 })
-    await page.waitForFunction(
-      () =>
-        (document
-          .querySelector<HTMLElement>('.pane.active .xterm-live-container')
-          ?.getBoundingClientRect().height ?? -1) < 0.5,
-    )
+    // The live region is NOT waited back down to nothing: nocx-2v80t.3.3
+    // retired that collapse on purpose — "nothing clears the terminal, and
+    // the live region is the whole surface" — the rows a command printed
+    // stay on it rather than being handed back and forth, and
+    // controller.test.ts's own settle test asserts the region's mode stays
+    // 'running' straight through a freeze. What this spec is actually
+    // about — the composer's box coming back at the geometry it left — does
+    // not depend on that region's height, only on the editor's own
+    // visibility (above) and the glide that repositions the stack around it
+    // (below); waiting on a height that no longer changes waited forever.
     // And wait for the settle to finish. The pane MOVES to its new geometry
     // rather than jumping to it, so a measurement taken mid-glide reads the
     // transform, not the layout (nocx-i4h04.2).

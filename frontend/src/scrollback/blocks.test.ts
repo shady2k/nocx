@@ -4361,30 +4361,37 @@ describe('backend-owned block rows', () => {
   }
 
   it('paints streamed rows while running and replaces them as history grows', () => {
+    // A real row never carries a literal '\n' cell — the grid has no such
+    // glyph, the break is the ROW BOUNDARY itself — so the fixture holds
+    // plain row text and the newline blockOutputText must supply comes only
+    // from joining `.term-grid-row` elements, never from an embedded
+    // character (nocx-2v80t.3.19: a fixture that folded '\n' into the row
+    // text let this pass through the untested `.term-line`-only fallback
+    // while the painter's own rows went unread).
     const { manager } = newManager()
     manager.startBlock('printf rows', '/repo', 0)
     manager.applyStoredRows('entry-stream', {
-      lines: [{ from: 0, row: row('first \n') }],
+      lines: [{ from: 0, row: row('first ') }],
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
     })
     manager.bindAttempt('entry-stream')
-    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \n')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first ')
 
     manager.applyStoredRows('entry-stream', {
       lines: [
-        { from: 0, row: row('first \n') },
-        { from: 1, row: row('second\n') },
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
       ],
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
     })
-    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
 
     const frozen = manager.freezeBlock(() => undefined, 0, 1)!
-    expect(blockOutputText(frozen.el)).toBe('first \nsecond\n')
+    expect(blockOutputText(frozen.el)).toBe('first \nsecond')
   })
 
   it('never lets a block.grew fetch that resolves late shrink an already-painted block', () => {
@@ -4401,25 +4408,25 @@ describe('backend-owned block rows', () => {
 
     manager.applyStoredRows('entry-stream', {
       lines: [
-        { from: 0, row: row('first \n') },
-        { from: 1, row: row('second\n') },
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
       ],
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
     })
-    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
 
     // The stale response: only the first row, as read before the second one
     // had appended.
     manager.applyStoredRows('entry-stream', {
-      lines: [{ from: 0, row: row('first \n') }],
+      lines: [{ from: 0, row: row('first ') }],
       droppedRows: 0,
       lostRows: 0,
       truncated: null,
     })
 
-    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
   })
 
   it('bounds how many never-adopted entries it remembers, evicting the oldest (a lost running fact must not leak forever)', () => {

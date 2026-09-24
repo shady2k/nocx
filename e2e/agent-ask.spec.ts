@@ -273,7 +273,7 @@ async function runCommand(
   // element at all — and the gesture would have nothing to select.
   const block = page.locator('.cmd-block:not(.cmd-block-running)', { hasText: marker }).first()
   await expect(block).toBeVisible({ timeout: 15_000 })
-  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  await expect(block.locator('.cmd-output .term-grid-row').first()).toBeVisible({ timeout: 15_000 })
   return { block }
 }
 
@@ -301,7 +301,7 @@ async function switchToAsk(page: Page): Promise<void> {
  * whole half would have gone on passing while testing nothing. */
 async function pointAtFromRun(block: Locator): Promise<void> {
   const page = block.page()
-  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  await expect(block.locator('.cmd-output .term-grid-row').first()).toBeVisible({ timeout: 15_000 })
   const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   await expect(indicator).toHaveAttribute('data-target', 'shell')
 
@@ -337,7 +337,7 @@ async function pointAtFromRun(block: Locator): Promise<void> {
  *  what these specs are about is what a selection MEANS. */
 async function selectWholeOutput(block: Locator): Promise<void> {
   await block.evaluate((el) => {
-    const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
+    const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-grid-row'))
     if (lines.length === 0) throw new Error('block has no output rows to point at')
     const first = lines[0]
     const last = lines[lines.length - 1]
@@ -390,7 +390,7 @@ async function confirmOffer(page: Page): Promise<void> {
  * would go on passing after the offer stopped being offered. */
 async function pointAt(block: Locator): Promise<void> {
   const page = block.page()
-  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  await expect(block.locator('.cmd-output .term-grid-row').first()).toBeVisible({ timeout: 15_000 })
   await expect(page.locator('.pane.active .ui-mode-indicator:visible')).toHaveAttribute(
     'data-target',
     'agent',

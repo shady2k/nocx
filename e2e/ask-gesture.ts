@@ -98,7 +98,7 @@ export async function expectGranted(
  */
 async function selectWholeOutput(block: Locator): Promise<void> {
   await block.evaluate((el) => {
-    const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
+    const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-grid-row'))
     if (lines.length === 0) throw new Error('block has no output rows to point at')
     const first = lines[0]
     const last = lines[lines.length - 1]
@@ -181,7 +181,7 @@ export async function switchToAsk(page: Page): Promise<void> {
 export async function markBlock(block: Locator): Promise<void> {
   const page = block.page()
   await expect(
-    block.locator('.cmd-output .term-line').first(),
+    block.locator('.cmd-output .term-grid-row').first(),
     'the block to mark has no output rows yet',
   ).toBeVisible({ timeout: 15_000 })
   await expect(
@@ -228,7 +228,7 @@ export async function runCommand(page: Page, command: string, marker: string): P
     timeout: 15_000,
   })
   await expect(
-    block.locator('.cmd-output .term-line').first(),
+    block.locator('.cmd-output .term-grid-row').first(),
     `the block for \`${command}\` froze with no output rows`,
   ).toBeVisible({ timeout: 15_000 })
   return block

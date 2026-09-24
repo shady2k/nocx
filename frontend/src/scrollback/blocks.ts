@@ -1047,13 +1047,19 @@ function isOutputEmpty(html: string): boolean {
  * appended after the frame — the overflow menu must resolve it from the
  * block at READ time, never hold a builder-time reference that was empty
  * or null. The extraction itself is kind-agnostic: every block's output
- * is `.term-line` rows or plain text.
+ * is `.term-line` rows (an answer body, or a block drawn by the retired
+ * serializer) or `.term-grid-row` rows (a command block painted from
+ * backend rows, `paint-row.ts`'s own class — nocx-2v80t.3.19) or plain
+ * text.
  *
- * The serializer emits one `<span class="term-line">` per logical line and
- * nothing between them — the line breaks you see are `display: block` in
- * CSS, not characters in the DOM. So `outputEl.textContent` returned the
- * whole block as a single run, and "Copy output" pasted a hundred rows of
- * `top` onto one line (nocx-6w4z).
+ * Neither row class carries a newline of its own — the line breaks you see
+ * are `display: block` in CSS, not characters in the DOM, for either
+ * painter — so `outputEl.textContent` returned the whole block as a single
+ * run, and "Copy output" pasted a hundred rows of `top` onto one line
+ * (nocx-6w4z). The two classes never mix inside one block, but the
+ * selector asks for both — never twice, since a node cannot carry two row
+ * classes at once — and `querySelectorAll` with a selector list still
+ * returns them in DOM order.
  *
  * Falls back to `textContent` when there are no line spans, which is what
  * a block with plain text content would give.
@@ -1062,7 +1068,7 @@ export function blockOutputText(blockEl: HTMLElement | null): string {
   if (!blockEl) return ''
   const outputEl = blockEl.querySelector('.cmd-output')
   if (!outputEl) return ''
-  const lines = outputEl.querySelectorAll('.term-line')
+  const lines = outputEl.querySelectorAll('.term-line, .term-grid-row')
   if (lines.length === 0) return outputEl.textContent ?? ''
   return Array.from(lines)
     .map((line) => line.textContent ?? '')

@@ -9,6 +9,7 @@ package session
 // internal/helper/client).
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -177,6 +178,18 @@ func validateRowSchema(t *testing.T, s *jsonschema.Schema, raw []byte) {
 // and carries the screen as the boundary sat on it. The payloads the pump
 // produced satisfy their schemas — the check a test-built payload cannot
 // make, made here against the bridge's own output.
+//
+// The fence sits mid-feed, with more of the SAME row's bytes ("tail") right
+// after it and nothing to flush in between — the shape nocx.bash's own
+// PROMPT_COMMAND writes (the fence, then 133;D, 133;A, OSC 7, then the
+// visible PS1 text, all back to back). The runtime feeds the emulator up to
+// the fence's own end before it ever asks for a screen (nocx-2v80t.3.12), so
+// the closing screen this boundary carries is the screen exactly as the
+// fence left it — "prompt", not "prompttail" — and "tail"'s own scroll,
+// which happens strictly AFTER the fence, belongs to the interval that
+// follows rather than to this one: EndRow stops at 7, not 8, and the row it
+// departs (still-undeparted flood content, unrelated to "tail" or "prompt")
+// streams separately, ahead of the boundary that excludes it.
 func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 	_, rt, sink := rowsBridgeSession(t, 80, 24)
 
@@ -198,9 +211,11 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 
 	waitForRows(t, sink, 2, 1)
 
-	// Two batches: the flood's seven departures, then the fence line's own
-	// departure (its feed scrolls once more) — both the interval's, the end
-	// marker after them.
+	// Two batches: the flood's seven departures, then one more row the
+	// trailing "tail\r\n" scrolls off — a row the flood itself had not yet
+	// departed, unrelated to "tail" or "prompt", and NOT this boundary's:
+	// it streams because it left the screen, but the end marker below
+	// excludes it from the interval that just closed.
 	frames := sink.rowFrames()
 	if len(frames) != 2 {
 		t.Fatalf("the pump sent %d row frames, want 2", len(frames))
@@ -216,8 +231,23 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 	if len(ends) != 1 {
 		t.Fatalf("the pump sent %d end markers, want 1", len(ends))
 	}
-	if ends[0].EndRow != 8 {
-		t.Fatalf("the end marker stops at row %d, want 8 — everything the interval departed, fence line included", ends[0].EndRow)
+	if ends[0].EndRow != 7 {
+		t.Fatalf("the end marker stops at row %d, want 7 — bytes the SAME feed wrote after the fence (\"tail\") belong to the interval that follows, never to this one (nocx-2v80t.3.12)", ends[0].EndRow)
+	}
+	var closing struct {
+		Closing []struct {
+			Text string `json:"text"`
+		} `json:"closing"`
+	}
+	if err := json.Unmarshal(ends[0].Payload, &closing); err != nil {
+		t.Fatalf("decode the end marker's own payload: %v", err)
+	}
+	if len(closing.Closing) == 0 {
+		t.Fatal("the end marker's closing screen carries no rows")
+	}
+	if last := closing.Closing[len(closing.Closing)-1].Text; last != "prompt" {
+		t.Fatalf(`the closing screen's last row reads %q, want "prompt": `+
+			`"tail", written after the fence in the same feed, leaked into this interval's own closing screen`, last)
 	}
 
 	// The real payloads, against their contracts.

@@ -116,8 +116,13 @@ func TestTheClosingScreenCarriesTheRowsThatLeaveNext(t *testing.T) {
 	if suppressed == 0 {
 		t.Fatal("no row of the boundary's screen left it: the boundary and its screen disagree")
 	}
-	if suppressed > uint64(len(closing)) {
-		t.Fatalf("the runtime suppressed %d rows, want at most the closing screen's %d", suppressed, len(closing))
+	// The suppression window (installed from the UNTRIMMED screen) may hold
+	// one entry more than the interval's own closing append streamed: its
+	// cursor row, blank at the fence and never part of this interval's own
+	// output (nocx-2v80t.3.12; closingRowsForStream), still belongs in the
+	// window so whatever departs there next is recognised and suppressed.
+	if suppressed > uint64(len(closing))+1 {
+		t.Fatalf("the runtime suppressed %d rows, want at most the closing screen's %d (+1 for its own trimmed cursor row)", suppressed, len(closing))
 	}
 	boundaryTexts := map[string]bool{}
 	for _, row := range closing {
@@ -257,8 +262,12 @@ func TestDepartedRowsStreamOnceInOrderBeforeTheEnd(t *testing.T) {
 	if end.endRow != 7 {
 		t.Fatalf("the end marker stops at row %d, want 7 — everything the interval departed", end.endRow)
 	}
-	if len(end.closing) != 24 {
-		t.Fatalf("the end marker carries %d closing rows, want the 24-row screen", len(end.closing))
+	// 23, not the screen's 24: the trailing entry is the cursor's own row,
+	// blank at the fence's instant, and the interval's own closing append
+	// never carries a row it wrote nothing into (nocx-2v80t.3.12) — the
+	// suppression window installed for what follows still holds all 24.
+	if len(end.closing) != 23 {
+		t.Fatalf("the end marker carries %d closing rows, want the screen's 24 minus its blank cursor row", len(end.closing))
 	}
 	if last := streamLastText(end.closing); last != "L000029" {
 		t.Fatalf("the closing screen ends at %q, want L000029", last)

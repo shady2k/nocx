@@ -1060,6 +1060,17 @@ func (s *Session) repairLocked() error {
 // — one work unit each — and never in a count inside them: `CSI 1000000000 b`
 // costs what its sixteen bytes cost here, and the expansion (and its clamp) is
 // the emulator's (ADR-0065).
+//
+// b is fed to the emulator in one or more sub-feeds, split at each complete
+// fence marker's own end (fence_split.go, nocx-2v80t.3.12): a pty read often
+// hands this call the fence AND the bytes the shell's own PROMPT_COMMAND
+// writes right after it (133;D, 133;A, OSC 7, the visible PS1 text) in one
+// feed, with nothing to flush in between. Feeding the whole thing before
+// ever reading the screen would make the fence's own closing screen — the
+// boundary window the next interval is judged against — read whatever the
+// NEXT command's prompt had already drawn into it. Splitting costs nothing
+// when no fence is present: the loop below runs its body exactly once, over
+// the whole of b, and behaves exactly as it did before this split existed.
 func (s *Session) Ingest(b []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1077,45 +1088,75 @@ func (s *Session) Ingest(b []byte) error {
 	// carries none of the output that opened it (observation.go).
 	s.openObservationLocked()
 
-	replies, err := s.emulator.Ingest(b)
-	if err != nil {
-		// The emulator refused bytes it was handed, so what it holds is not
-		// the whole stream and no attach may be told otherwise: the session
-		// says so, in the same breath as reporting the failure.
-		s.completeness = CompletenessLostIngest
-		return err
-	}
-	// The program's own answer is handed to the reply sink on the ordered
-	// path. A failure here is reported, and it does NOT swallow what the
-	// stream produced: the bytes reached the emulator, so the effects the
-	// program asked for and the frame the screen moved to are owed to the
-	// consumer either way. An effect dropped because a reply could not be
-	// delivered is a bell that rings nowhere and is never reported as lost.
-	replyErr := s.deliverReplyLocked(replies)
-	// The departure report is drained BEFORE the effects are read, because
-	// one of them may carry the fence that seals this record: a feed's own
-	// departures belong to the interval that feed belongs to (observation.go).
-	s.drainObservationLocked(len(b))
-	for _, e := range s.emulator.Effects() {
-		if e.Kind == emulator.EffectFence {
-			// The join: a fence the emulator drained LOCATES the
-			// authenticated half of the rendezvous (ADR-0024 decision 1)
-			// and is not a consumer payload, so it never reaches
-			// effectKindOf or the delivery path below — a kind the
-			// delivery vocabulary does not know is refused there, and a
-			// fenced command must not fail the ingest that carried it.
-			s.sightDrainedFenceLocked(e)
-			continue
+	var replyErr error
+	for rest := b; len(rest) > 0; {
+		chunk := rest
+		if end, ok := nextMarkerSplit(rest); ok {
+			chunk = rest[:end]
 		}
-		s.nextEffect++
-		effect := Effect{
-			ID:   s.nextEffect,
-			At:   s.inc,
-			Kind: effectKindOf(e.Kind),
-			Body: e.Body,
-		}
-		if err := s.deliverLocked(effectDelivery(effect)); err != nil {
+		rest = rest[len(chunk):]
+
+		replies, err := s.emulator.Ingest(chunk)
+		if err != nil {
+			// The emulator refused bytes it was handed, so what it holds is
+			// not the whole stream and no attach may be told otherwise: the
+			// session says so, in the same breath as reporting the failure.
+			s.completeness = CompletenessLostIngest
 			return err
+		}
+		// The program's own answer is handed to the reply sink on the
+		// ordered path. A failure here is reported, and it does NOT swallow
+		// what the stream produced: the bytes reached the emulator, so the
+		// effects the program asked for and the frame the screen moved to
+		// are owed to the consumer either way. An effect dropped because a
+		// reply could not be delivered is a bell that rings nowhere and is
+		// never reported as lost. Later sub-feeds overwrite an earlier
+		// reply failure the same way one combined call always would have —
+		// this is one Ingest, and the caller reads one answer for it.
+		if rerr := s.deliverReplyLocked(replies); rerr != nil {
+			replyErr = rerr
+		}
+		// The departure report is drained BEFORE the effects are read,
+		// because one of them may carry the fence that seals this record: a
+		// feed's own departures belong to the interval that feed belongs to
+		// (observation.go). Draining per sub-feed, in the same order the
+		// bytes arrived, is what keeps this true when a fence split b: the
+		// rows THIS sub-feed departed stream before the end marker its own
+		// fence emits, exactly as they would have for one combined feed.
+		s.drainObservationLocked(len(chunk))
+		for _, e := range s.emulator.Effects() {
+			if e.Kind == emulator.EffectFence {
+				// The join: a fence the emulator drained LOCATES the
+				// authenticated half of the rendezvous (ADR-0024 decision 1)
+				// and is not a consumer payload, so it never reaches
+				// effectKindOf or the delivery path below — a kind the
+				// delivery vocabulary does not know is refused there, and a
+				// fenced command must not fail the ingest that carried it.
+				// Reached with nothing past the fence's own bytes fed yet
+				// (the split above), so the screen read here is the screen
+				// exactly as the fence left it.
+				s.sightDrainedFenceLocked(e)
+				continue
+			}
+			if e.Kind == emulator.EffectOutputMark {
+				// Same reasoning as the fence: a sighted mark locates rather
+				// than authorises (ADR-0024 decision 1), is not a consumer
+				// payload, and reaching here with nothing past its own bytes
+				// fed yet (the split above) is what lets the screen read
+				// inside it be the screen exactly as THIS mark left it.
+				s.sightOutputMarkLocked()
+				continue
+			}
+			s.nextEffect++
+			effect := Effect{
+				ID:   s.nextEffect,
+				At:   s.inc,
+				Kind: effectKindOf(e.Kind),
+				Body: e.Body,
+			}
+			if err := s.deliverLocked(effectDelivery(effect)); err != nil {
+				return err
+			}
 		}
 	}
 	s.tick()

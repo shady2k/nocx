@@ -13,7 +13,13 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
   )
   const firstMarker = markers[0]
   const finalMarker = markers[markers.length - 1]
-  const command = `i=1; while [ "$i" -le 150 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done; IFS= read -r _; while [ "$i" -le 300 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done`
+  // The pause's own `read` is silent (-s): a `read -r` echoes the keystroke
+  // that answers it, and that echo is genuine tty output for a keystroke
+  // this SPEC injects to prove the block grows mid-run — not a boundary
+  // artifact nocx-2v80t.3.12 is about. Reading it silently keeps the test's
+  // own input off the stored output instead of asking the product to guess
+  // which bytes were typed rather than printed.
+  const command = `i=1; while [ "$i" -le 150 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done; IFS= read -rs _; while [ "$i" -le 300 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done`
   const input = page.locator('.pane.active .nocx-editor-input')
   await input.fill(command)
   await page.keyboard.press('Enter')
@@ -77,11 +83,11 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { row: { text: string } })
       .map((line) => line.row.text)
-    const markerPattern = new RegExp(`^ROWS-${nonce}-\\d{3}$`)
-    const storedMarkers = storedRows.filter((row) => markerPattern.test(row))
-    expect(storedMarkers).toHaveLength(markers.length)
-    expect(new Set(storedMarkers).size).toBe(markers.length)
-    expect(storedMarkers).toEqual(markers)
+    // The stored rows are EXACTLY the 300 markers — the shell's echo of the
+    // command line and the next prompt are not painted as output either
+    // (nocx-2v80t.3.12), so this is not a filtered subset check: any extra
+    // row at either end fails it.
+    expect(storedRows).toEqual(markers)
   } finally {
     wire.close()
   }

@@ -59,6 +59,19 @@ const (
 	// can overwrite or scroll those rows before the authenticated half
 	// arrives, and the content must not change when it does.
 	EffectFence
+	// EffectOutputMark is the shell's output-start mark (nocx-2v80t.3.12):
+	// OSC 133 C, unconditionally written by nocx.bash's preexec hook before
+	// every command a shell with authenticated integration hands off, with
+	// no payload. Body is always empty.
+	//
+	// Like EffectFence it LOCATES rather than authorises (ADR-0024 decision
+	// 1 — "C and D have no meaning" as lifecycle authority, and still do
+	// not): it only tells sessionruntime where, inside an interval it has
+	// already authenticated by other means, that interval's own output
+	// begins. It opens nothing, closes nothing and assigns no status; a
+	// sighting with no interval in flight to locate anything in does
+	// nothing at all.
+	EffectOutputMark
 )
 
 // Effect is one non-visual effect the program asked for: a thing that

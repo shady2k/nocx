@@ -158,6 +158,7 @@ var schemaLadder = []migrationStep{
 	{from: 17, to: 18, apply: migrateTerminationReasons17to18, schemaDigest: "f9d5269cf07e28beb22facac42548dcaebf74c3559b65ebec1a73ba7d112f982"},
 	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
+	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -321,6 +322,11 @@ var schemaShapeDigests = map[int]string{
 	// artifacts.media_type's CHECK for application/x-nocx-rows on top of
 	// exactly that shape (nocx-2v80t.3.7).
 	19: "fc842a885ae4009a928c0d099a9be047b71bb6f3710f2407139a9290ccb67eef",
+	// 20 is pinned in the commit that dethrones it, from
+	// testdata/schema_v20.sql — the schemaV1 constant lifted verbatim out of
+	// the tree where `const schemaVersion` held 20. 21 adds clear_boundaries
+	// on top of exactly that shape (nocx-2v80t.3.17).
+	20: "cbf78b0cf92ee5ef3543e35af94ff5fbf83ee31394403d08e07a85e529a84aad",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -330,6 +336,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	17: schema17ObjectNames(),
 	18: schema18ObjectNames(),
 	19: schema19ObjectNames(),
+	20: schema20ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -422,6 +429,15 @@ func schema19ObjectNames() map[string]struct{} {
 	result["table:worker_checkouts"] = struct{}{}
 	result["index:sqlite_autoindex_worker_checkouts_1"] = struct{}{}
 	return result
+}
+
+// schema20ObjectNames is schema19's set unchanged: the 19→20 edge
+// (migrateBlockRowsMediaTypes19to20) rebuilds `artifacts` to widen a CHECK
+// and recreates its two indexes under the SAME names, which changes that
+// table's DDL and no name — the same division of labour every rebuild-only
+// edge keeps (17→18 is the other example, schema18ObjectNames above).
+func schema20ObjectNames() map[string]struct{} {
+	return schema19ObjectNames()
 }
 
 type sqliteSchemaObject struct {
@@ -882,6 +898,31 @@ func migrateAddWorkerCheckouts18to19(ctx context.Context, tx *sql.Tx) error {
   PRIMARY KEY (repo_key, path)
 ) STRICT`); err != nil {
 		return fmt.Errorf("add worker_checkouts table: %w", err)
+	}
+	return nil
+}
+
+// migrateAddClearBoundaries20to21 adds the clear_boundaries table
+// (nocx-2v80t.3.17). Purely additive, exactly as the 16→17 and 18→19 rungs
+// above are: a database written by a build that predates it has no such
+// table, and no row anywhere else refers to one — the DDL itself lives in
+// schemaV1, which `Open` applies right after this walk, so the rung's job is
+// only to exist and to carry the stamp across the edge.
+func migrateAddClearBoundaries20to21(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS clear_boundaries (
+  id          TEXT PRIMARY KEY,
+  pane_id     TEXT REFERENCES panes(id) ON DELETE SET NULL,
+  session_id  TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  ingest_seq  INTEGER NOT NULL,
+  kind        TEXT NOT NULL CHECK (kind IN ('clear')),
+  created_at  INTEGER NOT NULL
+) STRICT`); err != nil {
+		return fmt.Errorf("add clear_boundaries table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL`,
+	); err != nil {
+		return fmt.Errorf("add clear_boundaries_by_pane index: %w", err)
 	}
 	return nil
 }

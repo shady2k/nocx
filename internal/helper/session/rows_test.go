@@ -32,6 +32,7 @@ type rowsSink struct {
 	mu     sync.Mutex
 	rows   []proto.OutputRowsFrame
 	ends   []proto.IntervalEndFrame
+	clears []proto.ClearBoundaryFrame
 	rawRow [][]byte
 }
 
@@ -57,10 +58,23 @@ func (s *rowsSink) SendIntervalEnd(f proto.IntervalEndFrame) error {
 	return nil
 }
 
+func (s *rowsSink) SendClearBoundary(f proto.ClearBoundaryFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clears = append(s.clears, f)
+	return nil
+}
+
 func (s *rowsSink) rowFrames() []proto.OutputRowsFrame {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]proto.OutputRowsFrame(nil), s.rows...)
+}
+
+func (s *rowsSink) clearFrames() []proto.ClearBoundaryFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]proto.ClearBoundaryFrame(nil), s.clears...)
 }
 
 func (s *rowsSink) endFrames() []proto.IntervalEndFrame {
@@ -255,6 +269,75 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 	validateRowSchema(t, rowSchema, frames[0].Payload)
 	endSchema := loadRowSchema(t, "session.interval-end.schema.json")
 	validateRowSchema(t, endSchema, ends[0].Payload)
+}
+
+// waitForClear waits until the pump has delivered at least n clear-boundary
+// frames — an observable state, never a duration.
+func waitForClear(t *testing.T, sink *rowsSink, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if got := len(sink.clearFrames()); got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the pump never delivered %d clear-boundary frames", n)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// TestTheBridgeCarriesAClearBoundary (nocx-2v80t.3.17): a real erase — ED3,
+// the sequence `clear` emits — reaches the sink as its own frame, over the
+// real runtime and the real bridge, with a payload that satisfies its
+// contract. The check a test-built payload cannot make: this is the
+// bridge's own output, not a document the test assembled.
+func TestTheBridgeCarriesAClearBoundary(t *testing.T) {
+	_, rt, sink := rowsBridgeSession(t, 80, 24)
+
+	rowsFeed(t, rt, 0, 30) // real scrollback behind it, the state `clear` erases
+	waitForRows(t, sink, 1, 0)
+
+	if err := rt.Ingest([]byte("\x1b[H\x1b[2J\x1b[3J")); err != nil {
+		t.Fatalf("ingest the clear sequence: %v", err)
+	}
+	waitForClear(t, sink, 1)
+
+	frames := sink.clearFrames()
+	if len(frames) != 1 {
+		t.Fatalf("the pump sent %d clear-boundary frames, want 1", len(frames))
+	}
+	if len(frames[0].Payload) == 0 {
+		t.Fatal("the clear-boundary frame carries no payload")
+	}
+	schema := loadRowSchema(t, "session.clear-boundary.schema.json")
+	validateRowSchema(t, schema, frames[0].Payload)
+}
+
+// TestErasingTheDisplayAloneCarriesNoClearBoundary: ED2 with no ED3 — a
+// full-screen program redrawing its own view — must never reach the wire as
+// a clear boundary, the paired acceptance criterion nocx-2v80t.3.17 names by
+// name.
+func TestErasingTheDisplayAloneCarriesNoClearBoundary(t *testing.T) {
+	_, rt, sink := rowsBridgeSession(t, 80, 24)
+
+	rowsFeed(t, rt, 0, 30)
+	waitForRows(t, sink, 1, 0)
+
+	if err := rt.Ingest([]byte("\x1b[H\x1b[2J")); err != nil {
+		t.Fatalf("ingest ED2 alone: %v", err)
+	}
+	// ED2 homes the cursor, so the screen is no longer full: enough lines to
+	// fill it again and overflow once more, waited for as the observable
+	// proof that the ED2 ingest above was fully processed (queued in the
+	// SAME ordered FIFO a clear boundary would have ridden) before this
+	// assertion runs — never a fixed sleep.
+	rowsFeed(t, rt, 1000, 30)
+	waitForRows(t, sink, 2, 0)
+
+	if got := len(sink.clearFrames()); got != 0 {
+		t.Fatalf("ED2 alone produced %d clear-boundary frames, want 0", got)
+	}
 }
 
 // The confirmed-written mark is the helper's one record of what the

@@ -252,4 +252,11 @@ package proto
 // published frame carries (nocx-zg3k3.2.9, review round 1). Zero means unmeasured and is the shape
 // every older caller already sent. Nothing has shipped at 15, so the round
 // that follows widens it rather than bumping again.
+// This is still 15, widened in place for the same reason: the wire grew a
+// THIRD member of the row stream plane, `TypeClearBoundary` — one sighted
+// erase-saved-lines, on the same ordered carrier the rows and their end
+// markers already share (nocx-2v80t.3.17). It carries no row index and no
+// document, only the header the other two already announce here, and the
+// byte is announced for the reason theirs was: a generation that did not
+// know it would resync through a live row stream rather than drop one frame.
 const Version = "15"

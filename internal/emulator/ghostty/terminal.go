@@ -172,6 +172,12 @@ type terminal struct {
 	// stay correct, regardless of which one (if either) a byte ends up
 	// completing.
 	outputMarkIdx int
+	// eraseIdx is the clear-boundary scanner's own position (erase.go): ED3,
+	// `ESC [ 3 J`. Its prefix (ESC `[`) does not overlap the fence's or the
+	// output mark's (ESC `]`), so it needs no shared divergence point with
+	// them — it is tracked in the same pass over the bytes purely because
+	// scanMarkers is the one place bytes are scanned at all.
+	eraseIdx int
 	// departed holds the rows that left the screen, captured at the instant
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
@@ -687,33 +693,38 @@ func (t *terminal) ingestLocked(b []byte) {
 			t.sightFence()
 		case markKindOutputMark:
 			t.sightOutputMark()
+		case markKindClearBoundary:
+			t.sightEraseSavedLines()
 		}
 		start += n
 	}
 }
 
-// markKind is which sighted marker scanMarkers found, if either.
+// markKind is which sighted marker scanMarkers found, if any.
 type markKind int
 
 const (
 	markKindNone markKind = iota
 	markKindFence
 	markKindOutputMark
+	markKindClearBoundary
 )
 
-// scanMarkers advances the fence scanner (fence.go) and the output-mark
-// scanner (output_mark.go) together, byte by byte, and answers how many
-// bytes of b may be fed to the library before EITHER one completes —
-// whichever comes first — and which one that was.
+// scanMarkers advances the fence scanner (fence.go), the output-mark scanner
+// (output_mark.go) and the clear-boundary scanner (erase.go) together, byte
+// by byte, and answers how many bytes of b may be fed to the library before
+// ANY of them completes — whichever comes first — and which one that was.
 //
-// The two sequences share a five-byte prefix (ESC ] 1 3 3) and diverge at
-// the sixth ('7' for the fence, ';' for the output mark), so this is one
-// pass over the bytes rather than two independent scans of the same slice:
-// a second, independent scan would advance the OTHER candidate's position
-// past bytes the caller only committed the FIRST candidate's length to
-// vt_write, corrupting it for the next call. Scanning once, updating both
-// candidates' state from the same byte, is what keeps each one's position
-// exactly as far as this scan actually returns.
+// The fence and the output mark share a five-byte prefix (ESC ] 1 3 3) and
+// diverge at the sixth ('7' for the fence, ';' for the output mark); the
+// clear boundary's prefix is ESC `[`, which shares only the leading ESC with
+// the other two. All three are scanned in one pass rather than as
+// independent scans of the same slice, for the reason the fence/output-mark
+// pair already states: a second, independent scan would advance another
+// candidate's position past bytes the caller only committed the FIRST
+// candidate's length to vt_write, corrupting it for the next call. Scanning
+// once, updating every candidate's state from the same byte, is what keeps
+// each one's position exactly as far as this scan actually returns.
 func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 	for i, c := range b {
 		if fenceMatches(t.fenceIdx, c) {
@@ -743,6 +754,18 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.outputMarkIdx = 1
 		} else {
 			t.outputMarkIdx = 0
+		}
+
+		if eraseSavedLinesMatches(t.eraseIdx, c) {
+			if t.eraseIdx == len(eraseSavedLinesFixed)-1 {
+				t.eraseIdx = 0
+				return i + 1, markKindClearBoundary
+			}
+			t.eraseIdx++
+		} else if c == eraseSavedLinesFixed[0] {
+			t.eraseIdx = 1
+		} else {
+			t.eraseIdx = 0
 		}
 	}
 	return len(b), markKindNone
@@ -845,6 +868,16 @@ func (t *terminal) noteDepartedLocked() {
 		// screen — they ceased. The baseline follows the buffer down
 		// without a report, exactly as it does for d == 0, the feed that
 		// scrolls nothing.
+		//
+		// ED3 ITSELF IS SIGHTED SEPARATELY, BY SCANNING (erase.go), NOT
+		// FROM THIS DELTA. A depth transition can only report an erase
+		// that had something to erase — and the common case this feature
+		// exists for is a short session whose live rows never scrolled
+		// into history at all (depth was already 0, so ED3 leaves it at
+		// 0): measured on the e2e, nocx-2v80t.3.17, where a single `echo`
+		// followed by `clear` never moved the depth and a depth-based
+		// signal fired for zero of the runs that mattered. The scanner
+		// below fires on the SEQUENCE, not on its effect on this counter.
 	}
 	base.rows, base.valid, base.torn = h, true, false
 }

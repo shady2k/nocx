@@ -55,6 +55,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/block.cleared.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/block.closed.ts",
       "symbol": ""
     },

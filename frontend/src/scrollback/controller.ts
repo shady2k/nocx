@@ -719,24 +719,32 @@ export class ScrollbackController {
     }
   }
 
-  // ── the shell's `clear` command ──────────────────────────────────────
+  // ── the backend's clear boundary (nocx-2v80t.3.17) ───────────────────
 
   /**
-   * Check if a command was `clear` (or starts with `clear`). If so, clear
-   * all DOM blocks. The xterm viewport is already cleared by the escape
-   * sequence `clear` emits — we just clean up our blocks.
+   * The backend sighted a clear boundary: the program erased the display
+   * and its saved lines (ED3 — the sequence `clear` emits, never plain ED2
+   * alone, which a full-screen program redrawing sends). This is never a
+   * guess from the command's text — the client no longer decides a clear by
+   * what was typed, which is what this replaces (the removed maybeClear
+   * matched the literal word `clear`, guessing at SUBMIT time, before the
+   * command had even run). The backend parses the real VT erase in the
+   * emulator it owns (ADR-0066) and this is purely a rendezvous with that
+   * fact.
+   *
+   * keepEntryId is the block whose interval the erase happened inside —
+   * almost always the `clear` command's own, still running — which must
+   * stay open and keep receiving rows normally; every other block is
+   * removed. Null means nothing was open at the sighting, and every block
+   * is removed. The xterm viewport is already cleared by the escape
+   * sequence itself — this only cleans up the DOM blocks.
    */
-  maybeClear(command: string): void {
-    const trimmed = command.trim()
-    const firstWord = trimmed.split(/\s+/)[0] ?? ''
-    const isClear = firstWord === 'clear' || firstWord.endsWith('/clear')
-    if (isClear) {
-      this._blockManager.clearAll()
-      this._updateSeparator()
-      // The ask chip's block went with the blocks: close the mode, or the
-      // chip's owner would hold a scope that no longer exists (nocx-x8s2.2).
-      this._onClear?.()
-    }
+  onClearBoundary(keepEntryId: string | null): void {
+    this._blockManager.applyClearBoundary(keepEntryId)
+    this._updateSeparator()
+    // The ask chip's block went with the blocks: close the mode, or the
+    // chip's owner would hold a scope that no longer exists (nocx-x8s2.2).
+    this._onClear?.()
   }
 
   /** Preserve follow intent across a synchronous DOM mutation. The geometry

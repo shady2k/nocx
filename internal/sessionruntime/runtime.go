@@ -1147,6 +1147,19 @@ func (s *Session) Ingest(b []byte) error {
 				s.sightOutputMarkLocked()
 				continue
 			}
+			if e.Kind == emulator.EffectClearBoundary {
+				// Unlike the fence and the output mark this is not a
+				// rendezvous with an authenticated event — ED3 is a real VT
+				// fact the emulator's own state already reflects (ADR-0066),
+				// so there is nothing to authenticate and nothing to attach
+				// to an attempt. It is not a consumer payload either (a
+				// program cannot ring the notify bell or set a title this
+				// way), so it never reaches effectKindOf: the vocabulary
+				// there refuses a kind it does not know, and an erase must
+				// not fail the ingest that carried it.
+				s.sightClearBoundaryLocked()
+				continue
+			}
 			s.nextEffect++
 			effect := Effect{
 				ID:   s.nextEffect,

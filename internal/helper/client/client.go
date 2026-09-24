@@ -424,6 +424,8 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.outputRows(payload)
 	case proto.TypeIntervalEnd:
 		c.intervalEnd(payload)
+	case proto.TypeClearBoundary:
+		c.clearBoundary(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}

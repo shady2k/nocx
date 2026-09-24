@@ -76,6 +76,17 @@ func (a *AttachedSession) OnIntervalEnd(f func(IntervalEnd)) {
 	a.mu.Unlock()
 }
 
+// OnClearBoundary registers the coordinator's consumer for this session's
+// sighted clear boundaries (nocx-2v80t.3.17), on the same ordered stream as
+// the rows and the end markers: the erase reaches the consumer in the
+// position it occurred, which is what lets it never be attributed to the
+// wrong side of a row.
+func (a *AttachedSession) OnClearBoundary(f func()) {
+	a.mu.Lock()
+	a.clearBoundaryObs = f
+	a.mu.Unlock()
+}
+
 // ConfirmWritten advances the helper's confirmed-written mark to upToRow:
 // the coordinator's acknowledgement that every row and end marker through
 // this absolute index is written where it must survive. The helper keeps no
@@ -112,6 +123,17 @@ func (a *AttachedSession) deliverIntervalEnd(end IntervalEnd) {
 		return
 	}
 	obs(end)
+}
+
+// deliverClearBoundary hands one sighted clear boundary to the observer.
+func (a *AttachedSession) deliverClearBoundary() {
+	a.mu.Lock()
+	obs := a.clearBoundaryObs
+	a.mu.Unlock()
+	if obs == nil {
+		return
+	}
+	obs()
 }
 
 // outputRows is one TypeOutputRows frame arriving: decode, find the
@@ -187,6 +209,26 @@ func (c *Client) intervalEnd(payload []byte) {
 		return
 	}
 	a.deliverIntervalEnd(IntervalEnd{Nonce: nonce, EndRow: doc.EndRow, Closing: closing})
+}
+
+// clearBoundary is one TypeClearBoundary frame arriving, on the same terms
+// the rows and end-marker frames are. It carries no document — the fact
+// needs none — so decoding it is only the shared header.
+func (c *Client) clearBoundary(payload []byte) {
+	f, err := proto.DecodeClearBoundaryFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed clear boundary frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("clear boundary dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
+		return
+	}
+	a.deliverClearBoundary()
 }
 
 // ErrShortNonce names a nonce that does not spell 32 bytes. It exists so the

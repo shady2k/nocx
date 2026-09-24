@@ -35,6 +35,9 @@ type blockRowsSink interface {
 	DetachBlockRows(sid session.ID)
 	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool)
 	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row)
+	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
+	// on the same ordered callback sequence as the two above.
+	BlockClearBoundary(sid session.ID)
 }
 type blockRowsConfirmationSink interface {
 	AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64))
@@ -61,6 +64,7 @@ func bindBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, atta
 type rowsSource interface {
 	OnOutputRows(func(client.OutputRows))
 	OnIntervalEnd(func(client.IntervalEnd))
+	OnClearBoundary(func())
 }
 
 func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
@@ -95,12 +99,16 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	src.OnIntervalEnd(func(e client.IntervalEnd) {
 		sink.BlockIntervalEnded(sid, [32]byte(e.Nonce), e.EndRow, e.Closing)
 	})
+	src.OnClearBoundary(func() {
+		sink.BlockClearBoundary(sid)
+	})
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			src.OnOutputRows(nil)
 			src.OnIntervalEnd(nil)
+			src.OnClearBoundary(nil)
 			sink.DetachBlockRows(sid)
 			cancel()
 		})

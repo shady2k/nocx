@@ -19,6 +19,7 @@ type fakeSink struct {
 	detached []session.ID
 	rows     []client.OutputRows
 	ends     []client.IntervalEnd
+	clears   []session.ID
 	answer   func(fromRow uint64, n int) (uint64, bool)
 }
 
@@ -48,11 +49,18 @@ func (f *fakeSink) BlockIntervalEnded(_ session.ID, nonce [32]byte, endRow uint6
 	f.ends = append(f.ends, client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: endRow, Closing: closing})
 }
 
+func (f *fakeSink) BlockClearBoundary(sid session.ID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.clears = append(f.clears, sid)
+}
+
 // fakeSource is the attachment's registration half.
 type fakeSource struct {
-	mu   sync.Mutex
-	rows func(client.OutputRows)
-	end  func(client.IntervalEnd)
+	mu    sync.Mutex
+	rows  func(client.OutputRows)
+	end   func(client.IntervalEnd)
+	clear func()
 }
 
 func (s *fakeSource) OnOutputRows(f func(client.OutputRows)) {
@@ -65,6 +73,12 @@ func (s *fakeSource) OnIntervalEnd(f func(client.IntervalEnd)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.end = f
+}
+
+func (s *fakeSource) OnClearBoundary(f func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clear = f
 }
 
 func (s *fakeSource) deliverRows(o client.OutputRows) {
@@ -82,6 +96,15 @@ func (s *fakeSource) deliverEnd(e client.IntervalEnd) {
 	s.mu.Unlock()
 	if f != nil {
 		f(e)
+	}
+}
+
+func (s *fakeSource) deliverClear() {
+	s.mu.Lock()
+	f := s.clear
+	s.mu.Unlock()
+	if f != nil {
+		f()
 	}
 }
 
@@ -180,9 +203,11 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 	var nonce sessionruntime.FenceNonce
 	nonce[0] = 0xab
 	src.deliverEnd(client.IntervalEnd{Nonce: nonce, EndRow: 42, Closing: rowsN(3)})
+	src.deliverClear()
 	stop()
 	stop() // idempotent
 	src.deliverRows(client.OutputRows{FromRow: 42, Rows: rowsN(1)})
+	src.deliverClear()
 
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
@@ -192,8 +217,14 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 	if len(sink.ends) != 1 || sink.ends[0].EndRow != 42 || sink.ends[0].Nonce[0] != 0xab || len(sink.ends[0].Closing) != 3 {
 		t.Fatalf("the end reached the transport as %+v", sink.ends)
 	}
+	if len(sink.clears) != 1 || sink.clears[0] != "s1" {
+		t.Fatalf("the clear boundary reached the transport as %v, want one for session s1", sink.clears)
+	}
 	if len(sink.rows) != 0 {
 		t.Fatalf("a delivery after stop reached the transport: %+v", sink.rows)
+	}
+	if len(sink.clears) != 1 {
+		t.Fatalf("a clear boundary after stop reached the transport: %v", sink.clears)
 	}
 }
 

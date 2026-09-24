@@ -10817,6 +10817,9 @@
       "$ref": "https://nocx.local/contracts/backup.saveToFile.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/block.cleared.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/block.closed.schema.json"
     },
     {

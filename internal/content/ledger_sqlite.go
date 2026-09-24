@@ -576,6 +576,15 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 	if q.PaneID != "" {
 		conds = append(conds, "e.pane_id = ?")
 		args = append(args, q.PaneID)
+		// A clear boundary hides everything at or before it, in this pane,
+		// from an ORDINARY read (nocx-2v80t.3.17): the record never deletes
+		// (nocx-zg3k3.10.3's decision), so this excludes rather than reads a
+		// hidden flag on the entry — a mark this store never writes. Reveal
+		// past the boundary is a later question (nocx-zg3k3.10.3's own
+		// paging) and has no predicate here: an ordinary restore is exactly
+		// the "no reveal requested" case.
+		conds = append(conds, "e.ingest_seq > COALESCE((SELECT MAX(ingest_seq) FROM clear_boundaries WHERE pane_id = ?), 0)")
+		args = append(args, q.PaneID)
 	}
 	// The search box, and it is the SAME predicate the interim path answers
 	// (sqlite.go's Query, nocx-ms7v) — one matching semantics for one product

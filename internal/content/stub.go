@@ -375,6 +375,11 @@ func (s *ledgerStub) CloseBlockRows(_ context.Context, in CloseBlockRows) (Block
 	return BlockRowsSummary{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordClearBoundary(_ context.Context, in RecordClearBoundary) (ClearBoundaryRecorded, error) {
+	s.log.Info("content stub: LedgerRepository.RecordClearBoundary", "session", in.SessionID)
+	return ClearBoundaryRecorded{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, body []byte) error {
 	s.log.Info("content stub: LedgerRepository.AppendChunk",
 		"artifact", artifactID, "seq", seq, "bytes", len(body))

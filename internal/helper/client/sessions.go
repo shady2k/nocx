@@ -356,6 +356,10 @@ type AttachedSession struct {
 	// fired outside it.
 	outputRowsObs  func(OutputRows)
 	intervalEndObs func(IntervalEnd)
+	// clearBoundaryObs is the coordinator's consumer for this session's
+	// sighted clear boundaries (nocx-2v80t.3.17) — see OnClearBoundary. On
+	// the same ordered stream and guarded the same way as the two above.
+	clearBoundaryObs func()
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire

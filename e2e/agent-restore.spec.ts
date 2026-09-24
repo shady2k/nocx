@@ -165,7 +165,9 @@ async function rpc(
  * ("what was stored comes back"), and everything the test CLAIMS is read off
  * the screen afterwards. The media type is the parameter because it is also
  * the fact the restore reads the block's grammar from — a command has an
- * `application/vt` grid, a turn has a `text/plain` original and never a grid.
+ * `application/x-nocx-rows` grid, streamed into history as it ran
+ * (restoredBody's own preference order), a turn has a `text/plain` original
+ * and never a grid.
  */
 async function storedWith(
   page: Page,
@@ -373,8 +375,8 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
 
     // ── All three are in the store, with their bodies, before anything is
     //    killed. Without this the restart races the write.
-    await storedWith(page, endpoint, SHELL_COMMAND, 'application/vt')
-    await storedWith(page, endpoint, AGENT_COMMAND, 'application/vt')
+    await storedWith(page, endpoint, SHELL_COMMAND, 'application/x-nocx-rows')
+    await storedWith(page, endpoint, AGENT_COMMAND, 'application/x-nocx-rows')
     await storedProseChild(page, endpoint, QUESTION)
 
     // ── The application restarts ──────────────────────────────────────────

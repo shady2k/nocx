@@ -704,9 +704,25 @@ func (p *Publisher) openAttemptsIn(snap lifecycle.LaneSnapshot) map[lifecycle.At
 
 // transitionsBelow reports to the emitter every transition of the attempts in
 // `before` that the published Fact cannot carry, and it is the ONLY place
-// either one is reported from, whatever mutation caused it. It runs after that
-// mutation succeeded, outside every lock, and reads nothing further when the
-// emitter has not asked for these transitions.
+// either one is reported from, whatever mutation caused it. It runs after
+// that mutation succeeded, outside every lock, and reads nothing further when
+// the emitter has not asked for these transitions.
+//
+// IT RUNS BEFORE THE CALLER'S OWN publishLane/publishLaneProjection, and that
+// is load-bearing: PublishAttemptClosed is the ONLY path that raises the
+// attempt's completion notification (block-finished; history.recorded is
+// PART of that report too, historically), so a lane fact that beats it to
+// closing the ledger row leaves nothing for it to report — the notification
+// is silently never raised at all, not merely late (measured: swapping this
+// order once made TestLifecycleCompletion_RaisesAttestedBlockFinished
+// observe zero events instead of one). What DOES need to wait for the lane's
+// own fact is only the WIRE DELIVERY of history.recorded, which the emitter
+// (PublishAttemptClosed → publishClosedAttemptHistory, ws_lifecycle.go)
+// defers by stashing it for PublishLifecycle to flush right after it sends
+// the fact naming the same attempt's completion (nocx-2v80t.3.22) — a
+// renderer that read the receipt before that fact still held the attempt
+// open, and a receipt naming an open attempt attaches to nothing and is
+// dropped for good.
 func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
 	if len(before) == 0 {
 		return

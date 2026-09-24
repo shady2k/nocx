@@ -820,6 +820,13 @@ type WSServer struct {
 	// historySources preserves the submitting target and capture scope for an
 	// app attempt when history policy suppresses its row before completion.
 	historySources map[string]historyAttemptScope
+	// pendingHistoryReceipts stashes a completed attempt's history.recorded
+	// data computed by publishClosedAttemptHistory (the transition report
+	// path, which runs BEFORE the lane's own completing fact — see
+	// lifecyclepub.Publisher.Ingest) until PublishLifecycle sends that fact
+	// and flushes it right after — never before (nocx-2v80t.3.22). Keyed by
+	// attempt id, which is never reused.
+	pendingHistoryReceipts map[lifecycle.AttemptID]historyRecordedData
 	// nextHistoryGeneration supplies a non-zero scope generation for commands
 	// whose lifecycle started from the native shell rather than a renderer
 	// submit.

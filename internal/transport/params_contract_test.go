@@ -186,9 +186,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"scope":"directory","cwd":"/tmp"}`),
 			[]byte(`{"scope":"host","host":""}`),
 		},
-		"history.record": {
-			[]byte(`{"command":"echo hi","source":"user","status":"success","paneId":"pane-1"}`),
-		},
 		"history.status": {
 			[]byte(`{}`),
 		},

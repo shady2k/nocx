@@ -101,7 +101,7 @@ export class Pane implements PaneHost {
   readonly id: number
   /** THE PANE'S ONE IDENTITY: a UUIDv7 minted once per pane and never reused
    *  (nocx-tsajw, then nocx-isoph.4 §7). It is the id the layout chain stores,
-   *  the id history.record scopes its captures to, and the id
+   *  the id lifecycle history scopes its captures to, and the id
    *  secrets.paneClosed names when they die — one identity, not one per seam.
    *  Chrome keeps its own numeric id for the DOM; this one is what crosses the
    *  wire, and it is durable: it must survive a restart, so it cannot come
@@ -1470,7 +1470,7 @@ export class PaneManager {
    * the backend refused must not stay on screen.
    *
    * With no layout store the id is still a UUIDv7 and still one identity for
-   * both history.record and secrets.paneClosed — it is simply not stored.
+   * lifecycle history and secrets.paneClosed — it is simply not stored.
    *
    * THE READINESS COMES BACK WITH THE ID because the session may not name a
    * pane before its row exists: `open` refuses a paneId it cannot resolve

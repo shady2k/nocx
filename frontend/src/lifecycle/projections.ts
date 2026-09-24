@@ -56,10 +56,6 @@ export interface BlockProjectionPort {
   enterBlock(): void
 }
 
-/** The history half: persists a completed app-owned record, authorized by
- *  the completed attempt. Resolves with the store's ack or null. */
-export type HistoryPort = (rec: CommandRecord, attempt: ExecutionAttempt) => Promise<unknown>
-
 /** Notifies the transport that an app-owned attempt reached its authenticated
  * running boundary. The callback is invoked once per attempt, after the local
  * record is bound and never from stream parsing. */
@@ -76,10 +72,11 @@ export type AttemptBindPort = (record: CommandRecord, attempt: ExecutionAttempt)
  *
  *  It exists because the loss is otherwise invisible from BOTH ends. The
  *  block still freezes with its exit status, so the terminal says the command
- *  finished; and history.record is never sent, so the backend has no request,
- *  no error and no log to show. Two occurrences of exactly that were
- *  diagnosed by reading rather than by evidence, and still did not settle
- *  which route they took — hence `at`, which says how far the command got. */
+ *  finished; and the backend lifecycle writer could not bind the app-owned
+ *  record, so there is no durable row or receipt to show. Two occurrences of
+ *  exactly that were diagnosed by reading rather than by evidence, and still
+ *  did not settle which route they took — hence `at`, which says how far the
+ *  command got. */
 export interface UnattributedCommand {
   /** `bind` — the running fact found no record. `complete` — the completion
    *  did, which is the one that loses a finished command. Both can fire for
@@ -135,7 +132,6 @@ export class LifecycleProjections {
     private readonly kernel: LifecycleKernel,
     private readonly ledger: CommandLedger,
     private readonly blocks: BlockProjectionPort,
-    private readonly persist: HistoryPort,
     private readonly bindAttempt?: AttemptBindPort,
     private readonly unattributed?: UnattributedPort,
   ) {}
@@ -262,22 +258,12 @@ export class LifecycleProjections {
 
     const rec = this.ledger.complete(attempt)
     if (attempt.state === 'completed') {
-      // Only a completed attempt persists, and only through its app-owned
-      // record — the attempt's own command text never crosses to the store.
-      //
-      // The freeze is OUTSIDE that guard on purpose: an authenticated
-      // completion is the truth about the command whether or not anything
-      // recorded it. That asymmetry is exactly how a finished command can
-      // show its exit status and exist nowhere else, so the branch that
-      // records nothing says so rather than passing in silence (nocx-2vb9y).
-      if (rec !== null) void this.persist(rec, attempt)
-      else this.reportUnattributed('complete', attempt)
+      if (rec === null) this.reportUnattributed('complete', attempt)
       this.blocks.freezeBlock(attempt)
     } else {
       this.blocks.abandonBlock(attempt)
     }
   }
-
   /** Abandon every bound attempt the kernel has already concluded as
    *  `unknown` — a lane that fell to Lost, or a domain that closed under
    *  the attempt. `current` is skipped: pump() processes the lane's own

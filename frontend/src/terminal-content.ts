@@ -102,7 +102,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
-import type { HistoryRecord } from './generated/history.record'
+import type { Capture, HistoryRecorded, Redaction } from './generated/history.recorded'
 import {
   blockOutputText,
   renderRecordedCommand,
@@ -128,7 +128,7 @@ import {
   type CommandRecord,
   type CommandStatus,
 } from './command-ledger'
-import { recordCommand, queryHistory } from './history-client'
+import { queryHistory, subscribeHistoryRecorded } from './history-client'
 import {
   answerTextForEntry,
   answerTextForTurn,
@@ -488,7 +488,7 @@ function isTextEntry(el: Element | null, terminalSurface: Element | null = null)
  */
 export interface PaneIdentity {
   /** The renderer-minted UUIDv7 (design §7). Durable, so it cannot come from
-   *  a backend instance, and it is one identity for history.record and
+   *  a backend instance, and it is one identity for lifecycle history and
    *  secrets.paneClosed WHETHER OR NOT a row was ever written for it. */
   readonly paneId: string
   /**
@@ -999,14 +999,18 @@ export class TerminalContent extends BasePaneContent {
     }
   >()
   /** The store's entry id for an agent run's record, keyed by the renderer's
-   *  own record id: opened at the submit (only a run needs one), filled by
-   *  the history.record ack, and removed when the run resolves. `entryId` is
-   *  null until the store has answered; '' is the store's answer that it
+   *  own record id: opened at submit (only a run needs one), filled by the
+   *  history.recorded receipt, and removed when the run resolves. `entryId`
+   *  is null until the store has answered; '' is the store's answer that it
    *  wrote no row (nocx-9sqii). */
   private readonly runEntryIds = new Map<
     number,
     { entryId: string | null; waiting: ((entryId: string) => void) | null }
   >()
+  /** Renderer record ids awaiting the backend-owned history.recorded receipt. */
+  private readonly attemptEntryIds = new Map<string, number>()
+  /** Receipts can precede the lifecycle.submitAttempt response. */
+  private readonly earlyHistoryReceipts = new Map<string, HistoryRecorded>()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
@@ -1170,6 +1174,7 @@ export class TerminalContent extends BasePaneContent {
     )
   }
   private lifecycle = new LifecycleKernel()
+  private _historyRecordedUnsub: (() => void) | null = null
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
   private indicator: TargetIndicator | null = null
@@ -1601,12 +1606,10 @@ export class TerminalContent extends BasePaneContent {
     private readonly client: WSClient,
     /** The renderer-minted per-pane identity and its row's readiness
      *  (nocx-tsajw, nocx-rtg0.29): minted once per pane by PaneManager,
-     *  never reused, carried on history.record so the backend scopes pending
-     *  captures to this pane, and on `open` so every block this session
-     *  records anchors on it. The identity replaced a bare string so the
-     *  readiness cannot be forgotten at a construction site — an optional
-     *  extra would have type-checked when omitted, which is the whole reason
-     *  the hooks below are named. */
+     *  never reused, carried on lifecycle history so the backend scopes
+     *  pending captures to this pane, and on `open` so every block this
+     *  session records anchors on it. The identity replaced a bare string
+     *  so readiness cannot be forgotten at a construction site. */
     private readonly pane: PaneIdentity,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
@@ -2535,13 +2538,11 @@ export class TerminalContent extends BasePaneContent {
       this.cols = renderer.cols
       this.rows = renderer.rows
 
-      // ── Command ledger (ADR-0008, severed) ──────────────────────────────
-      // The completion projection's app-owned half: records are opened at
-      // the app-owned submit (ADR-0024 §5) and read back; nothing completes
-      // them — the marker cycle is deleted — so the persistence seam
-      // (recordCommand) has no terminal caller and history recording is
-      // unavailable. The migration bead reconnects completion to
-      // authenticated domain events.
+      // ── Command ledger (ADR-0008) ───────────────────────────────────────
+      // Records open at the app-owned submit (ADR-0024 §5) and complete from
+      // authenticated lifecycle events. The backend owns durable history and
+      // sends the history.recorded receipt; the renderer only binds and paints
+      // that result.
       this.ledger = new CommandLedger({ now: () => Date.now() })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
@@ -2859,10 +2860,10 @@ export class TerminalContent extends BasePaneContent {
         {
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
           // with references is resolved through vault.resolveLine; the
-          // RESOLVED line goes to the PTY, the reference-intact line to the
-          // ledger and history.record. A sealed vault or an unresolved name
-          // is reported and the draft stays — never a silent send of a
-          // broken line (the editor's beforeSubmit seam keeps the draft on
+          // RESOLVED line goes to the PTY, the reference-intact line to
+          // lifecycle history. A sealed vault or an unresolved name is
+          // reported and the draft stays — never a silent send of a broken
+          // line (the editor's beforeSubmit seam keeps the draft on
           // false). A plain line resolves SYNCHRONOUSLY (planSubmitSync) —
           // an ordinary Enter keeps its no-gap atomic handoff. A recalled
           // masked row is refused first: the draft stays and resolution
@@ -3488,21 +3489,8 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback.abandonUnbound(renderer.cursorLine())
           },
         },
-        (rec, attempt) =>
-          recordCommand(this.client, this.pane.paneId, rec, attempt).then((ack) => {
-            if (ack) {
-              const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
-              this.attachRecordedAck(rec.id, block, ack)
-            }
-            // What the store made of this record, for whoever is waiting on
-            // it: the entry id it minted, or '' when it wrote no row (a
-            // dropped record answers null, which is the same fact). An
-            // agent run's resolution names this id and nothing else can
-            // (nocx-9sqii).
-            this.settleStoredEntry(rec.id, ack?.entryId ?? '')
-            return ack
-          }),
         (rec, attempt) => {
+          this.bindHistoryAttempt(attempt.id, rec.id)
           const sessionId = this.session?.sessionId
           if (!sessionId) return
           void this.client
@@ -4270,6 +4258,8 @@ export class TerminalContent extends BasePaneContent {
       // delivering facts about a dead session into a live pane.
       this._lifecycleUnsub?.()
       this._lifecycleUnsub = null
+      this._historyRecordedUnsub?.()
+      this._historyRecordedUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
       this._signalUndeliveredUnsub?.()
@@ -4442,6 +4432,18 @@ export class TerminalContent extends BasePaneContent {
         applied: this.lifecycle.state !== before,
       })
     })
+    const historySubscription = subscribeHistoryRecorded(this.client, (receipt) => {
+      const block = this.scrollback?.blockManager.blockForAttempt(receipt.attemptId)
+      this.attachRecordedAck(0, block, receipt)
+      const ledgerId = this.attemptEntryIds.get(receipt.attemptId)
+      if (ledgerId === undefined) {
+        this.earlyHistoryReceipts.set(receipt.attemptId, receipt)
+        return
+      }
+      this.settleStoredEntry(ledgerId, receipt.entryId)
+      this.attemptEntryIds.delete(receipt.attemptId)
+    })
+    this._historyRecordedUnsub = historySubscription.unsubscribe
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
     const refreshBlockRows = (params: unknown): void => {
       if (typeof params !== 'object' || params === null) return
@@ -4500,6 +4502,7 @@ export class TerminalContent extends BasePaneContent {
     // like a session that printed less. Mounted here, with the session,
     // because that is where the fact arrives and where the pane is known.
     this._showRecoveryNotice(session, target)
+    historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
     // session is what the drop has to be routed to, and it does not exist
@@ -7680,6 +7683,8 @@ export class TerminalContent extends BasePaneContent {
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
+    this._historyRecordedUnsub?.()
+    this._historyRecordedUnsub = null
     this._homeUnsub = null
     this.branchSource?.dispose()
     this._pendingReadFrame = null
@@ -8078,8 +8083,6 @@ export class TerminalContent extends BasePaneContent {
     // that can cause the shell's own start are written to the pty; the
     // later authenticated start attaches to it and replaces nothing.
     // Fail-open: a refused attempt (the domain lost its prompt mid-typing)
-    // must never swallow the command — the bytes still go out and the
-    // session stays conventional.
     void new LifecycleClient(this.client.dispatcher)
       .submitAttempt({
         domain: st.domain.id,
@@ -8094,7 +8097,10 @@ export class TerminalContent extends BasePaneContent {
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
       .then(
-        () => write(),
+        (attempt) => {
+          if (ledgerId !== null) this.bindHistoryAttempt(attempt.id, ledgerId)
+          write()
+        },
         (err: unknown) => {
           // STILL fail-open — the bytes go out either way, and swallowing a
           // command because the control plane was busy is the worse failure.
@@ -8315,9 +8321,10 @@ export class TerminalContent extends BasePaneContent {
       end,
       text: lines.slice(0, end).join('\n'),
     }
-    // A cancelled block completed exactly like any other — history.record
-    // already ran for it — so it waits for the stored entry the same way
-    // success/failure do; only 'entered'/'unknown' never got one.
+    // A cancelled block completed exactly like any other — its backend
+    // history.recorded receipt already ran — so it waits for the stored
+    // entry the same way success/failure do; only 'entered'/'unknown' never
+    // got one.
     if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
       waiter.resolve({ entryId: '', ...body })
@@ -8331,23 +8338,38 @@ export class TerminalContent extends BasePaneContent {
   /**
    * The STORE's entry id for one of this pane's own records, waited for.
    *
-   * The renderer mints a record at submit and the STORE mints the row at the
-   * completion (history.record, ADR-0021's receipt round), so the two ids
-   * exist at different moments and only the second one means anything to
-   * anybody else. The ack may land before the visual freeze or after it —
-   * the record goes out on the authenticated completion while the freeze
-   * waits for its fence — so this is a rendezvous rather than a read.
+   * The renderer mints a record at submit and the store mints the row at
+   * authenticated lifecycle completion. The two ids exist at different
+   * moments and only the second one means anything to anybody else. The
+   * history.recorded receipt may land before the visual freeze or after it —
+   * the record goes out on authenticated completion while the freeze waits
+   * for its fence — so this is a rendezvous rather than a read.
    *
    * Resolves with '' when the store wrote no row: History is off, or the
    * record was dropped. That is a real state and it is not an error — the
    * command ran — so it is answered as "no entry" and the relation that
    * would have hung off it is simply not written.
    *
-   * It always settles, which is what makes the wait safe: recordCommand
-   * answers the ack or null (the outbox keeps a record it could not send and
-   * answers null now), and a socket too dead to carry the ack is one too
-   * dead to carry the resolution this feeds.
+   * It always settles, which is what makes the wait safe: history.recorded
+   * answers with the entry id or an empty id when no row was written, and a
+   * socket too dead to carry the receipt is one too dead to carry the
+   * resolution this feeds.
    */
+  private bindHistoryAttempt(attemptId: string, ledgerId: number): void {
+    this.attemptEntryIds.set(attemptId, ledgerId)
+    const early = this.earlyHistoryReceipts.get(attemptId)
+    if (early === undefined) return
+    this.earlyHistoryReceipts.delete(attemptId)
+    this.settleStoredEntry(ledgerId, early.entryId)
+  }
+
+  private settleStoredEntry(ledgerId: number, entryId: string): void {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return
+    slot.entryId = entryId
+    slot.waiting?.(entryId)
+  }
+
   private storedEntryId(ledgerId: number): Promise<string> {
     const slot = this.runEntryIds.get(ledgerId)
     if (slot === undefined) return Promise.resolve('')
@@ -8363,28 +8385,17 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
-  /** The store answered for one of this pane's records: the entry id it
-   *  minted, or '' when it wrote no row. Only an agent run has a slot here
-   *  — a person's command needs no id on the wire — so this is a no-op for
-   *  every other record, which is also what keeps the map bounded. */
-  private settleStoredEntry(ledgerId: number, entryId: string): void {
-    const slot = this.runEntryIds.get(ledgerId)
-    if (slot === undefined) return
-    slot.entryId = entryId
-    slot.waiting?.(entryId)
-  }
-
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
 
-  /** The history.record ack crossed: paint the block with what was stored
-   *  and, when captures came back, attach the receipt to THAT block. The
-   *  block identity was captured at onComplete time; a block that is gone
-   *  by now (cleared scrollback, disposed tab, or never frozen) drops the
-   *  receipt silently. */
+  /** The history.recorded receipt crossed: paint the block with what was
+   *  stored and, when captures came back, attach the receipt to THAT block.
+   *  The block identity was captured at onComplete time; a block that is
+   *  gone by now (cleared scrollback, disposed tab, or never frozen) drops
+   *  the receipt silently. */
   private attachRecordedAck(
     _recId: number,
     block: BlockRecord | null | undefined,
-    ack: HistoryRecord,
+    ack: HistoryRecorded,
   ): void {
     if (!block) return
     const blockEl = block.el
@@ -8416,11 +8427,13 @@ export class TerminalContent extends BasePaneContent {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
     }
-    if (ack.redactions.length > 0) {
-      renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+    const redactions: Redaction[] = ack.redactions
+    if (redactions.length > 0) {
+      renderRecordedCommand(blockEl, ack.maskedCommand, redactions)
       this.refreshGrant(blockEl)
     }
-    if (ack.captures.length === 0) return
+    const captures: Capture[] = ack.captures
+    if (captures.length === 0) return
     // One receipt per block: a re-recorded block replaces its own, never
     // anybody else's.
     this.receipts.get(blockEl)?.destroy()

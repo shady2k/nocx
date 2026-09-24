@@ -217,7 +217,7 @@ export class VaultClient {
 
   /** Resolve every {{secret:NAME}} reference in a command line to its live
    *  value — the line to write to the PTY, and only that. The result's `line`
-   *  may carry secret values and must never be persisted; history.record
+   *  may carry secret values and must never be persisted; lifecycle submission
    *  receives the line with the reference INTACT. */
   resolveLine(line: string): Promise<VaultResolveLine> {
     return this.dispatcher.call('vault.resolveLine', { line })

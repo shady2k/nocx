@@ -47,13 +47,19 @@ function isExported(node: ts.Node): boolean {
   )
 }
 
-/** The base type name of a parameter's annotation, generics stripped. */
+/** The base names of parameter annotations, including nested callback parameters. */
 function paramTypeNames(fn: ts.FunctionLikeDeclaration): string[] {
   const names: string[] = []
+  const visitType = (type: ts.TypeNode): void => {
+    names.push(type.getText().replace(/<.*>$/, ''))
+    if (ts.isFunctionTypeNode(type) || ts.isConstructorTypeNode(type)) {
+      for (const parameter of type.parameters) {
+        if (parameter.type) visitType(parameter.type)
+      }
+    }
+  }
   for (const p of fn.parameters) {
-    if (!p.type) continue
-    const text = p.type.getText()
-    names.push(text.replace(/<.*>$/, ''))
+    if (p.type) visitType(p.type)
   }
   return names
 }
@@ -126,13 +132,13 @@ const MANIFEST: AuthorityEntry[] = [
     note: 'ADR-0024 §6: the editor owns keys because the lifecycle axis says PromptReady(domain), not because a boolean does. The boolean axis (native-mode.ts shouldShowEditor(owned, nativeMode)) is deleted.',
   },
   {
-    op: 'persist a history record',
+    op: 'receive a backend-owned history receipt',
     module: 'src/history-client.ts',
-    symbol: 'recordCommand',
-    authorityTypes: ['ExecutionAttempt'],
+    symbol: 'subscribeHistoryRecorded',
+    authorityTypes: ['HistoryRecorded'],
     state: 'live',
     bead: BEAD,
-    note: "ADR-0024 consequences: `trusted` is deleted as a field crossing to history.record; what persists becomes the attempt's domain-authenticated status — recordCommand takes the completed attempt as its authority (bead nocx-u7uh.7).",
+    note: 'The backend lifecycle writer owns masking, persistence and capture offers; the renderer only consumes the history.recorded receipt for the frozen block.',
   },
   {
     op: 'complete a ledger record',

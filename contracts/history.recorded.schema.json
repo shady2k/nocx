@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/history.recorded.schema.json",
+  "title": "HistoryRecorded",
+  "description": "Params of the history.recorded notification: the backend's receipt after an authenticated lifecycle attempt closes its history entry. It replaces history.record's acknowledgement without moving masking, redaction or capture ownership into the renderer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sessionId",
+    "attemptId",
+    "maskedCount",
+    "maskedKinds",
+    "entryId",
+    "source",
+    "redactions",
+    "maskedCommand",
+    "captures"
+  ],
+  "properties": {
+    "sessionId": { "type": "string", "minLength": 1 },
+    "attemptId": { "type": "string", "minLength": 1 },
+    "maskedCount": { "type": "integer", "minimum": 0 },
+    "maskedKinds": { "type": "array", "items": { "type": "string" } },
+    "entryId": { "type": "string" },
+    "source": { "enum": ["user", "assistant"] },
+    "redactions": { "type": "array", "items": { "$ref": "#/$defs/redaction" } },
+    "maskedCommand": { "type": "string" },
+    "captures": { "type": "array", "items": { "$ref": "#/$defs/capture" } }
+  },
+  "$defs": {
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "start", "end", "prefix", "suffix"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "private-key",
+            "openai",
+            "github-pat",
+            "slack",
+            "aws-access-key",
+            "gitlab",
+            "jwt",
+            "url-userinfo",
+            "db-connstring",
+            "auth-header",
+            "env-assignment",
+            "high-entropy"
+          ]
+        },
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 },
+        "prefix": { "type": "string" },
+        "suffix": { "type": "string" }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "entryId", "redaction", "suggestedName"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "entryId": { "type": "string" },
+        "redaction": { "$ref": "#/$defs/redaction" },
+        "suggestedName": { "type": "string" }
+      }
+    }
+  }
+}

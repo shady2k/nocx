@@ -248,29 +248,6 @@ func (s *WSServer) discoveryUpLocal() {
 	s.discoverySched.ConnectionUp(discovery.LocalTargetID, host)
 }
 
-// discoveryPromptHint is called after a command completes (history.record):
-// the listener set most likely changed, debounce a sample (spec §4). The
-// profile ids come from the tab's OWN sessions — the backend's registry —
-// never from anything the renderer reported.
-func (s *WSServer) discoveryPromptHint(state *connState) {
-	if s.discoverySched == nil {
-		return
-	}
-	for _, sid := range sessionIDsOf(state) {
-		sess, err := s.registry.Get(session.ID(sid))
-		if err != nil {
-			continue
-		}
-		if pid := sess.ProfileID(); pid != "" {
-			s.discoverySched.PromptHint(pid)
-		} else if sess.Kind() == session.KindLocal {
-			// A command completed in a local tab: the machine's listener
-			// set most likely changed, exactly as it does remotely.
-			s.discoverySched.PromptHint(discovery.LocalTargetID)
-		}
-	}
-}
-
 // discoverySessionClosed is called after a session tears down. When the
 // closed session was the last one on its profile, the target is forgotten
 // and its lease released — a background poll never outlives its consumer.

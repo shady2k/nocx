@@ -303,54 +303,6 @@ func TestShellOriginatedStart_HistoryOffOpensNoEntry(t *testing.T) {
 // no entry ever appears. With history ON the paired behaviour is
 // TestLifecycleSubmitAttempt_OpensLedgerEntryAtAttemptIDAndMasks and
 // TestLifecycleLedgerTransitions_ListAndReadByAttemptID.
-func TestSubmitAttemptAndHistoryRecord_HistoryOffRecordNothing(t *testing.T) {
-	policy := content.NewPolicy()
-	policy.SetEnabled(false)
-	db := newLedgerStoreWithPolicy(t, policy)
-	e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
-
-	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), "deploy prod"), 41))
-	if got.ID == "" {
-		t.Fatal("history-off submit returned an empty attempt id — the command must still run")
-	}
-	if _, ok := pub.Attempt(lifecycle.AttemptID(got.ID)); !ok {
-		t.Fatal("history-off submit left no live kernel attempt")
-	}
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "deploy prod")))
-
-	recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
-		"attemptId": got.ID,
-		"command":   "deploy prod",
-		"cwd":       "/repo",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": nil,
-		"endedAt":   nil,
-		"paneId":    "01930000-0000-7000-8000-0000000000a1",
-	}, 42)
-	var recordEnvelope struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-		t.Fatalf("history.record response: %v", err)
-	}
-	if recordEnvelope.Error != nil {
-		t.Fatalf("history.record with history off: %+v", recordEnvelope.Error)
-	}
-	var ack historyRecordResponse
-	if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
-		t.Fatalf("history.record result: %v", err)
-	}
-	if ack.EntryID != "" {
-		t.Fatalf("history.record ack entry id = %q, want the empty-id signal", ack.EntryID)
-	}
-	if n := entryCount(t, db); n != 0 {
-		t.Fatalf("entry count with history off after submit + record = %d, want zero", n)
-	}
-}
 
 // Criterion 4, both completions: a row whose start was recorded while history
 // was ON closes with its real outcome even after the setting turns off. The
@@ -383,7 +335,7 @@ func TestHistoryOffMidrun_AnOpenRowStillCloses(t *testing.T) {
 		}
 	})
 
-	t.Run("history.record closes it", func(t *testing.T) {
+	t.Run("app completion closes it", func(t *testing.T) {
 		policy := content.NewPolicy()
 		db := newLedgerStoreWithPolicy(t, policy)
 		e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
@@ -395,38 +347,11 @@ func TestHistoryOffMidrun_AnOpenRowStillCloses(t *testing.T) {
 		}
 
 		policy.SetEnabled(false)
-		recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
-			"attemptId": got.ID,
-			"command":   "sleep 30",
-			"cwd":       "/repo",
-			"host":      "",
-			"source":    "user",
-			"status":    "success",
-			"exitCode":  0,
-			"startedAt": nil,
-			"endedAt":   nil,
-			"paneId":    "01930000-0000-7000-8000-0000000000a1",
-		}, 42)
-		var recordEnvelope struct {
-			Result json.RawMessage  `json:"result"`
-			Error  *jsonrpcErrorObj `json:"error"`
-		}
-		if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-			t.Fatalf("history.record response: %v", err)
-		}
-		if recordEnvelope.Error != nil {
-			t.Fatalf("history.record with history off midrun: %+v", recordEnvelope.Error)
-		}
-		var ack historyRecordResponse
-		if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
-			t.Fatalf("history.record result: %v", err)
-		}
-		if ack.EntryID != got.ID {
-			t.Fatalf("history.record ack entry id = %q, want the open attempt %q", ack.EntryID, got.ID)
-		}
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(got.ID), 0, lifecycleFence(0x44))))
+
 		row := mustEntry(t, db, got.ID)
 		if row.Phase != content.PhaseClosed || row.Status != content.EntrySuccess {
-			t.Fatalf("row after record = phase=%q status=%q, want closed/success", row.Phase, row.Status)
+			t.Fatalf("row after completion with history off = phase=%q status=%q, want closed/success", row.Phase, row.Status)
 		}
 		if n := entryCount(t, db); n != 1 {
 			t.Fatalf("entry count = %d, want exactly the one open row, closed", n)

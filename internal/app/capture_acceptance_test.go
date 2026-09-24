@@ -12,6 +12,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,12 +22,15 @@ import (
 )
 
 func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
-	storagetest.Isolate(t)
+	src := realHelperArtifacts(t)
+	home := storagetest.IsolateWithHome(t)
+	binary := filepath.Join(helperRoot(home, src.hash()), "nocx-helper")
+	t.Cleanup(func() { endTheDaemon(t, binary) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a, err := newTestApp(t)
+	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -45,45 +49,23 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 		t.Fatalf("vault.setup: %+v", setup.Error)
 	}
 
-	// ── leg 1: submit a key, save it, read the row as a reference ────────
-	record := callAppWS(t, conn, "history.record", map[string]any{
-		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://openrouter.ai/api`,
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
-		// The capture scope is (connection, tab): a pending capture belongs to
-		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"paneId":    "pane-acceptance",
-		"startedAt": int64(1_750_000_000_000), "endedAt": int64(1_750_000_000_100), "trusted": true,
-	}, 2)
-	if record.Error != nil {
-		t.Fatalf("history.record: %+v", record.Error)
+	// The command is opened by lifecycle.submitAttempt and closed by the
+	// authenticated shell completion. history.record is no longer a client
+	// operation; the receipt carries the masking and capture offer.
+	lifecycle := openLifecycleAppSession(t, a)
+	conn = lifecycle.conn
+	record := lifecycle.record(t, `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://openrouter.ai/api`, "/srv", 2)
+	if record.MaskedCount != 1 || len(record.Captures) != 1 {
+		t.Fatalf("receipt = %+v, want one mask and one offer", record)
 	}
-	var ack struct {
-		EntryID     string `json:"entryId"`
-		MaskedCount int    `json:"maskedCount"`
-		Redactions  []struct {
-			Kind  string `json:"kind"`
-			Start int    `json:"start"`
-			End   int    `json:"end"`
-		} `json:"redactions"`
-		Captures []struct {
-			ID            string `json:"id"`
-			SuggestedName string `json:"suggestedName"`
-		} `json:"captures"`
+	if record.Captures[0].SuggestedName != "openrouter.ai" {
+		t.Errorf("suggestedName = %q, want the host openrouter.ai", record.Captures[0].SuggestedName)
 	}
-	if err := json.Unmarshal(record.Result, &ack); err != nil {
-		t.Fatalf("decode ack: %v", err)
-	}
-	if ack.MaskedCount != 1 || len(ack.Captures) != 1 {
-		t.Fatalf("ack = %+v, want one mask and one offer", ack)
-	}
-	if ack.Captures[0].SuggestedName != "openrouter.ai" {
-		t.Errorf("suggestedName = %q, want the host openrouter.ai", ack.Captures[0].SuggestedName)
-	}
-	if ack.EntryID == "" {
+	if record.EntryID == "" {
 		t.Fatal("entryId is empty")
 	}
-
-	save := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": ack.Captures[0].ID}, 3)
+	captureID := record.Captures[0].ID
+	save := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": captureID}, 3)
 	if save.Error != nil {
 		t.Fatalf("secrets.captureSave: %+v", save.Error)
 	}
@@ -134,49 +116,18 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// that, on a 30-second timer; both cost the decision, because deciding
 	// about a key is rarely the next thing anyone does. Two more commands
 	// run here — one carrying its own key, one carrying none — and the
-	// first offer is still answerable afterwards.
-	record2 := callAppWS(t, conn, "history.record", map[string]any{
-		"command": "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
-		// The capture scope is (connection, tab): a pending capture belongs to
-		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"paneId":    "pane-acceptance",
-		"startedAt": int64(1_750_000_000_200), "endedAt": int64(1_750_000_000_300), "trusted": true,
-	}, 5)
-	if record2.Error != nil {
-		t.Fatalf("history.record (leg 2): %+v", record2.Error)
+	record2 := lifecycle.record(t, "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh", "/srv", 5)
+	if len(record2.Captures) != 1 || len(record2.Redactions) != 1 {
+		t.Fatalf("receipt2 = %+v, want one capture and one structured redaction", record2)
 	}
-	var ack2 struct {
-		Captures []struct {
-			ID string `json:"id"`
-		} `json:"captures"`
-		Redactions []struct {
-			Kind   string `json:"kind"`
-			Prefix string `json:"prefix"`
-			Suffix string `json:"suffix"`
-		} `json:"redactions"`
-	}
-	if err := json.Unmarshal(record2.Result, &ack2); err != nil {
-		t.Fatalf("decode ack2: %v", err)
-	}
-	if len(ack2.Captures) != 1 || len(ack2.Redactions) != 1 {
-		t.Fatalf("ack2 = %+v, want one capture and one structured redaction", ack2)
-	}
+	captureID2 := record2.Captures[0].ID
 
 	// Ordinary work carries on in the same tab.
-	record3 := callAppWS(t, conn, "history.record", map[string]any{
-		"command": "echo done",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
-		// The capture scope is (connection, tab): a pending capture belongs to
-		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"paneId":    "pane-acceptance",
-		"startedAt": int64(1_750_000_000_400), "endedAt": int64(1_750_000_000_500), "trusted": true,
-	}, 8)
-	if record3.Error != nil {
-		t.Fatalf("history.record (leg 3): %+v", record3.Error)
+	record3 := lifecycle.record(t, "echo done", "/srv", 8)
+	if record3.AttemptID == "" {
+		t.Fatal("ordinary command returned no attempt id")
 	}
-
-	still := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": ack2.Captures[0].ID}, 6)
+	still := callAppWS(t, conn, "secrets.captureSave", map[string]any{"captureId": captureID2}, 6)
 	if still.Error != nil {
 		t.Fatalf("save after later commands = %+v, want the offer still answerable", still.Error)
 	}

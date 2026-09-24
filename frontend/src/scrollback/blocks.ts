@@ -104,6 +104,18 @@ export function copyToClipboard(text: string): Promise<void> {
  *  more than enough and bounds the memory of a hostile stream. */
 const MAX_FENCE_SIGHTINGS = 8
 
+/** Upper bound on rows held for an entry whose block has not bound yet
+ *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
+ *  before `bindAttempt` names the block it belongs to, and the pending
+ *  entry is ordinarily drained the moment binding happens — but binding
+ *  never happens for an attempt whose running fact is refused, lost, or
+ *  never reaches this pane, and nothing else ever visits the entry to
+ *  remove it. The same small ring as `_fences`, for the same reason: a
+ *  session has few blocks racing their own binding at once, so bounding it
+ *  costs nothing a real session would notice and stops an unbound entry
+ *  from being held forever. */
+const MAX_PENDING_STORED_ROWS = 8
+
 /** A block status that has left `running` — the terminal set the DOM
  *  freeze and the block record share. The LOGICAL freeze produces it and
  *  hands it to the VISUAL freeze, so serialization is typed to follow a
@@ -2340,6 +2352,16 @@ export class BlockManager {
     this._storedRowsCursor.set(entryId, cursor)
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
+      // A NEW entry may push the ring past its bound; re-setting one
+      // already held must not — it stays at its original age, exactly as
+      // `_fences` treats a repeated sighting.
+      if (
+        !this._pendingStoredRows.has(entryId) &&
+        this._pendingStoredRows.size >= MAX_PENDING_STORED_ROWS
+      ) {
+        const oldest = this._pendingStoredRows.keys().next().value
+        if (oldest !== undefined) this._pendingStoredRows.delete(oldest)
+      }
       this._pendingStoredRows.set(entryId, rows)
       return
     }

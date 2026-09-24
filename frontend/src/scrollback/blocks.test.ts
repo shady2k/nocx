@@ -4422,6 +4422,36 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
   })
 
+  it('bounds how many never-adopted entries it remembers, evicting the oldest (a lost running fact must not leak forever)', () => {
+    // A block.grew/closed notification can arrive before bindAttempt names
+    // the block it belongs to, and applyStoredRows stashes it pending.
+    // Ordinarily bindAttempt drains it the moment binding happens — but
+    // binding never happens for an attempt whose running fact is refused,
+    // lost, or never reaches this pane, and nothing else visits the entry
+    // to remove it. Nine such orphans, one past the ring's bound (8, same
+    // as _fences): the oldest must be gone, the newest must still be here.
+    const { manager } = newManager()
+    const orphanIds = Array.from({ length: 9 }, (_, i) => `orphan-${i}`)
+    for (const id of orphanIds) {
+      manager.applyStoredRows(id, {
+        lines: [{ from: 0, row: row(id) }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+    }
+
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt(orphanIds[0])
+    expect(manager.runningBlock!.storedRows).toBeUndefined()
+
+    manager.startBlock('printf rows', '/repo', 1)
+    manager.bindAttempt(orphanIds[orphanIds.length - 1])
+    expect(manager.runningBlock!.storedRows?.lines).toEqual([
+      { from: 0, row: row(orphanIds[orphanIds.length - 1]) },
+    ])
+  })
+
   it('does not paint terminal-buffer text when backend history is absent', () => {
     const { manager } = newManager()
     manager.startBlock('echo local', '/repo', 0)

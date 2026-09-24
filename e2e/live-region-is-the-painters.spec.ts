@@ -176,7 +176,15 @@ async function clickRound(page: Page, colWithin: number, roundMarker: string): P
 
 test('a mouse-reporting program receives the clicked painter cell, at two zoom levels', async ({
   page,
+  browserName,
 }) => {
+  // The zoom is simulated with a CDP device-metrics override (below), and
+  // CDP is a Chromium-only protocol — the same reason api-import.spec.ts's
+  // drag test is chromium-only. This is not the retired serializer path
+  // this file's own suite was written against (nocx-zg3k3.2.5); it is an
+  // unrelated, pre-existing browser-capability limit the test never
+  // guarded, newly exposed because this spec is new on this branch.
+  test.skip(browserName !== 'chromium', 'zoom emulation needs CDP, which only Chromium exposes')
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.goto('/')
   await promptReady(page)

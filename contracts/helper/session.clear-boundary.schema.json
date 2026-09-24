@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.clear-boundary.schema.json",
+  "title": "HelperSessionClearBoundary",
+  "description": "One sighted erase-saved-lines (nocx-2v80t.3.17), sent on the same ordered carrier as the rows and the interval end markers, in the position it occurred: a consumer that reads this plane in order can never attribute it to the wrong side of a row. Unlike session.output-rows and session.interval-end it carries no row index and no cursor of its own — the coordinator resolves what the boundary bounds from the session id alone (content.RecordClearBoundary), because the erase is a real VT fact the emulator's own state already reflects (ADR-0066) rather than something authenticated elsewhere that this frame only locates. `kind` is a closed discriminator, reserved so a later boundary kind (nocx-zg3k3.10.3's own scrollback paging) fits the same shape without widening this one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "kind": {
+      "description": "What kind of boundary this is. 'clear' is the only member today: the program erased the display and its saved lines.",
+      "type": "string",
+      "enum": ["clear"]
+    }
+  }
+}

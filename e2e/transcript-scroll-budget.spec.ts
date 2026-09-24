@@ -394,6 +394,18 @@ test.describe('long transcript scroll budget', () => {
       expect(inStore.ordered, `block ${i + 1} holds its stored rows out of order`).toBe(true)
 
       const inDom = numbered(dom[i].texts, own)
+      // The marker checks above see only rows matching transcript-NNNN-: an
+      // extra or missing STORED row that carries no marker of its own —
+      // duplicated or garbled ahead of a real column-count defect, say — is
+      // invisible to them. The DOM paints every stored row 1:1
+      // (paintStoredRows appends one .term-grid-row per line in
+      // stored.lines) and adds no row of its own — the incomplete notice is
+      // a sibling div, not a .term-grid-row — so the two counts must match
+      // exactly, not just agree on the numbered subset.
+      expect(
+        dom[i].texts.length,
+        `block ${i + 1} paints ${dom[i].texts.length} rows for ${stored[i].length} stored`,
+      ).toBe(stored[i].length)
       expect(inDom.mine, `block ${i + 1} paints ${inDom.mine} of its own rows`).toBe(ROWS_PER_BLOCK)
       expect(inDom.ordered, `block ${i + 1} paints its rows out of order`).toBe(true)
       painted += inDom.painted

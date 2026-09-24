@@ -175,6 +175,30 @@ describe('pixel to cell and back at two zoom levels', () => {
     const { mapping } = mounted(8)
     expect(mapping()).toBeNull()
   })
+
+  it('answers null, not NaN, when the committed cell metric is still zero (unmeasured, nocx-zg3k3.2.9)', () => {
+    // Every frame carries cellWidthPx/cellHeightPx: 0 until the client's own
+    // measurement is committed (nocx-zg3k3.2.9) — a legitimate state, not a
+    // malformed frame, so cols/rows are real while the pixel metric is not.
+    // Division by a zero pitch/cellWidth produces NaN or Infinity, and NaN
+    // slips past a `< 0 || >= rows` bounds check silently, so x=0/y=0 is the
+    // case that must be asserted rather than assumed refused.
+    const PLAIN_ROW: CellSpec[] = [
+      ['a', 1, true],
+      ['b', 1, true],
+    ]
+    const { painter, mapping } = mounted(8)
+    painter.apply(
+      snapshotOf(frameOf(1, [PLAIN_ROW], undefined, { cellWidthPx: 0, cellHeightPx: 0 })),
+    )
+    const m = mapping()
+    if (m === null) throw new Error('no mapping after apply')
+
+    expect(m.pixelToCell(0, 0)).toBeNull()
+    expect(m.pixelToCell(5, 5)).toBeNull()
+    expect(m.cellToPixel(0, 0)).toBeNull()
+    expect(m.cellToPixel(1, 0)).toBeNull()
+  })
 })
 
 // THE COMMITTED METRIC IS DEVICE PIXELS (review round 1, nocx-zg3k3.2.9).

@@ -93,6 +93,51 @@ describe('stored block rows', () => {
     expect(block.textContent).toContain('Output incomplete: 3 rows missing')
   })
 
+  it('reports the notice for a truncated block even when no count is known (suppressed)', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'suppressed' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
+    expect(block.textContent).toContain('Output incomplete')
+  })
+
+  it('reports the notice for a truncated block with a gap and no counted rows', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'gap' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
+  })
+
+  it('reports the notice for a truncated block capped with no counted rows', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'cap' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
+  })
+
+  it('shows no incomplete notice for a complete block (truncated null, no missing rows)', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(block, stored, { metric: null, palette: DEFAULT_SNAPSHOT })
+
+    expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+  })
+
   it('rejects malformed JSONL instead of inventing local output', () => {
     expect(() => parseStoredBlockRows('{"from":12}', { truncated: null, payload: {} })).toThrow(
       'stored block row is malformed',

@@ -17,7 +17,7 @@
 // here, and asserted to find the same thing — a regression that gave either
 // one its own regex would fail here and nowhere else.
 import { describe, expect, it } from 'vitest'
-import { serializeRange, DEFAULT_SNAPSHOT } from '../scrollback/serializer'
+import { serializeLine, DEFAULT_SNAPSHOT } from '../scrollback/serializer'
 import { lineWith } from '../scrollback/test-helpers'
 import { decorateLinks } from './decorate'
 import { attachLinkClicks } from './surface'
@@ -59,7 +59,7 @@ function frozenBlock(text: string, colourUntil = 0): HTMLElement {
   )
   const el = document.createElement('div')
   el.className = 'cmd-output'
-  el.innerHTML = serializeRange(DEFAULT_SNAPSHOT, (y) => (y === 0 ? line : undefined), 0, 0)
+  el.innerHTML = serializeLine(DEFAULT_SNAPSHOT, line)
   return el
 }
 

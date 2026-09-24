@@ -104,6 +104,18 @@ export function copyToClipboard(text: string): Promise<void> {
  *  more than enough and bounds the memory of a hostile stream. */
 const MAX_FENCE_SIGHTINGS = 8
 
+/** Upper bound on rows held for an entry whose block has not bound yet
+ *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
+ *  before `bindAttempt` names the block it belongs to, and the pending
+ *  entry is ordinarily drained the moment binding happens — but binding
+ *  never happens for an attempt whose running fact is refused, lost, or
+ *  never reaches this pane, and nothing else ever visits the entry to
+ *  remove it. The same small ring as `_fences`, for the same reason: a
+ *  session has few blocks racing their own binding at once, so bounding it
+ *  costs nothing a real session would notice and stops an unbound entry
+ *  from being held forever. */
+const MAX_PENDING_STORED_ROWS = 8
+
 /** A block status that has left `running` — the terminal set the DOM
  *  freeze and the block record share. The LOGICAL freeze produces it and
  *  hands it to the VISUAL freeze, so serialization is typed to follow a
@@ -1899,6 +1911,15 @@ export class BlockManager {
   private _onDeferredFreeze?: (rec: BlockRecord) => void
   private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
   private _pendingStoredRows = new Map<string, StoredBlockRows>()
+  /** The highest row cursor `applyStoredRows` has painted per entry — the
+   *  last stored line's `from` (block.grew.schema.json: absolute row index,
+   *  strictly increasing across deliveries, and never lower after a close,
+   *  which appends the closing rows before sealing). terminal-content.ts
+   *  refetches the WHOLE artifact on every block.grew/block.closed and two
+   *  in-flight fetches for one entry can resolve out of order; this is what
+   *  keeps the later-dispatched-but-earlier-resolving one from being
+   *  overwritten by a smaller delivery that was merely read first. */
+  private _storedRowsCursor = new Map<string, number>()
   /** The tab strip's answer to "what is this session called to a person",
    *  handed to every tool block this manager draws (nocx-vnzek). */
   private _sessionName?: (sessionId: string) => string | null
@@ -2321,10 +2342,26 @@ export class BlockManager {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
   }
 
-  /** Apply the latest durable rows to the matching block. */
+  /** Apply the latest durable rows to the matching block — unless a
+   *  response already applied (or pending) covers MORE of the stream, in
+   *  which case this one arrived late and is dropped. */
   applyStoredRows(entryId: string, rows: StoredBlockRows): void {
+    const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
+    const seen = this._storedRowsCursor.get(entryId) ?? -1
+    if (cursor < seen) return
+    this._storedRowsCursor.set(entryId, cursor)
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
+      // A NEW entry may push the ring past its bound; re-setting one
+      // already held must not — it stays at its original age, exactly as
+      // `_fences` treats a repeated sighting.
+      if (
+        !this._pendingStoredRows.has(entryId) &&
+        this._pendingStoredRows.size >= MAX_PENDING_STORED_ROWS
+      ) {
+        const oldest = this._pendingStoredRows.keys().next().value
+        if (oldest !== undefined) this._pendingStoredRows.delete(oldest)
+      }
       this._pendingStoredRows.set(entryId, rows)
       return
     }
@@ -3158,6 +3195,7 @@ export class BlockManager {
     this._stopTicker()
     this._pendingBoundaries = []
     this._pendingStoredRows.clear()
+    this._storedRowsCursor.clear()
     this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a

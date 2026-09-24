@@ -219,23 +219,37 @@ type sbBaseline struct {
 	// debt is paid before any growth is reported, and a consumer's absolute
 	// row space never sees a row twice.
 	owed int
-	// pushed is what each SHRINK pushed onto the top of this buffer's
-	// history, newest last. A shrink reflows the screen's top rows into
-	// history — that is not a departure, so those rows are never reported as
-	// they go — and a later refill pulls them back newest-first, so this is a
-	// stack: a pull-back takes from the end. Its members do NOT all have the
-	// same provenance, which is why a scalar cannot express it: the rows at
-	// the top of the screen a shrink pushes are first the ones an earlier
-	// refill had pulled back (already handed to the consumer, so their return
-	// owes a departure) and then rows nobody was ever handed (so their return
-	// owes nothing and they are reported when they leave for real).
+	// pushed is this buffer's HISTORY, newest last, as far as the ledger
+	// describes it: one block per run of rows that got there, with the
+	// provenance a refill needs when it pulls them back onto the screen. Two
+	// kinds of run arrive in history, and BOTH are here because a refill takes
+	// the newest rows first and has to know what it is taking:
 	//
-	// Bounded by the pushes that can still be taken back: segments are merged
-	// when adjacent and of one class, and the stack keeps at most
-	// maxSbPushes segments — the ones dropped are the oldest, deepest in
-	// history, and a refill that reaches them charges a departure that was
-	// already reported rather than swallowing one that was not, which is the
-	// conservative direction for a row-space that must not lose output.
+	//   - a SHRINK reflows the screen's top rows into history — not a
+	//     departure, so those rows were never reported as they went. The rows
+	//     at the top of the screen a shrink pushes are first the ones an
+	//     earlier refill had pulled back (already handed to the consumer, so
+	//     their return owes a departure) and then rows nobody was ever handed
+	//     (so their return owes nothing and they are reported when they leave
+	//     for real);
+	//   - a row that LEFT the screen for real and was handed over is newer
+	//     than anything a shrink pushed before it, and every row of such a run
+	//     owes a departure when a refill pulls it back.
+	//
+	// A ledger of pushes alone cannot say where a refill's rows came from, and
+	// the failure is not subtle: a row that left normally, was handed over and
+	// was then pulled back from plain history was charged against a push block
+	// and marked "fresh" (never handed), so the emulator reported its
+	// departure a second time — measured on the e2e's resize pattern, where
+	// the frontend re-measures the pane mid-transcript (transcript-0003-069
+	// reported twice, nocx-2v80t.3.9).
+	//
+	// Bounded by the runs that can still be taken back: adjacent runs of one
+	// class merge, and the ledger keeps at most maxSbPushes blocks — the ones
+	// dropped are the oldest, deepest in history, and a refill that reaches
+	// them charges a departure that was already reported rather than swallowing
+	// one that was not, which is the conservative direction for a row-space
+	// that must not lose output.
 	pushed []sbPush
 }
 
@@ -257,6 +271,36 @@ const maxSbPushes = 64
 // refill just pulled back onto the screen — and answers how many of them the
 // consumer had already been handed, which is the only part that owes a
 // departure when they leave again.
+// noteHandedLocked records that n rows left the screen for real and were handed
+// over: they are the newest rows in this buffer's history, newer than anything a
+// shrink pushed before them. See the pushed field for what a ledger without them
+// gets wrong.
+//
+// Marked where the rows are CAPTURED, which is the one instant the buffer that
+// lost them is known — the report the captures fill is the terminal's, and a
+// later drain cannot tell a primary row from an alternate-screen one. The drain
+// follows the capture inside the same ingest in this port's use, and the corner
+// where it does not is the one a refill already covers: it trims the rows still
+// sitting in the pending report before it charges the debt for what it pulled
+// back.
+func (b *sbBaseline) noteHandedLocked(n int) {
+	if n <= 0 {
+		return
+	}
+	if top := len(b.pushed) - 1; top >= 0 && b.pushed[top].fresh == 0 {
+		// Adjacent to a run that holds no un-handed rows: one run, all handed.
+		// (Within a block the debt cares only about how many rows are fresh,
+		// because a refill takes fresh before handed and nothing else about a
+		// handed row matters.)
+		b.pushed[top].handed += n
+	} else {
+		b.pushed = append(b.pushed, sbPush{handed: n})
+	}
+	if len(b.pushed) > maxSbPushes {
+		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
+	}
+}
+
 func (b *sbBaseline) takeBack(n int) int {
 	handed := 0
 	for n > 0 && len(b.pushed) > 0 {
@@ -702,6 +746,7 @@ func (t *terminal) noteDepartedLocked() {
 				fresh -= base.owed
 				base.owed = 0
 				t.captureDepartedLocked(h-fresh, h)
+				base.noteHandedLocked(fresh)
 			} else {
 				base.owed -= fresh
 			}

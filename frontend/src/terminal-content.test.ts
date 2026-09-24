@@ -35,7 +35,8 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
-import type { Row, SessionFrame, Style } from './generated/session.frame'
+import type { Row, SessionFrame } from './generated/session.frame'
+import { styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
@@ -15273,41 +15274,28 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
 // the ACTIVE pane — so the unit layer asserts the same surface the e2e
 // layer drives, not a private field.
 
-const SCREEN_COLOR = { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } }
 const SCREEN_COLS = 40
 const SCREEN_ROWS = 4
 
-/** One valid frame at `revision` whose first rows carry `lines`, padded to
- *  a full rectangle — the shape the backend publishes and the model's
- *  intake accepts. */
+/** One valid frame at `revision` whose first rows carry `lines` — each
+ *  row's own explicit content is only as long as its text; the model's
+ *  decode pads the rest of geometry.cols in the default style, and an
+ *  entirely absent row is the empty string, which pads the same way. That
+ *  is the shape the backend actually publishes (nocx-zg3k3.2.12): a row
+ *  does not carry its untouched tail, and a reader that wants the full
+ *  rectangle (this fixture's caller, joining cells back into a line) gets
+ *  it from the model's own padding, not from a fixture hand-building 40
+ *  columns per row. */
 function screenFrame(
   revision: number,
   lines: string[],
   geometry: Partial<SessionFrame['geometry']> = {},
 ): SessionFrame {
-  const style: Style = {
-    foreground: { ...SCREEN_COLOR, kind: 1 as const, palette: 7 },
-    background: SCREEN_COLOR,
-    underlineColor: SCREEN_COLOR,
-    attributes: 0,
-    underline: 0,
-  }
-  const blankRow: Row = {
-    cells: Array.from({ length: SCREEN_COLS }, () => ['', 1, false] as [string, 1, boolean]),
-    runs: [[style, SCREEN_COLS] as [typeof style, number]],
-    wrap: false,
-    continuation: false,
-  }
-  const rows: Row[] = lines.map((text): Row => ({
-    cells: Array.from({ length: SCREEN_COLS }, (_, c) => {
-      const ch = text[c] ?? ''
-      return [ch, 1, ch !== ''] as [string, 1, boolean]
-    }),
-    runs: [[style, SCREEN_COLS] as [typeof style, number]],
-    wrap: false,
-    continuation: false,
-  }))
-  while (rows.length < SCREEN_ROWS) rows.push(blankRow)
+  const style = styleOf({ foreground: { kind: 1, palette: 7, rgb: { r: 0, g: 0, b: 0 } } })
+  const rows: Row[] = lines.map((text) =>
+    wireRowOf(Array.from(text, (ch) => [ch, 1, true, style] as CellSpec)),
+  )
+  while (rows.length < SCREEN_ROWS) rows.push({ text: '' })
   return {
     revision,
     geometry: {

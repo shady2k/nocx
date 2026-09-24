@@ -16,57 +16,56 @@
 //     that began on the old revision never observes a cell of the new one.
 //
 // The frame shape under test is contracts/session.frame.schema.json,
-// generated into src/generated/session.frame.ts. Nothing sends frames yet
-// (nocx-zg3k3.2.2 owns that); the fixtures below ARE the frame here.
+// generated into src/generated/session.frame.ts, in the compact
+// text+marks+runs form nocx-zg3k3.2.12 brought it to. Fixtures are built
+// through painter/fixtures.ts's wireRowOf/frameOf, which run the SAME
+// algorithm the Go encoder does (one CellSpec per COLUMN, spacer included)
+// rather than hand-writing the wire's text/marks/runs — a fixture that
+// built the wire by hand would drift from the encoder the day either
+// changed.
 
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { Cell, Row, SessionFrame, Style } from './generated/session.frame'
+import type { SessionFrame } from './generated/session.frame'
 import {
   columnSpan,
   createCellModel,
   type ApplyResult,
   type CellModel,
   type FrameRefusal,
+  type ModelStyle,
   type ScreenSnapshot,
 } from './cell-model'
+import { type CellSpec, frameOf as fixtureFrameOf, styleOf, wireRowOf } from './painter/fixtures'
 
 // --- fixtures ---------------------------------------------------------------
 
-const DEFAULT_COLOR = { kind: 0 as const, palette: 0, rgb: { r: 0, g: 0, b: 0 } }
-
-function style(palette: number): Style {
-  return {
-    foreground: { ...DEFAULT_COLOR, kind: 1 as const, palette },
-    background: DEFAULT_COLOR,
-    underlineColor: DEFAULT_COLOR,
-    attributes: 0,
-    underline: 0,
-  }
+function style(palette: number): ModelStyle {
+  return styleOf({ foreground: { kind: 1, palette, rgb: { r: 0, g: 0, b: 0 } } })
 }
 
 const PLAIN = style(7)
 
-function frame(revision: number, rows: Row[], cols: number, rowsCount = rows.length): SessionFrame {
-  return {
-    revision,
-    geometry: { cols, rows: rowsCount, cellWidthPx: 8, cellHeightPx: 16, revision },
-    cursor: { x: 0, y: 0, visible: true },
-    rows,
-  }
+/** frameOf here additionally accepts a rowsCount override, the way the old
+ *  local helper did (a malformed row-count fixture needs a geometry that
+ *  disagrees with the rows array it is handed). */
+function frame(
+  revision: number,
+  rows: CellSpec[][],
+  cols: number,
+  rowsCount = rows.length,
+): SessionFrame {
+  return fixtureFrameOf(revision, rows, undefined, { cols, rows: rowsCount })
 }
 
 /** A frame of blank plain cells — the ordinary frame every refusal test
- *  pairs with an accepted one. */
+ *  pairs with an accepted one. `rowsCount` sets the GEOMETRY's declared row
+ *  count independently of the single row actually built, which is how the
+ *  "wrong row count" refusal fixture creates its mismatch. */
 function blankFrame(revision: number, cols: number, rowsCount = 1): SessionFrame {
-  const cells: Cell[] = Array.from({ length: cols }, () => ['', 1, false])
-  return frame(
-    revision,
-    [{ cells, runs: [[PLAIN, cols]], wrap: false, continuation: false }],
-    cols,
-    rowsCount,
-  )
+  const cells: CellSpec[] = Array.from({ length: cols }, () => ['', 1, false])
+  return frame(revision, [cells], cols, rowsCount)
 }
 
 function applied(model: CellModel, f: SessionFrame): ScreenSnapshot {
@@ -95,7 +94,7 @@ function browserAdvancePx(
   dpr: number,
 ): number {
   switch (grapheme) {
-    case 'e\u0301':
+    case 'é':
       // Claims wide: two cells' advance.
       return 2 * cellWidthPx * zoom * dpr
     default:
@@ -116,16 +115,11 @@ describe('declared columns, contradicting measurement', () => {
     const f = frame(
       1,
       [
-        {
-          cells: [
-            ['汉', 2, true],
-            ['', 3, false],
-            ['a', 1, true],
-          ],
-          runs: [[PLAIN, 3]],
-          wrap: false,
-          continuation: false,
-        },
+        [
+          ['汉', 2, true],
+          ['', 3, false],
+          ['a', 1, true],
+        ],
       ],
       3,
     )
@@ -159,19 +153,14 @@ describe('declared columns, contradicting measurement', () => {
         const f = frame(
           1,
           [
-            {
-              cells: [
-                ['汉', 2, true],
-                ['', 3, false],
-                ['e\u0301', 1, true],
-                ['👩\u200D🚀', 2, true],
-                ['', 3, false],
-                ['b', 1, true],
-              ],
-              runs: [[PLAIN, 6]],
-              wrap: false,
-              continuation: false,
-            },
+            [
+              ['汉', 2, true],
+              ['', 3, false],
+              ['é', 1, true],
+              ['👩‍🚀', 2, true],
+              ['', 3, false],
+              ['b', 1, true],
+            ],
           ],
           6,
         )
@@ -181,15 +170,15 @@ describe('declared columns, contradicting measurement', () => {
         // Every cluster above is one the browser mis-measures at this
         // zoom/dpr: wide and ZWJ claim one column, combining claims two.
         expect(browserAdvancePx('汉', 8, zoom, dpr)).toBe(8 * zoom * dpr)
-        expect(browserAdvancePx('e\u0301', 8, zoom, dpr)).toBe(2 * 8 * zoom * dpr)
-        expect(browserAdvancePx('👩\u200D🚀', 8, zoom, dpr)).toBe(8 * zoom * dpr)
+        expect(browserAdvancePx('é', 8, zoom, dpr)).toBe(2 * 8 * zoom * dpr)
+        expect(browserAdvancePx('👩‍🚀', 8, zoom, dpr)).toBe(8 * zoom * dpr)
 
         expect(snapshot.cellAt(0, 0)?.grapheme).toBe('汉')
         expect(snapshot.cellAt(0, 0)?.span).toBe(2)
         expect(snapshot.cellAt(0, 1)?.width).toBe(3)
-        expect(snapshot.cellAt(0, 2)?.grapheme).toBe('e\u0301')
+        expect(snapshot.cellAt(0, 2)?.grapheme).toBe('é')
         expect(snapshot.cellAt(0, 2)?.span).toBe(1)
-        expect(snapshot.cellAt(0, 3)?.grapheme).toBe('👩\u200D🚀')
+        expect(snapshot.cellAt(0, 3)?.grapheme).toBe('👩‍🚀')
         expect(snapshot.cellAt(0, 3)?.span).toBe(2)
         expect(snapshot.cellAt(0, 4)?.width).toBe(3)
         expect(snapshot.cellAt(0, 5)?.grapheme).toBe('b')
@@ -219,21 +208,13 @@ describe('cell facts', () => {
     const f = frame(
       1,
       [
-        {
-          cells: [
-            ['a', 1, true],
-            ['b', 1, true],
-            ['c', 1, true],
-            ['d', 1, true],
-            ['e', 1, true],
-          ],
-          runs: [
-            [red, 2],
-            [green, 3],
-          ],
-          wrap: false,
-          continuation: false,
-        },
+        [
+          ['a', 1, true, red],
+          ['b', 1, true, red],
+          ['c', 1, true, green],
+          ['d', 1, true, green],
+          ['e', 1, true, green],
+        ],
       ],
       5,
     )
@@ -253,18 +234,10 @@ describe('cell facts', () => {
     const f = frame(
       1,
       [
-        {
-          cells: [
-            ['', 1, false],
-            ['x', 1, true],
-          ],
-          runs: [
-            [inverse, 1],
-            [PLAIN, 1],
-          ],
-          wrap: false,
-          continuation: false,
-        },
+        [
+          ['', 1, false, inverse],
+          ['x', 1, true, PLAIN],
+        ],
       ],
       2,
     )
@@ -282,17 +255,17 @@ describe('cell facts', () => {
     // The last physical line of a wrapped sequence: wrap false and
     // continuation true — not each other's negation (the schema's own
     // example).
-    const one: Cell = ['a', 1, true]
-    const f = frame(
-      1,
-      [
-        { cells: [one], runs: [[PLAIN, 1]], wrap: true, continuation: false },
-        { cells: [one], runs: [[PLAIN, 1]], wrap: true, continuation: true },
-        { cells: [one], runs: [[PLAIN, 1]], wrap: false, continuation: true },
+    const one: CellSpec = ['a', 1, true]
+    const f: SessionFrame = {
+      revision: 1,
+      geometry: { cols: 1, rows: 3, cellWidthPx: 8, cellHeightPx: 20, revision: 1 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [
+        wireRowOf([one], true, false),
+        wireRowOf([one], true, true),
+        wireRowOf([one], false, true),
       ],
-      1,
-      3,
-    )
+    }
     const model = createCellModel()
     const snapshot = applied(model, f)
 
@@ -304,18 +277,73 @@ describe('cell facts', () => {
   })
 
   it('serves cursor and geometry with the revision they were read at', () => {
-    const f = frame(
-      9,
-      [{ cells: [['a', 1, true]], runs: [[PLAIN, 1]], wrap: false, continuation: false }],
-      1,
-    )
+    const f = frame(9, [[['a', 1, true]]], 1)
     const model = createCellModel()
     const snapshot = applied(model, f)
 
     expect(snapshot.revision).toBe(9)
     expect(snapshot.geometry.cols).toBe(1)
     expect(snapshot.geometry.cellWidthPx).toBe(8)
-    expect(snapshot.cursor).toEqual({ x: 0, y: 0, visible: true })
+    expect(snapshot.cursor).toEqual({ x: 0, y: 0, visible: false })
+  })
+})
+
+// --- the wire's own compaction: implied trailing default, omitted runs ------
+
+describe('the row a shorter wire message implies', () => {
+  it('pads a row shorter than geometry.cols with the default style', () => {
+    const f: SessionFrame = {
+      revision: 1,
+      geometry: { cols: 5, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 1 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'ab' }],
+    }
+    const model = createCellModel()
+    const snapshot = applied(model, f)
+
+    expect(snapshot.rows[0].cells).toHaveLength(5)
+    expect(snapshot.cellAt(0, 0)?.grapheme).toBe('a')
+    expect(snapshot.cellAt(0, 1)?.grapheme).toBe('b')
+    for (const column of [2, 3, 4]) {
+      const padded = snapshot.cellAt(0, column)
+      expect(padded?.grapheme).toBe('')
+      expect(padded?.hasText).toBe(false)
+      expect(padded?.width).toBe(1)
+      // The padded style is the wire's own default.
+      expect(padded?.style.foreground.kind).toBe(0)
+      expect(padded?.style.attributes).toBe(0)
+    }
+  })
+
+  it('reads an absent runs as one implicit default run over the whole explicit width', () => {
+    const f: SessionFrame = {
+      revision: 1,
+      geometry: { cols: 3, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 1 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'abc' }],
+    }
+    const model = createCellModel()
+    const snapshot = applied(model, f)
+    for (const column of [0, 1, 2]) {
+      expect(snapshot.cellAt(0, column)?.style.foreground.kind).toBe(0)
+      expect(snapshot.cellAt(0, column)?.style.attributes).toBe(0)
+    }
+  })
+
+  it('reads an absent marks as every position one codepoint, one column', () => {
+    const f: SessionFrame = {
+      revision: 1,
+      geometry: { cols: 3, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 1 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'xyz' }],
+    }
+    const model = createCellModel()
+    const snapshot = applied(model, f)
+    expect(snapshot.rows[0].cells.map((c) => [c.grapheme, c.width])).toEqual([
+      ['x', 1],
+      ['y', 1],
+      ['z', 1],
+    ])
   })
 })
 
@@ -401,24 +429,14 @@ describe('atomic per-revision replacement', () => {
     const first = frame(
       1,
       [
-        {
-          cells: [
-            ['r1-a', 1, true],
-            ['r1-b', 1, true],
-          ],
-          runs: [[PLAIN, 2]],
-          wrap: false,
-          continuation: false,
-        },
-        {
-          cells: [
-            ['r1-c', 1, true],
-            ['r1-d', 1, true],
-          ],
-          runs: [[PLAIN, 2]],
-          wrap: false,
-          continuation: false,
-        },
+        [
+          ['r1-a', 1, true],
+          ['r1-b', 1, true],
+        ],
+        [
+          ['r1-c', 1, true],
+          ['r1-d', 1, true],
+        ],
       ],
       2,
       2,
@@ -426,24 +444,14 @@ describe('atomic per-revision replacement', () => {
     const second = frame(
       2,
       [
-        {
-          cells: [
-            ['r2-a', 1, true],
-            ['r2-b', 1, true],
-          ],
-          runs: [[PLAIN, 2]],
-          wrap: false,
-          continuation: false,
-        },
-        {
-          cells: [
-            ['r2-c', 1, true],
-            ['r2-d', 1, true],
-          ],
-          runs: [[PLAIN, 2]],
-          wrap: false,
-          continuation: false,
-        },
+        [
+          ['r2-a', 1, true],
+          ['r2-b', 1, true],
+        ],
+        [
+          ['r2-c', 1, true],
+          ['r2-d', 1, true],
+        ],
       ],
       2,
       2,
@@ -478,20 +486,23 @@ describe('atomic per-revision replacement', () => {
     applied(model, good)
 
     // Malformed in three different ways: wrong row count, a run partition
-    // that does not sum to the cells length, and an unknown width.
+    // that does not sum to the row's own explicit width, and a row whose
+    // explicit content is wider than geometry.cols.
     const wrongHeight = blankFrame(6, 2, 3)
-    const badPartition = frame(
-      7,
-      [{ cells: [['a', 1, true]], runs: [[PLAIN, 2]], wrap: false, continuation: false }],
-      1,
-    )
-    const unknownWidth = frame(
-      8,
-      [{ cells: [['', 0, false]], runs: [[PLAIN, 1]], wrap: false, continuation: false }],
-      1,
-    )
+    const badPartition: SessionFrame = {
+      revision: 7,
+      geometry: { cols: 1, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 7 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'a', runs: [[0, 2]] }],
+    }
+    const tooWide: SessionFrame = {
+      revision: 8,
+      geometry: { cols: 1, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 8 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'ab' }],
+    }
 
-    for (const malformed of [wrongHeight, badPartition, unknownWidth]) {
+    for (const malformed of [wrongHeight, badPartition, tooWide]) {
       const refusal = refused(model, malformed)
       expect(refusal.reason).not.toBe('stale-revision')
       expect(model.current()?.revision).toBe(5)
@@ -521,61 +532,62 @@ describe('atomic per-revision replacement', () => {
     expect(model.current()?.revision).toBe(2)
   })
 
-  it('freezes what it installs: caller mutation after apply throws, not rewrites', () => {
+  it('never aliases the frame it decoded: mutating the caller’s objects after apply does not move the snapshot', () => {
     const red = style(1)
-    const f = frame(
-      1,
-      [{ cells: [['a', 1, true]], runs: [[red, 1]], wrap: false, continuation: false }],
-      1,
-    )
+    const f = frame(1, [[['a', 1, true, red]]], 1)
     const model = createCellModel()
     const snapshot = applied(model, f)
 
-    // The caller reuses its objects: mutating them after apply must not
-    // rewrite the installed revision. The model froze them at intake, so
-    // the attempts throw (ESM is strict) and the snapshot keeps its facts.
-    expect(() => {
-      red.foreground.palette = 99
-    }).toThrow(TypeError)
-    expect(() => {
-      f.geometry.cols = 80
-    }).toThrow(TypeError)
-    expect(() => {
-      f.cursor.x = 7
-    }).toThrow(TypeError)
+    // Decode already copied every fact out of red/f's own strings and
+    // numbers into fresh objects, so mutating the caller's inputs
+    // afterward — something a wire-aliasing design would have had to
+    // freeze against — simply does not reach the installed snapshot.
+    f.geometry.cols = 80
+    f.cursor.x = 7
 
     expect(snapshot.cellAt(0, 0)?.style.foreground.palette).toBe(1)
     expect(snapshot.geometry.cols).toBe(1)
     expect(snapshot.cursor.x).toBe(0)
   })
 
-  it('refuses a run that covers less than one cell', () => {
+  it('freezes what it installs: a caller cannot rewrite an installed snapshot', () => {
+    const f = frame(1, [[['a', 1, true]]], 1)
+    const model = createCellModel()
+    const snapshot = applied(model, f)
+
+    expect(() => {
+      ;(snapshot as { revision: number }).revision = 99
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(snapshot.geometry as { cols: number }).cols = 99
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(snapshot.rows[0].cells[0] as { grapheme: string }).grapheme = 'z'
+    }).toThrow(TypeError)
+  })
+
+  it('refuses a run that covers less than one column', () => {
     const model = createCellModel()
     applied(model, blankFrame(1, 1))
 
     // The schema: run length is at least 1 — a run that covered nothing
     // would be sender noise. The zero-length run sits beside a run whose
-    // lengths still sum to the cells length, so the partition sum alone
-    // does not catch it.
-    const zeroRun = frame(
-      2,
-      [
+    // lengths still sum to the row's explicit width, so the partition sum
+    // alone does not catch it.
+    const zeroRun: SessionFrame = {
+      revision: 2,
+      geometry: { cols: 3, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 2 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [
         {
-          cells: [
-            ['a', 1, true],
-            ['b', 1, true],
-            ['c', 1, true],
-          ],
+          text: 'abc',
           runs: [
-            [style(1), 0],
-            [PLAIN, 3],
+            [[1, 0, 0, 0, 0], 0],
+            [0, 3],
           ],
-          wrap: false,
-          continuation: false,
         },
       ],
-      3,
-    )
+    }
     const refusal = refused(model, zeroRun)
     expect(refusal.reason).toBe('malformed-row')
     expect(model.current()?.revision).toBe(1)

@@ -1,6 +1,6 @@
 import type { SessionFrame } from '../generated/session.frame'
-import type { Cell, LedgerBlockRowsLine, Row, Run, Style } from '../generated/ledger.blockRows'
-import { createCellModel } from '../cell-model'
+import type { LedgerBlockRowsLine } from '../generated/ledger.blockRows'
+import { createCellModel, rowColumnsOf } from '../cell-model'
 import { paintRow } from '../painter/paint-row'
 import type { RunMetric } from './run-geometry'
 import type { TerminalSnapshot } from './serializer'
@@ -73,84 +73,31 @@ export function parseStoredBlockRows(
   }
 }
 
-function defaultStyle(): Style {
-  return {
-    foreground: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    background: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    underlineColor: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
-    attributes: 0,
-    underline: 0,
-  }
-}
-
-function isDefaultStyle(style: Style): boolean {
-  return (
-    style.attributes === 0 &&
-    style.underline === 0 &&
-    style.foreground.kind === 0 &&
-    style.foreground.palette === 0 &&
-    style.foreground.rgb.r === 0 &&
-    style.foreground.rgb.g === 0 &&
-    style.foreground.rgb.b === 0 &&
-    style.background.kind === 0 &&
-    style.background.palette === 0 &&
-    style.background.rgb.r === 0 &&
-    style.background.rgb.g === 0 &&
-    style.background.rgb.b === 0 &&
-    style.underlineColor.kind === 0 &&
-    style.underlineColor.palette === 0 &&
-    style.underlineColor.rgb.r === 0 &&
-    style.underlineColor.rgb.g === 0 &&
-    style.underlineColor.rgb.b === 0
-  )
-}
-
-function nonEmptyRuns(runs: readonly Run[]): [Run, ...Run[]] {
-  if (runs.length === 0) {
-    throw new Error('stored row has no style runs')
-  }
-  return runs.map(([style, length]) => [style, length] as Run) as [Run, ...Run[]]
-}
-
-function padStoredRow(row: Row, width: number): Row {
-  const missing = width - row.cells.length
-  if (missing <= 0) return row
-
-  const cells: Cell[] = [...row.cells]
-  for (let i = 0; i < missing; i++) cells.push(['', 1, false])
-
-  const runs = nonEmptyRuns(row.runs)
-  const last = runs[runs.length - 1]
-  if (last !== undefined && isDefaultStyle(last[0])) {
-    last[1] += missing
-  } else {
-    runs.push([defaultStyle(), missing])
-  }
-  return { ...row, cells, runs }
-}
-
-function normalizeStoredRows(lines: readonly LedgerBlockRowsLine[]): LedgerBlockRowsLine[] {
-  const width = Math.max(...lines.map((line) => line.row.cells.length))
-  if (width === 0) return []
-  return lines.map((line) => ({ ...line, row: padStoredRow(line.row, width) }))
-}
-
+/** A stored block carries no frame geometry of its own (nocx-zg3k3.2.12):
+ *  each line's row is only as wide as its own explicit content, which
+ *  differs line to line (a short line, an inverse status bar that goes to
+ *  the block's own right edge). Building the rectangle the cell model
+ *  needs is therefore choosing `cols` — the widest line among the ones
+ *  read — and letting the model's own decode pad every shorter row out to
+ *  it in the default style, exactly as it pads a live frame's row against
+ *  geometry.cols. There is no cell-level padding here any more: that was
+ *  the [grapheme, width, hasText]-per-column shape's own bookkeeping, and
+ *  the compact wire does not carry cells to pad. */
 function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   if (lines.length === 0) return null
-  const normalized = normalizeStoredRows(lines)
-  if (normalized.length === 0) return null
-  const cols = normalized[0].row.cells.length
+  const cols = Math.max(...lines.map((line) => rowColumnsOf(line.row)))
+  if (cols === 0) return null
   const frame: SessionFrame = {
     revision: 1,
     geometry: {
       cols,
-      rows: normalized.length,
+      rows: lines.length,
       cellWidthPx: 1,
       cellHeightPx: 1,
       revision: 1,
     },
     cursor: { x: 0, y: 0, visible: false },
-    rows: normalized.map((line) => line.row),
+    rows: lines.map((line) => line.row),
   }
   const result = createCellModel().apply(frame)
   return result.ok ? result.snapshot : null

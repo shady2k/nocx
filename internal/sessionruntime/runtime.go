@@ -1279,12 +1279,21 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 			// boundary this completion is authenticating — so the capture
 			// seals, and the interval in flight, rebased at the fence, is
 			// already the next record. Under the same lock the join holds.
-			if e.captured != nil {
-				s.sealObservationFromCaptureLocked(nonce, e.captured)
-				e.captured = nil
-			} else {
-				s.sealObservationLocked(nonce)
+			//
+			// e.captured is set at the ONE call site that ever puts an entry
+			// into RendezvousAwaitingAuthenticated (sightDrainedFenceLocked,
+			// via splitObservationAtFenceLocked, which always returns a
+			// non-nil *observationCapture) and is consumed only here, so by
+			// the time this branch runs it can never be nil — asserted
+			// rather than silently routed around a nil that this codebase
+			// had already proven impossible (stage review nocx-2v80t.3.15,
+			// finding 2: the prior `else` branch was live code with no path
+			// that could ever reach it).
+			if e.captured == nil {
+				panic("sessionruntime: rendezvous awaiting-authenticated with no captured observation")
 			}
+			s.sealObservationFromCaptureLocked(nonce, e.captured)
+			e.captured = nil
 		}
 		return
 	}

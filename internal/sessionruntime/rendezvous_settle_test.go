@@ -121,8 +121,16 @@ func TestAParkedIntervalIsSettledByTheNextIntervalsStart(t *testing.T) {
 	if !ok {
 		t.Fatal("the settled interval emitted no end marker")
 	}
-	if end.endRow != atCompletion {
-		t.Fatalf("the settled end marker stops at row %d, want the %d its completion measured", end.endRow, atCompletion)
+	// The parked count is where the completion measured the boundary, and the
+	// interval kept streaming after it: the end marker is never behind what the
+	// interval already handed over, or the block's closing append lands behind
+	// its own cursor and the block never freezes. It carries the count at the
+	// settle, which can only be more than the completion's.
+	if end.endRow < atCompletion {
+		t.Fatalf("the settled end marker stops at row %d, behind the %d its completion measured", end.endRow, atCompletion)
+	}
+	if want := streamedRowsBefore(rs); end.endRow != want {
+		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
 	if len(end.closing) != 0 {
 		t.Fatalf("the settled end marker carries %d closing rows, want none", len(end.closing))
@@ -173,8 +181,11 @@ func TestAParkedIntervalIsSettledByASecondCompletion(t *testing.T) {
 		t.Fatalf("the settled record carries %d closing rows and %v, want none and no-fence", len(rec.Closing.Lines), rec.Completeness)
 	}
 	end, ok := settledEnds(rs)[parked]
-	if !ok || end.endRow != atCompletion || len(end.closing) != 0 {
-		t.Fatalf("the settled end marker is %+v, want row %d and no closing screen", end, atCompletion)
+	if !ok || end.endRow < atCompletion || len(end.closing) != 0 {
+		t.Fatalf("the settled end marker is %+v, want no less than row %d and no closing screen", end, atCompletion)
+	}
+	if want := streamedRowsBefore(rs); end.endRow != want {
+		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
 	if got := s.RendezvousFor(parked).State; got != RendezvousExpired {
 		t.Fatalf("the settled meeting reads %s, want expired", rendezvousStateName(got))
@@ -208,8 +219,11 @@ func TestAParkedIntervalIsSettledByTheSessionsEnd(t *testing.T) {
 		t.Fatalf("the settled record carries %d closing rows and %v, want none and no-fence", len(rec.Closing.Lines), rec.Completeness)
 	}
 	end, ok := settledEnds(rs)[nonce]
-	if !ok || end.endRow != atCompletion || len(end.closing) != 0 {
-		t.Fatalf("the settled end marker is %+v, want row %d and no closing screen", end, atCompletion)
+	if !ok || end.endRow < atCompletion || len(end.closing) != 0 {
+		t.Fatalf("the settled end marker is %+v, want no less than row %d and no closing screen", end, atCompletion)
+	}
+	if want := streamedRowsBefore(rs); end.endRow != want {
+		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
 }
 
@@ -238,8 +252,11 @@ func TestTheContractsOwnCallSettlesAParkedInterval(t *testing.T) {
 		t.Fatalf("the settled record carries %d closing rows and %v, want none and no-fence", len(rec.Closing.Lines), rec.Completeness)
 	}
 	end, ok := settledEnds(rs)[nonce]
-	if !ok || end.endRow != atCompletion || len(end.closing) != 0 {
-		t.Fatalf("the settled end marker is %+v, want row %d and no closing screen", end, atCompletion)
+	if !ok || end.endRow < atCompletion || len(end.closing) != 0 {
+		t.Fatalf("the settled end marker is %+v, want no less than row %d and no closing screen", end, atCompletion)
+	}
+	if want := streamedRowsBefore(rs); end.endRow != want {
+		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
 	if got := s.RendezvousFor(nonce).State; got != RendezvousExpired {
 		t.Fatalf("the settled meeting reads %s, want expired", rendezvousStateName(got))
@@ -344,8 +361,11 @@ func TestTheBoundNeverLeavesAParkedRecordUnsealed(t *testing.T) {
 		t.Fatalf("the settled record carries %d closing rows and %v, want none and no-fence", len(rec.Closing.Lines), rec.Completeness)
 	}
 	end, ok := settledEnds(rs)[oldest]
-	if !ok || end.endRow != atCompletion || len(end.closing) != 0 {
-		t.Fatalf("the settled end marker is %+v, want row %d and no closing screen", end, atCompletion)
+	if !ok || end.endRow < atCompletion || len(end.closing) != 0 {
+		t.Fatalf("the settled end marker is %+v, want no less than row %d and no closing screen", end, atCompletion)
+	}
+	if want := streamedRowsBefore(rs); end.endRow != want {
+		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
 	// Every completion whose fence never arrived left a record — the bound
 	// recycled a slot, not a record — and the interval in flight is parked on
@@ -355,5 +375,86 @@ func TestTheBoundNeverLeavesAParkedRecordUnsealed(t *testing.T) {
 	}
 	if s.observation == nil || s.observation.Nonce != obsNonce(0xFF) {
 		t.Fatal("the interval in flight is not parked on the newest completion")
+	}
+}
+
+// streamedRowsBefore is how many rows the runtime had handed to the stream
+// before the FIRST end marker: what that marker may not be behind.
+func streamedRowsBefore(rs *recordingRowStream) uint64 {
+	total := uint64(0)
+	for _, ev := range rs.snapshot() {
+		if ev.kind == "end" {
+			break
+		}
+		total += uint64(len(ev.rows)) // #nosec G115 -- a row count
+	}
+	return total
+}
+
+// endRowsInOrder is every end marker's endRow, in arrival order.
+func endRowsInOrder(rs *recordingRowStream) []uint64 {
+	var out []uint64
+	for _, ev := range rs.snapshot() {
+		if ev.kind == "end" {
+			out = append(out, ev.endRow)
+		}
+	}
+	return out
+}
+
+// TestAStaleCompletionNeverParksOnAnotherFencesInterval: command A's fence is
+// undecodable, so nothing ever sights it; command B's fence is sighted and its
+// sighting takes the boundary and rebases the interval in flight onto B. A's
+// authenticated half arrives afterwards and is OLDER than the interval it
+// would park on: parking it there gives one record two overlapping row spans
+// and emits an end marker behind rows the interval already streamed
+// (nocx-2v80t.3.9).
+func TestAStaleCompletionNeverParksOnAnotherFencesInterval(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	stale, live := obsNonce(1), obsNonce(2)
+
+	obsFeed(t, s, 0, 30)
+	// A's fence, in the shell's own sequence but with a body nothing can
+	// decode: the sighting is dropped and A's boundary is never seen.
+	if err := s.Ingest([]byte("\x1b]1337;NOCX_FENCE;not-a-nonce\x07")); err != nil {
+		t.Fatalf("feed A's undecodable fence: %v", err)
+	}
+	if got := s.RendezvousFor(stale).State; got != RendezvousIdle {
+		t.Fatalf("an undecodable fence left a meeting %s, want idle", rendezvousStateName(got))
+	}
+
+	// B prints, and B's fence is sighted: that sighting takes the boundary and
+	// rebases the interval in flight onto B.
+	obsFeed(t, s, 30, 30)
+	s.SightFenceBoundary(t, live)
+
+	// A's authenticated half arrives after B's sighting: it must not park.
+	s.Completed(s.Incarnation(), stale, 0)
+	if _, ok := s.ObservationFor(stale); ok {
+		t.Fatal("a completion whose fence was never sighted sealed a record on another fence's interval")
+	}
+	if _, ok := settledEnds(rs)[stale]; ok {
+		t.Fatal("a completion whose fence was never sighted emitted an end marker: no boundary was seen")
+	}
+	if got := s.observation; got != nil && got.Nonce != (FenceNonce{}) {
+		t.Fatalf("a stale completion parked the interval in flight (nonce %v)", got.Nonce)
+	}
+
+	// B's own completion closes B's capture, on B's screen.
+	s.Completed(s.Incarnation(), live, 0)
+	if _, ok := s.ObservationFor(live); !ok {
+		t.Fatal("B's own boundary sealed no record")
+	}
+	recs := s.Observations()
+	if len(recs) != 1 {
+		t.Fatalf("%d records sealed, want B's alone: no record this session holds may overlap another's rows", len(recs))
+	}
+
+	// And the session's end markers never go backwards — that is what the wire
+	// trace showed before this fix: two ends at one count, the second behind
+	// rows the interval had already streamed.
+	rows := endRowsInOrder(rs)
+	if len(rows) != 1 {
+		t.Fatalf("%d end markers, want one: a boundary nobody saw is never invented", len(rows))
 	}
 }

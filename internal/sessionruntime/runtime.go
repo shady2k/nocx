@@ -1238,6 +1238,16 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if !s.admitRendezvousLocked(parked, true) {
 		return
 	}
+	// An interval whose screen and row window were taken at ANOTHER fence's
+	// sighting belongs to that fence's command. Parking this half on it would
+	// give one record two overlapping spans, and the stale half's end marker
+	// arrives behind rows the interval already streamed (nocx-2v80t.3.9). The
+	// meeting is admitted and NOT parked: if its own sighting never arrives,
+	// the settle degrades completeness and invents no record, which is the
+	// honest answer for a boundary nobody saw.
+	if o := s.observation; o != nil && o.Rebased != (FenceNonce{}) && o.Rebased != nonce {
+		return
+	}
 	s.parkObservationLocked(nonce)
 }
 
@@ -1393,7 +1403,7 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if !s.admitRendezvousLocked(entry, false) {
 		return ErrRendezvousFull
 	}
-	entry.captured = s.splitObservationAtFenceLocked()
+	entry.captured = s.splitObservationAtFenceLocked(nonce)
 	return nil
 }
 

@@ -131,6 +131,14 @@ type observationOpen struct {
 	// event, never a timer: the next interval's start or the session's end
 	// seals it without a closing screen (sealPendingWithoutScreenLocked).
 	Nonce FenceNonce
+	// Rebased names the fence whose SIGHTING opened this interval in flight —
+	// splitObservationAtFenceLocked took its screen and its row window at that
+	// fence, so this interval belongs to that fence's command. A completion
+	// for any OTHER nonce is older than it, and parking it here would give one
+	// record two overlapping row spans and emit an end marker behind the
+	// stream (nocx-2v80t.3.9). Zero when the interval opened any other way: at
+	// a seal, or at the session's first ingest.
+	Rebased FenceNonce
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -399,7 +407,16 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 		Loss:         parked.Loss,
 	}
 	s.pendingScreen = nil
-	s.emitIntervalEndLocked(nonce, parked.EndRow, nil)
+	// The parked count is the completion's own measurement and the last
+	// trustworthy evidence of where the command's output ended — but the
+	// interval kept streaming after it, and an end marker BEHIND rows the
+	// runtime has already handed over puts the block's closing append behind
+	// its own cursor and leaves the block unfrozen (measured at the wire: two
+	// ends at one count while that interval's rows were already out,
+	// nocx-2v80t.3.9). The rule is that an end marker is never less than what
+	// the interval streamed: the rows it covers are the interval's own, and
+	// the closing screen stays empty because no screen was ever read.
+	s.emitIntervalEndLocked(nonce, max(s.departedRows, parked.EndRow), nil)
 	// The next record opens on the screen read at the settle event — one
 	// read under the lock, at the event's instant — never on the parked
 	// interval's Opening: the parked opening predates the boundary's own
@@ -563,7 +580,7 @@ type observationCapture struct {
 // at the fence's revision on the fence's screen. The fence itself is painted
 // by nothing, so the closing screen ends where the command's visible output
 // ended.
-func (s *Session) splitObservationAtFenceLocked() *observationCapture {
+func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationCapture {
 	o := s.observation
 	if o == nil {
 		o = &observationOpen{Opened: s.rev}
@@ -579,7 +596,7 @@ func (s *Session) splitObservationAtFenceLocked() *observationCapture {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
 	}
-	s.observation = &observationOpen{Opened: s.rev, Opening: cap.Closing}
+	s.observation = &observationOpen{Opened: s.rev, Opening: cap.Closing, Rebased: rebase}
 	return cap
 }
 
@@ -629,6 +646,8 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	o.Loss.RetentionFeedBytes += cap.Loss.RetentionFeedBytes
 	o.Loss.IngestLostBytes += cap.Loss.IngestLostBytes
 	o.Opened, o.Opening = cap.Opened, cap.Opening
+	// The split is un-done, so the interval belongs to no fence again.
+	o.Rebased = FenceNonce{}
 }
 
 // Observations is every sealed record the session retains, oldest first. The

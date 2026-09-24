@@ -119,29 +119,20 @@ func streamRows(t *testing.T, db content.ContentDB, entryID string) []struct {
 		if line == "" {
 			continue
 		}
-		// Cells are positional tuples; decode positionally.
+		// A stored row carries its line as `text` (nocx-zg3k3.2.12).
 		var loose struct {
-			From uint64          `json:"from"`
-			Row  json.RawMessage `json:"row"`
+			From uint64 `json:"from"`
+			Row  struct {
+				Text string `json:"text"`
+			} `json:"row"`
 		}
 		if err := json.Unmarshal([]byte(line), &loose); err != nil {
 			t.Fatalf("parse stored line: %v\nline: %s", err, line)
 		}
-		var row struct {
-			Cells [][]any `json:"cells"`
-		}
-		if err := json.Unmarshal(loose.Row, &row); err != nil {
-			t.Fatalf("parse stored row: %v", err)
-		}
-		var text strings.Builder
-		for _, cell := range row.Cells {
-			g, _ := cell[0].(string)
-			text.WriteString(g)
-		}
 		out = append(out, struct {
 			From uint64
 			Text string
-		}{loose.From, text.String()})
+		}{loose.From, loose.Row.Text})
 	}
 	return out
 }

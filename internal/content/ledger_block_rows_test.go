@@ -411,6 +411,53 @@ func TestAppendBlockRows_ARowJumpMustExplainItself(t *testing.T) {
 	}
 }
 
+// A CONTINUOUS append — FromRow already equal to the block's own NextRow —
+// takes no continuity check on LostRows at all (the discontinuity switch
+// only fires for FromRow < NextRow or FromRow > NextRow), so a caller can
+// claim more lost rows than the block's own span can ever explain without
+// its FromRow ever jumping. Closing such a block used to compute its
+// DroppedRows as an UNSIGNED span-minus-lost-minus-stored that underflowed
+// — roughly 2^64 rows reported missing for a block that stored every row it
+// was ever given (stage review nocx-2v80t.3.15, finding 10). The fix
+// reports zero rather than a wrapped lie whenever the chunks hold more than
+// the span-minus-loss arithmetic can account for.
+func TestCloseBlockRows_AnOverclaimedLossNeverUnderflowsTheDropCount(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "long command")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 0,
+		Rows: []emulator.Row{aTextRow("one"), aTextRow("two")},
+	}); err != nil {
+		t.Fatalf("first append: %v", err)
+	}
+	// FromRow(2) equals the block's own NextRow(2): a perfectly continuous
+	// append, and LostRows here claims ten rows that this append's own
+	// FromRow does not name a gap for.
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 2, LostRows: 10,
+		Rows: []emulator.Row{aTextRow("three")},
+	}); err != nil {
+		t.Fatalf("continuous append with an overclaimed loss: %v", err)
+	}
+	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: keptArtifact})
+	if err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	if summary.DroppedRows != 0 {
+		t.Fatalf("summary.DroppedRows = %d, want 0 — every row this block was given is stored, "+
+			"so nothing about ITS OWN arithmetic explains a drop (an unsigned underflow used to report ~2^64)",
+			summary.DroppedRows)
+	}
+	kept := storedBlockRows(t, led, keptArtifact)
+	if len(kept) != 3 || kept[0].Text != "one" || kept[1].Text != "two" || kept[2].Text != "three" {
+		t.Fatalf("the stored rows = %+v, want one, two, three — every row this test appended", kept)
+	}
+}
+
 // THE CAP, both ends. The per-command bound drops the middle of a long block
 // — the invocation in the head, the errors in the tail — and the block
 // records how many rows the cap took. A small command is stored whole.

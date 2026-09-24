@@ -560,5 +560,21 @@ func deriveBlockRowsDropped(ctx context.Context, tx *sql.Tx, artifactID string, 
 	if lost > span {
 		lost = span // defensive: loss beyond the block is not this block's
 	}
-	return span - lost - stored, nil
+	expected := span - lost
+	if stored > expected {
+		// The chunks hold MORE than this block's own span-minus-loss
+		// arithmetic expects — a bridge drop this block's deliveries never
+		// named, or a closing screen the coordinator placed at the
+		// artifact's own cursor rather than at the interval's endRow
+		// because the interval's rows never fully reached it
+		// (ws_block_rows.go's closeBlockRowsNow, "cursor < endRow"). The
+		// unsigned subtraction below would otherwise underflow and report
+		// roughly 2^64 rows missing for a block that in fact dropped
+		// nothing of its own (measured on the e2e, nocx-2v80t.3.9,
+		// stage review nocx-2v80t.3.15 finding 10) — so a shortfall this
+		// block's own numbers cannot account for is reported as zero
+		// rather than as a lie.
+		return 0, nil
+	}
+	return expected - stored, nil
 }

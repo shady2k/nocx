@@ -212,32 +212,6 @@ func mergePendingRows(a, b []pendingRows) []pendingRows {
 	return append(merged, b[j:]...)
 }
 
-// closeRowsAt places an interval's closing screen on its block's artifact: at
-// the artifact's OWN cursor, never behind it.
-//
-// The index relation the block states is that the artifact holds the
-// interval's rows at [begin, endRow) and its closing screen follows at
-// [endRow, endRow+len(closing)). That relation holds only while every row the
-// interval streamed reached the store, and the producer is not obliged to make
-// it hold: an end marker whose count does not advance past rows already
-// appended names a boundary the artifact has passed, and one that runs ahead
-// of what reached the artifact names a jump. Appending at endRow in the first
-// case lands the close BEHIND the store's own cursor, which the store refuses
-// by contract (ErrBlockRowsDiscontinuous) — the shape that used to leave the
-// block open forever, retried on every later delivery (nocx-2v80t.3.9). The
-// artifact is the authority in both:
-//
-//   - cursor > endRow: the interval's rows are already in; the closing screen
-//     follows them, and the block's index space is the artifact's.
-//   - cursor <= endRow: the closing screen belongs at the boundary, and the
-//     gap back to the cursor is what the store requires a jump to name.
-func closeRowsAt(cursor, endRow uint64) (from, lost uint64) {
-	if cursor > endRow {
-		return cursor, 0
-	}
-	return endRow, endRow - cursor
-}
-
 // splitPendingRowsAt separates deliveries at an interval's absolute end row.
 // A flush may already have rows from the next interval waiting behind the
 // current append; those rows must follow promotion, not be written to the
@@ -779,20 +753,45 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	closingIn := block.closingIn
 	bs.mu.Unlock()
 	if len(closing) > 0 && !closingIn {
-		// The closing screen goes where the artifact actually is
-		// (closeRowsAt): the interval's index relation holds only while
-		// every row it streamed reached the store, and an end marker that
-		// arrives behind rows already appended breaks it — appending at
-		// endRow then lands the close behind the store's own cursor, the
-		// refusal that used to leave the block open forever
-		// (nocx-2v80t.3.9).
-		from, lost := closeRowsAt(cursor, endRow)
+		// The closing screen goes where the artifact actually is.
+		//
+		// The index relation the block states is that the artifact holds the
+		// interval's rows at [begin, endRow) and its closing screen follows at
+		// [endRow, endRow+len(closing)). That relation holds only while every
+		// row the interval streamed reached the store, and the producer is not
+		// obliged to make it hold — the e2e's end-marker sequence is not
+		// monotone — so the close is placed by what the artifact really holds:
+		//
+		//   cursor == endRow — the relation holds, and this is the ordinary
+		//     shape: the closing screen follows the interval's rows.
+		//   cursor > endRow — an end marker behind rows already appended.
+		//     Appending at endRow would land the close BEHIND the store's own
+		//     cursor, which the store refuses by contract
+		//     (ErrBlockRowsDiscontinuous) — the shape that used to leave the
+		//     block open forever, retried on every later delivery
+		//     (nocx-2v80t.3.9). The closing screen follows what is there.
+		//   cursor < endRow — rows the interval streamed never reached this
+		//     artifact. The closing screen still follows what it holds, and
+		//     nothing is claimed for the ones that are absent: the store's
+		//     summary measures its drop as (span − lost − stored) over a span
+		//     that begins at the block's own first stored row, so a lost count
+		//     for rows BEFORE that span is not expressible — subtracting it
+		//     underflows the count and a surface renders
+		//     `18446744073709552000 rows missing` for a block that lost
+		//     nothing of its own (measured on the e2e, nocx-2v80t.3.9). Where
+		//     those rows went is a delivery fact — another interval's
+		//     artifact, a bridge drop, a floor skip — and the log line below
+		//     names the shortfall instead of billing this block for it.
+		if cursor != endRow {
+			s.log.Warn("block close: the artifact is not at the interval's end row; the closing screen follows what it holds",
+				"session", sid, "entry", block.entry, "endRow", endRow, "cursor", cursor)
+		}
 		if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 			EntryID: block.entry, ArtifactID: block.artifactID,
-			FromRow: from, LostRows: lost, Rows: closing,
+			FromRow: cursor, Rows: closing,
 		}); err != nil {
 			s.log.Warn("block closing rows failed", "session", sid, "entry", block.entry,
-				"fromRow", from, "endRow", endRow, "cursor", cursor, "error", err)
+				"fromRow", cursor, "endRow", endRow, "error", err)
 			if !fail() {
 				abandon()
 			}
@@ -800,10 +799,10 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		bs.mu.Lock()
 		block.closingIn = true
-		block.rows = from + uint64(len(closing)) //nolint:gosec // a row count, not a byte count
+		block.rows = cursor + uint64(len(closing)) //nolint:gosec // a row count, not a byte count
 		bs.mu.Unlock()
 		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
-			EntryID: block.entry, From: from, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
+			EntryID: block.entry, From: cursor, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
 		})
 	}
 	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
@@ -816,10 +815,10 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		return false
 	}
 	// The block owns its own departed rows: [begin, endRow). Its closing
-	// screen is appended after the artifact's own cursor — at
-	// [endRow, endRow+len(closing)) when every row the interval streamed
-	// reached the store, and at the cursor itself when the producer's end
-	// marker was behind or ahead of what arrived (closeRowsAt) — and the
+	// screen is appended after everything the artifact actually holds —
+	// at [endRow, endRow+len(closing)) when the interval's rows all reached
+	// the store, and at the artifact's own cursor otherwise; the placement
+	// rule and what a shortfall means are at the append above — and the
 	// RUNTIME owns those rows from here: it holds the screen it emitted and
 	// never streams it again, so no delivery for the next interval carries
 	// them (rowstream.go). What remains this coordinator's to refuse is a

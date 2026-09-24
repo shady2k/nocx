@@ -16,6 +16,8 @@ package transport
 // of being retried for the life of the session.
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -92,6 +94,65 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	e.ws.blockStream.mu.Unlock()
 	if parked != 0 || open != nil {
 		t.Fatalf("the close left state behind: parked ends=%d open block=%+v", parked, open)
+	}
+}
+
+// The other disagreement: the interval's end marker runs AHEAD of whatever
+// reached the artifact — rows the interval streamed that this block never
+// received (the e2e's transcript-0007, whose artifact held only its closing
+// screen). The block must still seal, hold exactly what it did receive, and
+// claim NOTHING for the absent rows: a lost count for rows before the
+// artifact's own first stored row is outside the span the store's summary
+// measures over, and subtracting it there underflows into the renderer's
+// `18446744073709552000 rows missing`.
+func TestBlockIntervalEnded_SealsWithoutClaimingRowsItNeverReceived(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf short")
+	fence := lifecycleFence(0x99)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+
+	// Ten rows reach the artifact; the end marker names row forty.
+	rows := make([]emulator.Row, 0, 10)
+	for i := range 10 {
+		rows = append(rows, aStreamRow(fmt.Sprintf("delivered-%02d", i)))
+	}
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows); !confirm || written != 10 {
+		t.Fatalf("rows ack = (%d, %v), want the exclusive end 10 confirmed", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 40, []emulator.Row{aStreamRow("closing")})
+
+	assertBlockSealed(t, db, attempt)
+	kept := streamRows(t, db, attempt)
+	if len(kept) != 11 {
+		t.Fatalf("the sealed block holds %d rows, want the 10 it received plus the closing screen: %+v", len(kept), kept)
+	}
+	for i := range 10 {
+		if want := fmt.Sprintf("delivered-%02d", i); kept[i].Text != want {
+			t.Fatalf("stored row %d = %q, want %q", i, kept[i].Text, want)
+		}
+	}
+	if kept[10].Text != "closing" || kept[10].From != 10 {
+		t.Fatalf("the closing screen is %+v, want it after the rows the artifact holds (from 10)", kept[10])
+	}
+
+	// The account it keeps: no rows dropped by a cap, no rows lost — nothing
+	// is billed to a block that received everything it was handed.
+	art, err := db.Ledger().Artifact(context.Background(), rowsArtifactID(t, db, attempt))
+	if err != nil {
+		t.Fatalf("Artifact: %v", err)
+	}
+	var account struct {
+		DroppedRows uint64 `json:"droppedRows"`
+		LostRows    uint64 `json:"lostRows"`
+	}
+	if err := json.Unmarshal([]byte(art.Payload), &account); err != nil {
+		t.Fatalf("parse the block's account %q: %v", art.Payload, err)
+	}
+	if account.DroppedRows != 0 || account.LostRows != 0 {
+		t.Fatalf("the block's account is dropped=%d lost=%d, want 0/0: rows it never received are not its loss to claim",
+			account.DroppedRows, account.LostRows)
 	}
 }
 

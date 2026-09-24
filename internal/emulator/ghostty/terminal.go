@@ -194,14 +194,96 @@ type sbBaseline struct {
 	rows  int
 	valid bool
 	// owed is how many rows a reflow moved back INTO the screen out of the
-	// scrollback. A taller screen is refilled from history, and those rows
-	// were reported as departures the first time they left; when the screen
-	// scrolls them off again the depth grows by the same rows, which is the
-	// SAME leave and not a new one. The port's rule is explicit — "a resize
-	// reflows the screen rather than scrolling it, so reflowed rows are not
-	// departures" — so the debt is paid before any growth is reported, and a
-	// consumer's absolute row space never sees a row twice.
+	// scrollback AND that the consumer has already been handed. A taller
+	// screen is refilled from history, and those rows were reported as
+	// departures the first time they left; when the screen scrolls them off
+	// again the depth grows by the same rows, which is the SAME leave and not
+	// a new one. The port's rule is explicit — "a resize reflows the screen
+	// rather than scrolling it, so reflowed rows are not departures" — so the
+	// debt is paid before any growth is reported, and a consumer's absolute
+	// row space never sees a row twice.
 	owed int
+	// pushed is what each SHRINK pushed onto the top of this buffer's
+	// history, newest last. A shrink reflows the screen's top rows into
+	// history — that is not a departure, so those rows are never reported as
+	// they go — and a later refill pulls them back newest-first, so this is a
+	// stack: a pull-back takes from the end. Its members do NOT all have the
+	// same provenance, which is why a scalar cannot express it: the rows at
+	// the top of the screen a shrink pushes are first the ones an earlier
+	// refill had pulled back (already handed to the consumer, so their return
+	// owes a departure) and then rows nobody was ever handed (so their return
+	// owes nothing and they are reported when they leave for real).
+	//
+	// Bounded by the pushes that can still be taken back: segments are merged
+	// when adjacent and of one class, and the stack keeps at most
+	// maxSbPushes segments — the ones dropped are the oldest, deepest in
+	// history, and a refill that reaches them charges a departure that was
+	// already reported rather than swallowing one that was not, which is the
+	// conservative direction for a row-space that must not lose output.
+	pushed []sbPush
+}
+
+// sbPush is one block of rows a shrink pushed onto the top of history: how
+// many of them the consumer had already been handed, and how many it never
+// was. The handed ones are the OLDER half of the block (they are the screen's
+// topmost rows, which a refill had put back), the fresh ones the newer, so a
+// pull-back consumes fresh before handed.
+type sbPush struct {
+	handed int
+	fresh  int
+}
+
+// maxSbPushes bounds the stack. See the field's comment for what dropping the
+// oldest costs.
+const maxSbPushes = 64
+
+// takeBack consumes n rows from the newest end of the stack — the rows a
+// refill just pulled back onto the screen — and answers how many of them the
+// consumer had already been handed, which is the only part that owes a
+// departure when they leave again.
+func (b *sbBaseline) takeBack(n int) int {
+	handed := 0
+	for n > 0 && len(b.pushed) > 0 {
+		seg := &b.pushed[len(b.pushed)-1]
+		if take := min(n, seg.fresh); take > 0 {
+			seg.fresh -= take
+			n -= take
+		} else {
+			take = min(n, seg.handed)
+			seg.handed -= take
+			n -= take
+			handed += take
+		}
+		if seg.fresh == 0 && seg.handed == 0 {
+			b.pushed = b.pushed[:len(b.pushed)-1]
+		}
+	}
+	// Rows older than anything the stack describes came out of history that
+	// was written before this ledger existed: they departed to get there, so
+	// they were handed over.
+	return handed + n
+}
+
+// pushReflow records n rows the screen's top just reflowed into history: the
+// ones the consumer has already been handed (at most what is owed) and the
+// rest, which nobody was ever told about. The handed half is the older half
+// of the block, so it goes first.
+func (b *sbBaseline) pushReflow(n int) {
+	handed := min(n, b.owed)
+	b.owed -= handed
+	fresh := n - handed
+	if len(b.pushed) > 0 {
+		top := &b.pushed[len(b.pushed)-1]
+		if top.fresh == 0 && top.handed > 0 && handed > 0 {
+			top.handed += handed
+			top.fresh = fresh
+			return
+		}
+	}
+	b.pushed = append(b.pushed, sbPush{handed: handed, fresh: fresh})
+	if len(b.pushed) > maxSbPushes {
+		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
+	}
 }
 
 var (
@@ -370,6 +452,7 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 			switch grew := g.Rows - beforeRows; {
 			case !base.valid || !sameBuffer:
 			case grew > 0 && before > after:
+				_ = grew
 				// The screen grew and took its new rows out of history: the
 				// depth shrank by what the refill pulled back, and each of
 				// those rows was reported when it first left. A refill can
@@ -383,17 +466,36 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 				// (nocx-2v80t.3.9). The pending report holds the newest
 				// departures, and the refill takes the newest history rows,
 				// so the overlap is the smaller of the two.
-				pulled := min(before-after, grew)
-				base.owed += pulled - min(pulled, len(t.departed))
+				refill := min(before-after, grew)
+				// The refill takes the NEWEST history rows, and the pending
+				// report holds the newest departures: a row the refill put
+				// back on the screen is still in that report, where it no
+				// longer belongs — it has not left the screen at all. Left
+				// there it is handed over AND reported again when it leaves,
+				// which shifts every later interval by the refill's size
+				// (measured: one 26-row pane grown to 40 hands each command
+				// the previous command's last 14 rows, nocx-2v80t.3.9).
+				if back := min(refill, len(t.departed)); back > 0 {
+					t.departed = t.departed[:len(t.departed)-back]
+					refill -= back
+				}
+				// What is left comes off the stack of rows an earlier shrink
+				// pushed into history: the ones the consumer was already
+				// handed owe a departure, the fresh ones owe nothing. Rows
+				// older than the stack departed to get into history, so they
+				// were handed over.
+				base.owed += base.takeBack(refill)
 			case grew < 0 && after > before:
 				// The screen shrank and reflowed its top rows INTO history:
 				// they are not on the screen any more, so none of them can
-				// leave it again, and the debt they were part of is paid off
-				// by the reflow that took them. Without this the debt
-				// outlives what the refill put back and eats real departures
-				// — a command's whole output read as already reported
+				// leave it again — and that is not a departure either. The
+				// block goes on the stack with its provenance, because a later
+				// refill pulls it back newest-first: the handed rows first off
+				// the screen are its older members, the rows nobody was ever
+				// handed its newer ones. Bounding the block by what the depth
+				// grew keeps a rewrap of history's own line breaks out of it
 				// (nocx-2v80t.3.9).
-				base.owed -= min(base.owed, after-before)
+				base.pushReflow(min(-grew, after-before))
 			}
 			// A debt larger than the screen it sits on is not a refill at
 			// all: at most the screen's own rows can be rows that were
@@ -588,9 +690,13 @@ func (t *terminal) rebaselineLocked() {
 	// does not un-report them, and zeroing it here is how a row comes back
 	// reported twice — the reflowed row's second leave reads as new output
 	// because the next growth had no debt to pay (nocx-2v80t.3.9).
-	owed := t.sb[sbIndex(screen)].owed
+	// Both the debt and the stack of rows the screen has already pushed into
+	// history survive the re-baseline: they are facts about rows that are out
+	// of the screen's sight one way or another, and re-seeding the depth does
+	// not un-report them or un-push them.
+	prev := t.sb[sbIndex(screen)]
 	t.sb = [2]sbBaseline{}
-	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true, owed: owed}
+	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true, owed: prev.owed, pushed: prev.pushed}
 }
 
 // sbIndex maps a screen to its baseline slot.

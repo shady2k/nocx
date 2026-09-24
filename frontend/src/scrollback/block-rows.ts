@@ -127,11 +127,22 @@ export function paintStoredRows(
     block.appendChild(output)
   }
   const missing = stored.droppedRows + stored.lostRows
-  if (missing > 0) {
+  if (stored.truncated !== null || missing > 0) {
     const notice = document.createElement('div')
     notice.className = 'cmd-output cmd-output-incomplete'
     notice.dataset.outputIncomplete = 'true'
-    notice.textContent = `Output incomplete: ${missing} rows missing`
+    // The count is only known for a cap/gap the chunks or the emulator
+    // actually counted (deriveBlockRowsDropped, LostRows). `suppressed`
+    // means capture was refused by policy and never ran, so there is
+    // nothing to count; a cap/gap with no counted rows yet (a close still
+    // in flight, or a reason the count does not cover) says the same thing
+    // without inventing a number.
+    notice.textContent =
+      missing > 0
+        ? `Output incomplete: ${missing} rows missing`
+        : stored.truncated === 'suppressed'
+          ? 'Output incomplete: capture was refused'
+          : 'Output incomplete'
     block.appendChild(notice)
   }
 }

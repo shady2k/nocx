@@ -72,10 +72,18 @@ type blockStream struct {
 	// open are the session's open blocks by attempt id — kept ones carry a
 	// real block, refused ones only remember the refusal.
 	open map[session.ID]map[string]*openBlock
-	// current is the block the session's newest authenticated start opened:
-	// the one rows arriving now belong to (the rows and the ends share one
-	// ordered channel, so stream order is the attribution).
+	// current is the interval whose rows are currently being delivered. A
+	// later authenticated start has an open block too, but stays queued until
+	// the current interval's end promotes it.
 	current map[session.ID]*openBlock
+	// queued names an eagerly opened block that must not receive rows until
+	// current closes. Lifecycle facts can cross the helper's ordered rows
+	// carrier, so this is a start reservation rather than a second current.
+	queued map[session.ID]string
+	// queuedEnds are interval ends that arrived for a queued block before the
+	// prior current interval promoted it. They cannot close the queued block
+	// early: its own rows still have to follow the prior interval's end.
+	queuedEnds map[session.ID][]pendingEnd
 	// ends are interval ends parked until their completion publishes the
 	// fence that names them.
 	ends map[session.ID][]pendingEnd
@@ -117,6 +125,54 @@ type pendingEnd struct {
 	closing []emulator.Row
 }
 
+// splitPendingRowsAt separates deliveries at an interval's absolute end row.
+// A flush may already have rows from the next interval waiting behind the
+// current append; those rows must follow promotion, not be written to the
+// block whose close is parked.
+func splitPendingRowsAt(deliveries []pendingRows, endRow uint64) (before, after []pendingRows) {
+	for _, delivery := range deliveries {
+		deliveryEnd := delivery.from + uint64(len(delivery.rows)) // #nosec G115 -- row count arithmetic
+		switch {
+		case delivery.from >= endRow:
+			after = append(after, delivery)
+		case deliveryEnd <= endRow:
+			before = append(before, delivery)
+		default:
+			split := int(endRow - delivery.from) // #nosec G115 -- bounded by len(rows)
+			before = append(before, pendingRows{
+				from: delivery.from, lost: delivery.lost, rows: delivery.rows[:split],
+			})
+			after = append(after, pendingRows{
+				from: endRow, rows: delivery.rows[split:],
+			})
+		}
+	}
+	return before, after
+}
+
+func (bs *blockStream) takePendingRows(sid session.ID, attempt string) []pendingRows {
+	bs.mu.Lock()
+	next := bs.pending[sid]
+	delete(bs.pending, sid)
+	var endRow uint64
+	hasEnd := false
+	for _, end := range bs.pendingCloses[sid] {
+		if end.attempt == attempt {
+			endRow, hasEnd = end.endRow, true
+			break
+		}
+	}
+	if hasEnd {
+		var remaining []pendingRows
+		next, remaining = splitPendingRowsAt(next, endRow)
+		if len(remaining) > 0 {
+			bs.pending[sid] = remaining
+		}
+	}
+	bs.mu.Unlock()
+	return next
+}
+
 // blockGrewParams is block.grew's payload (contracts/block.grew.schema.json).
 type blockGrewParams struct {
 	EntryID string `json:"entryId"`
@@ -145,8 +201,14 @@ func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(
 func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
+	if bs.queuedEnds == nil {
+		bs.queuedEnds = make(map[session.ID][]pendingEnd)
+	}
 	if bs.sources == nil {
 		bs.sources = make(map[session.ID]struct{})
+	}
+	if bs.queued == nil {
+		bs.queued = make(map[session.ID]string)
 	}
 	if bs.confirmers == nil {
 		bs.confirmers = make(map[session.ID]func(uint64))
@@ -184,6 +246,8 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	delete(bs.sources, sid)
 	delete(bs.open, sid)
 	delete(bs.current, sid)
+	delete(bs.queued, sid)
+	delete(bs.queuedEnds, sid)
 	delete(bs.ends, sid)
 	delete(bs.fences, sid)
 	delete(bs.confirmers, sid)
@@ -233,7 +297,23 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	flushing := bs.flushing[sid]
 	pending := len(bs.pending[sid]) > 0
 	closing := bs.closing[sid]
-	if sourced && pending && !flushing && waiting == "" && !closing && block != nil {
+	retryClose := sourced && len(bs.pendingCloses[sid]) > 0 && !flushing && !closing
+	if retryClose {
+		bs.closing[sid] = true
+		bs.mu.Unlock()
+		bs.drainPendingCloses(s, sid)
+		bs.mu.Lock()
+		if len(bs.pendingCloses[sid]) > 0 {
+			bs.pending[sid] = append(bs.pending[sid], pendingRows{
+				from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+			})
+			bs.mu.Unlock()
+			return 0, false
+		}
+		bs.mu.Unlock()
+		return s.BlockRowsArrived(sid, fromRow, lost, rows)
+	}
+	if sourced && pending && !flushing && !closing && block != nil && bs.queued[sid] == "" {
 		bs.pending[sid] = append(bs.pending[sid], pendingRows{
 			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
 		})
@@ -245,7 +325,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		bs.flushPendingRows(s, sid, block, toFlush, confirm)
 		return 0, false
 	}
-	if sourced && (flushing || waiting != "" || pending || closing) {
+	if sourced && (flushing || closing || (waiting != "" && block == nil)) {
 		if bs.pending == nil {
 			bs.pending = make(map[session.ID][]pendingRows)
 		}
@@ -324,38 +404,112 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) {
 	bs := s.blockStream
 	bs.mu.Lock()
+	end := pendingEnd{
+		attempt: attempt, nonce: hexNonce, endRow: endRow,
+		closing: append([]emulator.Row(nil), closing...),
+	}
+	current := bs.current[sid]
+	if len(bs.pending[sid]) > 0 && !bs.flushing[sid] && !bs.closing[sid] &&
+		current != nil && current.attempt == attempt {
+		toFlush, remaining := splitPendingRowsAt(bs.pending[sid], endRow)
+		delete(bs.pending, sid)
+		if len(remaining) > 0 {
+			bs.pending[sid] = remaining
+		}
+		if len(toFlush) > 0 {
+			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
+			bs.flushing[sid] = true
+			confirm := bs.confirmers[sid]
+			bs.mu.Unlock()
+			bs.flushPendingRows(s, sid, current, toFlush, confirm)
+			return
+		}
+		bs.closing[sid] = true
+		bs.mu.Unlock()
+		s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce)
+		return
+	}
 	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
-		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
-			attempt: attempt, nonce: hexNonce, endRow: endRow,
-			closing: append([]emulator.Row(nil), closing...),
-		})
+		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
 		bs.mu.Unlock()
 		return
 	}
+	if bs.queued[sid] == attempt && current != nil && current.attempt != attempt {
+		bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
+		bs.mu.Unlock()
+		return
+	}
+	bs.closing[sid] = true
 	bs.mu.Unlock()
 	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce)
 }
 
-func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) {
+func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) bool {
 	bs := s.blockStream
 	bs.mu.Lock()
 	block := bs.open[sid][attempt]
 	current := bs.current[sid]
-	if current != nil && current.attempt == attempt {
-		delete(bs.current, sid)
-	}
-	delete(bs.open[sid], attempt)
-	delete(bs.fences[sid], hexNonce)
+	queued := bs.queued[sid]
+	wasCurrent := current != nil && current.attempt == attempt
 	bs.mu.Unlock()
+
+	promote := func() {
+		if wasCurrent && queued != "" && queued != attempt {
+			bs.openAttemptFor(s, sid, queued)
+			bs.drainQueuedEnd(s, sid, queued)
+		}
+	}
+	finish := func() {
+		bs.mu.Lock()
+		if wasCurrent {
+			delete(bs.current, sid)
+		}
+		delete(bs.open[sid], attempt)
+		delete(bs.fences[sid], hexNonce)
+		if queued == attempt {
+			delete(bs.queued, sid)
+		}
+		delete(bs.closing, sid)
+		ends := bs.pendingCloses[sid]
+		kept := ends[:0]
+		for _, end := range ends {
+			if end.nonce != hexNonce {
+				kept = append(kept, end)
+			}
+		}
+		if len(kept) == 0 {
+			delete(bs.pendingCloses, sid)
+		} else {
+			bs.pendingCloses[sid] = kept
+		}
+		bs.mu.Unlock()
+	}
+	fail := func() {
+		// Keep current/open/fence/queued intact. A close error may follow a
+		// committed closing-row append, so promotion is unsafe; retain the
+		// exact end for a later close/row event to retry. Store continuity
+		// rejects any duplicate closing rows without changing ownership.
+		bs.mu.Lock()
+		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
+			attempt: attempt, nonce: hexNonce, endRow: endRow,
+			closing: append([]emulator.Row(nil), closing...),
+		})
+		delete(bs.closing, sid)
+		bs.mu.Unlock()
+	}
 	if block == nil {
-		return
+		finish()
+		return true
 	}
 	if !block.kept {
-		return
+		finish()
+		promote()
+		return true
 	}
 	store := s.blockStore()
 	if store == nil {
-		return
+		fail()
+		return false
 	}
 	// Owner: this stream, inside the interval's authenticated end.
 	// Closing event: the seal — the closing append and the close are the
@@ -367,19 +521,52 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			FromRow: endRow, Rows: closing,
 		}); err != nil {
 			s.log.Warn("block closing rows failed", "session", sid, "entry", block.entry, "error", err)
-		} else {
-			s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
-				EntryID: block.entry, From: endRow, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
-			})
+			fail()
+			return false
 		}
+		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+			EntryID: block.entry, From: endRow, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
+		})
 	}
 	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 		EntryID: block.entry, ArtifactID: block.artifactID,
 	}); err != nil {
 		s.log.Warn("block rows close failed", "session", sid, "entry", block.entry, "error", err)
-		return
+		fail()
+		return false
 	}
+	finish()
 	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
+	promote()
+	return true
+}
+
+// drainQueuedEnd replays the end that was held until the queued block became
+// current. Promotion has already removed the queued marker, so closeBlockRows
+// takes the ordinary current-block path.
+func (bs *blockStream) drainQueuedEnd(s *WSServer, sid session.ID, attempt string) {
+	bs.mu.Lock()
+	var end pendingEnd
+	found := false
+	ends := bs.queuedEnds[sid]
+	for i, candidate := range ends {
+		if candidate.attempt != attempt {
+			continue
+		}
+		end = candidate
+		ends = append(ends[:i], ends[i+1:]...)
+		found = true
+		break
+	}
+	if len(ends) == 0 {
+		delete(bs.queuedEnds, sid)
+	} else {
+		bs.queuedEnds[sid] = ends
+	}
+	bs.mu.Unlock()
+	if found {
+		s.closeBlockRows(sid, end.attempt, end.endRow, end.closing, end.nonce)
+	}
 }
 
 // attemptFact is the production hook: PublishLifecycle hands every
@@ -428,6 +615,10 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		return
 	}
 	if existing := bs.open[sid][attempt]; existing != nil {
+		if bs.current[sid] == nil {
+			bs.current[sid] = existing
+			delete(bs.queued, sid)
+		}
 		if bs.flushing[sid] {
 			bs.mu.Unlock()
 			return
@@ -444,15 +635,19 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		}
 		return
 	}
+	hasCurrent := bs.current[sid] != nil
 	if bs.waiting == nil {
 		bs.waiting = make(map[session.ID]string)
 	}
 	if bs.opening == nil {
 		bs.opening = make(map[session.ID]bool)
 	}
-	// Reserve before the store call: rows can arrive while OPEN is blocked,
-	// and a second OPEN fact must not start a competing attempt.
-	bs.waiting[sid] = attempt
+	// Reserve before the store call: rows can arrive while OPEN is blocked.
+	// An existing current block owns those rows; only a no-current open uses
+	// waiting to hold them for the block being created.
+	if !hasCurrent {
+		bs.waiting[sid] = attempt
+	}
 	bs.opening[sid] = true
 	bs.mu.Unlock()
 
@@ -495,13 +690,21 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	}
 	b := &openBlock{attempt: attempt, entry: attempt, artifactID: openArtifact, kept: openArtifact != ""}
 	bs.open[sid][attempt] = b
-	bs.current[sid] = b
+	hadCurrent := bs.current[sid] != nil
+	if !hadCurrent {
+		bs.current[sid] = b
+	} else {
+		bs.queued[sid] = attempt
+	}
 	delete(bs.opening, sid)
 	if bs.waiting[sid] == attempt {
 		delete(bs.waiting, sid)
 	}
-	pending := bs.pending[sid]
-	delete(bs.pending, sid)
+	var pending []pendingRows
+	if !hadCurrent {
+		pending = bs.pending[sid]
+		delete(bs.pending, sid)
+	}
 	confirm := bs.confirmers[sid]
 	if len(pending) > 0 {
 		bs.flushing[sid] = true
@@ -548,16 +751,14 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 		})
 		confirmPendingRows(confirm, delivery)
 	}
-	bs.mu.Lock()
-	next := bs.pending[sid]
-	delete(bs.pending, sid)
+	next := bs.takePendingRows(sid, block.attempt)
 	if len(next) == 0 {
+		bs.mu.Lock()
 		bs.flushing[sid] = false
 		bs.mu.Unlock()
 		bs.drainPendingCloses(s, sid)
 		return
 	}
-	bs.mu.Unlock()
 	bs.flushPendingRows(s, sid, block, next, confirm)
 }
 
@@ -574,7 +775,18 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 		bs.closing[sid] = true
 		bs.mu.Unlock()
 		for _, end := range closes {
-			s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce)
+			bs.mu.Lock()
+			current := bs.current[sid]
+			queued := bs.queued[sid]
+			if queued == end.attempt && current != nil && current.attempt != end.attempt {
+				bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
+				bs.mu.Unlock()
+				continue
+			}
+			bs.mu.Unlock()
+			if !s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce) {
+				return
+			}
 		}
 	}
 }
@@ -649,6 +861,9 @@ func (s *WSServer) notifyBlockSubscriber(sid session.ID, method string, params a
 // no store is wired — the composition root decides, as it does for every
 // other content consumer.
 func (s *WSServer) blockStore() blockOutputStore {
+	if s.blockRowsStore != nil {
+		return s.blockRowsStore
+	}
 	if s.contentDB == nil {
 		return nil
 	}

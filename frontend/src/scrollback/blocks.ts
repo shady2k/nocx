@@ -1899,6 +1899,15 @@ export class BlockManager {
   private _onDeferredFreeze?: (rec: BlockRecord) => void
   private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
   private _pendingStoredRows = new Map<string, StoredBlockRows>()
+  /** The highest row cursor `applyStoredRows` has painted per entry — the
+   *  last stored line's `from` (block.grew.schema.json: absolute row index,
+   *  strictly increasing across deliveries, and never lower after a close,
+   *  which appends the closing rows before sealing). terminal-content.ts
+   *  refetches the WHOLE artifact on every block.grew/block.closed and two
+   *  in-flight fetches for one entry can resolve out of order; this is what
+   *  keeps the later-dispatched-but-earlier-resolving one from being
+   *  overwritten by a smaller delivery that was merely read first. */
+  private _storedRowsCursor = new Map<string, number>()
   /** The tab strip's answer to "what is this session called to a person",
    *  handed to every tool block this manager draws (nocx-vnzek). */
   private _sessionName?: (sessionId: string) => string | null
@@ -2321,8 +2330,14 @@ export class BlockManager {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
   }
 
-  /** Apply the latest durable rows to the matching block. */
+  /** Apply the latest durable rows to the matching block — unless a
+   *  response already applied (or pending) covers MORE of the stream, in
+   *  which case this one arrived late and is dropped. */
   applyStoredRows(entryId: string, rows: StoredBlockRows): void {
+    const cursor = rows.lines.length > 0 ? rows.lines[rows.lines.length - 1].from : -1
+    const seen = this._storedRowsCursor.get(entryId) ?? -1
+    if (cursor < seen) return
+    this._storedRowsCursor.set(entryId, cursor)
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
       this._pendingStoredRows.set(entryId, rows)
@@ -3158,6 +3173,7 @@ export class BlockManager {
     this._stopTicker()
     this._pendingBoundaries = []
     this._pendingStoredRows.clear()
+    this._storedRowsCursor.clear()
     this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a

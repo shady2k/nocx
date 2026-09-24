@@ -4387,6 +4387,41 @@ describe('backend-owned block rows', () => {
     expect(blockOutputText(frozen.el)).toBe('first \nsecond\n')
   })
 
+  it('never lets a block.grew fetch that resolves late shrink an already-painted block', () => {
+    // terminal-content.ts refetches the whole artifact on every block.grew /
+    // block.closed and applies whatever comes back; two in-flight requests
+    // for the same entry can resolve in either order. Simulated here by
+    // calling applyStoredRows with the LARGER delivery first (as if its
+    // fetch, dispatched second, resolved first) and the smaller one after
+    // (its earlier fetch, resolving late) — the block must keep the rows it
+    // already has.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+
+    manager.applyStoredRows('entry-stream', {
+      lines: [
+        { from: 0, row: row('first \n') },
+        { from: 1, row: row('second\n') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+
+    // The stale response: only the first row, as read before the second one
+    // had appended.
+    manager.applyStoredRows('entry-stream', {
+      lines: [{ from: 0, row: row('first \n') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond\n')
+  })
+
   it('does not paint terminal-buffer text when backend history is absent', () => {
     const { manager } = newManager()
     manager.startBlock('echo local', '/repo', 0)

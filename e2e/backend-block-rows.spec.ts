@@ -13,7 +13,13 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
   )
   const firstMarker = markers[0]
   const finalMarker = markers[markers.length - 1]
-  const command = `i=1; while [ "$i" -le 150 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done; IFS= read -r _; while [ "$i" -le 300 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done`
+  // The pause's own `read` is silent (-s): a `read -r` echoes the keystroke
+  // that answers it, and that echo is genuine tty output for a keystroke
+  // this SPEC injects to prove the block grows mid-run — not a boundary
+  // artifact nocx-2v80t.3.12 is about. Reading it silently keeps the test's
+  // own input off the stored output instead of asking the product to guess
+  // which bytes were typed rather than printed.
+  const command = `i=1; while [ "$i" -le 150 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done; IFS= read -rs _; while [ "$i" -le 300 ]; do printf 'ROWS-${nonce}-%03d\\n' "$i"; i=$((i+1)); done`
   const input = page.locator('.pane.active .nocx-editor-input')
   await input.fill(command)
   await page.keyboard.press('Enter')

@@ -165,6 +165,13 @@ type terminal struct {
 	// adapter at all.
 	fenceIdx   int
 	fenceNonce [64]byte
+	// outputMarkIdx is the output-start mark scanner's own position
+	// (output_mark.go), tracked alongside fenceIdx in the same pass over
+	// the bytes (scanMarkers): the two sequences share a five-byte prefix
+	// and diverge at the sixth, so both need to see every byte in order to
+	// stay correct, regardless of which one (if either) a byte ends up
+	// completing.
+	outputMarkIdx int
 	// departed holds the rows that left the screen, captured at the instant
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
@@ -659,27 +666,86 @@ func (t *terminal) Ingest(b []byte) ([]byte, error) {
 	return t.takeReplies(), nil
 }
 
-// ingestLocked feeds b to the library through the fence scanner. The
+// ingestLocked feeds b to the library through the marker scanner. The
 // invariant is the feed, not the scan: every byte reaches vt_write exactly
-// once, in arrival order, whether or not a fence is in it. The only thing a
-// fence changes is WHERE the feed splits — the bytes up to and including the
-// fence's BEL go in, the fence is sighted against the screen as it stands at
-// that instant, and only then do the bytes after it go in. A chunk with no
-// fence costs exactly one vt_write, and a fence that straddles two chunks
-// costs nothing at all: the scanner's state is a byte position, not a buffer
-// of withheld input.
+// once, in arrival order, whether or not a marker is in it. The only thing a
+// marker changes is WHERE the feed splits — the bytes up to and including
+// its terminating BEL go in, it is sighted against the screen as it stands
+// at that instant, and only then do the bytes after it go in. A chunk with
+// no marker costs exactly one vt_write, and a marker that straddles two
+// chunks costs nothing at all: the scanner's state is a byte position, not a
+// buffer of withheld input.
 func (t *terminal) ingestLocked(b []byte) {
 	for start := 0; start < len(b); {
-		n, fired := t.scanFence(b[start:])
+		n, kind := t.scanMarkers(b[start:])
 		if n > 0 {
 			C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[start])), C.size_t(n))
 			t.noteDepartedLocked()
 		}
-		if fired {
+		switch kind {
+		case markKindFence:
 			t.sightFence()
+		case markKindOutputMark:
+			t.sightOutputMark()
 		}
 		start += n
 	}
+}
+
+// markKind is which sighted marker scanMarkers found, if either.
+type markKind int
+
+const (
+	markKindNone markKind = iota
+	markKindFence
+	markKindOutputMark
+)
+
+// scanMarkers advances the fence scanner (fence.go) and the output-mark
+// scanner (output_mark.go) together, byte by byte, and answers how many
+// bytes of b may be fed to the library before EITHER one completes —
+// whichever comes first — and which one that was.
+//
+// The two sequences share a five-byte prefix (ESC ] 1 3 3) and diverge at
+// the sixth ('7' for the fence, ';' for the output mark), so this is one
+// pass over the bytes rather than two independent scans of the same slice:
+// a second, independent scan would advance the OTHER candidate's position
+// past bytes the caller only committed the FIRST candidate's length to
+// vt_write, corrupting it for the next call. Scanning once, updating both
+// candidates' state from the same byte, is what keeps each one's position
+// exactly as far as this scan actually returns.
+func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
+	for i, c := range b {
+		if fenceMatches(t.fenceIdx, c) {
+			if t.fenceIdx == fenceLen-1 {
+				t.fenceIdx = 0
+				return i + 1, markKindFence
+			}
+			if t.fenceIdx >= len(fenceFixed) {
+				t.fenceNonce[t.fenceIdx-len(fenceFixed)] = c
+			}
+			t.fenceIdx++
+		} else if c == fenceFixed[0] {
+			// The candidate dies at this byte, and the byte itself may begin
+			// the next one: an ESC in the stream is always a potential fence.
+			t.fenceIdx = 1
+		} else {
+			t.fenceIdx = 0
+		}
+
+		if outputMarkMatches(t.outputMarkIdx, c) {
+			if t.outputMarkIdx == len(outputMarkFixed)-1 {
+				t.outputMarkIdx = 0
+				return i + 1, markKindOutputMark
+			}
+			t.outputMarkIdx++
+		} else if c == outputMarkFixed[0] {
+			t.outputMarkIdx = 1
+		} else {
+			t.outputMarkIdx = 0
+		}
+	}
+	return len(b), markKindNone
 }
 
 // The departure capture. Rows leave one at a time, off the top, and the

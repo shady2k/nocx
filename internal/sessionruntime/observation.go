@@ -143,6 +143,20 @@ type observationOpen struct {
 	// stream (nocx-2v80t.3.9). Zero when the interval opened any other way: at
 	// a seal, or at the session's first ingest.
 	Rebased FenceNonce
+	// OutputMarked is whether this interval's FIRST OSC 133 C has already
+	// been sighted (nocx-2v80t.3.12; sightOutputMarkLocked). Everything
+	// still on screen at that sighting — the prompt this interval opened
+	// with, and (for an app-submitted command) the echoed command line the
+	// bytes that follow it draw before the shell even starts running it —
+	// is this interval's own PREFIX, never its output, and gets installed
+	// as the suppression window a second time, from the mark's own screen
+	// rather than the last fence's. A second and later C within the same
+	// interval is ordinary output and does nothing: only the first ever
+	// arms this, and it never rearms. False for the whole interval when no
+	// C is ever sighted in it — a shell with no preexec support, or one
+	// whose integration never activated — leaves the fence-installed window
+	// (if any) as the only one, exactly as before this bead.
+	OutputMarked bool
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -561,11 +575,12 @@ func (s *Session) parkObservationLocked(nonce FenceNonce) {
 		return
 	}
 	s.observation = &observationOpen{
-		Opened:  o.Opened,
-		Opening: o.Opening,
-		Loss:    o.Loss,
-		Nonce:   nonce,
-		EndRow:  s.departedRows,
+		Opened:       o.Opened,
+		Opening:      o.Opening,
+		Loss:         o.Loss,
+		Nonce:        nonce,
+		EndRow:       s.departedRows,
+		OutputMarked: o.OutputMarked,
 	}
 }
 
@@ -743,14 +758,31 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 // holding the interval before's twenty-nine closing rows, the block after it
 // starting at the very row the window should have held (nocx-2v80t.3.9).
 func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
-	expect := boundaryRowsThatLeave(screen)
-	if len(expect) == 0 {
+	s.installPendingScreenLocked(boundaryRowsThatLeave(screen), screen.Geometry, true)
+}
+
+// installPendingScreenLocked is the one place s.pendingScreen is ever
+// (re)installed wholesale, shared by expectBoundaryScreenLocked (a
+// boundary's closing screen, cursor row included and marked as the
+// last-resort wildcard) and sightOutputMarkLocked (an output mark's screen,
+// cursor row excluded entirely — see that method for why the two must
+// differ there). rows carries whichever of those a caller already decided
+// on; includeCursor only controls whether its LAST entry is flagged as the
+// wildcard candidate, since rows itself has already been trimmed or not by
+// the caller.
+//
+// A caller that hands in no rows leaves the window IN FORCE rather than
+// clearing it: the rows an earlier boundary left may still be about to
+// leave, and wiping them on an empty expectation is how a whole closing
+// screen was stored a second time (nocx-2v80t.3.9).
+func (s *Session) installPendingScreenLocked(rows []emulator.Row, geom Geometry, includeCursor bool) {
+	if len(rows) == 0 {
 		return
 	}
 	s.releasePendingScreenLocked()
-	rows := cloneObservationRows(expect)
-	pending := make([]pendingBoundaryRow, len(rows))
-	for i, row := range rows {
+	cloned := cloneObservationRows(rows)
+	pending := make([]pendingBoundaryRow, len(cloned))
+	for i, row := range cloned {
 		// A row this port cannot track (ErrOutOfRange on a screen this call
 		// itself just measured would be a contradiction, but TrackRow can
 		// still refuse for a reason this comment does not need to guess) is
@@ -761,11 +793,77 @@ func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
 		if err != nil {
 			track = nil
 		}
-		pending[i] = pendingBoundaryRow{Row: row, Track: track, Cursor: i == len(rows)-1}
+		pending[i] = pendingBoundaryRow{Row: row, Track: track, Cursor: includeCursor && i == len(cloned)-1}
 	}
 	s.pendingScreen = pending
-	s.pendingScreenGeom = screen.Geometry
+	s.pendingScreenGeom = geom
 	s.pendingEntered = false
+}
+
+// sightOutputMarkLocked is the runtime's join for a sighted OSC 133 C
+// (nocx-2v80t.3.12): the FIRST one inside the interval in flight locates
+// where that interval's own output begins, exactly the way a fence's
+// sighting locates where one ends (ADR-0024 decision 1 — a sighted marker
+// authorises nothing, and this one authorises less than the fence, since it
+// does not even locate an authenticated event: it only marks a position
+// inside an interval sessionruntime already authenticated by other means).
+//
+// Everything ABOVE the cursor at this instant — the prompt this interval
+// opened with, and an app-submitted command's own echoed line (the app
+// writes it to the pty only AFTER the attempt already exists, decision 5,
+// so the shell's own preexec, and this sighting, always follow it) — is
+// this interval's own prefix, never its output, and is installed as the
+// suppression window rows still there when the mark is sighted are pinned
+// by identity, exactly as a boundary's closing screen is
+// (expectBoundaryScreenLocked).
+//
+// The cursor's OWN row is deliberately EXCLUDED, and this is the one place
+// this join must NOT mirror the fence's: at a fence, whatever later
+// overwrites the cursor row is the NEXT prompt or echo — never this
+// interval's own output — so the wildcard match is correct there. At an
+// output mark, the cursor's row is where control returns the instant preexec
+// finishes: bash goes straight to running the command (decision 5's own
+// ordering), so whatever gets written there next is the command's OWN FIRST
+// LINE OF REAL OUTPUT. Installing it as a suppression candidate — even
+// content-matched rather than wildcarded — would swallow a command whose
+// first line happens to read blank, exactly the row this cursor position
+// already does before anything runs. So the row is never a candidate at all.
+//
+// Reading the CURRENT screen here rather than reusing whatever the last
+// fence installed is deliberate: for a session's very first interval there
+// is no prior fence to have installed anything at all, which is the gap
+// this join exists to close, and for every later interval the current
+// screen is a superset of whatever survived from the fence-installed window
+// (nothing departs merely by drawing a prompt and an echoed line), so
+// replacing it loses nothing and corrects for anything that changed in
+// between.
+//
+// Called at most once per interval: OutputMarked is checked and set here,
+// and a later C within the SAME interval is silently ordinary output —
+// sessionruntime's own rule for "only the first counts" (ADR-0024 decision
+// 1 leaves C no authority to begin with; this is the runtime's own
+// bookkeeping, not a second authenticator). Without it, a nested command's
+// own preexec (a shell function, a subshell) would re-arm the window from
+// whatever the outer command had already printed, suppressing genuine
+// output the instant it departed.
+func (s *Session) sightOutputMarkLocked() {
+	o := s.observation
+	if o == nil || o.OutputMarked {
+		return
+	}
+	o.OutputMarked = true
+	scr, ok := s.takeObservationScreenLocked()
+	if !ok {
+		return
+	}
+	rows := boundaryRowsThatLeave(scr)
+	if len(rows) <= 1 {
+		// Nothing above the cursor to protect: a blank screen with the
+		// cursor already at the top, or the alternate buffer. The window
+		// stands exactly as it was.
+		return
+	}
+	s.installPendingScreenLocked(rows[:len(rows)-1], scr.Geometry, false)
 }
 
 // sameVisibleRow reports whether two rows are the same LINE of text, whatever
@@ -919,6 +1017,13 @@ type observationCapture struct {
 	Loss         ObservationLoss
 	Closing      ObservationScreen
 	Completeness Completeness
+	// OutputMarked is the SPLIT interval's own flag at the instant of the
+	// split — carried here so an undo (returnObservationCaptureLocked, an
+	// expired or evicted fence that authorised nothing) restores it rather
+	// than leaving the rebased interval's fresh "false" standing in for an
+	// interval that, since nothing about it actually ended, may already
+	// have sighted its own C before this fence ever arrived.
+	OutputMarked bool
 }
 
 // splitObservationAtFenceLocked takes the boundary capture at a parking
@@ -941,6 +1046,7 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 		Opening:      o.Opening,
 		Loss:         o.Loss,
 		Completeness: s.completeness,
+		OutputMarked: o.OutputMarked,
 	}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
@@ -985,9 +1091,10 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	o := s.observation
 	if o == nil {
 		s.observation = &observationOpen{
-			Opened:  cap.Opened,
-			Opening: cap.Opening,
-			Loss:    cap.Loss,
+			Opened:       cap.Opened,
+			Opening:      cap.Opening,
+			Loss:         cap.Loss,
+			OutputMarked: cap.OutputMarked,
 		}
 		return
 	}
@@ -995,8 +1102,12 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	o.Loss.RetentionFeedBytes += cap.Loss.RetentionFeedBytes
 	o.Loss.IngestLostBytes += cap.Loss.IngestLostBytes
 	o.Opened, o.Opening = cap.Opened, cap.Opening
-	// The split is un-done, so the interval belongs to no fence again.
+	// The split is un-done, so the interval belongs to no fence again, and
+	// its own C-sighting status is whatever it was before the split rather
+	// than the rebased interval's fresh "false" (nocx-2v80t.3.12) — nothing
+	// about the interval this fence sat inside actually ended.
 	o.Rebased = FenceNonce{}
+	o.OutputMarked = cap.OutputMarked
 }
 
 // Observations is every sealed record the session retains, oldest first. The

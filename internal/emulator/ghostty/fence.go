@@ -27,18 +27,19 @@ import (
 //
 // # The scanner is state, never a buffer
 //
-// scanFence walks the chunk once, keeping only how many bytes of the sequence
-// the stream has matched (t.fenceIdx) and the nonce bytes seen so far
-// (t.fenceNonce). It never holds a byte back from the library and nothing is
-// fed twice: Ingest feeds every byte exactly once, in arrival order, and a
-// fence only decides WHERE that one feed splits — before its BEL's snapshot,
-// after it the rest. A candidate that straddles two Ingest calls costs
-// nothing: the position is the terminal's state under mu, like every other
-// field.
+// scanMarkers (terminal.go) walks the chunk once, keeping only how many
+// bytes of the sequence the stream has matched (t.fenceIdx) and the nonce
+// bytes seen so far (t.fenceNonce) — shared with the output-start mark's own
+// scan (output_mark.go), since the two sequences share a five-byte prefix.
+// It never holds a byte back from the library and nothing is fed twice:
+// Ingest feeds every byte exactly once, in arrival order, and a fence only
+// decides WHERE that one feed splits — before its BEL's snapshot, after it
+// the rest. A candidate that straddles two Ingest calls costs nothing: the
+// position is the terminal's state under mu, like every other field.
 //
-// At most one candidate can be open at a time, and the state machine needs no
-// backtracking to prove it: every byte of the fixed prefix is either a
-// non-hex literal (so a nested start inside it dies with the parent) or the
+// At most one fence candidate can be open at a time, and the state machine
+// needs no backtracking to prove it: every byte of the fixed prefix is either
+// a non-hex literal (so a nested start inside it dies with the parent) or the
 // hex/BEL region (where the parent has already died at the first non-matching
 // byte, which is the same byte that would start a child).
 const (
@@ -57,35 +58,6 @@ func fenceMatches(idx int, b byte) bool {
 	default:
 		return b == 0x07
 	}
-}
-
-// scanFence advances the scanner over b and answers how many bytes of it may
-// be fed to the library before the fence must be sighted: through the BEL
-// that completes a sequence, or all of b when none completes in it. The
-// caller feeds exactly the bytes named and sights the fence when fired is
-// true, so the snapshot sees the screen at the fence and nothing after it.
-func (t *terminal) scanFence(b []byte) (n int, fired bool) {
-	for i, c := range b {
-		if !fenceMatches(t.fenceIdx, c) {
-			// The candidate dies at this byte, and the byte itself may begin
-			// the next one: an ESC in the stream is always a potential fence.
-			if c == fenceFixed[0] {
-				t.fenceIdx = 1
-			} else {
-				t.fenceIdx = 0
-			}
-			continue
-		}
-		if t.fenceIdx == fenceLen-1 {
-			t.fenceIdx = 0
-			return i + 1, true
-		}
-		if t.fenceIdx >= len(fenceFixed) {
-			t.fenceNonce[t.fenceIdx-len(fenceFixed)] = c
-		}
-		t.fenceIdx++
-	}
-	return len(b), false
 }
 
 // sightFence appends the fence effect: the nonce as the stream carried it and

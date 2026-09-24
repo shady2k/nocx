@@ -1091,7 +1091,7 @@ func (s *Session) Ingest(b []byte) error {
 	var replyErr error
 	for rest := b; len(rest) > 0; {
 		chunk := rest
-		if end, ok := nextFenceSplit(rest); ok {
+		if end, ok := nextMarkerSplit(rest); ok {
 			chunk = rest[:end]
 		}
 		rest = rest[len(chunk):]
@@ -1136,6 +1136,15 @@ func (s *Session) Ingest(b []byte) error {
 				// (the split above), so the screen read here is the screen
 				// exactly as the fence left it.
 				s.sightDrainedFenceLocked(e)
+				continue
+			}
+			if e.Kind == emulator.EffectOutputMark {
+				// Same reasoning as the fence: a sighted mark locates rather
+				// than authorises (ADR-0024 decision 1), is not a consumer
+				// payload, and reaching here with nothing past its own bytes
+				// fed yet (the split above) is what lets the screen read
+				// inside it be the screen exactly as THIS mark left it.
+				s.sightOutputMarkLocked()
 				continue
 			}
 			s.nextEffect++

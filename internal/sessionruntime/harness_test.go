@@ -178,12 +178,47 @@ type harnessEmulator struct {
 	mu      sync.Mutex
 	refuse  bool
 	replies []byte
+	// strike makes the next departure report fail. It is scripted because the
+	// failure the runtime owes handling for — "a report that could not be read
+	// is a hole, named and counted" — is no longer reachable by exhausting the
+	// library's retention: the adapter clears both budgets where the terminal
+	// is built (nocx-2v80t.3.9), and a schedule that reached the runtime
+	// through a library default would stop testing the runtime the moment that
+	// default changed.
+	strike error
 }
 
 var (
 	_ emulator.Terminal  = (*harnessEmulator)(nil)
 	_ EmulatorInstrument = (*harnessEmulator)(nil)
 )
+
+// errHarnessStrike is the refusal a struck departure report carries: the
+// emulator's own words when what left the screen could not be read.
+var errHarnessStrike = errors.New("sessionruntime harness: the departure report could not be read")
+
+// DepartedRows hands the caller the real adapter's report, or the scripted
+// refusal in its place: the rows the real adapter had already read go out WITH
+// the error, exactly as the port's contract says a report with a hole does —
+// what was read is ordered, and the caller judges the rest.
+func (h *harnessEmulator) DepartedRows() ([]emulator.Row, error) {
+	h.mu.Lock()
+	strike := h.strike
+	h.strike = nil
+	h.mu.Unlock()
+	rows, err := h.Terminal.DepartedRows()
+	if strike != nil {
+		return rows, strike
+	}
+	return rows, err
+}
+
+// StrikeNextDepartures makes the next departure report fail.
+func (h *harnessEmulator) StrikeNextDepartures(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.strike = err
+}
 
 func (h *harnessEmulator) Resize(g emulator.Geometry) ([]byte, error) {
 	h.mu.Lock()

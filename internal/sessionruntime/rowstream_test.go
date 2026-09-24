@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty"
 )
 
 // The streamed block output's helper half (nocx-2v80t.3.6): rows leave the
@@ -350,42 +351,42 @@ func TestRowsAfterTheFenceSightingDoNotJoinTheFencedInterval(t *testing.T) {
 // A row the emulator could not read is not silently skipped: the feed the
 // emulator struck carries a counted loss marker on the stream, and the
 // ordinary feeds around it carry none.
+//
+// The strike is scripted (harnessEmulator.StrikeNextDepartures): the adapter
+// clears both retention budgets where the terminal is built, so exhausting the
+// library's budget is no longer how a report goes unread (nocx-2v80t.3.9), and
+// what this schedule judges is the stream's own accounting for one.
 func TestAStruckFeedCarriesACountedLossMarker(t *testing.T) {
-	s, rs := streamSession(t, harnessGeometry(80, 24))
-
-	// Deep enough into scrollback the library prunes whole pages inside a
-	// feed (the observation record's own test measures the flag firing well
-	// inside sixty thousand rows at this pin). Feed numbered chunks until
-	// the stream carries a loss, then stop.
-	flagged := false
-	for chunk := range 60 {
-		obsFeed(t, s, chunk*1000, 1000)
-		for _, e := range rs.snapshot() {
-			if e.kind == "rows" && e.lost > 0 {
-				flagged = true
-			}
-		}
-		if flagged {
-			break
-		}
+	screen, err := ghostty.New(harnessGeometry(80, 24))
+	if err != nil {
+		t.Fatalf("build the real emulator: %v", err)
 	}
-	if !flagged {
-		t.Fatal("sixty thousand lines never carried a loss marker: the premise is broken at this pin")
-	}
+	t.Cleanup(screen.Close)
+	emu := &harnessEmulator{Terminal: screen}
+	s := obsSessionOver(t, harnessGeometry(80, 24), emu)
+	rs := &recordingRowStream{}
+	s.SetRowStream(rs)
 
-	// Paired: the ordinary feeds carried none — exactly one batch, the
-	// struck feed's, carries the marker.
-	flaggedBatches := 0
+	// Ordinary feed, the report that cannot be read, then two ordinary feeds:
+	// the marker rides the batch that follows the strike, and nothing else
+	// carries one.
+	obsFeed(t, s, 0, 100)
+	emu.StrikeNextDepartures(errHarnessStrike)
+	obsFeed(t, s, 100, 100)
+	obsFeed(t, s, 200, 100)
+	obsFeed(t, s, 300, 100)
+
+	flagged := 0
 	for _, e := range rs.snapshot() {
-		if e.kind != "rows" {
-			continue
-		}
-		if e.lost > 0 {
-			flaggedBatches++
+		if e.kind == "rows" && e.lost > 0 {
+			flagged++
 		}
 	}
-	if flaggedBatches != 1 {
-		t.Fatalf("%d batches carry a loss marker, want exactly the struck feed's one", flaggedBatches)
+	if flagged == 0 {
+		t.Fatal("a report that could not be read carried no loss marker: the hole reached the consumer as silence")
+	}
+	if flagged != 1 {
+		t.Fatalf("%d batches carry a loss marker, want exactly the struck feed's one", flagged)
 	}
 }
 

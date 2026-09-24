@@ -174,6 +174,15 @@ type terminal struct {
 	// caller with the rows that were read: a report with a hole in it is the
 	// caller's to judge, not this adapter's to pass off as whole.
 	departedErr error
+	// readScreen and readDepth are the two reads the departure capture takes,
+	// held as fields rather than calls so a test can make one fail: the
+	// torn-measurement path is otherwise unreachable (the library does not
+	// fail a read on request) and a path that cannot be tested is how a silent
+	// skip survives (nocx-2v80t.3.9). New sets both to the real reads, they
+	// take no lock of their own (the capture already holds mu), and nothing
+	// outside a test writes them.
+	readScreen func() (emulator.Screen, error)
+	readDepth  func() (int, error)
 	// sb is the scrollback baseline of each buffer, indexed by
 	// emulator.Screen: how many history rows that buffer had when last
 	// measured, and whether it has been measured at all. Departures are the
@@ -193,6 +202,13 @@ type terminal struct {
 type sbBaseline struct {
 	rows  int
 	valid bool
+	// torn is true when a measurement FAILED: the count left behind is not a
+	// measurement, and the rows that left the screen in that feed are unread.
+	// The next measurement must REPORT that span as a gap rather than
+	// re-baseline over it in silence (noteDepartedLocked) — silence about rows
+	// a consumer never received is indistinguishable from a feed that scrolled
+	// nothing, and only one of the two is true.
+	torn bool
 	// owed is how many rows a reflow moved back INTO the screen out of the
 	// scrollback AND that the consumer has already been handed. A taller
 	// screen is refilled from history, and those rows were reported as
@@ -334,6 +350,10 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 		return nil, resultError("terminal_new", r)
 	}
 	t := &terminal{t: handle, geom: g}
+	// The departure capture's two reads, wired once: they are fields so a test
+	// can make a read fail and pin the torn-measurement path, which the
+	// library itself never fails on request (see the fields' own comment).
+	t.readScreen, t.readDepth = t.screenLocked, t.scrollbackLocked
 	// A fresh terminal is on the primary screen with no history, and both
 	// facts are measured rather than assumed: seeding the baseline here is
 	// what lets the FIRST feed report its departures instead of silently
@@ -351,6 +371,37 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 	return t, nil
 }
 
+// setScrollbackBudget applies the library's two retention limits: a byte
+// limit for the scrollback's cell storage and a limit in physical lines.
+// Neither is a Go value the library can be handed directly, and each is a
+// POINTER because that is the library's shape — a NULL value removes that
+// limit, which is how install() leaves a session's history whole — so a nil
+// argument here means "no limit" and both options are named in this function
+// and nowhere else.
+//
+// A budget is a caller's decision, not a default to be inherited (see
+// install's own comment for what inheriting the library's cost), and a test
+// about the boundary states the one it means through this.
+func (t *terminal) setScrollbackBudget(maxBytes, maxLines *uint64) error {
+	var bytes, lines C.size_t
+	var bytesPtr, linesPtr unsafe.Pointer
+	if maxBytes != nil {
+		bytes = C.size_t(*maxBytes)
+		bytesPtr = unsafe.Pointer(&bytes)
+	}
+	if maxLines != nil {
+		lines = C.size_t(*maxLines)
+		linesPtr = unsafe.Pointer(&lines)
+	}
+	if r := C.ghostty_terminal_set(t.t, C.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, bytesPtr); r != C.GHOSTTY_SUCCESS {
+		return resultError("scrollback_max_bytes", r)
+	}
+	if r := C.ghostty_terminal_set(t.t, C.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, linesPtr); r != C.GHOSTTY_SUCCESS {
+		return resultError("scrollback_max_lines", r)
+	}
+	return nil
+}
+
 // install sizes the terminal and wires its callbacks. It is separate from New
 // so that every failure after the handle exists goes down one path that frees
 // it — release — rather than four that must each remember what was allocated
@@ -361,6 +412,41 @@ func (t *terminal) install(g emulator.Geometry) error {
 	// cell grid. A resize that does not change the grid still applies it — the
 	// library documents that — so this is a resize rather than a second way to
 	// construct a terminal.
+
+	// THE SESSION'S HISTORY IS NOT THE LIBRARY'S TO DELETE (nocx-2v80t.3.9).
+	//
+	// DepartedRows reads the rows that left the screen out of the buffer's
+	// scrollback depth, and the port's contract is one report per row, for as
+	// long as the session lives. A retention budget destroys the history that
+	// depth is measured against: the library prunes whole pages once the
+	// budget is reached, the depth read after the feed is then below its
+	// baseline, and the feed's own departures and the pruned pages land in one
+	// count no scalar separates — so the feed is a hole to the consumer
+	// (noteDepartedLocked's prune branch) and, when the prune is smaller than
+	// the feed's growth, the count drifts and rows are skipped with no hole at
+	// all (the residual hole emulator.Terminal.DepartedRows names).
+	//
+	// Nothing configured a budget before this: ghostty_terminal_new's nil
+	// options left the library's own in force, and that default is small in
+	// the terms that decide this. It saturates at about 80k cells, so the
+	// DEPTH it retains depends on the pane's width — measured: 1073 rows at 80
+	// columns, 873 at 100, 673 at 120, 573 at 148 — and a wide pane reaches it
+	// after a few hundred lines. At the e2e transcript's pane the seventh
+	// command of ten crossed it: one 2108-byte feed carrying a whole command's
+	// output, depth 581 -> 329, and every row of that command was gone from
+	// the transcript (nocx-2v80t.3.9).
+	//
+	// Both limits are therefore cleared: the history a session's departures
+	// are read out of lives as long as the session does, which is what the
+	// owner's decision already assumed when it made ghostty's scrollback the
+	// only buffer the helper keeps. A budget stays expressible
+	// (setScrollbackBudget) and the capture stays honest for one that prunes
+	// anyway; what cannot stand is a budget nobody chose deleting history
+	// behind the reader. Its memory is the library's to compress in place —
+	// ghostty_terminal_compress changes storage, never contents.
+	if err := t.setScrollbackBudget(nil, nil); err != nil {
+		return err
+	}
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		return resultError("terminal_resize", r)
@@ -576,19 +662,34 @@ func (t *terminal) scrollbackLocked() (int, error) {
 // depth reading, and that interval is flagged incomplete rather than
 // reported whole.
 func (t *terminal) noteDepartedLocked() {
-	screen, err := t.screenLocked()
+	screen, err := t.readScreen()
 	h := 0
 	if err == nil {
-		h, err = t.scrollbackLocked()
+		h, err = t.readDepth()
 	}
 	base := &t.sb[sbIndex(screen)]
 	if err != nil {
 		// The buffer's depth is unknown, so no delta can be taken: mark the
 		// gap in the report rather than guess, and let the next feed
-		// re-baseline from a fresh measurement.
+		// re-baseline from a fresh measurement — which REPORTS the span it
+		// could not read rather than measuring over it, below.
 		base.valid = false
+		base.torn = true
 		t.failDeparted(fmt.Errorf("ghostty: departed rows unmeasured: %w", err))
 		return
+	}
+	if base.torn {
+		// The measurement that failed took no count, so the rows that left the
+		// screen while it was failing are unread — and they cannot be separated
+		// from this feed's own departures, because both are growth in a count
+		// nobody could take across the two. A gap is the honest answer and
+		// silence is not: re-baselining here with no report claims the span
+		// held nothing, which is how a whole feed's departures disappeared
+		// while every feed after it read clean (nocx-2v80t.3.9). The count
+		// still re-baselines below, so the NEXT feed measures normally.
+		t.failDeparted(fmt.Errorf(
+			"ghostty: departed rows unmeasured across a torn measurement (depth %d -> %d): what left the screen while the depth was unreadable cannot be read",
+			base.rows, h))
 	}
 	if base.valid {
 		if d := h - base.rows; d > 0 {
@@ -623,7 +724,7 @@ func (t *terminal) noteDepartedLocked() {
 		// without a report, exactly as it does for d == 0, the feed that
 		// scrolls nothing.
 	}
-	base.rows, base.valid = h, true
+	base.rows, base.valid, base.torn = h, true, false
 }
 
 // captureDepartedLocked copies history rows [from, to) — the rows that just

@@ -174,13 +174,13 @@ test('a person can choose visible notification kinds without losing rows or read
     // One wait on all three facts, and it carries the numbers.
     //
     // A raised tab produces TWO events on two different paths: the BEL is a
-    // byte the renderer sees, while the command's completion is the ledger's
-    // KindBlockFinished, which travels history.record to the backend and comes
-    // back through the notification pipeline. So the badge can pass through
-    // "1" on its way to "2", and a wait that closes on the badge merely BEING
-    // a number closes on that "1" — the state the next assertion rejects. That
-    // is the repo's recurring flake shape, and it went red on a loaded runner
-    // exactly as recorded: fourteen polls at "1" while webkit passed.
+    // byte the renderer sees, while the command's completion is the
+    // authenticated lifecycle receipt (`history.recorded`) that feeds the
+    // notification pipeline. So the badge can pass through "1" on its way to
+    // "2", and a wait that closes on the badge merely BEING a number closes on
+    // that "1" — the state the next assertion rejects. That is the repo's
+    // recurring flake shape, and it went red on a loaded runner exactly as
+    // recorded: fourteen polls at "1" while webkit passed.
     //
     // Polling the conjunction fixes the shape; returning the counts rather
     // than a boolean is what makes a red run useful, because the timeout then

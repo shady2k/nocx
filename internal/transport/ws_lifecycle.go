@@ -241,11 +241,13 @@ func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 // PublishLifecycleProjection updates server-owned projections without
 // emitting a duplicate lifecycle notification to the renderer.
 func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
-	s.syncLifecycleLedger(f)
+	recorded := s.syncLifecycleLedger(f)
+	if recorded != nil {
+		s.publishHistoryRecorded(f, *recorded)
+	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
 	// completed attempt publishes the fence its interval end waits for.
-	// Inert without a rows source; see ws_block_rows.go.
 	s.blockStream.attemptFact(s, f)
 }
 
@@ -255,6 +257,52 @@ func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
 // for that reason: the held Stop's delivery is the only consumer today, and a
 // test that reads the obligation itself would be the only thing that noticed.
 var _ lifecyclepub.AttemptTransitionEmitter = (*WSServer)(nil)
+
+func (s *WSServer) publishHistoryRecorded(f lifecyclepub.Fact, data historyRecordedData) {
+	s.lifecycleMu.Lock()
+	sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+	s.lifecycleMu.Unlock()
+	if !ok {
+		return
+	}
+	rx := s.getRx(sid)
+	if rx == nil {
+		return
+	}
+	wconn, state := rx.getSubscriber()
+	if wconn != nil {
+		s.historyRecordedNotification(wconn, state, data)
+	}
+}
+
+func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
+	if s.lifecyclePub == nil {
+		return
+	}
+	att, ok := s.lifecyclePub.Attempt(id)
+	if !ok || (att.State != lifecycle.AttemptCompleted && att.State != lifecycle.AttemptUnknown) {
+		return
+	}
+	origin := lifecyclepub.OriginShell
+	if att.Origin == lifecycle.OriginApp {
+		origin = lifecyclepub.OriginApp
+	}
+	fact := lifecyclepub.Fact{
+		Lane: string(att.Lane),
+		Attempt: &lifecyclepub.Attempt{
+			ID: string(att.ID), State: lifecyclepub.AttemptCompleted, Command: att.Command,
+			Origin: origin, SubmitID: att.SubmitID, StartedAt: att.StartedAt,
+			ExitCode: att.ExitCode, CompletedAt: att.CompletedAt,
+		},
+	}
+	if att.State == lifecycle.AttemptUnknown {
+		fact.Attempt.State = lifecyclepub.AttemptUnknown
+	}
+	if recorded := s.syncLifecycleLedger(fact); recorded != nil {
+		s.raiseLifecycleBlockFinished(*recorded, fact)
+		s.publishHistoryRecorded(fact, *recorded)
+	}
+}
 
 // PublishLifecycle routes one published fact to the lane's session's current
 // subscriber and writes the notification. This is the Emitter half of
@@ -268,11 +316,10 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	sid, ok := s.lifecycleLanes[lane]
 	s.lifecycleMu.Unlock()
 	if !ok {
-
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
-	s.syncLifecycleLedger(f)
+	recorded := s.syncLifecycleLedger(f)
 	// The streamed block's half of the same fact (ws_block_rows.go): an
 	// authenticated start opens — and answers the keep decision for — the
 	// command's block; a completed attempt publishes the fence its interval
@@ -304,11 +351,8 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.cancelRecovery(sid)
 		return
 	}
-	// The installed fact (nocx-ak2d): what the far shell said it was brought
-	// up from, recorded once per domain. Before the routing decisions below,
-	// because the fact is about the HOST and does not depend on anybody being
-	// attached to watch it — a session whose renderer has gone away has still
-	// integrated the host it connected to.
+	// The installed fact (nocx-ak2d) is recorded before subscriber routing
+	// because it describes the host integration, not the renderer watching it.
 	s.recordInstalledFact(f)
 
 	// The session's integration axis (nocx-dvql): a live domain is the
@@ -340,7 +384,7 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 			"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
 	}
-	wconn, _ := rx.getSubscriber()
+	wconn, state := rx.getSubscriber()
 	if wconn == nil {
 		// Said out loud, because the drop is otherwise invisible: the fact is
 		// gone and the only trace is a renderer that never hears about a
@@ -348,6 +392,9 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		// different tests hanging on three different deadlines.
 		s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
+	}
+	if recorded != nil {
+		s.historyRecordedNotification(wconn, state, *recorded)
 	}
 	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
 		s.openRecovery(sid, f)
@@ -383,76 +430,121 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 }
 
+// raiseLifecycleBlockFinished raises the attested completion event for the
+// lifecycle-owned writer. A recorded receipt means FinishExecution closed the
+// same ledger row, so this is the one boundary at which a shell command may
+// enter the notification feed. ledger.close keeps its own raise for the
+// legacy close-only path; the two paths cannot close one attempt twice.
+func (s *WSServer) raiseLifecycleBlockFinished(data historyRecordedData, f lifecyclepub.Fact) {
+	if s.notifyRaiser == nil || data.SessionID == "" || f.Attempt == nil {
+		return
+	}
+	sess, err := s.registry.Get(data.SessionID)
+	if err != nil {
+		return
+	}
+	status := content.EntryFailure
+	facts := ledgerCloseFacts{ExitCode: f.Attempt.ExitCode}
+	if f.Attempt.State == lifecyclepub.AttemptUnknown {
+		status = content.EntryUnknown
+		facts.TerminationReason = string(content.TermTransportGone)
+	} else if f.Attempt.ExitCode != nil && *f.Attempt.ExitCode == 0 {
+		status = content.EntrySuccess
+		facts.TerminationReason = string(content.TermCompleted)
+	} else if s.signalDeliveryFor(f) == signalDeliveryDelivered {
+		status = content.EntryInterrupted
+		facts.TerminationReason = string(content.TermUserKilled)
+	} else {
+		facts.TerminationReason = string(content.TermCompleted)
+	}
+	// Owner: the lifecycle completion publisher, which raises the attested
+	// notification after the ledger transition closes. Closing event: Raise
+	// returns after the notification pipeline has admitted the event.
+	s.notifyRaiser.Raise(context.Background(), blockFinishedEvent(sess, data.Command, status, facts))
+}
+
 // syncLifecycleLedger projects authenticated attempt facts onto the same
 // entry the submit handler opened. It runs synchronously in the publisher's
 // emitter callback, so a lifecycle fact cannot outrun its store transition.
 // The lifecycle publisher is the authority for state; this function only
 // advances the ledger's existing Submit → StartExecution → FinishExecution
 // lifecycle and never invents a second phase machine.
-func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
+func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData {
 	if s.contentDB == nil || f.Attempt == nil {
-		return
+		return nil
 	}
-	// Owner: lifecycle publisher. Closing event: session close, after which
-	// no lifecycle facts are emitted.
+	// Owner: the lifecycle publisher's synchronous projection callback.
+	// Closing event: callback return after this ledger transition completes.
 	ctx := context.Background()
 	ledger := s.contentDB.Ledger()
 	row, err := ledger.Entry(ctx, f.Attempt.ID)
 	if err != nil {
 		s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
-		return
+		return nil
 	}
+	var sid session.ID
+	s.lifecycleMu.Lock()
+	sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+	s.lifecycleMu.Unlock()
 	if row == nil {
-		// Shell-originated attempts have no app-opened row — and since the
-		// owner's decision of 2026-09-19 they OPEN ONE HERE: every command
-		// that arrives through the authenticated shell channel gets an
-		// entry, under the shell's own attempt id, through the same writer
-		// and the same masking pass the submit path uses. A command typed
-		// straight into the shell, an agent's line written to the pane, a
-		// pane nobody is watching: all of them authenticated their start,
-		// and all of them leave a row the finish below can land on.
-		//
-		// An APP-originated attempt is deliberately not opened here: its
-		// row is the submit handler's write, and this projection runs in
-		// the emitter the publisher notifies BEFORE that insert is durable
-		// — opening here would make the ordinary submitted command a row
-		// twice. The handler reconciles the kernel's state itself once its
-		// row is durable (handleLifecycleSubmitAttempt).
-		//
-		// A start naming no command is a bare newline, not an execution —
-		// the submit path's own refusal — and a snapshot-declared attempt
-		// whose text never reached the backend has nothing to record.
 		if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
-			return
+			s.lifecycleMu.Lock()
+			scope, scoped := s.historySources[f.Attempt.ID]
+			sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+			s.lifecycleMu.Unlock()
+			if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
+				return nil
+			}
+			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+			if prepareErr != nil {
+				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+				return nil
+			}
+			s.lifecycleMu.Lock()
+			delete(s.historySources, f.Attempt.ID)
+			s.lifecycleMu.Unlock()
+			return &historyRecordedData{
+				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
+				Generation: scope.Generation, Source: scope.Source,
+				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+				Credentials: prepared.credentials,
+			}
 		}
-		// The row names the pipe it ran in (nocx-ie23r.6), from the session
-		// the lane is registered to. A lane that is not registered has no
-		// session identity to carry, and a session the registry does not
-		// hold is gone — neither records a row.
-		// Under lifecycleMu, like every other reader: registration moves on
-		// the session spawn and teardown paths, which run on other
-		// goroutines than the publisher's emission turn.
 		s.lifecycleMu.Lock()
-		sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+		laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+		sid = laneSID
 		s.lifecycleMu.Unlock()
 		if !ok {
-			return
+			return nil
 		}
 		sess, sessErr := s.registry.Get(sid)
 		if sessErr != nil {
-			return
+			return nil
 		}
 		s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
 			lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
 		row, err = ledger.Entry(ctx, f.Attempt.ID)
 		if err != nil {
 			s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
-			return
+			return nil
 		}
 		if row == nil {
-			// The write was suppressed (history off — the store's policy
-			// decides) or failed and said so above; nothing to advance.
-			return
+			if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+				return nil
+			}
+			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+			if prepareErr != nil {
+				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+				return nil
+			}
+			return &historyRecordedData{
+				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
+				Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
+				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+				Credentials: prepared.credentials,
+			}
 		}
 	}
 	start := func() (int64, error) {
@@ -468,10 +560,7 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 			return 0, ensureErr
 		}
 		if _, observeErr := ledger.RecordObservation(ctx, content.Observation{
-			EnvironmentID: row.EnvironmentID,
-			Confidence:    "{}",
-			Criticality:   content.CriticalityRoutine,
-			Payload:       "{}",
+			EnvironmentID: row.EnvironmentID, Confidence: "{}", Criticality: content.CriticalityRoutine, Payload: "{}",
 		}); observeErr != nil {
 			return 0, observeErr
 		}
@@ -483,25 +572,24 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", startErr)
 			}
 		}
-		return
+		return nil
 	}
 	if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
-		return
+		return nil
 	}
 	if row.Phase == content.PhaseClosed {
-		return
+		return nil
 	}
 	execID, ok := liveExecutionOf(row)
 	if !ok {
 		execID, err = start()
 		if err != nil {
 			s.log.Warn("lifecycle ledger recovery start failed", "attempt", row.ID, "error", err)
-			return
+			return nil
 		}
 	}
 	end := content.FinishExecution{
-		EndedAt:           time.Now().UnixMilli(),
-		Status:            content.EntryUnknown,
+		EndedAt: time.Now().UnixMilli(), Status: content.EntryUnknown,
 		TerminationReason: content.TermTransportGone,
 	}
 	if f.Attempt.State == lifecyclepub.AttemptCompleted {
@@ -510,12 +598,6 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 		if f.Attempt.ExitCode != nil && *f.Attempt.ExitCode == 0 {
 			end.Status = content.EntrySuccess
 		}
-		// A command the person stopped records the store's own word for that
-		// judgement, so a block RESTORED from this entry is not read back as
-		// the program's own failure — the durable half of the settlement the
-		// lifecycle fact carries live (nocx-zas0d, review of 6830b43d, major
-		// 2: the outcome has to be state a replay can reach, not only an event
-		// a dropped frame can lose).
 		if s.signalDeliveryFor(f) == signalDeliveryDelivered {
 			end.TerminationReason = content.TermUserKilled
 		}
@@ -531,6 +613,55 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 	}
 	if err := ledger.FinishExecution(ctx, execID, end); err != nil {
 		s.log.Warn("lifecycle ledger finish failed", "attempt", row.ID, "error", err)
+		return nil
+	}
+	prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+	if prepareErr != nil {
+		s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+		return nil
+	}
+	entryCommand := row.Intent
+	receipt, receiptErr := content.EntryMaskingOf(row.Payload)
+	if receiptErr == nil {
+		prepared.maskedCount = receipt.MaskedCount
+		prepared.maskedKinds = receipt.MaskedKinds
+		prepared.redactions = receipt.Redactions
+	}
+	source := row.Source
+	paneID := ""
+	if row.PaneID != nil {
+		paneID = *row.PaneID
+	}
+	generation := uint64(0)
+	s.lifecycleMu.Lock()
+	scope, scoped := s.historySources[f.Attempt.ID]
+	delete(s.historySources, f.Attempt.ID)
+	if row.SessionID != nil {
+		sid = session.ID(*row.SessionID)
+	}
+	s.lifecycleMu.Unlock()
+	if scoped {
+		source = scope.Source
+		if paneID == "" {
+			paneID = scope.Pane
+		}
+		generation = scope.Generation
+	}
+	if source == "" {
+		source = content.SourceUser
+	}
+	if generation == 0 {
+		generation = s.nextHistoryGeneration.Add(1)
+	}
+	if entryCommand == "" {
+		entryCommand = prepared.rowCommand
+	}
+	return &historyRecordedData{
+		SessionID: sid, AttemptID: f.Attempt.ID, EntryID: row.ID,
+		PaneID: paneID, Generation: generation, Source: source,
+		Command: entryCommand, MaskedCount: prepared.maskedCount,
+		MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+		Credentials: prepared.credentials,
 	}
 }
 
@@ -585,11 +716,10 @@ type submitAttemptParams struct {
 	//
 	// REQUIRED, WITH NO DEFAULT, and that is the whole point: since the
 	// entry is opened HERE (nocx-kpqr3) this is the only write that decides
-	// the author — history.record's close moves phase, status and times and
-	// leaves the column alone. A default would let a submit path forget it
-	// and silently attribute the assistant's command to the person, which
-	// is what nocx-1druc found: a hard-coded 'user' here, and a restored
-	// pane that no longer knew the assistant had run the command.
+	// the author. A default would let a submit path forget it and silently
+	// attribute the assistant's command to the person, which is what
+	// nocx-1druc found: a hard-coded 'user' here, and a restored pane that no
+	// longer knew the assistant had run the command.
 	Source string `json:"source"`
 }
 
@@ -612,17 +742,6 @@ type lifecycleSubmitAttemptResult struct {
 	StartedAt time.Time `json:"startedAt"`
 }
 
-// handleLifecycleSubmitAttempt opens an app-originated attempt on a live
-// domain at a ready prompt, synchronously, before the renderer writes the
-// command bytes to the pty.
-//
-//	--> {"jsonrpc":"2.0","id":1,"method":"lifecycle.submitAttempt","params":{"domain":"dom-1","command":"make","cwd":"/srv/app","host":"build.example.com","source":"user"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"id":"att-…","domain":"dom-1","state":"open","command":"make","cwd":"/srv/app","host":"build.example.com","origin":"app","startedAt":"2026-08-08T12:00:00.123456Z"}}
-//
-// Ownership is enforced exactly like the git/files bindings: the domain's
-// lane must be registered to a session THIS connection opened or reattached
-// to. This is a mutating call, and it must not be addressable by a domain
-// id guessed from another session.
 func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
 		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
@@ -665,6 +784,11 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 				"request_id", params.RequestID, "attempt", att.ID)
 		}
 	}
+	s.lifecycleMu.Lock()
+	s.historySources[string(att.ID)] = historyAttemptScope{
+		Source: content.Source(params.Source), Pane: sess.PaneID(), Generation: state.nextGeneration(),
+	}
+	s.lifecycleMu.Unlock()
 	if s.contentDB != nil {
 		s.recordAttemptEntry(ctx, string(att.ID), params.Command, params.Cwd,
 			fmt.Sprintf("%d", wconn.id), sess, att.StartedAt, content.Source(params.Source))
@@ -707,18 +831,18 @@ const lifecycleShellLedgerClient = "lifecycle-shell"
 // share — the renderer's submit (handleLifecycleSubmitAttempt) and the
 // shell-originated projection (syncLifecycleLedger) — so the masking pass,
 // the masking receipt on entries.payload and the row shape cannot drift
-// between the two ways a command enters the ledger. Masking is the one owner
-// (maskLedgerCommand, ws_history_record.go); the store's own policy governs
-// whether a command row is written at all (history off: Submit records
-// nothing, no error — the zero result), output and sensitivity downstream.
+// between lifecycle submission and completion. Masking is the one owner
+// (maskLedgerCommand, ws_ledger.go); the store's own policy governs whether a
+// command row is written at all (history off: Submit records nothing, no
+// error — the zero result), output and sensitivity downstream.
 //
 // Every failure here is fail-open — one warning line, no row — because the
 // command has already run or is about to: refusing the record fails nothing
-// the person did, exactly as history.record's masking rule states.
+// the person did.
 func (s *WSServer) recordAttemptEntry(ctx context.Context, attemptID, command, cwd, client string, sess session.Session, startedAt time.Time, source content.Source) {
-	masked, maskErr := maskLedgerCommand(command)
-	if maskErr != nil {
-		s.log.Warn("lifecycle ledger masking failed; command remains executable", "attempt", attemptID, "error", maskErr)
+	prepared, prepareErr := prepareHistoryCommand(command, s.captures)
+	if prepareErr != nil {
+		s.log.Warn("lifecycle ledger masking failed; command remains executable", "attempt", attemptID, "error", prepareErr)
 		return
 	}
 	ledger := s.contentDB.Ledger()
@@ -729,37 +853,20 @@ func (s *WSServer) recordAttemptEntry(ctx context.Context, attemptID, command, c
 	}
 	started := startedAt.UnixMilli()
 	payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
-		MaskedCount: len(masked.findings),
-		MaskedKinds: maskedKindsOf(masked.findings),
-		Redactions:  redactionsOf(masked.findings, masked.segments),
+		MaskedCount: prepared.maskedCount,
+		MaskedKinds: prepared.maskedKinds,
+		Redactions:  prepared.redactions,
 	})
 	if payloadErr != nil {
 		s.log.Warn("lifecycle ledger masking receipt failed; command remains executable", "attempt", attemptID, "error", payloadErr)
 		return
 	}
 	if _, submitErr := ledger.Submit(ctx, content.SubmitEntry{
-		ID:            attemptID,
-		Client:        client,
-		EnvironmentID: env.ID,
-		PaneID:        panePtr(sess.PaneID()),
-		// THE SESSION THIS COMMAND RAN IN (nocx-ie23r.6), from the session
-		// the caller resolved — the connection's own state for a submit,
-		// the registry for a shell-originated projection — so the column
-		// is a backend fact and not a request's claim. This is the writer
-		// that CREATES the row for an ordinary command, and a row created
-		// with no session would keep none for the rest of its life.
-		SessionID: sessionPtr(sess.ID()),
-		Cwd:       cwd,
-		Kind:      content.EntryShell,
-		// The submitting target's own word for a submit (design §3.1); the
-		// shell channel names no author, and the person at the keyboard is
-		// what a typed line is — the store's own normalization for an
-		// unnamed source (ledger_sqlite.go) says the same.
-		Source:      source,
-		Intent:      masked.text,
-		StartedAt:   &started,
-		Sensitivity: content.SensitivityNormal,
-		Payload:     payload,
+		ID: attemptID, Client: client, EnvironmentID: env.ID,
+		PaneID: panePtr(sess.PaneID()), SessionID: sessionPtr(sess.ID()),
+		Cwd: cwd, Kind: content.EntryShell, Source: source,
+		Intent: prepared.rowCommand, StartedAt: &started,
+		Sensitivity: content.SensitivityNormal, Payload: payload,
 	}); submitErr != nil {
 		s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", attemptID, "error", submitErr)
 	}

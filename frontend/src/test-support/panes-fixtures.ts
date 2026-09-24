@@ -701,6 +701,21 @@ export function lifecycleHandler(
     deliver({ ...params, sessionId })
   }
 }
+/** The backend-owned history receipt notification. */
+export function historyRecordedHandler(
+  client: ClientFake,
+  sessionId = client._sessions[0]?.sessionId,
+): (params: unknown) => void {
+  if (!sessionId) throw new Error('no session available for history.recorded')
+  const deliver = notificationHandler(client, 'history.recorded')
+  return (params: unknown): void => {
+    if (!params || typeof params !== 'object') {
+      deliver(params)
+      return
+    }
+    deliver({ ...params, sessionId })
+  }
+}
 
 /**
  * A pane whose row the chain ALREADY HOLDS — what every test that is not

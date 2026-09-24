@@ -1,24 +1,22 @@
 package transport
 
-// The translation between history.* and the ledger (nocx-rtg0.19).
+// The translation between history.query and the ledger (nocx-rtg0.19).
 //
-// command_history is gone and history.record / history.query keep their wire
-// shapes exactly — they answer from the ledger now. Everything the two
-// vocabularies disagree about is decided HERE, in one file, because a mapping
-// spread across two handlers is how the write and the read come to disagree
-// about what a row means.
+// command_history is gone. history.query answers from the ledger, while
+// lifecycle submission and completion own writes. Everything the history and
+// ledger vocabularies disagree about is decided HERE, in one file, because a
+// mapping spread across handlers is how the write and the read come to
+// disagree about what a row means.
 //
 // Four disagreements, all four decided on the bead before any of this was
 // written, and each one repeated at the code that implements it.
 
 import (
-	"encoding/json"
-
 	"github.com/shady2k/nocx/internal/content"
 )
 
 // environmentForHost derives the environment a recorded command ran in from
-// the only locator history.record carries: a host string, empty for the local
+// the host locator carried by lifecycle submission, empty for the local
 // machine.
 //
 // THE ASSUMPTION IS: EMPTY HOST → local, NON-EMPTY → ssh. It is written here
@@ -41,51 +39,6 @@ func environmentForHost(host string) content.Environment {
 		Kind:     content.EnvSSH,
 		Endpoint: &host,
 	}
-}
-
-// terminationForStatus is the execution's own fact derived from the only
-// outcome history.record sends. The ledger's lifecycle writer gets this from
-// the renderer, which watched the command end; history.record arrives after
-// the fact with a status and nothing else, so the reason is derived from it
-// rather than invented as `completed` for everything.
-func terminationForStatus(status content.EntryStatus) content.TerminationReason {
-	switch status {
-	case content.EntryFailure:
-		return content.TermFailed
-	case content.EntryInterrupted:
-		return content.TermInterrupted
-	case content.EntryUnknown:
-		// The honest one: the run ended and nobody observed how. Mapping it
-		// to `completed` would let a command whose outcome was lost render
-		// as one that finished cleanly.
-		return content.TermInterrupted
-	default:
-		return content.TermCompleted
-	}
-}
-
-// mergeShellExitCode folds the shell arm into an entry payload that already
-// carries its redaction receipt. Two sparse writers, one column: the receipt
-// is the masking owner's and the exit code is design §3.3's shell arm, and
-// neither may clobber the other.
-func mergeShellExitCode(payload string, exitCode *int) (string, error) {
-	var into map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(payload), &into); err != nil {
-		return "", err
-	}
-	arm := json.RawMessage(content.ShellPayloadJSON(exitCode))
-	var armFields map[string]json.RawMessage
-	if err := json.Unmarshal(arm, &armFields); err != nil {
-		return "", err
-	}
-	for k, v := range armFields {
-		into[k] = v
-	}
-	out, err := json.Marshal(into)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
 }
 
 // historyLedgerQuery expresses the recall ladder in the ledger's own terms.

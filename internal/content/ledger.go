@@ -11,16 +11,14 @@ package content
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and
-// FinishAgentRun. The READ
-// path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
-// ledger.get drives Entry plus Edges plus Caused (ws_ledger_query.go), and the query's
-// `host` field is what finally asks a resolved environment row for its host —
-// so Environment.Host has a renderer. history.record drives RecordCompleted
-// (nocx-rtg0.19), which is where a finished command lands now, under the
-// author the renderer minted (nocx-iadtt). Streamed command output uses
-// OpenBlockOutput and MediaBlockRows; CaptureOutput remains the shared
-// transactional body path for assistant/tool results.
+// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and FinishAgentRun.
+// The READ path is wired as of nocx-rtg0.20: ledger.query drives
+// QueryEntries and ledger.get drives Entry plus Edges plus Caused
+// (ws_ledger_query.go), and the query's `host` field is what finally asks a
+// resolved environment row for its host — so Environment.Host has a renderer.
+// Lifecycle submission and completion drive the command row; streamed command
+// output uses OpenBlockOutput and MediaBlockRows; CaptureOutput remains the
+// shared transactional body path for assistant/tool results.
 //
 // WHAT IS STILL TEST-REACHABLE ONLY: DeleteSession, ListEntries, DeleteEntry,
 // AppendArtifact, AddEdge and RunState. CreateSession is wired by the shipped
@@ -47,10 +45,8 @@ package content
 //
 // RewriteRedaction stopped being the awkward case when command_history went
 // (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
-// through capability.CaptureSaveService, the id router that used to choose a
-// store by parsing an integer is gone with the second store, and
-// history.record now mints the entry-keyed links that made the ledger arm
-// unreachable in production before.
+// through capability.CaptureSaveService, and the id router that used to choose
+// a store by parsing an integer is gone with the second store.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
@@ -1187,8 +1183,8 @@ const MaxArtifactBytes = 1 << 20
 // lost acknowledgement is idempotent on the same id and sequence, while the
 // same id naming another artifact is ErrIDConflict.
 type CaptureOutput struct {
-	// EntryID is the row the body belongs to — what history.record answered
-	// with.
+	// EntryID is the row the body belongs to — the backend-assigned id returned
+	// by lifecycle history.
 	EntryID string
 	// ArtifactID is client-minted UUIDv7 and the idempotency key.
 	ArtifactID string
@@ -1814,11 +1810,9 @@ type LedgerRepository interface {
 	RecordObservation(ctx context.Context, obs Observation) (int64, error)
 	// RecordCompleted writes one command that has already finished — the
 	// intent, its single execution and its outcome in ONE transaction, with
-	// the entry id minted by the backend. It is what history.record lands
-	// through since nocx-rtg0.19 replaced command_history, and it exists
-	// beside Submit rather than instead of it because the two answer
-	// different questions: Submit opens a lifecycle the renderer will drive
-	// to a close, this records one that is already over.
+	// the entry id minted by the backend. Lifecycle completion normally writes
+	// through the authenticated attempt; this method remains the completed-only
+	// repository seam for callers without such an attempt.
 	RecordCompleted(ctx context.Context, in CompletedCommand) (string, error)
 	// Submit accepts an intent as an open entry and returns the
 	// backend-assigned ingest_seq. Two entries in the same millisecond

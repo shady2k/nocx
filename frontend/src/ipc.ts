@@ -1,7 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
 import { Dispatcher } from './dispatcher'
-import { historyOutbox } from './history-client'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
@@ -575,11 +574,6 @@ export class WSClient {
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
-      // A socket came back, so anything the outbox kept can go now
-      // (nocx-rtg0.4). Fire-and-forget: a drain that fails leaves the queue
-      // exactly as it was and the next connect tries again, which is the
-      // whole point of keeping it.
-      void historyOutbox.drain()
       const ws = this.dispatcher.socket!
       ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
@@ -920,9 +914,9 @@ export class WSClient {
 
   /** Tell the backend a pane closed, so its PENDING CAPTURES die with it
    *  (nocx-tsajw). The paneId is the pane's one identity — the same UUIDv7
-   *  the layout chain stores and history.record carries — declared once in
-   *  contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is generated
-   *  from it). Fire-and-forget: a lost notification is covered by the
+   *  the layout chain stores and lifecycle history carries — declared once
+   *  in contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is
+   *  generated from it). Fire-and-forget: a lost notification is covered by
    *  transport disconnect, which is the same destruction the pane's death
    *  implies.
    *

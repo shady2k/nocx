@@ -22,13 +22,13 @@
  * its seal are irrelevant to it, which is the point of nocx-rtg0.14.
  *
  * The command is typed and Enter pressed; the OSC 133 D finalizes the
- * ledger record, which crosses the control plane as history.record (AD-1 as
- * amended). The backend is restarted — a fresh launch, fresh token, fresh
- * session — and the page reloaded. Up on the empty prompt opens recall, and
- * the recorded command must be there with source=store: the panel shows the
- * command and does NOT carry the "this session only" badge, because the
- * session ledger is empty after the reload and only the store could have
- * answered.
+ * ledger record, which the authenticated lifecycle path publishes as a
+ * `history.recorded` notification (AD-1 as amended). The backend is restarted —
+ * a fresh launch, fresh token, fresh session — and the page reloaded. Up on the
+ * empty prompt opens recall, and the recorded command must be there with
+ * source=store: the panel shows the command and does NOT carry the "this session
+ * only" badge, because the session ledger is empty after the reload and only the
+ * store could have answered.
  */
 import { expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
@@ -140,32 +140,19 @@ test.describe('history: a command survives a restart and recall answers from the
 
     // The command ran: post-scrollback, its output lives in a DOM scrollback
     // block (the OSC 133 D clears the live viewport into the block), so the
-    // block's presence IS the completed OSC 133 cycle — which is also what
-    // finalizes the ledger record. Then give the history.record round trip a
-    // moment to land — this is an integration test of a real local socket,
-    // and the record is fire-and-forget by design.
+    // block's presence IS the completed OSC 133 cycle — which also causes the
+    // backend to publish its authenticated history.recorded receipt.
     const block = page.locator('.cmd-block', { hasText: marker }).first()
     await expect(block).toBeVisible({ timeout: 15_000 })
 
     // THE RECORD REACHED THE STORE — established, not waited out.
     //
-    // This was `waitForTimeout(800)`, on the honest reasoning that
-    // history.record is fire-and-forget by design and the round trip needs a
-    // moment. 800 ms is a claim about how fast the machine is, written on a
-    // machine where it held: this spec passes alone in 6.9s and fails inside
-    // the full suite on both engines, at the runner's four vCPU, with the
-    // panel reporting "0 results" after the restart. By then the record can
-    // never arrive — the backend it was going to has been replaced — so the
-    // failure lands three phases away from its cause and reads as a lost
-    // feature (nocx-cbtc's method note, and the fourth instance of this shape
-    // on this branch).
-    //
-    // The wait is now on the product's own answer to the same question. The
-    // recall panel says where its rows came from, and "this session only" is
-    // what it says when nothing but the in-memory ledger replied. Its absence
-    // beside the marker IS the store having answered — which is exactly what
-    // phase 3 asserts, so the premise is established with the very statement
-    // the test is about, and a store that never records still fails.
+    // The UI observes the resulting store-backed recall answer rather than
+    // sleeping for the fire-and-forget receipt. The panel says where its rows
+    // came from, and "this session only" is what it says when nothing but the
+    // in-memory ledger replied. Its absence beside the marker IS the store
+    // having answered — exactly what phase 3 asserts, so a store that never
+    // records still fails.
     const panel1 = page.locator('.ui-floating-panel[data-variant="recall"]')
     await expect
       .poll(

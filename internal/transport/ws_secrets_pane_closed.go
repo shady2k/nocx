@@ -7,8 +7,9 @@ package transport
 // captures were scoped to the connection, so a pane's offer sat in backend
 // memory until the connection dropped, the vault sealed, or the app quit.
 // This notification is the missing trigger: the renderer mints a per-pane
-// identity, rides it on history.record so the captures are scoped to the pane,
-// and announces the pane's death here so those captures are destroyed with it.
+// identity, carries it on lifecycle history so captures are scoped to the
+// pane, and announces the pane's death here so those captures are destroyed
+// with it.
 //
 // IT WAS CALLED pane.close AND WAS RENAMED (nocx-isoph.4). The layout chain
 // gained a real removal method for the durable object — panes.close, beside
@@ -48,11 +49,12 @@ type paneClosedParams struct {
 	PaneID string `json:"paneId"`
 }
 
-// maxPaneIDRunes bounds the renderer-minted pane identity that history.record
-// and secrets.paneClosed accept: a UUIDv7 is 36 characters, and any real
-// identity fits far under this. The bound is per-field wire-cost hygiene —
-// the same shape as every other string bound in this package — so a hostile
-// frame cannot make the server hold an unbounded string in a capture scope.
+// maxPaneIDRunes bounds the renderer-minted pane identity that lifecycle
+// history and secrets.paneClosed accept: a UUIDv7 is 36 characters, and any
+// real identity fits far under this. The bound is per-field wire-cost
+// hygiene — the same shape as every other string bound in this package — so
+// a hostile frame cannot make the server hold an unbounded string in a capture
+// scope.
 //
 // IT IS DELIBERATELY NOT THE LAYOUT'S UUIDv7 CHECK, though the renderer now
 // mints one v7 identity and sends it to both (nocx-isoph.4). The layout

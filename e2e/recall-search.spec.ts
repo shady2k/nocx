@@ -136,8 +136,8 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
       await input.fill(cmd)
       await page.keyboard.press('Enter')
       // The block's presence is the completed OSC 133 cycle, which is what
-      // finalizes the ledger record; then give history.record a moment to
-      // cross the socket (fire-and-forget by design, nocx-rtg0.13).
+      // finalizes the ledger record and causes the backend's history.recorded
+      // completion receipt to cross the socket.
       const block = page.locator('.cmd-block', { hasText: cmd }).first()
       await expect(block).toBeVisible({ timeout: 15_000 })
       await page.waitForTimeout(800)

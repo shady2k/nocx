@@ -47,8 +47,9 @@ import {
   makeSession,
   anchoredPane,
   integrationHandler,
-  signalUndeliveredHandler,
   lifecycleHandler,
+  signalUndeliveredHandler,
+  historyRecordedHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -3788,32 +3789,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
   it('a receipt whose ack beats the render fence still lands, on the block it belongs to (nocx-ggha)', async () => {
     const FENCE = 'c'.repeat(64)
     const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 1,
-          maskedKinds: ['openai'],
-          entryId: 'e-ggha',
-          source: 'user',
-          redactions: [{ kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' }],
-          maskedCommand: 'echo sk-***',
-          captures: [
-            {
-              id: 'cap-1',
-              entryId: 'e-ggha',
-              suggestedName: 'openai-key',
-              redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
-            },
-          ],
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     const renderer = rendererOf(content)
@@ -3886,13 +3867,26 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(stop).toBeUndefined()
       document.querySelector('[data-testid="block-actions-menu"]')?.remove()
 
-      // The ack lands here. It used to be refused for the class alone and
-      // dropped for good — no retry, nothing shown, nothing logged.
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
-      )
-      await Promise.resolve()
-      await Promise.resolve()
+      // The backend-owned receipt arrives over the notification subscription,
+      // before the fence that replaces the visible block.
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-g',
+        maskedCount: 1,
+        maskedKinds: ['openai'],
+        entryId: 'e-ggha',
+        source: 'user',
+        redactions: [{ kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' }],
+        maskedCommand: 'echo sk-***',
+        captures: [
+          {
+            id: 'cap-1',
+            entryId: 'e-ggha',
+            suggestedName: 'openai-key',
+            redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
+          },
+        ],
+      })
 
       // The fence lands and the visual freeze replaces the element. The
       // receipt must be on the NEW element — the one the user is looking at.
@@ -3911,26 +3905,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
   it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     /* eslint-disable @typescript-eslint/unbound-method */
@@ -3992,6 +3972,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'user',
+        redactions: [],
+        captures: [],
+        maskedCommand: 'make',
+      })
 
       // The block froze with the authenticated status.
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
@@ -4002,12 +3993,10 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(grantBlockFromElement(frozen.el)?.itemId).toBe('att-1')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
-      // History persisted the app-owned text, authorized by the attempt.
-      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-      expect(recordCall).toBeTruthy()
-      const params = recordCall![1] as { command: string; status: string; exitCode: number }
-      expect(params.command).toBe('make')
-      expect(params.status).toBe('success')
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
@@ -4016,21 +4005,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
   })
   it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4207,20 +4181,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
   it('a finished command leaves its rows on the live surface (nocx-2v80t.3.3)', async () => {
     const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'seq',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     // A REAL renderer, injected through this file's mock seam: the rows
     // this criterion is about live in the actual grid, which the shared
     // mock does not model.
@@ -4332,24 +4292,8 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
-
   it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4391,9 +4335,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect((attemptCall![1] as { command: string }).command).toBe('make')
       // AND IT CARRIES WHO SUBMITTED IT. The durable row is opened by this
       // very call (nocx-kpqr3), so this is the only place the author reaches
-      // the store — history.record's close moves the status and leaves the
-      // column alone. An attempt submitted without it came back from a
-      // restart as the person's command (nocx-1druc, agent-restore.spec.ts).
+      // the store — the backend's completion receipt moves the status and
+      // leaves the column alone. An attempt submitted without it came back
+      // from a restart as the person's command (nocx-1druc, agent-restore.spec.ts).
       expect((attemptCall![1] as { source: string }).source).toBe('assistant')
 
       // The attempt attaches and completes: the block freezes with the exit
@@ -4428,12 +4372,23 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'make',
+        captures: [],
+      })
 
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
       rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
       const run = await pending
-      // THE ENTRY ID IS THE STORE'S, and it is the one history.record's ack
+      // THE ENTRY ID IS THE STORE'S, and it is the one completion receipt
       // named (nocx-9sqii). It used to be `String(rec.id)` — the renderer's
       // own record number, which counts blocks in this tab and is not an
       // entry anywhere. The backend joins the command to the turn that ran
@@ -4466,21 +4421,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     // order). Answering the renderer's own record number here instead is
     // what made the join fail silently when there WAS a row.
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: '',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4522,6 +4462,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
           fence: 'a'.repeat(64),
           completedAt: '2026-08-08T12:00:02Z',
         },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: '',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'make',
+        captures: [],
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
@@ -4586,6 +4537,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
           fence: 'a'.repeat(64),
           completedAt: '2026-08-08T12:00:02Z',
         },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'agent-command',
+        captures: [],
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
@@ -4675,28 +4637,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
     // complete block, the exit status persists exactly once, PromptReady
     // returns the editor, and the next submitted command reaches the shell.
     const client = makeClient()
-    const callMock = client.call
-    let recordCalls = 0
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        recordCalls++
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'echo hello',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const renderer = rendererOf(content)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
@@ -4779,14 +4725,23 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(frozen.exitCode).toBe(1)
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
-      // 6. The exit status persists exactly once — one history.record for
-      //    the completed app-owned attempt.
-      await vi.waitFor(() => expect(recordCalls).toBe(1))
-      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-      const params = recordCall![1] as { command: string; status: string; exitCode: number }
-      expect(params.command).toBe('echo hello')
-      expect(params.status).toBe('failure')
-      expect(params.exitCode).toBe(1)
+      // 6. The backend-owned receipt crosses the notification subscription
+      // exactly once for the completed app-owned attempt.
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'user',
+        redactions: [],
+        captures: [],
+        maskedCommand: 'echo hello',
+      })
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
 
       // 7. PromptReady returns the editor.
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -6013,7 +5968,9 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       expect(block!.el.dataset.recorded).toBe('no')
       expect(block!.el.querySelector('.cmd-header-unrecorded')?.textContent).toBe('not recorded')
       // And nothing was sent to the store, which is the fact the chip states.
-      expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(false)
+      expect(
+        client.dispatcher.call.mock.calls.some((c) => c[0] === 'lifecycle.submitAttempt'),
+      ).toBe(false)
     } finally {
       restoreScroll()
       teardown()
@@ -6030,21 +5987,6 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
     // out, one block carries the command, and its authenticated completion
     // is recorded with the app-owned text.
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e-refused',
-          source: 'user',
-          redactions: [],
-          maskedCommand: 'make deploy',
-          captures: [],
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     client.dispatcher.call.mockImplementation(() =>
       Promise.reject(new Error('control lane saturated')),
     )
@@ -6053,6 +5995,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const withSession = content as unknown as { session: SessionFake }
     const session = withSession.session
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
@@ -6096,13 +6039,21 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
 
       // Recorded — with the APP-OWNED text, which is the half a shell line
       // may never contribute.
-      await vi.waitFor(() => {
-        const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-        expect(recordCall).toBeTruthy()
-        const params = recordCall![1] as { command: string; exitCode: number }
-        expect(params.command).toBe('make deploy')
-        expect(params.exitCode).toBe(3)
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-refused',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e-refused',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'make deploy',
+        captures: [],
       })
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -6111,8 +6062,6 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
   it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
     const client = makeClient()
     const submitAttempt = client.dispatcher.call
-    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
-    // the resolver is captured via the executor form (the codebase pattern).
     let resolveAttempt!: (v: unknown) => void
     const attemptPromise = new Promise<unknown>((done) => {
       resolveAttempt = done
@@ -7030,7 +6979,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // untouched.
       expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
-      expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
+      expect(dispatcherCalls.find((c) => c.method === 'history.recorded')).toBeUndefined()
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
       expect(ledger?.records().map((r) => r.command)).toEqual(['echo hi'])
       expect(ledger?.records()[0].author).toBe('shell')
@@ -13417,20 +13366,6 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
   })
   it('keeps one composer unavailable across every call in an active turn', async () => {
     const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: '',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'assistant command',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
@@ -13446,6 +13381,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
@@ -13503,6 +13439,16 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           command: 'first call',
         },
       })
+      recorded({
+        attemptId: 'att-first',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'entry-first',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'first call',
+        captures: [],
+      })
       expect(ed.isVisible).toBe(false)
       handler({
         lane: 'lane-1',
@@ -13543,6 +13489,16 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           submitId: submitToken(client),
           command: 'second call',
         },
+      })
+      recorded({
+        attemptId: 'att-second',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'entry-second',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'second call',
+        captures: [],
       })
       expect(ed.isVisible).toBe(false)
       handler({

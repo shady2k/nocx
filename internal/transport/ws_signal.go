@@ -940,6 +940,7 @@ func (s *WSServer) PublishAttemptStarted(attempt lifecycle.AttemptID) {
 // never started) is the failure the whole notice exists for.
 func (s *WSServer) PublishAttemptClosed(attempt lifecycle.AttemptID) {
 	s.discardHeldStop(attempt, undeliveredAttemptClosed)
+	s.publishClosedAttemptHistory(attempt)
 }
 
 // submitHeldStop runs one held Stop's delivery on the signal lane, and the

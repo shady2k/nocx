@@ -813,7 +813,13 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
-	// blockStream is the streamed block output's coordinator half
+	// historySources preserves the submitting target and capture scope for an
+	// app attempt when history policy suppresses its row before completion.
+	historySources map[string]historyAttemptScope
+	// nextHistoryGeneration supplies a non-zero scope generation for commands
+	// whose lifecycle started from the native shell rather than a renderer
+	// submit.
+	nextHistoryGeneration atomic.Uint64
 	// (nocx-2v80t.3.7, ws_block_rows.go). Constructed always; inert until a
 	// rows source is attached.
 	blockStream *blockStream
@@ -1659,6 +1665,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		filesBindings:              make(map[string]*filesBinding),
 		filesBySession:             make(map[session.ID]map[string]struct{}),
 		lanes:                      make(map[session.ID]*sessionLane),
+		historySources:             make(map[string]historyAttemptScope),
 		filesPollInterval:          defaultFilesPollInterval,
 		filesRefreshStateThreshold: defaultFilesRefreshStateThreshold,
 		laneCapacity:               DefaultControlLaneCapacity,
@@ -2414,40 +2421,6 @@ func (c *connState) get(id session.ID) (session.Session, bool) {
 // files.* call (D15). One line of forwarding; the authorisation answer
 // still comes from the one place that already owns it.
 func (c *connState) Owns(id session.ID) bool { return c.has(id) }
-
-// sessionForPane returns the connection's session that is the pipe of pane.
-//
-// It exists because history.record names a PANE and no session (the pane id
-// is that method's one deliberate renderer-minted identity, ws_history_record
-// .go), while a notification's attribution may only come from the session the
-// backend holds — never from the renderer's claim about where it is (AD-7).
-// Session.PaneID is what makes the walk possible and immutable: "a session is
-// the pipe of one pane for its whole life" (internal/session/session.go).
-//
-// AMBIGUITY IS A NO, never a guess. An empty pane matches nothing — a session
-// attached to no recorded pane is a legitimate state and it is not "the pane
-// with no id" — and two sessions claiming one pane is a state this walk must
-// not resolve by picking, for the same reason sessionIDsOf falls back rather
-// than guessing. Both answer false, and the caller's feature is absent rather
-// than wrong.
-func (c *connState) sessionForPane(pane string) (session.Session, bool) {
-	if pane == "" {
-		return nil, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var found session.Session
-	for _, s := range c.sessions {
-		if s.PaneID() != pane {
-			continue
-		}
-		if found != nil {
-			return nil, false
-		}
-		found = s
-	}
-	return found, found != nil
-}
 
 // --- JSON-RPC types -------------------------------------------------------
 

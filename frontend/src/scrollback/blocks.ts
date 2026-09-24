@@ -626,10 +626,10 @@ export interface BlockRecord {
    *  discarded by the replacement.
    *
    *  So a decoration arriving in that window parks here instead of being
-   *  applied to an element about to be discarded, or dropped. The receipt is
-   *  the case that needed it: the history.record ack raced the fence, was
-   *  refused for looking unfinished, and was gone for good — a captured
-   *  secret with nothing offering to save it (nocx-ggha). */
+   *  applied to an element about to be discarded, or dropped. The
+   *  history.recorded receipt is the case that needed it: it raced the fence
+   *  and was gone for good — a captured secret with nothing offering to save
+   *  it (nocx-ggha). */
   afterVisualFreeze?: () => void
   /** Rows read from the backend's block artifact. They are a paint source,
    *  never a second client-side store of command output. */
@@ -1058,8 +1058,8 @@ export function blockOutputText(blockEl: HTMLElement | null): string {
 }
 
 /** The block's command as text, for a human label naming the block (the
- *  ask chip's value — nocx-x8s2.2). After history.record acks, the header
- *  renders the MASKED command and data-recorded-command holds the full
+ *  ask chip's value — nocx-x8s2.2). After the history.recorded receipt, the
+ *  header renders the MASKED command and data-recorded-command holds the full
  *  stored text: the label reads the same source the block shows (ADR-0021),
  *  never a second derivation of the line. */
 export function blockCommandText(blockEl: HTMLElement): string {
@@ -1204,8 +1204,8 @@ function buildOverflowMenu(
     })
   }
 
-  /** The command as the block shows it: once history.record acks, the MASKED
-   *  command in data-recorded-command (ADR-0021). */
+  /** The command as the block shows it: once history.recorded arrives, the
+   *  MASKED command in data-recorded-command (ADR-0021). */
   const intent = (): string => blockEl.getAttribute('data-recorded-command') ?? command
 
   // The label names the EFFECTIVE wrap state: the attribute answers when it is
@@ -1759,17 +1759,16 @@ export function freezeBlock(
 }
 
 /**
- * Re-render a frozen block's command line once history.record acks: the
- * MASKED command with an unresolved chip at every redaction span — what
- * you see in the block is what went to the store, and the receipt has
- * something to point at when a row is hovered. The chips carry their
- * redaction span (data-redaction-start/end) so the receipt's hover can
- * emphasise exactly one.
+ * Re-render a frozen block's command line once history.recorded arrives: the
+ * MASKED command with an unresolved chip at every redaction span — what you
+ * see in the block is what went to the store, and the receipt has something
+ * to point at when a row is hovered. The chips carry their redaction span
+ * (data-redaction-start/end) so the receipt's hover can emphasise exactly one.
  *
  * Copying the block copies the MASKED text: the full masked command lives
  * in data-recorded-command (the chips in the header are labels, never the
- * stored text), and the overflow menu prefers it over the pre-ack line.
- * This is the round's named trade — after the ack the renderer no longer
+ * stored text), and the overflow menu prefers it over the pre-receipt line.
+ * This is the round's named trade — after the receipt the renderer no longer
  * holds the plaintext for this block, and neither does the clipboard.
  */
 export function renderRecordedCommand(
@@ -2562,8 +2561,8 @@ export class BlockManager {
    * Freeze the running block on environment entry (N6): the ssh block freezes
    * with NO exit code, painted as neither success nor failure, and the
    * manager's running slot is freed for the remote commands that follow. The
-   * model-level completion (history.record) happens later, at the local D,
-   * via the ledger's completeTransition — this only paints the block.
+   * model-level completion arrives later from the authenticated lifecycle
+   * transition — this only paints the block.
    */
   freezeEntered(getLine: GetLineFn, endLine: number): BlockRecord | null {
     const rec = this._runningBlock

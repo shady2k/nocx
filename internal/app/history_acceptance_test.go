@@ -23,20 +23,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
+	"github.com/shady2k/nocx/internal/transport"
 
 	"github.com/gorilla/websocket"
 )
 
 func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
-	storagetest.Isolate(t)
+	src := realHelperArtifacts(t)
+	home := storagetest.IsolateWithHome(t)
+	binary := filepath.Join(helperRoot(home, src.hash()), "nocx-helper")
+	t.Cleanup(func() { endTheDaemon(t, binary) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	a, err := newTestApp(t)
+	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -66,29 +71,17 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 		t.Fatalf("content.db not created in data dir: %v", statErr)
 	}
 
-	// Run a command: the frontend's exact call over the real socket.
-	conn := dialAppWS(t, a)
-	if resp := callAppWS(t, conn, "history.record", map[string]any{
-		"command":   "echo survived",
-		"cwd":       "/srv",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": int64(1_750_000_000_000),
-		"endedAt":   int64(1_750_000_000_100),
-		"trusted":   true,
-		"paneId":    "pane-acceptance",
-	}, 1); resp.Error != nil {
-		t.Fatalf("history.record: %+v", resp.Error)
-	}
-	_ = conn.Close()
+	// Run a command through the authenticated lifecycle path. The receipt is
+	// server-owned and arrives only after the shell completion closes the row.
+	lifecycle := openLifecycleAppSession(t, a)
+	_ = lifecycle.record(t, "echo survived", "/srv", 2)
+	_ = lifecycle.conn.Close()
 
 	// Restart: shut the first composition root down and build a second one
 	// over the same directories — the process equivalent of quitting and
 	// relaunching the app.
 	a.Shutdown(ctx)
-	a2, err := newTestApp(t)
+	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}
@@ -166,9 +159,12 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 	// earlier id after a later request was sent): read until the response
 	// for THIS id shows up.
 	for {
-		_, raw, err := conn.ReadMessage()
+		messageType, raw, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read %s response: %v", method, err)
+		}
+		if messageType != websocket.TextMessage {
+			continue
 		}
 		var resp wsRPCResult
 		if err := json.Unmarshal(raw, &resp); err != nil {
@@ -180,6 +176,145 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 	}
 }
 
+type lifecycleAppSession struct {
+	conn   *websocket.Conn
+	id     string
+	domain string
+}
+
+func openLifecycleAppSession(t *testing.T, a *App) lifecycleAppSession {
+	t.Helper()
+	conn := dialAppWS(t, a)
+	open := callAppWS(t, conn, "open", map[string]any{
+		"cols": 80,
+		"rows": 24,
+	}, 1)
+	if open.Error != nil {
+		t.Fatalf("open: %+v", open.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(open.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	if opened.SessionID == "" {
+		t.Fatal("open returned no session id")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("wait for lifecycle prompt: %v", err)
+		}
+		var notification struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(raw, &notification) != nil || notification.Method != "lifecycle.changed" {
+			continue
+		}
+		var fact struct {
+			Lifecycle string `json:"lifecycle"`
+			Domain    string `json:"domain"`
+		}
+		if json.Unmarshal(notification.Params, &fact) == nil &&
+			fact.Lifecycle == "prompt_ready" && fact.Domain != "" {
+			return lifecycleAppSession{conn: conn, id: opened.SessionID, domain: fact.Domain}
+		}
+	}
+}
+
+type appHistoryCapture struct {
+	ID            string `json:"id"`
+	SuggestedName string `json:"suggestedName"`
+}
+
+type appHistoryReceipt struct {
+	AttemptID   string `json:"attemptId"`
+	EntryID     string `json:"entryId"`
+	MaskedCount int    `json:"maskedCount"`
+	Redactions  []struct {
+		Kind   string `json:"kind"`
+		Prefix string `json:"prefix"`
+		Suffix string `json:"suffix"`
+	} `json:"redactions"`
+	Captures []appHistoryCapture `json:"captures"`
+}
+
+func (s lifecycleAppSession) record(t *testing.T, command, cwd string, id int) appHistoryReceipt {
+	t.Helper()
+	submit := callAppWS(t, s.conn, "lifecycle.submitAttempt", map[string]any{
+		"domain":  s.domain,
+		"command": command,
+		"cwd":     cwd,
+		"source":  "user",
+	}, id)
+	if submit.Error != nil {
+		t.Fatalf("lifecycle.submitAttempt: %+v", submit.Error)
+	}
+	var attempt struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(submit.Result, &attempt); err != nil {
+		t.Fatalf("decode lifecycle.submitAttempt: %v", err)
+	}
+	if attempt.ID == "" {
+		t.Fatal("lifecycle.submitAttempt returned no attempt id")
+	}
+	sidBytes, err := session.IDToBytes(session.ID(s.id))
+	if err != nil {
+		t.Fatalf("session id: %v", err)
+	}
+	frame := transport.Frame{
+		Version:   transport.FrameVersion,
+		MsgType:   transport.MsgTypeData,
+		SessionID: sidBytes,
+		Payload:   []byte(command + "\r"),
+	}
+	if err := s.conn.WriteMessage(websocket.BinaryMessage, frame.Encode()); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	_ = s.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var receipt *appHistoryReceipt
+	promptReady := false
+	for {
+		_, raw, err := s.conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("wait for history.recorded: %v", err)
+		}
+		var notification struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(raw, &notification) != nil {
+			continue
+		}
+		switch notification.Method {
+		case "history.recorded":
+			var got appHistoryReceipt
+			if err := json.Unmarshal(notification.Params, &got); err != nil {
+				t.Fatalf("decode history.recorded: %v", err)
+			}
+			if got.AttemptID == attempt.ID {
+				receipt = &got
+			}
+		case "lifecycle.changed":
+			var fact struct {
+				Lifecycle string `json:"lifecycle"`
+				Domain    string `json:"domain"`
+			}
+			if json.Unmarshal(notification.Params, &fact) == nil &&
+				fact.Lifecycle == "prompt_ready" && fact.Domain == s.domain {
+				promptReady = true
+			}
+		}
+		if receipt != nil && promptReady {
+			return *receipt
+		}
+	}
+}
+
 // The guard, end to end, in the owner's words: a command carrying a real key
 // shape is recorded masked, and the fact of the masking survives a restart
 // with the row. Record a curl with a Bearer key over the real socket,
@@ -187,7 +322,10 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 // the row reads sk-p...7890, the entry says one secret was masked and of
 // what kind, and the raw key appears nowhere in the marshalled result.
 func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
-	storagetest.Isolate(t)
+	src := realHelperArtifacts(t)
+	home := storagetest.IsolateWithHome(t)
+	binary := filepath.Join(helperRoot(home, src.hash()), "nocx-helper")
+	t.Cleanup(func() { endTheDaemon(t, binary) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -195,7 +333,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	rawKey := "sk-proj-abcdef1234567890"
 	command := `curl -H "Authorization: Bearer ` + rawKey + `" https://api.example.com`
 
-	a, err := newTestApp(t)
+	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -203,40 +341,17 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 		t.Fatalf("Start: %v", startErr)
 	}
 
-	conn := dialAppWS(t, a)
-	rec := callAppWS(t, conn, "history.record", map[string]any{
-		"command":   command,
-		"cwd":       "/srv",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": int64(1_750_000_000_000),
-		"endedAt":   int64(1_750_000_000_100),
-		"trusted":   true,
-		"paneId":    "pane-acceptance",
-	}, 1)
-	if rec.Error != nil {
-		t.Fatalf("history.record: %+v", rec.Error)
+	lifecycle := openLifecycleAppSession(t, a)
+	receipt := lifecycle.record(t, command, "/srv", 1)
+	if receipt.MaskedCount != 1 || len(receipt.Redactions) != 1 {
+		t.Fatalf("receipt facts = %+v, want one mask and redaction", receipt)
 	}
-	// The ack itself reports the masking — the block can say "1 secret
-	// masked: openai" without re-deriving anything.
-	var ack struct {
-		MaskedCount int      `json:"maskedCount"`
-		MaskedKinds []string `json:"maskedKinds"`
-	}
-	if decodeErr := json.Unmarshal(rec.Result, &ack); decodeErr != nil {
-		t.Fatalf("decode ack: %v (raw %s)", decodeErr, rec.Result)
-	}
-	if ack.MaskedCount != 1 || len(ack.MaskedKinds) != 1 || ack.MaskedKinds[0] != "openai" {
-		t.Fatalf("ack facts = %d %v, want 1 [openai]", ack.MaskedCount, ack.MaskedKinds)
-	}
-	_ = conn.Close()
+	_ = lifecycle.conn.Close()
 
 	// Restart: the row must read masked from the encrypted store, with the
 	// facts intact — the durable text is the masked one, by construction.
 	a.Shutdown(ctx)
-	a2, err := newTestApp(t)
+	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}

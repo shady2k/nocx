@@ -420,8 +420,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
 	}
-	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(rec.Closing))
-	s.pendingEntered = false
+	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, boundaryRowsThatLeave(rec.Closing))
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
@@ -482,8 +481,12 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 		Closing:      ObservationScreen{},
 		Loss:         parked.Loss,
 	}
-	s.pendingScreen = nil
-	s.pendingEntered = false
+	// The boundary screen this interval would have expected is EMPTY — no screen
+	// was read at all — and an empty expectation must not wipe the one in force:
+	// the rows the interval before left may still be about to leave the screen,
+	// and losing their window is how a whole closing screen is stored twice
+	// (nocx-2v80t.3.9). expectBoundaryScreenLocked says the same for a seal whose
+	// screen read failed or was the alternate buffer's.
 	// The parked count is the completion's own measurement and the last
 	// trustworthy evidence of where the command's output ended — but the
 	// interval kept streaming after it, and an end marker BEHIND rows the
@@ -548,6 +551,25 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 	}
 	s.sealPendingWithoutScreenLocked(nonce, parked)
 	return true
+}
+
+// expectBoundaryScreenLocked installs the rows the interval just sealed left on
+// the screen as the window the interval that follows must not stream again.
+//
+// A boundary that carries NOTHING — the screen read failed, the alternate buffer
+// held the pane, or the interval was settled with no screen at all — leaves the
+// window IN FORCE rather than clearing it: the rows the interval before left may
+// still be about to leave, and an empty expectation that wipes them is how a
+// whole closing screen is stored a second time. Measured on the e2e: a block
+// holding the interval before's twenty-nine closing rows, the block after it
+// starting at the very row the window should have held (nocx-2v80t.3.9).
+func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
+	expect := boundaryRowsThatLeave(screen)
+	if len(expect) == 0 {
+		return
+	}
+	s.pendingScreen = cloneObservationRows(expect)
+	s.pendingEntered = false
 }
 
 // sameVisibleRow reports whether two rows are the same LINE of text, whatever
@@ -720,8 +742,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Closing:      cap.Closing,
 		Loss:         cap.Loss,
 	}
-	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(cap.Closing))
-	s.pendingEntered = false
+	s.expectBoundaryScreenLocked(cap.Closing)
 	s.emitIntervalEndLocked(nonce, cap.EndRow, boundaryRowsThatLeave(cap.Closing))
 	s.storeSealedObservationLocked(rec)
 }

@@ -190,3 +190,52 @@ func TestAStrayRowAboveTheWindowDoesNotCostTheClosingScreen(t *testing.T) {
 		t.Fatal("the injected row was not streamed: the window swallowed a row it never held")
 	}
 }
+
+// AN EMPTY BOUNDARY MUST NOT WIPE THE WINDOW (nocx-2v80t.3.9).
+//
+// A boundary that carries no screen — the read failed, the alternate buffer held
+// the pane, or the interval was settled with no sighting at all — used to
+// replace the window with nothing, and the rows the interval BEFORE left were
+// then stored a second time by the interval after: the e2e's block 4 holding the
+// twenty-nine closing rows of the block before it, the first of them the very
+// row the window should have held. An empty expectation leaves the window in
+// force; the rows it names may still be about to leave.
+func TestAnEmptyBoundaryDoesNotWipeTheWindow(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	obsFeed(t, s, 0, 40)
+	obsSeal(t, s, obsNonce(1))
+	boundary, endRow := boundaryScreen(t, rs)
+	if len(boundary) == 0 {
+		t.Fatal("the boundary carried no closing screen")
+	}
+	window := len(s.pendingScreen)
+	if window == 0 {
+		t.Fatal("the seal installed no window")
+	}
+
+	// An interval that authenticates complete and whose fence's sighting never
+	// arrives: the next interval's start settles it with NO closing screen.
+	s.Completed(s.Incarnation(), obsNonce(2), 0)
+	if err := s.SightFence(obsNonce(3), []byte("fence-source")); err != nil {
+		t.Fatalf("sight the next fence: %v", err)
+	}
+	if got := len(s.pendingScreen); got == 0 {
+		t.Fatal("an empty boundary wiped the window: the interval before's closing screen is now unguarded")
+	}
+
+	// And the guard still works: none of the boundary's rows streams again.
+	obsFeed(t, s, 100, 40)
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" || e.from < endRow {
+			continue
+		}
+		for i, row := range e.rows {
+			text := streamRowText(row)
+			if boundary[text] {
+				index := e.from + uint64(i) // #nosec G115 -- a slice index, never negative
+				t.Fatalf("row %q left the screen at index %d and streamed again after an empty boundary", text, index)
+			}
+		}
+	}
+}

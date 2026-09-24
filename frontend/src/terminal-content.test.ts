@@ -14290,6 +14290,9 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         }),
       )
       await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+      await vi.waitFor(() =>
+        expect(document.querySelector<HTMLElement>('.nocx-freeze-frame')).not.toBeNull(),
+      )
 
       const frame = document.querySelector<HTMLElement>('.nocx-freeze-frame')
       expect(frame).not.toBeNull()
@@ -14308,9 +14311,20 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       selection.addRange(range)
       document.dispatchEvent(new Event('selectionchange'))
 
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button'),
+        ).not.toBeNull(),
+      )
       const affordance = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')
       expect(affordance).not.toBeNull()
       affordance!.click()
+
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLElement>('[data-control="grant"]')?.textContent,
+        ).toContain('· 1'),
+      )
 
       // Counted as a person mark, and the rows are painted as granted.
       const chip = document.querySelector<HTMLElement>('[data-control="grant"]')
@@ -15325,6 +15339,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     )
     try {
       tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
       // Before any frame: the model holds no revision and names no rows.
       // The open reported THIS renderer's device cell (the fixture's dpr-1
@@ -15337,8 +15352,8 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
         reported: { cols: 80, rows: 24, xpixel: 640, ypixel: 384 },
       })
       session.fireScreenFrame(screenFrame(3, ['PROMPT$ ls', 'NOCX-MARKER-1']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(3))
       const reading = paneScreen()
-      expect(reading?.revision).toBe(3)
       expect(reading?.rows[0]).toBe('PROMPT$ ls')
       expect(reading?.rows[1]).toContain('NOCX-MARKER-1')
 
@@ -15382,6 +15397,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     )
     try {
       tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
       const renderer = rendererOf(content)
       // A dense display: dpr 2, device cell 17x34 — CSS 8.5x17.
@@ -15391,15 +15407,17 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       session.fireScreenFrame(
         screenFrame(4, ['NOCX-MARKER-1'], { cellWidthPx: 17, cellHeightPx: 34 }),
       )
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(4))
       // The display moved: fire the dims-change subscription the pane
       // registered, exactly what a dpr change or a zoom fires.
       const fireDimsChange = (
         renderer.onCellDimsChange as unknown as Mock<(cb: () => void) => void>
       ).mock.calls.slice(-1)[0][0]
       fireDimsChange()
-
       await vi.waitFor(() => {
-        expect(paneScreen()?.reported).toEqual({ cols: 80, rows: 24, xpixel: 1360, ypixel: 816 })
+        const expected = { cols: 80, rows: 24, xpixel: 1360, ypixel: 816 }
+        expect(session.sendResize).toHaveBeenCalledWith(expected)
+        expect(paneScreen()?.reported).toEqual(expected)
       })
       // THE ROUND TRIP, exact on both axes: the frame's committed device px
       // over the grid the client named is the client's report per cell, and
@@ -15432,14 +15450,21 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     )
     try {
       tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
 
       session.fireScreenFrame(screenFrame(1, ['before']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(1))
       // A document with no frame shape — apply throws inside it, and the
       // handler catches rather than tearing down the socket.
       const notAFrame = { nonsense: true } as unknown as SessionFrame
       expect(() => session.fireScreenFrame(notAFrame)).not.toThrow()
 
+      await vi.waitFor(() =>
+        expect(
+          debug.mock.calls.find((c) => String(c[0]).includes('could not be applied')),
+        ).toBeDefined(),
+      )
       expect(paneScreen()?.revision).toBe(1)
       const dropLine = debug.mock.calls.find((c) => String(c[0]).includes('could not be applied'))
       expect(dropLine).toBeDefined()

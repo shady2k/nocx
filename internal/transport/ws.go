@@ -3864,6 +3864,11 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// A receipt stashed for one of this session's attempts, waiting on a fact
+	// that unregistering the lane above just made undeliverable, goes with it
+	// (nocx-2v80t.3.23) — the same rule dropStopStatesFor and dropHeldStopsFor
+	// apply below.
+	s.dropPendingHistoryReceiptsFor(sid)
 	// The Stop records go with the session, like the holds they describe.
 	s.dropStopStatesFor(sid)
 	// A held Stop belongs to an attempt, and an attempt belongs to a session:

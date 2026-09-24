@@ -337,6 +337,33 @@ func (s *WSServer) takeStashedHistoryRecorded(id lifecycle.AttemptID) (historyRe
 	return data, ok
 }
 
+// dropPendingHistoryReceiptsFor discards every receipt stashed for sid,
+// called from closeSession alongside unregisterLifecycleLanes, dropStopStatesFor
+// and dropHeldStopsFor — the same "session ends, its per-attempt records go
+// with it" rule, applied to the one record among them keyed by attempt id
+// rather than by lane.
+//
+// A receipt sits in pendingHistoryReceipts between publishClosedAttemptHistory
+// stashing it and PublishLifecycle's own fact naming the same attempt done
+// (nocx-2v80t.3.22); ONLY that fact ever takes it back out. When the session
+// or its lane ends before the fact arrives — the lane's Unknown transition IS
+// often the session ending, and unregisterLifecycleLanes drops the lane in the
+// same teardown — nothing calls takeStashedHistoryRecorded for that attempt
+// ever again, and the entry, with its masked command, would otherwise outlive
+// the session for the rest of the server's life (nocx-2v80t.3.23). Keyed by
+// SessionID rather than by walking lifecycleLanes: the receipt already carries
+// the session it belongs to, and a lane can be re-registered to a new session
+// before this runs.
+func (s *WSServer) dropPendingHistoryReceiptsFor(sid session.ID) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	for id, data := range s.pendingHistoryReceipts {
+		if data.SessionID == sid {
+			delete(s.pendingHistoryReceipts, id)
+		}
+	}
+}
+
 // unknownAttemptImpliesSessionEnd reports whether an attempt going Unknown on
 // THIS domain is the session itself ending, rather than a nested integration
 // alone being lost (the coordinator's decision for nocx-2v80t.3.22, one fact

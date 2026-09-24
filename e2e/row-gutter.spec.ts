@@ -22,13 +22,18 @@ async function measure(page: Page) {
     // THE LIVE COLUMN IS THE PAINTED GRID since the cutover (nocx-zg3k3.2.5):
     // the first painted row's inline content is exactly the grid's columns —
     // every row is a full rectangle — read through a Range because a block
-    // element spans its container while its content is the paint.
-    const row = pane.querySelector<HTMLElement>('.term-grid-row')!
+    // element spans its container while its content is the paint. Scoped to
+    // `.term-grid`, the live painter's own container (painter.ts GRID_CLASS):
+    // a frozen block's rows carry the same `.term-grid-row` class since the
+    // block-rows painter cutover (nocx-2v80t.3.18), and an unscoped query
+    // would find whichever comes first in DOM order — a settled block above
+    // the live region — rather than the live row this measurement wants.
+    const row = pane.querySelector<HTMLElement>('.term-grid .term-grid-row')!
     const rowRange = document.createRange()
     rowRange.selectNodeContents(row)
     const blocks = pane.querySelectorAll<HTMLElement>('.scrollback-inner > .cmd-block')
     const block = blocks[blocks.length - 1] ?? null
-    const line = block?.querySelector<HTMLElement>('.cmd-output .term-line') ?? null
+    const line = block?.querySelector<HTMLElement>('.cmd-output .term-grid-row') ?? null
     const cs = getComputedStyle(live)
     const liveContent = live.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
     const cellWidth = parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-width'))
@@ -88,7 +93,7 @@ test('the frozen column and the live column share one edge, before and after a r
   await page.keyboard.type('printf "gutter-probe\\n"')
   await page.keyboard.press('Enter')
   await expect(
-    page.locator('.pane.active .scrollback-inner > .cmd-block .term-line').first(),
+    page.locator('.pane.active .scrollback-inner > .cmd-block .term-grid-row').first(),
   ).toContainText('gutter-probe', { timeout: 30_000 })
   await promptReady(page)
 

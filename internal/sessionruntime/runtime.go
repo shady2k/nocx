@@ -234,12 +234,29 @@ type Session struct {
 	// next command, as its output pushes them off — and the emulator reports
 	// them as departures when they do. The interval's block already holds
 	// them as its closing screen, so the stream must not carry them a second
-	// time: the identity of the next reported row against the head of this
-	// list is what tells a row leaving the screen again from the next
-	// command's own output. Held only until the first row that is not one of
-	// them (the screen has been rewritten, so the boundary's rows are gone),
-	// and bounded by the geometry. Nil after the first mismatch.
-	pendingScreen []emulator.Row
+	// time: content against the head of this list is what tells a row
+	// leaving the screen again from the next command's own output. Held only
+	// until the first row that is not one of them (the screen has been
+	// rewritten, so the boundary's rows are gone), and bounded by the
+	// geometry. Nil after the first mismatch.
+	//
+	// Content alone is ambiguous by design (nocx-2v80t.3.10): a row a `clear`
+	// destroyed and a row the NEXT command legitimately prints can read the
+	// same, and content cannot tell them apart. Each entry therefore also
+	// carries a [emulator.RowTrack] pinned to the row at capture time —
+	// released the moment the entry is consumed, dropped, or the whole
+	// window is replaced or cleared, so none outlives the window it names.
+	pendingScreen []pendingBoundaryRow
+	// pendingScreenGeom is the geometry [pendingScreen] was captured or last
+	// reconciled at. A settle with no screen (sealPendingWithoutScreenLocked)
+	// reconciles the window against a screen it reads fresh rather than
+	// leaving stale content standing (nocx-2v80t.3.10) — but only when the
+	// geometry has not moved since: a reflow already changes which index
+	// holds which row (departed_window_geometry_test.go), and reconciling
+	// positionally across one would repeat that exact defect. Zero value
+	// compares unequal to any real geometry, so a window nobody has captured
+	// yet is never mistaken for one captured at a zero size.
+	pendingScreenGeom Geometry
 	// pendingEntered is whether a row has matched that window yet. Before it
 	// has, an arriving row that matches nothing is a row from ABOVE the
 	// boundary's screen (history a geometry commit pulled back), not the next

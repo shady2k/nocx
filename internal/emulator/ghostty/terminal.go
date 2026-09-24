@@ -193,6 +193,17 @@ type terminal struct {
 	// terminal's zero history is a real measurement; the alternate screen's
 	// stays invalid until first read.
 	sb [2]sbBaseline
+	// tracked is every tracked grid reference this terminal has handed out and
+	// not yet had freed, keyed by its own handle. TrackRow adds to it,
+	// (*rowTrack).Release removes from it, and release (Close's own) frees
+	// whatever is left: a caller that forgets to release one, or one still
+	// held when the session ends, must not outlive the terminal that made it
+	// meaningless — ghostty_tracked_grid_ref_free is safe to call after the
+	// terminal that created the reference is gone, but nothing else is safe
+	// to call it TWICE, which is why release clears this map rather than
+	// leaving it for a (*rowTrack).Release that may still arrive after: that
+	// arrival finds t.t nil and does nothing (see (*rowTrack).Release).
+	tracked map[C.GhosttyTrackedGridRef]struct{}
 }
 
 // sbBaseline is one buffer's scrollback at its last measurement. valid is
@@ -821,14 +832,19 @@ func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 // be, so its next measurement starts a fresh baseline instead of a delta —
 // which is also why the check rides the feed and nothing else.
 func (t *terminal) rebaselineLocked() {
-	screen, err := t.screenLocked()
+	// Read through the same two injectable seams noteDepartedLocked does
+	// (readScreen/readDepth): the library never fails either on request, so
+	// a test that wants THIS function's own read-failure path — as opposed
+	// to a resize's refusal, which is a different call entirely — has no
+	// other way to reach it (nocx-2v80t.3.10; the two fields' own comment).
+	screen, err := t.readScreen()
 	if err != nil {
-		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		t.invalidateBaselinesLocked()
 		return
 	}
-	h, err := t.scrollbackLocked()
+	h, err := t.readDepth()
 	if err != nil {
-		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		t.invalidateBaselinesLocked()
 		return
 	}
 	// The debt SURVIVES a re-baseline. It is a fact about rows that are on the
@@ -840,9 +856,38 @@ func (t *terminal) rebaselineLocked() {
 	// history survive the re-baseline: they are facts about rows that are out
 	// of the screen's sight one way or another, and re-seeding the depth does
 	// not un-report them or un-push them.
-	prev := t.sb[sbIndex(screen)]
-	t.sb = [2]sbBaseline{}
-	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true, owed: prev.owed, pushed: prev.pushed}
+	//
+	// That holds for BOTH buffers, not only the one this call measured
+	// (nocx-2v80t.3.10). A resize taken while the ALTERNATE screen owns the
+	// pane still reflows the PRIMARY's geometry underneath it — ghostty
+	// carries a size per buffer — and the debt a primary refill owed before
+	// that resize is exactly as unpaid after it: the rows it names have not
+	// left the screen a second time merely because the pane the resize was
+	// read on was the other one. Discarding it here, on every resize rather
+	// than only the ones this buffer happens to be active for, was measured
+	// reporting a refilled row twice the next time it left — a double count
+	// this port exists to prevent, on the buffer this call never touches
+	// only because it never has reason to invalidate what it never read.
+	active := sbIndex(screen)
+	t.sb[active].rows = h
+	t.sb[active].valid = true
+	t.sb[active].torn = false
+	// The hidden buffer cannot be measured from here — this read is per
+	// ACTIVE buffer, exactly as scrollbackLocked's own doc says — so its
+	// depth is unmeasured rather than assumed; only that changes.
+	t.sb[1-active].valid = false
+}
+
+// invalidateBaselinesLocked marks both buffers unmeasured without discarding
+// the debt or the pushed-history ledger either carries. A failed measurement
+// destroys neither (nocx-2v80t.3.10, the same finding as rebaselineLocked's
+// own comment): the rows a debt or a pushed block names are exactly as real
+// when a read fails as when it succeeds, and zeroing them here is the same
+// double-count this function exists to prevent, just reached by a different
+// door.
+func (t *terminal) invalidateBaselinesLocked() {
+	t.sb[0].valid = false
+	t.sb[1].valid = false
 }
 
 // sbIndex maps a screen to its baseline slot.
@@ -993,6 +1038,76 @@ func (t *terminal) cursorLocked() (emulator.Cursor, error) {
 		return emulator.Cursor{}, resultError("cursor_visible", r)
 	}
 	return emulator.Cursor{X: int(x), Y: int(y), Visible: bool(visible)}, nil
+}
+
+// TrackRow builds a TRACKED grid reference at column 0 of active row y and
+// wraps it in a [rowTrack]. The library's own bookkeeping keeps it pointed at
+// the same physical row as the terminal mutates (grid_ref_tracked.h); nothing
+// on this side re-derives that, which is the whole reason to use it rather
+// than an index or a serial this adapter would have to keep in step itself.
+func (t *terminal) TrackRow(y int) (emulator.RowTrack, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	if y < 0 || y >= t.geom.Rows {
+		return nil, fmt.Errorf("ghostty: row %d of %d: %w", y, t.geom.Rows, emulator.ErrOutOfRange)
+	}
+	var ref C.GhosttyTrackedGridRef
+	if r := C.nocxTrackRowAt(t.t, pointActive, C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
+		return nil, resultError("grid_ref_track", r)
+	}
+	if t.tracked == nil {
+		t.tracked = make(map[C.GhosttyTrackedGridRef]struct{})
+	}
+	t.tracked[ref] = struct{}{}
+	return &rowTrack{term: t, ref: ref}, nil
+}
+
+// rowTrack is the [emulator.RowTrack] this port hands out: the terminal that
+// made the reference, and the reference itself. Every method takes the
+// terminal's own lock, exactly as every other read and mutation here does —
+// the library is not reentrant, and a tracked reference is no exception.
+type rowTrack struct {
+	term *terminal
+	ref  C.GhosttyTrackedGridRef
+	// released is set the instant THIS handle's own Release runs, which is
+	// what makes Alive answer false rather than ask the library about a
+	// reference this same call already freed. The terminal's own release()
+	// (Close's) may ALSO free ref, on a DIFFERENT rowTrack's behalf never on
+	// this field — see its own comment for why checking t.t is what guards
+	// that side.
+	released bool
+}
+
+// Alive reports whether the row this handle names can still be named at all.
+// A closed terminal, or a handle Release has already run on, answers false
+// without touching ref: both mean the library has already freed it — Close's
+// own sweep frees whatever a caller left outstanding — and asking the library
+// about a freed handle is the one thing that is never safe to do.
+func (rt *rowTrack) Alive() bool {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	if rt.term.t == nil || rt.released {
+		return false
+	}
+	return bool(C.ghostty_tracked_grid_ref_has_value(rt.ref))
+}
+
+// Release frees the handle and forgets it, so the terminal's own close does
+// not try to free it a second time. Idempotent — a second call finds
+// released already true and does nothing — and safe after the terminal has
+// already closed and swept it, for the same reason Alive is.
+func (rt *rowTrack) Release() {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	if rt.term.t == nil || rt.released {
+		return
+	}
+	rt.released = true
+	delete(rt.term.tracked, rt.ref)
+	C.ghostty_tracked_grid_ref_free(rt.ref)
 }
 
 func (t *terminal) Row(y int) (emulator.Row, error) {
@@ -1512,6 +1627,17 @@ func (t *terminal) release() {
 		C.ghostty_mouse_encoder_free(t.menc)
 		t.menc = nil
 	}
+	// Every tracked reference a caller left outstanding is freed here rather
+	// than left to leak: a caller that forgot to release one, or one still
+	// held for a window in force when the session ends, must not outlive the
+	// terminal it names. t.t is set nil below BEFORE this map is cleared in
+	// the caller's eyes — (*rowTrack).Alive and .Release both check t.t first
+	// and touch ref only when it is still set, so a release arriving after
+	// this point finds nothing to double free.
+	for ref := range t.tracked {
+		C.ghostty_tracked_grid_ref_free(ref)
+	}
+	t.tracked = nil
 	C.ghostty_terminal_free(t.t)
 	t.t = nil
 	t.replies = nil

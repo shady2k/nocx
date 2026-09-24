@@ -250,6 +250,39 @@ type HistoryPage struct {
 	Total int
 }
 
+// RowTrack is a handle on the physical row [Terminal.TrackRow] named, obtained
+// once and consulted later — the identity a text comparison cannot give,
+// because two rows that read the same are not one row (nocx-2v80t.3.10:
+// the boundary window used to decide a re-departing row by its graphemes, and
+// a command that repeated the closing screen's own text after a `clear` had
+// its first output swallowed as if it were that screen leaving again — the
+// screen it named had already CEASED, and a row that ceased can never leave).
+//
+// It follows the row across every operation that MOVES it without destroying
+// it: a resize's reflow, a scroll, history the library re-pages while
+// compacting. [RowTrack.Alive] answers whether the row can still be named at
+// all, and it is the one question content can never answer honestly, because
+// an erase or a reset can leave behind a row that reads exactly like the one
+// that was there before.
+type RowTrack interface {
+	// Alive reports whether the row this handle names can still be named at
+	// all. It goes false the instant the row is DESTROYED — an erase, a
+	// reset, or the library's own retention pruning it beyond recall — and
+	// never true again afterward: a destroyed row does not come back, and
+	// nor does its identity. A row that merely reflows, scrolls, or is later
+	// reported by [Terminal.DepartedRows] keeps Alive true throughout,
+	// whatever it now reads: it is the same physical row the whole time.
+	//
+	// A closed terminal answers false, exactly as a destroyed row would: a
+	// terminal that is gone can name nothing.
+	Alive() bool
+	// Release frees the handle. It is idempotent, and safe to call after the
+	// terminal that created it has closed — the terminal's own close frees
+	// whatever a caller left outstanding, so a caller who also released
+	// leaves nothing to double free.
+	Release()
+}
+
 // Terminal is the port: one terminal instance, and everything a session runtime
 // does to it and reads from it.
 //
@@ -331,6 +364,22 @@ type Terminal interface {
 	// the last position it held — exactly as Geometry does, and for the same
 	// reason: a position nobody can act on is not an answer.
 	Cursor() (Cursor, error)
+
+	// TrackRow returns a handle on the physical row currently at position y of
+	// the ACTIVE area — the same counting [Terminal.Row] uses — that keeps
+	// naming that row as the terminal mutates, so a caller can ask LATER
+	// whether the exact row it saw here is still nameable at all
+	// ([RowTrack.Alive]) without re-reading its text. It is how a caller
+	// distinguishes "the row I saw leaving again" from "a different row that
+	// merely reads the same" (nocx-2v80t.3.10), which content alone cannot: a
+	// destroyed row can leave behind cells that read exactly like it did.
+	//
+	// A row outside the active area is [ErrOutOfRange], exactly as Row's is.
+	// The handle must be released with [RowTrack.Release] once no longer
+	// needed; a caller that tracks many rows for a long time is spending the
+	// library's own per-mutation bookkeeping for each one; use it for the
+	// short, bounded lifetime a boundary's window has and nothing longer.
+	TrackRow(y int) (RowTrack, error)
 
 	// EncodeKey encodes one key event into the bytes to write to the PTY,
 	// DRIVEN FROM THE TERMINAL'S OWN STATE. A program that turned on

@@ -211,19 +211,104 @@ func (s *Session) openObservationLocked() {
 	s.observation = o
 }
 
+// pendingBoundaryRow is one row of the window: the text a departing row is
+// matched against, exactly as before, and a [emulator.RowTrack] pinned to the
+// physical row at the instant the window was installed — the identity content
+// alone cannot give (nocx-2v80t.3.10). Track is nil when the port refused to
+// track the row (TrackRow returned an error, e.g. [emulator.ErrOutOfRange] on
+// a screen too short to have a row there); a nil Track is treated as already
+// dead, never as alive, because a window entry this port could not name at
+// all can name nothing today either.
+type pendingBoundaryRow struct {
+	Row   emulator.Row
+	Track emulator.RowTrack
+}
+
+// alive answers whether the physical row a pendingBoundaryRow names can still
+// be named at all — false for a nil Track (never pinned) and for one whose
+// row has been destroyed since (an erase the pin's own coordinate space
+// survives, a reset, or the library's retention pruning it beyond recall).
+func (p pendingBoundaryRow) alive() bool {
+	return p.Track != nil && p.Track.Alive()
+}
+
+// releasePendingScreenLocked frees every track the current window holds and
+// empties it. The one place [Session.pendingScreen] is ever set to nil or
+// replaced wholesale, so a track is never simply dropped on the floor: every
+// path that used to write `s.pendingScreen = nil` calls this instead.
+func (s *Session) releasePendingScreenLocked() {
+	for _, p := range s.pendingScreen {
+		if p.Track != nil {
+			p.Track.Release()
+		}
+	}
+	s.pendingScreen = nil
+	s.pendingEntered = false
+}
+
+// purgeDestroyedPendingScreenLocked drops, and releases, every window entry
+// whose row has been destroyed since the window was installed — content that
+// ceased rather than left, and can therefore never legitimately depart again
+// (nocx-2v80t.3.10). It runs before the window is ever consulted for a match,
+// so a row a `clear` destroyed cannot be mistaken for the next command's own
+// output merely because that output reads the same.
+//
+// This is the identity half of the fix and the reflow-safe half: a
+// [emulator.RowTrack] follows its row across a resize's reflow exactly as
+// content does (TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit stays
+// green), and unlike content it also survives a coincidental repeat, because
+// it names the row rather than reading it. It is not the WHOLE fix: an erase
+// that leaves the row's own page slot in place (ordinary ED, verified against
+// the real library — GhosttyTrackedGridRef stays alive through it) is
+// destruction by this port's own contract (emulator.Terminal.DepartedRows:
+// "an erase... destroyed ceased rather than left") that the library's tracked
+// reference does not surface as one; sealPendingWithoutScreenLocked's
+// reconciliation against a freshly read screen is the other half, for exactly
+// that case.
+func (s *Session) purgeDestroyedPendingScreenLocked() {
+	if len(s.pendingScreen) == 0 {
+		return
+	}
+	kept := s.pendingScreen[:0]
+	for _, p := range s.pendingScreen {
+		if !p.alive() {
+			if p.Track != nil {
+				p.Track.Release()
+			}
+			continue
+		}
+		kept = append(kept, p)
+	}
+	s.pendingScreen = kept
+	if len(s.pendingScreen) == 0 {
+		s.pendingEntered = false
+	}
+}
+
 // suppressBoundaryScreenLocked declines to stream the rows the interval sealed
 // last already handed over as its closing screen.
 //
-// The window is that boundary's screen, and it is matched BY CONTENT rather
-// than by position, because a geometry commit can land between the boundary and
-// the rows that leave next: a pane that SHRINKS pushes the screen's top row
-// into history WITHOUT it departing (the port's rule — a pushed row is not a
-// departure), so the first row that leaves is not the window's first row.
-// Matching only the head is what this used to do, and a commit therefore killed
-// the whole window on its first comparison: the closing screen the block before
-// already holds was streamed again into the block after it, 26 and 27 rows at a
-// time on the e2e, and deterministically in
-// TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit.
+// The window is that boundary's screen, and a candidate row is matched BY
+// CONTENT rather than by position, because a geometry commit can land between
+// the boundary and the rows that leave next: a pane that SHRINKS pushes the
+// screen's top row into history WITHOUT it departing (the port's rule — a
+// pushed row is not a departure), so the first row that leaves is not the
+// window's first row. Matching only the head is what this used to do, and a
+// commit therefore killed the whole window on its first comparison: the
+// closing screen the block before already holds was streamed again into the
+// block after it, 26 and 27 rows at a time on the e2e, and deterministically
+// in TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit.
+//
+// Content is ambiguous by design, though: a row a `clear` destroyed and a row
+// the NEXT command legitimately prints can read the same, and no comparison
+// of the two texts can ever tell them apart (nocx-2v80t.3.10). That is what
+// purgeDestroyedPendingScreenLocked runs for, first, every time: an entry
+// still standing here has already been confirmed nameable — not necessarily
+// UNCHANGED (an in-place rewrite the library does not treat as destruction is
+// the harder case sealPendingWithoutScreenLocked's reconciliation closes),
+// but not a row that ceased to exist. Content is what decides WHICH remaining
+// entry a departing row belongs to; identity is what decides whether an entry
+// may be matched against at all.
 //
 // A row that matches an entry consumes THAT entry — a row leaves once — and the
 // entries before it STAY: they are rows a commit pushed off the screen, and one
@@ -238,6 +323,7 @@ func (s *Session) openObservationLocked() {
 // that follows the boundary, and that the feed was not struck: a struck feed
 // suppresses nothing, because the hole it names rides the batch that follows.
 func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.Row {
+	s.purgeDestroyedPendingScreenLocked()
 	if len(s.pendingScreen) == 0 {
 		// Nothing the interval before left is on the screen: every row that
 		// leaves now is the next command's own.
@@ -247,7 +333,7 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 	for i, row := range rows {
 		at := -1
 		for j := range s.pendingScreen {
-			if sameVisibleRow(row, s.pendingScreen[j]) {
+			if sameVisibleRow(row, s.pendingScreen[j].Row) {
 				at = j
 				break
 			}
@@ -275,9 +361,11 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 			// The boundary's screen is done: from here on, what leaves the
 			// screen is the next command's own output.
 			kept = append(kept, rows[i:]...)
-			s.pendingScreen = nil
-			s.pendingEntered = false
+			s.releasePendingScreenLocked()
 			return kept
+		}
+		if t := s.pendingScreen[at].Track; t != nil {
+			t.Release()
 		}
 		s.pendingScreen = append(s.pendingScreen[:at], s.pendingScreen[at+1:]...)
 		s.suppressedScreenRows++
@@ -341,7 +429,7 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 		// batch withheld whole would swallow the hole it names.
 		return
 	}
-	s.pendingScreen = nil
+	s.releasePendingScreenLocked()
 	from := s.departedRows
 	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
 	if rs := s.rowStream; rs != nil {
@@ -505,9 +593,75 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 	next := &observationOpen{Opened: rec.Sealed}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		next.Opening = scr
+		// The window this settle leaves standing was never re-captured, so a
+		// row it names may since have been overwritten by exactly this
+		// interval's own output — a `clear`, plainly, but any rewrite that
+		// happens to read the same as what departs next is the same defect
+		// (nocx-2v80t.3.10). This read is the one chance to notice before the
+		// next command's real content arrives and a stale entry swallows it.
+		s.reconcilePendingScreenLocked(scr)
 	}
 	s.observation = next
 	s.storeSealedObservationLocked(rec)
+}
+
+// reconcilePendingScreenLocked drops whatever part of the window a screen
+// read FRESHER than the window's own capture disagrees with — the check
+// [Session.expectBoundaryScreenLocked] cannot make, because the boundary that
+// just sealed had no screen of its own to compare (sealPendingWithoutScreenLocked;
+// nocx-2v80t.3.10).
+//
+// It compares BY POSITION, at the same index, entry for entry — which is
+// exactly the identity that breaks across a reflow (departed_window_geometry_test.go)
+// — so it runs only when scr's geometry is the one the window was captured or
+// last reconciled at: unchanged means nothing has pushed a row into history or
+// pulled one back, so index i still names the same slot it did, and a
+// position that no longer reads what the window recorded there was written to
+// in between — an erase a [emulator.RowTrack] does not see as one
+// (purgeDestroyedPendingScreenLocked's own comment has the library evidence),
+// since content is the only signal that survives an in-place rewrite at all.
+// A geometry that HAS moved leaves the window exactly as it stood: reconciling
+// positionally across a reflow is the defect this file already fixed once,
+// and suppressBoundaryScreenLocked's content match, which a reflow does not
+// confuse, is what still guards it.
+//
+// Kept is the longest PREFIX still confirmed unwritten; the conservative
+// direction, matching every other cut in this file — an occasional duplicate
+// the block absorbs costs less than a false match swallowing real output.
+func (s *Session) reconcilePendingScreenLocked(scr ObservationScreen) {
+	if len(s.pendingScreen) == 0 {
+		return
+	}
+	if scr.Geometry != s.pendingScreenGeom {
+		return
+	}
+	candidates := boundaryRowsThatLeave(scr)
+	n := len(s.pendingScreen)
+	if len(candidates) < n {
+		n = len(candidates)
+	}
+	cut := n
+	for i := 0; i < n; i++ {
+		if !sameVisibleRow(s.pendingScreen[i].Row, candidates[i]) {
+			cut = i
+			break
+		}
+	}
+	if cut == len(s.pendingScreen) {
+		// Every entry still reads exactly what it did when captured, at the
+		// same position: nothing has overwritten it, so the window stands
+		// whole.
+		return
+	}
+	for _, p := range s.pendingScreen[cut:] {
+		if p.Track != nil {
+			p.Track.Release()
+		}
+	}
+	s.pendingScreen = s.pendingScreen[:cut]
+	if len(s.pendingScreen) == 0 {
+		s.pendingEntered = false
+	}
 }
 
 // settlePendingLocked settles the interval that is parked waiting for its
@@ -568,7 +722,24 @@ func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
 	if len(expect) == 0 {
 		return
 	}
-	s.pendingScreen = cloneObservationRows(expect)
+	s.releasePendingScreenLocked()
+	rows := cloneObservationRows(expect)
+	pending := make([]pendingBoundaryRow, len(rows))
+	for i, row := range rows {
+		// A row this port cannot track (ErrOutOfRange on a screen this call
+		// itself just measured would be a contradiction, but TrackRow can
+		// still refuse for a reason this comment does not need to guess) is
+		// carried as an entry with no pin: pendingBoundaryRow.alive treats a
+		// nil Track as already dead, so it is dropped by the very next purge
+		// rather than trusted on content alone.
+		track, err := s.emulator.TrackRow(i)
+		if err != nil {
+			track = nil
+		}
+		pending[i] = pendingBoundaryRow{Row: row, Track: track}
+	}
+	s.pendingScreen = pending
+	s.pendingScreenGeom = screen.Geometry
 	s.pendingEntered = false
 }
 

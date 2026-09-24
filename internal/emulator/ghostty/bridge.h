@@ -125,6 +125,19 @@ GhosttyResult nocxHistoryRow(GhosttyTerminal terminal, uint32_t y,
                              bool *out_wrap, bool *out_continuation);
 
 /*
+ * A TRACKED grid reference for row y, column 0, of the coordinate space tag
+ * names — the row-identity primitive nocxGridRefAt has no tracked equivalent
+ * of. GhosttyPoint is a tagged union cgo cannot build, exactly as
+ * nocxGridRefAt's own comment says, so this shim builds it the same way and
+ * calls the tracked constructor instead of the untracked one. The handle it
+ * returns follows the row across reflow, scrolling and retention pruning;
+ * ghostty_tracked_grid_ref_has_value answers later whether it still names a
+ * row at all, and ghostty_tracked_grid_ref_free releases it.
+ */
+GhosttyResult nocxTrackRowAt(GhosttyTerminal terminal, GhosttyPointTag tag,
+                             uint32_t y, GhosttyTrackedGridRef *out);
+
+/*
  * The running total of grid references this shim has resolved, across every
  * terminal in the process. It exists so a test can measure the one-per-row
  * cost of a history range; it is not a statistic anyone else should read.

@@ -249,6 +249,21 @@ GhosttyResult nocxGridRefAt(GhosttyTerminal terminal, GhosttyPointTag tag,
   return ghostty_terminal_grid_ref(terminal, pt, out);
 }
 
+/*
+ * The TRACKED counterpart of nocxGridRefAt, at column 0 of row y: the caller
+ * wants the row's identity, never one of its cells, so there is no x
+ * parameter to build wrong. GhosttyTrackedGridRef is an opaque handle rather
+ * than a sized struct, so it needs no GHOSTTY_INIT_SIZED before the call.
+ */
+GhosttyResult nocxTrackRowAt(GhosttyTerminal terminal, GhosttyPointTag tag,
+                             uint32_t y, GhosttyTrackedGridRef *out) {
+  GhosttyPoint pt = {0};
+  pt.tag = tag;
+  pt.value.coordinate.x = 0;
+  pt.value.coordinate.y = y;
+  return ghostty_terminal_grid_ref_track(terminal, pt, out);
+}
+
 static void color_facts(GhosttyStyleColor color, GhosttyStyleColorTag *tag,
                         GhosttyColorPaletteIndex *palette,
                         GhosttyColorRgb *rgb) {

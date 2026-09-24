@@ -276,9 +276,7 @@ func (s lifecycleAppSession) record(t *testing.T, command, cwd string, id int) a
 		t.Fatalf("write command: %v", err)
 	}
 	_ = s.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-	var receipt *appHistoryReceipt
-	promptReady := false
-	for {
+	receipt, ok := awaitRecordedReceipt(func() (string, json.RawMessage, bool) {
 		_, raw, err := s.conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("wait for history.recorded: %v", err)
@@ -288,15 +286,48 @@ func (s lifecycleAppSession) record(t *testing.T, command, cwd string, id int) a
 			Params json.RawMessage `json:"params"`
 		}
 		if json.Unmarshal(raw, &notification) != nil {
-			continue
+			return "", nil, true // not a decodable notification; keep reading
 		}
-		switch notification.Method {
+		return notification.Method, notification.Params, true
+	}, attempt.ID, s.domain)
+	if !ok {
+		t.Fatal("connection closed before the receipt and its prompt_ready arrived")
+	}
+	return receipt
+}
+
+// awaitRecordedReceipt scans notifications for the receipt of one attempt —
+// history.recorded matching attemptID — and the lifecycle.changed prompt_ready
+// that closes it, returning once both have been seen. `next` returns ("", …,
+// true) for a message that decoded to nothing this scan cares about, and
+// (_, _, false) when there is nothing left to read.
+//
+// A prompt_ready for the right domain is accepted ONLY once the receipt has
+// already been seen — never before. Before that, it may be a STALE fact: the
+// kernel primes an app-submitted attempt that has not yet started when the
+// shell's own PROMPT_COMMAND races its DEBUG trap for the very same command
+// (lifecycle/kernel.go's applyPromptReady, case 1, "the DEBUG trap's start is
+// a few milliseconds behind PROMPT_COMMAND's own prompt_ready"), and that
+// priming publishes prompt_ready for the domain while the submitted command
+// has not run at all. Requiring the receipt first is the identity check the
+// brief asked for: this attempt's own completion is known BEFORE any
+// prompt_ready may count as the one that follows it — the kernel's own event
+// order guarantees a genuine completion's history.recorded is published
+// (via Ingest's transitionsBelow) strictly before the later, separate
+// Ingest of the shell's real prompt_ready envelope, so the ordering the
+// guard relies on is not a race of its own (nocx-2v80t.3.14).
+func awaitRecordedReceipt(next func() (method string, params json.RawMessage, ok bool), attemptID, domain string) (appHistoryReceipt, bool) {
+	var receipt *appHistoryReceipt
+	promptReady := false
+	for {
+		method, raw, ok := next()
+		if !ok {
+			return appHistoryReceipt{}, false
+		}
+		switch method {
 		case "history.recorded":
 			var got appHistoryReceipt
-			if err := json.Unmarshal(notification.Params, &got); err != nil {
-				t.Fatalf("decode history.recorded: %v", err)
-			}
-			if got.AttemptID == attempt.ID {
+			if json.Unmarshal(raw, &got) == nil && got.AttemptID == attemptID {
 				receipt = &got
 			}
 		case "lifecycle.changed":
@@ -304,14 +335,69 @@ func (s lifecycleAppSession) record(t *testing.T, command, cwd string, id int) a
 				Lifecycle string `json:"lifecycle"`
 				Domain    string `json:"domain"`
 			}
-			if json.Unmarshal(notification.Params, &fact) == nil &&
-				fact.Lifecycle == "prompt_ready" && fact.Domain == s.domain {
+			if json.Unmarshal(raw, &fact) == nil &&
+				fact.Lifecycle == "prompt_ready" && fact.Domain == domain && receipt != nil {
 				promptReady = true
 			}
 		}
 		if receipt != nil && promptReady {
-			return *receipt
+			return *receipt, true
 		}
+	}
+}
+
+// TestAwaitRecordedReceipt_IgnoresPromptReadyBeforeCompletion pins
+// nocx-2v80t.3.14 with the exact interleaving `make ci-full`'s `go test
+// -race` measured over the real socket (capture_acceptance_test.go:119): the
+// kernel primes the just-submitted, not-yet-started attempt when the shell's
+// own PROMPT_COMMAND races its DEBUG trap for the very same command
+// (lifecycle/kernel.go's applyPromptReady, case 1) and publishes a
+// prompt_ready fact for the domain BEFORE the command has run at all. A
+// helper that counts any domain-matching prompt_ready toward readiness
+// returns as soon as history.recorded arrives — four messages in, having
+// never seen the prompt_ready that actually follows the completion — and the
+// next lifecycle.submitAttempt then races a lane the kernel has not yet
+// settled: -32602 "no prompt is ready".
+//
+// This is deterministic (a canned sequence of five decoded notifications,
+// no socket, no timing): reverting the `receipt != nil` guard in
+// awaitRecordedReceipt makes it fail — it returns after the 4th message
+// (i == 4) instead of consuming the trailing, genuine prompt_ready (i == 5).
+func TestAwaitRecordedReceipt_IgnoresPromptReadyBeforeCompletion(t *testing.T) {
+	const attemptID = "att-1"
+	const domain = "dom-1"
+
+	type msg struct {
+		method string
+		params string
+	}
+	messages := []msg{
+		{"lifecycle.changed", `{"lifecycle":"running","domain":"` + domain + `"}`},      // submitAttempt's own transition
+		{"lifecycle.changed", `{"lifecycle":"prompt_ready","domain":"` + domain + `"}`}, // STALE: raced, before Start
+		{"lifecycle.changed", `{"lifecycle":"running","domain":"` + domain + `"}`},      // Start attaches; back to running
+		{"history.recorded", `{"attemptId":"` + attemptID + `","entryId":"e1"}`},        // the real completion
+		{"lifecycle.changed", `{"lifecycle":"prompt_ready","domain":"` + domain + `"}`}, // the real prompt_ready
+	}
+	i := 0
+	next := func() (string, json.RawMessage, bool) {
+		if i >= len(messages) {
+			return "", nil, false
+		}
+		m := messages[i]
+		i++
+		return m.method, json.RawMessage(m.params), true
+	}
+
+	receipt, ok := awaitRecordedReceipt(next, attemptID, domain)
+	if !ok {
+		t.Fatal("awaitRecordedReceipt reported no receipt, want the one following the trailing prompt_ready")
+	}
+	if receipt.EntryID != "e1" {
+		t.Fatalf("receipt = %+v, want entryId e1", receipt)
+	}
+	if i != len(messages) {
+		t.Fatalf("awaitRecordedReceipt consumed %d of %d messages; it returned on the stale "+
+			"prompt_ready instead of waiting for the one that follows the completion", i, len(messages))
 	}
 }
 

@@ -706,3 +706,53 @@ func TestPublisherReconnectFlushesFreshAccept(t *testing.T) {
 		t.Fatalf("reconnect accept not flushed, got %v", got)
 	}
 }
+
+// TestPublisherDeliversAcceptBeforePublishingPromptReady pins the ordering
+// 23d47d91 (nocx-2v80t.3.5) moved Ingest's KindAccept case ahead of
+// publishLane for: "the shell must receive ACCEPT before the lifecycle.changed
+// prompt_ready publication. Otherwise a renderer can submit against the
+// prompt_ready fact while the domain still waits for the shell's
+// authenticated admission." No test asserted the order directly — every
+// other accept test here asserts the SEND happened and that a submit right
+// after it succeeds (TestPublisherFlushesAcceptWithSubscriberAndNoAcknowledgement),
+// which the kernel's own acceptPending gate would still make pass even if
+// publish moved back ahead of deliver, because Ingest is one synchronous
+// call. What only THIS ordering protects is a renderer that reacts to the
+// notification alone (session.open's real path): if a future change moved
+// the accept send back below publishLane, a subscriber could see prompt_ready
+// and race a submit or a raw keystroke to the shell before the shell has
+// been told it may leave its suppressed prompt.
+//
+// recordingPort.onSend runs synchronously inside Kernel.Deliver's port.Send,
+// which happens-before deliverAccept returns and therefore happens-before
+// Ingest's later publishLane call under the current order — so asserting
+// "no fact has been published yet" from inside onSend is exactly the
+// ordering check, with no timing involved: reverting the switch in Ingest to
+// its pre-23d47d91 shape (deliver KindAccept in the trailing loop, after
+// publishLane) makes this fail.
+func TestPublisherDeliversAcceptBeforePublishingPromptReady(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(k)
+	r := &recorder{}
+	pub.SetEmitter(r)
+	port := &recordingPort{}
+	port.onSend = func(sent lifecycle.Envelope) {
+		if sent.Event.Kind != lifecycle.KindAccept {
+			return
+		}
+		if got := len(r.all()); got != 0 {
+			t.Errorf("accept flushed after %d fact(s) already published; want the accept delivered first", got)
+		}
+	}
+	_ = pub.BindTransport("T", port)
+	h, _ := pub.RequestDomain("L", nil, "T")
+	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
+
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("accept not flushed: %v", got)
+	}
+	facts := r.all()
+	if len(facts) != 1 || facts[0].Lifecycle != lifecyclepub.LifecyclePromptReady {
+		t.Fatalf("facts = %+v, want exactly one prompt_ready published after the accept", facts)
+	}
+}

@@ -39,6 +39,19 @@ type RowStream interface {
 	// it (nil when the screen could not be read — the same honest silence
 	// every screen read keeps).
 	IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row)
+	// ClearBoundary reports that the program erased the display and its
+	// saved lines (nocx-2v80t.3.17): a real VT fact the emulator itself
+	// observed (emulator.EffectClearBoundary), never an authenticated
+	// event — unlike a fence or an output mark there is nothing to
+	// rendezvous with, because ADR-0066 already gives the backend the
+	// whole VT grammar and the erase IS the fact. It rides the SAME
+	// ordered stream as OutputRows and IntervalEnd, in the position it
+	// occurred, so a consumer can never attribute it to the wrong side of
+	// a row: everything the stream has already carried is before it,
+	// everything still to come is after. The record never deletes
+	// (nocx-zg3k3.10.3's owner decision) — this is the sighting a reader
+	// turns into a cursor, not a command to remove anything here.
+	ClearBoundary()
 }
 
 // DepartedRowCount is how many departed rows this session has read off the

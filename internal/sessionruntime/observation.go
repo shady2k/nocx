@@ -866,6 +866,34 @@ func (s *Session) sightOutputMarkLocked() {
 	s.installPendingScreenLocked(rows[:len(rows)-1], scr.Geometry, false)
 }
 
+// sightClearBoundaryLocked joins a sighted EffectClearBoundary: the program
+// erased the display and its saved lines (nocx-2v80t.3.17). Unlike a fence or
+// an output mark this needs no rendezvous with anything sessionruntime
+// authenticated — the erase is a real fact the emulator's own state already
+// reflects (ADR-0066: the backend owns the whole VT grammar, not a private
+// second reading) — so the whole of this method is handing the sighting to
+// the row stream, on the SAME ordered carrier OutputRows and IntervalEnd
+// travel on. That is what keeps it from ever being attributed to the wrong
+// side of a row: everything the stream has already carried when this fires
+// is before it, and everything still to come is after, in the one order the
+// stream keeps.
+//
+// It does not touch s.observation, s.pendingScreen or any loss counter: an
+// erase does not open, close or seal an interval (that is still only an
+// authenticated boundary's to do), and the rows it destroyed were never
+// "departed" in the first place — DepartedRows' own contract already says an
+// erase ceases rows rather than handing them off, so there is nothing here
+// for a departure count to reconcile against.
+//
+// With no row stream bound (a session with nobody watching its rows yet)
+// this is a no-op, exactly as drainObservationLocked is: the fact has nobody
+// to reach, and there is nothing else for it to do.
+func (s *Session) sightClearBoundaryLocked() {
+	if rs := s.rowStream; rs != nil {
+		rs.ClearBoundary()
+	}
+}
+
 // sameVisibleRow reports whether two rows are the same LINE of text, whatever
 // width the screen held when each was read.
 //

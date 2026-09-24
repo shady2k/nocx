@@ -25,7 +25,7 @@ import (
 // end marker. One slice, because the order between the two kinds is the
 // seam's whole point — a row can never be attributed to the wrong interval.
 type rowEvent struct {
-	kind    string // "rows" | "end"
+	kind    string // "rows" | "end" | "clear"
 	from    uint64
 	lost    uint64
 	rows    []emulator.Row
@@ -50,6 +50,12 @@ func (r *recordingRowStream) IntervalEnd(nonce FenceNonce, endRow uint64, closin
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, rowEvent{kind: "end", nonce: nonce, endRow: endRow, closing: closing})
+}
+
+func (r *recordingRowStream) ClearBoundary() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, rowEvent{kind: "clear"})
 }
 
 func (r *recordingRowStream) snapshot() []rowEvent {
@@ -422,4 +428,74 @@ func TestTheRowIndexIsTheSessionsNotTheConsumers(t *testing.T) {
 	if first, last := streamRowText(batch.rows[0]), streamRowText(batch.rows[len(batch.rows)-1]); first != "L000007" || last != "L000036" {
 		t.Fatalf("the batch carries %q..%q, want L000007..L000036", first, last)
 	}
+}
+
+// clearRowStreamSeq is exactly what `clear(1)` emits (nocx-zg3k3.10.3's owner
+// decision): home the cursor, erase the display, erase the saved lines.
+const clearRowStreamSeq = "\x1b[H\x1b[2J\x1b[3J"
+
+// TestClearBoundaryTravelsInOrderWithTheRowsAroundIt (nocx-2v80t.3.17): the
+// erase lands on the SAME ordered stream as OutputRows and IntervalEnd, at
+// the position it occurred — never before the interval it interrupts and
+// never after the interval it happened inside. A command runs and closes
+// (its own end marker), then the NEXT command prints, erases its saved
+// lines mid-output, and keeps printing: the clear boundary must sit strictly
+// after the first command's own end marker and strictly before the second
+// command's own later rows, or a consumer reading the stream in order could
+// attribute it to the wrong side of a row.
+func TestClearBoundaryTravelsInOrderWithTheRowsAroundIt(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	// Command 1: output, then its authenticated boundary.
+	obsFeed(t, s, 0, 30)
+	obsSeal(t, s, obsNonce(1))
+
+	// Command 2 (`clear`): some output, then it erases its own saved lines,
+	// then more output — the shape an interval containing `clear` has.
+	obsFeed(t, s, 1000, 30)
+	if err := s.Ingest([]byte(clearRowStreamSeq)); err != nil {
+		t.Fatalf("ingest the clear sequence: %v", err)
+	}
+	obsFeed(t, s, 2000, 30)
+	obsSeal(t, s, obsNonce(2))
+
+	events := rs.snapshot()
+	clearAt := -1
+	for i, e := range events {
+		if e.kind == "clear" {
+			if clearAt >= 0 {
+				t.Fatalf("a second clear-boundary event arrived at %d, want exactly one (first at %d)", i, clearAt)
+			}
+			clearAt = i
+		}
+	}
+	if clearAt < 0 {
+		t.Fatalf("the clear boundary never reached the row stream: events were %v", eventKinds(events))
+	}
+	sawCommand1End := false
+	for _, e := range events[:clearAt] {
+		if e.kind == "end" {
+			sawCommand1End = true
+		}
+	}
+	if !sawCommand1End {
+		t.Fatalf("command 1's own end marker did not precede the clear boundary: events were %v", eventKinds(events))
+	}
+	sawLaterRows := false
+	for _, e := range events[clearAt+1:] {
+		if e.kind == "rows" {
+			sawLaterRows = true
+		}
+	}
+	if !sawLaterRows {
+		t.Fatalf("rows fed after the clear sequence did not stream after the clear boundary: events were %v", eventKinds(events))
+	}
+}
+
+func eventKinds(events []rowEvent) []string {
+	kinds := make([]string, len(events))
+	for i, e := range events {
+		kinds[i] = e.kind
+	}
+	return kinds
 }

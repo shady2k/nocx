@@ -4,7 +4,12 @@ import { describe, expect, it } from 'vitest'
 import type { LedgerBlockRowsLine, Mark } from '../generated/ledger.blockRows'
 import { styleOf, wireRowOf, type CellSpec } from '../painter/fixtures'
 import { DEFAULT_SNAPSHOT } from './serializer'
-import { paintStoredRows, parseStoredBlockRows, type StoredBlockRows } from './block-rows'
+import {
+  blockColumnsOf,
+  paintStoredRows,
+  parseStoredBlockRows,
+  type StoredBlockRows,
+} from './block-rows'
 
 const PLAIN = styleOf()
 
@@ -40,6 +45,67 @@ describe('stored block rows', () => {
       'abc',
     ])
     expect(block.querySelector('.cmd-output')?.classList.contains('cmd-output-evicted')).toBe(false)
+  })
+
+  it("warms cell-fit with every row's cells before painting a single one (nocx-2v80t.3.18)", () => {
+    // boxOf is a pure cache read (cell-fit.ts) — nothing warmed before the
+    // paint pass means no glyph is ever boxed, whatever the metric says.
+    // This is the wiring that keeps that from regressing silently: warm
+    // must fire, with the candidates the rows actually carry, and it must
+    // fire BEFORE any row paints so the read that follows hits a warm cache.
+    const block = document.createElement('article')
+    const glyphRow: CellSpec[] = [
+      ['⬢', 1, true],
+      ['x', 1, true],
+    ]
+    const seen: Array<{ chars: string; width: number }> = []
+    let warmedBeforePaint = false
+    paintStoredRows(
+      block,
+      { ...stored, lines: [{ from: 0, row: wireRowOf(glyphRow) }] },
+      {
+        metric: null,
+        palette: DEFAULT_SNAPSHOT,
+        warm: (candidates) => {
+          for (const c of candidates) seen.push({ chars: c.chars, width: c.width })
+          warmedBeforePaint = block.querySelector('.term-grid-row') === null
+        },
+      },
+    )
+    expect(seen).toEqual([
+      { chars: '⬢', width: 1 },
+      { chars: 'x', width: 1 },
+    ])
+    expect(warmedBeforePaint).toBe(true)
+  })
+
+  it('turns a path reference in a painted row into a clickable link (nocx-2v80t.3.18)', () => {
+    // The retired outputHtml path decorated links once, at freeze, on the
+    // HTML string it injected (blocks.ts) — dead since block bodies come
+    // from stored rows and that string is always ''. Nothing replaced the
+    // call, so a stored block's paths and urls stopped being links.
+    const text = 'see docs/architecture.md:101 for more'
+    const row: CellSpec[] = [...text].map((ch) => [ch, 1, true] as CellSpec)
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, lines: [{ from: 0, row: wireRowOf(row) }] },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const link = block.querySelector<HTMLElement>('.term-link')
+    expect(link?.textContent).toBe('docs/architecture.md:101')
+    expect(block.querySelector('.cmd-output')?.textContent).toBe(text)
+  })
+
+  it('names the widest line as the column count every row shares', () => {
+    // 'ok\n' is 3 cells wide, 'abc' is 3 too, but a block whose lines differ
+    // (nocx-2v80t.3.18) must report the WIDEST one: every row is padded out
+    // to it, so that is the width the drift instrument has to check against.
+    expect(blockColumnsOf(stored.lines)).toBe(3)
+    expect(blockColumnsOf([{ from: 0, row: wireRowOf(abcRow) }])).toBe(3)
+    expect(blockColumnsOf([])).toBe(0)
   })
 
   it('pads mixed trimmed rows while preserving a styled trailing cell', () => {

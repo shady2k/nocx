@@ -140,7 +140,8 @@ import {
   type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
-import { paintStoredRows } from './scrollback/block-rows'
+import { blockColumnsOf, paintStoredRows } from './scrollback/block-rows'
+import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
@@ -2465,7 +2466,19 @@ export class TerminalContent extends BasePaneContent {
           paintStoredRows(block, rows, {
             metric,
             palette: fromITheme(getCurrentTheme()),
+            // cell-fit's batch write (nocx-2v80t.3.18): warmed here, once
+            // for the whole block, so `boxOf` inside `paintRow` above is a
+            // pure cache read — `fit.warm` itself is a no-op when `begin`
+            // found nowhere to measure.
+            warm: fit ? (candidates) => fit.warm(candidates) : undefined,
           })
+          // The frozen-line drift instrument (nocx-4n6sj, off by default):
+          // only a FROZEN block's rows are worth measuring — a running
+          // block's output is still arriving and remeasuring it on every
+          // chunk would be noise, not a sample.
+          if (!block.classList.contains('cmd-block-running')) {
+            recordStoredBlock(block, rows.lines.length, blockColumnsOf(rows.lines))
+          }
         },
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         // The copy path is handed a TURN's entry id (blocks.ts reaches it

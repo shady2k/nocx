@@ -1,7 +1,9 @@
 import type { SessionFrame } from '../generated/session.frame'
 import type { LedgerBlockRowsLine } from '../generated/ledger.blockRows'
 import { createCellModel, rowColumnsOf } from '../cell-model'
-import { paintRow } from '../painter/paint-row'
+import { fitCandidatesOf, paintRow } from '../painter/paint-row'
+import { decorateLinks } from '../terminal-links/decorate'
+import type { FitCandidate } from './cell-fit'
 import type { RunMetric } from './run-geometry'
 import type { TerminalSnapshot } from './serializer'
 
@@ -73,6 +75,17 @@ export function parseStoredBlockRows(
   }
 }
 
+/** The single column count every row in a stored block is padded to: the
+ *  widest line among the ones read. `snapshotForRows` uses it to build the
+ *  synthetic frame; the frozen-line drift instrument (cell-drift.ts,
+ *  nocx-2v80t.3.18) uses it too, to compare the rows it actually measures
+ *  against the width the grid painted them at — every row in a stored
+ *  block shares this one count, unlike the retired live-buffer path, which
+ *  handed out one column count per line. */
+export function blockColumnsOf(lines: readonly LedgerBlockRowsLine[]): number {
+  return lines.length === 0 ? 0 : Math.max(...lines.map((line) => rowColumnsOf(line.row)))
+}
+
 /** A stored block carries no frame geometry of its own (nocx-zg3k3.2.12):
  *  each line's row is only as wide as its own explicit content, which
  *  differs line to line (a short line, an inverse status bar that goes to
@@ -85,7 +98,7 @@ export function parseStoredBlockRows(
  *  the compact wire does not carry cells to pad. */
 function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   if (lines.length === 0) return null
-  const cols = Math.max(...lines.map((line) => rowColumnsOf(line.row)))
+  const cols = blockColumnsOf(lines)
   if (cols === 0) return null
   const frame: SessionFrame = {
     revision: 1,
@@ -106,6 +119,17 @@ function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
 export interface StoredBlockPaintOptions {
   readonly metric: RunMetric | null
   readonly palette: TerminalSnapshot
+  /** Cell-fit's batch write, run once for the WHOLE block before any row
+   *  paints (nocx-2v80t.3.18): cell-fit.ts's own rule is "every write, then
+   *  every read" — one forced layout for every candidate this block's rows
+   *  carry, so `boxOf` is a pure cache read for the paint pass that
+   *  follows. Without it every cell measures as unclassified and no glyph
+   *  is ever boxed, whatever the metric says — cell-fit.ts's `warm`,
+   *  wired by the caller that owns the CellFit instance (this module holds
+   *  no reference of its own, matching `metric` above). Absent is a valid
+   *  degrade: a caller with nowhere to measure paints with no boxing,
+   *  unchanged from before this wiring existed. */
+  readonly warm?: (candidates: Iterable<FitCandidate>) => void
 }
 
 /** Replace a command block's body with rows read from the ledger artifact. */
@@ -119,11 +143,21 @@ export function paintStoredRows(
     .forEach((el) => el.remove())
   const snapshot = snapshotForRows(stored.lines)
   if (snapshot !== null) {
+    opts.warm?.(fitCandidatesOf(snapshot.rows))
     const output = document.createElement('div')
     output.className = 'cmd-output'
     for (const row of snapshot.rows) {
       output.appendChild(paintRow(row, opts))
     }
+    // Paths and urls become clickable HERE, once per paint, the same "one
+    // pass beats a pass per click" rule the retired outputHtml path used
+    // (nocx-2v80t.3.18): that call site died with the html string it
+    // decorated (block bodies come from stored rows now, blocks.ts
+    // freezeBlock's outputHtml is always ''), and nothing replaced it, so a
+    // stored block's URLs stopped being links. terminal-links/surface.ts
+    // still attaches the one click gesture per tab; this only puts the
+    // rows in its reach.
+    decorateLinks(output)
     block.appendChild(output)
   }
   const missing = stored.droppedRows + stored.lostRows

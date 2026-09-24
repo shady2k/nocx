@@ -404,7 +404,20 @@ type Terminal interface {
 	// feed so large that pruning inside it still leaves the count grown: the
 	// ABI carries no departure counter and page sizes are not contract, so a
 	// caller capturing unbounded output bounds its feeds or configures the
-	// budget rather than trusting the flag line alone.
+	// budget rather than trusting the flag line alone. This adapter takes the
+	// budget in hand instead and clears it where the terminal is built
+	// (ghostty's install): the report below is a row reported once for as
+	// long as the session lives, and a budget nobody chose deleting the
+	// history that count is taken against is what turned a whole command's
+	// output into nothing at all (nocx-2v80t.3.9). The prune branch stays as
+	// the honest answer for a terminal whose budget was set.
+	//
+	// A measurement that FAILS is not silence either. There is no count to
+	// take, so the rows that left the screen in that feed are unread; the
+	// report names the span from the last good measurement to the next one as
+	// a gap (a non-nil error) rather than re-baselining across it, because a
+	// consumer told nothing about rows it never received cannot tell a lost
+	// feed from an idle one.
 	//
 	// A closed terminal has no report: this returns [ErrClosed] after
 	// [Terminal.Close], and a report that was never read dies with it.

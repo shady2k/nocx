@@ -182,8 +182,8 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("one"), aStreamRow("two"),
 	})
-	if !confirm || written != 1 {
-		t.Fatalf("ack = (%d, %v), want rows 0..1 confirmed", written, confirm)
+	if !confirm || written != 2 {
+		t.Fatalf("ack = (%d, %v), want exclusive end row 2", written, confirm)
 	}
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 2 {
@@ -217,6 +217,13 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 		t.Fatal("the first interval's delayed row was not confirmed")
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")})
+
+	// A replay from below the closed interval's own boundary is confirmed at
+	// that boundary — so the helper's mark may advance — and enters no block.
+	// Its closing screen never streams again: the runtime holds it back.
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-tail-replayed")}); !confirm || written != 1 {
+		t.Fatalf("replayed row ack = (%d, %v), want the closed boundary 1", written, confirm)
+	}
 	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("second-departed")}); !confirm {
 		t.Fatal("the second interval's row was not confirmed")
 	}
@@ -229,6 +236,164 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 	if len(secondRows) != 1 || secondRows[0].Text != "second-departed" {
 		t.Fatalf("second block rows = %+v, want its one row", secondRows)
 	}
+}
+
+// A long command's output crosses the screen. At its end marker the rows still
+// ON the screen are appended to it as its closing screen, and those rows leave
+// the screen later, one at a time, as the next command's output pushes them
+// off — so the next interval's stream re-delivers them at the very indices the
+// closed block stored them at, and they belong to the block that already holds
+// them. How many leave is the SCREEN's business, not the count's: the row the
+// boundary's cursor sits above is overwritten in place and never leaves, so a
+// rule that drops len(closing) rows eats the next command's first output
+// (measured in the e2e: 33 closing rows, 32 departures, the successor's first
+// row lost and its block never containing `-001`). Identity against the screen
+// is what separates a row leaving again from the successor's own row.
+func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x91)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	secondFence := lifecycleFence(0x92)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+
+	// The first command's departed rows, then its end marker at row 2 carrying
+	// the two rows the boundary sat on — a screenful that has not left the
+	// screen yet.
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("first-1"), aStreamRow("first-2"),
+	}); !confirm || written != 2 {
+		t.Fatalf("first rows ack = (%d, %v), want rows 0..1 written", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{
+		aStreamRow("first-3"), aStreamRow("first-4"),
+	})
+
+	// A replay of the closed interval's own departed rows is confirmed and
+	// stored nowhere. Its closing screen never arrives again at all: the
+	// runtime holds it back (rowstream.go), so there is no delivery of it to
+	// refuse — the ownership of those rows is the runtime's.
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("first-1-again"), aStreamRow("first-2-again"),
+	}); !confirm || written != 2 {
+		t.Fatalf("replay ack = (%d, %v), want the closed boundary 2", written, confirm)
+	}
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-1")}); !confirm || written != 5 {
+		t.Fatalf("second rows ack = (%d, %v), want the successor's first row written at 4", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-2")})
+
+	firstRows := streamRows(t, db, first)
+	wantFirst := []struct {
+		From uint64
+		Text string
+	}{{0, "first-1"}, {1, "first-2"}, {2, "first-3"}, {3, "first-4"}}
+	if len(firstRows) != len(wantFirst) {
+		t.Fatalf("first block holds %d rows, want its own rows and its closing screen: %+v", len(firstRows), firstRows)
+	}
+	for i, want := range wantFirst {
+		if firstRows[i].From != want.From || firstRows[i].Text != want.Text {
+			t.Fatalf("first block row %d = (%d, %q), want (%d, %q)", i, firstRows[i].From, firstRows[i].Text, want.From, want.Text)
+		}
+	}
+	secondRows := streamRows(t, db, second)
+	wantSecond := []struct {
+		From uint64
+		Text string
+	}{{4, "second-1"}, {5, "second-2"}}
+	if len(secondRows) != len(wantSecond) {
+		t.Fatalf("second block holds %d rows, want exactly its own and no row of the previous command: %+v", len(secondRows), secondRows)
+	}
+	for i, want := range wantSecond {
+		if secondRows[i].From != want.From || secondRows[i].Text != want.Text {
+			t.Fatalf("second block row %d = (%d, %q), want (%d, %q)", i, secondRows[i].From, secondRows[i].Text, want.From, want.Text)
+		}
+	}
+	assertBlockSealed(t, db, first)
+	assertBlockSealed(t, db, second)
+}
+
+// The end marker and the authenticated completion that names its fence travel
+// on different carriers, so the end marker routinely arrives first and parks.
+// Its EndRow is the boundary from that moment: the rows that stream after it
+// belong to the interval that follows, and the ended interval's own block must
+// not swallow them. Without that, a long command's block absorbs the head of
+// the next command's output, the next block opens short, and the closing
+// append lands behind a cursor that already moved.
+func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0xa1)
+
+	// The first interval's own rows, then its end marker at row 2 — parked,
+	// because its completion has not been published yet.
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("first-1"), aStreamRow("first-2"),
+	}); !confirm || written != 2 {
+		t.Fatalf("first rows ack = (%d, %v), want rows 0..1 written", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-screen")})
+
+	// The shell has moved on and its next command's output is already
+	// leaving the screen, while the completion is still on its way. None of
+	// it may enter the first interval's block, and the mark must not claim
+	// it is written either.
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{
+		aStreamRow("second-1"), aStreamRow("second-2"),
+	}); confirm {
+		t.Fatal("rows past a parked boundary were acknowledged as written")
+	}
+
+	// The completion arrives, the fence resolves, and the first interval
+	// seals with its own rows and its closing screen — and nothing else.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 5, lifecyclePromptEvt()))
+
+	firstRows := streamRows(t, db, first)
+	wantFirst := []struct {
+		From uint64
+		Text string
+	}{{0, "first-1"}, {1, "first-2"}, {2, "first-screen"}}
+	if len(firstRows) != len(wantFirst) {
+		t.Fatalf("first block holds %d rows, want its own and no row of the next command: %+v", len(firstRows), firstRows)
+	}
+	for i, want := range wantFirst {
+		if firstRows[i].From != want.From || firstRows[i].Text != want.Text {
+			t.Fatalf("first block row %d = (%d, %q), want (%d, %q)", i, firstRows[i].From, firstRows[i].Text, want.From, want.Text)
+		}
+	}
+	assertBlockSealed(t, db, first)
+
+	// The next interval's block opens on the rows held for it — once, at
+	// their own absolute indices — and its own output follows.
+	second := startsACommand(t, e, pub, lane, h, 6, "printf second")
+	secondFence := lifecycleFence(0xa2)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-3")}); !confirm || written != 5 {
+		t.Fatalf("second rows ack = (%d, %v), want row 4 written", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-screen")})
+
+	secondRows := streamRows(t, db, second)
+	wantSecond := []struct {
+		From uint64
+		Text string
+	}{{2, "second-1"}, {3, "second-2"}, {4, "second-3"}, {5, "second-screen"}}
+	if len(secondRows) != len(wantSecond) {
+		t.Fatalf("second block holds %d rows, want its own four: %+v", len(secondRows), secondRows)
+	}
+	for i, want := range wantSecond {
+		if secondRows[i].From != want.From || secondRows[i].Text != want.Text {
+			t.Fatalf("second block row %d = (%d, %q), want (%d, %q)", i, secondRows[i].From, secondRows[i].Text, want.From, want.Text)
+		}
+	}
+	assertBlockSealed(t, db, second)
 }
 
 // A queued block's authenticated completion can beat the prior interval's
@@ -418,8 +583,10 @@ func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
 	if len(kept) != 1 || kept[0].Text != "before-bind" {
 		t.Fatalf("bind retry stored rows = %+v, want the held pre-bind row", kept)
 	}
-	if len(confirmed) != 1 || confirmed[0] != 0 {
-		t.Fatalf("deferred confirmation = %v, want [0]", confirmed)
+	// The held row sits at index 0, so the mark the helper may advance to is
+	// the exclusive end of what the store holds: 1.
+	if len(confirmed) != 1 || confirmed[0] != 1 {
+		t.Fatalf("deferred confirmation = %v, want [1]", confirmed)
 	}
 }
 
@@ -554,8 +721,8 @@ func TestBlockRowsArrived_RefusedCommandConfirmsButStoresNothing(t *testing.T) {
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
 
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("classified")})
-	if !confirm || written != 0 {
-		t.Fatalf("ack = (%d, %v), want the delivery confirmed", written, confirm)
+	if !confirm || written != 1 {
+		t.Fatalf("ack = (%d, %v), want exclusive end row 1", written, confirm)
 	}
 	if body := blockRowsBody(t, db, attempt); body != "" {
 		t.Fatalf("a refused command stored %q — not even a first chunk may be written", body)
@@ -685,8 +852,8 @@ func TestBlockRowsArrived_NoAttemptRowsAreConfirmedAndDropped(t *testing.T) {
 	e.ws.AttachBlockRows(session.ID(sid))
 
 	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 7, 0, []emulator.Row{aStreamRow("prompt")})
-	if !confirm || written != 7 {
-		t.Fatalf("no-attempt rows ack = (%d, %v), want (7, true)", written, confirm)
+	if !confirm || written != 8 {
+		t.Fatalf("no-attempt rows ack = (%d, %v), want (8, true)", written, confirm)
 	}
 	e.ws.blockStream.mu.Lock()
 	defer e.ws.blockStream.mu.Unlock()

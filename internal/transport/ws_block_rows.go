@@ -63,6 +63,17 @@ type blockOutputStore interface {
 // would hide exactly that.
 const maxPendingEnds = 8
 
+// maxCloseAttempts is how many times one interval's close may be attempted
+// before the stream SETTLES it: the first attempt and two retries. A retry
+// exists for a real shape — an append that was still in flight when the close
+// read the artifact's cursor, a store that refused once — and two of them
+// cover it. Past that the bound is the point: a store that keeps refusing, or
+// a stream with no store wired at all, must not leave a block open, retried on
+// every later delivery forever, with the client never told the command ended
+// (nocx-2v80t.3.9). The number is a bound rather than a policy statement, the
+// way every other bound in this file is.
+const maxCloseAttempts = 3
+
 // blockStream is the per-session state. Everything in it exists only while a
 // rows source is attached, and all of it dies with the session.
 type blockStream struct {
@@ -84,6 +95,20 @@ type blockStream struct {
 	// prior current interval promoted it. They cannot close the queued block
 	// early: its own rows still have to follow the prior interval's end.
 	queuedEnds map[session.ID][]pendingEnd
+	// closedThrough is the first absolute row not already owned by a
+	// completed interval. Replayed rows below it stay confirmed but cannot
+	// enter the following block.
+	closedThrough map[session.ID]uint64
+	// beyond are the rows that streamed AFTER an interval's end marker but
+	// BEFORE the authenticated completion that names its fence. The fence
+	// and the rows travel on different carriers (ADR-0024 decision 7), so
+	// this window is ordinary: the end marker's own EndRow is the boundary
+	// the moment it arrives, and a row at or above it belongs to the
+	// interval that follows, never to the block the ended interval closes
+	// over. beyondThrough is the exclusive end of what beyond holds, so a
+	// delivery below it is the same rows arriving again.
+	beyond        map[session.ID][]pendingRows
+	beyondThrough map[session.ID]uint64
 	// ends are interval ends parked until their completion publishes the
 	// fence that names them.
 	ends map[session.ID][]pendingEnd
@@ -103,6 +128,12 @@ type blockStream struct {
 	// They are drained only after every pending row reaches the store.
 	pendingCloses map[session.ID][]pendingEnd
 	closing       map[session.ID]bool
+	// closeTries counts the close attempts one interval's end has already
+	// spent, keyed by the end's own nonce. It exists only to make a close
+	// that keeps failing TERMINAL (maxCloseAttempts): past the bound the
+	// stream settles the block instead of retrying it on every later
+	// delivery for the life of the session (nocx-2v80t.3.9).
+	closeTries map[session.ID]map[string]uint8
 }
 
 type openBlock struct {
@@ -110,6 +141,20 @@ type openBlock struct {
 	entry      string
 	artifactID string
 	kept       bool
+	// rows is the artifact's own cursor: the exclusive end of everything
+	// this stream has successfully appended to it. The store enforces that
+	// cursor (a delivery behind it is refused, a jump ahead of it must name
+	// what went missing), so this is the same number it holds, and it exists
+	// so the CLOSE can place its closing screen where the artifact really is
+	// rather than where the interval's index says it should be
+	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
+	rows uint64
+	// closingIn is whether this interval's closing screen already reached
+	// the artifact. A close that committed its closing rows and then failed
+	// to seal must not append them a second time: the retry places them at
+	// the artifact's cursor now, where a second copy would be ACCEPTED
+	// instead of refused by continuity (nocx-2v80t.3.9).
+	closingIn bool
 }
 
 type pendingRows struct {
@@ -123,6 +168,48 @@ type pendingEnd struct {
 	nonce   string // hex, the completion's own spelling
 	endRow  uint64
 	closing []emulator.Row
+}
+
+// parkedBoundary is the boundary an interval end marker has already stated
+// while its fence is still on its way: the earliest EndRow among the ends
+// parked for their completions. Rows at and above it streamed after that
+// boundary and belong to the interval that follows. Derived from the parked
+// ends rather than stored, so it cannot drift from them.
+func (bs *blockStream) parkedBoundary(sid session.ID) (uint64, bool) {
+	var bound uint64
+	found := false
+	for _, end := range bs.ends[sid] {
+		if !found || end.endRow < bound {
+			bound, found = end.endRow, true
+		}
+	}
+	return bound, found
+}
+
+// mergePendingRows joins two index-ordered deliveries into one, keeping the
+// order: the store appends a block's rows in order and refuses a delivery
+// that starts anywhere but its own cursor, so the queue a flush reads is
+// ordered by the absolute row each delivery begins at.
+func mergePendingRows(a, b []pendingRows) []pendingRows {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	merged := make([]pendingRows, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i].from <= b[j].from {
+			merged = append(merged, a[i])
+			i++
+			continue
+		}
+		merged = append(merged, b[j])
+		j++
+	}
+	merged = append(merged, a[i:]...)
+	return append(merged, b[j:]...)
 }
 
 // splitPendingRowsAt separates deliveries at an interval's absolute end row.
@@ -219,6 +306,15 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 	if bs.pending == nil {
 		bs.pending = make(map[session.ID][]pendingRows)
 	}
+	if bs.closedThrough == nil {
+		bs.closedThrough = make(map[session.ID]uint64)
+	}
+	if bs.beyond == nil {
+		bs.beyond = make(map[session.ID][]pendingRows)
+	}
+	if bs.beyondThrough == nil {
+		bs.beyondThrough = make(map[session.ID]uint64)
+	}
 	if bs.flushing == nil {
 		bs.flushing = make(map[session.ID]bool)
 	}
@@ -227,6 +323,9 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 	}
 	if bs.closing == nil {
 		bs.closing = make(map[session.ID]bool)
+	}
+	if bs.closeTries == nil {
+		bs.closeTries = make(map[session.ID]map[string]uint8)
 	}
 	bs.sources[sid] = struct{}{}
 	bs.confirmers[sid] = confirm
@@ -243,6 +342,9 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	bs.mu.Lock()
 	opens := bs.open[sid]
+	delete(bs.closedThrough, sid)
+	delete(bs.beyond, sid)
+	delete(bs.beyondThrough, sid)
 	delete(bs.sources, sid)
 	delete(bs.open, sid)
 	delete(bs.current, sid)
@@ -257,6 +359,7 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	delete(bs.opening, sid)
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
+	delete(bs.closeTries, sid)
 	bs.mu.Unlock()
 	for _, b := range opens {
 		if !b.kept {
@@ -293,6 +396,52 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
 	block := bs.current[sid]
+	if sourced {
+		if closed := bs.closedThrough[sid]; fromRow < closed {
+			skip := closed - fromRow
+			if skip >= uint64(len(rows)) {
+				bs.mu.Unlock()
+				return closed, true
+			}
+			rows = rows[skip:]
+			fromRow = closed
+			lost = 0
+		}
+		// The interval's end marker may have arrived without the completion
+		// that names its fence. Its EndRow is the boundary either way, and
+		// anything at or above it streamed after the boundary: it is held for
+		// the interval that follows rather than appended to the one that is
+		// closing over it.
+		if block != nil {
+			if bound, parked := bs.parkedBoundary(sid); parked {
+				if held := bs.beyondThrough[sid]; fromRow < held {
+					skip := held - fromRow
+					if skip >= uint64(len(rows)) {
+						bs.mu.Unlock()
+						return 0, false
+					}
+					rows = rows[skip:]
+					fromRow = held
+					lost = 0
+				}
+				if fromRow+uint64(len(rows)) > bound { //nolint:gosec // a row count, not a byte count
+					before, after := splitPendingRowsAt([]pendingRows{{from: fromRow, lost: lost, rows: rows}}, bound)
+					if len(after) == 1 {
+						bs.beyond[sid] = append(bs.beyond[sid], after...)
+						held := after[len(after)-1]
+						bs.beyondThrough[sid] = held.from + uint64(len(held.rows)) //nolint:gosec // a row count, not a byte count
+					}
+					if len(before) == 0 {
+						// The whole delivery is past the boundary: it is held,
+						// so the mark must not claim it is written.
+						bs.mu.Unlock()
+						return 0, false
+					}
+					fromRow, lost, rows = before[0].from, before[0].lost, before[0].rows
+				}
+			}
+		}
+	}
 	waiting := bs.waiting[sid]
 	flushing := bs.flushing[sid]
 	pending := len(bs.pending[sid]) > 0
@@ -339,9 +488,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	if !sourced {
 		return 0, false
 	}
-	last := fromRow + uint64(len(rows)) - 1 //nolint:gosec // a row count, not a byte count
+	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
 	if block == nil || !block.kept {
-		return last, true
+		return writtenUpTo, true
 	}
 	store := s.blockStore()
 	if store == nil {
@@ -359,10 +508,15 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		s.log.Warn("block rows append failed", "session", sid, "entry", block.entry, "error", err)
 		return 0, false
 	}
+	// The append committed, so the artifact's cursor is now the exclusive end
+	// of this delivery. The close reads it to place its closing screen.
+	bs.mu.Lock()
+	block.rows = writtenUpTo
+	bs.mu.Unlock()
 	s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
 		EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
 	})
-	return last, true
+	return writtenUpTo, true
 }
 
 // BlockIntervalEnded delivers the session's interval end: the end marker's
@@ -451,7 +605,20 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	current := bs.current[sid]
 	queued := bs.queued[sid]
 	wasCurrent := current != nil && current.attempt == attempt
+	var cursor uint64
+	if block != nil {
+		cursor = block.rows
+	}
 	bs.mu.Unlock()
+	// store and ctx are named before the closures below, so the retry path
+	// and the terminal path can both reach them. The order of the CHECKS that
+	// follow is unchanged: a refused block closes without a store.
+	//
+	// Owner: this stream, inside the interval's authenticated end.
+	// Closing event: the seal — the closing append and the close are the
+	// last writes this interval can cause.
+	store := s.blockStore()
+	ctx := context.Background()
 
 	promote := func() {
 		if wasCurrent && queued != "" && queued != attempt {
@@ -470,6 +637,14 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			delete(bs.queued, sid)
 		}
 		delete(bs.closing, sid)
+		// The rows held past this interval's boundary belong to the interval
+		// that follows: they join the queue the next block's flush reads, in
+		// index order, and the hold's mark goes with them.
+		if held := bs.beyond[sid]; len(held) > 0 {
+			delete(bs.beyond, sid)
+			delete(bs.beyondThrough, sid)
+			bs.pending[sid] = mergePendingRows(bs.pending[sid], held)
+		}
 		ends := bs.pendingCloses[sid]
 		kept := ends[:0]
 		for _, end := range ends {
@@ -484,18 +659,78 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		bs.mu.Unlock()
 	}
-	fail := func() {
-		// Keep current/open/fence/queued intact. A close error may follow a
-		// committed closing-row append, so promotion is unsafe; retain the
-		// exact end for a later close/row event to retry. Store continuity
-		// rejects any duplicate closing rows without changing ownership.
+	// fail records one failed close attempt and answers whether the end is
+	// still worth retrying.
+	//
+	// A retry exists for a real shape: an append that was still in flight
+	// when this close read the artifact's cursor, or a store that refused
+	// once. It is BOUNDED (maxCloseAttempts), because the alternative is
+	// exactly the defect: a close that can never succeed, retried on every
+	// later delivery for the life of the session, leaves the block open and
+	// the client never told the command ended (nocx-2v80t.3.9). Past the
+	// bound the caller takes the terminal decision (abandon).
+	fail := func() bool {
+		// Keep current/open/fence/queued intact while a retry is still
+		// possible. A close error may follow a committed closing-row append,
+		// so promotion is unsafe mid-retry; retain the exact end for a later
+		// close/row event to retry. store continuity rejects any duplicate
+		// closing rows without changing ownership, and openBlock.closingIn is
+		// what keeps a retry from appending them twice at the cursor.
 		bs.mu.Lock()
-		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
-			attempt: attempt, nonce: hexNonce, endRow: endRow,
-			closing: append([]emulator.Row(nil), closing...),
-		})
+		if bs.closeTries == nil {
+			bs.closeTries = make(map[session.ID]map[string]uint8)
+		}
+		tries := bs.closeTries[sid]
+		if tries == nil {
+			tries = make(map[string]uint8)
+			bs.closeTries[sid] = tries
+		}
+		tries[hexNonce]++
+		spent := tries[hexNonce]
+		if spent < maxCloseAttempts {
+			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
+				attempt: attempt, nonce: hexNonce, endRow: endRow,
+				closing: append([]emulator.Row(nil), closing...),
+			})
+		} else {
+			delete(tries, hexNonce)
+		}
 		delete(bs.closing, sid)
 		bs.mu.Unlock()
+		return spent < maxCloseAttempts
+	}
+	// abandon is the TERMINAL decision the bound names: the interval is over,
+	// so the block is settled here whatever the store did — sealed as far as
+	// the store allows, its closing screen dropped and counted as dropped,
+	// the client told it closed, and the queue promoted. Nothing retries it
+	// afterwards: an end that kept failing would otherwise hang the command
+	// in a running state with no event that could ever end it, which is the
+	// user-visible defect this bound exists for. The block's rows are what
+	// reached the store, and a later read of history says exactly that.
+	abandon := func() {
+		s.log.Warn("block close abandoned at the attempt bound: the block is settled without its closing screen",
+			"session", sid, "entry", block.entry, "attempts", maxCloseAttempts,
+			"droppedClosingRows", len(closing))
+		if store != nil {
+			if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
+				EntryID: block.entry, ArtifactID: block.artifactID,
+			}); err != nil {
+				// Refused even here: the artifact stands as it is, and the
+				// block is settled anyway — the rows it holds are readable,
+				// and a retry that can never succeed is what this path exists
+				// to end.
+				s.log.Warn("block rows seal refused at the attempt bound; the block is left as it stands",
+					"session", sid, "entry", block.entry, "error", err)
+			}
+		}
+		bs.mu.Lock()
+		if endRow > bs.closedThrough[sid] {
+			bs.closedThrough[sid] = endRow
+		}
+		bs.mu.Unlock()
+		finish()
+		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
+		promote()
 	}
 	if block == nil {
 		finish()
@@ -506,35 +741,95 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		promote()
 		return true
 	}
-	store := s.blockStore()
 	if store == nil {
-		fail()
+		if !fail() {
+			abandon()
+		}
 		return false
 	}
-	// Owner: this stream, inside the interval's authenticated end.
-	// Closing event: the seal — the closing append and the close are the
-	// last writes this interval can cause.
-	ctx := context.Background()
-	if len(closing) > 0 {
+	// The closing screen's placement, decided from the artifact's own cursor
+	// and from whether a previous attempt already committed it.
+	bs.mu.Lock()
+	closingIn := block.closingIn
+	bs.mu.Unlock()
+	if len(closing) > 0 && !closingIn {
+		// The closing screen goes where the artifact actually is.
+		//
+		// The index relation the block states is that the artifact holds the
+		// interval's rows at [begin, endRow) and its closing screen follows at
+		// [endRow, endRow+len(closing)). That relation holds only while every
+		// row the interval streamed reached the store, and the producer is not
+		// obliged to make it hold — the e2e's end-marker sequence is not
+		// monotone — so the close is placed by what the artifact really holds:
+		//
+		//   cursor == endRow — the relation holds, and this is the ordinary
+		//     shape: the closing screen follows the interval's rows.
+		//   cursor > endRow — an end marker behind rows already appended.
+		//     Appending at endRow would land the close BEHIND the store's own
+		//     cursor, which the store refuses by contract
+		//     (ErrBlockRowsDiscontinuous) — the shape that used to leave the
+		//     block open forever, retried on every later delivery
+		//     (nocx-2v80t.3.9). The closing screen follows what is there.
+		//   cursor < endRow — rows the interval streamed never reached this
+		//     artifact. The closing screen still follows what it holds, and
+		//     nothing is claimed for the ones that are absent: the store's
+		//     summary measures its drop as (span − lost − stored) over a span
+		//     that begins at the block's own first stored row, so a lost count
+		//     for rows BEFORE that span is not expressible — subtracting it
+		//     underflows the count and a surface renders
+		//     `18446744073709552000 rows missing` for a block that lost
+		//     nothing of its own (measured on the e2e, nocx-2v80t.3.9). Where
+		//     those rows went is a delivery fact — another interval's
+		//     artifact, a bridge drop, a floor skip — and the log line below
+		//     names the shortfall instead of billing this block for it.
+		if cursor != endRow {
+			s.log.Warn("block close: the artifact is not at the interval's end row; the closing screen follows what it holds",
+				"session", sid, "entry", block.entry, "endRow", endRow, "cursor", cursor)
+		}
 		if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 			EntryID: block.entry, ArtifactID: block.artifactID,
-			FromRow: endRow, Rows: closing,
+			FromRow: cursor, Rows: closing,
 		}); err != nil {
-			s.log.Warn("block closing rows failed", "session", sid, "entry", block.entry, "error", err)
-			fail()
+			s.log.Warn("block closing rows failed", "session", sid, "entry", block.entry,
+				"fromRow", cursor, "endRow", endRow, "error", err)
+			if !fail() {
+				abandon()
+			}
 			return false
 		}
+		bs.mu.Lock()
+		block.closingIn = true
+		block.rows = cursor + uint64(len(closing)) //nolint:gosec // a row count, not a byte count
+		bs.mu.Unlock()
 		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
-			EntryID: block.entry, From: endRow, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
+			EntryID: block.entry, From: cursor, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
 		})
 	}
 	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 		EntryID: block.entry, ArtifactID: block.artifactID,
 	}); err != nil {
 		s.log.Warn("block rows close failed", "session", sid, "entry", block.entry, "error", err)
-		fail()
+		if !fail() {
+			abandon()
+		}
 		return false
 	}
+	// The block owns its own departed rows: [begin, endRow). Its closing
+	// screen is appended after everything the artifact actually holds —
+	// at [endRow, endRow+len(closing)) when the interval's rows all reached
+	// the store, and at the artifact's own cursor otherwise; the placement
+	// rule and what a shortfall means are at the append above — and the
+	// RUNTIME owns those rows from here: it holds the screen it emitted and
+	// never streams it again, so no delivery for the next interval carries
+	// them (rowstream.go). What remains this coordinator's to refuse is a
+	// delivery below the closed interval's own boundary: the past arriving
+	// again.
+	bs.mu.Lock()
+	delete(bs.closeTries[sid], hexNonce)
+	if endRow > bs.closedThrough[sid] {
+		bs.closedThrough[sid] = endRow
+	}
+	bs.mu.Unlock()
 	finish()
 	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
 	promote()
@@ -746,6 +1041,12 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 			bs.requeuePendingRows(sid, pending[i:])
 			return
 		}
+		// The artifact's cursor follows every committed delivery, in the
+		// deferred path exactly as in the direct one: the close places its
+		// closing screen at that cursor.
+		bs.mu.Lock()
+		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
+		bs.mu.Unlock()
 		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
 			EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 		})
@@ -793,7 +1094,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 
 func confirmPendingRows(confirm func(uint64), delivery pendingRows) {
 	if confirm != nil {
-		confirm(delivery.from + uint64(len(delivery.rows)) - 1) //nolint:gosec // a row count, not a byte count
+		confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
 	}
 }
 

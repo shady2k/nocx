@@ -221,6 +221,14 @@ type model struct {
 	rendezvousOrder  []FenceNonce
 	rendezvousLatest FenceNonce
 	hasLatest        bool
+	// shown is whether the session has taken in any output, and parked is the
+	// completion the INTERVAL IN FLIGHT is waiting on — the model's mirror of
+	// the runtime's observation record, whose first interval opens at the
+	// session's first ingest and whose park a completion takes with no screen
+	// read (observation.go). The event settle is the interval's, so a session
+	// that has shown nothing parks nothing (nocx-2v80t.3.9).
+	shown  bool
+	parked FenceNonce
 
 	completeness Completeness
 
@@ -668,6 +676,9 @@ func (m *model) Ingest(b []byte) error {
 	if err := m.live(); err != nil {
 		return err
 	}
+	// The first output opens the interval in flight (observation.go's
+	// openObservationLocked), which is what a completion can park on.
+	m.shown = true
 	if m.rules.on(ruleIngestIsBounded) && len(b) > MaxIngestBytes {
 		// One call carries at most the ingest bound, and a larger one is
 		// REFUSED rather than truncated: nothing is ingested, no work is
@@ -1038,6 +1049,7 @@ func (m *model) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if m.avail != AvailabilityAvailable || at != m.inc {
 		return
 	}
+	m.settlePending(nonce)
 	if !m.rules.on(ruleMeetingsAreIndependent) {
 		// The defect, stated as code: ONE slot, so a second command's
 		// completion overwrites the first and the first's half is lost.
@@ -1065,15 +1077,24 @@ func (m *model) Completed(at Incarnation, nonce FenceNonce, _ int) {
 		}
 		return
 	}
-	m.admitRendezvous(&rendezvousEntry{Rendezvous: Rendezvous{
+	if !m.admitRendezvous(&rendezvousEntry{Rendezvous: Rendezvous{
 		State: RendezvousAwaitingSighting, Nonce: nonce, At: at,
-	}}, true)
+	}}, true) {
+		return
+	}
+	// The interval in flight is PARKED on this completion: the screen is never
+	// read at a completion, so the seal waits for the fence's sighting, which
+	// arrives in the ordered stream (observation.go).
+	if m.shown {
+		m.parked = nonce
+	}
 }
 
 func (m *model) SightFence(nonce FenceNonce, source []byte) error {
 	if err := m.live(); err != nil {
 		return err
 	}
+	m.settlePending(nonce)
 	if !m.rules.on(ruleMeetingsAreIndependent) {
 		// The defect, stated as code: ONE slot, so a fence sighted while
 		// another meeting waits overwrites it.
@@ -1099,6 +1120,11 @@ func (m *model) SightFence(nonce FenceNonce, source []byte) error {
 			e.SightedAt = m.rev
 			e.PinnedSource = append([]byte(nil), source...)
 			m.rendezvousLatest, m.hasLatest = nonce, true
+			// The join IS the parked interval's seal: it consumes the park
+			// (observation.go seals the interval here and opens the next).
+			if m.parked == nonce {
+				m.parked = FenceNonce{}
+			}
 			m.tick()
 			return nil
 		case RendezvousAwaitingAuthenticated:
@@ -1140,6 +1166,34 @@ func (m *model) parkedSighting(nonce FenceNonce, source []byte) *rendezvousEntry
 	return e
 }
 
+// settlePending is the EVENT settle the real runtime drives (nocx-2v80t.3.9):
+// the interval parked waiting for its own fence is closed when the next event
+// that names a later interval arrives — a completion or a fence for a
+// DIFFERENT nonce — and by the session's end. Nothing arms a wait and nothing
+// reads a duration: no timer exists in the rendezvous at all, and the state
+// that replaces it is this transition.
+//
+// It is the INTERVAL's event, exactly as the runtime's is: with no interval in
+// flight (the session has taken in no output, so no interval ever opened) a
+// completion parks nothing, and no later event settles it — its own sighting
+// is still the join that closes it.
+func (m *model) settlePending(arriving FenceNonce) {
+	if !m.rules.on(ruleMeetingsAreIndependent) {
+		return
+	}
+	if m.parked == (FenceNonce{}) || m.parked == arriving {
+		// Nothing is parked, or the arriving event IS the parked interval's
+		// own join — which the caller goes on to take.
+		return
+	}
+	e := m.rendezvous[m.parked]
+	m.parked = FenceNonce{}
+	if e == nil || !e.pending() {
+		return
+	}
+	_ = m.expire(e)
+}
+
 func (m *model) ExpireRendezvous(nonce FenceNonce) error {
 	if err := m.live(); err != nil {
 		return err
@@ -1169,6 +1223,11 @@ func (m *model) expire(e *rendezvousEntry) error {
 	awaitingSighting := e.State == RendezvousAwaitingSighting
 	e.State = RendezvousExpired
 	e.PinnedSource = nil
+	// Settling the meeting the interval is parked on IS the parked record's
+	// seal (observation.go), so the park goes with it.
+	if m.parked == e.Nonce {
+		m.parked = FenceNonce{}
+	}
 	if (!m.rules.on(ruleOnlyAuthenticExpiryDegrades) || awaitingSighting) &&
 		m.completeness == CompletenessComplete {
 		m.completeness = CompletenessNoFence
@@ -1662,6 +1721,10 @@ func (m *model) resendState() error {
 // --- failure and observation -----------------------------------------------
 
 func (m *model) Fail(string) error {
+	// The session's end is the last event there is, so it settles the meeting
+	// a completion left waiting for its fence (nocx-2v80t.3.9) — before the
+	// refusal below, so a second Fail is not the reason it is left unjoined.
+	m.settlePending(FenceNonce{})
 	if m.avail == AvailabilityUnavailable {
 		return ErrUnavailable
 	}

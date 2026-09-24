@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/emulator/ghostty"
@@ -147,11 +146,12 @@ func cellGeometry(cols, rows, xpixel, ypixel uint16) sessionruntime.Geometry {
 // byte — and it is the reason the runtime is created HERE rather than lazily
 // on the first attach, where a program's question asked before anybody
 // attached would have been answered by nobody.
-// expireIn and expireAfter are the bounded missing-fence wait the runtime's
-// rendezvous runs under (design §6.4) — the service's Options threading,
-// handed down so the policy is stated at the composition root and a test's
-// trigger is the one the session actually arms.
-func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows, xpixel, ypixel uint16, expireIn time.Duration, expireAfter func(d time.Duration, f func()) (stop func() bool)) (*sessionruntime.Session, emulator.Terminal, error) {
+//
+// The runtime is built with no missing-fence policy to state: the rendezvous
+// arms no wait at all (nocx-2v80t.3.9). A meeting left with one half missing
+// is settled by an EVENT, inside the runtime — the next interval's start or
+// the session's end — so the composition root has nothing to inject here.
+func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows, xpixel, ypixel uint16) (*sessionruntime.Session, emulator.Terminal, error) {
 	g := cellGeometry(cols, rows, xpixel, ypixel)
 	screen, err := newScreen(g)
 	if err != nil {
@@ -165,12 +165,10 @@ func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, r
 			Session:    sessionruntime.SessionID(id),
 			Generation: 1,
 		},
-		Geometry:         g,
-		Terminal:         ptyTerminal{proc: proc},
-		Emulator:         screen,
-		Completeness:     sessionruntime.CompletenessComplete,
-		RendezvousExpiry: expireIn,
-		ExpireAfter:      expireAfter,
+		Geometry:     g,
+		Terminal:     ptyTerminal{proc: proc},
+		Emulator:     screen,
+		Completeness: sessionruntime.CompletenessComplete,
 	})
 	if err != nil {
 		// The screen was built and the runtime refused it, so the screen is

@@ -55,6 +55,13 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
+			name: "scheduleTheNextIntervalSettlesTheUnjoinedHalf",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleTheNextIntervalSettlesTheUnjoinedHalf(s)
+			},
+		},
+		{
 			name: "scheduleFenceSightedFirst",
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)

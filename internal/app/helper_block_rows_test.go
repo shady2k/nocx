@@ -108,15 +108,18 @@ func rowsN(n int) []emulator.Row { return make([]emulator.Row, n) }
 // the transport, and the marks that pile up meanwhile collapse to the
 // newest one — the mark is a watermark, so the highest is all of them.
 func TestTheRowsReadLoopNeverWaitsOnAConfirmation(t *testing.T) {
-	sink := &fakeSink{answer: func(from uint64, n int) (uint64, bool) { return from + uint64(n) - 1, true }} //nolint:gosec // a test's row count, never negative
+	// The exclusive mark: the helper's UpToRow is one past the last row it
+	// may believe written (proto.ConfirmRowsParams), so ten rows from 0 are
+	// confirmed through 10, never through 9.
+	sink := &fakeSink{answer: func(from uint64, n int) (uint64, bool) { return from + uint64(n), true }} //nolint:gosec // a test's row count, never negative
 	src := &fakeSource{}
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
 	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
 	defer stop()
 
 	src.deliverRows(client.OutputRows{FromRow: 0, Rows: rowsN(10)})
-	if got := <-conf.asked; got != 9 {
-		t.Fatalf("first confirmation asked for %d, want 9", got)
+	if got := <-conf.asked; got != 10 {
+		t.Fatalf("first confirmation asked for %d, want 10", got)
 	}
 	// The first confirmation is now held open by the helper. Three more
 	// deliveries arrive on the read loop; none of them may block.
@@ -131,8 +134,8 @@ func TestTheRowsReadLoopNeverWaitsOnAConfirmation(t *testing.T) {
 	}
 
 	close(conf.release)
-	if got := <-conf.asked; got != 24 {
-		t.Fatalf("after the held confirmation, the next one asked for %d, want the newest mark 24 (5, 19 and 24 collapse)", got)
+	if got := <-conf.asked; got != 25 {
+		t.Fatalf("after the held confirmation, the next one asked for %d, want the newest mark 25 (5, 20 and 25 collapse)", got)
 	}
 }
 

@@ -33,6 +33,15 @@ func obsSession(t *testing.T, g Geometry) *Session {
 		t.Fatalf("build the real emulator: %v", err)
 	}
 	t.Cleanup(screen.Close)
+	return obsSessionOver(t, g, screen)
+}
+
+// obsSessionOver is obsSession with the screen left to the caller: a schedule
+// that must SEE a departure report which cannot be read hands in the real
+// adapter wrapped in the harness instrument that strikes one, while obsSession
+// itself stays the plain shape the rest of the suite uses.
+func obsSessionOver(t *testing.T, g Geometry, screen emulator.Terminal) *Session {
+	t.Helper()
 	s, err := New(Config{
 		Incarnation:  Incarnation{Session: "observation", Generation: 1},
 		Geometry:     g,
@@ -52,11 +61,20 @@ func obsSession(t *testing.T, g Geometry) *Session {
 func obsSeal(t *testing.T, s *Session, nonce FenceNonce) {
 	t.Helper()
 	s.Completed(s.Incarnation(), nonce, 0)
-	if err := s.SightFence(nonce, []byte("fence-source")); err != nil {
-		t.Fatalf("sight the fence that joins the boundary: %v", err)
-	}
+	s.SightFenceBoundary(t, nonce)
 	if got := s.RendezvousFor(nonce).State; got != RendezvousComplete {
 		t.Fatalf("the boundary reads %s, want complete", rendezvousStateName(got))
+	}
+}
+
+// SightFenceBoundary is one fence sighting, the test's spelling of the join.
+// The completion may park the interval (the screen is never read at the
+// completion); the sighting is what carries the boundary and seals it, so
+// every harness caller lands both halves.
+func (s *Session) SightFenceBoundary(t *testing.T, nonce FenceNonce) {
+	t.Helper()
+	if err := s.SightFence(nonce, []byte("fence-source")); err != nil {
+		t.Fatalf("sight the fence that joins the boundary: %v", err)
 	}
 }
 
@@ -82,33 +100,46 @@ func obsNonce(k byte) FenceNonce {
 }
 
 // ---------------------------------------------------------------------------
-// Cause one: the emulator's OWN retention pruned rows during a feed. The
-// rows that left in that feed cannot be read; the record carries the loss
-// as feeds struck and the bytes those feeds carried, and its completeness
-// degrades to Evicted — never presented as the whole of the output.
+// Cause one: a feed whose departures could not be READ. The rows that left in
+// that feed are unread; the record carries the loss as feeds struck and the
+// bytes those feeds carried, and its completeness degrades to Evicted — never
+// presented as the whole of the output.
+//
+// The strike is scripted (harnessEmulator.StrikeNextDepartures) rather than
+// provoked by exhausting the library's retention: the adapter now clears both
+// budgets where the terminal is built, because inheriting the library's turned
+// a whole command's output into nothing at all (nocx-2v80t.3.9). What this
+// test judges is the RUNTIME's answer to a report that could not be read, and
+// a premise that depends on a library default stops testing that the moment
+// the default changes.
 // ---------------------------------------------------------------------------
 
-func TestRetentionPruningMidIntervalIsACountedNamedLoss(t *testing.T) {
-	s := obsSession(t, harnessGeometry(80, 24))
-
-	// Deep enough into scrollback the library prunes whole pages inside a
-	// feed (the emulator's own boundary test measures the flag firing well
-	// inside sixty thousand rows at this pin). Feed numbered chunks until
-	// the flag fires, then once more so a whole interval is behind it.
-	flagged := 0
-	for chunk := range 60 {
-		obsFeed(t, s, chunk*1000, 1000)
-		if s.observation != nil && s.observation.Loss.RetentionFeeds > 0 {
-			flagged++
-			break
-		}
+func TestAStruckDepartureReportIsACountedNamedLoss(t *testing.T) {
+	screen, err := ghostty.New(harnessGeometry(80, 24))
+	if err != nil {
+		t.Fatalf("build the real emulator: %v", err)
 	}
-	if flagged == 0 {
-		t.Fatal("sixty thousand lines never struck the emulator's retention: the premise is broken at this pin")
+	t.Cleanup(screen.Close)
+	emu := &harnessEmulator{Terminal: screen}
+	s := obsSessionOver(t, harnessGeometry(80, 24), emu)
+
+	// An ordinary feed, then a report the emulator cannot read, then the feed
+	// that follows it: the loss is inside the interval, and the interval is a
+	// whole one.
+	obsFeed(t, s, 0, 100)
+	emu.StrikeNextDepartures(errHarnessStrike)
+	obsFeed(t, s, 100, 100)
+	obsFeed(t, s, 200, 100)
+
+	if s.observation == nil {
+		t.Fatal("the interval in flight has no record")
+	}
+	if got := s.observation.Loss.RetentionFeeds; got != 1 {
+		t.Fatalf("the open record counts %d struck feeds, want the one report that could not be read", got)
 	}
 	retentionBytes := s.observation.Loss.RetentionFeedBytes
 	if retentionBytes == 0 {
-		t.Fatal("a retention hole names no feed bytes: the loss is not countable")
+		t.Fatal("a struck feed names no feed bytes: the loss is not countable")
 	}
 
 	obsSeal(t, s, obsNonce(1))
@@ -117,13 +148,13 @@ func TestRetentionPruningMidIntervalIsACountedNamedLoss(t *testing.T) {
 		t.Fatal("the interval sealed no record")
 	}
 	if rec.Loss.RetentionFeeds == 0 {
-		t.Fatal("the sealed record dropped the retention loss")
+		t.Fatal("the sealed record dropped the loss")
 	}
 	if rec.Loss.RetentionFeedBytes != retentionBytes {
 		t.Fatalf("the sealed record counts %d feed bytes, want the %d drained in flight", rec.Loss.RetentionFeedBytes, retentionBytes)
 	}
 	if rec.Completeness != CompletenessEvicted {
-		t.Fatalf("a record the emulator pruned mid-interval reads back %v, want evicted", rec.Completeness)
+		t.Fatalf("a record whose feed could not be read reads back %v, want evicted", rec.Completeness)
 	}
 }
 

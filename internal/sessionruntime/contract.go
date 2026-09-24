@@ -277,12 +277,16 @@ const (
 	RendezvousAwaitingAuthenticated
 	// RendezvousComplete means both halves arrived and their nonces matched.
 	RendezvousComplete
-	// RendezvousExpired means the bounded wait elapsed with one half missing.
-	// It is an outcome with a name, not a silent fall-through. It forces
-	// CompletenessNoFence only when the AUTHENTICATED half was the one left
-	// waiting (ADR-0024 decision 1): a fence sighted with nothing
-	// authenticated behind it authorised nothing, so its expiry may revoke
-	// nothing either — completeness and write authority are untouched.
+	// RendezvousExpired means the meeting was SETTLED with one half missing:
+	// the event that settles an interval whose fence's sighting never arrived
+	// (the next interval's start, the session's end, or the contract's own
+	// call) or a settling call. It is an outcome with a name, not a silent
+	// fall-through, and there is no timer behind it: no wait is ever armed
+	// (nocx-2v80t.3.9). It forces CompletenessNoFence only when the
+	// AUTHENTICATED half was the one left waiting (ADR-0024 decision 1): a
+	// fence sighted with nothing authenticated behind it authorised nothing,
+	// so its settle may revoke nothing either — completeness and write
+	// authority are untouched.
 	RendezvousExpired
 )
 
@@ -340,11 +344,12 @@ const (
 	// emulator fed only the surviving suffix is not authoritative.
 	CompletenessLostIngest
 	// CompletenessNoFence means ingest was whole but an AUTHENTICATED
-	// completion's fence never arrived — its bounded wait elapsed — so the
-	// interval has no authenticated boundary. The body may still be worth
-	// keeping; it may not be described as the command's complete output. A
-	// fence sighted with nothing authenticated behind it can never cause
-	// this: it authorises nothing, so its expiry degrades nothing.
+	// completion's fence never arrived — its interval was settled with the
+	// boundary unmet — so the interval has no authenticated boundary. The
+	// body may still be worth keeping; it may not be described as the
+	// command's complete output. A fence sighted with nothing authenticated
+	// behind it can never cause this: it authorises nothing, so its settle
+	// degrades nothing.
 	CompletenessNoFence
 	// CompletenessEvicted means retention deliberately kept less than the
 	// whole. It is a DIFFERENT available artifact, never an empty body and
@@ -875,11 +880,13 @@ type Runtime interface {
 	// SightFence reports that the emulator drew a fence, and pins the content
 	// it was drawn over.
 	SightFence(nonce FenceNonce, source []byte) error
-	// ExpireRendezvous is the bounded wait elapsing for ONE meeting, named by
-	// nonce. It is a call rather than a timer so the contract can exercise it
-	// without depending on duration: a test may not depend on timing
-	// (AGENTS.md). A nonce with no pending meeting answers [ErrNoRendezvous]
-	// and changes nothing.
+	// ExpireRendezvous SETTLES one meeting, named by nonce, that still has a
+	// half missing — the deterministic way a schedule closes a meeting no
+	// event closed. It is a call and not a timer, so the contract exercises
+	// it without depending on duration: a test may not depend on timing
+	// (AGENTS.md), and no wait exists to elapse (nocx-2v80t.3.9). A nonce
+	// with no pending meeting answers [ErrNoRendezvous] and changes
+	// nothing.
 	ExpireRendezvous(nonce FenceNonce) error
 	// Rendezvous answers the meeting most recently touched — created, joined
 	// or expired — and the zero Rendezvous (idle) only when nothing is

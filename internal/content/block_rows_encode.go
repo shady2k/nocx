@@ -18,8 +18,11 @@ package content
 // same bytes. Two encoders, one contract, zero drift that a test cannot see.
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 
 	"github.com/shady2k/nocx/internal/emulator"
 )
@@ -101,6 +104,73 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 		return nil, fmt.Errorf("content: block rows: marshal row %d: %w", from, err)
 	}
 	return append(raw, '\n'), nil
+}
+
+// BlockRowsText turns a stored rows artifact into the plain text a block
+// reader needs. Styles are intentionally ignored; spacer cells are geometry,
+// not characters, and continuation rows belong to the logical line above.
+func BlockRowsText(chunks [][]byte) (string, error) {
+	var body bytes.Buffer
+	for _, chunk := range chunks {
+		_, _ = body.Write(chunk)
+	}
+
+	var lines []string
+	decoder := json.NewDecoder(&body)
+	for {
+		var line struct {
+			Row struct {
+				Cells        [][3]json.RawMessage `json:"cells"`
+				Continuation bool                 `json:"continuation"`
+			} `json:"row"`
+		}
+		if err := decoder.Decode(&line); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return "", fmt.Errorf("content: block rows: decode stored line: %w", err)
+		}
+		var text bytes.Buffer
+		for i, cell := range line.Row.Cells {
+			if len(cell) != 3 {
+				return "", fmt.Errorf("content: block rows: line cell %d has %d fields, want 3", i, len(cell))
+			}
+			var width int
+			if err := json.Unmarshal(cell[1], &width); err != nil {
+				return "", fmt.Errorf("content: block rows: line cell %d width: %w", i, err)
+			}
+			if width == int(emulator.WidthSpacerTail) || width == int(emulator.WidthSpacerHead) {
+				continue
+			}
+			var hasText bool
+			if err := json.Unmarshal(cell[2], &hasText); err != nil {
+				return "", fmt.Errorf("content: block rows: line cell %d hasText: %w", i, err)
+			}
+			if !hasText {
+				text.WriteByte(' ')
+				continue
+			}
+			var grapheme string
+			if err := json.Unmarshal(cell[0], &grapheme); err != nil {
+				return "", fmt.Errorf("content: block rows: line cell %d grapheme: %w", i, err)
+			}
+			text.WriteString(grapheme)
+		}
+		rowText := string(bytes.TrimRight(text.Bytes(), " "))
+		if line.Row.Continuation && len(lines) > 0 {
+			lines[len(lines)-1] += rowText
+		} else {
+			lines = append(lines, rowText)
+		}
+	}
+	var out bytes.Buffer
+	for i, line := range lines {
+		if i > 0 {
+			out.WriteByte('\n')
+		}
+		out.WriteString(line)
+	}
+	return out.String(), nil
 }
 
 func trimStoredTrailingCells(cells []emulator.Cell) []emulator.Cell {

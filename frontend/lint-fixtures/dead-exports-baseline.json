@@ -64,11 +64,6 @@
       "symbol": ""
     },
     {
-      "kind": "files",
-      "file": "src/generated/ledger.capture.ts",
-      "symbol": ""
-    },
-    {
       "kind": "types",
       "file": "src/generated/fs.complete.ts",
       "symbol": "FsEntry"

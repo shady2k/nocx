@@ -1135,14 +1135,14 @@ func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, bo
 	return err
 }
 
-// CaptureOutput records one body of a frozen block (nocx-2f0f, design §4):
-// the artifact if it is not there yet, then the chunk at its seq, in ONE
-// transaction against the entry's own execution.
+// CaptureOutput records one assistant/tool-result body (nocx-2f0f's
+// transactional storage path): the artifact if it is not there yet, then the
+// chunk at its sequence, in ONE transaction against the entry's execution.
 //
 // The two refusals-that-are-not-errors are decided before the transaction
 // opens, so nothing is written for a body nobody wants: output retention off
 // is the user's setting, and a sensitive entry is the store's own rule about
-// what a command's text says about its output.
+// what a result says about its output.
 func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error) {
 	if in.EntryID == "" || in.ArtifactID == "" {
 		return false, errors.New("content: capture: entry id and artifact id are required")

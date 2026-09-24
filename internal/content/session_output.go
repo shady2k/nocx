@@ -4,14 +4,14 @@ package content
 // session produced, written by the BACKEND on its own read path rather than
 // by the renderer at freeze time.
 //
-// ── Why this exists, and why it is not ledger.capture ─────────────────────
+// ── Why this exists, and why it is not streamed block rows ──────────────────
 //
-// nocx-2f0f shipped output capture, and it captures in the RENDERER: the
-// terminal freezes a block, serialises its cells and sends them up as
-// artifacts. That path is correct for what it does and cannot do this one,
-// because a session with no client attached has no renderer to freeze
-// anything — and a session with no client attached is now the ordinary case
-// (nocx-22k1c: the coordinator outlives the window).
+// Streamed command blocks are produced by the helper's emulator and stored as
+// `application/x-nocx-rows` artifacts. This path is different: it records the
+// backend's raw session bytes even when no client is attached, so it has no
+// renderer grid or block boundary to consult. A session with no client
+// attached is now the ordinary case (nocx-22k1c: the coordinator outlives the
+// window).
 //
 // It was also a STALL and not merely a gap. The AD-9 replay ring blocks its
 // writer when it is full (transport/ring.go), deliberately, because AD-10

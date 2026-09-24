@@ -58,6 +58,10 @@ func (s *closeFailureBlockStore) CloseBlockRows(ctx context.Context, in content.
 	return s.ledger.CloseBlockRows(ctx, in)
 }
 
+func (s *closeFailureBlockStore) RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
+	return s.ledger.RecordClearBoundary(ctx, in)
+}
+
 func blockRowsBody(t *testing.T, db content.ContentDB, entryID string) string {
 	t.Helper()
 	row, err := db.Ledger().Entry(context.Background(), entryID)
@@ -808,6 +812,160 @@ func TestBlockGrewAndClosed_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("block.closed frame did not decode: %s", closedMsg)
 	}
 	validateJSON(t, loadSchema(t, "block.closed.schema.json"), closedFrame.Params, "block.closed params (real socket)")
+}
+
+// createSessionRow writes the durable `sessions` row a real hosted open
+// would already have written before any block ever runs on it
+// (session_open.go's recordHostedBinding / claimSpawn) — this lightweight
+// lifecycle test harness never hosts a real session, so a test that reaches
+// content.RecordClearBoundary's own FOREIGN KEY on sessions(id) has to write
+// it by hand, exactly as production's own open path would have.
+func createSessionRow(t *testing.T, db content.ContentDB, sid string) {
+	t.Helper()
+	if err := db.Ledger().CreateSession(context.Background(), content.Session{
+		ID: sid, WorkspaceID: "ws-lifecycle",
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+}
+
+// TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies (nocx-2v80t.3.17):
+// a real erase inside a command that is still running — almost always
+// `clear` itself — must never hide the very block reporting it. The running
+// command's own entry is named as keepEntryId, and the store's own
+// exclusion (content.RecordClearBoundary) is scoped so the same entry can
+// never be excluded either — this asserts the LIVE half, the notification
+// an attached client uses to remove every OTHER block right away.
+func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	// An earlier command, sealed — this is what the boundary must hide.
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	fence := lifecycleFence(0x51)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(before), 0, fence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	deadline := time.Now().Add(wantWithin)
+	if _, err := awaitFrame(e.conn, deadline, isNotification("block.closed")); err != nil {
+		t.Fatalf("the earlier command never closed: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+
+	// `clear` itself: still running when the erase is sighted inside it.
+	attempt := startsACommand(t, e, pub, lane, h, 5, "clear")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	deadline = time.Now().Add(wantWithin)
+	msg, err := awaitFrame(e.conn, deadline, isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID == nil || *params.KeepEntryID != attempt {
+		t.Fatalf("keepEntryId = %v, want the running command's own entry %q", params.KeepEntryID, attempt)
+	}
+
+	// The durable half: the earlier, sealed command is hidden from an
+	// ordinary pane read, but its record still exists — never deleted
+	// (nocx-zg3k3.10.3's owner decision) — and `clear`'s own still-running
+	// block is not hidden by its own report of the erase.
+	page, err := db.Ledger().QueryEntries(context.Background(), content.LedgerQuery{
+		Scope: content.ScopePane, PaneID: "01930000-0000-7000-8000-0000000000a1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	var ids []string
+	for _, e := range page.Entries {
+		ids = append(ids, e.ID)
+	}
+	for _, id := range ids {
+		if id == before {
+			t.Fatalf("the sealed command %q is still shown after the clear boundary: %v", before, ids)
+		}
+	}
+	found := false
+	for _, id := range ids {
+		if id == attempt {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the still-running command %q was hidden by its own report of the clear: %v", attempt, ids)
+	}
+	if _, err := db.Ledger().Entry(context.Background(), before); err != nil {
+		t.Fatalf("the hidden entry is no longer readable by id — it must never be deleted: %v", err)
+	}
+}
+
+// TestBlockClearBoundary_NoOpenBlockKeepsNothing: an erase sighted with no
+// interval open (a plain scrollback, or between commands) names no entry to
+// keep — every block the client currently shows is removed.
+func TestBlockClearBoundary_NoOpenBlockKeepsNothing(t *testing.T) {
+	e, _, _, _, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	deadline := time.Now().Add(wantWithin)
+	msg, err := awaitFrame(e.conn, deadline, isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID != nil {
+		t.Fatalf("keepEntryId = %q, want null: nothing was open", *params.KeepEntryID)
+	}
+}
+
+// TestBlockCleared_OverTheWireConformsToContract validates the REAL result
+// off the real socket (AGENTS.md rule 5's third check), rather than a
+// payload the test built.
+func TestBlockCleared_OverTheWireConformsToContract(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+	startsACommand(t, e, pub, lane, h, 2, "clear")
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	deadline := time.Now().Add(wantWithin)
+	msg, err := awaitFrame(e.conn, deadline, isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	validateJSON(t, loadSchema(t, "block.cleared.schema.json"), frame.Params, "block.cleared params (real socket)")
 }
 
 // THE END, end marker first — the order ADR-0024 decision 7 says is real.

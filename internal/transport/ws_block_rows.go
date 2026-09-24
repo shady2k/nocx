@@ -55,6 +55,10 @@ type blockOutputStore interface {
 	OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error)
 	AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error
 	CloseBlockRows(ctx context.Context, in content.CloseBlockRows) (content.BlockRowsSummary, error)
+	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
+	// a read applies rather than a mark on every entry it hides
+	// (nocx-2v80t.3.17).
+	RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error)
 }
 
 // maxPendingEnds bounds the interval ends parked while their completion is
@@ -550,6 +554,45 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 		return
 	}
 	s.closeBlockRows(sid, attempt, endRow, closing, hexNonce)
+}
+
+// blockClearedParams is block.cleared's payload — see contracts/block.cleared.schema.json.
+type blockClearedParams struct {
+	// KeepEntryID is the block whose interval the erase happened inside —
+	// the command still running, which must never be hidden by its own
+	// report of the clear. Null when no interval was open at the sighting:
+	// every block the client currently shows is removed.
+	KeepEntryID *string `json:"keepEntryId"`
+}
+
+// BlockClearBoundary delivers one sighted erase-saved-lines
+// (nocx-2v80t.3.17): the store records the cursor an ordinary read applies —
+// the record itself is never touched (nocx-zg3k3.10.3's decision) — and the
+// attached client is told to remove every block it currently shows except
+// the one whose interval the erase happened inside, if one is open. Without
+// a store, or without a block to bound, the client is still told: the LIVE
+// removal is not conditioned on the durable half succeeding, because a user
+// who just watched their screen clear must not go on looking at blocks the
+// product itself just erased.
+func (s *WSServer) BlockClearBoundary(sid session.ID) {
+	if store := s.blockStore(); store != nil {
+		// Owner: this stream, inside the helper's clear-boundary callback.
+		// Closing event: the one store write below, nothing held past it —
+		// the same shape BlockRowsArrived's own AppendBlockRows call has.
+		if _, err := store.RecordClearBoundary(context.Background(),
+			content.RecordClearBoundary{SessionID: string(sid)}); err != nil {
+			s.log.Warn("clear boundary not recorded", "session", sid, "error", err)
+		}
+	}
+	bs := s.blockStream
+	bs.mu.Lock()
+	var keepEntryID *string
+	if block := bs.current[sid]; block != nil && block.entry != "" {
+		id := block.entry
+		keepEntryID = &id
+	}
+	bs.mu.Unlock()
+	s.notifyBlockSubscriber(sid, "block.cleared", blockClearedParams{KeepEntryID: keepEntryID})
 }
 
 // closeBlockRows appends the closing rows and seals the block an interval

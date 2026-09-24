@@ -1346,6 +1346,16 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
+  /** The most recently started rows fetch per entry, keyed by attempt id —
+   *  what a block.grew/block.closed notification only STARTS
+   *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
+   *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
+   *  than starting a second fetch for the same entry when one is already
+   *  running — a notification that arrived before the fence did — and
+   *  starts its own (also tracked here) when nothing was; either way the
+   *  run tool's completion waits on the SAME fetch this map would otherwise
+   *  let a second caller duplicate (nocx-2v80t.3.19). */
+  private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -4361,6 +4371,7 @@ export class TerminalContent extends BasePaneContent {
     ++this._bindGeneration
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
+    this._blockRowsInFlight.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4449,12 +4460,7 @@ export class TerminalContent extends BasePaneContent {
       if (typeof params !== 'object' || params === null) return
       if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
         return
-      const entryId = params.entryId
-      void blockRowsForEntry(this.client, entryId).then((rows) => {
-        if (rows !== null && !this._disposed) {
-          this.scrollback?.blockManager.applyStoredRows(entryId, rows)
-        }
-      })
+      void this._refreshBlockRows(params.entryId)
     }
     this._blockRowsUnsubs.push(
       this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
@@ -7680,6 +7686,7 @@ export class TerminalContent extends BasePaneContent {
     this._disposed = true
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
+    this._blockRowsInFlight.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8264,6 +8271,56 @@ export class TerminalContent extends BasePaneContent {
     return promise
   }
 
+  /** Fetch one entry's stored rows, paint them, and follow the tail —
+   *  everything a block.grew/block.closed notification's delivery does.
+   *  Tracked in `_blockRowsInFlight` so a freeze landing while this is
+   *  still running can wait for it (`_ensureBlockRows`) instead of reading
+   *  `.cmd-output` before it has anything written into it. Cleared only if
+   *  nothing newer replaced the entry — block.grew and then block.closed
+   *  for the same entry each start their own fetch, and the closing one is
+   *  the one worth waiting for; never removing a newer entry's promise out
+   *  from under it. */
+  private _refreshBlockRows(entryId: string): Promise<void> {
+    const fetch = blockRowsForEntry(this.client, entryId).then((rows) => {
+      if (rows === null || this._disposed) return
+      const sb = this.scrollback
+      if (!sb) return
+      // The rows arrive asynchronously, well after the block that owns
+      // them has already been laid out — a running block's own live
+      // growth is followed inline (controller.ts's own height guard), but
+      // this delivery is a SEPARATE mutation the controller does not see
+      // on its own. Without settling around it, a block that grows once
+      // its stream lands pushes the viewport away from the tail a person
+      // was following, silently (nocx-2v80t.3.19).
+      sb.settleAround(() => {
+        sb.blockManager.applyStoredRows(entryId, rows)
+        sb.scrollToBottomIfFollowing()
+      })
+    })
+    this._blockRowsInFlight.set(entryId, fetch)
+    void fetch.finally(() => {
+      if (this._blockRowsInFlight.get(entryId) === fetch) this._blockRowsInFlight.delete(entryId)
+    })
+    return fetch
+  }
+
+  /** Guarantee this record's stored rows are being asked for, and answer
+   *  once the asking is done — successfully or not; `_refreshBlockRows`
+   *  itself decides what a failed or empty answer paints, if anything.
+   *  Resolves at once when the record already carries rows (the common
+   *  case: most output arrives, via block.grew, while the command is still
+   *  running, well before it freezes) or reuses a fetch a notification
+   *  already started. Starts its own only when neither is true — the fence
+   *  sighting that drives a freeze and the block.closed notification that
+   *  starts the closing fetch cross the same socket on different planes
+   *  (render bytes vs. control-plane JSON) with no ordering promised
+   *  between them (nocx-2v80t.3.19), so the notification cannot be trusted
+   *  to always arrive first. */
+  private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
+    if (rec.storedRows) return Promise.resolve()
+    return this._blockRowsInFlight.get(entryId) ?? this._refreshBlockRows(entryId)
+  }
+
   /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
    *  fixed in the DOM. Resolve the agent-run completion wait whose block
    *  this is — the same object the submission's beginBlock returned, so a
@@ -8291,47 +8348,67 @@ export class TerminalContent extends BasePaneContent {
     const waiter = this.agentRuns.get(rec)
     if (!waiter) return
     this.agentRuns.delete(rec)
-    const all = blockOutputText(rec.el)
-    const lines = all.split('\n')
-    let end = 0
-    let chars = 0
-    for (; end < lines.length; end++) {
-      const next = chars + lines[end].length + (end > 0 ? 1 : 0)
-      if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
-      chars = next
+    // `blockOutputText` reads `.cmd-output` AS IT STANDS RIGHT NOW, and at
+    // this exact instant it usually does not stand for anything yet: a
+    // block.grew/block.closed notification only STARTS the rows fetch
+    // (`_refreshBlockRows`'s `blockRowsForEntry`, two more RPC round trips),
+    // and that fetch races the visual freeze rather than preceding it — the
+    // render fence that drives the freeze is a local, data-plane read, while
+    // the notification and its fetch cross the control-plane socket, with no
+    // ordering promised between the two planes. Reading now, unconditionally,
+    // sent the run's real output to the model as empty text far more often
+    // than not (nocx-2v80t.3.19). `_ensureBlockRows` covers every ordering:
+    // rows already on the record (most output arrives well before a freeze),
+    // a fetch already in flight (the closing notification arrived first), or
+    // neither (the freeze arrived first, or an older test's fake dispatcher
+    // never sends the notification at all) — in which case it starts the
+    // fetch itself rather than trusting one that may never come, the same
+    // way `storedEntryId` below already waits, unbounded, for the history
+    // receipt.
+    const buildBody = (): Omit<AgentRunCompletion, 'entryId'> => {
+      const all = blockOutputText(rec.el)
+      const lines = all.split('\n')
+      let end = 0
+      let chars = 0
+      for (; end < lines.length; end++) {
+        const next = chars + lines[end].length + (end > 0 ? 1 : 0)
+        if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
+        chars = next
+      }
+      return {
+        exitCode: rec.exitCode,
+        // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
+        // own (run-command.ts): "the stopped fact is explicit renderer
+        // evidence and is never inferred from the exit code" is the SAME
+        // separation nocx-9bpeq.19 draws for the block header, the other
+        // direction — the model reads the raw exit-code truth (nonzero, so
+        // 'failure') plus `stopped` below, rather than one word standing in
+        // for both facts the way the header's `data-outcome` does.
+        status:
+          rec.status === 'running'
+            ? ('unknown' as const)
+            : rec.status === 'cancelled'
+              ? ('failure' as const)
+              : rec.status,
+        stopped: waiter.stopped,
+        total: lines.length,
+        start: 0,
+        end,
+        text: lines.slice(0, end).join('\n'),
+      }
     }
-    const body = {
-      exitCode: rec.exitCode,
-      // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
-      // own (run-command.ts): "the stopped fact is explicit renderer
-      // evidence and is never inferred from the exit code" is the SAME
-      // separation nocx-9bpeq.19 draws for the block header, the other
-      // direction — the model reads the raw exit-code truth (nonzero, so
-      // 'failure') plus `stopped` below, rather than one word standing in
-      // for both facts the way the header's `data-outcome` does.
-      status:
-        rec.status === 'running'
-          ? ('unknown' as const)
-          : rec.status === 'cancelled'
-            ? ('failure' as const)
-            : rec.status,
-      stopped: waiter.stopped,
-      total: lines.length,
-      start: 0,
-      end,
-      text: lines.slice(0, end).join('\n'),
-    }
+    const rowsReady = rec.attemptId ? this._ensureBlockRows(rec.attemptId, rec) : Promise.resolve()
     // A cancelled block completed exactly like any other — its backend
     // history.recorded receipt already ran — so it waits for the stored
     // entry the same way success/failure do; only 'entered'/'unknown' never
     // got one.
     if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
-      waiter.resolve({ entryId: '', ...body })
+      void rowsReady.then(() => waiter.resolve({ entryId: '', ...buildBody() }))
       return
     }
-    void this.storedEntryId(waiter.ledgerId).then((entryId) => {
-      waiter.resolve({ entryId, ...body })
+    void Promise.all([this.storedEntryId(waiter.ledgerId), rowsReady]).then(([entryId]) => {
+      waiter.resolve({ entryId, ...buildBody() })
     })
   }
 

@@ -4004,6 +4004,83 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+  it('follows the tail when a block.grew delivery grows a block after the scroller already settled (nocx-2v80t.3.19)', async () => {
+    // block.grew/block.closed only NAME the entry; the rows are a further
+    // fetch (ledger.get then ledger.artifact) that resolves well after the
+    // notification, on its own tick — a mutation the scrollback controller
+    // never sees on its own, unlike a running block's own live growth
+    // (controller.ts's inline height guard). Applying it without settling
+    // around it left a person who was following the tail behind once the
+    // fetch landed, silently.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf([['x', 1, true] as CellSpec]),
+        })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+
+      const scrollTo = vi.fn()
+      withScrollback.scrollback.scrollbackArea.scrollTo = scrollTo
+
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-1' })
+
+      // The fetch is two chained RPC round trips (ledger.get then
+      // ledger.artifact) before the paint and the follow — let them run.
+      await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    } finally {
+      teardown()
+    }
+  })
+
   it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
@@ -4407,6 +4484,105 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // resolved on the block's completion, never on a timer.
       expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it("fetches a frozen block's stored rows itself when it froze before any block.grew/closed notification named it, and reports the real output (nocx-2v80t.3.19)", async () => {
+    // The render fence that drives a freeze is a local, data-plane read; the
+    // block.grew/block.closed notification that would otherwise start the
+    // rows fetch crosses the control-plane socket, with no ordering promised
+    // between the two. This drives the freeze with NEITHER notification ever
+    // dispatched, so `_ensureBlockRows` has nothing to wait on and must start
+    // the fetch itself — the run tool's result is the one place this
+    // reaches: an unmarked `.cmd-output` still had `blockOutputText` fall
+    // back to an empty read, so the model saw no output at all far more
+    // often than not.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
+        })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const pending = content.submitAgentCommand('printf the-real-output')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'printf the-real-output',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'printf the-real-output',
+        captures: [],
+      })
+      // The fence — nothing else — settles the visual boundary; no
+      // block.grew or block.closed notification is ever dispatched here.
+      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      const run = await pending
+      expect(run.text).toBe('the real output')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

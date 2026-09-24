@@ -373,8 +373,18 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 				// The screen grew and took its new rows out of history: the
 				// depth shrank by what the refill pulled back, and each of
 				// those rows was reported when it first left. A refill can
-				// only return the rows the screen gained.
-				base.owed += min(before-after, grew)
+				// only return the rows the screen gained — and only rows the
+				// consumer has ALREADY BEEN HANDED may be owed. A row the
+				// refill pulled back that is still in the pending report has
+				// not been reported at all yet, so charging a debt for it
+				// cancels a departure nobody received, and the debt then eats
+				// the NEXT interval's own rows: the frozen departure count
+				// that hands one command's rows to the next block
+				// (nocx-2v80t.3.9). The pending report holds the newest
+				// departures, and the refill takes the newest history rows,
+				// so the overlap is the smaller of the two.
+				pulled := min(before-after, grew)
+				base.owed += pulled - min(pulled, len(t.departed))
 			case grew < 0 && after > before:
 				// The screen shrank and reflowed its top rows INTO history:
 				// they are not on the screen any more, so none of them can

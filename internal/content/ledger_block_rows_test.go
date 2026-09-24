@@ -127,6 +127,46 @@ const (
 	keptArtifact2 = "00000000-0000-7000-8000-00000000b002"
 )
 
+func TestBlockRowsText_ReadsStyledWideRows(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "printf 'A中\\nnext'")
+	if opened, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{
+		EntryID: entryID, ArtifactID: keptArtifact,
+	}); err != nil || opened != keptArtifact {
+		t.Fatalf("OpenBlockOutput = %q, err %v; want %q", opened, err, keptArtifact)
+	}
+	style := emulator.Style{Attributes: emulator.AttrBold}
+	rows := []emulator.Row{{
+		Cells: []emulator.Cell{
+			{Grapheme: "A", Width: emulator.WidthNarrow, HasText: true, Style: style},
+			{Grapheme: "中", Width: emulator.WidthWide, HasText: true, Style: style},
+			{Width: emulator.WidthSpacerTail, Style: style},
+		},
+	}, aTextRow("next"), aTextRow("")}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 0, Rows: rows,
+	}); err != nil {
+		t.Fatalf("AppendBlockRows: %v", err)
+	}
+	if _, err := led.CloseBlockRows(ctx, content.CloseBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact,
+	}); err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	artifact := blockRowsArtifactOf(t, led, entryID)
+	if artifact == nil {
+		t.Fatal("block rows artifact missing")
+	}
+	got, err := content.BlockRowsText(artifact.Chunks)
+	if err != nil {
+		t.Fatalf("BlockRowsText: %v", err)
+	}
+	if got != "A中\nnext\n" {
+		t.Fatalf("BlockRowsText = %q, want %q", got, "A中\nnext\n")
+	}
+}
+
 // THE GATE, rule by rule. Each refusal leaves no artifact of any kind on the
 // entry, and each is paired with an ordinary command whose block opens.
 func TestOpenBlockOutput_DecidesAtTheStart(t *testing.T) {

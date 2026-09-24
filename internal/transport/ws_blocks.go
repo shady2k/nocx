@@ -6,8 +6,8 @@ package transport
 // authoritative ledger, disposable projections) — rather than from the
 // renderer, and internal/assistant/blocks.go carries the whole argument for
 // that choice. There is no wire method here and no renderer round trip: the
-// renderer already wrote every one of these rows (history.record for the
-// entry, ledger.capture for the body), and this reads them back.
+// renderer streams every finished block's rows into the ledger, and this
+// reads them back.
 //
 // WHAT IS SCOPED, AND WHERE. The run's grant names a SESSION, and a block is
 // anchored to a PANE — entries.session_id is deliberately NULL for a command
@@ -185,26 +185,17 @@ type blockBodyResult struct {
 	truncated string
 }
 
-// blockBody reads one block's plain body. Two artifacts hang on a frozen
-// block — the SGR body a restore draws, and the plain body derived from it,
-// which is what search, copy and this read use (capture-client.ts) — so this
-// takes the derived one and never re-derives text from the escape sequences.
-// No such artifact is not a failure: history off, output retention off or a
-// sensitive command all end here, and the tools state it as an absence
-// rather than as an empty output.
-//
-// The shape of the read — entry, then its execution's artifacts, then the
-// artifact's chunks — is the one capability.agentService.FrameText already
-// uses: the recall read never hauls bytes, so the body is a second,
-// deliberate fetch.
+// blockBody reads one block's plain body. A command's streamed rows artifact
+// is the durable source for its printed text; this reader ignores styles and
+// turns the stored cell vocabulary into logical lines. Missing an artifact is
+// not a failure: history off, output retention off or a sensitive command all
+// end here, and the tools state it as an absence rather than as empty output.
 //
 // A TURN takes the second path, and it is not a special case so much as the
 // same read one level down: since ADR-0040 an assistant turn owns no body of
 // its own — its answer is the `text` children the run wrote, one per run of
 // prose — so a block that kept nothing on its own attempts is asked for its
-// prose before it is reported as a block that kept nothing at all. Without
-// this, `blocks.read` of an earlier answer would say the assistant had
-// printed nothing, which is a sentence about a turn that plainly did.
+// prose before it is reported as a block that kept nothing at all.
 func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepository, entryID string) (blockBodyResult, error) {
 	entry, err := ledger.Entry(ctx, entryID)
 	if err != nil {
@@ -215,7 +206,7 @@ func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepositor
 	}
 	for _, ex := range entry.Executions {
 		for _, a := range ex.Artifacts {
-			if a.MediaType != content.MediaText {
+			if a.MediaType != content.MediaBlockRows {
 				continue
 			}
 			art, artErr := ledger.Artifact(ctx, a.ID)
@@ -228,11 +219,11 @@ func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepositor
 				// §7) rather than as an empty output.
 				continue
 			}
-			var sb strings.Builder
-			for _, c := range art.Chunks {
-				sb.Write(c)
+			text, textErr := content.BlockRowsText(art.Chunks)
+			if textErr != nil {
+				return blockBodyResult{}, textErr
 			}
-			out := blockBodyResult{text: sb.String(), kept: true}
+			out := blockBodyResult{text: text, kept: true}
 			if a.Truncated != nil {
 				out.truncated = string(*a.Truncated)
 			}

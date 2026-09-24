@@ -18,8 +18,9 @@ package content
 // `host` field is what finally asks a resolved environment row for its host —
 // so Environment.Host has a renderer. history.record drives RecordCompleted
 // (nocx-rtg0.19), which is where a finished command lands now, under the
-// author the renderer minted (nocx-iadtt); ledger.capture drives
-// CaptureOutput.
+// author the renderer minted (nocx-iadtt). Streamed command output uses
+// OpenBlockOutput and MediaBlockRows; CaptureOutput remains the shared
+// transactional body path for assistant/tool results.
 //
 // WHAT IS STILL TEST-REACHABLE ONLY: DeleteSession, ListEntries, DeleteEntry,
 // AppendArtifact, AddEdge and RunState. CreateSession is wired by the shipped
@@ -1176,16 +1177,15 @@ var (
 // accident.
 const MaxArtifactBytes = 1 << 20
 
-// CaptureOutput is one body of a frozen block arriving from the renderer
-// (nocx-2f0f, design §4). It is the only write path for what a shell command
-// printed, and it is deliberately not AppendArtifact followed by AppendChunk
-// at the caller: the two have to land in one transaction, and the execution
-// the artifact hangs on is resolved HERE — the renderer knows the entry it
-// recorded and has never seen an execution id, which is a backend integer.
+// CaptureOutput stores one transactional body for an assistant/tool result.
+// It remains separate from streamed command rows because those rows are
+// opened at command start and keep the backend's cell vocabulary. This path
+// still resolves the execution attached to the entry here: callers know the
+// entry but have never seen the backend execution id.
 //
-// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a capture whose
-// ack was lost is retried: the same id and seq is a replay that writes
-// nothing, and the same id asking for a different artifact is ErrIDConflict.
+// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a retry after a
+// lost acknowledgement is idempotent on the same id and sequence, while the
+// same id naming another artifact is ErrIDConflict.
 type CaptureOutput struct {
 	// EntryID is the row the body belongs to — what history.record answered
 	// with.
@@ -1227,14 +1227,11 @@ const MediaBlockRows MediaType = "application/x-nocx-rows"
 // OpenBlockOutput opens the block a streamed command writes into, at the
 // command's authenticated start — BEFORE any row exists, because the whole
 // point is that a command whose output may not be kept never has a first
-// chunk to refuse. The three rules CaptureOutput applies at capture time
-// answer here, once per command: output retention off, a sensitive entry
-// and a critical environment all return ("", nil) and NOTHING is written —
-// not an empty artifact, not a first chunk. An ordinary command's artifact
-// row is created open, and its id is the caller's own: untrusted, the same
-// idempotency key CaptureOutput takes, so a replayed open finds the block
-// it already wrote and the same id naming a different block is
-// ErrIDConflict.
+// chunk to refuse. The retention, sensitivity and pinned-criticality rules
+// answer here, once per command: each refusal returns ("", nil) and NOTHING
+// is written. An ordinary command's rows artifact is created open, and its
+// id is the caller's own idempotency key; replay finds the existing block and
+// a different entry using the same id is ErrIDConflict.
 type OpenBlockOutput struct {
 	// EntryID is the command's entry — the row the authenticated start
 	// opened. Required; unknown is ErrNoSuchEntry.
@@ -1916,25 +1913,21 @@ type LedgerRepository interface {
 	// arrives chunked). The entry owns it; the execution, when there was
 	// one, is the provenance of which attempt produced it.
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
-	// CaptureOutput records one body of a frozen block: the artifact if it
-	// is not there yet and the chunk at its seq, in one transaction against
-	// the entry's own execution. Idempotent on (artifact id, seq).
+	// CaptureOutput records one assistant/tool-result body: the artifact if
+	// it is not there yet and the chunk at its seq, in one transaction
+	// against the entry's own execution. Idempotent on (artifact id, seq).
 	//
 	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened.
 	// Output retention off, or an entry marked sensitive, returns
-	// (false, nil): the block keeps its row and keeps no body, the same shape
-	// RecordCompleted uses for history.enabled. An error there would surface
-	// in front of somebody who turned the setting off deliberately, and a
-	// bare nil would leave the caller sending the rest of a body nobody is
-	// storing.
+	// (false, nil): the result keeps its record and keeps no body. An error
+	// there would surface in front of somebody who turned the setting off
+	// deliberately, and a bare nil would leave the caller sending the rest
+	// of a body nobody is storing.
 	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
-	// OpenBlockOutput opens the block a streamed command writes into, at the
-	// command's authenticated start, and answers the ONE keep decision the
-	// whole stream hangs on: ("", nil) means the command keeps its row and
-	// keeps no body — the same three rules CaptureOutput answers at capture
-	// time, applied before anything exists to refuse. The returned id is the
-	// caller's own, idempotent on replay, ErrIDConflict when the same id
-	// names a different block.
+	// OpenBlockOutput answers the one keep decision for a streamed command at
+	// its authenticated start, before any row exists. ("", nil) means the
+	// command keeps its row and keeps no body; otherwise the returned id is
+	// the caller's idempotent rows-artifact key.
 	OpenBlockOutput(ctx context.Context, in OpenBlockOutput) (string, error)
 	// AppendBlockRows appends one delivery of departed rows to the block's
 	// body, in order, under the per-command cap: the head and the tail are

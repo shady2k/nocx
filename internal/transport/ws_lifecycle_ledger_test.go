@@ -446,7 +446,7 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if recordEnvelope.Error != nil {
 		t.Fatalf("history.record: %+v", recordEnvelope.Error)
 	}
-	captureBody(t, h.db, submitted.ID, "artifact-block-read", "finished block output")
+	recordRowsBody(t, h.db, submitted.ID, "artifact-block-read", "finished block output")
 	close(provider.releaseSecond)
 
 	secondCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)

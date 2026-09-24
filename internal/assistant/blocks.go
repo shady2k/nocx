@@ -15,13 +15,12 @@ package assistant
 // WHERE THE TEXT COMES FROM, and this is the decision the bead asked to be
 // made explicitly: the LEDGER, not the renderer. ADR-0019 decision 1 is one
 // authoritative ledger with disposable projections, and the DOM scrollback
-// is a projection of it — the renderer already writes every frozen block
-// there (history.record for the row, ledger.capture for the two bodies), so
-// reading the record is reading what the renderer put there rather than
-// asking it to re-derive it. It needs no renderer round trip, so it has no
-// timeout and no "the tab is gone" hang; it survives a closed tab; and it
-// reuses the query, the paging and the artifact read that already exist
-// instead of growing a second enumeration of blocks beside them.
+// is a projection of it — history.record owns the row and the rows artifact
+// owns streamed command output. Reading the record is reading what the
+// backend put there rather than asking the renderer to re-derive it. It needs
+// no renderer round trip, so it has no timeout and no "the tab is gone" hang;
+// it survives a closed tab; and it reuses the query, paging and artifact read
+// that already exist instead of growing a second block enumeration.
 //
 // What that costs is named on the return rather than hidden: a block whose
 // body the store never kept (history off, output retention off, a sensitive

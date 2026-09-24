@@ -114,6 +114,79 @@ func TestAWindowDoesNotSurviveItsOwnRowsBeingDestroyed(t *testing.T) {
 	}
 }
 
+// A COMMAND REPEATING THE WINDOW'S HEAD AFTER A `clear` IS NOT SUPPRESSED
+// (nocx-2v80t.3.10).
+//
+// Content alone cannot tell a row a `clear` destroyed from a row the NEXT
+// command legitimately prints with the same text — "identical lines are
+// legitimate output". The window used to survive a `clear` verbatim whenever
+// the erase's OWN boundary settled with no screen of its own
+// (sealPendingWithoutScreenLocked, ADR-0074 case 3: the fence sighted first
+// is the ordinary local case, but a completion racing ahead of its sighting
+// still parks, and here nothing ever sights `clear`'s own fence at all — the
+// very next command's fence settles it instead), which is exactly the shape
+// TestAnEmptyBoundaryDoesNotWipeTheWindow protects on purpose. What that test
+// does not exercise is a `clear` in between: the erased rows never depart (the
+// port's own contract — an erase ceased them, it did not leave them), so
+// nothing ever drains the stale window away, and the settle that follows
+// leaves it standing untouched. The next command's first line, if it happens
+// to repeat what the window remembers, was swallowed as though the destroyed
+// row were leaving a second time.
+func TestACommandRepeatingTheWindowAfterAClearIsNotSuppressed(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	// Command A: short enough that nothing has departed yet, so the whole
+	// closing screen becomes the window.
+	obsFeed(t, s, 0, 10)
+	obsSeal(t, s, obsNonce(1))
+	boundary, _ := boundaryScreen(t, rs)
+	if len(boundary) == 0 {
+		t.Fatal("the boundary carried no closing screen")
+	}
+	if len(s.pendingScreen) == 0 {
+		t.Fatal("the seal installed no window")
+	}
+
+	// `clear`: erase the whole display and home the cursor. The port's own
+	// contract is that these rows CEASE rather than leave, so nothing departs
+	// and nothing drains the window away on its account.
+	if err := s.Ingest([]byte("\x1b[2J\x1b[H")); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	// `clear`'s own fence is never sighted at all: the next command's fence
+	// settles the parked interval instead (ADR-0074 case 3), exactly the
+	// shape TestAnEmptyBoundaryDoesNotWipeTheWindow exercises without a
+	// `clear` in between.
+	s.Completed(s.Incarnation(), obsNonce(2), 0)
+
+	// Command B repeats A's exact lines, enough of them to push its own first
+	// lines off the screen for real.
+	if err := s.SightFence(obsNonce(3), []byte("fence-source")); err != nil {
+		t.Fatalf("sight command B's fence, settling clear's parked interval: %v", err)
+	}
+	obsFeed(t, s, 0, 40)
+	obsSeal(t, s, obsNonce(4))
+
+	var streamed []string
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			continue
+		}
+		for _, row := range e.rows {
+			streamed = append(streamed, streamRowText(row))
+		}
+	}
+	if len(streamed) == 0 {
+		t.Fatal("command B departed nothing at all: the schedule stopped proving anything")
+	}
+	if streamed[0] != "L000000" {
+		t.Fatalf("command B's first departing row was %q, want %q (L000000): "+
+			"the stale window from before the `clear` swallowed it as though "+
+			"the destroyed row were leaving a second time",
+			streamed[0], "L000000")
+	}
+}
+
 // boundaryScreen is the boundary's closing screen as a set of texts, plus the
 // row index the end marker stopped at: the rows the interval before stored.
 func boundaryScreen(t *testing.T, rs *recordingRowStream) (map[string]bool, uint64) {

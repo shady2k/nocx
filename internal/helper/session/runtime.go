@@ -148,7 +148,7 @@ func cellGeometry(cols, rows, xpixel, ypixel uint16) sessionruntime.Geometry {
 // attached would have been answered by nobody.
 //
 // The runtime is built with no missing-fence policy to state: the rendezvous
-// arms no wait at all (nocx-2v80t.3.9). A meeting left with one half missing
+// arms no wait at all (ADR-0074, nocx-2v80t.3.9). A meeting left with one half missing
 // is settled by an EVENT, inside the runtime — the next interval's start or
 // the session's end — so the composition root has nothing to inject here.
 func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows, xpixel, ypixel uint16) (*sessionruntime.Session, emulator.Terminal, error) {

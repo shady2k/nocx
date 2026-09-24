@@ -258,9 +258,9 @@ func TestARowsStreamReachesTheCoordinatorInOrderThenTheEnd(t *testing.T) {
 
 	// The authenticated half arrives through the lifecycle downlink BEFORE
 	// the fence is ever sighted — the completion-first order ADR-0024
-	// decision 7 names as ordinary, and the one that keeps this test free
-	// of the bounded missing-fence wait: when the fence byte arrives, the
-	// join is instant and the end marker streams after the interval's rows.
+	// decision 7 names as ordinary: the completion parks the interval, and
+	// when the fence byte arrives the join is instant and the end marker
+	// streams after the interval's rows (ADR-0074).
 	lc := proto.LifecycleCompleteParams{
 		Session:     spawned.Entry.Session,
 		Incarnation: proto.Incarnation{Session: spawned.Entry.Session.Session, Generation: 1},

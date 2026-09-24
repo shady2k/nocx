@@ -1,6 +1,10 @@
 package sessionruntime
 
-import "github.com/shady2k/nocx/internal/emulator"
+import (
+	"strings"
+
+	"github.com/shady2k/nocx/internal/emulator"
+)
 
 // The observation record (nocx-zg3k3.5.2; ADR-0072, design §6.3): ONE record
 // per authenticated execution interval, owned by the runtime and built ON the
@@ -238,7 +242,7 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 	for i, row := range rows {
 		at := -1
 		for j := range s.pendingScreen {
-			if sameScreenRow(row, s.pendingScreen[j]) {
+			if sameVisibleRow(row, s.pendingScreen[j]) {
 				at = j
 				break
 			}
@@ -518,24 +522,48 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 	return true
 }
 
-// sameScreenRow is whether two rows are the same row of the screen: every
-// cell's grapheme, footprint and hasText, and the row's own wrap flags. The
-// styles are not part of it on purpose: a re-departing screen row comes back
-// out of the scrollback with the cells it had, and a strict style comparison
-// would miss it on a theme change, while a false match costs at most one
-// suppressed row — a row that arrived at the position the boundary's screen
-// occupies, which is the ambiguity the block's closing screen already
-// absorbs (nocx-2v80t.3.9).
-func sameScreenRow(a, b emulator.Row) bool {
-	if a.Wrap != b.Wrap || a.Continuation != b.Continuation || len(a.Cells) != len(b.Cells) {
-		return false
-	}
-	for i := range a.Cells {
-		if a.Cells[i] != b.Cells[i] {
-			return false
+// sameVisibleRow reports whether two rows are the same LINE of text, whatever
+// width the screen held when each was read.
+//
+// The suppression window below compares rows that were captured before a
+// geometry commit with rows that leave after it, and a width change re-lays
+// every row out: each row's cell slice is as wide as the pane was at the time,
+// so the same line is never cell-equal across a reflow (80 cells against 148
+// for the same eleven characters, measured — nocx-2v80t.3.9). What the window
+// is deciding is whether the block before already holds this line, and that is
+// a fact about the line, not about the layout: the comparison is on the
+// graphemes, with the trailing blanks a wider screen pads with removed.
+//
+// The row's wrap flags are not compared either: a width change re-wraps rows, so
+// one logical line may be one physical row before the change and two after, and a
+// comparison that failed on wrapping would kill the window on the very reflow it
+// exists for. Styles are not part of it for the reason a cell comparison never
+// had them: a re-departing row comes back with the cells it had, a strict style
+// comparison would miss it on a theme change, and a false match costs at most one
+// suppressed row at the position the boundary's screen occupies — the ambiguity
+// the block's own closing screen already absorbs.
+//
+// Two different rows that read the same are therefore one row to this window.
+// That is the same tradeoff the order of the window already makes — a row that
+// matches an entry consumes it — and it is bounded by the window being the
+// boundary's own screen: a row the next command writes is not suppressed unless
+// it reads exactly like a line the boundary left AND the window still expects
+// one, which the clear-on-first-unmatched-row rule ends as soon as the next
+// command's own output starts.
+func sameVisibleRow(a, b emulator.Row) bool {
+	return visibleRowText(a) == visibleRowText(b)
+}
+
+// visibleRowText is a row's visible line: the graphemes its cells carry, with
+// the trailing blanks a wider screen pads with removed.
+func visibleRowText(r emulator.Row) string {
+	var sb strings.Builder
+	for _, c := range r.Cells {
+		if c.Grapheme != "" {
+			sb.WriteString(c.Grapheme)
 		}
 	}
-	return true
+	return strings.TrimRight(sb.String(), " ")
 }
 
 // SuppressedScreenRows is how many rows the runtime declined to stream a

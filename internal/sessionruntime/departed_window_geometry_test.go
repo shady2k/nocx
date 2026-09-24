@@ -1,6 +1,11 @@
 package sessionruntime
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+
+	"github.com/shady2k/nocx/internal/emulator"
+)
 
 // A GEOMETRY COMMIT MAY NOT RE-STORE THE INTERVAL BEFORE'S CLOSING SCREEN
 // (nocx-2v80t.3.9, the last instance of "rows cross the command boundary").
@@ -21,11 +26,17 @@ import "testing"
 // interval before stored as its closing screen is never stored again by the
 // interval after it.
 func TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit(t *testing.T) {
-	for _, shrink := range []bool{true, false} {
-		name := "a pane that grows"
-		if shrink {
-			name = "a pane that shrinks"
-		}
+	// The three shapes a commit takes between a boundary and the rows that leave
+	// next: a pane one row shorter (the top row is pushed into history, silently),
+	// one row taller (a row is pulled back in ABOVE the window's head), and the
+	// e2e's own measured geometry — 80x24 spawned, then the wide pane the layout
+	// settles on — which re-lays every row out as well as changing the height.
+	for _, g := range []emulator.Geometry{
+		harnessGeometry(80, 23),
+		harnessGeometry(80, 25),
+		harnessGeometry(148, 33),
+	} {
+		name := fmt.Sprintf("a pane that becomes %dx%d", g.Cols, g.Rows)
 		t.Run(name, func(t *testing.T) {
 			s, rs := streamSession(t, harnessGeometry(80, 24))
 
@@ -40,14 +51,8 @@ func TestAClosingScreenIsNotStoredAgainAfterAGeometryCommit(t *testing.T) {
 			}
 
 			// The geometry commits BETWEEN the boundary and the rows that leave
-			// next: the pane changes height by one row, which moves which row is
-			// at the top of the screen without any of those rows departing.
-			g := harnessGeometry(80, 24)
-			if shrink {
-				g.Rows = 23
-			} else {
-				g.Rows = 25
-			}
+			// next: which row is at the top of the screen moves without any of
+			// those rows departing, and a width change re-lays every row out.
 			if _, err := s.CommitGeometry(g); err != nil {
 				t.Fatalf("commit the geometry: %v", err)
 			}

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty"
 )
 
 // A GEOMETRY COMMIT MAY NOT RE-STORE THE INTERVAL BEFORE'S CLOSING SCREEN
@@ -127,4 +128,65 @@ func boundaryScreen(t *testing.T, rs *recordingRowStream) (map[string]bool, uint
 		out[streamRowText(row)] = true
 	}
 	return out, end.endRow
+}
+
+// A ROW FROM ABOVE THE WINDOW MUST NOT COST THE WINDOW (nocx-2v80t.3.9).
+//
+// The e2e's own leak, at the last: a shrink and a growth around a boundary gave
+// one row back to the screen that the interval before had already stored, the
+// emulator reported that row's departure AGAIN (its ledger's own account of
+// what a refill put back is a count, and it was wrong here), and the row
+// arrived in front of the boundary's screen. The window died on it — the first
+// row that matched nothing was taken for the end of the boundary's screen — and
+// the whole closing screen was streamed into the block after, 27 rows at a
+// time, measured on the block the store criterion failed on.
+//
+// The invariant: the boundary's own rows are not stored again, whatever else
+// arrives. The stray row is still streamed — it is the emulator's contract that
+// it should not have been reported at all, and the schedule below injects it to
+// say exactly that — but it no longer takes the closing screen with it.
+func TestAStrayRowAboveTheWindowDoesNotCostTheClosingScreen(t *testing.T) {
+	screen, err := ghostty.New(harnessGeometry(80, 24))
+	if err != nil {
+		t.Fatalf("build the real emulator: %v", err)
+	}
+	t.Cleanup(screen.Close)
+	emu := &harnessEmulator{Terminal: screen}
+	s := obsSessionOver(t, harnessGeometry(80, 24), emu)
+	rs := &recordingRowStream{}
+	s.SetRowStream(rs)
+
+	obsFeed(t, s, 0, 40)
+	handed := rs.snapshot()[0].rows[0] // a row the interval before already streamed
+	obsSeal(t, s, obsNonce(1))
+	boundary, endRow := boundaryScreen(t, rs)
+	if boundary[streamRowText(handed)] {
+		t.Fatal("the row chosen as the stray one is part of the boundary's screen")
+	}
+
+	// The row comes back onto the screen above the boundary's screen and leaves
+	// again, ahead of it.
+	emu.InjectDepartures(handed)
+	obsFeed(t, s, 100, 40)
+
+	stray := false
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" || e.from < endRow {
+			continue
+		}
+		for i, row := range e.rows {
+			text := streamRowText(row)
+			if boundary[text] {
+				index := e.from + uint64(i) // #nosec G115 -- a slice index, never negative
+				t.Fatalf("row %q left the screen at index %d and streamed again: a stray row above the window cost the interval before its closing screen",
+					text, index)
+			}
+			if text == streamRowText(handed) {
+				stray = true
+			}
+		}
+	}
+	if !stray {
+		t.Fatal("the injected row was not streamed: the window swallowed a row it never held")
+	}
 }

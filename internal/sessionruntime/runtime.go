@@ -240,6 +240,12 @@ type Session struct {
 	// them (the screen has been rewritten, so the boundary's rows are gone),
 	// and bounded by the geometry. Nil after the first mismatch.
 	pendingScreen []emulator.Row
+	// pendingEntered is whether a row has matched that window yet. Before it
+	// has, an arriving row that matches nothing is a row from ABOVE the
+	// boundary's screen (history a geometry commit pulled back), not the next
+	// command's own output: it leaves the window standing, and only once the
+	// window has been entered does an unmatched row end it.
+	pendingEntered bool
 	// suppressedScreenRows counts the rows the stream declined to carry a
 	// second time because they were the interval before's closing screen
 	// leaving the screen again. A count, because a consumer must be able to

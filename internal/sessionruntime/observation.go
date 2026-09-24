@@ -238,6 +238,11 @@ func (s *Session) openObservationLocked() {
 // that follows the boundary, and that the feed was not struck: a struck feed
 // suppresses nothing, because the hole it names rides the batch that follows.
 func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.Row {
+	if len(s.pendingScreen) == 0 {
+		// Nothing the interval before left is on the screen: every row that
+		// leaves now is the next command's own.
+		return rows
+	}
 	kept := rows[:0]
 	for i, row := range rows {
 		at := -1
@@ -248,14 +253,35 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 			}
 		}
 		if at < 0 {
+			if !s.pendingEntered {
+				// BEFORE the window's first row: this is a row from ABOVE the
+				// boundary's screen — history a geometry commit pulled back onto
+				// the screen, whose departure the emulator reports again because
+				// the row left once already. It is not the boundary's screen, and
+				// it must not END the window: one stray row would otherwise cost
+				// every row the window still holds.
+				//
+				// That is not hypothetical. Measured on the e2e: a shrink and a
+				// growth around a boundary handed back one row the interval
+				// before already stored, the window died on it, and the block
+				// after stored the whole closing screen a second time — 27
+				// foreign rows (nocx-2v80t.3.9). The stray row itself is still
+				// streamed, and it is the EMULATOR's contract that it should not
+				// have been reported at all; what this guards is that the
+				// boundary's own rows do not go with it.
+				kept = append(kept, row)
+				continue
+			}
 			// The boundary's screen is done: from here on, what leaves the
 			// screen is the next command's own output.
 			kept = append(kept, rows[i:]...)
 			s.pendingScreen = nil
+			s.pendingEntered = false
 			return kept
 		}
 		s.pendingScreen = append(s.pendingScreen[:at], s.pendingScreen[at+1:]...)
 		s.suppressedScreenRows++
+		s.pendingEntered = true
 	}
 	return kept
 }
@@ -395,6 +421,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 		rec.Closing = scr
 	}
 	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(rec.Closing))
+	s.pendingEntered = false
 	s.emitIntervalEndLocked(nonce, s.departedRows, boundaryRowsThatLeave(rec.Closing))
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
@@ -456,6 +483,7 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 		Loss:         parked.Loss,
 	}
 	s.pendingScreen = nil
+	s.pendingEntered = false
 	// The parked count is the completion's own measurement and the last
 	// trustworthy evidence of where the command's output ended — but the
 	// interval kept streaming after it, and an end marker BEHIND rows the
@@ -693,6 +721,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Loss:         cap.Loss,
 	}
 	s.pendingScreen = cloneObservationRows(boundaryRowsThatLeave(cap.Closing))
+	s.pendingEntered = false
 	s.emitIntervalEndLocked(nonce, cap.EndRow, boundaryRowsThatLeave(cap.Closing))
 	s.storeSealedObservationLocked(rec)
 }

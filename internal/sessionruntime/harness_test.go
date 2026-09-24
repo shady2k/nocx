@@ -178,6 +178,12 @@ type harnessEmulator struct {
 	mu      sync.Mutex
 	refuse  bool
 	replies []byte
+	// injected are rows the report hands over BEFORE what the emulator itself
+	// has: a row from above a boundary's screen coming back and leaving again,
+	// which is what the ledger of a shrink and a growth can produce. It is
+	// scripted here because the library produces it only under a resize pattern
+	// this schedule cannot stage (nocx-2v80t.3.9).
+	injected []emulator.Row
 	// strike makes the next departure report fail. It is scripted because the
 	// failure the runtime owes handling for — "a report that could not be read
 	// is a hole, named and counted" — is no longer reachable by exhausting the
@@ -205,12 +211,26 @@ func (h *harnessEmulator) DepartedRows() ([]emulator.Row, error) {
 	h.mu.Lock()
 	strike := h.strike
 	h.strike = nil
+	injected := h.injected
+	h.injected = nil
 	h.mu.Unlock()
 	rows, err := h.Terminal.DepartedRows()
+	if len(injected) > 0 {
+		rows = append(injected, rows...)
+	}
 	if strike != nil {
 		return rows, strike
 	}
 	return rows, err
+}
+
+// InjectDepartures hands the next report rows the emulator itself has not
+// reported: they ride in FRONT of what it has, which is where a row from above
+// a boundary's screen leaves.
+func (h *harnessEmulator) InjectDepartures(rows ...emulator.Row) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.injected = append(h.injected, rows...)
 }
 
 // StrikeNextDepartures makes the next departure report fail.

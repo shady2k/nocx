@@ -1,13 +1,17 @@
 package content
 
-// The stored row vocabulary (nocx-2v80t.3.7): one JSON Lines line per row of
-// a streamed block, in the SAME cell vocabulary the live screen frame
-// declares (contracts/session.frame.schema.json, ADR-0072's one record for
-// the cell model). The shape is forced here by the frame contract, not
-// invented: cells as the positional tuple [grapheme, width, hasText], a
-// row's styles as maximal [style, length] runs, a row self-describing — it
-// decodes against nothing outside itself, which is what lets a stored block
-// survive without the frame it arrived in.
+// The stored row vocabulary (nocx-2v80t.3.7, brought to its final compact
+// form by nocx-zg3k3.2.12): one JSON Lines line per row of a streamed
+// block, in the SAME cell vocabulary the live screen frame declares
+// (contracts/session.frame.schema.json, ADR-0072's one record for the cell
+// model). A row rides as its TEXT — the clusters in column order, a wide
+// cluster's spacer not repeated — a sparse list of the positions whose
+// codepoint count or column width departs from the default (one codepoint,
+// one column), and style runs measured in columns; a trailing run of
+// ordinary default blank cells is omitted rather than sent, since a stored
+// row carries no frame geometry to pad against and the reader (BlockRowsText,
+// frontend/src/scrollback/block-rows.ts) treats a shorter row as ending
+// there.
 //
 // The Go shapes are declared HERE rather than borrowed from
 // internal/sessionruntime's frame encoder for an ownership reason, not a
@@ -23,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/emulator"
 )
@@ -36,69 +42,70 @@ type blockRowsLine struct {
 	Row  blockRow `json:"row"`
 }
 
-// blockRow is one physical line of the screen. Cells and runs are tuples
-// rather than named structs for the measured reason the frame contract
-// records: at thousands of cells the field-name bytes are the payload.
+// blockRow is one physical line of the screen, in the text+marks+runs shape
+// contracts/ledger.blockRows.schema.json declares. Marks and runs are
+// omitted (nil, dropped by omitempty) when the row needs neither.
 type blockRow struct {
-	Cells        [][3]any `json:"cells"`
-	Runs         [][2]any `json:"runs"`
-	Wrap         bool     `json:"wrap"`
-	Continuation bool     `json:"continuation"`
-}
-
-type blockStyle struct {
-	Foreground     blockColor `json:"foreground"`
-	Background     blockColor `json:"background"`
-	UnderlineColor blockColor `json:"underlineColor"`
-	Attributes     int        `json:"attributes"`
-	Underline      int        `json:"underline"`
-}
-
-type blockColor struct {
-	Kind    int      `json:"kind"`
-	Palette int      `json:"palette"`
-	RGB     blockRGB `json:"rgb"`
-}
-
-type blockRGB struct {
-	R int `json:"r"`
-	G int `json:"g"`
-	B int `json:"b"`
+	Text         string   `json:"text"`
+	Marks        [][3]int `json:"marks,omitempty"`
+	Runs         [][2]any `json:"runs,omitempty"`
+	Wrap         bool     `json:"wrap,omitempty"`
+	Continuation bool     `json:"continuation,omitempty"`
 }
 
 // encodeBlockRowsLine renders one departed row as one stored line, newline
-// terminated. Trailing default blank cells are omitted: unlike a live frame,
-// a stored row does not need to carry the terminal rectangle's untouched tail.
-// Keep one cell for an entirely blank or empty row so the row remains a valid,
-// styled line and the existing one-or-more run contract stays intact.
+// terminated. The row shape and the trimming rule are IDENTICAL to
+// sessionruntime.EncodeRows' — this function is that one's mirror, checked
+// against it by TestBlockRowsEncoder_MatchesTheFrameEncoderOnTheSameRows —
+// so a stored block decodes with the same painter the live screen does.
 func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 	cells := trimStoredTrailingCells(row.Cells)
-	line := blockRowsLine{From: from, Row: blockRow{
-		Cells:        make([][3]any, 0, len(cells)),
-		Runs:         make([][2]any, 0, len(cells)),
-		Wrap:         row.Wrap,
-		Continuation: row.Continuation,
-	}}
+	var text strings.Builder
+	var marks [][3]int
+	var runs [][2]any
 	var runStyle emulator.Style
 	var runLength int
 	flush := func() {
 		if runLength == 0 {
 			return
 		}
-		line.Row.Runs = append(line.Row.Runs, [2]any{encodeBlockStyle(runStyle), runLength})
+		runs = append(runs, [2]any{encodeBlockStyleValue(runStyle), runLength})
 		runLength = 0
 	}
+	pos := 0
 	for _, cell := range cells {
-		line.Row.Cells = append(line.Row.Cells, [3]any{cell.Grapheme, int(cell.Width), cell.HasText})
 		if runLength > 0 && cell.Style == runStyle {
 			runLength++
+		} else {
+			flush()
+			runStyle = cell.Style
+			runLength = 1
+		}
+		if cell.Width == emulator.WidthSpacerTail {
 			continue
 		}
-		flush()
-		runStyle = cell.Style
-		runLength = 1
+		grapheme := cell.Grapheme
+		if !cell.HasText {
+			grapheme = ""
+		}
+		text.WriteString(grapheme)
+		codepoints := utf8.RuneCountInString(grapheme)
+		width := int(cell.Width)
+		if codepoints != 1 || width != 1 {
+			marks = append(marks, [3]int{pos, codepoints, width})
+		}
+		pos++
 	}
 	flush()
+	line := blockRowsLine{From: from, Row: blockRow{
+		Text:         text.String(),
+		Marks:        marks,
+		Wrap:         row.Wrap,
+		Continuation: row.Continuation,
+	}}
+	if !isImplicitDefaultBlockRuns(runs) {
+		line.Row.Runs = runs
+	}
 	raw, err := json.Marshal(line)
 	if err != nil {
 		return nil, fmt.Errorf("content: block rows: marshal row %d: %w", from, err)
@@ -106,9 +113,22 @@ func encodeBlockRowsLine(from uint64, row emulator.Row) ([]byte, error) {
 	return append(raw, '\n'), nil
 }
 
+// isImplicitDefaultBlockRuns mirrors sessionruntime's isImplicitDefaultRuns:
+// true when runs is exactly the one a reader assumes when `runs` is absent
+// — a single run of the default style.
+func isImplicitDefaultBlockRuns(runs [][2]any) bool {
+	if len(runs) != 1 {
+		return false
+	}
+	style, ok := runs[0][0].(int)
+	return ok && style == 0
+}
+
 // BlockRowsText turns a stored rows artifact into the plain text a block
-// reader needs. Styles are intentionally ignored; spacer cells are geometry,
-// not characters, and continuation rows belong to the logical line above.
+// reader needs. Styles are intentionally ignored; a mark's width is read
+// only to tell a spacer head from ordinary text (neither carries text, so
+// both already read as blank once hasText is false), and continuation rows
+// belong to the logical line above.
 func BlockRowsText(chunks [][]byte) (string, error) {
 	var body bytes.Buffer
 	for _, chunk := range chunks {
@@ -120,8 +140,9 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 	for {
 		var line struct {
 			Row struct {
-				Cells        [][3]json.RawMessage `json:"cells"`
-				Continuation bool                 `json:"continuation"`
+				Text         string     `json:"text"`
+				Marks        [][3]int64 `json:"marks"`
+				Continuation bool       `json:"continuation"`
 			} `json:"row"`
 		}
 		if err := decoder.Decode(&line); err != nil {
@@ -130,33 +151,10 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 			}
 			return "", fmt.Errorf("content: block rows: decode stored line: %w", err)
 		}
-		var text bytes.Buffer
-		for i, cell := range line.Row.Cells {
-			if len(cell) != 3 {
-				return "", fmt.Errorf("content: block rows: line cell %d has %d fields, want 3", i, len(cell))
-			}
-			var width int
-			if err := json.Unmarshal(cell[1], &width); err != nil {
-				return "", fmt.Errorf("content: block rows: line cell %d width: %w", i, err)
-			}
-			if width == int(emulator.WidthSpacerTail) || width == int(emulator.WidthSpacerHead) {
-				continue
-			}
-			var hasText bool
-			if err := json.Unmarshal(cell[2], &hasText); err != nil {
-				return "", fmt.Errorf("content: block rows: line cell %d hasText: %w", i, err)
-			}
-			if !hasText {
-				text.WriteByte(' ')
-				continue
-			}
-			var grapheme string
-			if err := json.Unmarshal(cell[0], &grapheme); err != nil {
-				return "", fmt.Errorf("content: block rows: line cell %d grapheme: %w", i, err)
-			}
-			text.WriteString(grapheme)
+		rowText, err := blockRowPlainText(line.Row.Text, line.Row.Marks)
+		if err != nil {
+			return "", err
 		}
-		rowText := string(bytes.TrimRight(text.Bytes(), " "))
 		if line.Row.Continuation && len(lines) > 0 {
 			lines[len(lines)-1] += rowText
 		} else {
@@ -173,12 +171,86 @@ func BlockRowsText(chunks [][]byte) (string, error) {
 	return out.String(), nil
 }
 
-func trimStoredTrailingCells(cells []emulator.Cell) []emulator.Cell {
-	if len(cells) == 0 {
-		return []emulator.Cell{{Width: emulator.WidthNarrow}}
+// blockRowPlainText walks one row's text+marks and reads back each
+// position's grapheme (a space for a position with no text), skipping
+// nothing else — a spacer contributes no position of its own, so there is
+// nothing to skip here that decodeStoredRowCells does not already leave out.
+// The trailing space trim matches the prior cell-walk reader: a row's own
+// trailing default blanks are already omitted at the source, but a caller
+// may still have padded before calling this, and a plain-text reader has no
+// use for that padding either way.
+func blockRowPlainText(text string, marks [][3]int64) (string, error) {
+	cells, err := decodeStoredRowCells(text, marks)
+	if err != nil {
+		return "", err
 	}
+	var out strings.Builder
+	for _, cell := range cells {
+		if cell.width == int(emulator.WidthSpacerTail) {
+			continue
+		}
+		if !cell.hasText {
+			out.WriteByte(' ')
+			continue
+		}
+		out.WriteString(cell.grapheme)
+	}
+	return strings.TrimRight(out.String(), " "), nil
+}
+
+// storedCell is the fully expanded (column-indexed) form BlockRowsText and
+// trimStoredTrailingCells's callers read: what decodeStoredRowCells rebuilds
+// from a row's text+marks, spacers synthesised back in.
+type storedCell struct {
+	grapheme string
+	width    int
+	hasText  bool
+}
+
+// decodeStoredRowCells rebuilds the column-indexed cells a stored row's
+// text+marks encode — the read half of encodeBlockRowsLine's write half,
+// used by BlockRowsText. It does not need runs (styles are not part of
+// plain text) and does not pad to any column count: a stored row carries no
+// frame geometry, and nothing here needs the untouched tail a live frame
+// pads back in.
+func decodeStoredRowCells(text string, marks [][3]int64) ([]storedCell, error) {
+	codepoints := []rune(text)
+	byPos := make(map[int][2]int64, len(marks))
+	explicitCodepoints := 0
+	for _, m := range marks {
+		if _, dup := byPos[int(m[0])]; dup {
+			return nil, fmt.Errorf("content: block rows: two marks name position %d", m[0])
+		}
+		byPos[int(m[0])] = [2]int64{m[1], m[2]}
+		explicitCodepoints += int(m[1])
+	}
+	positions := len(codepoints) - explicitCodepoints + len(marks)
+	if positions < 0 {
+		return nil, fmt.Errorf("content: block rows: marks claim more codepoints than the row's text has")
+	}
+	out := make([]storedCell, 0, positions)
+	idx := 0
+	for pos := 0; pos < positions; pos++ {
+		span, width := 1, 1
+		if m, ok := byPos[pos]; ok {
+			span, width = int(m[0]), int(m[1])
+		}
+		if idx+span > len(codepoints) {
+			return nil, fmt.Errorf("content: block rows: position %d needs %d codepoints past the row's text", pos, span)
+		}
+		grapheme := string(codepoints[idx : idx+span])
+		idx += span
+		out = append(out, storedCell{grapheme: grapheme, width: width, hasText: span > 0})
+		if width == 2 {
+			out = append(out, storedCell{width: 3})
+		}
+	}
+	return out, nil
+}
+
+func trimStoredTrailingCells(cells []emulator.Cell) []emulator.Cell {
 	end := len(cells)
-	for end > 1 && isDefaultBlankCell(cells[end-1]) {
+	for end > 0 && isDefaultBlankCell(cells[end-1]) {
 		end--
 	}
 	return cells[:end]
@@ -191,20 +263,30 @@ func isDefaultBlankCell(cell emulator.Cell) bool {
 		cell.Style == (emulator.Style{})
 }
 
-func encodeBlockStyle(style emulator.Style) blockStyle {
-	return blockStyle{
-		Foreground:     encodeBlockColor(style.Foreground),
-		Background:     encodeBlockColor(style.Background),
-		UnderlineColor: encodeBlockColor(style.UnderlineColor),
-		Attributes:     int(style.Attributes),
-		Underline:      int(style.Underline),
+// encodeBlockStyleValue mirrors sessionruntime's encodeStyleValue: the bare
+// integer 0 for the all-default style, or the 5-element tuple otherwise.
+func encodeBlockStyleValue(style emulator.Style) any {
+	if style == (emulator.Style{}) {
+		return 0
+	}
+	return [5]int{
+		encodeBlockColorValue(style.Foreground),
+		encodeBlockColorValue(style.Background),
+		encodeBlockColorValue(style.UnderlineColor),
+		int(style.Attributes),
+		int(style.Underline),
 	}
 }
 
-func encodeBlockColor(color emulator.Color) blockColor {
-	return blockColor{
-		Kind:    int(color.Kind),
-		Palette: int(color.Palette),
-		RGB:     blockRGB{R: int(color.RGB.R), G: int(color.RGB.G), B: int(color.RGB.B)},
+// encodeBlockColorValue mirrors sessionruntime's encodeColorValue: 0
+// default, 1-256 a palette index plus one, 257+ a packed RGB triple.
+func encodeBlockColorValue(color emulator.Color) int {
+	switch color.Kind {
+	case emulator.ColorPalette:
+		return int(color.Palette) + 1
+	case emulator.ColorRGB:
+		return 257 + (int(color.RGB.R)<<16 | int(color.RGB.G)<<8 | int(color.RGB.B))
+	default:
+		return 0
 	}
 }

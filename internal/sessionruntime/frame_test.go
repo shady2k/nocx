@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
@@ -168,10 +169,41 @@ func TestFrameDTOConformsToContract(t *testing.T) {
 	}
 }
 
-// TestFrameRowsCarrySelfDescribingRuns is the row invariant the schema states:
-// runs partition the row's cells exactly (lengths sum to the cells length),
-// every run covers at least one cell, and no two adjacent runs share a style —
-// maximal by construction, because the sender merges.
+// explicitColumnsOf returns how many columns a wire row's own (unpadded)
+// content spans: one per surviving position, plus one more for every
+// position a mark declares two columns wide. This is the test's own mirror
+// of the decode arithmetic (cell-model.ts, internal/helper/client/rows.go),
+// so a drift between the three would show here as a wrong count rather than
+// as a silently accepted malformed row.
+func explicitColumnsOf(text string, marks [][3]json.RawMessage) (int, error) {
+	codepoints := utf8.RuneCountInString(text)
+	explicitCodepoints, extraColumns := 0, 0
+	for _, m := range marks {
+		var triple [3]int
+		if err := json.Unmarshal(m[0], &triple[0]); err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(m[1], &triple[1]); err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(m[2], &triple[2]); err != nil {
+			return 0, err
+		}
+		explicitCodepoints += triple[1]
+		if triple[2] == int(emulator.WidthWide) {
+			extraColumns++
+		}
+	}
+	positions := codepoints - explicitCodepoints + len(marks)
+	return positions + extraColumns, nil
+}
+
+// TestFrameRowsCarrySelfDescribingRuns is the row invariant the schema
+// states: a row's runs, when present, partition its OWN explicit column
+// count exactly (never geometry.cols — a trimmed row is shorter than the
+// frame's rectangle by design), every run covers at least one column, and
+// no two adjacent runs share a style — maximal by construction, because the
+// sender merges.
 func TestFrameRowsCarrySelfDescribingRuns(t *testing.T) {
 	raw, err := EncodeFrame(denseSnapshot(80, 24))
 	if err != nil {
@@ -179,7 +211,8 @@ func TestFrameRowsCarrySelfDescribingRuns(t *testing.T) {
 	}
 	var decoded struct {
 		Rows []struct {
-			Cells []json.RawMessage    `json:"cells"`
+			Text  string               `json:"text"`
+			Marks [][3]json.RawMessage `json:"marks"`
 			Runs  [][2]json.RawMessage `json:"runs"`
 		} `json:"rows"`
 	}
@@ -190,6 +223,15 @@ func TestFrameRowsCarrySelfDescribingRuns(t *testing.T) {
 		t.Fatalf("rows: got %d, want 24", len(decoded.Rows))
 	}
 	for y, row := range decoded.Rows {
+		if len(row.Runs) == 0 {
+			// No runs at all means the implicit single default run, which by
+			// construction cannot disagree with anything — nothing to check.
+			continue
+		}
+		explicit, err := explicitColumnsOf(row.Text, row.Marks)
+		if err != nil {
+			t.Fatalf("row %d: explicit columns: %v", y, err)
+		}
 		total := 0
 		for i, run := range row.Runs {
 			var length int
@@ -197,16 +239,57 @@ func TestFrameRowsCarrySelfDescribingRuns(t *testing.T) {
 				t.Fatalf("row %d run %d length: %v", y, i, err)
 			}
 			if length < 1 {
-				t.Errorf("row %d run %d covers %d cells, want at least 1", y, i, length)
+				t.Errorf("row %d run %d covers %d columns, want at least 1", y, i, length)
 			}
 			total += length
 			if i > 0 && bytes.Equal(run[0], row.Runs[i-1][0]) {
 				t.Errorf("row %d runs %d and %d carry the same style; the sender must merge adjacent equal styles", y, i-1, i)
 			}
 		}
-		if total != len(row.Cells) {
-			t.Errorf("row %d run lengths sum to %d, cells length %d; runs must partition the cells exactly", y, total, len(row.Cells))
+		if total != explicit {
+			t.Errorf("row %d run lengths sum to %d, explicit columns %d; runs must partition the row's own content exactly", y, total, explicit)
 		}
+	}
+}
+
+// TestFrameRowOmitsRunsAndMarksWhenPlain is the compaction the wire shape
+// exists for: a row with no styling and no cluster wider than one codepoint
+// and one column carries neither `runs` nor `marks` at all — a receiver
+// with neither present paints the row's whole explicit text in the default
+// style, one codepoint per column.
+func TestFrameRowOmitsRunsAndMarksWhenPlain(t *testing.T) {
+	snap := Snapshot{
+		Revision: 1,
+		Geometry: GeometryCommit{Geometry: emulator.Geometry{Cols: 20, Rows: 1, CellWidthPx: 8, CellHeightPx: 16}},
+		Cursor:   emulator.Cursor{},
+		Rows: []emulator.Row{{Cells: []emulator.Cell{
+			{Grapheme: "h", Width: emulator.WidthNarrow, HasText: true},
+			{Grapheme: "i", Width: emulator.WidthNarrow, HasText: true},
+		}}},
+	}
+	raw, err := EncodeFrame(snap)
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	var decoded struct {
+		Rows []map[string]json.RawMessage `json:"rows"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	row := decoded.Rows[0]
+	if _, ok := row["runs"]; ok {
+		t.Errorf("a plain row carries runs on the wire; want it omitted (implicit default)")
+	}
+	if _, ok := row["marks"]; ok {
+		t.Errorf("a plain row carries marks on the wire; want it omitted (nothing departs from the default)")
+	}
+	var text string
+	if err := json.Unmarshal(row["text"], &text); err != nil {
+		t.Fatalf("text: %v", err)
+	}
+	if text != "hi" {
+		t.Errorf("text = %q, want %q", text, "hi")
 	}
 }
 

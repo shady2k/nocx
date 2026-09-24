@@ -190,41 +190,27 @@ func (c *Client) intervalEnd(payload []byte) {
 // something was.
 var ErrShortNonce = errors.New("client: the nonce does not spell 32 bytes")
 
-// The wire row's shape, as session.frame declares it: cells as the tuples
-// the contract's measurement chose, styles as per-row runs. The Go encoder
-// is sessionruntime's; this is the decode half, and the schema is what
-// keeps the two one vocabulary.
+// The wire row's shape, as session.frame declares it (nocx-zg3k3.2.12): the
+// row's text, a sparse list of the positions whose codepoint count or
+// column width departs from the default, and style runs measured in
+// columns. The Go encoder is sessionruntime's (and internal/content's
+// mirror for the stored form); this is the decode half, and the schema is
+// what keeps every side one vocabulary.
 type wireRow struct {
-	Cells        [][3]any `json:"cells"`
+	Text         string   `json:"text"`
+	Marks        [][3]int `json:"marks"`
 	Runs         [][2]any `json:"runs"`
 	Wrap         bool     `json:"wrap"`
 	Continuation bool     `json:"continuation"`
 }
 
-type wireStyle struct {
-	Foreground     wireColor `json:"foreground"`
-	Background     wireColor `json:"background"`
-	UnderlineColor wireColor `json:"underlineColor"`
-	Attributes     int       `json:"attributes"`
-	Underline      int       `json:"underline"`
-}
-
-type wireColor struct {
-	Kind    int     `json:"kind"`
-	Palette int     `json:"palette"`
-	RGB     wireRGB `json:"rgb"`
-}
-
-type wireRGB struct {
-	R int `json:"r"`
-	G int `json:"g"`
-	B int `json:"b"`
-}
-
 // decodeWireRows turns the frame contract's rows array into the emulator
-// rows the coordinator's history stores. The runs walk is the encoder's
-// mirror: runs are adjacent, in order, and partition the row's cells
-// exactly, so each cell's style comes from the run covering it.
+// rows the coordinator's history stores. Positions are derived from the
+// row's own text and marks (never from a column count nobody sends here —
+// a departed row carries no frame geometry to pad against), and a wide
+// mark's spacer is synthesised back in so the result is exactly the
+// column-indexed shape sessionruntime.EncodeRows read to build the wire in
+// the first place.
 func decodeWireRows(raw json.RawMessage) ([]emulator.Row, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -234,80 +220,179 @@ func decodeWireRows(raw json.RawMessage) ([]emulator.Row, error) {
 		return nil, err
 	}
 	out := make([]emulator.Row, 0, len(wires))
-	for _, w := range wires {
-		row := emulator.Row{
-			Cells:        make([]emulator.Cell, 0, len(w.Cells)),
-			Wrap:         w.Wrap,
-			Continuation: w.Continuation,
+	for i, w := range wires {
+		cells, err := decodeWireRowCells(w)
+		if err != nil {
+			return nil, fmt.Errorf("client: row %d: %w", i, err)
 		}
-		var style emulator.Style
-		runLeft := 0
-		runIdx := 0
-		for _, tuple := range w.Cells {
-			if len(tuple) != 3 {
-				return nil, fmt.Errorf("client: a cell is not a [grapheme, width, hasText] tuple")
-			}
-			grapheme, _ := tuple[0].(string)
-			widthF, _ := tuple[1].(float64)
-			hasText, _ := tuple[2].(bool)
-			if runLeft == 0 {
-				if runIdx >= len(w.Runs) {
-					return nil, fmt.Errorf("client: a row's runs do not cover its cells")
-				}
-				pair := w.Runs[runIdx]
-				runIdx++
-				lengthF, ok := pair[1].(float64)
-				if !ok {
-					return nil, fmt.Errorf("client: a run's length is not a number")
-				}
-				runLeft = int(lengthF)
-				style, ok = decodeWireStyle(pair[0])
-				if !ok {
-					return nil, fmt.Errorf("client: a run's style does not decode")
-				}
-			}
-			runLeft--
-			row.Cells = append(row.Cells, emulator.Cell{
-				Grapheme: grapheme,
-				Width:    emulator.Width(widthF),
-				HasText:  hasText,
-				Style:    style,
-			})
-		}
-		out = append(out, row)
+		out = append(out, emulator.Row{Cells: cells, Wrap: w.Wrap, Continuation: w.Continuation})
 	}
 	return out, nil
 }
 
-// decodeWireStyle turns one run's style object into the emulator's Style.
-// The integers are the same enumerations both sides read from
-// internal/emulator, passed through in the values the encoder wrote.
+// decodeWireRowCells rebuilds one row's column-indexed cells from its
+// text+marks+runs. `positions` is derived by arithmetic rather than by
+// walking text until it runs out: a trailing position whose mark declares
+// zero codepoints (a styled or spacer-head blank at the row's own end,
+// which the trimming rule at the source does not omit) consumes nothing
+// from text, so exhausting text is not a valid stopping rule.
+func decodeWireRowCells(w wireRow) ([]emulator.Cell, error) {
+	codepoints := []rune(w.Text)
+	byPos := make(map[int][2]int, len(w.Marks))
+	explicitCodepoints := 0
+	for _, m := range w.Marks {
+		if len(m) != 3 {
+			return nil, fmt.Errorf("a mark is not a [position, codepoints, width] triple")
+		}
+		if _, dup := byPos[m[0]]; dup {
+			return nil, fmt.Errorf("two marks name position %d", m[0])
+		}
+		byPos[m[0]] = [2]int{m[1], m[2]}
+		explicitCodepoints += m[1]
+	}
+	positions := len(codepoints) - explicitCodepoints + len(w.Marks)
+	if positions < 0 {
+		return nil, fmt.Errorf("marks claim more codepoints than the row's text has")
+	}
+
+	var runStyle emulator.Style
+	runLeft := 0
+	runIdx := 0
+	nextStyle := func() error {
+		if runIdx >= len(w.Runs) {
+			if runIdx == 0 && len(w.Runs) == 0 {
+				// No runs at all: the implicit single default run, covering
+				// however many columns this row turns out to need.
+				runStyle = emulator.Style{}
+				runLeft = int(^uint(0) >> 1) // the rest of the row, whatever that is
+				return nil
+			}
+			return fmt.Errorf("a row's runs do not cover its columns")
+		}
+		pair := w.Runs[runIdx]
+		runIdx++
+		lengthF, ok := pair[1].(float64)
+		if !ok {
+			return fmt.Errorf("a run's length is not a number")
+		}
+		runLeft = int(lengthF)
+		style, ok := decodeWireStyle(pair[0])
+		if !ok {
+			return fmt.Errorf("a run's style does not decode")
+		}
+		runStyle = style
+		return nil
+	}
+
+	cells := make([]emulator.Cell, 0, positions)
+	idx := 0
+	for pos := 0; pos < positions; pos++ {
+		span, width := 1, 1
+		if m, ok := byPos[pos]; ok {
+			span, width = m[0], m[1]
+		}
+		if idx+span > len(codepoints) {
+			return nil, fmt.Errorf("position %d needs %d codepoints past the row's text", pos, span)
+		}
+		grapheme := string(codepoints[idx : idx+span])
+		idx += span
+		hasText := span > 0
+		if !hasText {
+			grapheme = ""
+		}
+		columns := 1
+		if width == int(emulator.WidthWide) {
+			columns = 2
+		}
+		for c := 0; c < columns; c++ {
+			if runLeft == 0 {
+				if err := nextStyle(); err != nil {
+					return nil, err
+				}
+			}
+			runLeft--
+			if c == 0 {
+				cells = append(cells, emulator.Cell{
+					Grapheme: grapheme,
+					Width:    emulator.Width(width), // #nosec G115 -- the contract bounds width to {1,2,4}
+					HasText:  hasText,
+					Style:    runStyle,
+				})
+			} else {
+				cells = append(cells, emulator.Cell{Width: emulator.WidthSpacerTail, Style: runStyle})
+			}
+		}
+	}
+	return cells, nil
+}
+
+// decodeWireStyle turns one run's style value into the emulator's Style:
+// the bare integer 0 (the all-default style) or the 5-element tuple
+// [foreground, background, underlineColor, attributes, underline].
 func decodeWireStyle(v any) (emulator.Style, bool) {
-	raw, err := json.Marshal(v)
-	if err != nil {
+	if f, ok := v.(float64); ok {
+		if f != 0 {
+			return emulator.Style{}, false
+		}
+		return emulator.Style{}, true
+	}
+	tuple, ok := v.([]any)
+	if !ok || len(tuple) != 5 {
 		return emulator.Style{}, false
 	}
-	var w wireStyle
-	if err := json.Unmarshal(raw, &w); err != nil {
+	fg, ok := decodeWireColorValue(tuple[0])
+	if !ok {
+		return emulator.Style{}, false
+	}
+	bg, ok := decodeWireColorValue(tuple[1])
+	if !ok {
+		return emulator.Style{}, false
+	}
+	ul, ok := decodeWireColorValue(tuple[2])
+	if !ok {
+		return emulator.Style{}, false
+	}
+	attrs, ok := tuple[3].(float64)
+	if !ok {
+		return emulator.Style{}, false
+	}
+	underline, ok := tuple[4].(float64)
+	if !ok {
 		return emulator.Style{}, false
 	}
 	return emulator.Style{
-		Foreground:     decodeWireColor(w.Foreground),
-		Background:     decodeWireColor(w.Background),
-		UnderlineColor: decodeWireColor(w.UnderlineColor),
-		// The wire spells each enumeration as the plain integer the
-		// emulator declares; the conversions narrow to the same bit
-		// widths the contract's enums bound.
-		Attributes: emulator.Attributes(w.Attributes), // #nosec G115 -- the contract bounds the attributes bitset to 16 bits
-		Underline:  emulator.Underline(w.Underline),   // #nosec G115 -- the contract bounds the underline enum to 8 bits
+		Foreground:     fg,
+		Background:     bg,
+		UnderlineColor: ul,
+		Attributes:     emulator.Attributes(attrs),    // #nosec G115 -- the contract bounds the attributes bitset to 16 bits
+		Underline:      emulator.Underline(underline), // #nosec G115 -- the contract bounds the underline enum to 8 bits
 	}, true
 }
 
-func decodeWireColor(w wireColor) emulator.Color {
-	r, g, b := uint8(w.RGB.R), uint8(w.RGB.G), uint8(w.RGB.B) // #nosec G115 -- the wire's colours are one byte per channel by contract
-	return emulator.Color{
-		Kind:    emulator.ColorKind(w.Kind), // #nosec G115 -- the contract bounds the colour-kind enum to 8 bits
-		Palette: uint8(w.Palette),           // #nosec G115 -- the wire's palette index is 0-255 by contract
-		RGB:     emulator.RGB{R: r, G: g, B: b},
+// decodeWireColorValue unpacks one colour's packed integer (session.frame's
+// $defs/color): 0 default, 1-256 a palette index plus one, 257+ a packed
+// RGB triple offset by 257 — the same three ranges
+// internal/sessionruntime's encodeColorValue writes.
+func decodeWireColorValue(v any) (emulator.Color, bool) {
+	f, ok := v.(float64)
+	if !ok {
+		return emulator.Color{}, false
+	}
+	n := int(f)
+	switch {
+	case n == 0:
+		return emulator.Color{Kind: emulator.ColorDefault}, true
+	case n < 257:
+		return emulator.Color{Kind: emulator.ColorPalette, Palette: uint8(n - 1)}, true // #nosec G115 -- bounded to 0-255 by the range check
+	default:
+		packed := n - 257
+		return emulator.Color{
+			Kind: emulator.ColorRGB,
+			RGB: emulator.RGB{
+				R: uint8(packed >> 16 & 0xFF), // #nosec G115 -- masked to one byte
+				G: uint8(packed >> 8 & 0xFF),  // #nosec G115 -- masked to one byte
+				B: uint8(packed & 0xFF),       // #nosec G115 -- masked to one byte
+			},
+		}, true
 	}
 }

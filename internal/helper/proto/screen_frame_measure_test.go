@@ -112,8 +112,18 @@ func TestPublishedFrameSizeAtRealGeometry(t *testing.T) {
 }
 
 func TestPublishedPathologicalScreenTakesTheNamedAnswer(t *testing.T) {
-	rt := newMeasuredRuntime(t, 120, 40)
-	ingestAll(t, rt, pathologicalScreen(120, 40))
+	// The geometry is deliberately far past any shipped terminal — nocx-
+	// zg3k3.2.12 packed a style into one integer (was a five-field named
+	// object) and put text in one string (was one [grapheme, width,
+	// hasText] tuple per column), so a per-cell distinct-style screen that
+	// used to bust the single-part bound at 120x40 (the geometry this test
+	// used before) now measures a fraction of it there. What this test
+	// checks is the SPLIT MECHANISM, not a real geometry — that is
+	// TestPublishedFrameSizeAtRealGeometry's job — so the fixture is sized
+	// to whatever still exercises it under the compacted wire.
+	const cols, rows = 300, 300
+	rt := newMeasuredRuntime(t, cols, rows)
+	ingestAll(t, rt, pathologicalScreen(cols, rows))
 
 	c := rt.Consumers().Attach()
 	frames := c.Take()
@@ -121,12 +131,12 @@ func TestPublishedPathologicalScreenTakesTheNamedAnswer(t *testing.T) {
 		t.Fatal("the pathological screen published no frame")
 	}
 	got := frames[len(frames)-1]
-	t.Logf("120x40 pathological published frame: %d bytes", len(got.Bytes))
+	t.Logf("%dx%d pathological published frame: %d bytes", cols, rows, len(got.Bytes))
 	parts, err := SplitScreenDataFrame([16]byte{}, [16]byte{}, uint64(got.Revision), got.Bytes)
 	if err != nil {
 		t.Fatalf("the pathological screen was refused whole and must be delivered as parts: %v", err)
 	}
-	t.Logf("120x40 pathological carried as %d parts", len(parts))
+	t.Logf("%dx%d pathological carried as %d parts", cols, rows, len(parts))
 	if len(parts) < 2 {
 		t.Fatalf("the pathological screen fit one part (%d); the fixture no longer exercises the continuation", len(parts))
 	}

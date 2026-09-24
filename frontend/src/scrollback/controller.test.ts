@@ -170,7 +170,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
     controller.blockManager.startBlock('clear', '~', 0)
     expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(2)
 
-    controller.maybeClear('clear')
+    controller.onClearBoundary(null)
 
     expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(0)
     expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
@@ -184,7 +184,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
     controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
     expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(2)
 
-    controller.maybeClear('clear')
+    controller.onClearBoundary(null)
 
     expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(0)
     expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
@@ -219,7 +219,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
     controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
     controller.blockManager.startBlock('clear', '~', 0)
 
-    controller.maybeClear('clear')
+    controller.onClearBoundary(null)
 
     expect(controller.blockManager.blocks.length).toBe(0)
     expect(controller.blockManager.runningBlock).toBeNull()
@@ -232,7 +232,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
   it('a restore into a pane that has already been cleared still draws the past', () => {
     const { controller } = makeRestoredController()
     controller.blockManager.startBlock('clear', '~', 0)
-    controller.maybeClear('clear')
+    controller.onClearBoundary(null)
 
     controller.restorePast([restored('oldest'), restored('newest')])
 
@@ -240,9 +240,65 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
     expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).not.toBeNull()
     // And a second clear takes that past too — the registration is not a
     // one-shot that only the first restore gets.
-    controller.maybeClear('clear')
+    controller.onClearBoundary(null)
     expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(0)
     expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+})
+
+// ── the backend names the boundary, not the client (nocx-2v80t.3.17) ──────
+// The removed maybeClear matched the typed command's text at submit time,
+// before the command had even run. onClearBoundary is the backend's own
+// rendezvous with a real VT erase it parsed, and it names WHICH block the
+// erase happened inside — the running command's own block must survive
+// its own report of the clear, or the block reporting `clear` finished
+// would vanish out from under the stream still delivering its rows.
+describe('onClearBoundary keeps the block reporting the clear (nocx-2v80t.3.17)', () => {
+  it('keeps the running command bound to keepEntryId and removes every other block', () => {
+    const { controller } = makeController()
+    controller.blockManager.startBlock('make watch', '~', 0)
+    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    const running = controller.blockManager.startBlock('clear', '~', 0)
+    controller.blockManager.bindAttempt('attempt-clear-1')
+
+    controller.onClearBoundary('attempt-clear-1')
+
+    expect(controller.blockManager.blocks.length).toBe(1)
+    expect(controller.blockManager.runningBlock?.el).toBe(running.el)
+    expect(controller.blockManager.runningBlock?.attemptId).toBe('attempt-clear-1')
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(1)
+    expect(controller.scrollbackInner.contains(running.el)).toBe(true)
+  })
+
+  it('keeps the restored past out of it too — only the named entry survives', () => {
+    const { controller } = makeController()
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 4000,
+      configurable: true,
+    })
+    const restoredEl = document.createElement('div')
+    restoredEl.className = 'cmd-block'
+    restoredEl.dataset.restored = 'true'
+    controller.restorePast([restoredEl])
+    const running = controller.blockManager.startBlock('clear', '~', 0)
+    controller.blockManager.bindAttempt('attempt-clear-2')
+
+    controller.onClearBoundary('attempt-clear-2')
+
+    expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(0)
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+    expect(controller.scrollbackInner.contains(running.el)).toBe(true)
+  })
+
+  it('a keepEntryId this pane does not own falls back to clearing everything', () => {
+    const { controller } = makeController()
+    controller.blockManager.startBlock('ls', '~', 0)
+    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+
+    controller.onClearBoundary('some-other-panes-attempt')
+
+    expect(controller.blockManager.blocks.length).toBe(0)
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(0)
   })
 })
 

@@ -3212,6 +3212,67 @@ export class BlockManager {
     this._consumedFence = null
   }
 
+  /**
+   * Apply a backend-sighted clear boundary (nocx-2v80t.3.17): the program
+   * erased the display and its saved lines. Removes every block this
+   * manager owns — live, frozen or restored, and the "Previous session"
+   * boundary that labels the restored past — except the one whose
+   * `data-entry-id` is keepEntryId: the interval the erase happened inside,
+   * almost always the `clear` command's own block, which stays open and
+   * keeps receiving its own rows exactly as before. Null means no interval
+   * was open at the sighting (a plain scrollback, or between commands), and
+   * this is exactly clearAll() — as is a keepEntryId this manager does not
+   * currently own, which can only mean the block already left by some other
+   * path before this notification arrived.
+   *
+   * The record itself is never touched here (nocx-zg3k3.10.3's owner
+   * decision: the record never deletes, clear bounds what is shown). The
+   * backend already recorded a cursor a reader applies; this is the LIVE
+   * half of that fact — the DOM this manager owns, never the store.
+   */
+  applyClearBoundary(keepEntryId: string | null): void {
+    const keep = keepEntryId
+      ? [...this._owned].find((el) => el.dataset.entryId === keepEntryId)
+      : undefined
+    if (!keep) {
+      this.clearAll()
+      return
+    }
+    const keepingRunning = this._runningBlock !== null && this._runningBlock.el === keep
+    this.closeOverflowMenus()
+    if (!keepingRunning) {
+      this._stopTicker()
+      this._clearCommandIndicator()
+    }
+    this._pendingBoundaries = this._pendingBoundaries.filter((p) => p.rec.el === keep)
+    for (const id of [...this._pendingStoredRows.keys()]) {
+      if (id !== keepEntryId) this._pendingStoredRows.delete(id)
+    }
+    for (const id of [...this._storedRowsCursor.keys()]) {
+      if (id !== keepEntryId) this._storedRowsCursor.delete(id)
+    }
+    for (const el of [...this._owned]) {
+      if (el === keep) continue
+      el.remove()
+      this._owned.delete(el)
+    }
+    this._blocks = this._blocks.filter((b) => b.el === keep)
+    this._answerBlocks = this._answerBlocks.filter((b) => b.el === keep)
+    if (!keepingRunning) {
+      this._runningBlock = null
+      this._cmdStartTime = null
+      this._attemptId = null
+    }
+    if (this._selectedBlockId !== null) {
+      const stillThere =
+        this._blocks.some((b) => b.id === this._selectedBlockId) ||
+        this._answerBlocks.some((b) => b.id === this._selectedBlockId)
+      if (!stillThere) this._selectedBlockId = null
+    }
+    this._fences.clear()
+    this._consumedFence = null
+  }
+
   private _finalizeRunningUnsafe(): void {
     // Note: a pending render-fence boundary belongs to an ALREADY logically
     // frozen block, never to the running block this finalizes — its sighting

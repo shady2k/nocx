@@ -4456,9 +4456,18 @@ export class TerminalContent extends BasePaneContent {
         }
       })
     }
+    const onBlockCleared = (params: unknown): void => {
+      // BlockCleared (contracts/block.cleared.schema.json, nocx-2v80t.3.17):
+      // the backend sighted a real erase and this is the LIVE half of it —
+      // the client no longer decides a clear from the command's text.
+      if (typeof params !== 'object' || params === null || !('keepEntryId' in params)) return
+      const keepEntryId = typeof params.keepEntryId === 'string' ? params.keepEntryId : null
+      this.scrollback?.onClearBoundary(keepEntryId)
+    }
     this._blockRowsUnsubs.push(
       this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
       this.client.dispatcher.subscribe('block.closed', refreshBlockRows),
+      this.client.dispatcher.subscribe('block.cleared', onBlockCleared),
     )
     const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
 
@@ -8052,7 +8061,10 @@ export class TerminalContent extends BasePaneContent {
     // running fact arrives later over the wire, and a conventional shell
     // may never send one.
     this.pushTitle()
-    this.scrollback?.maybeClear(recordLine)
+    // NO CLEAR DECIDED HERE EITHER (nocx-2v80t.3.17): the client no longer
+    // guesses a clear from the command's text at submit time — the backend
+    // parses the real VT erase and tells attached clients over block.cleared
+    // (subscribed below, beside block.grew/block.closed).
     // NO CARD OPENS HERE (nocx-2v80t.3.2). The submit is the client's
     // guess that a command is about to run; the card's boundaries are what
     // the backend sent. The published running fact (which the backend

@@ -1253,6 +1253,10 @@ func (bs *blockStream) abandonAttempt(s *WSServer, sid session.ID, attempt strin
 	}
 	bs.mu.Unlock()
 	if block == nil {
+		// Nothing to seal, and still an end: the renderer closes a block on
+		// block.closed alone, and it holds one for this attempt whenever its
+		// running fact reached the pane (nocx-2v80t.3.30).
+		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
 		return
 	}
 	// No fence: nothing sighted this interval's end, and nothing ever will.
@@ -1318,31 +1322,44 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	bs.opening[sid] = true
 	bs.mu.Unlock()
 
+	// With no store the block is still TRACKED, unkept — the same shape a
+	// refused open takes — so each of its ends says block.closed like any
+	// other: the renderer closes a block on that alone, and an untracked
+	// one would run on screen forever (nocx-2v80t.3.30).
+	openArtifact := ""
 	store := s.blockStore()
 	if store == nil {
-		bs.clearOpening(sid)
-		return
-	}
-	v7, mintErr := uuid.NewV7()
-	if mintErr != nil {
-		s.log.Warn("block rows artifact id mint failed", "session", sid, "entry", attempt, "error", mintErr)
-		bs.clearOpening(sid)
-		return
-	}
-	artifactID := v7.String()
-	// Owner: this stream, at the command's authenticated start.
-	// Closing event: the open — one store write that decides keep or
-	// refuse; nothing is held past it.
-	openArtifact, err := store.OpenBlockOutput(context.Background(), content.OpenBlockOutput{
-		EntryID: attempt, ArtifactID: artifactID,
-	})
-	if err != nil {
-		if !errors.Is(err, content.ErrNoSuchEntry) {
-			s.log.Warn("block rows open failed", "session", sid, "entry", attempt, "error", err)
+		// Inert without a rows source, as ever: nothing would end it.
+		bs.mu.Lock()
+		_, sourced := bs.sources[sid]
+		bs.mu.Unlock()
+		if !sourced {
+			bs.clearOpening(sid)
+			return
 		}
-		bs.clearOpening(sid)
-		// Keep waiting reserved. The ledger.bind retry owns the next open.
-		return
+	}
+	if store != nil {
+		v7, mintErr := uuid.NewV7()
+		if mintErr != nil {
+			s.log.Warn("block rows artifact id mint failed", "session", sid, "entry", attempt, "error", mintErr)
+			bs.clearOpening(sid)
+			return
+		}
+		// Owner: this stream, at the command's authenticated start.
+		// Closing event: the open — one store write that decides keep or
+		// refuse; nothing is held past it.
+		opened, err := store.OpenBlockOutput(context.Background(), content.OpenBlockOutput{
+			EntryID: attempt, ArtifactID: v7.String(),
+		})
+		if err != nil {
+			if !errors.Is(err, content.ErrNoSuchEntry) {
+				s.log.Warn("block rows open failed", "session", sid, "entry", attempt, "error", err)
+			}
+			bs.clearOpening(sid)
+			// Keep waiting reserved. The ledger.bind retry owns the next open.
+			return
+		}
+		openArtifact = opened
 	}
 
 	bs.mu.Lock()

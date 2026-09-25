@@ -1662,3 +1662,35 @@ func TestBlockClosed_DTOConformsToContract(t *testing.T) {
 		validateJSON(t, schema, raw, "block.closed params (DTO)")
 	}
 }
+
+// THE PATHS THAT END A BLOCK WITHOUT A COMPLETION each say block.closed too
+// (nocx-2v80t.3.30): the renderer closes a block on that notification alone,
+// so an end the stream settles in silence is a block running forever on
+// screen.
+func TestBlockClosed_EndsWithoutACompletionAreSaid(t *testing.T) {
+	t.Run("an attempt gone unknown whose block never opened", func(t *testing.T) {
+		e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
+		e.ws.AttachBlockRows(session.ID(sid))
+		e.ws.blockStream.abandonAttempt(e.ws, session.ID(sid), "att-never-opened")
+
+		got := awaitBlockClosed(t, e)
+		if got.EntryID != "att-never-opened" || got.Kept {
+			t.Fatalf("block.closed = %+v, want entry att-never-opened not kept", got)
+		}
+	})
+
+	t.Run("an environment entry with no store: the block is tracked, unkept", func(t *testing.T) {
+		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, false)
+		e.ws.AttachBlockRows(session.ID(sid))
+		sshID := lifecycle.AttemptID("att-ssh-nostore")
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&sshID, "ssh host")))
+
+		var noFence [32]byte
+		e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, nil, false)
+
+		got := awaitBlockClosed(t, e)
+		if got.EntryID != string(sshID) || got.Kept {
+			t.Fatalf("block.closed = %+v, want entry %q not kept", got, sshID)
+		}
+	})
+}

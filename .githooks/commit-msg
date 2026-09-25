@@ -21,7 +21,7 @@ if [ ! -f "$gate/commit-links.mjs" ]; then
     exit 0
 fi
 if ! command -v node >/dev/null 2>&1; then
-    printf 'commit-msg: node is not on PATH, so the commit-link check cannot run\n' >&2
+    printf 'commit-msg: node is not on PATH, so the commit-link check cannot run; run make connect, which names what is missing\n' >&2
     exit 1
 fi
 exec node "$gate/commit-links.mjs" --message "$1"

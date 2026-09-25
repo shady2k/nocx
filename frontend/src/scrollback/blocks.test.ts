@@ -864,6 +864,39 @@ describe('BlockManager', () => {
     expect(manager.runningBlock).toBe(second)
   })
 
+  it('opening a block keeps the keyboard in the live grid it seats after (nocx-askcb)', () => {
+    // The authenticated start opens the card while the person may already be
+    // typing into the running program: the grid took the keyboard at submit.
+    // Seating the live region after the new block is a DOM move, and a move
+    // drops the focus of anything inside it to <body> — every key typed
+    // between the start and the next focus call was lost (CI run
+    // 36105113564: `read x` got an empty line for a typed `hello`).
+    const gridInput = document.createElement('textarea')
+    xtermContainer.appendChild(gridInput)
+    gridInput.focus()
+    expect(document.activeElement).toBe(gridInput)
+
+    manager.startBlock('read x', '~', 0)
+
+    expect(xtermContainer.previousElementSibling).toBe(manager.runningBlock?.el)
+    expect(document.activeElement).toBe(gridInput)
+  })
+
+  it('opening a block leaves the focus alone when the grid does not hold it', () => {
+    // The other half: the region is re-seated without claiming a focus it
+    // never had — the editor, a menu, anything outside it keeps the keys.
+    const gridInput = document.createElement('textarea')
+    xtermContainer.appendChild(gridInput)
+    const elsewhere = document.createElement('input')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+
+    manager.startBlock('read x', '~', 0)
+
+    expect(document.activeElement).toBe(elsewhere)
+    elsewhere.remove()
+  })
+
   it('stores blocks in order', () => {
     manager.startBlock('a', '~', 0)
     manager.startBlock('b', '~', 0)

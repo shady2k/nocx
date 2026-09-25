@@ -229,20 +229,19 @@ all:frontend/dist` needs populated before the Go compiler runs, and then runs
 > are already installed — it sets up the repo (hooks, backlog, dependencies), not
 > your machine.
 
-`make init` is safe to re-run, and does four things:
+`make init` is safe to re-run, and does three things:
 
-| Step                                  | Why it matters                                                                                          |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `git config core.hooksPath .githooks` | Installs the quality gate. Without it nothing is enforced.                                              |
-| `br sync --import-only`               | Builds the SQLite from the tracked `.beads/issues.jsonl`. Skipped with a note if `br` is not installed. |
-| `npm ci` (root)                       | `@playwright/test`, for the e2e suite.                                                                  |
-| `npm ci` (frontend)                   | The app's own dependencies.                                                                             |
+| Step                | Why it matters                                                                                                                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `make connect`      | `git config core.hooksPath .githooks` and `br sync --import-only`, after checking every input a hook reads: `node`, `br`, the hook scripts, the backlog gate's files. Anything missing is named and nothing is connected. |
+| `npm ci` (root)     | `@playwright/test`, for the e2e suite.                                                                                                                                                                                    |
+| `npm ci` (frontend) | The app's own dependencies.                                                                                                                                                                                               |
 
 The backlog needs no bootstrapping: `.beads/issues.jsonl` is a tracked file, so a
 clone already has every issue and `br` builds its SQLite from it on the first
-command. `make init` just does that eagerly. What a clone can lack is `br` itself
-— git carries the data, not the tool — and without it `make init` says so and
-moves on.
+command. `make connect` just does that eagerly. What a clone can lack is `br` itself
+— git carries the data, not the tool — and without it `make connect` refuses and says
+where to get it, because the commit-message hook resolves tasks through `br`.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
@@ -342,7 +341,7 @@ tag (`v*`) so a release gates on a green suite (GitHub Actions, macos-latest for
 the Go and e2e jobs, ubuntu-latest for the frontend). The pull-request run is
 what enforces **no merge without green** on `main`: the pre-commit hook and
 `make ci` run the identical checks as fast local feedback, but a hook is
-bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh
+bypassable with `--no-verify` and `make connect` is a per-clone step a fresh
 checkout may skip.
 
 ## Task tracking — beads (br)

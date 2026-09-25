@@ -254,14 +254,14 @@ func awaitCompletion(t *testing.T, rec *recordingSession) proto.LifecycleComplet
 // receives exactly ONE completion, naming the session the spawn returned,
 // the runtime incarnation that generation mints ({session, 1} — the fact
 // TestTheRuntimeIncarnationIsTheSessionAtGenerationOne pins), the kernel's
-// nonce, and the shell's exit code. The report seam stays silent: the
-// normal path succeeds, which is the paired half of criterion 3.
+// nonce, and the shell's exit code. Nothing is logged lost: the normal path
+// succeeds, which is the paired half of criterion 3.
 func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	var reported []error
-	downlink := client.NewCompletionDownlink(c, ctx, func(err error) { reported = append(reported, err) })
+	dctx, sl := downlinkLog(t)
+	downlink := client.NewCompletionDownlink(c, dctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -298,8 +298,8 @@ func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	if state, _ := pub.Attempt(att.ID); state.State != lifecycle.AttemptCompleted {
 		t.Fatalf("the kernel's attempt is %v after a successful downlink, want untouched AttemptCompleted", state.State)
 	}
-	if len(reported) != 0 {
-		t.Fatalf("the normal path reported %v, want a silent report seam", reported)
+	if lost := lostLines(sl); len(lost) != 0 {
+		t.Fatalf("the normal path logged a loss: %v", lost)
 	}
 }
 
@@ -323,7 +323,7 @@ func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
 	rec.seenEntered = make(chan struct{}, 1)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
 		Cols: 80, Rows: 24,
@@ -365,7 +365,7 @@ func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testi
 	rec.seenEntered = make(chan struct{}, 1)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 	downlink.ObserveEnvironmentEntry()
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -396,7 +396,7 @@ func TestAnAcceptedCompletionRidesDownToAnSSHHostedPane(t *testing.T) {
 	c, rec, pub := completionStand(t, spawner)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.SpawnSSH(ctx, proto.SSHSpawnParams{
@@ -437,7 +437,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -504,14 +504,14 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 
 // TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt is criterion 3's
 // failure half: the helper session is gone when the completion fires, the
-// delivery fails, the failure is reported — and the kernel's execution
+// delivery is refused, the loss is logged — and the kernel's execution
 // state is exactly what the kernel set when it accepted the completion.
 func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	var reported []error
-	downlink := client.NewCompletionDownlink(c, ctx, func(err error) { reported = append(reported, err) })
+	dctx, sl := downlinkLog(t)
+	downlink := client.NewCompletionDownlink(c, dctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -558,8 +558,8 @@ func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	code := 1
 	prompt(6, lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id2, ExitCode: &code, Fence: lifecycle.FenceNonce(fence2)}})
 
-	if len(reported) == 0 {
-		t.Fatal("the delivery to a closed session was not reported")
+	if err := awaitLost(t, sl); err == nil {
+		t.Fatal("the delivery to a closed session was logged without its cause")
 	}
 	got, ok := pub.Attempt(att2.ID)
 	if !ok || got.State != lifecycle.AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 1 {

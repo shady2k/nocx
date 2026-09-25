@@ -5,7 +5,7 @@
 
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
-import type { StoredBlockRows } from './block-rows'
+import { paintUnreadableRows, type StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import type { AgentRunToolCall } from '../generated/agent.runToolCall'
@@ -646,6 +646,12 @@ export interface BlockRecord {
   /** Rows read from the backend's block artifact. They are a paint source,
    *  never a second client-side store of command output. */
   storedRows?: StoredBlockRows
+  /** Why the latest read of this block's stored rows failed, when it did
+   *  (nocx-2v80t.3.27) — the store could not be asked, or the artifact did
+   *  not parse. Set by `markRowsUnreadable`, cleared by the next read that
+   *  succeeds. While set, the block says its output could not be read, and
+   *  an agent run on it reports this as an error rather than empty output. */
+  rowsUnreadable?: string
   /** The authenticated attempt this block is bound to (ADR-0024 §7
    *  projection): set when the running block binds to the published
    *  attempt, kept when the block freezes. Absent only for a block that
@@ -2382,7 +2388,20 @@ export class BlockManager {
       return
     }
     rec.storedRows = rows
+    rec.rowsUnreadable = undefined
     this._paintStoredRows?.(rec.el, rows)
+  }
+
+  /** The latest read of an entry's stored rows FAILED (nocx-2v80t.3.27):
+   *  say so on its block. Rows an earlier read painted stay — they are
+   *  true; the notice says the rest could not be read. A block not bound
+   *  yet has nowhere to say it: the read that follows its binding (the
+   *  closing notification's, or the run's own) is the one that decides. */
+  markRowsUnreadable(entryId: string, reason: string): void {
+    const rec = this.blockForAttempt(entryId)
+    if (!rec) return
+    rec.rowsUnreadable = reason
+    paintUnreadableRows(rec.el)
   }
 
   /**
@@ -2684,6 +2703,7 @@ export class BlockManager {
 
     this._reown(rec.el, newEl)
     if (rec.storedRows) this._paintStoredRows?.(newEl, rec.storedRows)
+    if (rec.rowsUnreadable !== undefined) paintUnreadableRows(newEl)
     rec.el = newEl
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One

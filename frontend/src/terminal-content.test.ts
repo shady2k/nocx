@@ -79,6 +79,7 @@ import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
+import type { AgentRunCompletion } from './run-command'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -4588,6 +4589,192 @@ describe('the projections consume the kernel through the composition root (ADR-0
       Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
+  })
+
+  // ── a stored-rows read that failed is said, never drawn as empty ──────
+  // (nocx-2v80t.3.27). The successful read these pair with is the test just
+  // above: the same agent run, the same freeze, and the rows arrive.
+  describe('a block whose stored rows could not be read says so (nocx-2v80t.3.27)', () => {
+    /** Drive one agent command to its freeze, with the store answering the
+     *  rows read through `rowsRead`; returns the run and the frozen block. */
+    async function agentRunWithRowsRead(
+      rowsRead: (method: string) => Promise<unknown> | undefined,
+    ): Promise<{
+      run: Promise<AgentRunCompletion>
+      block: () => HTMLElement
+      teardown: () => void
+    }> {
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        const answer = rowsRead(method)
+        if (answer !== undefined) return answer
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const run = content.submitAgentCommand('printf the-real-output')
+      // Observed before anything else can: an unhandled rejection between
+      // here and the test's own await would fail the file, not the test.
+      run.catch(() => {})
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'printf the-real-output',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'printf the-real-output',
+        captures: [],
+      })
+      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!.el
+      return { run, block, teardown }
+    }
+
+    const ROWS_ENTRY = {
+      entry: {},
+      edges: [],
+      artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+    }
+
+    it('an agent run whose rows read FAILED reports an error, and the block says its output could not be read', async () => {
+      const { run, block, teardown } = await agentRunWithRowsRead((method) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') return Promise.reject(new Error('artifact read refused'))
+        return undefined
+      })
+      try {
+        await expect(run).rejects.toThrow(/could not be read/)
+        const notice = block().querySelector('[data-output-unreadable]')
+        expect(notice?.textContent).toContain('could not be read')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('an agent run whose stored rows are MALFORMED reports an error, and the block says so', async () => {
+      const { run, block, teardown } = await agentRunWithRowsRead((method) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') {
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body: '{"from":12}\n',
+            truncated: null,
+            byteLen: 12,
+          })
+        }
+        return undefined
+      })
+      try {
+        await expect(run).rejects.toThrow(/malformed/)
+        expect(block().querySelector('[data-output-unreadable]')).not.toBeNull()
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a successful read after a failed one takes the notice back and paints the rows', async () => {
+      let fail = true
+      const line = JSON.stringify({
+        from: 0,
+        row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
+      })
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') {
+          if (fail) return Promise.reject(new Error('socket closed'))
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body: `${line}\n`,
+            truncated: null,
+            byteLen: line.length,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { view, ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        ed.insertText('make')
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+        const notify = (name: string) =>
+          client.dispatcher.subscribe.mock.calls.find(([method]) => method === name)?.[1] as (
+            params: unknown,
+          ) => void
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!.el
+
+        notify('block.grew')({ entryId: 'att-1', from: 0, count: 1 })
+        await vi.waitFor(() =>
+          expect(block().querySelector('[data-output-unreadable]')).not.toBeNull(),
+        )
+
+        fail = false
+        notify('block.closed')({ entryId: 'att-1' })
+        await vi.waitFor(() => expect(blockOutputText(block())).toBe('the real output'))
+        expect(block().querySelector('[data-output-unreadable]')).toBeNull()
+      } finally {
+        teardown()
+      }
+    })
   })
 
   it('an agent command the store wrote no row for resolves naming no entry at all (nocx-9sqii)', async () => {

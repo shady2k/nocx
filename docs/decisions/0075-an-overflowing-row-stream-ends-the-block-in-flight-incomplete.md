@@ -63,7 +63,7 @@ recorded again until the next command begins after the stream is healthy.**
    fence stands in for a real one. A lost clear leaves earlier blocks visible in history although
    the screen erased them: losing a clear is safer than losing output.
 5. **Both buffers are the person's settings, not ours.** They are `history.helperBufferMB` and
-   `history.coordinatorBufferMB` in Settings, in whole megabytes per session, with defaults sized
+   `history.coordinatorBufferMB` in Settings, in megabytes per session (a fraction is converted, never truncated), with defaults sized
    from the limits before this record.
    - The value applies to sessions opened after it changes.
    - The settings accept 4 to 256 MB. The helper clamps its buffer, as AD-10 clamps its window,

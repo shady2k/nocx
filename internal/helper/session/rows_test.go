@@ -34,6 +34,34 @@ type rowsSink struct {
 	ends   []proto.IntervalEndFrame
 	clears []proto.ClearBoundaryFrame
 	rawRow [][]byte
+	// changed is signalled after every recorded frame: what a test waits on
+	// is the frame arriving, never a duration passing.
+	changed chan struct{}
+}
+
+func newRowsSink() *rowsSink { return &rowsSink{changed: make(chan struct{}, 1)} }
+
+func (s *rowsSink) signal() {
+	select {
+	case s.changed <- struct{}{}:
+	default:
+	}
+}
+
+// waitFor blocks until the pump has delivered at least nRows row frames, nEnds
+// end markers and nClears clear boundaries, woken by each delivery. A pump
+// that never delivers them hangs into go test's own timeout, which names this
+// frame.
+func (s *rowsSink) waitFor(nRows, nEnds, nClears int) {
+	for {
+		s.mu.Lock()
+		done := len(s.rows) >= nRows && len(s.ends) >= nEnds && len(s.clears) >= nClears
+		s.mu.Unlock()
+		if done {
+			return
+		}
+		<-s.changed
+	}
 }
 
 func (s *rowsSink) SendSessionData(proto.SessionFrame) error   { return nil }
@@ -45,23 +73,26 @@ func (s *rowsSink) SendScreenFrame(proto.ScreenDataFrame) error {
 
 func (s *rowsSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.rows = append(s.rows, f)
 	s.rawRow = append(s.rawRow, f.Payload)
+	s.mu.Unlock()
+	s.signal()
 	return nil
 }
 
 func (s *rowsSink) SendIntervalEnd(f proto.IntervalEndFrame) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.ends = append(s.ends, f)
+	s.mu.Unlock()
+	s.signal()
 	return nil
 }
 
 func (s *rowsSink) SendClearBoundary(f proto.ClearBoundaryFrame) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.clears = append(s.clears, f)
+	s.mu.Unlock()
+	s.signal()
 	return nil
 }
 
@@ -102,7 +133,7 @@ func rowsBridgeSession(t *testing.T, cols, rows int) (*hostSession, *sessionrunt
 		rowWake:  make(chan struct{}, 1),
 		rowsDone: make(chan struct{}),
 	}
-	sink := &rowsSink{}
+	sink := newRowsSink()
 	hs.subs["coord-1"] = &subscriber{
 		id:   "coord-1",
 		raw:  mintRaw(t),
@@ -223,7 +254,7 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 	}
 	rt.Completed(rt.Incarnation(), nonce, 0)
 
-	waitForRows(t, sink, 2, 1)
+	sink.waitFor(2, 1, 0)
 
 	// Two batches: the flood's seven departures, then one more row the
 	// trailing "tail\r\n" scrolls off — a row the flood itself had not yet
@@ -271,22 +302,6 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 	validateRowSchema(t, endSchema, ends[0].Payload)
 }
 
-// waitForClear waits until the pump has delivered at least n clear-boundary
-// frames — an observable state, never a duration.
-func waitForClear(t *testing.T, sink *rowsSink, n int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if got := len(sink.clearFrames()); got >= n {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the pump never delivered %d clear-boundary frames", n)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
 // TestTheBridgeCarriesAClearBoundary (nocx-2v80t.3.17): a real erase — ED3,
 // the sequence `clear` emits — reaches the sink as its own frame, over the
 // real runtime and the real bridge, with a payload that satisfies its
@@ -296,12 +311,12 @@ func TestTheBridgeCarriesAClearBoundary(t *testing.T) {
 	_, rt, sink := rowsBridgeSession(t, 80, 24)
 
 	rowsFeed(t, rt, 0, 30) // real scrollback behind it, the state `clear` erases
-	waitForRows(t, sink, 1, 0)
+	sink.waitFor(1, 0, 0)
 
 	if err := rt.Ingest([]byte("\x1b[H\x1b[2J\x1b[3J")); err != nil {
 		t.Fatalf("ingest the clear sequence: %v", err)
 	}
-	waitForClear(t, sink, 1)
+	sink.waitFor(0, 0, 1)
 
 	frames := sink.clearFrames()
 	if len(frames) != 1 {
@@ -322,7 +337,7 @@ func TestErasingTheDisplayAloneCarriesNoClearBoundary(t *testing.T) {
 	_, rt, sink := rowsBridgeSession(t, 80, 24)
 
 	rowsFeed(t, rt, 0, 30)
-	waitForRows(t, sink, 1, 0)
+	sink.waitFor(1, 0, 0)
 
 	if err := rt.Ingest([]byte("\x1b[H\x1b[2J")); err != nil {
 		t.Fatalf("ingest ED2 alone: %v", err)
@@ -333,7 +348,7 @@ func TestErasingTheDisplayAloneCarriesNoClearBoundary(t *testing.T) {
 	// SAME ordered FIFO a clear boundary would have ridden) before this
 	// assertion runs — never a fixed sleep.
 	rowsFeed(t, rt, 1000, 30)
-	waitForRows(t, sink, 2, 0)
+	sink.waitFor(2, 0, 0)
 
 	if got := len(sink.clearFrames()); got != 0 {
 		t.Fatalf("ED2 alone produced %d clear-boundary frames, want 0", got)
@@ -348,7 +363,7 @@ func TestTheConfirmedMarkAdvancesOnlyWhereItMay(t *testing.T) {
 	hs, rt, sink := rowsBridgeSession(t, 80, 24)
 
 	rowsFeed(t, rt, 0, 30)
-	waitForRows(t, sink, 1, 0)
+	sink.waitFor(1, 0, 0)
 
 	if err := hs.confirmRows(sink, "coord-1", 4); err != nil {
 		t.Fatalf("confirm rows through 4: %v", err)
@@ -373,7 +388,7 @@ func TestTheConfirmedMarkAdvancesOnlyWhereItMay(t *testing.T) {
 
 	// Depart more; now the mark may move there.
 	rowsFeed(t, rt, 30, 1)
-	waitForRows(t, sink, 2, 0)
+	sink.waitFor(2, 0, 0)
 	if err := hs.confirmRows(sink, "coord-1", 8); err != nil {
 		t.Fatalf("confirm rows through 8: %v", err)
 	}
@@ -399,23 +414,4 @@ func rowsPending(t *testing.T, hs *hostSession) uint64 {
 		return 0
 	}
 	return departed - hs.rowsConfirmed
-}
-
-// waitForRows waits until the pump has delivered at least nRows row frames
-// and nEnds end markers — an observable state, never a duration.
-func waitForRows(t *testing.T, sink *rowsSink, nRows, nEnds int) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		sink.mu.Lock()
-		gotRows, gotEnds := len(sink.rows), len(sink.ends)
-		sink.mu.Unlock()
-		if gotRows >= nRows && gotEnds >= nEnds {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the pump never delivered %d row frames and %d end markers (has %d and %d)", nRows, nEnds, gotRows, gotEnds)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
 }

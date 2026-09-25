@@ -42,6 +42,9 @@ type blockRowsSink interface {
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
+	// BlockOutputIncomplete is the helper's one marker that its row buffer
+	// overflowed (nocx-2v80t.3.36), on the same ordered sequence.
+	BlockOutputIncomplete(sid session.ID, fromRow uint64)
 }
 type blockRowsConfirmationSink interface {
 	AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64))
@@ -96,6 +99,10 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	}()
 
 	src.OnOutputRows(func(o client.OutputRows) {
+		if o.Incomplete {
+			sink.BlockOutputIncomplete(sid, o.FromRow)
+			return
+		}
 		if up, confirm := sink.BlockRowsArrived(sid, o.FromRow, o.LostRows, o.Rows); confirm {
 			marks.offer(up)
 		}

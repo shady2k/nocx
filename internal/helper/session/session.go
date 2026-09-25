@@ -405,20 +405,14 @@ type hostSession struct {
 	// rowMu guards the row bridge's hand-off (rows.go): the runtime's
 	// RowStream appends one emission per drained feed under rowMu — an
 	// append never blocks the caller, unlike a full channel's send — and the
-	// pump below drains them in the same order. Every kind in the queue is
-	// bounded (nocx-2v80t.3.26): rowQueuedBatches counts the runtime's row
-	// batches against maxQueuedRowBatches, rowQueuedMarkers the end markers
-	// and clear boundaries against maxQueuedMarkers. rowsLostPending is the
-	// exact count of indices shed batches spanned, owed to the next batch or
-	// marker the bridge ACCEPTS, and rowStreamNext is the index one past the
-	// last batch the runtime handed over, accepted or shed — the position a
-	// loss-only carrier states the owed loss at.
-	rowMu            sync.Mutex
-	rowQueue         []rowEmission
-	rowQueuedBatches int
-	rowQueuedMarkers int
-	rowsLostPending  uint64
-	rowStreamNext    uint64
+	// pump below drains them in the same order. rowState is whether the
+	// bridge records (nocx-2v80t.3.36), and rowStreamNext is the index one
+	// past the last batch the runtime handed over, recorded or not — where
+	// the incomplete marker says recording stopped when a marker overflows.
+	rowMu         sync.Mutex
+	rowQueue      []rowEmission
+	rowState      rowRecording
+	rowStreamNext uint64
 	// rowWake wakes the pump when the queue was empty and a new emission
 	// arrived; capacity 1, because a pending wake means "the queue is
 	// non-empty" and coalesces the same way a watermark does — the pump
@@ -426,17 +420,20 @@ type hostSession struct {
 	// never loses an emission.
 	rowWake chan struct{}
 	// rowsDone ends the pump; rowsConfirmed is the coordinator's
-	// acknowledged "written up to here" mark; rowsDropped counts the
-	// BATCHES the bridge shed, and markersFolded the hand-offs folded into
-	// an overflow record past the marker budget (rows.go).
-	rowsDone      chan struct{}
-	rowsConfirmed uint64
-	rowsDropped   atomic.Uint64
-	markersFolded atomic.Uint64
-	writer        *proto.SubscriberID
-	writerAtt     proto.AttachmentID
-	epoch         proto.LeaseEpoch
-	exit          *proto.SessionExitStatus
+	// acknowledged "written up to here" mark (rows.go).
+	// rowBufferBytes bounds the row buffer — the bytes the queue may hold,
+	// set at spawn from the person's setting (nocx-2v80t.3.36) — and
+	// rowQueuedBytes is what it holds now; rowsIncomplete counts the times
+	// it overflowed and ended a block incomplete.
+	rowBufferBytes int64
+	rowQueuedBytes int64
+	rowsIncomplete atomic.Uint64
+	rowsDone       chan struct{}
+	rowsConfirmed  uint64
+	writer         *proto.SubscriberID
+	writerAtt      proto.AttachmentID
+	epoch          proto.LeaseEpoch
+	exit           *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while

@@ -17,6 +17,7 @@
     "xpixel",
     "ypixel",
     "windowBytes",
+    "rowBufferBytes",
     "desiredMode"
   ],
   "properties": {
@@ -61,6 +62,11 @@
     },
     "windowBytes": {
       "description": "The requested bound on this session's output window, clamped by the helper exactly as `spawn`'s is: the cost is spent on somebody else's machine, so the helper keeps the last word, and what the session actually got is reported in the launch record.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "rowBufferBytes": {
+      "description": "The requested bound on this session's row buffer, in bytes: the departed rows and markers the helper holds for the coordinator while the wire is slow (nocx-2v80t.3.36). It is the person's setting, read by the coordinator when the session is opened, so a changed value applies to the next session and never a running one; the helper clamps it to its own ceiling, because the memory is spent on the machine the helper runs on. Past it the block in flight ends incomplete rather than the buffer growing. 0 means the helper's default.",
       "type": "integer",
       "minimum": 0
     },

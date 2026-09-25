@@ -201,10 +201,17 @@ func encodeRowsPlaneFrame(session, subscriber [16]byte, rowIndex uint64, payload
 // nocx-2v80t.3.15). Rows rides pre-encoded: the vocabulary has ONE Go
 // encoder (sessionruntime.EncodeRows) and this document carries its bytes
 // unchanged.
+//
+// Incomplete is the helper's one marker that its row buffer overflowed
+// (nocx-2v80t.3.36): the block in flight ends here, incomplete, and nothing
+// the session departs is recorded again until the next command starts after
+// the stream is healthy. A document carrying it has no rows, and FromRow is
+// the first row that was not recorded.
 type OutputRowsDoc struct {
-	FromRow  uint64          `json:"fromRow"`
-	LostRows uint64          `json:"lostRows"`
-	Rows     json.RawMessage `json:"rows"`
+	FromRow    uint64          `json:"fromRow"`
+	LostRows   uint64          `json:"lostRows"`
+	Rows       json.RawMessage `json:"rows"`
+	Incomplete bool            `json:"incomplete"`
 }
 
 // ClearBoundaryFrameHeaderLen is 16 (session) + 16 (subscriber): this plane

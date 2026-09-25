@@ -263,4 +263,8 @@ package proto
 // document gained `noFence`, whether the runtime settled the interval
 // without its fence (nocx-2v80t.3.29), and `session.lifecycle-entered` its
 // `entry` identity (nocx-2v80t.3.28). Nothing has shipped at 15.
+// This is still 15, widened in place for the same reason: the rows document
+// gained `incomplete`, the helper's one marker that its row buffer overflowed,
+// and both spawn shapes `rowBufferBytes`, the person's bound on that buffer
+// (nocx-2v80t.3.36). Nothing has shipped at 15.
 const Version = "15"

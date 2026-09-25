@@ -37,10 +37,15 @@ import (
 // helper's own bridge had to drop under backpressure before this batch ever
 // left it (an exact row count there, nocx-2v80t.3.15). An ordinary batch,
 // with a keeping-up wire and no struck feed, carries none.
+//
+// Incomplete is the helper's one marker that its row buffer overflowed
+// (nocx-2v80t.3.36): the block in flight ends incomplete here, Rows is empty,
+// and FromRow is the first row that was not recorded.
 type OutputRows struct {
-	FromRow  uint64
-	Rows     []emulator.Row
-	LostRows uint64
+	FromRow    uint64
+	Rows       []emulator.Row
+	LostRows   uint64
+	Incomplete bool
 }
 
 // IntervalEnd closes the interval the nonce names, after every row that
@@ -170,7 +175,7 @@ func (c *Client) outputRows(payload []byte) {
 			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 		return
 	}
-	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows})
+	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows, Incomplete: doc.Incomplete})
 }
 
 // intervalEnd is one TypeIntervalEnd frame arriving, on the same terms the

@@ -264,6 +264,16 @@ type Session struct {
 	// session's, not any consumer's, so it advances whether or not a row
 	// stream is bound.
 	departedRows uint64
+	// screenDepartedRows is how many rows have left the TOP of the screen,
+	// as the emulator reported them — every row departedRows counts, plus
+	// every row the suppression window declined to stream a second time
+	// (suppressBoundaryScreenLocked). The two differ exactly by those
+	// suppressed rows, and the difference matters to one question only:
+	// how far a scroll has moved what sat on the screen at an instant, which
+	// every departed row does whether or not it was streamed
+	// (outputMarkSkipLocked, nocx-2v80t.3.24). departedRows stays the
+	// stream's index space; this is never an index.
+	screenDepartedRows uint64
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at

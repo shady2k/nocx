@@ -297,6 +297,16 @@ func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
 	}
 	if att.State == lifecycle.AttemptUnknown {
 		fact.Attempt.State = lifecyclepub.AttemptUnknown
+		// The content stream's own half of the same fact (nocx-2v80t.3.24):
+		// an attempt that goes Unknown reaches PublishAttemptClosed alone —
+		// by the time the lane's own fact next derives, the domain that
+		// carried this attempt is gone and the lane has moved past it, so
+		// PublishLifecycle/PublishLifecycleProjection (blockStream's other
+		// two callers of attemptFact) never name it again. Without this
+		// call, a block this attempt opened stays "current" forever, and
+		// every later command in the session queues up behind one that can
+		// never close.
+		s.blockStream.attemptFact(s, fact)
 	}
 	if recorded := s.syncLifecycleLedger(fact); recorded != nil {
 		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {

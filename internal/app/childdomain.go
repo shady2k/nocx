@@ -41,6 +41,7 @@ import (
 	"sync"
 	"time"
 
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -133,7 +134,7 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // never this process's environment — a backend started from inside a pane
 // inherits that pane's path, which belongs to another generation
 // (nocx-e2bws).
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string) lifecyclepub.GrantBuilder {
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, observers *environmentEntryRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
 		// Every outcome is logged, refusals loudest. A refusal here is
 		// invisible by construction — the publisher answers it with an
@@ -175,7 +176,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
 			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint, localHelperBinary)
 		case lifecycle.EnvSSH:
-			return buildSSHChildBootstrap(lg, p, sessions, req, kind, typed)
+			return buildSSHChildBootstrap(lg, p, sessions, observers, req, kind, typed)
 		default:
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unsupported environment %q", req.Env)
 		}
@@ -303,7 +304,7 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 // handshake has proven ownership of that specific socket, which happens in
 // typed_line.go after the user has finished authenticating to their own
 // client.
-func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentKind transportKind, typed *typedRunner) (lifecyclepub.GrantBootstrap, error) {
+func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions *sessionRegistry, observers *environmentEntryRegistry, req lifecyclepub.GrantRequest, parentKind transportKind, typed *typedRunner) (lifecyclepub.GrantBootstrap, error) {
 	if !parentKind.local {
 		// A remote parent runs ssh on the far host: the -R forward would
 		// terminate at that host, not at this backend's listener, and the
@@ -337,7 +338,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		return lifecyclepub.GrantBootstrap{Bootstrap: composeSSHLine(ssh.TypedWrap{}, nil, inv, "")}, nil
 	}
 
-	ln, err := lifecyclechannel.NewListener(lg, pub)
+	ln, err := lifecyclechannel.NewListener(lg, sshChildKernel(pub, req.Lane, observers))
 	if err != nil {
 		return lifecyclepub.GrantBootstrap{}, err
 	}
@@ -472,4 +473,30 @@ func sshChildLaunchOptions(sid string, req lifecyclepub.GrantRequest, h lifecycl
 		Capability: hex.EncodeToString(h.Capability[:]),
 		Recovery:   hex.EncodeToString(h.Recovery[:]),
 	}
+}
+
+// sshChildKernel is the kernel an ssh child's own lifecycle listener drives
+// (nocx-2v80t.3.24). The child authenticates on a transport of its own, so
+// the pane's observing kernel (helper_hosted.go, helper_git.go,
+// session_readopt_lifecycle.go) never sees the completions the kernel
+// accepts from it — and a runtime that is never told a command completed
+// never ends that command's interval: no end marker reaches the block stream,
+// the block stays current, and every block after it streams nothing of its
+// own. So the child's listener is wrapped with the SAME observing kernel over
+// the SAME downlink, found through the lane: one owner of "which accepted
+// completions reach the pane's runtime", whichever transport carried them.
+//
+// The downlink is looked up once, at the grant: a pane registers its lane at
+// its spawn's end, and a child is only ever requested by that pane's running
+// shell. A lane with no pane registered gets the plain kernel — there is no
+// runtime to tell, which is the same answer environmentEntryEmitter gives.
+func sshChildKernel(pub *lifecyclepub.Publisher, lane lifecycle.LaneID, observers *environmentEntryRegistry) lifecyclechannel.Kernel {
+	if observers == nil {
+		return pub
+	}
+	o, ok := observers.lookup(lane)
+	if !ok {
+		return pub
+	}
+	return helperclient.NewCompletionObservingKernel(pub, o)
 }

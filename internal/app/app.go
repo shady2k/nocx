@@ -1716,7 +1716,7 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH,
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, envEntryRegistry, typedSSH,
 			// The endpoint a nested child on THIS machine is told, which is
 			// this backend's own (nocx-1n56d). Read through the opener rather
 			// than captured, because cmd/nocx-server publishes its tool socket

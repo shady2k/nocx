@@ -426,6 +426,189 @@ func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
 	assertBlockSealed(t, db, second)
 }
 
+// TestBlockRowsUnknownAttemptOnNestedDomainClose_DoesNotStickTheQueue pins
+// nocx-2v80t.3.24: a nested domain that closes with an attempt still open —
+// the shell died before an authenticated fence could ever name it, exactly
+// what `exit` does to its own remote shell (nocx-mlyu, case 1 of the race it
+// measured: the start frame DOES reach the kernel sometimes) — used to leave
+// that attempt's block "current" in this stream forever. attemptFact had no
+// case for AttemptUnknown, and the transition reaches this stream through no
+// OTHER path (lifecyclepub's transitionsBelow: PublishAttemptClosed is the
+// only notice, because by the time the lane's own fact next derives, the
+// domain is gone and the lane has moved past this attempt). So every later
+// command in the session queued up behind a current that could never
+// close. Against a real sshd (nocxify-journey.spec.ts) the remote `exit`'s
+// start reached the kernel in every run measured for this bead.
+func TestBlockRowsUnknownAttemptOnNestedDomainClose_DoesNotStickTheQueue(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	if err := pub.BindTransport("T2", noopPort{}); err != nil {
+		t.Fatalf("BindTransport T2: %v", err)
+	}
+	h2, err := pub.RequestDomain(lane, &h.Domain, "T2")
+	if err != nil {
+		t.Fatalf("RequestDomain nested: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h2, e.conn)
+
+	// The far shell's own `exit`: its start frame reaches the kernel and
+	// opens a block, but the shell that would report its completion is the
+	// one `exit` destroys.
+	exitAttempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h2.Domain), "exit"), 41))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 2, lifecycleStartEvt(nil, "exit")))
+
+	// The shell's own exit trap sends domain_closed before its process's own
+	// exit ends the channel (nocx-2v80t.3.22's measured ordering): the
+	// child's attempt goes Unknown through the kernel's ordinary close path,
+	// not through a transport loss.
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{},
+	}))
+
+	// The parent reclaims the lane exactly as nocx.bash's own
+	// __nocx_prompt_command does once the nested launch returns.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainActivated, DomainActivated: &lifecycle.DomainActivatedEvent{},
+	}))
+
+	// Without the fix, exit's block is still "current" here, and this NEXT
+	// command's own end queues up behind it forever. With the fix, exit's
+	// block sealed the moment it went Unknown, so this one becomes current
+	// immediately and closes on its own fence like any ordinary command.
+	next := startsACommand(t, e, pub, lane, h, 4, "printf next")
+	nextFence := lifecycleFence(0x93)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 5, lifecycleCompleteEvt(lifecycle.AttemptID(next), 0, nextFence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 1, nil)
+
+	assertBlockSealed(t, db, exitAttempt.ID)
+	assertBlockSealed(t, db, next)
+}
+
+// blockRowsArtifactCount is how many block-rows artifacts an entry carries —
+// one per block the stream opened for it.
+func blockRowsArtifactCount(t *testing.T, db content.ContentDB, entryID string) int {
+	t.Helper()
+	row, err := db.Ledger().Entry(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("Entry(%s): %v", entryID, err)
+	}
+	n := 0
+	for _, ex := range row.Executions {
+		for i := range ex.Artifacts {
+			if ex.Artifacts[i].MediaType == content.MediaBlockRows {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// submitsInChild is startsACommand for a command typed inside a child
+// domain, whose frames ride the child's own transport.
+func submitsInChild(t *testing.T, e *lifecycleTestEnv, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle, tID lifecycle.TransportID, seq uint64, command string) string {
+	t.Helper()
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), command), 41))
+	mustLifecycleIngest(t, pub, tID, lifecycleEnv(lane, h, seq, lifecycleStartEvt(nil, command)))
+	return got.ID
+}
+
+// TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows pins nocx-2v80t.3.24's
+// row attribution across a whole ssh session, in the order the journey
+// produced it against a real sshd: the local `ssh` block is sealed at the
+// child's hello (the fenceless environment entry, nocx-2v80t.3.21), a remote
+// command runs and completes, the remote `exit` destroys the shell that would
+// have completed it (so it goes Unknown), and the parent reclaims the lane —
+// at which point the lane's fact names the local `ssh` attempt OPEN again,
+// because in the lifecycle it is: it completes for real a moment later, with
+// the status the ssh client exited with.
+//
+// That re-report used to open the entered block a SECOND time — a fresh
+// artifact for the same entry, taking the stream's single queued slot from
+// whatever held it — and the ssh's real end then sealed "exit / Connection
+// closed" into it. An entered block is over at the entry: its later
+// completion settles the attempt, not a new block.
+func TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	// The local `ssh`, handing the lane to a child that says hello.
+	sshAttempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+	if err := pub.BindTransport("T2", noopPort{}); err != nil {
+		t.Fatalf("BindTransport T2: %v", err)
+	}
+	h2, err := pub.RequestDomain(lane, &h.Domain, "T2")
+	if err != nil {
+		t.Fatalf("RequestDomain nested: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h2, e.conn)
+	var noFence [32]byte
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, []emulator.Row{aStreamRow("password:")})
+
+	// A remote command, completed on the child's transport.
+	remote := submitsInChild(t, e, pub, lane, h2, "T2", 2, "echo journey-1-ok")
+	remoteFence := lifecycleFence(0xa1)
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 3, lifecycleCompleteEvt(lifecycle.AttemptID(remote), 0, remoteFence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), remoteFence, 0, []emulator.Row{aStreamRow("journey-1-ok")})
+
+	// The remote `exit`: its start reaches the kernel, its shell dies.
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 4, lifecyclePromptEvt()))
+	exitAttempt := submitsInChild(t, e, pub, lane, h2, "T2", 5, "exit")
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 6, lifecycle.Event{
+		Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{},
+	}))
+
+	// The parent reclaims the lane; its `ssh` is still running there, and
+	// completes for real with the client's own status.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecycle.Event{
+		Kind: lifecycle.KindDomainActivated, DomainActivated: &lifecycle.DomainActivatedEvent{},
+	}))
+	sshFence := lifecycleFence(0xa2)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 5, lifecycleCompleteEvt(lifecycle.AttemptID(sshAttempt), 0, sshFence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), sshFence, 0,
+		[]emulator.Row{aStreamRow("exit"), aStreamRow("Connection to host closed.")})
+
+	// The next local command gets its own block, with its own rows.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecyclePromptEvt()))
+	next := startsACommand(t, e, pub, lane, h, 7, "echo local-after-exit")
+	nextFence := lifecycleFence(0xa3)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 8, lifecycleCompleteEvt(lifecycle.AttemptID(next), 0, nextFence)))
+	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 0, []emulator.Row{aStreamRow("local-after-exit")})
+
+	if n := blockRowsArtifactCount(t, db, sshAttempt); n != 1 {
+		t.Fatalf("the entered ssh block has %d rows artifacts, want exactly the one sealed at the entry", n)
+	}
+	for _, want := range []struct {
+		entry, what string
+		rows        []string
+	}{
+		{sshAttempt, "the local ssh", []string{"password:"}},
+		{remote, "the remote command", []string{"journey-1-ok"}},
+		{next, "the local command after the session", []string{"local-after-exit"}},
+	} {
+		assertBlockSealed(t, db, want.entry)
+		got := streamRows(t, db, want.entry)
+		var texts []string
+		for _, r := range got {
+			texts = append(texts, r.Text)
+		}
+		if strings.Join(texts, "\n") != strings.Join(want.rows, "\n") {
+			t.Fatalf("%s block holds %q, want %q", want.what, texts, want.rows)
+		}
+	}
+	assertBlockSealed(t, db, exitAttempt)
+}
+
 func TestBlockRowsPendingRowsSplitAtPriorEnd(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))

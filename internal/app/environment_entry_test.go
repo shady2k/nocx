@@ -12,6 +12,8 @@ type fakeEnvEntryObserver struct{ n int }
 
 func (f *fakeEnvEntryObserver) ObserveEnvironmentEntry() { f.n++ }
 
+func (f *fakeEnvEntryObserver) Observe([32]byte, *int) {}
+
 // noopEmitter is the decorator's inner emitter: this file's own criterion is
 // what the decorator ADDS, so the real emitter's own behaviour is out of
 // scope and stubbed to nothing.

@@ -165,9 +165,14 @@ type observationOpen struct {
 	// must still keep every line it wrote (the paired case the original bead
 	// named). Meaningless while OutputMarked is false.
 	OutputStartRow int
-	// OutputMarkDeparted is [Session.departedRows] at the same instant: how
-	// many rows the session had ALREADY departed when OutputStartRow was
-	// measured. A command that never scrolls departs none of its own rows
+	// OutputMarkDeparted is [Session.screenDepartedRows] at the same
+	// instant: how many rows had ALREADY left the top of the screen when
+	// OutputStartRow was measured. Not [Session.departedRows]: a row the
+	// suppression window withholds (the interval before's closing screen
+	// leaving again) is never streamed, but it scrolls this interval's rows
+	// up exactly as a streamed one does, and a cut that did not count it
+	// took the command's own output off its closing screen
+	// (nocx-2v80t.3.24). A command that never scrolls departs none of its own rows
 	// before it seals, so OutputStartRow still names exactly the row its own
 	// output began on when the closing screen is built — the gap the
 	// original fix left, because it protected rows that later DEPART (the
@@ -471,6 +476,10 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 	if len(rows) == 0 && lost == 0 {
 		return
 	}
+	// Every reported row left the top of the screen, streamed or not: the
+	// count the closing screen's cut is measured against
+	// (screenDepartedRows).
+	s.screenDepartedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
 	// The interval sealed last left a screen behind, and its rows leave the
 	// screen during the command that follows — reported as departures, at
 	// their own pace. The block holds them as its closing screen already, so
@@ -569,7 +578,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
 	}
-	skip := outputMarkSkipLocked(o.OutputStartRow, o.OutputMarkDeparted, s.departedRows)
+	skip := outputMarkSkipLocked(o.OutputStartRow, o.OutputMarkDeparted, s.screenDepartedRows)
 	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip))
 	// The next interval opens on the boundary screen, at the boundary
@@ -918,7 +927,7 @@ func (s *Session) sightOutputMarkLocked() {
 		startRow = 0
 	}
 	o.OutputStartRow = startRow
-	o.OutputMarkDeparted = s.departedRows
+	o.OutputMarkDeparted = s.screenDepartedRows
 	if len(rows) <= 1 {
 		// Nothing above the cursor to protect: a blank screen with the
 		// cursor already at the top, or the alternate buffer. The window
@@ -1089,11 +1098,13 @@ func closingRowsForStream(scr ObservationScreen, skip int) []emulator.Row {
 // OutputStartRow / observationCapture's own copy) — the number of rows that
 // sat above this interval's own first output row at that instant, every one
 // of them either a prior interval's still-undeparted content or this
-// interval's own prompt and echo. markDeparted is [Session.departedRows] at
-// that same instant; departed is the same counter at closing (or, for a
-// parked interval sealed from its capture, the capture's own EndRow — the
-// departedRows the fence's sighting had measured, which is exactly this
-// count for that instant).
+// interval's own prompt and echo. markDeparted is [Session.screenDepartedRows]
+// at that same instant; departed is the same counter at closing (or, for a
+// parked interval sealed from its capture, the capture's own ScreenDeparted —
+// the count the fence's sighting had measured). It counts rows that left the
+// screen, streamed or withheld alike: a withheld row (the interval before's
+// closing screen leaving again) moves this interval's rows up exactly as a
+// streamed one does (nocx-2v80t.3.24).
 //
 // A row can only leave the prefix by ACTUALLY departing — DepartedRows
 // always takes from the top of the active area, in order — so each row
@@ -1168,12 +1179,17 @@ type observationCapture struct {
 	// of observationOpen's fields of the same name, same reason as
 	// OutputMarked above: sealObservationFromCaptureLocked needs them to cut
 	// the capture's closing screen at the right position (outputMarkSkipLocked,
-	// against EndRow rather than a fresh read of [Session.departedRows], since
-	// EndRow IS departedRows at this capture's own instant), and an undone
-	// split must hand them back rather than leave the rebased interval's zero
-	// values standing in for a mark it may already have sighted.
+	// against ScreenDeparted rather than a fresh read of
+	// [Session.screenDepartedRows]), and an undone split must hand them back
+	// rather than leave the rebased interval's zero values standing in for a
+	// mark it may already have sighted.
 	OutputStartRow     int
 	OutputMarkDeparted uint64
+	// ScreenDeparted is [Session.screenDepartedRows] at this capture's own
+	// instant — EndRow's counterpart for the cut, which must count the rows
+	// the suppression window withheld as well as the ones it streamed
+	// (nocx-2v80t.3.24).
+	ScreenDeparted uint64
 }
 
 // splitObservationAtFenceLocked takes the boundary capture at a parking
@@ -1193,6 +1209,7 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 		Opened:             o.Opened,
 		SightRev:           s.rev,
 		EndRow:             s.departedRows,
+		ScreenDeparted:     s.screenDepartedRows,
 		Opening:            o.Opening,
 		Loss:               o.Loss,
 		Completeness:       s.completeness,
@@ -1226,7 +1243,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Closing:      cap.Closing,
 		Loss:         cap.Loss,
 	}
-	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.EndRow)
+	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.ScreenDeparted)
 	s.expectBoundaryScreenLocked(cap.Closing)
 	s.emitIntervalEndLocked(nonce, cap.EndRow, closingRowsForStream(cap.Closing, skip))
 	s.storeSealedObservationLocked(rec)

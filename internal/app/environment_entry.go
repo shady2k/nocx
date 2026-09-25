@@ -33,6 +33,7 @@ package app
 // envelope on every transport. That is the one seam this file hooks.
 
 import (
+	"context"
 	"sync"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -59,38 +60,82 @@ type environmentEntryObserver interface {
 }
 
 // environmentEntryRegistry maps a lifecycle lane to the pane's own
-// observer, registered once the lane is known — the spawn's own end
-// (helper_hosted.go, helper_git.go) — and consulted by
-// environmentEntryEmitter for every lane whose stack it watches. A lane
-// belongs to exactly one hosted pane for the pane's whole life, so one
-// registration is never overwritten by a second pane's.
+// observer, registered once the lane is known — before the pane's shell can
+// say anything on it (helper_hosted.go, helper_git.go,
+// session_readopt_lifecycle.go) — and consulted by environmentEntryEmitter
+// for every lane whose stack it watches. It is the ONE owner of per-lane
+// state here: the observer and the depth the emitter last saw live in one
+// entry, and the entry lives exactly as long as the pane (nocx-2v80t.3.32).
 type environmentEntryRegistry struct {
 	mu     sync.Mutex
-	byLane map[lifecycle.LaneID]environmentEntryObserver
+	byLane map[lifecycle.LaneID]*laneEntry
+}
+
+// laneEntry is one registered lane: its pane's observer, and the stack depth
+// environmentEntryEmitter last read for it (seen false until the first read).
+type laneEntry struct {
+	observer environmentEntryObserver
+	depth    int
+	seen     bool
 }
 
 func newEnvironmentEntryRegistry() *environmentEntryRegistry {
-	return &environmentEntryRegistry{byLane: make(map[lifecycle.LaneID]environmentEntryObserver)}
+	return &environmentEntryRegistry{byLane: make(map[lifecycle.LaneID]*laneEntry)}
 }
 
-// register names the observer for a lane. A blank lane or a nil observer is
-// silently ignored: neither wiring ever wants to register a lane it could
-// not otherwise reach at all — the same "nil wires nothing" shape blockRows
-// and publishScreen already have.
-func (r *environmentEntryRegistry) register(lane lifecycle.LaneID, o environmentEntryObserver) {
+// register names the observer for a lane for as long as life lasts. life is
+// the pane's own lifetime — the context its completion downlink delivers
+// under, which every route ends when the pane ends and on every rollback —
+// so the lane is forgotten with the pane rather than kept for the life of the
+// process. A later registration of the same lane (a re-adoption) replaces
+// this one, and this lifetime's end then leaves it alone. A blank lane or a
+// nil observer is silently ignored: neither wiring ever wants to register a
+// lane it could not otherwise reach at all — the same "nil wires nothing"
+// shape blockRows and publishScreen already have.
+func (r *environmentEntryRegistry) register(life context.Context, lane lifecycle.LaneID, o environmentEntryObserver) {
 	if lane == "" || o == nil {
 		return
 	}
+	e := &laneEntry{observer: o}
 	r.mu.Lock()
-	r.byLane[lane] = o
+	r.byLane[lane] = e
 	r.mu.Unlock()
+	context.AfterFunc(life, func() {
+		r.mu.Lock()
+		if r.byLane[lane] == e {
+			delete(r.byLane, lane)
+		}
+		r.mu.Unlock()
+	})
 }
 
 func (r *environmentEntryRegistry) lookup(lane lifecycle.LaneID) (environmentEntryObserver, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	o, ok := r.byLane[lane]
-	return o, ok
+	e, ok := r.byLane[lane]
+	if !ok {
+		return nil, false
+	}
+	return e.observer, true
+}
+
+// observeDepth records the lane's stack depth and answers the observer to
+// tell when the stack GREW past its first domain since the last read — the
+// rule checkGrowth documents. A lane no pane holds records nothing: a fact
+// that arrives after the pane is gone must not bring its lane back.
+func (r *environmentEntryRegistry) observeDepth(lane lifecycle.LaneID, depth int) (environmentEntryObserver, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byLane[lane]
+	if !ok {
+		return nil, false
+	}
+	before, seen := e.depth, e.seen
+	e.depth, e.seen = depth, true
+	if !seen || depth < 2 || depth <= before {
+		return nil, false
+	}
+	return e.observer, true
 }
 
 // laneStacker is the one lifecyclepub.Publisher method environmentEntryEmitter
@@ -114,9 +159,6 @@ type environmentEntryEmitter struct {
 	inner    lifecyclepub.Emitter
 	stacks   laneStacker
 	registry *environmentEntryRegistry
-
-	mu    sync.Mutex
-	depth map[lifecycle.LaneID]int
 }
 
 // newEnvironmentEntryEmitter wraps inner — the real emitter every other
@@ -124,7 +166,7 @@ type environmentEntryEmitter struct {
 // file adds. stacks is the publisher itself; registry is filled in as panes
 // spawn.
 func newEnvironmentEntryEmitter(inner lifecyclepub.Emitter, stacks laneStacker, registry *environmentEntryRegistry) *environmentEntryEmitter {
-	return &environmentEntryEmitter{inner: inner, stacks: stacks, registry: registry, depth: make(map[lifecycle.LaneID]int)}
+	return &environmentEntryEmitter{inner: inner, stacks: stacks, registry: registry}
 }
 
 // PublishLifecycle is the Emitter method every transport's Ingest reaches
@@ -151,14 +193,9 @@ func (e *environmentEntryEmitter) checkGrowth(lane lifecycle.LaneID) {
 		return
 	}
 	depth := len(snap.Stack)
-	e.mu.Lock()
-	before, seen := e.depth[lane]
-	e.depth[lane] = depth
-	e.mu.Unlock()
-	if !seen || depth < 2 || depth <= before {
-		return
-	}
-	if o, ok := e.registry.lookup(lane); ok {
+	// The depth is kept with the lane's registration, so it is forgotten with
+	// the pane (environmentEntryRegistry.observeDepth).
+	if o, grew := e.registry.observeDepth(lane, depth); grew {
 		// The entry is named by the child domain on top of the stack — the
 		// one whose establishment grew it. A domain id is minted once and
 		// never recurs, so it tells a retried delivery of this entry from

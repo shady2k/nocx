@@ -988,7 +988,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
 		}
 		if r.environmentEntries != nil {
-			r.environmentEntries.register(launch.Lane, downlink)
+			r.environmentEntries.register(sessionCtx, launch.Lane, downlink)
 		}
 	}
 	// endLifecycleLeg rolls back everything this open built for the lifecycle

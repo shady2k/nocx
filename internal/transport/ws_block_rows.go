@@ -383,7 +383,11 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 	// on it (ADR-0074 decision 3), and nothing after it can send block.closed
 	// — so it is said here, for each, or the renderer, which finishes a block
 	// on that notification alone, shows it running forever (nocx-2v80t.3.27).
-	for _, closed := range s.blockStream.detach(s.blockStore(), sid) {
+	//
+	// Owner: this stream, on behalf of the detached session.
+	// Closing event: the detach's own seals — nothing is held past them.
+	ctx := log.WithLogger(context.Background(), s.log)
+	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
 	}
 }
@@ -391,10 +395,9 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 // detach forgets the session and seals what it held, and answers the
 // block.closed each still-unended interval is owed: every open block, and
 // every completion whose end marker never arrived.
-func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClosedParams {
+func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid session.ID) []blockClosedParams {
 	bs.mu.Lock()
 	opens := bs.open[sid]
-	var owed []blockClosedParams
 	var unsettled []*openBlock
 	said := make(map[string]bool)
 	for _, b := range opens {
@@ -403,13 +406,15 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClo
 			// Its own end, or its lost boundary, is sealing it and says so.
 			continue
 		}
+		// Claimed here, under the lock, so a close still in flight does not
+		// say it too; what is SAID is decided below, by what the seal did.
 		b.settled = true
 		unsettled = append(unsettled, b)
-		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: b.kept})
 	}
+	var unended []blockClosedParams
 	for _, attempt := range bs.fences[sid] {
 		if attempt != "" && !said[attempt] {
-			owed = append(owed, blockClosedParams{EntryID: attempt, Kept: false})
+			unended = append(unended, blockClosedParams{EntryID: attempt, Kept: false})
 			said[attempt] = true
 		}
 	}
@@ -434,23 +439,37 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClo
 	delete(bs.entered, sid)
 	delete(bs.lost, sid)
 	bs.mu.Unlock()
+	owed := make([]blockClosedParams, 0, len(unsettled)+len(unended))
 	for _, b := range unsettled {
-		if !b.kept {
-			continue
-		}
-		// Sealing what arrived is best-effort at teardown: the interval's
-		// own end never will come, the rows already stored are durable
-		// either way, and a close that fails here loses nothing that was
-		// not already lost.
+		// Sealing what arrived: the interval's own end never will come, and
+		// the rows already stored are the block's truth. block.closed with
+		// kept:true says the block is sealed in history
+		// (contracts/block.closed.schema.json), so it says so only when the
+		// seal landed; a seal the store refused is said kept:false — nothing
+		// final to read — and logged, never claimed (nocx-2v80t.3.32).
 		//
 		// Owner: the stream itself, on behalf of the detached session.
 		// Closing event: DetachBlockRows — the session's rows callbacks are
 		// gone and no later fact can name this session.
-		_, _ = store.CloseBlockRows(context.Background(), content.CloseBlockRows{
-			EntryID: b.entry, ArtifactID: b.artifactID,
-		})
+		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: sealAtDetach(ctx, store, sid, b)})
 	}
-	return owed
+	return append(owed, unended...)
+}
+
+// sealAtDetach seals one kept block at the session's detach and answers
+// whether the store now holds it sealed.
+func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b *openBlock) bool {
+	if !b.kept || store == nil {
+		return false
+	}
+	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
+		EntryID: b.entry, ArtifactID: b.artifactID,
+	}); err != nil {
+		log.From(ctx).Warn("block rows seal refused at detach; the block is said closed but not kept",
+			"session", sid, "entry", b.entry, "error", err)
+		return false
+	}
+	return true
 }
 
 // BlockRowsArrived delivers one OutputRows delivery from the session's
@@ -644,9 +663,26 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 		return
 	}
 	if nonce == noFenceNonce {
-		if cur := bs.current[sid]; cur != nil {
+		// The zero nonce is an environment entry's own end, or an end the
+		// helper's row bridge folded past its budget (nocx-2v80t.3.31) — no
+		// longer rare. It ends the CURRENT block; with none current, the
+		// block queued next is the one whose interval is running, its
+		// promotion held back by an open still in flight, and dropping the
+		// end would leave it open for good (nocx-2v80t.3.32).
+		cur := bs.current[sid]
+		if cur == nil {
+			if queued := bs.queued[sid]; queued != "" {
+				cur = bs.open[sid][queued]
+			}
+		}
+		if cur != nil {
 			attempt, resolved = cur.attempt, true
-			bs.markEnteredLocked(sid, attempt)
+			// Only an entry's end is an entry: the attempt runs on under the
+			// child and must not open a second block. A folded end, settled
+			// without its fence, ends its attempt's block like any other end.
+			if !noFence {
+				bs.markEnteredLocked(sid, attempt)
+			}
 		}
 	} else {
 		attempt, resolved = bs.fences[sid][hexNonce]
@@ -914,6 +950,15 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		delete(bs.open[sid], attempt)
 		delete(bs.fences[sid], hexNonce)
+		// A block settled by any other end than its own fence's — the zero
+		// nonce, a lost boundary — leaves that fence behind with no end ever
+		// coming to take it (nocx-2v80t.3.32); the block's end is its fence's
+		// end too.
+		for f, a := range bs.fences[sid] {
+			if a == attempt {
+				delete(bs.fences[sid], f)
+			}
+		}
 		if queued == attempt {
 			delete(bs.queued, sid)
 		}
@@ -1003,6 +1048,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	// user-visible defect this bound exists for. The block's rows are what
 	// reached the store, and a later read of history says exactly that.
 	abandon := func() {
+		sealed := false
 		s.log.Warn("block close abandoned at the attempt bound: the block is settled without its closing screen",
 			"session", sid, "entry", block.entry, "attempts", maxCloseAttempts,
 			"droppedClosingRows", len(closing))
@@ -1011,11 +1057,14 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 				EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
 			}); err != nil {
 				// Refused even here: the artifact stands as it is, and the
-				// block is settled anyway — the rows it holds are readable,
-				// and a retry that can never succeed is what this path exists
-				// to end.
-				s.log.Warn("block rows seal refused at the attempt bound; the block is left as it stands",
+				// block is settled anyway — a retry that can never succeed is
+				// what this path exists to end — but it is not SEALED, so it
+				// is not said kept (nocx-2v80t.3.32): block.closed with
+				// kept:true is the claim that the block is sealed in history.
+				s.log.Warn("block rows seal refused at the attempt bound; the block is said closed but not kept",
 					"session", sid, "entry", block.entry, "error", err)
+			} else {
+				sealed = true
 			}
 		}
 		bs.mu.Lock()
@@ -1025,7 +1074,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		bs.mu.Unlock()
 		finish()
 		if claim() {
-			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
 		}
 		promote()
 	}

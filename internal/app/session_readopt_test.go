@@ -272,6 +272,7 @@ type stubAdopter struct {
 
 	mu       sync.Mutex
 	adopted  []session.ID
+	sessions []session.Session
 	attempts int
 	lastErr  error
 	open     transport.HostedSessionOpen
@@ -296,6 +297,7 @@ func (a *stubAdopter) ReadoptHostedSession(ctx context.Context, sid session.ID, 
 	}
 	a.mu.Lock()
 	a.adopted = append(a.adopted, hosted.Session.ID())
+	a.sessions = append(a.sessions, hosted.Session)
 	a.open = hosted
 	a.mu.Unlock()
 	// The transport's own half starts the lifecycle bridge here (see
@@ -420,7 +422,24 @@ func openHostedFixture(t *testing.T, c *coordinator, paneID string) content.Pend
 
 func readoptFixture(t *testing.T, c *coordinator, routes *stubRoutes, adopter *stubAdopter) *readoptPass {
 	t.Helper()
+	// The double stands in for the transport, which would own every session
+	// it adopted and end it with the pane. Nothing else ends them here, and a
+	// session left running keeps its completion downlink's worker alive for
+	// the rest of the package's run (nocx-2v80t.3.32).
+	t.Cleanup(adopter.endAdopted)
 	return &readoptPass{registry: c.reg, routes: routes, adopter: adopter}
+}
+
+// endAdopted ends every session the double adopted, as the transport's own
+// teardown would when the pane closes.
+func (a *stubAdopter) endAdopted() {
+	a.mu.Lock()
+	sessions := a.sessions
+	a.sessions = nil
+	a.mu.Unlock()
+	for _, sess := range sessions {
+		_ = sess.Close()
+	}
 }
 
 func routesFor(p content.PendingSession) *stubRoutes {

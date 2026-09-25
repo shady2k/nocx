@@ -165,6 +165,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// lifetime is the hosted session's, and the two ends are named below:
 	// AbortLifecycle's rollback arms, and the session's own end.
 	var stopDownlink context.CancelFunc
+	// paneLife is that delivery context: the pane's own lifetime, which the
+	// lane's registration below is tied to as well (nocx-2v80t.3.32).
+	var paneLife context.Context
 	if h.lifecycle != nil {
 		// THE DELIVERY CONTEXT IS THE HOSTED SESSION'S LIFETIME, not the open
 		// request's. The request context is cancelled the moment the
@@ -177,7 +180,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// which is the lifetime's existing owner: the transport's teardown
 		// goroutine waits on the same Done.
 		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
-		stopDownlink = cancelSession
+		stopDownlink, paneLife = cancelSession, sessionCtx
 		// A delivery that fails is retried, and one that is lost is logged
 		// by the downlink itself, through log.From on this same context.
 		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx, boundaryLossTo(h.blockRows))
@@ -308,7 +311,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		out.LifecycleLane = lifecycleAdapter.Lane()
 		out.LifecycleTransport = lifecycleAdapter.TransportID()
 		if h.environmentEntries != nil && downlink != nil {
-			h.environmentEntries.register(out.LifecycleLane, downlink)
+			// Forgotten when the pane's lifetime ends — its session's end or
+			// the rollback's — the same context the downlink stops with.
+			h.environmentEntries.register(paneLife, out.LifecycleLane, downlink)
 		}
 		var startOnce sync.Once
 		out.StartLifecycle = func() {

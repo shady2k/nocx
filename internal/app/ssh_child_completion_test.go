@@ -130,7 +130,7 @@ func (st *sshChildStand) runRemoteCommand(t *testing.T, seq uint64, fenceByte by
 func TestSSHChildCompletionReachesThePaneRuntime(t *testing.T) {
 	observers := newEnvironmentEntryRegistry()
 	obs := &recordingLaneObserver{}
-	observers.register("lane-ssh-child", obs)
+	observers.register(t.Context(), "lane-ssh-child", obs)
 	st := newSSHChildStand(t, observers)
 
 	fence, err := st.runRemoteCommand(t, 2, 0x5a, 3)

@@ -236,10 +236,20 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 			h.log.Warn("malformed request", "err", err)
 			return
 		}
+		// The per-request context is registered HERE, on the read loop,
+		// before the goroutine exists (nocx-2v80t.3.31): frames are read in
+		// order, so a TypeCancel that follows this request always finds it,
+		// however late the scheduler runs the handler. Registered inside the
+		// goroutine, a cancel read first found nothing, and the handler ran
+		// later with a live context after its caller had given up.
+		reqCtx, stop := context.WithCancel(WithConnection(ctx, h))
+		h.mu.Lock()
+		h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
+		h.mu.Unlock()
 		h.inflight.Add(1)
 		go func() {
 			defer h.inflight.Done()
-			h.request(ctx, req)
+			h.request(reqCtx, stop, req)
 		}()
 	case proto.TypeResponse:
 		// An answer to a request THIS helper sent (Ask, reverse.go). Until the
@@ -490,13 +500,10 @@ func (h *Host) SendNotification(n proto.Notification) error {
 }
 
 // request serves one request on its own goroutine, so a blocking handler
-// never stalls the read loop or another request (D13). The per-request
-// context is stored by id so a TypeCancel can reach it.
-func (h *Host) request(ctx context.Context, req proto.Request) {
-	reqCtx, stop := context.WithCancel(WithConnection(ctx, h))
-	h.mu.Lock()
-	h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
-	h.mu.Unlock()
+// never stalls the read loop or another request (D13). reqCtx is the
+// per-request context the read loop already stored by id, so a TypeCancel
+// can reach it; stop releases it when the request is done.
+func (h *Host) request(reqCtx context.Context, stop context.CancelFunc, req proto.Request) {
 	defer func() {
 		h.mu.Lock()
 		delete(h.requests, req.ID)

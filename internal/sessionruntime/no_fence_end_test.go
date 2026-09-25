@@ -1,6 +1,9 @@
 package sessionruntime
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // An interval settled without its fence (ADR-0074 decision 3) is sealed with
 // no closing screen and reads no-fence on its record — and the END MARKER is
@@ -44,7 +47,9 @@ func TestAFencedIntervalAndAnEntryEndOnAWholeMarker(t *testing.T) {
 		t.Fatal("a fenced interval's end marker says its fence never arrived")
 	}
 
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 	entry, ok := settledEnds(rs)[FenceNonce{}]
 	if !ok {
 		t.Fatal("the environment entry emitted no end marker")

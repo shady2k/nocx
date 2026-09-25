@@ -1161,3 +1161,72 @@ func TestEveryHelperRefusalIsLogged(t *testing.T) {
 		})
 	}
 }
+
+// A cancel that reaches the host before the request's goroutine has run still
+// cancels it (nocx-2v80t.3.31). Each request is served on a goroutine of its
+// own, and the per-request context used to be registered by THAT goroutine,
+// so a cancel read first — the downlink timing an attempt out while its
+// handler had not been scheduled yet — found nothing to cancel, and the
+// handler then ran with a live context after its caller had given up and
+// retried. The request and its cancel are written as ONE write here, so the
+// read loop meets the cancel as soon after the request as it ever can; a
+// third request, answered, proves the cancel was read before the first
+// handler is let go. Paired with an ordinary request, whose context is live.
+func TestACancelReadBeforeTheHandlerRunsStillCancelsIt(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	release := make(chan struct{})
+	seen := make(chan error, 2)
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"late": struct{}{}, "sync": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			if op == "sync" {
+				return "ok", nil
+			}
+			<-release
+			seen <- ctx.Err()
+			return "done", nil
+		},
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	var burst bytes.Buffer
+	burst.Write(proto.EncodeFrame(proto.TypeRequest, 0, 0, mustJSON(proto.Request{ID: 7, Service: "test", Op: "late"})))
+	burst.Write(proto.EncodeFrame(proto.TypeCancel, 0, 0, mustJSON(struct {
+		ID uint64 `json:"id"`
+	}{ID: 7})))
+	burst.Write(proto.EncodeFrame(proto.TypeRequest, 0, 0, mustJSON(proto.Request{ID: 8, Service: "test", Op: "sync"})))
+	if _, err := inW.Write(burst.Bytes()); err != nil {
+		t.Fatalf("write the burst: %v", err)
+	}
+	if resp := readResponse(t, outCh); resp.ID != 8 {
+		t.Fatalf("want the sync request's answer first, got id %d", resp.ID)
+	}
+	close(release)
+	if err := <-seen; err == nil {
+		t.Fatal("the handler of a request cancelled before it ran saw a live context")
+	}
+	readResponse(t, outCh) // id 7's own answer
+
+	// Paired: an ordinary request is served under a live context.
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 9, Service: "test", Op: "late"}))
+	if err := <-seen; err != nil {
+		t.Fatalf("an ordinary request's handler saw %v, want a live context", err)
+	}
+	readResponse(t, outCh)
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}

@@ -7,10 +7,17 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 )
 
-// fakeEnvEntryObserver counts every ObserveEnvironmentEntry call.
-type fakeEnvEntryObserver struct{ n int }
+// fakeEnvEntryObserver counts every ObserveEnvironmentEntry call and keeps
+// the entry each one named.
+type fakeEnvEntryObserver struct {
+	n       int
+	entries []string
+}
 
-func (f *fakeEnvEntryObserver) ObserveEnvironmentEntry() { f.n++ }
+func (f *fakeEnvEntryObserver) ObserveEnvironmentEntry(entry string) {
+	f.n++
+	f.entries = append(f.entries, entry)
+}
 
 func (f *fakeEnvEntryObserver) Accept(ingest func() error, _ *lifecycle.Complete) error {
 	return ingest()
@@ -94,6 +101,11 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 	}
 	if obs.n != 1 {
 		t.Fatalf("the child's hello fired %d entries, want exactly 1", obs.n)
+	}
+	// The entry is named by the child domain that took the lane — the
+	// identity the helper seals one interval per (nocx-2v80t.3.28).
+	if obs.entries[0] != string(childH.Domain) {
+		t.Fatalf("the entry was named %q, want the child domain %q", obs.entries[0], childH.Domain)
 	}
 
 	// The child closes and the parent reactivates: a SHRINK, never counted.

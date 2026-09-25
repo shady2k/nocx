@@ -54,7 +54,7 @@ import (
 // sshChildKernel). The registry is therefore the lane -> pane-runtime
 // observer map, and entries are one of the two facts it carries.
 type environmentEntryObserver interface {
-	ObserveEnvironmentEntry()
+	ObserveEnvironmentEntry(entry string)
 	helperclient.CompletionObserver
 }
 
@@ -159,7 +159,11 @@ func (e *environmentEntryEmitter) checkGrowth(lane lifecycle.LaneID) {
 		return
 	}
 	if o, ok := e.registry.lookup(lane); ok {
-		o.ObserveEnvironmentEntry()
+		// The entry is named by the child domain on top of the stack — the
+		// one whose establishment grew it. A domain id is minted once and
+		// never recurs, so it tells a retried delivery of this entry from
+		// the next entry (nocx-2v80t.3.28).
+		o.ObserveEnvironmentEntry(string(snap.Stack[depth-1]))
 	}
 }
 

@@ -14,7 +14,7 @@ type recordingLaneObserver struct {
 	exits  []int
 }
 
-func (r *recordingLaneObserver) ObserveEnvironmentEntry() {}
+func (r *recordingLaneObserver) ObserveEnvironmentEntry(string) {}
 
 func (r *recordingLaneObserver) Accept(ingest func() error, c *lifecycle.Complete) error {
 	if err := ingest(); err != nil {

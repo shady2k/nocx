@@ -334,7 +334,7 @@ func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
 	}
 	downlink.Bind(spawned.HostSessionID)
 
-	downlink.ObserveEnvironmentEntry()
+	downlink.ObserveEnvironmentEntry("dom-child")
 
 	select {
 	case <-rec.seenEntered:
@@ -352,6 +352,9 @@ func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
 	if got[0].Incarnation != wantInc {
 		t.Fatalf("the entry's incarnation was %+v, want %+v", got[0].Incarnation, wantInc)
 	}
+	if got[0].Entry != "dom-child" {
+		t.Fatalf("the entry crossed the wire named %q, want the child domain %q", got[0].Entry, "dom-child")
+	}
 	if len(rec.received()) != 0 {
 		t.Fatalf("an environment entry sent %d completions down, want none", len(rec.received()))
 	}
@@ -366,7 +369,7 @@ func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testi
 	ctx := context.Background()
 
 	downlink := client.NewCompletionDownlink(c, ctx)
-	downlink.ObserveEnvironmentEntry()
+	downlink.ObserveEnvironmentEntry("dom-child")
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
 		Cols: 80, Rows: 24,

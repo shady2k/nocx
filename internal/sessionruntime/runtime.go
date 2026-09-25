@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -296,7 +297,33 @@ type Session struct {
 	bufferInstance uint64
 	bufferActive   bool
 	bufferSeen     bool
+
+	// entriesSealed are the environment entries this incarnation has already
+	// sealed an interval for, oldest first, bounded by
+	// [MaxRememberedEnvironmentEntries] (nocx-2v80t.3.28). It is what makes
+	// [Session.SealEnvironmentEntry] idempotent: the coordinator's downlink
+	// retries a delivery whose attempt timed out, and that attempt may
+	// already have landed.
+	entriesSealed []EnvironmentEntryID
 }
+
+// EnvironmentEntryID names one environment entry: the CHILD domain whose
+// establishment took the lane (internal/lifecycle's DomainID, minted by the
+// kernel as "dom-" and random hex, so it never recurs). It is the entry's
+// identity, not the delivery's: every copy of one entry carries the same id,
+// whichever attempt carried it, and two different child domains are two
+// entries even when nothing ran between them.
+type EnvironmentEntryID string
+
+// MaxRememberedEnvironmentEntries bounds how many entries a session
+// remembers having sealed. A duplicate is a RETRY of the downlink's queue
+// head (internal/helper/client's CompletionDownlink sends nothing behind the
+// head until the head lands), so it arrives before any other entry is sent
+// and the most recent id alone would catch it; the bound keeps a few more so
+// that an abandoned attempt the helper answers late, behind a later entry,
+// is still recognised. A number, like every bound here, not an unbounded set
+// fed by an unbounded session (AD-10).
+const MaxRememberedEnvironmentEntries = 8
 
 // intentRecord is one admitted intent and where it got to. The record outlives
 // the queue: IntentState(id) has to answer long after an intent left it.
@@ -1279,7 +1306,9 @@ func (e *rendezvousEntry) pending() bool {
 // hunting for a nonexistent authenticated completion.
 //
 // Like every other public entry point here this is an EVENT, never a timer
-// (ADR-0074): it fires once, when the coordinator's kernel accepts the fact.
+// (ADR-0074): it fires once, when the coordinator's kernel accepts the fact,
+// and once per entry — a second delivery of the same entry, named by the
+// child domain that made it, seals nothing (nocx-2v80t.3.28).
 // at is judged exactly as [Session.Completed] judges it: a session that is
 // not available, or a caller naming a generation this runtime is not, is
 // refused rather than applied late — the same stale-sender guard, because a
@@ -1289,11 +1318,23 @@ func (e *rendezvousEntry) pending() bool {
 // closing screen (ADR-0074's "the next event... seals it"), before the
 // interval that follows — the one an environment entry actually ends — seals
 // with its own.
-func (s *Session) SealEnvironmentEntry(at Incarnation) {
+func (s *Session) SealEnvironmentEntry(at Incarnation, entry EnvironmentEntryID) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.avail != AvailabilityAvailable || at != s.inc {
 		return
+	}
+	// The same entry a second time is the same event again — a delivery
+	// retried after an attempt that timed out but landed — and seals
+	// nothing: the interval it ended is already sealed, and the one in
+	// flight now is the child's, which no entry of this id ends
+	// (nocx-2v80t.3.28). Keyed by the entry, never by elapsed time.
+	if slices.Contains(s.entriesSealed, entry) {
+		return
+	}
+	s.entriesSealed = append(s.entriesSealed, entry)
+	if excess := len(s.entriesSealed) - MaxRememberedEnvironmentEntries; excess > 0 {
+		s.entriesSealed = slices.Delete(s.entriesSealed, 0, excess)
 	}
 	s.settlePendingLocked(FenceNonce{})
 	s.tick()

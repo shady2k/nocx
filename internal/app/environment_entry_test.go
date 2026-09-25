@@ -60,7 +60,7 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 	if err != nil {
 		t.Fatalf("request parent domain: %v", err)
 	}
-	registry.register(lane, obs)
+	registry.register(t.Context(), lane, obs)
 
 	env := func(seq uint64, dom lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, evt lifecycle.Event) lifecycle.Envelope {
 		return lifecycle.Envelope{

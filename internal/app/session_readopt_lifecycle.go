@@ -167,7 +167,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 		}
 	}
 	if rp.registry.environmentEntries != nil {
-		rp.registry.environmentEntries.register(adapter.Lane(), downlink)
+		rp.registry.environmentEntries.register(sessionCtx, adapter.Lane(), downlink)
 	}
 	return lifecycleAdoption{
 		// STARTING and not INTEGRATED, even though the domain is already

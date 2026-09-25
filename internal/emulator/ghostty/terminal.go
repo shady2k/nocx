@@ -99,6 +99,10 @@ const (
 const (
 	pointActive  = C.GHOSTTY_POINT_TAG_ACTIVE
 	pointHistory = C.GHOSTTY_POINT_TAG_HISTORY
+	// pointScreen spans the history and the active area as one space, which
+	// is the only one a tracked row can always be named in: a reflow or a
+	// scroll may carry it from either into the other (rowTrack.Row).
+	pointScreen = C.GHOSTTY_POINT_TAG_SCREEN
 )
 
 // terminal is one libghostty-vt terminal. It is the only implementation of
@@ -1192,6 +1196,44 @@ func (rt *rowTrack) Alive() bool {
 		return false
 	}
 	return bool(C.ghostty_tracked_grid_ref_has_value(rt.ref))
+}
+
+// Row reads the tracked row as it stands now. The library resolves the
+// reference to wherever its bookkeeping has since carried it — the reflow and
+// scroll it follows, nothing re-derived here — in the screen space, which
+// covers both the active area and the history, and the row is read there the
+// way every other row of this port is (rowAt).
+//
+// The reference is resolved against the page list that owns it, and a read
+// through a coordinate resolves against the screen that is ACTIVE: while the
+// alternate screen holds the pane the two are different buffers, so the read
+// is refused rather than answered from the wrong one.
+func (rt *rowTrack) Row() (emulator.Row, error) {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	t := rt.term
+	if t.t == nil {
+		return emulator.Row{}, emulator.ErrClosed
+	}
+	if rt.released {
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row released: %w", emulator.ErrOutOfRange)
+	}
+	screen, err := t.screenLocked()
+	if err != nil {
+		return emulator.Row{}, err
+	}
+	if screen != emulator.ScreenPrimary {
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row read while the alternate screen is active: %w", emulator.ErrUnsupported)
+	}
+	var pt C.GhosttyPointCoordinate
+	switch r := C.ghostty_tracked_grid_ref_point(rt.ref, pointScreen, &pt); r {
+	case C.GHOSTTY_SUCCESS:
+	case C.GHOSTTY_NO_VALUE:
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row no longer named: %w", emulator.ErrOutOfRange)
+	default:
+		return emulator.Row{}, resultError("tracked_grid_ref_point", r)
+	}
+	return t.rowAt(pointScreen, int(pt.y))
 }
 
 // Release frees the handle and forgets it, so the terminal's own close does

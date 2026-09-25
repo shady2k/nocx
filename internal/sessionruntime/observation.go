@@ -306,8 +306,9 @@ func (s *Session) releasePendingScreenLocked() {
 // destruction by this port's own contract (emulator.Terminal.DepartedRows:
 // "an erase... destroyed ceased rather than left") that the library's tracked
 // reference does not surface as one; sealPendingWithoutScreenLocked's
-// reconciliation against a freshly read screen is the other half, for exactly
-// that case.
+// reconciliation, which reads each entry's row back through its own pin
+// (reconcilePendingScreenLocked, nocx-2v80t.3.13), is the other half, for
+// exactly that case.
 func (s *Session) purgeDestroyedPendingScreenLocked() {
 	if len(s.pendingScreen) == 0 {
 		return
@@ -657,64 +658,67 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 	next := &observationOpen{Opened: rec.Sealed}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		next.Opening = scr
-		// The window this settle leaves standing was never re-captured, so a
-		// row it names may since have been overwritten by exactly this
-		// interval's own output — a `clear`, plainly, but any rewrite that
-		// happens to read the same as what departs next is the same defect
-		// (nocx-2v80t.3.10). This read is the one chance to notice before the
-		// next command's real content arrives and a stale entry swallows it.
-		s.reconcilePendingScreenLocked(scr)
 	}
+	// The window this settle leaves standing was never re-captured, so a row
+	// it names may since have been overwritten by exactly this interval's own
+	// output — a `clear`, plainly, but any rewrite that happens to read the
+	// same as what departs next is the same defect (nocx-2v80t.3.10), and a
+	// reflow in between changes nothing about that (nocx-2v80t.3.13). This is
+	// the one chance to notice before the next command's real content arrives
+	// and a stale entry swallows it.
+	s.reconcilePendingScreenLocked()
 	s.observation = next
 	s.storeSealedObservationLocked(rec)
 }
 
-// reconcilePendingScreenLocked drops whatever part of the window a screen
-// read FRESHER than the window's own capture disagrees with — the check
+// reconcilePendingScreenLocked drops whatever part of the window no longer
+// reads what it did when it was captured — the check
 // [Session.expectBoundaryScreenLocked] cannot make, because the boundary that
 // just sealed had no screen of its own to compare (sealPendingWithoutScreenLocked;
 // nocx-2v80t.3.10).
 //
-// It compares BY POSITION, at the same index, entry for entry — which is
-// exactly the identity that breaks across a reflow (departed_window_geometry_test.go)
-// — so it runs only when scr's geometry is the one the window was captured or
-// last reconciled at: unchanged means nothing has pushed a row into history or
-// pulled one back, so index i still names the same slot it did, and a
-// position that no longer reads what the window recorded there was written to
-// in between — an erase a [emulator.RowTrack] does not see as one
-// (purgeDestroyedPendingScreenLocked's own comment has the library evidence),
-// since content is the only signal that survives an in-place rewrite at all.
-// A geometry that HAS moved leaves the window exactly as it stood: reconciling
-// positionally across a reflow is the defect this file already fixed once,
-// and suppressBoundaryScreenLocked's content match, which a reflow does not
-// confuse, is what still guards it.
+// Each entry is read THROUGH ITS OWN PIN ([emulator.RowTrack.Row]): the pin
+// says which row, wherever a reflow or a scroll has since carried it, and the
+// read says whether that row still carries what the window recorded. An
+// ordinary erase (`clear`'s ESC[H ESC[2J) leaves the pin alive — the library
+// rewrites the row in place rather than discarding it
+// (TestTrackRowStaysAliveThroughAPlainErase) — so content is the only signal
+// it leaves, and this is where it is read.
+//
+// It used to read a fresh screen and compare BY POSITION instead, which a
+// reflow breaks (departed_window_geometry_test.go), so it stood down whenever
+// the geometry had moved since capture — and an erase followed by a resize
+// before the next boundary was then closed by neither layer: the next
+// command's first lines, repeating the erased rows' old text, were swallowed
+// as though the destroyed rows were leaving again (nocx-2v80t.3.13,
+// TestARowErasedInPlaceThenReflowedIsNotTakenForTheStoredScreen). Reading
+// through the pin needs no geometry guard, and needs no assumption that no
+// entry has been consumed yet either: an index never enters into it.
 //
 // Kept is the longest PREFIX still confirmed unwritten; the conservative
 // direction, matching every other cut in this file — an occasional duplicate
-// the block absorbs costs less than a false match swallowing real output.
-func (s *Session) reconcilePendingScreenLocked(scr ObservationScreen) {
+// the block absorbs costs less than a false match swallowing real output. An
+// entry whose row cannot be read at all (no pin, a pin no longer alive, the
+// alternate screen holding the pane) is not confirmed, and cuts there.
+func (s *Session) reconcilePendingScreenLocked() {
 	if len(s.pendingScreen) == 0 {
 		return
 	}
-	if scr.Geometry != s.pendingScreenGeom {
-		return
-	}
-	candidates := boundaryRowsThatLeave(scr)
-	n := len(s.pendingScreen)
-	if len(candidates) < n {
-		n = len(candidates)
-	}
-	cut := n
-	for i := 0; i < n; i++ {
-		if !sameVisibleRow(s.pendingScreen[i].Row, candidates[i]) {
+	cut := len(s.pendingScreen)
+	for i, p := range s.pendingScreen {
+		if p.Track == nil {
+			cut = i
+			break
+		}
+		now, err := p.Track.Row()
+		if err != nil || !stillReadsAsCaptured(p.Row, now) {
 			cut = i
 			break
 		}
 	}
 	if cut == len(s.pendingScreen) {
-		// Every entry still reads exactly what it did when captured, at the
-		// same position: nothing has overwritten it, so the window stands
-		// whole.
+		// Every entry still reads what it did when captured: nothing has
+		// overwritten it, so the window stands whole.
 		return
 	}
 	for _, p := range s.pendingScreen[cut:] {
@@ -726,6 +730,30 @@ func (s *Session) reconcilePendingScreenLocked(scr ObservationScreen) {
 	if len(s.pendingScreen) == 0 {
 		s.pendingEntered = false
 	}
+}
+
+// stillReadsAsCaptured answers whether a pinned row, read now, still carries
+// the line the window captured from it. The same visible line is the plain
+// answer (sameVisibleRow). A row that is part of a soft-wrapped line — as
+// captured or as read now — may have been re-cut by a reflow without anything
+// writing to it, and the read then shows the shapes the port measures
+// (TestTrackRowReadAcrossARewrap): narrowing, the pin's row reads the FIRST
+// piece of what was captured; widening, a continuation is merged into its
+// line's one row, which then contains what was captured. Both are accepted as
+// unwritten; any other difference is a rewrite. A row that reads blank now and
+// did not when captured is never accepted, which is the erase this exists for.
+func stillReadsAsCaptured(captured, now emulator.Row) bool {
+	if sameVisibleRow(captured, now) {
+		return true
+	}
+	if !captured.Wrap && !captured.Continuation && !now.Wrap && !now.Continuation {
+		return false
+	}
+	was, is := visibleRowText(captured), visibleRowText(now)
+	if was == "" || is == "" {
+		return false
+	}
+	return strings.Contains(is, was) || strings.HasPrefix(was, is)
 }
 
 // settlePendingLocked settles the interval that is parked waiting for its
@@ -782,7 +810,7 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 // holding the interval before's twenty-nine closing rows, the block after it
 // starting at the very row the window should have held (nocx-2v80t.3.9).
 func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
-	s.installPendingScreenLocked(boundaryRowsThatLeave(screen), screen.Geometry, true)
+	s.installPendingScreenLocked(boundaryRowsThatLeave(screen), true)
 }
 
 // installPendingScreenLocked is the one place s.pendingScreen is ever
@@ -799,7 +827,7 @@ func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
 // clearing it: the rows an earlier boundary left may still be about to
 // leave, and wiping them on an empty expectation is how a whole closing
 // screen was stored a second time (nocx-2v80t.3.9).
-func (s *Session) installPendingScreenLocked(rows []emulator.Row, geom Geometry, includeCursor bool) {
+func (s *Session) installPendingScreenLocked(rows []emulator.Row, includeCursor bool) {
 	if len(rows) == 0 {
 		return
 	}
@@ -820,7 +848,6 @@ func (s *Session) installPendingScreenLocked(rows []emulator.Row, geom Geometry,
 		pending[i] = pendingBoundaryRow{Row: row, Track: track, Cursor: includeCursor && i == len(cloned)-1}
 	}
 	s.pendingScreen = pending
-	s.pendingScreenGeom = geom
 	s.pendingEntered = false
 }
 
@@ -898,7 +925,7 @@ func (s *Session) sightOutputMarkLocked() {
 		// stands exactly as it was.
 		return
 	}
-	s.installPendingScreenLocked(rows[:len(rows)-1], scr.Geometry, false)
+	s.installPendingScreenLocked(rows[:len(rows)-1], false)
 }
 
 // sightClearBoundaryLocked joins a sighted EffectClearBoundary: the program

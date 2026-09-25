@@ -25,6 +25,7 @@ import {
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
+import { judgeFrames, type FrameVerdict } from './frame-budget.mts'
 
 const serverBin = () => readStand().server
 
@@ -34,26 +35,10 @@ const ROWS_PER_BLOCK = 100
 // Derived from BLOCKS, never spelled out — a reduced run is the same spec.
 const LAST_MARKER = `transcript-${String(BLOCKS).padStart(4, '0')}-${String(ROWS_PER_BLOCK).padStart(3, '0')}`
 const FRAME_SAMPLES = 180
-// THE BUDGET IS THE DISPLAY'S OWN INTERVAL, not a rounded constant: a 60 Hz
-// headless Chromium schedules frames at ~16.7 ms and jitters above it (measured
-// on this host: median 16.700, p95 16.800 at ten blocks), so a fixed 16.7 ms
-// budget fails on the host's own vsync rather than on a missed frame. What this
-// benchmark exists for is whether scrolling the transcript MISSES frames, and a
-// missed frame is one interval at about twice the display's — so the criterion
-// is stated against the interval the run actually scheduled: the median within
-// a quarter of it, and no more than one dropped-frame-scale outlier at p95.
-//
-// The interval is read as the TENTH PERCENTILE of the intervals, not the single
-// fastest (nocx-2v80t.3.35). Headless WebKit reports whole milliseconds and now
-// and then delivers two callbacks a few milliseconds apart: measured at 200
-// blocks, intervals of 16 and 17 ms with a median of 16 and one of 3 ms (4 ms in
-// another run), which made the "display interval" 3 ms and failed a scroll that
-// dropped no frame. One early callback is not the display; a tenth of the
-// samples is, and a run whose frames are ALL slow still reports its slow
-// interval here, exactly as the fastest one did.
-const VSYNC_PERCENTILE = 0.1
-const FRAME_TOLERANCE = 1.25
-const P95_TOLERANCE = 2
+// Idle frames sampled just before the scroll, in the same page, with nothing
+// moving: the display interval the scroll is judged against. Why it cannot come
+// from the scroll itself, and the criterion, are in e2e/frame-budget.mts.
+const IDLE_SAMPLES = 120
 const INPUT = '.pane.active .nocx-editor-input'
 const BLOCK = '.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-running)'
 const RUNNING_BLOCK = '.pane.active .scrollback-inner > .cmd-block.cmd-block-running'
@@ -66,12 +51,8 @@ interface TranscriptMetrics {
   scrollHeight: number
   clientHeight: number
   maxScrollTop: number
-  frameSamples: number
-  /** The display's OWN frame interval this run scheduled, as the tenth percentile
-   *  of the intervals seen (VSYNC_PERCENTILE). */
-  vsyncMs: number
-  medianMs: number
-  p95Ms: number
+  idleFrames: number[]
+  scrollFrames: number[]
 }
 
 interface SelectionEvidence {
@@ -168,16 +149,33 @@ test.describe('long transcript scroll budget', () => {
   }
   async function measure(page: Page): Promise<TranscriptMetrics> {
     return page.evaluate(
-      async ({ blockSelector, rowSelector, scrollerSelector, frameSamples, vsyncPercentile }) => {
+      async ({ blockSelector, rowSelector, scrollerSelector, frameSamples, idleSamples }) => {
         const scroller = document.querySelector<HTMLElement>(scrollerSelector)
         if (!scroller) throw new Error(`missing transcript scroller: ${scrollerSelector}`)
 
         const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+        scroller.scrollTop = 0
+
+        // The display at rest: the same page, the same position, nothing
+        // written between frames.
+        const idleFrames: number[] = []
+        await new Promise<void>((resolve) => {
+          let last: number | null = null
+          const tick = (timestamp: number): void => {
+            if (last !== null) idleFrames.push(timestamp - last)
+            last = timestamp
+            if (idleFrames.length === idleSamples) {
+              resolve()
+              return
+            }
+            requestAnimationFrame(tick)
+          }
+          requestAnimationFrame(tick)
+        })
+
         const frameTimes: number[] = []
         let previousTimestamp: number | null = null
         let frame = 0
-
-        scroller.scrollTop = 0
         await new Promise<void>((resolve) => {
           const sample = (timestamp: number): void => {
             if (previousTimestamp !== null) frameTimes.push(timestamp - previousTimestamp)
@@ -193,10 +191,6 @@ test.describe('long transcript scroll budget', () => {
           requestAnimationFrame(sample)
         })
 
-        const sorted = [...frameTimes].sort((a, b) => a - b)
-        const percentile = (fraction: number): number =>
-          sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))] ?? 0
-
         return {
           blocks: document.querySelectorAll(blockSelector).length,
           rows: document.querySelectorAll(rowSelector).length,
@@ -204,10 +198,8 @@ test.describe('long transcript scroll budget', () => {
           scrollHeight: scroller.scrollHeight,
           clientHeight: scroller.clientHeight,
           maxScrollTop,
-          frameSamples: frameTimes.length,
-          vsyncMs: percentile(vsyncPercentile),
-          medianMs: percentile(0.5),
-          p95Ms: percentile(0.95),
+          idleFrames,
+          scrollFrames: frameTimes,
         }
       },
       {
@@ -215,7 +207,7 @@ test.describe('long transcript scroll budget', () => {
         rowSelector: ROW,
         scrollerSelector: SCROLLER,
         frameSamples: FRAME_SAMPLES,
-        vsyncPercentile: VSYNC_PERCENTILE,
+        idleSamples: IDLE_SAMPLES,
       },
     )
   }
@@ -457,9 +449,12 @@ test.describe('long transcript scroll budget', () => {
 
     const selection = await selectionEvidence(page)
     const find = await findEvidence(page)
-    const metrics = await measure(page)
+    const { idleFrames, scrollFrames, ...metrics } = await measure(page)
+    const frames: FrameVerdict = judgeFrames(idleFrames, scrollFrames)
 
-    console.log(`TRANSCRIPT_METRICS ${JSON.stringify(metrics)}`)
+    console.log(
+      `TRANSCRIPT_METRICS ${JSON.stringify({ ...metrics, idleSamples: idleFrames.length, scrollSamples: scrollFrames.length, ...frames })}`,
+    )
     console.log(`TRANSCRIPT_SELECTION ${JSON.stringify(selection)}`)
     console.log(`TRANSCRIPT_NATIVE_FIND ${JSON.stringify(find)}`)
 
@@ -472,8 +467,6 @@ test.describe('long transcript scroll budget', () => {
     expect(find.offscreenBeforeSearch).toBe(true)
     expect(find.offscreenFound).toBe(true)
 
-    expect(metrics.vsyncMs).toBeGreaterThan(0)
-    expect(metrics.medianMs).toBeLessThanOrEqual(metrics.vsyncMs * FRAME_TOLERANCE)
-    expect(metrics.p95Ms).toBeLessThanOrEqual(metrics.vsyncMs * P95_TOLERANCE)
+    expect(frames.failures, 'the transcript scroll missed frames').toEqual([])
   })
 })

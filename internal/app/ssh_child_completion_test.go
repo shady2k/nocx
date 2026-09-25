@@ -16,13 +16,20 @@ type recordingLaneObserver struct {
 
 func (r *recordingLaneObserver) ObserveEnvironmentEntry() {}
 
-func (r *recordingLaneObserver) Observe(fence [32]byte, exit *int) {
-	r.fences = append(r.fences, lifecycle.FenceNonce(fence))
+func (r *recordingLaneObserver) Accept(ingest func() error, c *lifecycle.Complete) error {
+	if err := ingest(); err != nil {
+		return err
+	}
+	if c == nil {
+		return nil
+	}
+	r.fences = append(r.fences, c.Fence)
 	code := -1
-	if exit != nil {
-		code = *exit
+	if c.ExitCode != nil {
+		code = *c.ExitCode
 	}
 	r.exits = append(r.exits, code)
+	return nil
 }
 
 // sshChildStand is a real kernel and publisher with a parent domain on the

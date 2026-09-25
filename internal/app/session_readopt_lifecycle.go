@@ -139,10 +139,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	// attempt's bound: the pass's context ends when the pass returns, and the
 	// pane does not.
 	sessionCtx, stopDownlink := context.WithCancel(context.WithoutCancel(ctx))
-	downlink := client.NewCompletionDownlink(carrier, sessionCtx, func(err error) {
-		log.NewSlogAdapter(rp.registry.log).Warn(
-			"helper: the completion the kernel accepted did not reach the helper session", "err", err)
-	})
+	downlink := client.NewCompletionDownlink(carrier, sessionCtx)
 	// The identity is known HERE — the helper handed it back — so the
 	// downlink binds at construction and carries no pending window at all.
 	downlink.Bind(entry.HostSessionID)

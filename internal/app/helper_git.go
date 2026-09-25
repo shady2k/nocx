@@ -961,13 +961,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		// drops its cancellation.
 		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
 		stopDownlink = cancelSession
-		downlink = client.NewCompletionDownlink(c, sessionCtx, func(err error) {
-			// The kernel's execution state stands exactly as it set it; the
-			// report is the whole of a failed delivery's handling.
-			log.NewSlogAdapter(r.log).WithContext(ctx).Warn(
-				"far helper: the completion the kernel accepted did not reach the helper session",
-				"host", cfg.Host, "err", err)
-		})
+		// A delivery that fails is retried, and one that is lost is logged
+		// by the downlink itself, through log.From on this same context.
+		downlink = client.NewCompletionDownlink(c, sessionCtx)
 		driveKernel := client.NewCompletionObservingKernel(r.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()

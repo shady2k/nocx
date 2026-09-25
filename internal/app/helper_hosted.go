@@ -178,12 +178,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// goroutine waits on the same Done.
 		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
 		stopDownlink = cancelSession
-		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx, func(err error) {
-			// The kernel's execution state stands exactly as it set it; the
-			// report is the whole of a failed delivery's handling.
-			log.NewSlogAdapter(h.log).WithContext(ctx).Warn(
-				"helper: the completion the kernel accepted did not reach the helper session", "err", err)
-		})
+		// A delivery that fails is retried, and one that is lost is logged
+		// by the downlink itself, through log.From on this same context.
+		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx)
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()

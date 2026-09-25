@@ -457,9 +457,10 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 //
 // A holed report is both a loss on the record and a marker on the stream:
 // the feeds struck and the bytes they carried are counted here, and the row
-// batch that follows the hole carries lost=1 (rowstream.go). A feed that
-// departed nothing but was struck still carries its marker, so a hole at the
-// very end of an interval is never silently dropped.
+// batch that follows the hole carries lost=1 (rowstream.go), spending one
+// index for it. A feed that departed nothing but was struck still carries its
+// marker, as a loss-only emission, so a hole at the very end of an interval
+// is never silently dropped.
 func (s *Session) drainObservationLocked(feedBytes int) {
 	if s.observation == nil {
 		// No interval is in flight; nothing may claim the report's rows, so
@@ -500,6 +501,15 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 		return
 	}
 	s.releasePendingScreenLocked()
+	// A loss SPENDS the indices it names (nocx-2v80t.3.26): the struck
+	// feed's symbolic count advances the index before this batch's first
+	// row, so every consumer reads FromRow minus LostRows as exactly where
+	// the delivery before it ended, and one arithmetic holds for this hole
+	// and for a bridge's drop alike. A loss-only emission (no rows) then
+	// has a position of its own — the end of the hole — and the interval's
+	// end marker, read from the same counter, agrees with it, so a hole at
+	// an interval's tail is carried rather than lost between two readers.
+	s.departedRows += lost
 	from := s.departedRows
 	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
 	if rs := s.rowStream; rs != nil {

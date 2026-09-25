@@ -170,11 +170,20 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 	if in.EntryID == "" || in.ArtifactID == "" {
 		return errors.New("content: block rows: entry id and artifact id are required")
 	}
-	if len(in.Rows) == 0 {
-		// An empty delivery is not an event: the seam never sends one, and
-		// recording nothing under a row index that advanced would put a
-		// silent hole in the block.
-		return errors.New("content: block rows: an append carries at least one row")
+	if len(in.Rows) == 0 && in.LostRows == 0 {
+		// A delivery with neither rows nor a loss is not an event. A
+		// LOSS-ONLY delivery is one (nocx-2v80t.3.26): it is how a hole at
+		// the very end of an interval is stated — the struck feed departed
+		// nothing readable and nothing follows it — and refusing it would
+		// drop the one record of that hole before it reached the summary.
+		return errors.New("content: block rows: an append carries a row or a loss")
+	}
+	if in.LostRows > in.FromRow {
+		// Every loss spends the indices it stands for, so FromRow minus
+		// LostRows is where the gap began — and a gap cannot begin before
+		// the session's first row.
+		return fmt.Errorf("%w: block %s: append at %d claims %d lost, a gap before row 0",
+			ErrBlockRowsDiscontinuous, in.ArtifactID, in.FromRow, in.LostRows)
 	}
 	capBytes := int64(s.policy.OutputCapBytes())
 	return s.run(ctx, func(ctx context.Context) error {
@@ -199,7 +208,13 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 		}
 
 		// Continuity, both ends: a replay from behind the cursor is the
-		// past arriving again; a jump must name the rows that went missing.
+		// past arriving again; a jump must name the rows that went missing,
+		// EXACTLY — and a loss must name a jump. Every loss spends the
+		// indices it stands for (the bridge's drops and the runtime's struck
+		// feeds alike, nocx-2v80t.3.26), so FromRow minus LostRows is where
+		// the delivery before this one ended, and a loss at FromRow ==
+		// NextRow names no gap: it was attributed to the wrong stream
+		// position, and storing it would persist that false position.
 		// The FIRST append takes any FromRow — the session's absolute row
 		// counter includes rows that departed before this command started,
 		// which belonged to no block.
@@ -208,7 +223,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			case in.FromRow < state.payload.NextRow:
 				return fmt.Errorf("%w: block %s is at row %d, append starts at %d",
 					ErrBlockRowsDiscontinuous, in.ArtifactID, state.payload.NextRow, in.FromRow)
-			case in.FromRow > state.payload.NextRow && in.LostRows != in.FromRow-state.payload.NextRow:
+			case in.LostRows != in.FromRow-state.payload.NextRow:
 				return fmt.Errorf("%w: block %s is at row %d, append starts at %d claiming %d lost",
 					ErrBlockRowsDiscontinuous, in.ArtifactID, state.payload.NextRow, in.FromRow, in.LostRows)
 			}
@@ -218,6 +233,20 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			// The reservation is FIXED here and never moves; see the header.
 			head := capBytes / 2
 			state.payload.HeadEnd = &head
+		}
+
+		if len(in.Rows) == 0 {
+			// A loss-only delivery stores no row: it moves the cursor to the
+			// end of the gap it names and carries the count to the summary,
+			// and that is all it has to say.
+			state.payload.NextRow = in.FromRow
+			state.payload.LostRows += in.LostRows
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE artifacts SET payload = ? WHERE id = ?`,
+				state.payload.json(), in.ArtifactID); err != nil {
+				return err
+			}
+			return tx.Commit()
 		}
 
 		// Encode, then cut into chunk rows at line boundaries — every line

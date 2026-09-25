@@ -405,6 +405,77 @@ func TestAStruckFeedCarriesACountedLossMarker(t *testing.T) {
 	}
 }
 
+// A loss spends the indices it names (nocx-2v80t.3.26, finding 4): every
+// batch's FromRow minus its LostRows is exactly where the batch before it
+// ended, so a consumer can hold a loss to the stream position it happened at
+// — and a hole at the very END of an interval, a struck feed that departed
+// nothing readable, is a loss-only emission whose position the interval's end
+// marker then agrees with, so the closing screen lands after the hole rather
+// than on top of it. Paired with the ordinary feeds around it, which advance
+// the index by exactly the rows they carry.
+func TestALossSpendsTheIndicesItNames(t *testing.T) {
+	screen, err := ghostty.New(harnessGeometry(80, 24))
+	if err != nil {
+		t.Fatalf("build the real emulator: %v", err)
+	}
+	t.Cleanup(screen.Close)
+	emu := &harnessEmulator{Terminal: screen}
+	s := obsSessionOver(t, harnessGeometry(80, 24), emu)
+	rs := &recordingRowStream{}
+	s.SetRowStream(rs)
+
+	obsFeed(t, s, 0, 100)
+	emu.StrikeNextDepartures(errHarnessStrike)
+	obsFeed(t, s, 100, 100) // a struck feed WITH rows: the hole rides them
+	obsFeed(t, s, 200, 100)
+	// A struck feed that departs nothing: no newline on a full screen moves
+	// no row off it. The hole is the interval's last event before its end.
+	emu.StrikeNextDepartures(errHarnessStrike)
+	if err := s.Ingest([]byte("no newline")); err != nil {
+		t.Fatalf("ingest the tail: %v", err)
+	}
+	obsSeal(t, s, obsNonce(7))
+
+	var next uint64
+	started := false
+	var tail *rowEvent
+	var end *rowEvent
+	flagged := 0
+	for _, e := range rs.snapshot() {
+		switch e.kind {
+		case "rows":
+			if started && e.from-e.lost != next {
+				t.Fatalf("a batch at FromRow %d carries lost=%d, so its gap begins at %d — but the batch before ended at %d",
+					e.from, e.lost, e.from-e.lost, next)
+			}
+			if e.lost > 0 {
+				flagged++
+			}
+			started = true
+			next = e.from + uint64(len(e.rows)) //nolint:gosec // a row count
+			if len(e.rows) == 0 {
+				ev := e
+				tail = &ev
+			}
+		case "end":
+			ev := e
+			end = &ev
+		}
+	}
+	if flagged != 2 {
+		t.Fatalf("%d batches carry a loss, want the two struck feeds'", flagged)
+	}
+	if tail == nil || tail.lost != 1 {
+		t.Fatalf("the struck feed that departed nothing reached the stream as %+v, want a loss-only emission of 1", tail)
+	}
+	if end == nil {
+		t.Fatal("the interval's end never reached the stream")
+	}
+	if end.endRow != next {
+		t.Fatalf("the end marker stops at row %d, want %d — the end of the hole the interval's last emission named", end.endRow, next)
+	}
+}
+
 // The absolute row index is the SESSION's, not the stream consumer's: rows
 // that departed before any consumer was bound still spent their indices, so
 // a consumer bound late continues where the session left off.

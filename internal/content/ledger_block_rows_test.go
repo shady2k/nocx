@@ -411,17 +411,13 @@ func TestAppendBlockRows_ARowJumpMustExplainItself(t *testing.T) {
 	}
 }
 
-// A CONTINUOUS append — FromRow already equal to the block's own NextRow —
-// takes no continuity check on LostRows at all (the discontinuity switch
-// only fires for FromRow < NextRow or FromRow > NextRow), so a caller can
-// claim more lost rows than the block's own span can ever explain without
-// its FromRow ever jumping. Closing such a block used to compute its
-// DroppedRows as an UNSIGNED span-minus-lost-minus-stored that underflowed
-// — roughly 2^64 rows reported missing for a block that stored every row it
-// was ever given (stage review nocx-2v80t.3.15, finding 10). The fix
-// reports zero rather than a wrapped lie whenever the chunks hold more than
-// the span-minus-loss arithmetic can account for.
-func TestCloseBlockRows_AnOverclaimedLossNeverUnderflowsTheDropCount(t *testing.T) {
+// A loss must name the gap it stands for (nocx-2v80t.3.26, finding 6): a
+// delivery whose FromRow already equals the block's own NextRow names no gap,
+// so a LostRows it carries was attributed to the wrong stream position — the
+// bridge used to fold a drop into whichever batch it delivered next, even one
+// enqueued BEFORE the drop — and storing it would persist a false position.
+// Refused, paired with the same loss at the gap it names, which is kept.
+func TestAppendBlockRows_ALossThatNamesNoGapIsRefused(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)
 	entryID := recordOne(t, led, "long command")
@@ -434,14 +430,53 @@ func TestCloseBlockRows_AnOverclaimedLossNeverUnderflowsTheDropCount(t *testing.
 	}); err != nil {
 		t.Fatalf("first append: %v", err)
 	}
-	// FromRow(2) equals the block's own NextRow(2): a perfectly continuous
-	// append, and LostRows here claims ten rows that this append's own
-	// FromRow does not name a gap for.
-	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+	err := led.AppendBlockRows(ctx, content.AppendBlockRows{
 		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 2, LostRows: 10,
 		Rows: []emulator.Row{aTextRow("three")},
+	})
+	if !errors.Is(err, content.ErrBlockRowsDiscontinuous) {
+		t.Fatalf("a continuous append claiming a loss err = %v, want ErrBlockRowsDiscontinuous", err)
+	}
+	// A loss-only delivery claiming no gap is refused the same way.
+	err = led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 2, LostRows: 1,
+	})
+	if !errors.Is(err, content.ErrBlockRowsDiscontinuous) {
+		t.Fatalf("a loss-only append naming no gap err = %v, want ErrBlockRowsDiscontinuous", err)
+	}
+	// The same rows at the gap they name: kept, and the loss carried.
+	if err = led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 12, LostRows: 10,
+		Rows: []emulator.Row{aTextRow("three")},
 	}); err != nil {
-		t.Fatalf("continuous append with an overclaimed loss: %v", err)
+		t.Fatalf("an append at the gap its loss names: %v", err)
+	}
+	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: keptArtifact})
+	if err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	if summary.LostRows != 10 || summary.DroppedRows != 0 {
+		t.Fatalf("summary = %+v, want 10 lost and nothing dropped", summary)
+	}
+}
+
+// A first append takes any FromRow (the session's index counts rows that
+// belonged to no block), so a loss it carries cannot be checked against a
+// cursor — and one that claims more than the block's own span explains must
+// still never underflow the drop count into ~2^64 rows missing (stage review
+// nocx-2v80t.3.15, finding 10).
+func TestCloseBlockRows_AnOverclaimedLossNeverUnderflowsTheDropCount(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "long command")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 10, LostRows: 10,
+		Rows: []emulator.Row{aTextRow("one"), aTextRow("two"), aTextRow("three")},
+	}); err != nil {
+		t.Fatalf("first append: %v", err)
 	}
 	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: keptArtifact})
 	if err != nil {
@@ -455,6 +490,114 @@ func TestCloseBlockRows_AnOverclaimedLossNeverUnderflowsTheDropCount(t *testing.
 	kept := storedBlockRows(t, led, keptArtifact)
 	if len(kept) != 3 || kept[0].Text != "one" || kept[1].Text != "two" || kept[2].Text != "three" {
 		t.Fatalf("the stored rows = %+v, want one, two, three — every row this test appended", kept)
+	}
+}
+
+// A loss-only delivery (nocx-2v80t.3.26, finding 4) — no rows, a loss at the
+// gap it names — is how a hole at the very END of an interval is stated: the
+// struck feed departed nothing readable, and nothing follows it in the
+// interval. It is recorded in the block's summary rather than refused, the
+// block's cursor moves to the end of the gap so the closing screen lands
+// where the interval really ended, and nothing is stored for it. Paired with
+// the ordinary tail — the same rows with no hole after them — which records
+// no loss.
+func TestAppendBlockRows_ALossOnlyDeliveryIsRecordedInTheSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		lossTail bool
+		wantLost uint64
+	}{
+		{name: "a hole at the tail", lossTail: true, wantLost: 1},
+		{name: "the ordinary tail", lossTail: false, wantLost: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			_, led := newLedger(t)
+			entryID := recordOne(t, led, "make")
+			if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+				t.Fatalf("OpenBlockOutput: %v", err)
+			}
+			if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+				EntryID: entryID, ArtifactID: keptArtifact, FromRow: 4,
+				Rows: []emulator.Row{aTextRow("one"), aTextRow("two")},
+			}); err != nil {
+				t.Fatalf("first append: %v", err)
+			}
+			closingAt := uint64(6)
+			if tc.lossTail {
+				if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+					EntryID: entryID, ArtifactID: keptArtifact, FromRow: 7, LostRows: 1,
+				}); err != nil {
+					t.Fatalf("a loss-only delivery at the tail: %v", err)
+				}
+				closingAt = 7
+			}
+			// The closing screen follows at the cursor the tail left.
+			if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+				EntryID: entryID, ArtifactID: keptArtifact, FromRow: closingAt,
+				Rows: []emulator.Row{aTextRow("$ ")},
+			}); err != nil {
+				t.Fatalf("the closing screen at %d: %v", closingAt, err)
+			}
+			summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: keptArtifact})
+			if err != nil {
+				t.Fatalf("CloseBlockRows: %v", err)
+			}
+			if summary.LostRows != tc.wantLost || summary.DroppedRows != 0 {
+				t.Fatalf("summary = %+v, want %d lost and nothing dropped", summary, tc.wantLost)
+			}
+			if kept := storedBlockRows(t, led, keptArtifact); len(kept) != 3 {
+				t.Fatalf("the block stores %d rows, want 3 — a loss-only delivery stores nothing", len(kept))
+			}
+		})
+	}
+}
+
+// A loss-only delivery can be a block's FIRST event: a command whose only
+// output was a struck feed. It is recorded, not refused.
+func TestAppendBlockRows_ALossOnlyFirstDeliveryIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "cat big")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 3, LostRows: 1,
+	}); err != nil {
+		t.Fatalf("a loss-only first delivery: %v", err)
+	}
+	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: keptArtifact})
+	if err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	if summary.LostRows != 1 {
+		t.Fatalf("summary.LostRows = %d, want 1", summary.LostRows)
+	}
+	if body := textOfRows(t, led, keptArtifact); body != "" {
+		t.Fatalf("body = %q, want empty — a loss stores no row", body)
+	}
+}
+
+// A delivery with neither rows nor a loss is not an event, and a loss larger
+// than the index it ends at names a gap before the session's first row.
+func TestAppendBlockRows_RefusesAnEmptyDeliveryAndAnImpossibleGap(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "true")
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: entryID, ArtifactID: keptArtifact}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 3,
+	}); err == nil {
+		t.Fatal("an append with no rows and no loss was accepted")
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: keptArtifact, FromRow: 1, LostRows: 2,
+		Rows: []emulator.Row{aTextRow("x")},
+	}); !errors.Is(err, content.ErrBlockRowsDiscontinuous) {
+		t.Fatalf("a loss reaching before row 0 err = %v, want ErrBlockRowsDiscontinuous", err)
 	}
 }
 

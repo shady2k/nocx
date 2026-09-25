@@ -107,8 +107,14 @@ jobs:
   # ci-backlog, not the product suites: the owner's decision of 2026-09-19
   # (AGENTS.md "Git authority"). Anything else, and every event that is not a
   # pull request (a release branch, a release calling this workflow), runs
-  # everything. The hooks and this workflow are NOT supporting here: they decide
-  # how everything else is checked, so a change to them runs every job.
+  # everything. This workflow is NOT supporting here, and neither is whatever in
+  # .githooks CI itself runs -- images/, check-deadcode.mjs and its baseline,
+  # check-log-context.mjs, which ci-frontend tests -- since they decide how
+  # everything else is checked, so a change to them runs every job. The four
+  # git hooks and scripts/connect-clone.sh are supporting: CI never executes
+  # them, so a product run proves nothing about a change to them, and AGENTS.md
+  # "Git authority" names .githooks/ as a change that owes review, not the
+  # product suites (nocx-fptlv).
   # A skipped job reports as skipped, which no branch rule on main requires.
   changes:
     runs-on: ubuntu-latest
@@ -139,6 +145,8 @@ jobs:
             [ -n "$f" ] || continue
             case "$f" in
               .beads/*|docs/*|.internal/*|.githooks/backlog-gate/*) ;;
+              .githooks/pre-commit|.githooks/commit-msg|.githooks/pre-merge-commit|.githooks/pre-push) ;;
+              scripts/connect-clone.sh) ;;
               */*) product=true ;;
               *.md) ;;
               *) product=true ;;

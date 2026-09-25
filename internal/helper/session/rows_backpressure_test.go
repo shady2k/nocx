@@ -13,6 +13,7 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -57,6 +58,10 @@ type orderedStallingSink struct {
 	stalled chan struct{}
 	release chan struct{}
 	changed chan struct{}
+	// failIncomplete makes the first incomplete marker's send fail, the way
+	// a dying connection answers it (nocx-2v80t.3.38).
+	failIncomplete bool
+	failed         chan struct{}
 }
 
 func newOrderedStallingSink() *orderedStallingSink {
@@ -92,6 +97,16 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	var rows []json.RawMessage
 	if err := json.Unmarshal(doc.Rows, &rows); err != nil {
 		return err
+	}
+	s.mu.Lock()
+	fail := doc.Incomplete && s.failIncomplete
+	if fail {
+		s.failIncomplete = false
+	}
+	s.mu.Unlock()
+	if fail {
+		close(s.failed)
+		return errors.New("injected: the marker's send failed")
 	}
 	s.record(recordedDelivery{fromRow: f.FromRow, lostRows: doc.LostRows, rows: len(rows), incomplete: doc.Incomplete, raw: f.Payload})
 	return nil
@@ -330,6 +345,49 @@ func TestAWedgedSinkWithinTheBufferLosesNothing(t *testing.T) {
 		t.Fatalf("the clear arrived as %+v", log[12])
 	}
 	assertLossesNameTheirGaps(t, log)
+}
+
+// A failed send of the incomplete marker does not lose the only statement of
+// the loss (nocx-2v80t.3.38): the bridge still owes it, and states it before
+// the next thing it delivers — here the end that closes the interval running
+// through the overflow — so the coordinator settles that block incomplete
+// rather than whole. Paired with the ordinary send, which is not repeated
+// (TestAWedgedSinkPastTheBufferEndsTheBlockIncomplete delivers it once).
+func TestAFailedIncompleteMarkerIsStatedAgainBeforeTheNextDelivery(t *testing.T) {
+	sink := newOrderedStallingSink()
+	sink.failIncomplete = true
+	sink.failed = make(chan struct{})
+	hs := newBridgeOnlySession(t, sink)
+	bufferOf(hs, 2)
+	go hs.serveRows()
+	t.Cleanup(func() { close(hs.rowsDone) })
+	bridge := &rowBridge{hs: hs}
+	row := []emulator.Row{textRow("x")}
+	stallThePump(t, sink, bridge)
+
+	for i := uint64(1); i <= 10; i++ {
+		bridge.OutputRows(i, row, 0)
+	}
+	close(sink.release)
+	<-sink.failed // the marker's one send has failed
+
+	bridge.IntervalEnd(endNonce(0xAB), 11, nil, false)
+	log := sink.waitUntil(func(log []recordedDelivery) bool {
+		last := lastOf(log)
+		return last != nil && last.end
+	})
+	if len(log) < 2 || !log[len(log)-2].incomplete || log[len(log)-2].fromRow != 3 {
+		t.Fatalf("the delivery before the end is %+v, want the owed incomplete marker at 3", log[len(log)-2])
+	}
+	marks := 0
+	for _, d := range log {
+		if d.incomplete {
+			marks++
+		}
+	}
+	if marks != 1 {
+		t.Fatalf("the marker reached the coordinator %d times, want once", marks)
+	}
 }
 
 func lastOf(log []recordedDelivery) *recordedDelivery {

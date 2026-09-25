@@ -11,6 +11,8 @@ package transport
 // "whichever block is current" — each block is settled by its own fence.
 
 import (
+	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -124,8 +126,11 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
-			one := heldRowsBytes([]emulator.Row{aStreamRow("row")})
-			e.ws.SetBlockRowsBufferBytes(10 * one)
+			// A wide row, so the floor-sized buffer overflows within a few
+			// dozen of them.
+			wide := aStreamRow(strings.Repeat("r", 2000))
+			bound := MinBlockRowsBufferBytes
+			e.ws.SetBlockRowsBufferBytes(bound)
 			e.ws.AttachBlockRows(sid)
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
 
@@ -135,13 +140,8 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 			e.ws.blockStream.flushing[sid] = true
 			e.ws.blockStream.mu.Unlock()
 			for i := range tc.rows {
-				e.ws.BlockRowsArrived(sid, uint64(i), 0, []emulator.Row{aStreamRow("row")}) //nolint:gosec // a small index
-				e.ws.blockStream.mu.Lock()
-				held := e.ws.blockStream.heldBytesLocked(sid)
-				e.ws.blockStream.mu.Unlock()
-				if held > 10*one {
-					t.Fatalf("the coordinator holds %d bytes, past its %d-byte buffer", held, 10*one)
-				}
+				e.ws.BlockRowsArrived(sid, uint64(i), 0, []emulator.Row{wide}) //nolint:gosec // a small index
+				assertHeldWithin(t, e, sid, bound)
 			}
 			e.ws.blockStream.mu.Lock()
 			e.ws.blockStream.flushing[sid] = false
@@ -178,18 +178,18 @@ func TestTheCoordinatorsBufferIsTheOneTheSessionWasOpenedWith(t *testing.T) {
 	first := session.ID(sidStr)
 	second := session.ID("0123456789abcdef0123456789abcdef")
 
-	e.ws.SetBlockRowsBufferBytes(3 << 20)
-	e.ws.AttachBlockRows(first)
 	e.ws.SetBlockRowsBufferBytes(5 << 20)
+	e.ws.AttachBlockRows(first)
+	e.ws.SetBlockRowsBufferBytes(7 << 20)
 	e.ws.AttachBlockRows(second)
 
 	e.ws.blockStream.mu.Lock()
 	defer e.ws.blockStream.mu.Unlock()
-	if got := e.ws.blockStream.budgets[first]; got != 3<<20 {
-		t.Fatalf("the first session's buffer is %d bytes, want the 3 MB it was opened with", got)
+	if got := e.ws.blockStream.budgets[first]; got != 5<<20 {
+		t.Fatalf("the first session's buffer is %d bytes, want the 5 MB it was opened with", got)
 	}
-	if got := e.ws.blockStream.budgets[second]; got != 5<<20 {
-		t.Fatalf("a session opened after the change has %d bytes, want 5 MB", got)
+	if got := e.ws.blockStream.budgets[second]; got != 7<<20 {
+		t.Fatalf("a session opened after the change has %d bytes, want 7 MB", got)
 	}
 }
 
@@ -202,4 +202,164 @@ func TestTheCoordinatorsBufferDefaultsWhenNothingIsConfigured(t *testing.T) {
 	if got := e.ws.blockStream.budgets[session.ID(sidStr)]; got != DefaultBlockRowsBufferBytes {
 		t.Fatalf("an unconfigured session's buffer is %d bytes, want the default %d", got, DefaultBlockRowsBufferBytes)
 	}
+}
+
+// assertHeldWithin fails when the session's buffer holds more than bound.
+func assertHeldWithin(t *testing.T, e *lifecycleTestEnv, sid session.ID, bound int64) {
+	t.Helper()
+	e.ws.blockStream.mu.Lock()
+	held := e.ws.blockStream.heldBytesLocked(sid)
+	e.ws.blockStream.mu.Unlock()
+	if held > bound {
+		t.Fatalf("the coordinator holds %d bytes, past its %d-byte buffer", held, bound)
+	}
+}
+
+// The coordinator owns a floor too (nocx-2v80t.3.38): a buffer that cannot
+// hold one closing screen would end every block incomplete at its first end.
+// A one-byte setting gets the floor; one above it is kept
+// (TestTheCoordinatorsBufferIsTheOneTheSessionWasOpenedWith).
+func TestTheCoordinatorsBufferHasAFloor(t *testing.T) {
+	e, _, _, _, sidStr, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.SetBlockRowsBufferBytes(1)
+	e.ws.AttachBlockRows(session.ID(sidStr))
+	e.ws.blockStream.mu.Lock()
+	defer e.ws.blockStream.mu.Unlock()
+	if got := e.ws.blockStream.budgets[session.ID(sidStr)]; got != MinBlockRowsBufferBytes {
+		t.Fatalf("a one-byte setting gave a %d-byte buffer, want the floor %d", got, MinBlockRowsBufferBytes)
+	}
+}
+
+// A completion may arrive before its output does (ADR-0024 decision 7), so
+// it can precede the overflow marker (nocx-2v80t.3.38, the review's blocker).
+// The marker still settles that block — the one in flight, whose end the
+// helper will never send — and after recovery the next command's rows go to
+// the next command's block, not to the stale one. Paired with the marker
+// arriving first (TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete).
+func TestAnIncompleteMarkerAfterItsCompletionStillSettlesTheBlock(t *testing.T) {
+	e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+	sid := session.ID(sidStr)
+	e.ws.AttachBlockRows(sid)
+
+	a := startsACommand(t, e, pub, lane, h, 2, "make a")
+	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0")}); !confirm {
+		t.Fatal("A's row was not confirmed")
+	}
+	fenceA := lifecycleFence(0x61)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+
+	e.ws.BlockOutputIncomplete(sid, 1)
+
+	assertSealedAs(t, db, a, gap)
+	if n := closedCount(t, e, sid, a); n != 1 {
+		t.Fatalf("A was said closed %d times, want once", n)
+	}
+
+	// Recovery: the next end the helper carries is B's, B ran through the
+	// overflow and is incomplete; C, after it, is recorded whole.
+	b := startsACommand(t, e, pub, lane, h, 5, "make b")
+	fenceB := lifecycleFence(0x62)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(b), 0, fenceB)))
+	e.ws.BlockIntervalEnded(sid, fenceB, 2, nil, false)
+	assertSealedAs(t, db, b, gap)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecyclePromptEvt()))
+
+	c := startsACommand(t, e, pub, lane, h, 8, "make c")
+	if _, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("c0")}); !confirm {
+		t.Fatal("C's row was not confirmed")
+	}
+	if rows := streamRows(t, db, a); len(rows) != 1 {
+		t.Fatalf("A holds %+v after recovery, want only its own row — the next command's rows went to it", rows)
+	}
+	if rows := streamRows(t, db, c); len(rows) != 1 || rows[0].Text != "c0" {
+		t.Fatalf("C holds %+v, want its own row", rows)
+	}
+}
+
+// Every queue that holds a closing screen counts against the coordinator's
+// buffer (nocx-2v80t.3.38): an end parked for its completion, an end held
+// behind a deferred append, and an end queued for a block not yet current.
+// A closing screen that would take the buffer past its bound is not kept —
+// that end closes its block incomplete — and the end itself is never lost.
+// Paired: a closing screen within the bound is kept whole.
+func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
+	bound := MinBlockRowsBufferBytes
+	screen := func(rows int) []emulator.Row {
+		out := make([]emulator.Row, rows)
+		for i := range out {
+			out[i] = aStreamRow(strings.Repeat("s", 2000))
+		}
+		return out
+	}
+	big := screen(40)  // ~3.3 MB: one fits, two do not
+	small := screen(1) // well within
+
+	t.Run("parked for their completions", func(t *testing.T) {
+		e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+		sid := session.ID(sidStr)
+		e.ws.SetBlockRowsBufferBytes(bound)
+		e.ws.AttachBlockRows(sid)
+		a := startsACommand(t, e, pub, lane, h, 2, "make a")
+		fenceA, fenceX := lifecycleFence(0x71), lifecycleFence(0x72)
+		// Two ends whose completions have not arrived: both parked.
+		e.ws.BlockIntervalEnded(sid, fenceX, 0, big, false)
+		e.ws.BlockIntervalEnded(sid, fenceA, 0, big, false)
+		assertHeldWithin(t, e, sid, bound)
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
+		assertSealedAs(t, db, a, gap)
+	})
+	t.Run("held behind a deferred append", func(t *testing.T) {
+		for _, closing := range [][]emulator.Row{big, small} {
+			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
+			sid := session.ID(sidStr)
+			e.ws.SetBlockRowsBufferBytes(bound)
+			e.ws.AttachBlockRows(sid)
+			a := startsACommand(t, e, pub, lane, h, 2, "make a")
+			fenceA := lifecycleFence(0x73)
+			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
+			e.ws.blockStream.mu.Lock()
+			e.ws.blockStream.flushing[sid] = true
+			e.ws.blockStream.pending[sid] = []pendingRows{{from: 0, rows: big}}
+			e.ws.blockStream.mu.Unlock()
+			e.ws.BlockIntervalEnded(sid, fenceA, 40, closing, false)
+			assertHeldWithin(t, e, sid, bound)
+			e.ws.blockStream.mu.Lock()
+			pending := e.ws.blockStream.pending[sid]
+			delete(e.ws.blockStream.pending, sid)
+			e.ws.blockStream.flushing[sid] = false
+			block := e.ws.blockStream.current[sid]
+			e.ws.blockStream.mu.Unlock()
+			e.ws.blockStream.flushPendingRows(e.ws, sid, block, pending, nil)
+			if len(closing) == len(small) {
+				assertSealedAs(t, db, a, nil)
+			} else {
+				assertSealedAs(t, db, a, gap)
+			}
+		}
+	})
+	t.Run("queued for a block not yet current", func(t *testing.T) {
+		for _, closing := range [][]emulator.Row{big, small} {
+			fenceFirst := lifecycleFence(0x74)
+			e, sid, _, second := twoCommands(t, fenceFirst)
+			db := e.ws.contentDB
+			e.ws.blockStream.mu.Lock()
+			e.ws.blockStream.budgets[sid] = bound
+			e.ws.blockStream.beyond[sid] = []pendingRows{{from: 1, rows: big}}
+			e.ws.blockStream.mu.Unlock()
+			fenceSecond := lifecycleFence(0x75)
+			e.ws.blockStream.publishFence(e.ws, sid, hex.EncodeToString(fenceSecond[:]), second)
+			e.ws.BlockIntervalEnded(sid, fenceSecond, 2, closing, false)
+			assertHeldWithin(t, e, sid, bound)
+			e.ws.blockStream.mu.Lock()
+			delete(e.ws.blockStream.beyond, sid)
+			e.ws.blockStream.mu.Unlock()
+			e.ws.BlockIntervalEnded(sid, fenceFirst, 1, nil, false)
+			if len(closing) == len(small) {
+				assertSealedAs(t, db, second, nil)
+			} else {
+				assertSealedAs(t, db, second, gap)
+			}
+		}
+	})
 }

@@ -791,6 +791,10 @@ type LocalLaunchRecord struct {
 	// for. Reported rather than assumed: a caller whose request was clamped
 	// must be able to see that it was.
 	WindowBytes int64 `json:"windowBytes"`
+	// RowBufferBytes is the row buffer this session actually got
+	// (nocx-2v80t.3.38): the requested bound after the helper's floor,
+	// ceiling and aggregate budget, reported for the same reason.
+	RowBufferBytes int64 `json:"rowBufferBytes"`
 }
 
 // SSHLaunchRecord is the launch record of a session whose process is a shell
@@ -837,6 +841,8 @@ type SSHLaunchRecord struct {
 	Rows uint16 `json:"rows"`
 	// WindowBytes is the bound this session actually got.
 	WindowBytes int64 `json:"windowBytes"`
+	// RowBufferBytes is the row buffer this session actually got.
+	RowBufferBytes int64 `json:"rowBufferBytes"`
 }
 
 // WindowBytes reports the output-window bound this session actually got, from
@@ -849,6 +855,18 @@ func (r LaunchRecord) WindowBytes() int64 {
 		return r.Local.WindowBytes
 	case r.SSH != nil:
 		return r.SSH.WindowBytes
+	}
+	return 0
+}
+
+// RowBufferBytes reports the row buffer this session actually got, from
+// whichever branch the record is (nocx-2v80t.3.38).
+func (r LaunchRecord) RowBufferBytes() int64 {
+	switch {
+	case r.Local != nil:
+		return r.Local.RowBufferBytes
+	case r.SSH != nil:
+		return r.SSH.RowBufferBytes
 	}
 	return 0
 }

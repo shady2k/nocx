@@ -44,11 +44,17 @@ func TestClosingAHelperHostedSessionReleasesItsHelperWindowBudget(t *testing.T) 
 	// aggregate admits exactly ONE session at a time: the smallest budget
 	// that can prove a release happened, and small so the test stays fast.
 	const windowBytes = 2 * 64 << 10 // 128 KiB
+	// Room for exactly one session: its window and its row buffer, which
+	// draws on the same aggregate (AD-10, nocx-2v80t.3.38).
+	const rowBufferBytes = 64 << 10
 	limits := helper.Limits{
-		DefaultWindowBytes: windowBytes,
-		MinWindowBytes:     windowBytes,
-		MaxWindowBytes:     windowBytes,
-		BudgetBytes:        windowBytes,
+		DefaultWindowBytes:    windowBytes,
+		MinWindowBytes:        windowBytes,
+		MaxWindowBytes:        windowBytes,
+		BudgetBytes:           windowBytes + rowBufferBytes,
+		DefaultRowBufferBytes: rowBufferBytes,
+		MinRowBufferBytes:     rowBufferBytes,
+		MaxRowBufferBytes:     rowBufferBytes,
 	}
 	svc := helper.New(helper.Options{
 		Generation: helperproto.GenerationID(generation),
@@ -117,8 +123,9 @@ func TestClosingAHelperHostedSessionReleasesItsHelperWindowBudget(t *testing.T) 
 			t.Fatalf("iteration %d: adopt: %v", i, err)
 		}
 
-		if used := svc.WindowBytesInUse(); used != windowBytes {
-			t.Fatalf("iteration %d: window bytes in use = %d while the session is open, want %d", i, used, windowBytes)
+		if used := svc.WindowBytesInUse(); used != windowBytes+rowBufferBytes {
+			t.Fatalf("iteration %d: bytes in use = %d while the session is open, want its window and row buffer, %d",
+				i, used, windowBytes+rowBufferBytes)
 		}
 
 		// This is the seam under test: the SAME EndSession a pane's removal

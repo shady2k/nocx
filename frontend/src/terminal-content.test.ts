@@ -4683,6 +4683,51 @@ describe('the projections consume the kernel through the composition root (ADR-0
       }
     })
 
+    it('an attempt gone unknown keeps its block open on screen until block.closed, then closes it (nocx-2v80t.3.30)', async () => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const run = content.submitAgentCommand('sleep 100')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'sleep 100',
+          },
+        })
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: { id: 'att-1', state: 'unknown' },
+        })
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+        expect(block().status).toBe('unknown')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(true)
+
+        blockClosedHandler(client)('att-1')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        expect((await run).status).toBe('unknown')
+      } finally {
+        teardown()
+      }
+    })
+
     it('a block.closed that arrives before the completion closes the block the moment the completion lands', async () => {
       const client = makeClient()
       const { content, teardown } = await mountTerminal(

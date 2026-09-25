@@ -1078,10 +1078,10 @@ export class ScrollbackController {
 
   /** The attempt-driven abandonment: the attempt went `unknown`, the block
    *  freezes as abandoned — never successful (ADR-0024 §5). */
-  abandonAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+  abandonAttempt(attempt: ExecutionAttempt, endLine: number, sessionGone = false): boolean {
     const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
-    const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
+    const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine, sessionGone)
     if (rec) {
       this._finishFreeze(rec, followIntent)
       return true

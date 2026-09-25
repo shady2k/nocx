@@ -55,8 +55,15 @@ class FakeBlocks implements BlockProjectionPort {
   freezeBlock(a: ExecutionAttempt): void {
     this.events.push(`freeze:${a.id}:${a.exitCode ?? 'null'}`)
   }
-  abandonBlock(a: ExecutionAttempt): void {
+  /** Which abandons the pane made because it let its session go. */
+  readonly sessionGone: string[] = []
+  settled = 0
+  abandonBlock(a: ExecutionAttempt, sessionGone?: boolean): void {
     this.events.push(`abandon:${a.id}`)
+    if (sessionGone === true) this.sessionGone.push(a.id)
+  }
+  settleWithoutBackend(): void {
+    this.settled++
   }
   abandonPending(): void {
     this.events.push('abandon-pending')
@@ -363,6 +370,11 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(first.status).toBe('unknown')
     expect(pending.status).toBe('unknown')
     expect(blocks.events).toEqual(['bind:att-reused', 'abandon:att-reused', 'abandon-pending'])
+    // The session is let go: nothing will send block.closed for its blocks
+    // to this pane, so the abandon says so and the waiting blocks settle
+    // (nocx-2v80t.3.30).
+    expect(blocks.sessionGone).toEqual(['att-reused'])
+    expect(blocks.settled).toBe(1)
 
     kernel.reset()
     ledger.open('second', '/', '', () => undefined, 'shell')

@@ -57,26 +57,6 @@ export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 // supplied, and never where the message should go.
 export type NotificationRequestCallback = (request: OscNotification) => void
 
-// RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
-// ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
-// carries the same 64 hex chars in the authenticated `complete` event. The
-// renderer parses the OSC and reports WHERE the fence landed (render-only —
-// a fence carries no authority; see ADR-0024 decision 1). The block model
-// matches the fence hex against the authenticated completion to freeze the
-// block at the true output end instead of truncating the in-flight tail.
-export interface RenderFenceEvent {
-  /** 64 lowercase hex chars — the nonce the shell generated at completion. */
-  hex: string
-  /** Absolute buffer line the fence sequence was parsed on. The command's
-   *  last output byte is on this line or the one above it. */
-  line: number
-  /** Active buffer at parse time. A fence in the alternate buffer has no
-   *  scrollback line to serialize — the consumer ignores it. */
-  buffer: 'normal' | 'alternate'
-}
-
-export type RenderFenceCallback = (event: RenderFenceEvent) => void
-
 // ── Links (nocx-8yg.8) ────────────────────────────────────────────────────
 
 /** A half-open [from, to) range of UTF-16 offsets into one row's text. */
@@ -188,20 +168,12 @@ export interface TerminalRenderer {
   // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
-  // onRenderFence registers a callback that fires when the shell emits the
-  // private render fence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out).
-  // Parse-and-report only: the renderer says where the fence landed; the
-  // consumer matches it against the authenticated completion. Optional so a
-  // renderer that does not parse fences degrades to the documented
-  // no-fence deferral instead of failing to mount.
-  onRenderFence?(cb: RenderFenceCallback): void
-
   // onNotification registers a callback that fires when a program asks nocx
   // to present a message (ADR-0047) — OSC 9 or OSC 777, two spellings of one
   // request, fanned out identically so nothing downstream depends on which
   // one a program chose. Parse-and-report only: the renderer says a program
   // asked and never says where the message goes; the backend's router is the
-  // only holder of that. Optional, like onRenderFence, so a renderer that
+  // only holder of that. Optional, so a renderer that
   // does not parse these degrades to raising nothing rather than failing to
   // mount.
   onNotification?(cb: NotificationRequestCallback): void

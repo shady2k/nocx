@@ -147,6 +147,7 @@ import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
+import type { BlockClosed } from './generated/block.closed'
 import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
@@ -1352,8 +1353,7 @@ export class TerminalContent extends BasePaneContent {
    *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
    *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
    *  than starting a second fetch for the same entry when one is already
-   *  running — a notification that arrived before the fence did — and
-   *  starts its own (also tracked here) when nothing was; either way the
+   *  running — block.closed's closing read above all — and starts its own (also tracked here) when nothing was; either way the
    *  run tool's completion waits on the SAME fetch this map would otherwise
    *  let a second caller duplicate (nocx-2v80t.3.19). */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
@@ -3479,10 +3479,10 @@ export class TerminalContent extends BasePaneContent {
             this._openAuthenticatedBlock(renderer, attempt, undefined)
           },
           freezeBlock: (attempt) => {
-            // ADR-0024 §7: the visual freeze is authorized only by the
-            // authenticated completion (kernel derivation). The render-fence
-            // rendezvous is bead nocx-u7uh.8; the freeze lands on the event
-            // for now, at the current output end.
+            // ADR-0024 §7: the freeze is authorized only by the authenticated
+            // completion (kernel derivation). The block closes on screen when
+            // the backend's block.closed for it has also arrived
+            // (nocx-2v80t.3.27).
             if (!this.scrollback) return
             if (!kernelFreezeBlock(attempt, attempt.domain)) return
             this.scrollback.freezeFromAttempt(attempt, renderer.cursorLine())
@@ -4475,6 +4475,26 @@ export class TerminalContent extends BasePaneContent {
         return
       void this._refreshBlockRows(params.entryId)
     }
+    const onBlockClosed = (params: unknown): void => {
+      // BlockClosed (contracts/block.closed.schema.json, nocx-2v80t.3.27):
+      // the backend met the command's completion with its end marker, and
+      // the block's rows are whole. It is the ONE event a finished block
+      // closes on — the renderer no longer watches the stream for a fence of
+      // its own (ADR-0066 moved that rendezvous beside the emulator). A kept
+      // block's closing read starts FIRST, so the close that follows — and
+      // an agent run waiting on it — reads the rows the close made final,
+      // never the ones an earlier block.grew left. A block the store did not
+      // keep has nothing to read.
+      if (typeof params !== 'object' || params === null) return
+      if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
+        return
+      const closed: BlockClosed = {
+        entryId: params.entryId,
+        kept: 'kept' in params && params.kept === true,
+      }
+      if (closed.kept) void this._refreshBlockRows(closed.entryId)
+      this.scrollback?.blockManager.blockClosed(closed.entryId)
+    }
     const onBlockCleared = (params: unknown): void => {
       // BlockCleared (contracts/block.cleared.schema.json, nocx-2v80t.3.17):
       // the backend sighted a real erase and this is the LIVE half of it —
@@ -4485,7 +4505,7 @@ export class TerminalContent extends BasePaneContent {
     }
     this._blockRowsUnsubs.push(
       this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
-      this.client.dispatcher.subscribe('block.closed', refreshBlockRows),
+      this.client.dispatcher.subscribe('block.closed', onBlockClosed),
       this.client.dispatcher.subscribe('block.cleared', onBlockCleared),
     )
     const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
@@ -8350,18 +8370,20 @@ export class TerminalContent extends BasePaneContent {
   /** Guarantee this record's stored rows are being asked for, and answer
    *  once the asking is done — successfully or not; `_refreshBlockRows`
    *  itself decides what a failed or empty answer paints, if anything.
-   *  Resolves at once when the record already carries rows (the common
-   *  case: most output arrives, via block.grew, while the command is still
-   *  running, well before it freezes) or reuses a fetch a notification
-   *  already started. Starts its own only when neither is true — the fence
-   *  sighting that drives a freeze and the block.closed notification that
-   *  starts the closing fetch cross the same socket on different planes
-   *  (render bytes vs. control-plane JSON) with no ordering promised
-   *  between them (nocx-2v80t.3.19), so the notification cannot be trusted
-   *  to always arrive first. */
+   *  Reuses a fetch a notification already started — block.closed starts
+   *  the closing one before it closes the block — resolves at once when
+   *  none is in flight and the record already carries rows, and starts its
+   *  own only when neither is true (a block closed with no read behind it:
+   *  one the store did not keep, or a completion that carried no fence). */
   private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
+    // A read in flight comes first, even when the record already holds rows:
+    // the block closes on block.closed, which starts the closing read before
+    // it closes the block (nocx-2v80t.3.27), and the rows an earlier
+    // block.grew left are not the final ones.
+    const inFlight = this._blockRowsInFlight.get(entryId)
+    if (inFlight) return inFlight
     if (rec.storedRows) return Promise.resolve()
-    return this._blockRowsInFlight.get(entryId) ?? this._refreshBlockRows(entryId)
+    return this._refreshBlockRows(entryId)
   }
 
   /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
@@ -8392,22 +8414,13 @@ export class TerminalContent extends BasePaneContent {
     if (!waiter) return
     this.agentRuns.delete(rec)
     // `blockOutputText` reads `.cmd-output` AS IT STANDS RIGHT NOW, and at
-    // this exact instant it usually does not stand for anything yet: a
-    // block.grew/block.closed notification only STARTS the rows fetch
-    // (`_refreshBlockRows`'s `blockRowsForEntry`, two more RPC round trips),
-    // and that fetch races the visual freeze rather than preceding it — the
-    // render fence that drives the freeze is a local, data-plane read, while
-    // the notification and its fetch cross the control-plane socket, with no
-    // ordering promised between the two planes. Reading now, unconditionally,
-    // sent the run's real output to the model as empty text far more often
-    // than not (nocx-2v80t.3.19). `_ensureBlockRows` covers every ordering:
-    // rows already on the record (most output arrives well before a freeze),
-    // a fetch already in flight (the closing notification arrived first), or
-    // neither (the freeze arrived first, or an older test's fake dispatcher
-    // never sends the notification at all) — in which case it starts the
-    // fetch itself rather than trusting one that may never come, the same
-    // way `storedEntryId` below already waits, unbounded, for the history
-    // receipt.
+    // this instant the closing rows may not be painted yet: block.closed
+    // STARTS the closing read (`_refreshBlockRows`'s `blockRowsForEntry`, two
+    // more RPC round trips) and then closes the block, so the read is still
+    // in flight here. Reading now sent the run's output to the model as empty
+    // or partial text (nocx-2v80t.3.19, nocx-2v80t.3.27). `_ensureBlockRows`
+    // waits for that read, and starts one only when nothing is in flight and
+    // the record holds no rows.
     const buildBody = (): Omit<AgentRunCompletion, 'entryId'> => {
       const all = blockOutputText(rec.el)
       const lines = all.split('\n')

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import type { TerminalRenderer, RenderFenceEvent } from '../renderers/types'
+import type { TerminalRenderer } from '../renderers/types'
 import { ScrollbackController } from './controller'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
@@ -422,23 +422,11 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     }
   }
 
-  /** A renderer that records the fence callback instead of wiring it. */
-  function rendererWithFence(): {
-    renderer: TerminalRenderer
-    sight: (ev: RenderFenceEvent) => void
-  } {
-    const renderer = makeRenderer()
-    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
-    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
-      fenceCb = cb
-    }
-    return {
-      renderer,
-      sight: (ev) => fenceCb?.(ev),
-    }
+  function rendererWithFence(): { renderer: TerminalRenderer } {
+    return { renderer: makeRenderer() }
   }
-  it('flips the status on the completion event and settles the boundary when the fence arrives', () => {
-    const { renderer, sight } = rendererWithFence()
+  it("flips the status on the completion event and closes the block on the backend's block.closed (nocx-2v80t.3.27)", () => {
+    const { renderer } = rendererWithFence()
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
@@ -457,24 +445,23 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
     expect(controller.blockManager.runningBlock).toBeNull()
     expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
-    // PromptReady may arrive before the render fence. It must not collapse
-    // the live rows into empty space while their DOM boundary is pending.
+    // PromptReady may arrive before block.closed. It must not collapse the
+    // live rows into empty space while the block's closing rows are not in
+    // it yet.
     controller.setIdle()
     expect(controller.mode).toBe('running')
 
-    // The fence bytes land (via the renderer's OSC 1337 handler): the block
-    // serializes at the fence's line and the boundary settles — without a
-    // clear and without collapsing the live region, which stays the whole
-    // terminal (nocx-2v80t.3.3).
-    sight({ hex: FENCE, line: 5, buffer: 'normal' })
-    expect(controller.blockManager.runningBlock).toBeNull()
-    expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
-    expect(controller.blockManager.blockForAttempt('att-1')?.endLine).toBe(5)
-    expect(controller.mode).toBe('running')
+    // The backend says the block is closed: it closes on screen, and the
+    // idle layout the prompt asked for lands now that nothing waits.
+    controller.blockManager.blockClosed('att-1')
+    const block = controller.blockManager.blockForAttempt('att-1')
+    expect(block?.status).toBe('success')
+    expect(block?.el.classList.contains('cmd-block-running')).toBe(false)
+    expect(controller.mode).toBe('idle')
   })
 
-  it('a fence in the alternate buffer is ignored — it has no scrollback line to serialize', () => {
-    const { renderer, sight } = rendererWithFence()
+  it('a command that ends while a full-screen program owns the pane still closes on block.closed', () => {
+    const { renderer } = rendererWithFence()
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
@@ -483,22 +470,20 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     })
     // jsdom implements no scrollTo; setRunning scrolls to the live end.
     controller.scrollbackArea.scrollTo = vi.fn()
-    controller.blockManager.startBlock('make', '~', 0)
+    controller.blockManager.startBlock('vim', '~', 0)
     controller.blockManager.bindAttempt('att-1')
-    controller.setRunning() // the live region is up while the block runs
+    controller.setRunning()
+    controller.enterFullscreen()
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
 
-    // The status flipped on the event; the boundary is still pending. An
-    // alternate-buffer fence is ignored: the pending stays and the live
-    // region is NOT settled.
-    sight({ hex: FENCE, line: 5, buffer: 'alternate' })
-    expect(controller.blockManager.runningBlock).toBeNull()
-    expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
-    expect(controller.mode).toBe('running')
+    controller.blockManager.blockClosed('att-1')
+    const block = controller.blockManager.blockForAttempt('att-1')
+    expect(block?.status).toBe('success')
+    expect(block?.el.classList.contains('cmd-block-running')).toBe(false)
     controller.blockManager.clearAll()
   })
-  it('a second shell-originated attempt opens its own block while the first is pending its fence — no merge (nocx-m87n)', () => {
-    const { renderer, sight } = rendererWithFence()
+  it('a second shell-originated attempt opens its own block while the first is pending its close — no merge (nocx-m87n)', () => {
+    const { renderer } = rendererWithFence()
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
@@ -530,9 +515,9 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.blockManager.runningBlock?.status).toBe('running')
     expect(controller.blockManager.blockForAttempt('att-2')?.status).toBe('running')
 
-    // The first fence lands: the first block freezes with its own exit
+    // The first block's block.closed lands: it closes with its own exit
     // status — while the second command is still running.
-    sight({ hex: FENCE, line: 3, buffer: 'normal' })
+    controller.blockManager.blockClosed('att-1')
     const first = controller.blockManager.blockForAttempt('att-1')
     expect(first?.status).toBe('failure')
     expect(first?.exitCode).toBe(130)
@@ -621,10 +606,9 @@ describe('nothing clears or rebases the grid (nocx-2v80t.3.3)', () => {
       controller.beginBlock('seq 3', '~', 0)
       controller.blockManager.bindAttempt('att-1')
       renderer.write('out 1\r\nout 2\r\nout 3')
-      // The render fence is the ordinary freeze's other half: the shell
-      // writes it after the output, and the sighting settles the boundary.
-      renderer.write('\x1b]1337;NOCX_FENCE;' + FENCE + '\x07')
       await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
+      // The backend's block.closed is the ordinary freeze's other half.
+      controller.blockManager.blockClosed('att-1')
       const endLine: number = renderer.cursorLine()
 
       expect(controller.freezeFromAttempt(completedAttempt(FENCE), endLine)).toBe(true)
@@ -644,13 +628,12 @@ describe('nothing clears or rebases the grid (nocx-2v80t.3.3)', () => {
       const rows = Array.from({ length: 12 }, (_, i) => `before ${i}`)
       renderer.write(rows.join('\r\n') + '\u001b7')
       await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
-      renderer.write('\x1b]1337;NOCX_FENCE;' + FENCE + '\x07')
-      await vi.waitFor(() => expect(renderer.hasUnsettledWrite()).toBe(false))
       const savedRow = renderer.cursorLine()
       expect(savedRow).toBe(11)
 
       controller.beginBlock('true', '~', 0)
       controller.blockManager.bindAttempt('att-1')
+      controller.blockManager.blockClosed('att-1')
       expect(controller.freezeFromAttempt(completedAttempt(FENCE), renderer.cursorLine())).toBe(
         true,
       )
@@ -700,14 +683,9 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
    *  scrolled out of the grid. */
   function rendererWithGeometry(): {
     renderer: TerminalRenderer
-    sight: (ev: RenderFenceEvent) => void
     setViewportTop: (line: number) => void
   } {
     const renderer = makeRenderer()
-    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
-    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
-      fenceCb = cb
-    }
     let top = 0
     Object.defineProperty(renderer, 'cellHeight', { value: 16, configurable: true })
     Object.defineProperty(renderer, 'viewportTopLine', {
@@ -716,7 +694,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     })
     return {
       renderer,
-      sight: (ev) => fenceCb?.(ev),
       setViewportTop: (line: number) => {
         top = line
       },
@@ -753,7 +730,7 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
   })
 
   it('hides the echo row from the running block and releases it once the grid scrolls past', () => {
-    const { renderer, sight, setViewportTop } = rendererWithGeometry()
+    const { renderer, setViewportTop } = rendererWithGeometry()
 
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
@@ -811,7 +788,7 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     // (nocx-2v80t.3.3). With no running block the echo shift is moot, so
     // the grid sits untransformed beneath the frozen card.
     controller.blockManager.bindAttempt('att-1')
-    sight({ hex: FENCE, line: 3, buffer: 'normal' })
+    controller.blockManager.blockClosed('att-1')
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 3)).toBe(true)
     expect(controller.mode).toBe('running')
     expect(controller.xtermInner.style.transform).toBe('')
@@ -1348,14 +1325,9 @@ describe('ScrollbackController tells the pet how the command went', () => {
 
   function petController(): {
     controller: ScrollbackController
-    sight: (ev: RenderFenceEvent) => void
     heard: ReturnType<typeof vi.spyOn>
   } {
     const renderer = makeRenderer()
-    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
-    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
-      fenceCb = cb
-    }
     // Spied on the prototype: the overlay is built inside the controller, so
     // there is no instance to hand a double to — which is the point. A double
     // injected from the test would have passed against the dead method too.
@@ -1368,18 +1340,17 @@ describe('ScrollbackController tells the pet how the command went', () => {
       snapshotStore: new CommandSnapshotStore(),
     })
     controller.scrollbackArea.scrollTo = vi.fn()
-    return { controller, sight: (ev) => fenceCb?.(ev), heard }
+    return { controller, heard }
   }
 
   function finish(
     controller: ScrollbackController,
-    sight: (ev: RenderFenceEvent) => void,
     exitCode: number,
     author: 'shell' | 'agent' = 'shell',
   ): void {
     controller.beginBlock('ls', '~', 0, undefined, author)
     controller.blockManager.bindAttempt('att-1')
-    sight({ hex: FENCE, line: 2, buffer: 'normal' })
+    controller.blockManager.blockClosed('att-1')
     controller.freezeFromAttempt(
       { id: 'att-1', domain, state: 'completed', exitCode, fence: FENCE },
       2,
@@ -1387,14 +1358,14 @@ describe('ScrollbackController tells the pet how the command went', () => {
   }
 
   it('says success when the command succeeded', () => {
-    const { controller, sight, heard } = petController()
-    finish(controller, sight, 0)
+    const { controller, heard } = petController()
+    finish(controller, 0)
     expect(heard).toHaveBeenCalledWith('success', 'shell')
   })
 
   it('says failure when it did not', () => {
-    const { controller, sight, heard } = petController()
-    finish(controller, sight, 2)
+    const { controller, heard } = petController()
+    finish(controller, 2)
     expect(heard).toHaveBeenCalledWith('failure', 'shell')
   })
 
@@ -1411,8 +1382,8 @@ describe('ScrollbackController tells the pet how the command went', () => {
     // The author is minted at submit and carried on the block. Deriving which
     // lane a finished block came from is exactly what the ledger exists to
     // make unnecessary.
-    const { controller, sight, heard } = petController()
-    finish(controller, sight, 0, 'agent')
+    const { controller, heard } = petController()
+    finish(controller, 0, 'agent')
     expect(heard).toHaveBeenCalledWith('success', 'agent')
   })
 
@@ -1420,17 +1391,13 @@ describe('ScrollbackController tells the pet how the command went', () => {
     unmountWindowPet()
     const heard = vi.spyOn(PetOverlay.prototype, 'reactTo').mockImplementation(() => {})
     const renderer = makeRenderer()
-    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
-    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
-      fenceCb = cb
-    }
     const controller = new ScrollbackController({
       pane: document.createElement('div'),
       renderer,
       snapshotStore: new CommandSnapshotStore(),
     })
     controller.scrollbackArea.scrollTo = vi.fn()
-    finish(controller, (ev) => fenceCb?.(ev), 0)
+    finish(controller, 0)
     expect(heard).not.toHaveBeenCalled()
   })
 })

@@ -90,19 +90,22 @@ export function copyToClipboard(text: string): Promise<void> {
   return copyToClipboardImpl(text)
 }
 
-// ── Render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8) ──
-// The lifecycle channel and the pty are independent streams, so an
-// authenticated completion can reach nocx before the command's last output
-// bytes do. The shell writes a 32-random-byte nonce (64 hex chars) to the
-// pty AFTER the output and carries the same nonce in the `complete` event;
-// the block's VISUAL freeze waits for both, while the LOGICAL completion
-// (exit status, history) lands on the event alone.
+// ── The block's close (nocx-2v80t.3.27, ADR-0066, ADR-0074) ─────────────
+// A command's end reaches the pane twice: the authenticated COMPLETION,
+// which says how it ended, and the backend's block.closed, which says its
+// rows are whole — the backend has met the completion with the end marker
+// in the terminal stream (the rendezvous ADR-0066 moved beside the
+// emulator). The LOGICAL freeze (status, exit code, duration) lands on the
+// completion; the VISUAL freeze — the block closing on screen — lands when
+// both have arrived, in either order. Nothing the renderer sees in the
+// stream takes part: a second owner of that rendezvous is what left a block
+// running forever whenever the renderer missed the fence.
 
-/** Upper bound on remembered fence sightings (hex → line). Sightings are
- *  kept only so a completion that lands after its fence can match it; a
- *  crypto-random nonce makes collisions impossible, so a small ring is
- *  more than enough and bounds the memory of a hostile stream. */
-const MAX_FENCE_SIGHTINGS = 8
+/** Upper bound on remembered block.closed notifications for blocks whose
+ *  completion has not arrived yet (`_closedEarly`). Ordinarily one is
+ *  consumed within a frame; the bound only keeps a notification for a
+ *  block this pane never completes from being held forever. */
+const MAX_CLOSED_EARLY = 8
 
 /** Upper bound on rows held for an entry whose block has not bound yet
  *  (`_pendingStoredRows`). A block.grew/closed notification can arrive
@@ -110,7 +113,7 @@ const MAX_FENCE_SIGHTINGS = 8
  *  entry is ordinarily drained the moment binding happens — but binding
  *  never happens for an attempt whose running fact is refused, lost, or
  *  never reaches this pane, and nothing else ever visits the entry to
- *  remove it. The same small ring as `_fences`, for the same reason: a
+ *  remove it. A small ring, for the same reason as `_closedEarly`: a
  *  session has few blocks racing their own binding at once, so bounding it
  *  costs nothing a real session would notice and stops an unbound entry
  *  from being held forever. */
@@ -632,15 +635,15 @@ export interface BlockRecord {
    *
    *  The two freezes are separate moments (u7uh.8): the logical one lands on
    *  the authenticated completion and sets `status` above, while the visual
-   *  one waits for the fence bytes and REPLACES `el`
-   *  when it lands. Between them the block is finished but its element still
+   *  one waits for the backend's block.closed and REPLACES `el`
+   *  when it lands (nocx-2v80t.3.27). Between them the block is finished but its element still
    *  reads `cmd-block-running`, and anything written onto that element is
    *  discarded by the replacement.
    *
    *  So a decoration arriving in that window parks here instead of being
    *  applied to an element about to be discarded, or dropped. The
-   *  history.recorded receipt is the case that needed it: it raced the fence
-   *  and was gone for good — a captured secret with nothing offering to save
+   *  history.recorded receipt is the case that needed it: it raced the
+   *  visual freeze and was gone for good — a captured secret with nothing offering to save
    *  it (nocx-ggha). */
   afterVisualFreeze?: () => void
   /** Rows read from the backend's block artifact. They are a paint source,
@@ -1834,17 +1837,17 @@ export interface BlockManagerOpts {
   /** The tab's command-existence snapshot store (OSC 636), passed through to
    *  every frozen header this manager creates. */
   snapshotStore: CommandSnapshotStore
-  /** Fired when a DEFERRED freeze lands — the fence arrived and the block
-   *  settled at its line. The freeze originated inside the manager
-   *  (sightFence), so the caller learns to settle the live region
-   *  around this exact frozen record. */
+  /** Fired when a DEFERRED freeze lands — the backend's block.closed met a
+   *  completion that was waiting for it. The freeze originated inside the
+   *  manager (`blockClosed`), so the caller learns to settle around this
+   *  exact frozen record. */
   onDeferredFreeze?: (rec: BlockRecord) => void
   /** Fired at the end of EVERY visual freeze — the moment the frozen
    *  element replaces the running one and the block's output rows are fixed
    *  in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block, so it must observe this exact
    *  moment, not the logical freeze, which may still be waiting on the
-   *  render fence). Fires after afterVisualFreeze, so a waiter that sets
+   *  backend's block.closed). Fires after afterVisualFreeze, so a waiter that sets
    *  that slot and an observer here never race. */
   onBlockFrozen?: (rec: BlockRecord) => void
   /** Paints rows read from the backend's block artifact. */
@@ -1951,34 +1954,29 @@ export class BlockManager {
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
   private _attemptId: string | null = null
-  /** Recent fence sightings keyed by hex (the buffer line they landed on),
-   *  bounded by MAX_FENCE_SIGHTINGS. A sighting already present is a replay
-   *  and is ignored; an entry is consumed when a completion's fence matches.
-   *  This is the render-only half of the rendezvous — a fence with no
-   *  authenticated event behind it changes nothing (ADR-0024 §1). */
-  private _fences = new Map<string, number>()
-  /** Completions whose LOGICAL freeze has landed but whose output boundary
-   *  (the VISUAL freeze) is still waiting on the render fence: the rows are
-   *  serialized when each entry's fence bytes are sighted — and by NOTHING
-   *  else (nocx-2v80t.3.2). A timer here would be the client deciding a
-   *  boundary a second time, so there is deliberately no clock: an entry
-   *  whose fence never renders stays pending, which is the honest state of
-   *  a boundary the pane has not seen. Only the sighting resolution fires
-   *  onDeferredFreeze, and only while no newer command owns the running
-   *  slot. */
-  private _pendingBoundaries: Array<{
-    hex: string
-    /** The block whose boundary is pending — already logically frozen,
-     *  still in `_blocks`, never the running block. */
-    rec: BlockRecord
-    /** The terminal status the logical freeze already applied — the
-     *  visual freeze hands it to the DOM exactly as the event decided. */
-    status: FrozenStatus
-    getLine: GetLineFn
-  }> = []
-  /** The fence hex consumed by the last freeze — a replay of it (one seen
-   *  for an already-frozen block) does nothing. */
-  private _consumedFence: string | null = null
+  /** Completions whose LOGICAL freeze has landed and whose block waits for
+   *  the backend's block.closed, keyed by entry (the attempt id). Closed by
+   *  `blockClosed` and by NOTHING else: a timer here would be the client
+   *  deciding the end a second time, so an entry the backend never closes
+   *  stays open, which is the honest state of a block whose rows are not
+   *  known to be whole. */
+  private _awaitingClose = new Map<
+    string,
+    {
+      /** Already logically frozen, still in `_blocks`, never the running
+       *  block. */
+      rec: BlockRecord
+      /** The terminal status the logical freeze applied — handed to the
+       *  DOM exactly as the event decided. */
+      status: FrozenStatus
+      getLine: GetLineFn
+      endLine: number
+    }
+  >()
+  /** block.closed notifications that arrived BEFORE their completion — the
+   *  two cross the socket in either order. Consumed by the completion that
+   *  names the entry; bounded by MAX_CLOSED_EARLY. */
+  private _closedEarly = new Set<string>()
   /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0040).
    *
    *  A turn's `run` call is announced BEFORE the command is submitted, and
@@ -2269,9 +2267,11 @@ export class BlockManager {
     return this._runningBlock
   }
 
-  /** A completed attempt whose DOM output boundary still awaits its fence. */
-  get visualFreezePending(): boolean {
-    return this._pendingBoundaries.length > 0
+  /** A completed block is still waiting for the backend's block.closed:
+   *  its closing rows are not in the block yet, so the live terminal is
+   *  still where they are on screen. */
+  get closePending(): boolean {
+    return this._awaitingClose.size > 0
   }
 
   get cmdStartTime(): number | null {
@@ -2375,8 +2375,7 @@ export class BlockManager {
     const rec = this.blockForAttempt(entryId)
     if (!rec) {
       // A NEW entry may push the ring past its bound; re-setting one
-      // already held must not — it stays at its original age, exactly as
-      // `_fences` treats a repeated sighting.
+      // already held must not — it stays at its original age.
       if (
         !this._pendingStoredRows.has(entryId) &&
         this._pendingStoredRows.size >= MAX_PENDING_STORED_ROWS
@@ -2648,8 +2647,8 @@ export class BlockManager {
    *  state — status, exit code and duration land on the authenticated event
    *  alone; the running slot is freed and the ticker stops. The DOM is
    *  untouched: which rows belong to the block is the VISUAL freeze's
-   *  question, and it waits for the render fence's sighting — nothing
-   *  else (nocx-2v80t.3.2). */
+   *  question, and it waits for the backend's block.closed — nothing else
+   *  (nocx-2v80t.3.27). */
   private _logicalFreeze(
     rec: BlockRecord,
     exitCode: number | null,
@@ -2726,19 +2725,14 @@ export class BlockManager {
    *  attempt — the kernel derivation freezeBlock() is the authority, and
    *  this keeps the DOM operation honest if a caller bypasses it.
    *
-   *  Render fence (u7uh.8): the LOGICAL freeze — status, exit code,
-   *  duration, freeing the running slot — lands on the authenticated event
-   *  ALONE; the ledger and history have already landed (the projection
-   *  order guarantees it). Only the VISUAL freeze — which rows belong to
-   *  the block — waits for the fence bytes: when the fence was already
-   *  sighted, this serializes at its line and returns the record; otherwise
-   *  it defers (returns null) and `sightFence` resolves the boundary —
-   *  nothing else does (nocx-2v80t.3.2). The caller keeps the live region
-   *  up while the boundary is pending, so the in-flight tail renders live
-   *  instead of vanishing. A completion without a fence (unreachable from
-   *  the kernel, which requires the nonce) freezes visually at the
-   *  event-time end: no sighting could ever match it, so the runtime's
-   *  word alone cuts the boundary — approximate, never timed. */
+   *  The LOGICAL freeze — status, exit code, duration, freeing the running
+   *  slot — lands on the authenticated event ALONE. The VISUAL freeze — the
+   *  block closing on screen — lands on the backend's block.closed for this
+   *  entry (nocx-2v80t.3.27): at once when it already arrived, and otherwise
+   *  in `blockClosed` when it does (this returns null, so the caller knows
+   *  the close is still to come). A completion with no fence freezes at
+   *  once: the backend pairs an end marker with a completion by its fence,
+   *  so without one no block.closed can ever name it. */
   freezeFromAttempt(
     attempt: ExecutionAttempt,
     getLine: GetLineFn,
@@ -2747,8 +2741,6 @@ export class BlockManager {
     if (attempt.state !== 'completed') return null
     if (this._attemptId !== attempt.id) return null
     const code = attempt.exitCode ?? null
-    const fence = attempt.fence
-    const sighted = fence !== undefined ? this._fences.get(fence) : undefined
     const rec = this._runningBlock
     if (!rec) return null
     // A nonzero exit is a failure UNLESS this block was sent a stop request
@@ -2779,60 +2771,37 @@ export class BlockManager {
     const terminal = this._logicalFreeze(rec, code, status)
     this._attemptId = null
 
-    if (fence !== undefined && sighted !== undefined) {
-      // Rendezvous complete: the fence bytes landed before the completion.
-      // Its line IS the output end — serialize now, boundary included.
-      this._fences.delete(fence)
-      this._consumedFence = fence
-      this._freezeCard(rec, getLine, sighted, terminal)
-      return rec
-    }
-
-    if (fence === undefined) {
-      // No fence, no sighting that could ever match: the boundary is cut
-      // on the runtime's word alone, at the event-time end. Reached only
-      // by callers bypassing the kernel's own fence gate.
+    if (attempt.fence === undefined || this._closedEarly.delete(attempt.id)) {
       this._freezeCard(rec, getLine, endLine, terminal)
       return rec
     }
-
-    // The fence bytes are still in flight: the visual freeze defers, and
-    // the boundary resolves in sightFence when the fence's line arrives —
-    // nothing else cuts it (nocx-2v80t.3.2). Null tells the caller the
-    // live region stays up until the boundary settles.
-    this._pendingBoundaries.push({ hex: fence, rec, status: terminal, getLine })
+    this._awaitingClose.set(attempt.id, { rec, status: terminal, getLine, endLine })
     return null
   }
 
-  /** Report where a fence landed. A fence with no authenticated event behind
-   *  it changes nothing at all (ADR-0024 §1): the sighting is remembered for
-   *  a completion that arrives later, and consumed — never applied — when
-   *  it matches. A replay (the same hex twice, or one for an already-frozen
-   *  block) does nothing. */
-  sightFence(hex: string, line: number): void {
-    if (this._consumedFence === hex) return // already-frozen block's fence
-    if (this._fences.has(hex)) return // same value seen twice — a replay
-
-    const at = this._pendingBoundaries.findIndex((boundary) => boundary.hex === hex)
-    if (at !== -1) {
-      // The deferred boundary's fence landed: serialize the block at the
-      // fence's line. The block's STATUS flipped on the completion event —
-      // this settles only which rows belong to it. A fence for a block that
-      // has since been cleared changes nothing.
-      const pending = this._pendingBoundaries.splice(at, 1)[0]
-      if (!this._blocks.includes(pending.rec)) return
-      this._freezeCard(pending.rec, pending.getLine, line, pending.status)
-      this._consumedFence = hex
-      // Settle the live region only if no newer command owns the running
-      if (this._runningBlock === null) this._onDeferredFreeze?.(pending.rec)
+  /** The backend said this entry's block is closed (block.closed): its rows
+   *  are whole. A block whose completion already landed closes on screen
+   *  now; one whose completion has not arrived yet is remembered, and closes
+   *  the moment it does. A notification for a block already closed, or for
+   *  one this pane does not hold, changes nothing on screen. */
+  blockClosed(entryId: string): void {
+    const waiting = this._awaitingClose.get(entryId)
+    if (waiting !== undefined) {
+      this._awaitingClose.delete(entryId)
+      // A block cleared since its completion has nothing left to close.
+      if (!this._blocks.includes(waiting.rec)) return
+      this._freezeCard(waiting.rec, waiting.getLine, waiting.endLine, waiting.status)
+      // Settle around it only if no newer command owns the running slot.
+      if (this._runningBlock === null) this._onDeferredFreeze?.(waiting.rec)
       return
     }
-
-    this._fences.set(hex, line)
-    if (this._fences.size > MAX_FENCE_SIGHTINGS) {
-      const oldest = this._fences.keys().next().value
-      if (oldest !== undefined) this._fences.delete(oldest)
+    const rec = this.blockForAttempt(entryId)
+    if (rec !== null && rec.status !== 'running') return
+    if (!this._closedEarly.has(entryId) && this._closedEarly.size >= MAX_CLOSED_EARLY) {
+      const oldest = this._closedEarly.values().next().value
+      if (oldest !== undefined) this._closedEarly.delete(oldest)
     }
+    this._closedEarly.add(entryId)
   }
 
   /** Freeze the running block bound to the attempt as abandoned: the
@@ -2848,9 +2817,9 @@ export class BlockManager {
     if (this._attemptId !== attempt.id) return null
     const rec = this._runningBlock
     if (!rec) return null
-    // No pending-boundary interaction here: a pending fence belongs to an
-    // older, already logically frozen block (its sighting may still be in
-    // flight), never to the running block being abandoned.
+    // No interaction with the blocks awaiting their close: those belong to
+    // older, already logically frozen blocks, never to the running block
+    // being abandoned.
     const status = this._logicalFreeze(rec, null, 'unknown')
     this._freezeCard(rec, getLine, endLine, status)
     this._attemptId = null
@@ -3229,7 +3198,8 @@ export class BlockManager {
   clearAll(): void {
     this.closeOverflowMenus()
     this._stopTicker()
-    this._pendingBoundaries = []
+    this._awaitingClose.clear()
+    this._closedEarly.clear()
     this._pendingStoredRows.clear()
     this._storedRowsCursor.clear()
     this._clearCommandIndicator()
@@ -3244,8 +3214,6 @@ export class BlockManager {
     this._cmdStartTime = null
     this._selectedBlockId = null
     this._attemptId = null
-    this._fences.clear()
-    this._consumedFence = null
   }
 
   /**
@@ -3280,7 +3248,9 @@ export class BlockManager {
       this._stopTicker()
       this._clearCommandIndicator()
     }
-    this._pendingBoundaries = this._pendingBoundaries.filter((p) => p.rec.el === keep)
+    for (const [id, waiting] of [...this._awaitingClose]) {
+      if (waiting.rec.el !== keep) this._awaitingClose.delete(id)
+    }
     for (const id of [...this._pendingStoredRows.keys()]) {
       if (id !== keepEntryId) this._pendingStoredRows.delete(id)
     }
@@ -3305,14 +3275,12 @@ export class BlockManager {
         this._answerBlocks.some((b) => b.id === this._selectedBlockId)
       if (!stillThere) this._selectedBlockId = null
     }
-    this._fences.clear()
-    this._consumedFence = null
   }
 
   private _finalizeRunningUnsafe(): void {
-    // Note: a pending render-fence boundary belongs to an ALREADY logically
-    // frozen block, never to the running block this finalizes — its sighting
-    // settles it independently, guarded by the running slot.
+    // Note: a block awaiting its block.closed is an ALREADY logically frozen
+    // one, never the running block this finalizes — its close settles it
+    // independently, guarded by the running slot.
     this._stopTicker()
     this._clearCommandIndicator()
     if (!this._runningBlock) return

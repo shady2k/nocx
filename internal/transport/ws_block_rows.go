@@ -273,6 +273,13 @@ type openBlock struct {
 	// one that sets it seals and says block.closed; any other finds it set
 	// and does neither (nocx-2v80t.3.29). Guarded by blockStream.mu.
 	settled bool
+	// sealing is whether an ordinary close's seal is in the store right now
+	// (nocx-2v80t.3.37). A detach that finds it set leaves the block to that
+	// close, which seals it once and says what the seal did; one that finds
+	// it clear claims the block (settled) and seals it itself, and a close
+	// arriving after that seals nothing. One seal per block either way.
+	// Guarded by blockStream.mu.
+	sealing bool
 	// closingIn is whether this interval's closing screen already reached
 	// the artifact. A close that committed its closing rows and then failed
 	// to seal must not append them a second time: the retry places them at
@@ -511,8 +518,10 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	said := make(map[string]bool)
 	for _, b := range opens {
 		said[b.entry] = true
-		if b.settled {
-			// Its own end, or its lost boundary, is sealing it and says so.
+		if b.settled || b.sealing {
+			// Its own end, or its lost boundary, is sealing it and says so —
+			// with what its seal did, since that is the seal the block gets
+			// (nocx-2v80t.3.37).
 			continue
 		}
 		// Claimed here, under the lock, so a close still in flight does not
@@ -1124,6 +1133,37 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		block.settled = true
 		return true
 	}
+	// beginSeal takes the seal for this close (nocx-2v80t.3.37), or answers
+	// false when the session's detach already claimed the block and sealed
+	// it: then this close seals nothing and says nothing — the detach said
+	// what its own seal did.
+	beginSeal := func() bool {
+		bs.mu.Lock()
+		defer bs.mu.Unlock()
+		if block.settled {
+			return false
+		}
+		block.sealing = true
+		return true
+	}
+	// endSeal releases the seal and answers whether the session is still
+	// attached: after a detach nothing of it may be recreated, so a failed
+	// seal is not retried and is said closed, not kept, at once.
+	endSeal := func() (attached bool) {
+		bs.mu.Lock()
+		defer bs.mu.Unlock()
+		block.sealing = false
+		_, attached = bs.sources[sid]
+		return attached
+	}
+	// detachedSettle finishes a close whose session was detached under it,
+	// saying what its own seal did when it was the one that sealed.
+	detachedSettle := func(sealed, said bool) {
+		finish()
+		if said && claim() {
+			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
+		}
+	}
 	// fail records one failed close attempt and answers whether the end is
 	// still worth retrying.
 	//
@@ -1142,6 +1182,12 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		// closing rows without changing ownership, and openBlock.closingIn is
 		// what keeps a retry from appending them twice at the cursor.
 		bs.mu.Lock()
+		if _, attached := bs.sources[sid]; !attached {
+			// Detached: nothing of the session is recreated, and nothing will
+			// ever retry this end (nocx-2v80t.3.37).
+			bs.mu.Unlock()
+			return false
+		}
 		if bs.closeTries == nil {
 			bs.closeTries = make(map[session.ID]map[string]uint8)
 		}
@@ -1177,10 +1223,20 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		s.log.Warn("block close abandoned at the attempt bound: the block is settled without its closing screen",
 			"session", sid, "entry", block.entry, "attempts", maxCloseAttempts,
 			"droppedClosingRows", len(closing))
+		if !beginSeal() {
+			detachedSettle(false, false)
+			return
+		}
 		if store != nil {
-			if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
+			_, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 				EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
-			}); err != nil {
+			})
+			attached := endSeal()
+			if !attached {
+				detachedSettle(err == nil, true)
+				return
+			}
+			if err != nil {
 				// Refused even here: the artifact stands as it is, and the
 				// block is settled anyway — a retry that can never succeed is
 				// what this path exists to end — but it is not SEALED, so it
@@ -1191,6 +1247,9 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			} else {
 				sealed = true
 			}
+		} else if !endSeal() {
+			detachedSettle(false, true)
+			return
 		}
 		bs.mu.Lock()
 		if endRow > bs.closedThrough[sid] {
@@ -1288,9 +1347,20 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			EntryID: block.entry, From: cursor, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
 		})
 	}
-	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
+	if !beginSeal() {
+		detachedSettle(false, false)
+		return true
+	}
+	_, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 		EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
-	}); err != nil {
+	})
+	if !endSeal() {
+		// The session was detached while this seal was in the store: the
+		// detach left the block to it, and this is the one seal it gets.
+		detachedSettle(err == nil, true)
+		return true
+	}
+	if err != nil {
 		s.log.Warn("block rows close failed", "session", sid, "entry", block.entry, "error", err)
 		if !fail() {
 			abandon()

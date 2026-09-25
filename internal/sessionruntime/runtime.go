@@ -1260,6 +1260,45 @@ func (e *rendezvousEntry) pending() bool {
 	return e.State == RendezvousAwaitingSighting || e.State == RendezvousAwaitingAuthenticated
 }
 
+// SealEnvironmentEntry seals the interval in flight at an authenticated
+// environment entry (nocx-2v80t.3.21): the coordinator's kernel accepted a
+// confirmed environment change — a nested domain taking the lane, which
+// abandons whatever local attempt was running under it (ADR-0024 §5,
+// internal/lifecycle's applySuspend) — while this session's command was
+// still open. The owner's decision is that this ends the local command's
+// interval exactly as its own end marker would: the screen at the entry,
+// bounded the same way as any other closing screen (closingRowsForStream,
+// outputMarkSkipLocked), is appended and the block is sealed.
+//
+// There is no fence for this boundary — the shell that would have printed
+// one is no longer the one holding the terminal — so the record seals with
+// the ZERO nonce, which an ordinary command's fence never is (32
+// cryptographically random bytes) and which the row stream's consumer reads
+// as "no fence to match, close whichever interval is open" rather than
+// hunting for a nonexistent authenticated completion.
+//
+// Like every other public entry point here this is an EVENT, never a timer
+// (ADR-0074): it fires once, when the coordinator's kernel accepts the fact.
+// at is judged exactly as [Session.Completed] judges it: a session that is
+// not available, or a caller naming a generation this runtime is not, is
+// refused rather than applied late — the same stale-sender guard, because a
+// replaced coordinator asking a runtime to seal an incarnation it left
+// behind is exactly what that guard exists for. An interval already parked
+// on a completion whose own fence never arrived is settled here too, with no
+// closing screen (ADR-0074's "the next event... seals it"), before the
+// interval that follows — the one an environment entry actually ends — seals
+// with its own.
+func (s *Session) SealEnvironmentEntry(at Incarnation) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.avail != AvailabilityAvailable || at != s.inc {
+		return
+	}
+	s.settlePendingLocked(FenceNonce{})
+	s.tick()
+	s.sealObservationLocked(FenceNonce{})
+}
+
 // Completed is the authenticated half arriving. It authenticates nothing: the
 // caller has already validated the protocol version, the epoch, the capability
 // and the sequence rule (internal/lifecycle's), and this method does not

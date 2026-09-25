@@ -337,6 +337,10 @@ type localHelperOpener struct {
 	// the same reason publishScreen is (helper_block_rows.go). Nil wires
 	// nothing.
 	blockRows blockRowsSink
+	// environmentEntries is the lane -> downlink registry
+	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
+	// reason blockRows is. Nil wires nothing.
+	environmentEntries *environmentEntryRegistry
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -646,8 +650,9 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	spawn := hostedSpawn{
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
-		publishScreen: o.publishScreen,
-		blockRows:     o.blockRows,
+		publishScreen:      o.publishScreen,
+		blockRows:          o.blockRows,
+		environmentEntries: o.environmentEntries,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is
@@ -1465,6 +1470,17 @@ func (o *localHelperOpener) LifecycleComplete(ctx context.Context, params proto.
 		return err
 	}
 	return c.LifecycleComplete(ctx, params)
+}
+
+// LifecycleEntered is LifecycleComplete's sibling for an authenticated
+// environment entry (nocx-2v80t.3.21) — the same connection, for the same
+// reason.
+func (o *localHelperOpener) LifecycleEntered(ctx context.Context, params proto.LifecycleEnteredParams) error {
+	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
+	if err != nil {
+		return err
+	}
+	return c.LifecycleEntered(ctx, params)
 }
 
 // localSessionConn is one re-attached session's connection: the client, and the

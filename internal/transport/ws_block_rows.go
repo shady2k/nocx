@@ -523,18 +523,44 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	return writtenUpTo, true
 }
 
+// noFenceNonce is the sentinel [Session.SealEnvironmentEntry] sends: a
+// confirmed environment change (nocx-2v80t.3.21) has no fence, because the
+// shell that would have printed one is no longer the one holding the
+// terminal, so there is nothing for BlockIntervalEnded's ordinary
+// fence-matching to resolve. An ordinary command's fence is 32
+// cryptographically random bytes and is never this — the same reasoning
+// internal/lifecycle's own recovery-nonce sentinel already rests on ("the
+// read model treats zero as 'no recovery nonce'") — so it is resolved
+// directly to whichever attempt is CURRENT rather than matched against one.
+var noFenceNonce [32]byte
+
 // BlockIntervalEnded delivers the session's interval end: the end marker's
 // rows, the screen at the marker, and the fence the shell minted for this
 // command — the same fence the authenticated completion carries. The fence
 // is the authentication: an end whose fence the coordinator has not seen
 // from the kernel waits (bounded) for it, and one whose fence resolves
 // appends the closing rows and seals the block.
+//
+// nonce == noFenceNonce is the one exception: an authenticated environment
+// entry ends the local interval with no fence at all (nocx-2v80t.3.21), so
+// it is resolved to the session's CURRENT block directly rather than parked
+// waiting for a fence that will never arrive. With no current block there is
+// nothing to seal, and the end is dropped rather than parked — parking it
+// would wait forever for a fence noFenceNonce can never resolve.
 func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row) {
 	hexNonce := hex.EncodeToString(nonce[:])
 	bs := s.blockStream
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
-	attempt, resolved := bs.fences[sid][hexNonce]
+	var attempt string
+	var resolved bool
+	if nonce == noFenceNonce {
+		if cur := bs.current[sid]; cur != nil {
+			attempt, resolved = cur.attempt, true
+		}
+	} else {
+		attempt, resolved = bs.fences[sid][hexNonce]
+	}
 	if bs.ends == nil {
 		bs.ends = make(map[session.ID][]pendingEnd)
 	}
@@ -543,6 +569,13 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 		return
 	}
 	if !resolved {
+		if nonce == noFenceNonce {
+			// No current block to seal at the entry: nothing this session
+			// streamed is open, so there is nothing an environment entry
+			// could end. Never parked — a park here would wait forever for a
+			// fence this nonce can never carry.
+			return
+		}
 		bs.mu.Lock()
 		ends := append(bs.ends[sid], pendingEnd{nonce: hexNonce, endRow: endRow, closing: closing})
 		if len(ends) > maxPendingEnds {

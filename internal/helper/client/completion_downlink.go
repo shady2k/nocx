@@ -21,9 +21,15 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 )
 
-// pendingCompletion is one accepted completion waiting for the open to learn
-// which helper session it belongs to.
+// pendingCompletion is one accepted completion — or, entered set, one
+// accepted environment entry (nocx-2v80t.3.21) — waiting for the open to
+// learn which helper session it belongs to. The two share one buffer and one
+// FIFO rather than two, so an entry that lands between two completions is
+// delivered in the same order the kernel accepted all three: the runtime's
+// own seal (ADR-0074) cares which interval an event closes, and a downlink
+// that reordered them behind the bind would hand it the wrong one.
 type pendingCompletion struct {
+	entered  bool
 	fence    [32]byte
 	exitCode *int
 }
@@ -41,6 +47,10 @@ type pendingCompletion struct {
 // them the moment Bind names the session.
 type CompletionDownlink struct {
 	send func(context.Context, proto.LifecycleCompleteParams) error
+	// sendEntered is send's sibling for an environment entry
+	// (nocx-2v80t.3.21): the same carrier, the same session, no fence to
+	// carry.
+	sendEntered func(context.Context, proto.LifecycleEnteredParams) error
 	// report is told about every failed delivery. Nil reports nowhere, and
 	// the failure is still the kernel's state's business: nothing here ever
 	// reaches back into the kernel, whose execution state is exactly what it
@@ -71,13 +81,14 @@ const maxPendingCompletions = 16
 // slow answer to wait for.
 const completionDeliveryTimeout = 5 * time.Second
 
-// CompletionSender is the one op the downlink needs from the pane's client:
-// the carrier op the already-authenticated completion travels down on.
-// *Client is it; so is any carrier that forwards the session service — the
-// re-adoption path's hostedCarrier, which is a connection and not always
-// this client.
+// CompletionSender is what the downlink needs from the pane's client: the
+// carrier ops the already-authenticated completion, and an authenticated
+// environment entry beside it (nocx-2v80t.3.21), travel down on. *Client is
+// it; so is any carrier that forwards the session service — the re-adoption
+// path's hostedCarrier, which is a connection and not always this client.
 type CompletionSender interface {
 	LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error
+	LifecycleEntered(ctx context.Context, params proto.LifecycleEnteredParams) error
 }
 
 // NewCompletionDownlink builds the downlink over this pane's client. The
@@ -91,6 +102,9 @@ func NewCompletionDownlink(c CompletionSender, ctx context.Context, report func(
 	return &CompletionDownlink{
 		send: func(ctx context.Context, params proto.LifecycleCompleteParams) error {
 			return c.LifecycleComplete(ctx, params)
+		},
+		sendEntered: func(ctx context.Context, params proto.LifecycleEnteredParams) error {
+			return c.LifecycleEntered(ctx, params)
 		},
 		report: report,
 		ctx:    ctx,
@@ -149,6 +163,28 @@ func (d *CompletionDownlink) Observe(fence [32]byte, exit *int) {
 	d.deliver(c)
 }
 
+// ObserveEnvironmentEntry delivers one accepted environment entry
+// (nocx-2v80t.3.21) — a child domain taking the lane over a running local
+// command, Ingest's own condition on the stack growing — or buffers it when
+// Bind has not named the session yet. Observe's own shape, with no fence to
+// carry: there is none for this boundary.
+func (d *CompletionDownlink) ObserveEnvironmentEntry() {
+	c := pendingCompletion{entered: true}
+	d.mu.Lock()
+	if !d.bound {
+		if len(d.pending) >= maxPendingCompletions {
+			d.mu.Unlock()
+			d.reportf("the helper session's identity was never bound; dropping the environment entry the kernel accepted")
+			return
+		}
+		d.pending = append(d.pending, c)
+		d.mu.Unlock()
+		return
+	}
+	d.mu.Unlock()
+	d.deliver(c)
+}
+
 // deliver sends one completion DOWN. The incarnation is derived HERE, once,
 // from the entry the spawn returned: the helper mints one session runtime
 // per PTY, at generation 1, over the session id it minted — that fact is
@@ -175,7 +211,26 @@ func (d *CompletionDownlink) deliver(c pendingCompletion) {
 	// lock across a network call to buy a helper answering "no such
 	// session" to an op nobody is waiting for.
 	if err := d.ctx.Err(); err != nil {
+		if c.entered {
+			d.reportf("the environment entry the kernel accepted did not reach the helper session: %v", err)
+			return
+		}
 		d.reportf("the completion the kernel accepted did not reach the helper session: %v", err)
+		return
+	}
+	if c.entered {
+		params := proto.LifecycleEnteredParams{
+			Session: proto.HostSessionID{
+				Generation: proto.GenerationID(d.entry.Generation),
+				Session:    d.entry.Session,
+			},
+			Incarnation: proto.Incarnation{Session: d.entry.Session, Generation: 1},
+		}
+		ctx, cancel := context.WithTimeout(d.ctx, completionDeliveryTimeout)
+		defer cancel()
+		if err := d.sendEntered(ctx, params); err != nil {
+			d.reportf("the environment entry the kernel accepted did not reach the helper session: %v", err)
+		}
 		return
 	}
 	var exit *int
@@ -259,10 +314,22 @@ func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d *CompletionDownli
 	return &CompletionObservingKernel{Kernel: k, downlink: d}
 }
 
-// Ingest forwards to the kernel and observes acceptance.
+// Ingest forwards to the kernel and observes acceptance. What crosses this
+// wrapper is completions alone (Observe); an authenticated environment entry
+// (nocx-2v80t.3.21, ObserveEnvironmentEntry) is a LANE-level fact rather than
+// a per-transport one — the child domain that triggers it authenticates on
+// its OWN transport, over a listener this wrapper never sees (a local
+// nested shell shares the parent's descriptor, but an ssh child's hello
+// arrives on a forwarded connection of its own) — so it is observed at
+// internal/app's environmentEntryEmitter, which decorates the one
+// lifecyclepub.Emitter every transport's Ingest already reports to,
+// regardless of which one carried the frame.
 func (k *CompletionObservingKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
 	err := k.Kernel.Ingest(t, env)
-	if err == nil && env.Event.Kind == lifecycle.KindComplete && env.Event.Complete != nil {
+	if err != nil {
+		return err
+	}
+	if env.Event.Kind == lifecycle.KindComplete && env.Event.Complete != nil {
 		k.downlink.Observe(env.Event.Complete.Fence, env.Event.Complete.ExitCode)
 	}
 	return err

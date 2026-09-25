@@ -562,9 +562,13 @@ type helperRegistry struct {
 	// Nil (tests, or a server without the wiring) reports nowhere and the
 	// loss is still logged by the adapter.
 	lifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
-	mu            sync.Mutex
-	hosts         map[session.ID]*hostHelper
-	closing       map[string]struct{}
+	// environmentEntries is the lane -> downlink registry
+	// (environment_entry.go, nocx-2v80t.3.21), the same one the local route
+	// uses. Nil wires nothing.
+	environmentEntries *environmentEntryRegistry
+	mu                 sync.Mutex
+	hosts              map[session.ID]*hostHelper
+	closing            map[string]struct{}
 	// farTools are the far-side tool sockets this registry opened, keyed by the
 	// session each belongs to (nocx-e2bws). They are held HERE rather than by
 	// the hostHelper because the event that ends them is a session's end and not
@@ -984,6 +988,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		lifecycleLaunch = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+		}
+		if r.environmentEntries != nil {
+			r.environmentEntries.register(launch.Lane, downlink)
 		}
 	}
 	// endLifecycleLeg rolls back everything this open built for the lifecycle

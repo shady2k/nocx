@@ -481,7 +481,7 @@ func (s *Service) Ops() []string {
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpConfirmRows,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpScreen, proto.OpReplay,
+		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
@@ -526,6 +526,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.AccessBumpParams{})
 	case proto.OpLifecycleComplete:
 		return host.SchemaFor(proto.LifecycleCompleteParams{})
+	case proto.OpLifecycleEntered:
+		return host.SchemaFor(proto.LifecycleEnteredParams{})
 	}
 	return nil
 }
@@ -709,6 +711,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.lifecycleComplete(p)
+	case proto.OpLifecycleEntered:
+		var p proto.LifecycleEnteredParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.lifecycleEntered(p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -1819,6 +1827,26 @@ func (s *Service) lifecycleComplete(p proto.LifecycleCompleteParams) (proto.Life
 		Generation: sessionruntime.Generation(p.Incarnation.Generation),
 	}, nonce, exitCodeFromWire(p.ExitCode))
 	return proto.LifecycleCompleteResult{}, nil
+}
+
+// lifecycleEntered hands one already-authenticated environment entry to the
+// session runtime that owns the pane (nocx-2v80t.3.21). Like
+// lifecycleComplete this adds no gate: the coordinator's kernel has already
+// accepted the confirmed environment change, and the runtime's own
+// incarnation check is the only judging this side of the wire does. There is
+// no fence to decode — the op carries none (OpLifecycleEntered's own doc) —
+// so this is a shorter version of lifecycleComplete with nothing to decode
+// but the session and the incarnation.
+func (s *Service) lifecycleEntered(p proto.LifecycleEnteredParams) (proto.LifecycleEnteredResult, error) {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return proto.LifecycleEnteredResult{}, err
+	}
+	hs.runtime.SealEnvironmentEntry(sessionruntime.Incarnation{
+		Session:    sessionruntime.SessionID(p.Incarnation.Session),
+		Generation: sessionruntime.Generation(p.Incarnation.Generation),
+	})
+	return proto.LifecycleEnteredResult{}, nil
 }
 
 // fenceNonceFromWire decodes the completion's fence: exactly 64 LOWERCASE

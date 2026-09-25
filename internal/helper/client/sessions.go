@@ -1249,3 +1249,10 @@ func (a *AttachedSession) SignalForeground(sig syscall.Signal) error {
 func (c *Client) LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error {
 	return c.Call(ctx, proto.ServiceSession, proto.OpLifecycleComplete, params, nil)
 }
+
+// LifecycleEntered carries one already-authenticated environment entry DOWN
+// to the helper session it names (nocx-2v80t.3.21) — LifecycleComplete's own
+// shape, with no fence to carry: there is none for this boundary.
+func (c *Client) LifecycleEntered(ctx context.Context, params proto.LifecycleEnteredParams) error {
+	return c.Call(ctx, proto.ServiceSession, proto.OpLifecycleEntered, params, nil)
+}

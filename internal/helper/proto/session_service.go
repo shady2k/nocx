@@ -106,6 +106,17 @@ const (
 	// unknown_op, which is the sentence a coordinator already reads as "this
 	// machine's helper is older than this app".
 	OpLifecycleComplete = "lifecycle-complete"
+	// OpLifecycleEntered carries one authenticated environment entry DOWN to
+	// the session that owns the pane (nocx-2v80t.3.21): the coordinator's
+	// kernel accepted a confirmed environment change — a nested domain
+	// taking the lane — while this session's local command was still open,
+	// and the owner's decision is that this ends its interval exactly as its
+	// own end marker would. There is no fence for this boundary — the shell
+	// that would have printed one is no longer the one holding the terminal
+	// — so this op carries none: the helper hands it to the session
+	// runtime's SealEnvironmentEntry, which reads the screen at the entry
+	// itself, bounded the same way as any other closing screen.
+	OpLifecycleEntered = "lifecycle-entered"
 )
 
 // Incarnation is a session runtime's identity on the wire: the session the
@@ -162,6 +173,24 @@ type LifecycleCompleteParams struct {
 // error. It exists so the op has a result type at all, the way every other
 // op does.
 type LifecycleCompleteResult struct{}
+
+// LifecycleEnteredParams carries one authenticated environment entry down to
+// the session that owns the pane. It names no fence: there is none for this
+// boundary (OpLifecycleEntered's own doc), so the runtime seals the interval
+// in flight against its own screen rather than a rendezvous nothing sighted.
+type LifecycleEnteredParams struct {
+	// Session addresses the helper session, generation-qualified like every
+	// other op on this service.
+	Session HostSessionID `json:"session"`
+	// Incarnation is the runtime incarnation the sender believes is live, the
+	// same guard LifecycleCompleteParams carries and for the same reason: a
+	// stale sender is refused by the runtime rather than applied late.
+	Incarnation Incarnation `json:"incarnation"`
+}
+
+// LifecycleEnteredResult is deliberately empty, like LifecycleCompleteResult:
+// the answer to "did the entry land" is the absence of an error.
+type LifecycleEnteredResult struct{}
 
 // AdoptLifecycleParams names the session whose lifecycle identity the caller
 // intends to take over.

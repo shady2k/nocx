@@ -786,6 +786,24 @@ func (k *Kernel) applySuspend(d *Domain, ls *laneState, env Envelope) ([]Outboun
 		return nil, err
 	}
 	d.State = DomainSuspended
+	// Suspension is NOT completion, and it must never be read as one
+	// (nocx-2v80t.3.21's own investigation first tried marking the running
+	// attempt Unknown here, and TestLiveSshd_SSHChildAssembly_
+	// ExitFreezesTheChildBlockAndCompletesTheParent is exactly the measured
+	// reason that is wrong: "the parent comes back and completes its own
+	// block with the status the ssh client really exited with" — the local
+	// `ssh` command's own attempt stays genuinely OPEN through the whole
+	// nested session and is completed later, by its own authenticated
+	// completion, with its own real exit code. Nothing here may end that
+	// attempt early). What DOES end, once the CHILD domain this suspend
+	// yields to actually establishes, is the block's ROWS ARTIFACT — its
+	// closing screen, with no fence to authenticate it. That is
+	// sessionruntime's own concern (Session.SealEnvironmentEntry), raised
+	// from internal/app's environmentEntryEmitter, which watches the lane's
+	// domain stack grow — never a change to the attempt this method leaves
+	// untouched, and never this event's own kind: suspend fires before the
+	// child has produced a single byte, so a screen read here would hold
+	// only the echoed command line.
 	k.setLifecycle(ls, LifecycleNative, "", "")
 	return nil, nil
 }

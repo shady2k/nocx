@@ -139,6 +139,11 @@ type hostedCarrier interface {
 	// that could not say this would re-adopt a pane whose blocks stop
 	// reaching the runtime that owns it.
 	LifecycleComplete(ctx context.Context, params proto.LifecycleCompleteParams) error
+	// LifecycleEntered is LifecycleComplete's sibling for an authenticated
+	// environment entry (nocx-2v80t.3.21) — the same connection, the same
+	// reason: a re-adopted pane's completions and its environment entries
+	// both have to keep reaching the runtime that owns it.
+	LifecycleEntered(ctx context.Context, params proto.LifecycleEnteredParams) error
 }
 
 // sessionAdopter installs the transport-owned half of a re-adopted session:

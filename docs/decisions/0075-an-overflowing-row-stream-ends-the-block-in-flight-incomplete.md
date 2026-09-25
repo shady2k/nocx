@@ -66,9 +66,12 @@ recorded again until the next command begins after the stream is healthy.**
    `history.coordinatorBufferMB` in Settings, in whole megabytes per session, with defaults sized
    from the limits before this record.
    - The value applies to sessions opened after it changes.
-   - The helper clamps its buffer, as AD-10 clamps its window, to a floor that holds at least one
-     full screen (named in `internal/helper/session`), a ceiling, and the helper-wide aggregate
-     budget it shares with the output window.
+   - The settings accept 4 to 256 MB. The helper clamps its buffer, as AD-10 clamps its window,
+     to a floor of 4 MiB (`MinRowBufferBytes`: one closing screen of 400 × 250 cells, about 3.9
+     MiB, beside the incomplete marker), a ceiling of 256 MiB (half the helper's default
+     aggregate budget), and the helper-wide aggregate budget it shares with the output window: a
+     session asking for more than is left gets what is left, and a spawn that cannot fit the
+     floor is refused. The coordinator applies the same floor (`MinBlockRowsBufferBytes`).
    - A session records the size it actually got.
 6. **The coordinator's bound counts every queue** that holds rows or closing screens for the
    stream, not only the rows waiting for the store.

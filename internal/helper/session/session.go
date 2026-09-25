@@ -427,15 +427,16 @@ type hostSession struct {
 	rowWake chan struct{}
 	// rowsDone ends the pump; rowsConfirmed is the coordinator's
 	// acknowledged "written up to here" mark; rowsDropped counts the
-	// BATCHES the bridge shed and markersDropped the MARKERS (rows.go).
-	rowsDone       chan struct{}
-	rowsConfirmed  uint64
-	rowsDropped    atomic.Uint64
-	markersDropped atomic.Uint64
-	writer         *proto.SubscriberID
-	writerAtt      proto.AttachmentID
-	epoch          proto.LeaseEpoch
-	exit           *proto.SessionExitStatus
+	// BATCHES the bridge shed, and markersFolded the hand-offs folded into
+	// an overflow record past the marker budget (rows.go).
+	rowsDone      chan struct{}
+	rowsConfirmed uint64
+	rowsDropped   atomic.Uint64
+	markersFolded atomic.Uint64
+	writer        *proto.SubscriberID
+	writerAtt     proto.AttachmentID
+	epoch         proto.LeaseEpoch
+	exit          *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while

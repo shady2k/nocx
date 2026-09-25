@@ -22,7 +22,7 @@
       "$ref": "#/$defs/rowsOrNull"
     },
     "noFence": {
-      "description": "Whether the interval was settled WITHOUT its fence (ADR-0074 decision 3, nocx-2v80t.3.29): its authenticated completion arrived, the next event proved its fence would never be sighted, and it ended with no closing screen. The block it closes may be missing output, and the coordinator stores it as a gap so the block says so. False for every boundary that joined its fence, and for an environment entry, which has no fence by design. Always present: false is an answer.",
+      "description": "Whether the interval was settled WITHOUT its fence (ADR-0074 decision 3, nocx-2v80t.3.29): its authenticated completion arrived, the next event proved its fence would never be sighted, and it ended with no closing screen. The block it closes may be missing output, and the coordinator stores it as a gap so the block says so. False for every boundary that joined its fence, and for an environment entry, which has no fence by design. True with the all-zero nonce is an end the helper's row bridge could not keep in full behind a wedged wire (nocx-2v80t.3.31): it lost its fence and closing screen but not its place in the stream, and settles the block then current as a gap. Always present: false is an answer.",
       "type": "boolean"
     }
   },

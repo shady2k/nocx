@@ -1553,3 +1553,112 @@ type clearFailureBlockStore struct{ closeFailureBlockStore }
 func (s *clearFailureBlockStore) RecordClearBoundary(context.Context, content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
 	return content.ClearBoundaryRecorded{}, fmt.Errorf("injected clear boundary failure")
 }
+
+// awaitBlockClosed answers the next block.closed the subscriber hears, its
+// params validated against the contract off the real socket.
+func awaitBlockClosed(t *testing.T, e *lifecycleTestEnv) blockClosedParams {
+	t.Helper()
+	msg, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.closed"))
+	if err != nil {
+		t.Fatalf("no block.closed reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.closed frame did not decode: %s", msg)
+	}
+	validateJSON(t, loadSchema(t, "block.closed.schema.json"), frame.Params, "block.closed params (real socket)")
+	var got blockClosedParams
+	if err := json.Unmarshal(frame.Params, &got); err != nil {
+		t.Fatalf("block.closed params: %v", err)
+	}
+	return got
+}
+
+// EVERY RESOLVED END IS SAID (nocx-2v80t.3.27). The renderer finishes a
+// block on block.closed and on nothing else, so an end the coordinator
+// resolved for a block the store did not keep has to be said too — the
+// renderer cannot know that no notification is coming. The kept case is the
+// pair: the same end, the same notification, and `kept` says which it was.
+func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
+	t.Run("kept: the store holds the block's rows", func(t *testing.T) {
+		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+		e.ws.AttachBlockRows(session.ID(sid))
+		attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
+		fence := lifecycleFence(0x51)
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("done")})
+
+		got := awaitBlockClosed(t, e)
+		if got.EntryID != attempt || !got.Kept {
+			t.Fatalf("block.closed = %+v, want entry %q kept", got, attempt)
+		}
+	})
+
+	t.Run("not kept: output retention refused the block", func(t *testing.T) {
+		policy := content.NewPolicy()
+		policy.SetOutputEnabled(false)
+		db := newLedgerStoreWithPolicy(t, policy)
+		e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+		e.ws.AttachBlockRows(session.ID(sid))
+		attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
+		fence := lifecycleFence(0x52)
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("classified")})
+
+		got := awaitBlockClosed(t, e)
+		if got.EntryID != attempt || got.Kept {
+			t.Fatalf("block.closed = %+v, want entry %q not kept", got, attempt)
+		}
+	})
+
+	t.Run("no block at all: a shell-originated attempt with no store", func(t *testing.T) {
+		e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, false)
+		e.ws.AttachBlockRows(session.ID(sid))
+		shellID := lifecycle.AttemptID("att-shell-closed")
+		fence := lifecycleFence(0x53)
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "ls")))
+		// The end marker first this time: it parks until the completion
+		// names its fence, and the meeting is what closes it.
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("a b c")})
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(shellID, 0, fence)))
+
+		got := awaitBlockClosed(t, e)
+		if got.EntryID != string(shellID) || got.Kept {
+			t.Fatalf("block.closed = %+v, want entry %q not kept", got, shellID)
+		}
+	})
+}
+
+// THE SESSION'S END settles what is still open (ADR-0074 decision 3): a
+// completion whose end marker never came, and a block whose command never
+// ended, are each said closed at the detach — the renderer waits for
+// block.closed and nothing after this can send it (nocx-2v80t.3.27).
+func TestDetachBlockRows_SaysEveryUnendedBlockClosed(t *testing.T) {
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	fence := lifecycleFence(0x54)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+	// No end marker: the helper went away first.
+	e.ws.DetachBlockRows(session.ID(sid))
+
+	got := awaitBlockClosed(t, e)
+	if got.EntryID != attempt || !got.Kept {
+		t.Fatalf("block.closed = %+v, want entry %q kept", got, attempt)
+	}
+}
+
+// The struct half of the contract: both answers of `kept` marshal to what
+// the schema accepts, and `kept` is sent even when false — a false that the
+// encoder dropped would read as a missing required field.
+func TestBlockClosed_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "block.closed.schema.json")
+	for _, p := range []blockClosedParams{{EntryID: "e1", Kept: true}, {EntryID: "e2", Kept: false}} {
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal %+v: %v", p, err)
+		}
+		validateJSON(t, schema, raw, "block.closed params (DTO)")
+	}
+}

@@ -294,6 +294,10 @@ type blockGrewParams struct {
 // (contracts/block.closed.schema.json).
 type blockClosedParams struct {
 	EntryID string `json:"entryId"`
+	// Kept says whether the store holds rows for this block. False is a
+	// block the keep decision refused, or one no store could open: nothing
+	// will ever be readable, and a renderer has nothing to fetch.
+	Kept bool `json:"kept"`
 }
 
 // AttachBlockRows registers a session's helper rows callbacks as this
@@ -359,12 +363,33 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64)) {
 // never will. The composition root calls it where the session's helper
 // callbacks are torn down.
 func (s *WSServer) DetachBlockRows(sid session.ID) {
-	s.blockStream.detach(s.blockStore(), sid)
+	// The session's end is the event that settles every interval still open
+	// on it (ADR-0074 decision 3), and nothing after it can send block.closed
+	// — so it is said here, for each, or the renderer, which finishes a block
+	// on that notification alone, shows it running forever (nocx-2v80t.3.27).
+	for _, closed := range s.blockStream.detach(s.blockStore(), sid) {
+		s.notifyBlockSubscriber(sid, "block.closed", closed)
+	}
 }
 
-func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
+// detach forgets the session and seals what it held, and answers the
+// block.closed each still-unended interval is owed: every open block, and
+// every completion whose end marker never arrived.
+func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClosedParams {
 	bs.mu.Lock()
 	opens := bs.open[sid]
+	var owed []blockClosedParams
+	said := make(map[string]bool)
+	for _, b := range opens {
+		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: b.kept})
+		said[b.entry] = true
+	}
+	for _, attempt := range bs.fences[sid] {
+		if attempt != "" && !said[attempt] {
+			owed = append(owed, blockClosedParams{EntryID: attempt, Kept: false})
+			said[attempt] = true
+		}
+	}
 	delete(bs.closedThrough, sid)
 	delete(bs.beyond, sid)
 	delete(bs.beyondThrough, sid)
@@ -401,6 +426,7 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 			EntryID: b.entry, ArtifactID: b.artifactID,
 		})
 	}
+	return owed
 }
 
 // BlockRowsArrived delivers one OutputRows delivery from the session's
@@ -851,15 +877,25 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		bs.mu.Unlock()
 		finish()
-		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
+		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
 		promote()
 	}
+	// EVERY END THE COORDINATOR RESOLVES IS SAID (nocx-2v80t.3.27), kept or
+	// not. The renderer finishes a block on block.closed and on nothing else
+	// — the render fence it used to wait on was a second owner of this
+	// rendezvous (ADR-0066) — and it cannot know that no notification is
+	// coming, so a block the store refused, or never opened, would otherwise
+	// run forever on screen.
 	if block == nil {
 		finish()
+		if attempt != "" {
+			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
+		}
 		return true
 	}
 	if !block.kept {
 		finish()
+		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: false})
 		promote()
 		return true
 	}
@@ -953,7 +989,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	}
 	bs.mu.Unlock()
 	finish()
-	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry})
+	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
 	promote()
 	return true
 }

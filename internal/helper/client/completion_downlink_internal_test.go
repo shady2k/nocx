@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -439,5 +440,52 @@ func TestTheDownlinkDeliversUnderItsOwnContext(t *testing.T) {
 		close(release)
 	case <-time.After(5 * time.Second):
 		t.Fatal("deliver never reached the send")
+	}
+}
+
+// A retried environment entry carries the SAME identity on every attempt, and
+// the next entry carries its own (nocx-2v80t.3.28). An attempt that timed out
+// may already have landed at the helper, so the identity is the only thing
+// that lets the helper's runtime seal one interval per entry rather than one
+// per delivery; minting it per attempt would make every retry a new entry.
+func TestARetriedEnvironmentEntryCarriesTheSameIdentityOnEveryAttempt(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts []string
+	)
+	landed := make(chan struct{}, 8)
+	sendEntered := func(_ context.Context, p proto.LifecycleEnteredParams) error {
+		mu.Lock()
+		attempts = append(attempts, p.Entry)
+		first := len(attempts) == 1
+		mu.Unlock()
+		if first {
+			// The attempt's own bound passing: retryable, and it may well have
+			// landed on the far side.
+			return context.DeadlineExceeded
+		}
+		landed <- struct{}{}
+		return nil
+	}
+	ctx := log.WithLogger(context.Background(), log.NewSlogAdapter(logtest.Slog(t)))
+	d := newCompletionDownlink(ctx, newSpy().send, sendEntered)
+	d.retryWait = func(ctx context.Context, _ int) error { return ctx.Err() }
+	d.Bind(HostSessionID{Generation: "gen-under-test", Session: "0123456789abcdef0123456789abcdef"})
+
+	d.ObserveEnvironmentEntry("dom-child")
+	d.ObserveEnvironmentEntry("dom-grandchild")
+	for i := range 2 {
+		select {
+		case <-landed:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%d of 2 environment entries landed", i)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"dom-child", "dom-child", "dom-grandchild"}
+	if !slices.Equal(attempts, want) {
+		t.Fatalf("attempts named %q, want %q", attempts, want)
 	}
 }

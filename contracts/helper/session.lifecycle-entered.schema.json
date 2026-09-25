@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.lifecycle-entered.schema.json",
+  "title": "HelperSessionLifecycleEnteredResult",
+  "description": "Result of carrying one authenticated environment entry down to the session that owns the pane. Deliberately empty, like lifecycle-complete: the answer to \"did the entry land\" is the absence of an error, and a second delivery of the same entry lands the same way while sealing nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

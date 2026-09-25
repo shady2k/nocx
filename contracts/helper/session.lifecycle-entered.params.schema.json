@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.lifecycle-entered.params.schema.json",
+  "title": "HelperSessionLifecycleEnteredParams",
+  "description": "One authenticated environment entry, carried DOWN by the coordinator to the session that owns the pane (nocx-2v80t.3.21): the coordinator's kernel accepted a child domain taking the lane while the session's local command was still open, and the helper's runtime seals that command's interval at the screen as it stands, with no fence. The entry names its own identity so the op is idempotent (nocx-2v80t.3.28): the coordinator retries a delivery whose attempt timed out, that attempt may already have landed, and the runtime seals one interval per entry rather than one per delivery.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "incarnation", "entry"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "incarnation": {
+      "description": "The session runtime's own identity, spelled and derived exactly as lifecycle-complete's: the session the PTY belongs to and the runtime generation (1). A sender whose derivation is stale is refused by the runtime rather than applied late.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session", "generation"],
+      "properties": {
+        "session": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "generation": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "entry": {
+      "description": "The entry's identity: the kernel's id for the child domain whose establishment took the lane. Minted once and never reused, so every retry of one entry carries the same value and two entries never share one. Never empty: an entry with no identity could not be told from its own retry, and the helper refuses it as bad params.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

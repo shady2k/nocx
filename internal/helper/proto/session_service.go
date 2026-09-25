@@ -186,6 +186,14 @@ type LifecycleEnteredParams struct {
 	// same guard LifecycleCompleteParams carries and for the same reason: a
 	// stale sender is refused by the runtime rather than applied late.
 	Incarnation Incarnation `json:"incarnation"`
+	// Entry is the entry's identity: the child domain whose establishment
+	// took the lane (the kernel's DomainID). It is what makes the op
+	// idempotent (nocx-2v80t.3.28): the coordinator retries a delivery whose
+	// attempt timed out, that attempt may already have landed, and the
+	// runtime seals one interval per entry rather than one per delivery.
+	// Required and never empty — an entry with no identity could not be told
+	// from its own retry, so the helper refuses it as malformed.
+	Entry string `json:"entry"`
 }
 
 // LifecycleEnteredResult is deliberately empty, like LifecycleCompleteResult:

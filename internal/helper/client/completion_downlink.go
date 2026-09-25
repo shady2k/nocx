@@ -32,7 +32,12 @@ import (
 // all three: the runtime's own seal (ADR-0074) cares which interval an event
 // closes, and a downlink that reordered them would hand it the wrong one.
 type pendingCompletion struct {
-	entered  bool
+	entered bool
+	// entry is an environment entry's identity — the child domain that took
+	// the lane — and travels with every attempt at delivering it, so the
+	// helper's runtime can tell a retry of one entry from a second entry
+	// (nocx-2v80t.3.28). Empty on a completion, whose fence is its identity.
+	entry    string
 	fence    [32]byte
 	exitCode *int
 }
@@ -219,8 +224,13 @@ func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.C
 // command, Ingest's own condition on the stack growing. It is called from
 // inside the Ingest that grew the stack, which is Accept's own, so the entry
 // takes its place in acceptance order without a lock of its own.
-func (d *CompletionDownlink) ObserveEnvironmentEntry() {
-	d.enqueue(pendingCompletion{entered: true})
+//
+// entry is the entry's identity: the child domain whose establishment took
+// the lane. A failed send is retried, and an attempt that timed out may have
+// landed, so every attempt carries the same identity and the helper seals
+// one interval per entry rather than one per delivery (nocx-2v80t.3.28).
+func (d *CompletionDownlink) ObserveEnvironmentEntry(entry string) {
+	d.enqueue(pendingCompletion{entered: true, entry: entry})
 }
 
 // enqueue puts one accepted fact at the back of the queue and wakes the
@@ -347,7 +357,7 @@ func (d *CompletionDownlink) sendOnce(c pendingCompletion) error {
 	ctx, cancel := context.WithTimeout(d.ctx, completionDeliveryTimeout)
 	defer cancel()
 	if c.entered {
-		return d.sendEntered(ctx, proto.LifecycleEnteredParams{Session: session, Incarnation: inc})
+		return d.sendEntered(ctx, proto.LifecycleEnteredParams{Session: session, Incarnation: inc, Entry: c.entry})
 	}
 	return d.send(ctx, proto.LifecycleCompleteParams{
 		Session:     session,

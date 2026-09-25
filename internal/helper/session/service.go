@@ -588,7 +588,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeSpawnFailed, nil
 	case errors.Is(err, ErrNoSSHSpawner):
 		return proto.ErrCodeNoSSHClient, nil
-	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams), errors.Is(err, errBadFence):
+	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams), errors.Is(err, errBadFence), errors.Is(err, errBadEntry):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, errBadTargetKind):
 		return proto.ErrCodeBadParams, nil
@@ -1836,16 +1836,24 @@ func (s *Service) lifecycleComplete(p proto.LifecycleCompleteParams) (proto.Life
 // incarnation check is the only judging this side of the wire does. There is
 // no fence to decode — the op carries none (OpLifecycleEntered's own doc) —
 // so this is a shorter version of lifecycleComplete with nothing to decode
-// but the session and the incarnation.
+// but the session, the incarnation and the entry's identity. The identity is
+// what makes the op idempotent (nocx-2v80t.3.28): the runtime seals one
+// interval per entry, so a delivery the coordinator retried after an attempt
+// that timed out but landed seals nothing a second time. An entry with no
+// identity could not be told from its own retry, and is refused as malformed
+// rather than sealed on trust.
 func (s *Service) lifecycleEntered(p proto.LifecycleEnteredParams) (proto.LifecycleEnteredResult, error) {
 	hs, err := s.find(p.Session)
 	if err != nil {
 		return proto.LifecycleEnteredResult{}, err
 	}
+	if p.Entry == "" {
+		return proto.LifecycleEnteredResult{}, errBadEntry
+	}
 	hs.runtime.SealEnvironmentEntry(sessionruntime.Incarnation{
 		Session:    sessionruntime.SessionID(p.Incarnation.Session),
 		Generation: sessionruntime.Generation(p.Incarnation.Generation),
-	})
+	}, sessionruntime.EnvironmentEntryID(p.Entry))
 	return proto.LifecycleEnteredResult{}, nil
 }
 
@@ -1924,3 +1932,9 @@ func adoptableLaunch(launch *proto.LifecycleLaunch, win *window) *proto.Lifecycl
 // zero-filling it instead would hand the runtime a rendezvous nothing
 // sighted.
 var errBadFence = errors.New("session: the completion's nonce is not a 64-character hex fence")
+
+// errBadEntry refuses an environment-entry op that names no entry
+// (nocx-2v80t.3.28). The entry's identity is what keeps a retried delivery
+// from sealing a second interval, so an op without one is malformed wire,
+// not a boundary to seal on trust.
+var errBadEntry = errors.New("session: the environment entry names no entry")

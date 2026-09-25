@@ -100,6 +100,16 @@ export function copyToClipboard(text: string): Promise<void> {
 // both have arrived, in either order. Nothing the renderer sees in the
 // stream takes part: a second owner of that rendezvous is what left a block
 // running forever whenever the renderer missed the fence.
+//
+// Every path that ENDS a block the backend knows about closes it the same
+// way (nocx-2v80t.3.30): the completion, the environment entry, and the
+// attempt gone unknown each land their logical freeze at once and wait for
+// block.closed (`_closeOnBackend`). Two paths close at once because nothing
+// could ever send block.closed for them to this pane, each named where it
+// happens: a block never bound to an attempt (`abandonUnbound` — the
+// backend has no entry to name it by), and every block of a session this
+// pane has let go of (`settleWithoutBackend` — the session that would say
+// it is gone).
 
 /** Upper bound on remembered block.closed notifications for blocks whose
  *  completion has not arrived yet (`_closedEarly`). Ordinarily one is
@@ -1971,6 +1981,10 @@ export class BlockManager {
       status: FrozenStatus
       getLine: GetLineFn
       endLine: number
+      /** Where the block ran, as the pane stood when it ENDED: by its
+       *  block.closed an environment entry has moved the pane to the far
+       *  host, and the local `ssh` block must not be labelled with it. */
+      location: string
     }
   >()
   /** block.closed notifications that arrived BEFORE their completion — the
@@ -2639,8 +2653,49 @@ export class BlockManager {
     const rec = this._runningBlock
     if (!rec) return null
     const status = this._logicalFreeze(rec, null, 'entered')
-    this._freezeCard(rec, getLine, endLine, status)
-    return rec
+    // The backend seals the local interval at the entry and says
+    // block.closed for it; the block closes on screen then.
+    return this._closeOnBackend(rec, getLine, endLine, status) ? rec : null
+  }
+
+  /** The VISUAL half of every end the backend knows about: close the block
+   *  on screen now if its block.closed already arrived, and otherwise park
+   *  it until `blockClosed` names it. Answers whether it closed now. A block
+   *  bound to no attempt has no entry the backend could name, so it closes
+   *  at once — reached only through abandonUnbound's own case. */
+  private _closeOnBackend(
+    rec: BlockRecord,
+    getLine: GetLineFn,
+    endLine: number,
+    status: FrozenStatus,
+  ): boolean {
+    const id = rec.attemptId
+    if (id === undefined || this._closedEarly.delete(id)) {
+      this._freezeCard(rec, getLine, endLine, status)
+      return true
+    }
+    this._awaitingClose.set(id, { rec, status, getLine, endLine, location: this._location })
+    return false
+  }
+
+  /** The session this pane was showing is gone (it exited, or the pane let
+   *  it go for another): nothing will ever send block.closed for its blocks
+   *  to this pane, so every block still waiting for one closes now, as it
+   *  stands. The one place the pane closes a block on its own word, and
+   *  only because the backend that would have said it no longer can. */
+  settleWithoutBackend(): void {
+    for (const [id, waiting] of [...this._awaitingClose]) {
+      this._awaitingClose.delete(id)
+      if (!this._blocks.includes(waiting.rec)) continue
+      this._freezeCard(
+        waiting.rec,
+        waiting.getLine,
+        waiting.endLine,
+        waiting.status,
+        waiting.location,
+      )
+    }
+    this._closedEarly.clear()
   }
 
   /** The LOGICAL freeze (u7uh.8): flip the block's record to its terminal
@@ -2676,6 +2731,7 @@ export class BlockManager {
     _getLine: GetLineFn,
     endLine: number,
     status: FrozenStatus,
+    location = this._location,
   ): void {
     rec.endLine = endLine
 
@@ -2684,7 +2740,7 @@ export class BlockManager {
       rec.id,
       rec.command,
       rec.cwd,
-      this._location,
+      location,
       '',
       rec.durationMs ?? 0,
       rec.exitCode,
@@ -2730,9 +2786,10 @@ export class BlockManager {
    *  block closing on screen — lands on the backend's block.closed for this
    *  entry (nocx-2v80t.3.27): at once when it already arrived, and otherwise
    *  in `blockClosed` when it does (this returns null, so the caller knows
-   *  the close is still to come). A completion with no fence freezes at
-   *  once: the backend pairs an end marker with a completion by its fence,
-   *  so without one no block.closed can ever name it. */
+   *  the close is still to come). There is no fenceless exception: both
+   *  kernels refuse a completion without its fence, and an interval the
+   *  helper settles without SIGHTING the fence still reaches the
+   *  coordinator and ends in block.closed (nocx-2v80t.3.29). */
   freezeFromAttempt(
     attempt: ExecutionAttempt,
     getLine: GetLineFn,
@@ -2771,12 +2828,7 @@ export class BlockManager {
     const terminal = this._logicalFreeze(rec, code, status)
     this._attemptId = null
 
-    if (attempt.fence === undefined || this._closedEarly.delete(attempt.id)) {
-      this._freezeCard(rec, getLine, endLine, terminal)
-      return rec
-    }
-    this._awaitingClose.set(attempt.id, { rec, status: terminal, getLine, endLine })
-    return null
+    return this._closeOnBackend(rec, getLine, endLine, terminal) ? rec : null
   }
 
   /** The backend said this entry's block is closed (block.closed): its rows
@@ -2790,7 +2842,13 @@ export class BlockManager {
       this._awaitingClose.delete(entryId)
       // A block cleared since its completion has nothing left to close.
       if (!this._blocks.includes(waiting.rec)) return
-      this._freezeCard(waiting.rec, waiting.getLine, waiting.endLine, waiting.status)
+      this._freezeCard(
+        waiting.rec,
+        waiting.getLine,
+        waiting.endLine,
+        waiting.status,
+        waiting.location,
+      )
       // Settle around it only if no newer command owns the running slot.
       if (this._runningBlock === null) this._onDeferredFreeze?.(waiting.rec)
       return
@@ -2805,13 +2863,17 @@ export class BlockManager {
   }
 
   /** Freeze the running block bound to the attempt as abandoned: the
-   *  attempt went `unknown` (loss, closure, native escape) — frozen, never
-   *  successful, no reported exit code (ADR-0024 §5). Abandonment carries
-   *  no fence and waits for none. */
+   *  attempt went `unknown` (loss, closure, native escape) — never
+   *  successful, no reported exit code (ADR-0024 §5). The status lands now;
+   *  the block closes on screen on the backend's block.closed, which the
+   *  coordinator says for every attempt it abandons (nocx-2v80t.3.30) —
+   *  unless `sessionGone`: an attempt the pane abandons because it let its
+   *  session go has nobody left to say it, and closes at once. */
   abandonAttempt(
     attempt: ExecutionAttempt,
     getLine: GetLineFn,
     endLine: number,
+    sessionGone = false,
   ): BlockRecord | null {
     if (attempt.state !== 'unknown') return null
     if (this._attemptId !== attempt.id) return null
@@ -2821,9 +2883,12 @@ export class BlockManager {
     // older, already logically frozen blocks, never to the running block
     // being abandoned.
     const status = this._logicalFreeze(rec, null, 'unknown')
-    this._freezeCard(rec, getLine, endLine, status)
     this._attemptId = null
-    return rec
+    if (sessionGone) {
+      this._freezeCard(rec, getLine, endLine, status)
+      return rec
+    }
+    return this._closeOnBackend(rec, getLine, endLine, status) ? rec : null
   }
 
   /** Freeze a running block that never bound to an attempt at all. The
@@ -2832,7 +2897,11 @@ export class BlockManager {
    *  destroys the shell that would have sent both, and against a real sshd
    *  the start frame does not get out before the transport dies (nocx-mlyu).
    *  A BOUND block is not this method's business — its attempt goes unknown
-   *  and abandonAttempt freezes it, with the attempt as the authority. */
+   *  and abandonAttempt freezes it, with the attempt as the authority.
+   *
+   *  It closes at once, on the pane's own word, and that is deliberate
+   *  (nocx-2v80t.3.30): the backend names a block by its attempt, and this
+   *  block never had one, so no block.closed could ever name it. */
   abandonUnbound(getLine: GetLineFn, endLine: number): BlockRecord | null {
     if (this._attemptId !== null) return null
     const rec = this._runningBlock

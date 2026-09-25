@@ -1781,6 +1781,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
   it('abandonAttempt freezes the bound block as unknown — never successful, no exit code', () => {
     const rec = manager.startBlock('sleep 100', '~', 0)
     manager.bindAttempt('att-1')
+    manager.blockClosed('att-1')
     const frozen = manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('unknown')
@@ -1801,6 +1802,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     const rec = manager.startBlock('sleep 100', '~', 0)
     manager.bindAttempt('att-1')
     rec.stopRequested = true
+    manager.blockClosed('att-1')
     const frozen = manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('unknown')
@@ -1943,12 +1945,85 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     expect(closedOnScreen('att-1')).toBe(true)
   })
 
-  it('a completion that carries no fence closes at once — no block.closed can ever name it', () => {
+  it('a completion that carries no fence waits for block.closed like any other (nocx-2v80t.3.30)', () => {
+    // Both kernels refuse a completion without its fence; an interval the
+    // helper settles without SIGHTING it still ends in block.closed
+    // (nocx-2v80t.3.29). There is no exception for the pane to take.
     manager.startBlock('cmd', '~', 0)
     manager.bindAttempt('att-1')
-    const frozen = manager.freezeFromAttempt(attempt({ fence: undefined }), () => undefined, 0)
+    expect(manager.freezeFromAttempt(attempt({ fence: undefined }), () => undefined, 0)).toBeNull()
+    expect(manager.blockForAttempt('att-1')!.status).toBe('success')
+    expect(closedOnScreen('att-1')).toBe(false)
+    manager.blockClosed('att-1')
+    expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  // ── every other end the backend knows about (nocx-2v80t.3.30) ──────────
+
+  it('an environment entry frees the running slot now, and the block closes on screen only on block.closed', () => {
+    manager.startBlock('ssh host', '~', 0)
+    manager.bindAttempt('att-ssh')
+    expect(manager.freezeEntered(() => undefined, 3)).toBeNull()
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.blockForAttempt('att-ssh')!.status).toBe('entered')
+    expect(closedOnScreen('att-ssh')).toBe(false)
+
+    manager.blockClosed('att-ssh')
+    expect(closedOnScreen('att-ssh')).toBe(true)
+  })
+
+  it('an entered block is labelled where it ran, not where the pane stands by its block.closed', () => {
+    manager.startBlock('ssh far', '~', 0)
+    manager.bindAttempt('att-ssh')
+    manager.freezeEntered(() => undefined, 3)
+    // The far session begins before the local block's close arrives.
+    manager.setLocation('dev@far-host')
+    manager.blockClosed('att-ssh')
+    const header = manager.blockForAttempt('att-ssh')!.el.querySelector('.cmd-header')!
+    expect(header.textContent).not.toContain('far-host')
+  })
+
+  it('an environment entry whose block.closed came first closes at once', () => {
+    manager.startBlock('ssh host', '~', 0)
+    manager.bindAttempt('att-ssh')
+    manager.blockClosed('att-ssh')
+    expect(manager.freezeEntered(() => undefined, 3)).not.toBeNull()
+    expect(closedOnScreen('att-ssh')).toBe(true)
+  })
+
+  it('an attempt gone unknown is never successful at once, and closes on screen only on block.closed', () => {
+    manager.startBlock('sleep 100', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6)).toBeNull()
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.blockForAttempt('att-1')!.status).toBe('unknown')
+    expect(closedOnScreen('att-1')).toBe(false)
+
+    manager.blockClosed('att-1')
+    expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  it('an attempt the pane abandons because it let its session go closes at once — nobody is left to say block.closed', () => {
+    manager.startBlock('sleep 100', '~', 0)
+    manager.bindAttempt('att-1')
+    const frozen = manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6, true)
     expect(frozen).not.toBeNull()
-    expect(frozen!.status).toBe('success')
+    expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  it('a block never bound to an attempt closes at once — the backend has no entry to name it by', () => {
+    manager.startBlock('exit', '~', 0)
+    const frozen = manager.abandonUnbound(() => undefined, 2)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.el.classList.contains('cmd-block-running')).toBe(false)
+  })
+
+  it('a session let go settles every block still waiting for its block.closed', () => {
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.freezeFromAttempt(attempt(), () => undefined, 0)
+    expect(closedOnScreen('att-1')).toBe(false)
+    manager.settleWithoutBackend()
     expect(closedOnScreen('att-1')).toBe(true)
   })
 

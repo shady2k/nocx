@@ -3487,11 +3487,16 @@ export class TerminalContent extends BasePaneContent {
             if (!kernelFreezeBlock(attempt, attempt.domain)) return
             this.scrollback.freezeFromAttempt(attempt, renderer.cursorLine())
           },
-          abandonBlock: (attempt) => {
+          abandonBlock: (attempt, sessionGone) => {
             // The attempt went unknown (loss, closure, native escape): the
-            // block freezes as abandoned — never successful.
+            // block freezes as abandoned — never successful — and closes on
+            // screen on the backend's block.closed, unless the pane let the
+            // session go and nobody is left to send it.
             if (!this.scrollback) return
-            this.scrollback.abandonAttempt(attempt, renderer.cursorLine())
+            this.scrollback.abandonAttempt(attempt, renderer.cursorLine(), sessionGone)
+          },
+          settleWithoutBackend: () => {
+            this.scrollback?.blockManager.settleWithoutBackend()
           },
           enterBlock: () => {
             // The far session began: the local `ssh` block ends here with

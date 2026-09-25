@@ -38,12 +38,17 @@ export interface BlockProjectionPort {
    *  (ADR-0024 §5), and nothing of it persists. */
   openBlock(attempt: ExecutionAttempt): void
   /** Freeze the bound block with the attempt's authenticated exit status.
-   *  The port may defer the VISUAL freeze until the render fence (u7uh.8)
-   *  proves where the output ended; the projection never waits for that —
-   *  the ledger and history land on this event alone. */
+   *  The port defers the VISUAL freeze until the backend's block.closed
+   *  (nocx-2v80t.3.27); the projection never waits for that — the ledger
+   *  and history land on this event alone. */
   freezeBlock(attempt: ExecutionAttempt): void
-  /** Freeze the bound block as abandoned — the attempt went `unknown`. */
-  abandonBlock(attempt: ExecutionAttempt): void
+  /** Freeze the bound block as abandoned — the attempt went `unknown`.
+   *  `sessionGone` when the pane itself let the session go (reset): nothing
+   *  will send block.closed for it to this pane any more. */
+  abandonBlock(attempt: ExecutionAttempt, sessionGone?: boolean): void
+  /** The session is gone: close every block still waiting for a
+   *  block.closed that can no longer reach this pane (nocx-2v80t.3.30). */
+  settleWithoutBackend(): void
   /** Freeze the running block that never bound to an attempt at all: it was
    *  opened at the app-owned submit and the domain it was submitted under
    *  has ended, so nothing can ever complete it. */
@@ -175,9 +180,10 @@ export class LifecycleProjections {
       const abandoned: ExecutionAttempt = { ...attempt, state: 'unknown' }
       this._done.add(id)
       this.ledger.complete(abandoned)
-      this.blocks.abandonBlock(abandoned)
+      this.blocks.abandonBlock(abandoned, true)
     }
     if (this.ledger.abandonPending() !== null) this.blocks.abandonPending()
+    this.blocks.settleWithoutBackend()
     this._bound.clear()
     this._done.clear()
     this._endedSeen = 0

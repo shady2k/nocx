@@ -35,6 +35,7 @@ package app
 import (
 	"sync"
 
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 )
@@ -45,8 +46,16 @@ import (
 // ObserveEnvironmentEntry). Named narrowly, on purpose, so this package
 // depends on the one method it uses rather than on the downlink's whole
 // shape.
+//
+// It also carries the pane's accepted completions (nocx-2v80t.3.24): an ssh
+// child authenticates on a listener of its own, so its completions never
+// cross the pane's own observing kernel, and the lane this registry keys is
+// how the child's listener finds the pane's downlink (childdomain.go's
+// sshChildKernel). The registry is therefore the lane -> pane-runtime
+// observer map, and entries are one of the two facts it carries.
 type environmentEntryObserver interface {
 	ObserveEnvironmentEntry()
+	helperclient.CompletionObserver
 }
 
 // environmentEntryRegistry maps a lifecycle lane to the pane's own

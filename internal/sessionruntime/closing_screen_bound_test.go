@@ -190,3 +190,63 @@ func TestAScrollingSecondCommandsClosingScreenIsUnbounded(t *testing.T) {
 		t.Fatalf("the scrolling interval's closing screen lost its own tail output: %v", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// nocx-2v80t.3.24: the rows the interval BEFORE left on screen depart during
+// this one — and they depart SUPPRESSED, because the block before already
+// holds them as its closing screen, so they never count as streamed rows.
+// They still left the screen: every one of them moved this interval's own
+// output up by a row. A cut measured against the STREAMED count alone thinks
+// nothing scrolled, cuts at the output-start row the mark measured, and
+// takes the command's own output with it — measured on nocxify-journey,
+// where every block after the screen first filled closed empty and its
+// output stayed in the live region.
+// ---------------------------------------------------------------------------
+
+func TestAClosingScreenKeepsItsOutputWhenThePriorBoundaryDepartsSuppressed(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(20, 5))
+
+	if err := s.Ingest([]byte("cmd one\r\n")); err != nil {
+		t.Fatalf("ingest the first command's echo: %v", err)
+	}
+	if err := s.Ingest([]byte(outputMarkerFixed)); err != nil {
+		t.Fatalf("ingest the first output mark: %v", err)
+	}
+	if err := s.Ingest([]byte("o1\r\no2\r\no3\r\n")); err != nil {
+		t.Fatalf("ingest the first command's output: %v", err)
+	}
+	nonce1 := obsNonce(0x31)
+	s.Completed(s.Incarnation(), nonce1, 0)
+	if err := s.Ingest([]byte(fenceFor(0x31))); err != nil {
+		t.Fatalf("ingest the first fence: %v", err)
+	}
+	if got := closingTexts(t, rs, nonce1); strings.Join(got, "|") != "o1|o2|o3" {
+		t.Fatalf("the first interval closed with %v, want its own three rows", got)
+	}
+
+	// The screen is full: the echo and the output each push one of the
+	// first boundary's rows off the top, and both are suppressed on the way.
+	if err := s.Ingest([]byte("cmd two\r\n")); err != nil {
+		t.Fatalf("ingest the second command's echo: %v", err)
+	}
+	if err := s.Ingest([]byte(outputMarkerFixed)); err != nil {
+		t.Fatalf("ingest the second output mark: %v", err)
+	}
+	if err := s.Ingest([]byte("mine\r\n")); err != nil {
+		t.Fatalf("ingest the second command's output: %v", err)
+	}
+	nonce2 := obsNonce(0x32)
+	s.Completed(s.Incarnation(), nonce2, 0)
+	if err := s.Ingest([]byte(fenceFor(0x32))); err != nil {
+		t.Fatalf("ingest the second fence: %v", err)
+	}
+
+	if got := closingTexts(t, rs, nonce2); strings.Join(got, "|") != "mine" {
+		t.Fatalf("the second interval closed with %v, want exactly its own output [mine]", got)
+	}
+	for _, e := range rs.snapshot() {
+		if e.kind == "rows" {
+			t.Fatalf("a row the block before already holds was streamed again: %+v", e)
+		}
+	}
+}

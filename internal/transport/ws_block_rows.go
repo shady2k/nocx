@@ -138,6 +138,15 @@ type blockStream struct {
 	// stream settles the block instead of retrying it on every later
 	// delivery for the life of the session (nocx-2v80t.3.9).
 	closeTries map[session.ID]map[string]uint8
+	// entered names the attempts whose block an environment entry sealed
+	// while the attempt itself runs on (nocx-2v80t.3.24): the local `ssh`
+	// whose child said hello. The lifecycle still holds that attempt open —
+	// it completes for real once the parent reclaims the lane, with the
+	// status the client exited with — so the lane's fact names it OPEN again
+	// when the parent is back, and that must not open its block a second
+	// time. Cleared by the attempt's own completion or abandonment, and by
+	// detach.
+	entered map[session.ID]map[string]struct{}
 }
 
 type openBlock struct {
@@ -364,6 +373,7 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
 	delete(bs.closeTries, sid)
+	delete(bs.entered, sid)
 	bs.mu.Unlock()
 	for _, b := range opens {
 		if !b.kept {
@@ -557,6 +567,13 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 	if nonce == noFenceNonce {
 		if cur := bs.current[sid]; cur != nil {
 			attempt, resolved = cur.attempt, true
+			if bs.entered == nil {
+				bs.entered = make(map[session.ID]map[string]struct{})
+			}
+			if bs.entered[sid] == nil {
+				bs.entered[sid] = make(map[string]struct{})
+			}
+			bs.entered[sid][attempt] = struct{}{}
 		}
 	} else {
 		attempt, resolved = bs.fences[sid][hexNonce]
@@ -943,8 +960,10 @@ func (bs *blockStream) drainQueuedEnd(s *WSServer, sid session.ID, attempt strin
 // attemptFact is the production hook: PublishLifecycle hands every
 // authenticated attempt fact here. An OPEN fact opens the block (and
 // answers the keep decision once per command); a COMPLETED fact publishes
-// the fence that resolves any parked interval end; every fact for a session
-// with no rows source is a no-op.
+// the fence that resolves any parked interval end; an UNKNOWN fact (the
+// attempt's own domain closed, or lost its transport, before a fence ever
+// named it) seals the block directly, since no fence is ever coming; every
+// fact for a session with no rows source is a no-op.
 func (bs *blockStream) attemptFact(s *WSServer, f lifecyclepub.Fact) {
 	if f.Attempt == nil {
 		return
@@ -966,17 +985,76 @@ func (bs *blockStream) attemptFact(s *WSServer, f lifecyclepub.Fact) {
 	case lifecyclepub.AttemptOpen:
 		bs.openAttemptFor(s, sid, f.Attempt.ID)
 	case lifecyclepub.AttemptCompleted:
+		bs.forgetEntered(sid, f.Attempt.ID)
 		if f.Attempt.Fence == "" {
 			return
 		}
 		bs.publishFence(s, sid, f.Attempt.Fence, f.Attempt.ID)
+	case lifecyclepub.AttemptUnknown:
+		bs.forgetEntered(sid, f.Attempt.ID)
+		bs.abandonAttempt(s, sid, f.Attempt.ID)
 	}
+}
+
+// forgetEntered drops an attempt from the entered set once the lifecycle
+// settles it: no later fact names it open again.
+func (bs *blockStream) forgetEntered(sid session.ID, attempt string) {
+	bs.mu.Lock()
+	delete(bs.entered[sid], attempt)
+	if len(bs.entered[sid]) == 0 {
+		delete(bs.entered, sid)
+	}
+	bs.mu.Unlock()
+}
+
+// abandonAttempt seals the block an attempt opened but can never complete
+// (nocx-2v80t.3.24): AttemptUnknown means the domain that owned it closed,
+// or its transport was lost, before an authenticated fence ever named it —
+// exactly what `exit` does to its own remote shell (nocx-mlyu) — so
+// BlockIntervalEnded's ordinary fence-matching has nothing left to wait
+// for. lifecyclepub's transitionsBelow is the ONLY caller that ever reports
+// this transition (PublishAttemptClosed, routed here through
+// publishClosedAttemptHistory's own synthetic fact): by the time the lane's
+// own fact next derives, the domain is gone and the lane has moved past this
+// attempt, so neither PublishLifecycle nor PublishLifecycleProjection ever
+// name it again. Without this, the block this attempt opened (when its
+// start frame DID reach the kernel — case 1 of the race nocx-mlyu measured,
+// and on nocxify-journey.spec.ts against a real sshd the remote `exit`
+// reached it in every run measured for nocx-2v80t.3.24) stays "current" forever: every later command's own
+// end queues up behind a current that can never close.
+//
+// A start that never reached the kernel at all opened no block here in the
+// first place (bs.open[sid][attempt] is nil), which is the ordinary,
+// far-more-common case nocx-mlyu measured — not a bug, and nothing to seal.
+func (bs *blockStream) abandonAttempt(s *WSServer, sid session.ID, attempt string) {
+	bs.mu.Lock()
+	block := bs.open[sid][attempt]
+	var rows uint64
+	if block != nil {
+		rows = block.rows
+	}
+	bs.mu.Unlock()
+	if block == nil {
+		return
+	}
+	// No fence: nothing sighted this interval's end, and nothing ever will.
+	// Sealed with whatever rows already reached the store and no closing
+	// screen — the same shape an abandoned block-close retry settles for
+	// (closeBlockRowsNow's own "abandon"), reached directly here because
+	// there is no fence for a retry to ever resolve.
+	s.closeBlockRows(sid, attempt, rows, nil, "")
 }
 
 // openAttemptFor answers the keep decision for one authenticated start the
 // caller has already resolved to its session — the submit path's own shape.
 func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt string) {
 	bs.mu.Lock()
+	if _, sealed := bs.entered[sid][attempt]; sealed {
+		// Its block was sealed at an environment entry; the attempt running
+		// on under the child is not a new block (see blockStream.entered).
+		bs.mu.Unlock()
+		return
+	}
 	if waiting := bs.waiting[sid]; waiting != "" && waiting != attempt {
 		bs.mu.Unlock()
 		return

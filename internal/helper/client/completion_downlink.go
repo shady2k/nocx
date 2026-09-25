@@ -274,9 +274,24 @@ func (d *CompletionDownlink) reportf(format string, args ...any) {
 // per pane, so every completion it sees rode this pane's own channel —
 // nested child domains included, which is correct: the helper session owns
 // the whole lane, and its runtime matches completions by nonce.
+//
+// "Every completion it sees rode this pane's own channel" is the whole of
+// what one wrapper can see, and it is not the whole lane: an ssh child
+// authenticates on a listener of its own (internal/app/childdomain.go's
+// buildSSHChildBootstrap), so the child's completions never cross the pane's
+// wrapper. That listener is given a wrapper of its own over the SAME
+// downlink (nocx-2v80t.3.24) — which is why the observer is an interface:
+// the app side reaches the downlink through a lane registry rather than
+// holding the concrete type.
 type CompletionObservingKernel struct {
 	lifecyclechannel.Kernel
-	downlink *CompletionDownlink
+	downlink CompletionObserver
+}
+
+// CompletionObserver is what an observing kernel reports an accepted
+// completion to. *CompletionDownlink is the one production implementation.
+type CompletionObserver interface {
+	Observe(fence [32]byte, exit *int)
 }
 
 // CompletionObservingAdoptingKernel is the adopting form of the observing
@@ -310,7 +325,7 @@ func (k *CompletionObservingAdoptingKernel) AdoptDomain(lane lifecycle.LaneID, d
 
 // NewCompletionObservingKernel wraps k. The wrapper satisfies the same
 // lifecyclechannel.Kernel seam, so the adapter cannot tell it apart.
-func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d *CompletionDownlink) *CompletionObservingKernel {
+func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d CompletionObserver) *CompletionObservingKernel {
 	return &CompletionObservingKernel{Kernel: k, downlink: d}
 }
 

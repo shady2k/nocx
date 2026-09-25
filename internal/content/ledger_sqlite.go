@@ -576,6 +576,15 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 	if q.PaneID != "" {
 		conds = append(conds, "e.pane_id = ?")
 		args = append(args, q.PaneID)
+		// A clear boundary hides everything at or before it, in this pane,
+		// from an ORDINARY read (nocx-2v80t.3.17): the record never deletes
+		// (nocx-zg3k3.10.3's decision), so this excludes rather than reads a
+		// hidden flag on the entry — a mark this store never writes. Reveal
+		// past the boundary is a later question (nocx-zg3k3.10.3's own
+		// paging) and has no predicate here: an ordinary restore is exactly
+		// the "no reveal requested" case.
+		conds = append(conds, "e.ingest_seq > COALESCE((SELECT MAX(ingest_seq) FROM clear_boundaries WHERE pane_id = ?), 0)")
+		args = append(args, q.PaneID)
 	}
 	// The search box, and it is the SAME predicate the interim path answers
 	// (sqlite.go's Query, nocx-ms7v) — one matching semantics for one product
@@ -1135,14 +1144,14 @@ func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, bo
 	return err
 }
 
-// CaptureOutput records one body of a frozen block (nocx-2f0f, design §4):
-// the artifact if it is not there yet, then the chunk at its seq, in ONE
-// transaction against the entry's own execution.
+// CaptureOutput records one assistant/tool-result body (nocx-2f0f's
+// transactional storage path): the artifact if it is not there yet, then the
+// chunk at its sequence, in ONE transaction against the entry's execution.
 //
 // The two refusals-that-are-not-errors are decided before the transaction
 // opens, so nothing is written for a body nobody wants: output retention off
 // is the user's setting, and a sensitive entry is the store's own rule about
-// what a command's text says about its output.
+// what a result says about its output.
 func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error) {
 	if in.EntryID == "" || in.ArtifactID == "" {
 		return false, errors.New("content: capture: entry id and artifact id are required")

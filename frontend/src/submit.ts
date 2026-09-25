@@ -5,9 +5,9 @@
 //
 // The resolution half (planSubmit) is the renderer side of ADR-0021's
 // "a line may reference a vault secret by name; the backend resolves it at
-// submit": the RESOLVED line goes to the PTY and nowhere else, the line with
-// the reference INTACT goes to the ledger and history.record. A sealed vault
-// or an unresolved name must never silently send a broken line — the caller
+// submit": the RESOLVED line goes to the PTY and nowhere else, while the
+// reference INTACT line goes to lifecycle history. A sealed vault or an
+// unresolved name must never silently send a broken line — the caller
 // surfaces the verdict and keeps the draft.
 import type { VaultResolveLine, ResolveRef } from './vault-client'
 import { findReferences } from './secret-reference'
@@ -33,8 +33,8 @@ export interface SubmitPlan {
    *  secret values: never persisted, never logged, never in a model
    *  context (ADR-0021). */
   readonly sendLine: string
-  /** The line to record — the reference intact. The ledger and
-   *  history.record receive THIS, never sendLine. */
+  /** The reference-intact line carried in lifecycle.submitAttempt. The
+   *  backend persists this text; sendLine is PTY-only. */
   readonly recordLine: string
   /** One entry per reference, first-occurrence order. */
   readonly refs: ReadonlyArray<ResolveRef>

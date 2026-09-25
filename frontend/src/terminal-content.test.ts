@@ -34,7 +34,9 @@ const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/command-block-frame.css')
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
-import type { PaneIdentity } from './terminal-content'
+import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import type { Row, SessionFrame } from './generated/session.frame'
+import { styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
@@ -46,8 +48,10 @@ import {
   makeSession,
   anchoredPane,
   integrationHandler,
-  signalUndeliveredHandler,
   lifecycleHandler,
+  signalUndeliveredHandler,
+  historyRecordedHandler,
+  blockClosedHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -75,12 +79,14 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
-import { blockOutputText, createCommandBlock } from './scrollback/blocks'
+import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
+import type { AgentRunCompletion } from './run-command'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
+import type { TerminalRenderer } from './renderers/types'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
@@ -394,7 +400,12 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       expect(session.sendResize).not.toHaveBeenCalled()
       vi.advanceTimersByTime(80)
       expect(session.sendResize).toHaveBeenCalledTimes(1)
-      expect(session.sendResize).toHaveBeenCalledWith(90, 28)
+      expect(session.sendResize).toHaveBeenCalledWith({
+        cols: 90,
+        rows: 28,
+        xpixel: 720,
+        ypixel: 448,
+      })
     } finally {
       teardown?.()
       vi.useRealTimers()
@@ -758,9 +769,9 @@ describe('SSH open connect-time-ask recovery (ADR-0069)', () => {
     try {
       expect(openSSHSessionByHost).toHaveBeenCalledTimes(2)
       // First attempt: no override, since nothing has been answered yet.
-      expect(openSSHSessionByHost.mock.calls[0][5]).toBeUndefined()
+      expect(openSSHSessionByHost.mock.calls[0][4]).toBeUndefined()
       // Retry: the method just chosen rides this open alone.
-      expect(openSSHSessionByHost.mock.calls[1][5]).toBe('script')
+      expect(openSSHSessionByHost.mock.calls[1][4]).toBe('script')
     } finally {
       teardown()
     }
@@ -3427,7 +3438,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
           completedAt: '2026-09-15T00:00:00Z',
         },
       })
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-branch')
       expect(branchSource.requests).toHaveLength(2)
       expect(branchSource.requests[1]).toMatchObject({
         sessionId,
@@ -3781,35 +3792,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
   it('a receipt whose ack beats the render fence still lands, on the block it belongs to (nocx-ggha)', async () => {
     const FENCE = 'c'.repeat(64)
     const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 1,
-          maskedKinds: ['openai'],
-          entryId: 'e-ggha',
-          source: 'user',
-          redactions: [{ kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' }],
-          maskedCommand: 'echo sk-***',
-          captures: [
-            {
-              id: 'cap-1',
-              entryId: 'e-ggha',
-              suggestedName: 'openai-key',
-              redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
-            },
-          ],
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
-    const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
@@ -3879,17 +3869,30 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(stop).toBeUndefined()
       document.querySelector('[data-testid="block-actions-menu"]')?.remove()
 
-      // The ack lands here. It used to be refused for the class alone and
-      // dropped for good — no retry, nothing shown, nothing logged.
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
-      )
-      await Promise.resolve()
-      await Promise.resolve()
+      // The backend-owned receipt arrives over the notification subscription,
+      // before the fence that replaces the visible block.
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-g',
+        maskedCount: 1,
+        maskedKinds: ['openai'],
+        entryId: 'e-ggha',
+        source: 'user',
+        redactions: [{ kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' }],
+        maskedCommand: 'echo sk-***',
+        captures: [
+          {
+            id: 'cap-1',
+            entryId: 'e-ggha',
+            suggestedName: 'openai-key',
+            redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
+          },
+        ],
+      })
 
       // The fence lands and the visual freeze replaces the element. The
       // receipt must be on the NEW element — the one the user is looking at.
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-g')
       expect(rec.el.classList.contains('cmd-block-running')).toBe(false)
       await vi.waitFor(() => expect(rec.el.querySelector('.ui-block-receipt')).not.toBeNull())
       expect(
@@ -3904,26 +3907,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
   it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     /* eslint-disable @typescript-eslint/unbound-method */
@@ -3985,6 +3974,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'user',
+        redactions: [],
+        captures: [],
+        maskedCommand: 'make',
+      })
 
       // The block froze with the authenticated status.
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
@@ -3995,35 +3995,95 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(grantBlockFromElement(frozen.el)?.itemId).toBe('att-1')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
-      // History persisted the app-owned text, authorized by the attempt.
-      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-      expect(recordCall).toBeTruthy()
-      const params = recordCall![1] as { command: string; status: string; exitCode: number }
-      expect(params.command).toBe('make')
-      expect(params.status).toBe('success')
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
-  it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
+  it('follows the tail when a block.grew delivery grows a block after the scroller already settled (nocx-2v80t.3.19)', async () => {
+    // block.grew/block.closed only NAME the entry; the rows are a further
+    // fetch (ledger.get then ledger.artifact) that resolves well after the
+    // notification, on its own tick — a mutation the scrollback controller
+    // never sees on its own, unlike a running block's own live growth
+    // (controller.ts's inline height guard). Applying it without settling
+    // around it left a person who was following the tail behind once the
+    // fetch landed, silently.
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
         return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf([['x', 1, true] as CellSpec]),
+        })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
         })
       }
       return Promise.reject(new Error('no store wired (fake)'))
     })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+
+      const scrollTo = vi.fn()
+      withScrollback.scrollback.scrollbackArea.scrollTo = scrollTo
+
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      blockGrew?.({ entryId: 'att-1' })
+
+      // The fetch is two chained RPC round trips (ledger.get then
+      // ledger.artifact) before the paint and the follow — let them run.
+      await vi.waitFor(() => expect(scrollTo).toHaveBeenCalled())
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
+    const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4080,7 +4140,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       // The shell's fence lands after the output (the nonce row), then the
       // authenticated completion closes the card — with its body.
-      renderer._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -4097,7 +4157,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('success')
       expect(frozen.exitCode).toBe(0)
-      expect(blockOutputText(frozen.el)).toContain('hello world')
+      // The frontend does not serialize the terminal buffer into a frozen
+      // block. Backend row artifacts are painted through block.grew/closed.
+      expect(blockOutputText(frozen.el)).toBe('')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -4174,23 +4236,143 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('no clear or rebase of the buffer survives in the boundary sources (nocx-2v80t.3.3)', () => {
+    for (const rel of [
+      'scrollback/controller.ts',
+      'scrollback/blocks.ts',
+      'terminal-content.ts',
+      'renderers/xterm.ts',
+      'renderers/types.ts',
+    ]) {
+      const src = readFileSync(resolve(srcDir, rel), 'utf8')
+      expect(src, `${rel}: clearViewport`).not.toMatch(/clearViewport/)
+      expect(src, `${rel}: _settleFrozen`).not.toMatch(/_settleFrozen/)
+      expect(src, `${rel}: _freezeVisual`).not.toMatch(/_freezeVisual/)
+      expect(src, `${rel}: _clearFrozenRows`).not.toMatch(/_clearFrozenRows/)
+    }
+    // And the renderer carries no raw clear of its own: the only writer of
+    // the grid is the program's byte stream.
+    expect(
+      readFileSync(resolve(srcDir, 'renderers/xterm.ts'), 'utf8'),
+      'renderers/xterm.ts: t.clear()',
+    ).not.toMatch(/\bt\.clear\(\)/)
+  })
+
+  it('a finished command leaves its rows on the live surface (nocx-2v80t.3.3)', async () => {
+    const client = makeClient()
+    // A REAL renderer, injected through this file's mock seam: the rows
+    // this criterion is about live in the actual grid, which the shared
+    // mock does not model.
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    // The dynamic import is the point: the mock seam replaced the class, and
+    // the real implementation is reachable only at runtime here. Through the
+    // mock, the actual module's types are unresolvable to the linter — the
+    // runtime object is the real class this file's tests assert against.
+    const raw: unknown = await vi.importActual('./renderers/xterm')
+    const RealXterm = (raw as { XtermRenderer: new () => TerminalRenderer }).XtermRenderer
+    const realRenderer = new RealXterm()
+    const { XtermRenderer } = await import('./renderers/xterm')
+    vi.mocked(XtermRenderer).mockImplementationOnce(
+      () => realRenderer as unknown as InstanceType<typeof XtermRenderer>,
+    )
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      ed.insertText('seq 3')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The authenticated start opens the card; the command's bytes land on
+      // the grid while it runs.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'seq 3',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      rendererOf(content).write('out 1\r\nout 2\r\nout 3')
+      // The shell writes the render fence AFTER the command's output; the
+      // sighting is the ordinary freeze's boundary half.
+      rendererOf(content).write('\x1b]1337;NOCX_FENCE;' + 'a'.repeat(64) + '\x07')
+      // The sighting must have LANDED before the completion fact fires, or
+      // the freeze defers and this test reasons about a boundary that never
+      // settled. Wait on the renderer's own write fence, never a duration.
+      const real = rendererOf(content) as unknown as { hasUnsettledWrite(): boolean }
+      await vi.waitFor(() => expect(real.hasUnsettledWrite()).toBe(false))
+
+      // The command completes and its boundary is sighted — the ordinary
+      // freeze every finished command takes.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
+
+      // AND THE ROWS ARE STILL ON THE LIVE SURFACE. A freeze that cleared
+      // the buffer would make this a lie: the grid is the frame the backend
+      // diffs against, and the rows a command printed belong to it.
+      const row = (y: number): string =>
+        rendererOf(content).getBufferLine(y)?.translateToString(true) ?? ''
+      expect(row(0)).toBe('out 1')
+      expect(row(1)).toBe('out 2')
+      expect(row(2)).toBe('out 3')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
   it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4232,9 +4414,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect((attemptCall![1] as { command: string }).command).toBe('make')
       // AND IT CARRIES WHO SUBMITTED IT. The durable row is opened by this
       // very call (nocx-kpqr3), so this is the only place the author reaches
-      // the store — history.record's close moves the status and leaves the
-      // column alone. An attempt submitted without it came back from a
-      // restart as the person's command (nocx-1druc, agent-restore.spec.ts).
+      // the store — the backend's completion receipt moves the status and
+      // leaves the column alone. An attempt submitted without it came back
+      // from a restart as the person's command (nocx-1druc, agent-restore.spec.ts).
       expect((attemptCall![1] as { source: string }).source).toBe('assistant')
 
       // The attempt attaches and completes: the block freezes with the exit
@@ -4269,12 +4451,23 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'make',
+        captures: [],
+      })
 
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const run = await pending
-      // THE ENTRY ID IS THE STORE'S, and it is the one history.record's ack
+      // THE ENTRY ID IS THE STORE'S, and it is the one completion receipt
       // named (nocx-9sqii). It used to be `String(rec.id)` — the renderer's
       // own record number, which counts blocks in this tab and is not an
       // entry anywhere. The backend joins the command to the turn that ran
@@ -4299,6 +4492,540 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it("fetches a frozen block's stored rows itself when it froze before any block.grew/closed notification named it, and reports the real output (nocx-2v80t.3.19)", async () => {
+    // The render fence that drives a freeze is a local, data-plane read; the
+    // block.grew/block.closed notification that would otherwise start the
+    // rows fetch crosses the control-plane socket, with no ordering promised
+    // between the two. This drives the freeze with NEITHER notification ever
+    // dispatched, so `_ensureBlockRows` has nothing to wait on and must start
+    // the fetch itself — the run tool's result is the one place this
+    // reaches: an unmarked `.cmd-output` still had `blockOutputText` fall
+    // back to an empty read, so the model saw no output at all far more
+    // often than not.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
+        })
+        return Promise.resolve({
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const pending = content.submitAgentCommand('printf the-real-output')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'printf the-real-output',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'printf the-real-output',
+        captures: [],
+      })
+      // The fence — nothing else — settles the visual boundary; no
+      // block.grew or block.closed notification is ever dispatched here.
+      blockClosedHandler(client)('att-1')
+      const run = await pending
+      expect(run.text).toBe('the real output')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  // ── the block closes on the backend's block.closed, and on nothing else ──
+  // (nocx-2v80t.3.27, ADR-0066). The renderer's own fence sighting used to
+  // decide when a finished command's block closed: a fence callback that
+  // never came, or a fence in the alternate buffer (ignored), left the
+  // backend's block sealed while the block on screen and an agent run's
+  // completion waited forever.
+  describe("a block closes on the backend's block.closed alone (nocx-2v80t.3.27)", () => {
+    async function runToCompletion(opts: { alternate?: boolean } = {}) {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const run = content.submitAgentCommand('vim notes.txt')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'vim notes.txt',
+        },
+      })
+      // A full-screen program owns the terminal when its command ends.
+      if (opts.alternate) rendererOf(content)._fireBufferChange('alternate')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'c'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'vim notes.txt',
+        captures: [],
+      })
+      const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+      return { client, run, block, teardown }
+    }
+
+    it('with no fence callback at all, the block finishes when the backend says block.closed', async () => {
+      const { client, run, block, teardown } = await runToCompletion()
+      try {
+        // The block is logically done, and not yet closed on screen: the
+        // backend has not said its rows are whole.
+        expect(block().status).toBe('success')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(true)
+
+        blockClosedHandler(client)('att-1')
+
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        const done = await run
+        expect(done.status).toBe('success')
+        expect(done.exitCode).toBe(0)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a command that ends inside the alternate buffer still finishes on block.closed', async () => {
+      const { client, run, block, teardown } = await runToCompletion({ alternate: true })
+      try {
+        blockClosedHandler(client)('att-1')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        expect((await run).status).toBe('success')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a block.closed that arrives before the completion closes the block the moment the completion lands', async () => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const run = content.submitAgentCommand('true')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'true',
+          },
+        })
+        blockClosedHandler(client)('att-1')
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+        // Rows whole is not the command done: the block keeps running until
+        // the authenticated completion says how it ended.
+        expect(block().status).toBe('running')
+
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'completed',
+            exitCode: 0,
+            fence: 'd'.repeat(64),
+            completedAt: '2026-08-08T12:00:02Z',
+          },
+        })
+        historyRecordedHandler(client)({
+          sessionId: client._sessions[0].sessionId,
+          attemptId: 'att-1',
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          maskedCommand: 'true',
+          captures: [],
+        })
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        expect((await run).status).toBe('success')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('an agent run on a kept block reports the rows the closing read returned, not the ones it already had', async () => {
+      // The block already holds rows from a block.grew when it completes; an
+      // answer read from those would miss the closing screen.
+      let final = false
+      const rowsBody = (text: string) =>
+        `${JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
+        })}\n`
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          const body = rowsBody(final ? 'closing screen' : 'partial')
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body,
+            truncated: null,
+            byteLen: body.length,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const run = content.submitAgentCommand('make')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+        const grew = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'block.grew',
+        )?.[1] as (params: unknown) => void
+        grew({ entryId: 'att-1', from: 0, count: 1 })
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+        await vi.waitFor(() => expect(block().storedRows).toBeDefined())
+
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'completed',
+            exitCode: 0,
+            fence: 'e'.repeat(64),
+            completedAt: '2026-08-08T12:00:02Z',
+          },
+        })
+        historyRecordedHandler(client)({
+          sessionId: client._sessions[0].sessionId,
+          attemptId: 'att-1',
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          maskedCommand: 'make',
+          captures: [],
+        })
+        final = true
+        blockClosedHandler(client)('att-1', true)
+        expect((await run).text).toBe('closing screen')
+      } finally {
+        teardown()
+      }
+    })
+  })
+
+  // ── a stored-rows read that failed is said, never drawn as empty ──────
+  // (nocx-2v80t.3.27). The successful read these pair with is the test just
+  // above: the same agent run, the same freeze, and the rows arrive.
+  describe('a block whose stored rows could not be read says so (nocx-2v80t.3.27)', () => {
+    /** Drive one agent command to its freeze, with the store answering the
+     *  rows read through `rowsRead`; returns the run and the frozen block. */
+    async function agentRunWithRowsRead(
+      rowsRead: (method: string) => Promise<unknown> | undefined,
+    ): Promise<{
+      run: Promise<AgentRunCompletion>
+      block: () => HTMLElement
+      teardown: () => void
+    }> {
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        const answer = rowsRead(method)
+        if (answer !== undefined) return answer
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const run = content.submitAgentCommand('printf the-real-output')
+      // Observed before anything else can: an unhandled rejection between
+      // here and the test's own await would fail the file, not the test.
+      run.catch(() => {})
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'printf the-real-output',
+        },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'printf the-real-output',
+        captures: [],
+      })
+      blockClosedHandler(client)('att-1')
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!.el
+      return { run, block, teardown }
+    }
+
+    const ROWS_ENTRY = {
+      entry: {},
+      edges: [],
+      artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+    }
+
+    it('an agent run whose rows read FAILED reports an error, and the block says its output could not be read', async () => {
+      const { run, block, teardown } = await agentRunWithRowsRead((method) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') return Promise.reject(new Error('artifact read refused'))
+        return undefined
+      })
+      try {
+        await expect(run).rejects.toThrow(/could not be read/)
+        const notice = block().querySelector('[data-output-unreadable]')
+        expect(notice?.textContent).toContain('could not be read')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('an agent run whose stored rows are MALFORMED reports an error, and the block says so', async () => {
+      const { run, block, teardown } = await agentRunWithRowsRead((method) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') {
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body: '{"from":12}\n',
+            truncated: null,
+            byteLen: 12,
+          })
+        }
+        return undefined
+      })
+      try {
+        await expect(run).rejects.toThrow(/malformed/)
+        expect(block().querySelector('[data-output-unreadable]')).not.toBeNull()
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a successful read after a failed one takes the notice back and paints the rows', async () => {
+      let fail = true
+      const line = JSON.stringify({
+        from: 0,
+        row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
+      })
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') return Promise.resolve(ROWS_ENTRY)
+        if (method === 'ledger.artifact') {
+          if (fail) return Promise.reject(new Error('socket closed'))
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body: `${line}\n`,
+            truncated: null,
+            byteLen: line.length,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { view, ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        ed.insertText('make')
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+        const notify = (name: string) =>
+          client.dispatcher.subscribe.mock.calls.find(([method]) => method === name)?.[1] as (
+            params: unknown,
+          ) => void
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!.el
+
+        notify('block.grew')({ entryId: 'att-1', from: 0, count: 1 })
+        await vi.waitFor(() =>
+          expect(block().querySelector('[data-output-unreadable]')).not.toBeNull(),
+        )
+
+        fail = false
+        notify('block.closed')({ entryId: 'att-1', kept: true })
+        await vi.waitFor(() => expect(blockOutputText(block())).toBe('the real output'))
+        expect(block().querySelector('[data-output-unreadable]')).toBeNull()
+      } finally {
+        teardown()
+      }
+    })
+  })
+
   it('an agent command the store wrote no row for resolves naming no entry at all (nocx-9sqii)', async () => {
     // History is off, or the record was dropped: the ack names no row. The
     // command still RAN and its output is the tool's result, so the run
@@ -4307,21 +5034,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     // order). Answering the renderer's own record number here instead is
     // what made the join fail silently when there WAS a row.
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: '',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'make',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4364,9 +5076,20 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: '',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'make',
+        captures: [],
+      })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const run = await pending
       expect(run.entryId).toBe('')
       // And the command's own outcome is unaffected: a missing row costs
@@ -4428,9 +5151,20 @@ describe('the projections consume the kernel through the composition root (ADR-0
           completedAt: '2026-08-08T12:00:02Z',
         },
       })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'agent-command',
+        captures: [],
+      })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       await pendingAgent
 
       // The human's command, through the same content's editor: still the
@@ -4516,28 +5250,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
     // complete block, the exit status persists exactly once, PromptReady
     // returns the editor, and the next submitted command reaches the shell.
     const client = makeClient()
-    const callMock = client.call
-    let recordCalls = 0
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        recordCalls++
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e1',
-          source: 'user',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'echo hello',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const renderer = rendererOf(content)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
@@ -4614,20 +5332,29 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'b'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('failure')
       expect(frozen.exitCode).toBe(1)
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
-      // 6. The exit status persists exactly once — one history.record for
-      //    the completed app-owned attempt.
-      await vi.waitFor(() => expect(recordCalls).toBe(1))
-      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-      const params = recordCall![1] as { command: string; status: string; exitCode: number }
-      expect(params.command).toBe('echo hello')
-      expect(params.status).toBe('failure')
-      expect(params.exitCode).toBe(1)
+      // 6. The backend-owned receipt crosses the notification subscription
+      // exactly once for the completed app-owned attempt.
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'user',
+        redactions: [],
+        captures: [],
+        maskedCommand: 'echo hello',
+      })
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
 
       // 7. PromptReady returns the editor.
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -5123,15 +5850,10 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // The first fence lands while the second command runs: the first
       // block freezes with its own exit status, the second stays running,
       // and the live region belongs to the second command.
-      rendererOf(content)._fireRenderFence({
-        hex: 'f'.repeat(64),
-        line: 3,
-        buffer: 'normal',
-      })
+      blockClosedHandler(client)('att-1')
       const firstAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
       expect(firstAfter?.status).toBe('failure')
       expect(firstAfter?.exitCode).toBe(130)
-      expect(firstAfter?.endLine).toBe(3)
       expect(firstAfter?.el.classList.contains('cmd-block-running')).toBe(false)
       const secondAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
       expect(secondAfter?.status).toBe('running')
@@ -5854,7 +6576,9 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       expect(block!.el.dataset.recorded).toBe('no')
       expect(block!.el.querySelector('.cmd-header-unrecorded')?.textContent).toBe('not recorded')
       // And nothing was sent to the store, which is the fact the chip states.
-      expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(false)
+      expect(
+        client.dispatcher.call.mock.calls.some((c) => c[0] === 'lifecycle.submitAttempt'),
+      ).toBe(false)
     } finally {
       restoreScroll()
       teardown()
@@ -5871,21 +6595,6 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
     // out, one block carries the command, and its authenticated completion
     // is recorded with the app-owned text.
     const client = makeClient()
-    const callMock = client.call
-    callMock.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e-refused',
-          source: 'user',
-          redactions: [],
-          maskedCommand: 'make deploy',
-          captures: [],
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     client.dispatcher.call.mockImplementation(() =>
       Promise.reject(new Error('control lane saturated')),
     )
@@ -5894,6 +6603,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     const withSession = content as unknown as { session: SessionFake }
     const session = withSession.session
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
@@ -5937,13 +6647,21 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
 
       // Recorded — with the APP-OWNED text, which is the half a shell line
       // may never contribute.
-      await vi.waitFor(() => {
-        const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
-        expect(recordCall).toBeTruthy()
-        const params = recordCall![1] as { command: string; exitCode: number }
-        expect(params.command).toBe('make deploy')
-        expect(params.exitCode).toBe(3)
+      recorded({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-refused',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e-refused',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'make deploy',
+        captures: [],
       })
+      expect(client.dispatcher.subscribe).toHaveBeenCalledWith(
+        'history.recorded',
+        expect.any(Function),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -5952,8 +6670,6 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
   it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
     const client = makeClient()
     const submitAttempt = client.dispatcher.call
-    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
-    // the resolver is captured via the executor form (the codebase pattern).
     let resolveAttempt!: (v: unknown) => void
     const attemptPromise = new Promise<unknown>((done) => {
       resolveAttempt = done
@@ -6688,19 +7404,49 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   }
 
   /** A frozen command block through the REAL manager chain. */
+  let fixtureEntrySeq = 0
   function frozenBlockOf(
     content: TerminalContent,
     command = 'ls',
     output = ['total 12', 'docs'],
   ): HTMLElement {
+    // A card that CARRIES rows, built the way a restored record is built:
+    // the body is the record's stored text, rendered as term-line rows. The
+    // freeze no longer cuts a body from the grid — nothing clears it
+    // (nocx-2v80t.3.3), and the backend's own body is nocx-2v80t.3.4 — so
+    // the gesture under test uses the shape that still has rows.
     const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-    const manager = scrollback.blockManager
-    manager.startBlock(command, '~', 0)
-    manager.bindAttempt(`att-fixture-${manager.blocks.length}`)
-    const lines = output.map((t) => new BufferLine(t))
-    const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
-    expect(frozen).not.toBeNull()
-    return frozen!.el
+    const manager = scrollback.blockManager as unknown as {
+      _onBlockSelected(id: number): void
+      _onBlockDeselected(id: number): void
+      _runningActions?: RunningBlockActions
+    }
+    const outputHtml = output.map((t) => `<span class="term-line">${t}</span>`).join('')
+    const el = createCommandBlock(
+      'command',
+      10_000 + fixtureEntrySeq + 1,
+      command,
+      '~',
+      '',
+      outputHtml,
+      12,
+      0,
+      'success',
+      () => scrollback.scrollbackInner,
+      (bid, sel) => {
+        if (sel) manager._onBlockSelected(bid)
+        else manager._onBlockDeselected(bid)
+      },
+      new CommandSnapshotStore(),
+      'shell',
+      undefined,
+      manager._runningActions,
+    )
+    // A grant names the block's ledger entry: the fixture mints a UNIQUE
+    // one, the way the history ack does for a real block.
+    el.dataset.entryId = `entry-fixture-${++fixtureEntrySeq}`
+    scrollback.restorePast([el])
+    return el
   }
 
   /** The registry's active label — the truth the indicator must render. */
@@ -6841,7 +7587,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // untouched.
       expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
-      expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
+      expect(dispatcherCalls.find((c) => c.method === 'history.recorded')).toBeUndefined()
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
       expect(ledger?.records().map((r) => r.command)).toEqual(['echo hi'])
       expect(ledger?.records()[0].author).toBe('shell')
@@ -8397,7 +9143,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
     const { teardown } = await mounting
     try {
       expect(client.openSession).toHaveBeenCalledTimes(1)
-      expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: PANE })
+      expect(client.openSession.mock.calls[0][1]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }
@@ -8415,7 +9161,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
     )
     try {
       expect(client.openSession).toHaveBeenCalledTimes(1)
-      expect(client.openSession.mock.calls[0][2]).toEqual({})
+      expect(client.openSession.mock.calls[0][1]).toEqual({})
     } finally {
       teardown()
     }
@@ -8432,7 +9178,7 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
       client,
     )
     try {
-      expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: PANE })
+      expect(client.openSSHSession.mock.calls[0][2]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }
@@ -8449,122 +9195,8 @@ describe('the session waits for its pane row (nocx-rtg0.29)', () => {
       client,
     )
     try {
-      expect(client.openSSHSessionByHost.mock.calls[0][4]).toEqual({ paneId: PANE })
+      expect(client.openSSHSessionByHost.mock.calls[0][3]).toEqual({ paneId: PANE })
     } finally {
-      teardown()
-    }
-  })
-})
-
-// ═══════════════════════════════════════════════════════════════════════════
-// A frozen block sends what it printed (nocx-2f0f)
-// ═══════════════════════════════════════════════════════════════════════════
-describe('a frozen block sends what it printed (nocx-2f0f)', () => {
-  // The whole feature, through the seam a person reaches: they type a command,
-  // it finishes, and the text it printed leaves for the store. Everything
-  // below the assertion is the ordinary path — the app-owned submit, the
-  // authenticated completion, the render fence, the history.record ack — and
-  // none of it is stubbed past the socket.
-  it('takes the entry from the record ack and sends the body against it', async () => {
-    const FENCE = 'd'.repeat(64)
-    const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: 'e-capture',
-          // Required by the contract, and load-bearing: the renderer refuses
-          // an ack whose source is not the one it minted (design §3.1), so a
-          // fixture without it is a backend that dropped the fact.
-          source: 'user',
-          redactions: [],
-          maskedCommand: 'echo hello',
-          captures: [],
-        })
-      }
-      if (method === 'ledger.capture') {
-        return Promise.resolve({ artifactId: 'a-1', stored: true })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    // The lifecycle fact handler the content registered on the fake
-    // dispatcher — the seam authenticated facts arrive through.
-    const handler = lifecycleHandler(client)
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('echo hello')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-c',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'echo hello',
-        },
-      })
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-c',
-          state: 'completed',
-          exitCode: 0,
-          fence: FENCE,
-          completedAt: '2026-08-08T12:00:02Z',
-        },
-      })
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
-      )
-      // The visual freeze is what produces the bodies, and it waits for the
-      // fence. Until it runs there is nothing to send — which is why the ack
-      // parks rather than being dropped.
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
-
-      await vi.waitFor(() =>
-        expect(client.call.mock.calls.some((c) => c[0] === 'ledger.capture')).toBe(true),
-      )
-      const sent = client.call.mock.calls
-        .filter((c) => c[0] === 'ledger.capture')
-        .map((c) => c[1] as { entryId: string; mediaType: string; seq: number })
-      expect(sent[0].entryId).toBe('e-capture')
-      expect(sent[0].mediaType).toBe('application/vt')
-      expect(sent[0].seq).toBe(1)
-      // Both bodies: the durable one and the derived text the second names it
-      // from. One without the other is half the artifact pair.
-      await vi.waitFor(() =>
-        expect(
-          client.call.mock.calls
-            .filter((c) => c[0] === 'ledger.capture')
-            .some((c) => (c[1] as { mediaType: string }).mediaType === 'text/plain'),
-        ).toBe(true),
-      )
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
@@ -11770,7 +12402,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '9'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '9'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-stop-19')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -11852,7 +12484,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '7'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '7'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-held-19')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -11930,7 +12562,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '5'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '5'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-undelivered-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12072,7 +12704,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '3'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '3'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-state-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12132,7 +12764,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '4'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '4'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-state-20')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12205,7 +12837,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '6'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '6'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-retry-21')
       expect(rec.status).toBe('cancelled')
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
       expect(rec.el.dataset.outcome).toBe('cancelled')
@@ -12269,7 +12901,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '1'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '1'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-self-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -13318,7 +13950,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-28T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
@@ -13342,20 +13974,6 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
   })
   it('keeps one composer unavailable across every call in an active turn', async () => {
     const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'history.record') {
-        return Promise.resolve({
-          maskedCount: 0,
-          maskedKinds: [],
-          entryId: '',
-          source: 'assistant',
-          redactions: [],
-          captures: [],
-          maskedCommand: 'assistant command',
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
@@ -13371,6 +13989,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       { attachToDocument: true },
       client,
     )
+    const recorded = historyRecordedHandler(client)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
@@ -13399,7 +14018,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
 
@@ -13428,6 +14047,16 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           command: 'first call',
         },
       })
+      recorded({
+        attemptId: 'att-first',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'entry-first',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'first call',
+        captures: [],
+      })
       expect(ed.isVisible).toBe(false)
       handler({
         lane: 'lane-1',
@@ -13442,7 +14071,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:01Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: firstCallFence, line: 4, buffer: 'normal' })
+      blockClosedHandler(client)('att-first')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
       await expect(firstCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
@@ -13469,6 +14098,16 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           command: 'second call',
         },
       })
+      recorded({
+        attemptId: 'att-second',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'entry-second',
+        source: 'user',
+        redactions: [],
+        maskedCommand: 'second call',
+        captures: [],
+      })
       expect(ed.isVisible).toBe(false)
       handler({
         lane: 'lane-1',
@@ -13483,7 +14122,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:02Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: secondCallFence, line: 5, buffer: 'normal' })
+      blockClosedHandler(client)('att-second')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
       await expect(secondCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
@@ -13748,11 +14387,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-27T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({
-        hex: commandFence,
-        line: 3,
-        buffer: 'normal',
-      })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
@@ -13831,7 +14466,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const area = scrollbackFor(content).scrollbackArea
@@ -14173,7 +14808,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-28T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       const frozen = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
       const afterFreeze = Array.from(inner.children)
@@ -14259,6 +14894,9 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         }),
       )
       await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+      await vi.waitFor(() =>
+        expect(document.querySelector<HTMLElement>('.nocx-freeze-frame')).not.toBeNull(),
+      )
 
       const frame = document.querySelector<HTMLElement>('.nocx-freeze-frame')
       expect(frame).not.toBeNull()
@@ -14277,9 +14915,20 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       selection.addRange(range)
       document.dispatchEvent(new Event('selectionchange'))
 
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button'),
+        ).not.toBeNull(),
+      )
       const affordance = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')
       expect(affordance).not.toBeNull()
       affordance!.click()
+
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector<HTMLElement>('[data-control="grant"]')?.textContent,
+        ).toContain('· 1'),
+      )
 
       // Counted as a person mark, and the rows are painted as granted.
       const chip = document.querySelector<HTMLElement>('[data-control="grant"]')
@@ -14918,7 +15567,12 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
         content.viewportChanged({ width: 800, height: 400 })
         rendererOf(content)._fireResize(100, 30)
         vi.advanceTimersByTime(10_000)
-        expect(session.sendResize).toHaveBeenCalledWith(100, 30)
+        expect(session.sendResize).toHaveBeenCalledWith({
+          cols: 100,
+          rows: 30,
+          xpixel: 800,
+          ypixel: 480,
+        })
       } finally {
         vi.useRealTimers()
       }
@@ -15209,6 +15863,345 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
         'the restored block still reads unknown after its completion replayed',
       ).toBe('Exit 7')
     } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane receives the screen plane into its cell model (nocx-zg3k3.2.8)
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane holds ONE cell model, fed by the session's screen frames; nothing
+// paints from it and xterm keeps the byte path. These tests read the model
+// only through the seam an e2e spec reads — window.__nocxPaneScreen() over
+// the ACTIVE pane — so the unit layer asserts the same surface the e2e
+// layer drives, not a private field.
+
+const SCREEN_COLS = 40
+const SCREEN_ROWS = 4
+
+/** One valid frame at `revision` whose first rows carry `lines` — each
+ *  row's own explicit content is only as long as its text; the model's
+ *  decode pads the rest of geometry.cols in the default style, and an
+ *  entirely absent row is the empty string, which pads the same way. That
+ *  is the shape the backend actually publishes (nocx-zg3k3.2.12): a row
+ *  does not carry its untouched tail, and a reader that wants the full
+ *  rectangle (this fixture's caller, joining cells back into a line) gets
+ *  it from the model's own padding, not from a fixture hand-building 40
+ *  columns per row. */
+function screenFrame(
+  revision: number,
+  lines: string[],
+  geometry: Partial<SessionFrame['geometry']> = {},
+): SessionFrame {
+  const style = styleOf({ foreground: { kind: 1, palette: 7, rgb: { r: 0, g: 0, b: 0 } } })
+  const rows: Row[] = lines.map((text) =>
+    wireRowOf(Array.from(text, (ch) => [ch, 1, true, style] as CellSpec)),
+  )
+  while (rows.length < SCREEN_ROWS) rows.push({ text: '' })
+  return {
+    revision,
+    geometry: {
+      cols: SCREEN_COLS,
+      rows: SCREEN_ROWS,
+      cellWidthPx: 8,
+      cellHeightPx: 16,
+      revision,
+      ...geometry,
+    },
+    cursor: { x: 0, y: 0, visible: true },
+    rows,
+  }
+}
+
+function paneScreen(): PaneScreenReading | null {
+  const host = window as unknown as { __nocxPaneScreen?: () => PaneScreenReading | null }
+  return host.__nocxPaneScreen?.() ?? null
+}
+
+describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8)', () => {
+  it('a valid frame advances the model the active pane reads, paired with a refused stale one', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session: SessionFake = client._sessions[0]
+      // Before any frame: the model holds no revision and names no rows.
+      // The open reported THIS renderer's device cell (the fixture's dpr-1
+      // identity, 8x16) over its grid — the report thread carries the
+      // renderer even before the window's own field exists.
+      expect(paneScreen()).toEqual({
+        revision: null,
+        rows: [],
+        geometry: null,
+        reported: { cols: 80, rows: 24, xpixel: 640, ypixel: 384 },
+      })
+      session.fireScreenFrame(screenFrame(3, ['PROMPT$ ls', 'NOCX-MARKER-1']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(3))
+      const reading = paneScreen()
+      expect(reading?.rows[0]).toBe('PROMPT$ ls')
+      expect(reading?.rows[1]).toContain('NOCX-MARKER-1')
+
+      // THE REFUSAL, paired: a stale frame neither throws out of the
+      // socket handler nor moves the model, and the refusal is logged with
+      // the model's own vocabulary.
+      expect(() => session.fireScreenFrame(screenFrame(2, ['stale']))).not.toThrow()
+      expect(paneScreen()?.revision).toBe(3)
+      const refusalLine = debug.mock.calls.find((c) =>
+        String(c[0]).includes('screen frame refused'),
+      )
+      expect(refusalLine).toBeDefined()
+      expect(String(refusalLine?.[0])).toContain('stale-revision')
+
+      // …and the pane is where the seam looked for it: not active, not read.
+      tab.pane.classList.remove('active')
+      expect(paneScreen()).toBeNull()
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  // THE COMMITTED METRIC IS DEVICE PIXELS (review round 1, nocx-zg3k3.2.9).
+  // xterm builds its CSS cell FROM an integer device cell (css = device /
+  // dpr), so device pixels are the unit where the metric is exact: at dpr 2
+  // a 17x34 device cell is a fractional 8.5x17 CSS cell, and rounding CSS
+  // would drift the painter's grid off xterm's by up to half a pixel per
+  // cell. The report carries the DEVICE cell — cols x device width exactly,
+  // no rounding anywhere — and the committed geometry decodes back to it,
+  // so committed px / dpr IS the CSS cell. A dims change at the same
+  // cols/rows (this display move, a zoom) reaches the report through the
+  // same settle door, and a REPEATED metric sends nothing (the ipc dedupe).
+  it('reports and commits the device cell: committed px / dpr is the CSS cell', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session: SessionFake = client._sessions[0]
+      const renderer = rendererOf(content)
+      // A dense display: dpr 2, device cell 17x34 — CSS 8.5x17.
+      vi.stubGlobal('devicePixelRatio', 2)
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({ width: 17, height: 34 })
+
+      session.fireScreenFrame(
+        screenFrame(4, ['NOCX-MARKER-1'], { cellWidthPx: 17, cellHeightPx: 34 }),
+      )
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(4))
+      // The display moved: fire the dims-change subscription the pane
+      // registered, exactly what a dpr change or a zoom fires.
+      const fireDimsChange = (
+        renderer.onCellDimsChange as unknown as Mock<(cb: () => void) => void>
+      ).mock.calls.slice(-1)[0][0]
+      fireDimsChange()
+      await vi.waitFor(() => {
+        const expected = { cols: 80, rows: 24, xpixel: 1360, ypixel: 816 }
+        expect(session.sendResize).toHaveBeenCalledWith(expected)
+        expect(paneScreen()?.reported).toEqual(expected)
+      })
+      // THE ROUND TRIP, exact on both axes: the frame's committed device px
+      // over the grid the client named is the client's report per cell, and
+      // committed px / dpr is the CSS cell — no rounding step anywhere.
+      const reading = paneScreen()
+      expect(reading?.geometry?.cellWidthPx).toBe(17)
+      expect(reading?.geometry?.cellHeightPx).toBe(34)
+      expect(reading!.geometry!.cellWidthPx * reading!.reported!.cols).toBe(
+        reading!.reported!.xpixel,
+      )
+      expect(reading!.geometry!.cellHeightPx * reading!.reported!.rows).toBe(
+        reading!.reported!.ypixel,
+      )
+      expect(reading!.geometry!.cellWidthPx / 2).toBe(8.5)
+      expect(reading!.geometry!.cellHeightPx / 2).toBe(17)
+    } finally {
+      vi.unstubAllGlobals()
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('a document that is not a frame at all is dropped without throwing out of the handler', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session: SessionFake = client._sessions[0]
+
+      session.fireScreenFrame(screenFrame(1, ['before']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(1))
+      // A document with no frame shape — apply throws inside it, and the
+      // handler catches rather than tearing down the socket.
+      const notAFrame = { nonsense: true } as unknown as SessionFrame
+      expect(() => session.fireScreenFrame(notAFrame)).not.toThrow()
+
+      await vi.waitFor(() =>
+        expect(
+          debug.mock.calls.find((c) => String(c[0]).includes('could not be applied')),
+        ).toBeDefined(),
+      )
+      expect(paneScreen()?.revision).toBe(1)
+      const dropLine = debug.mock.calls.find((c) => String(c[0]).includes('could not be applied'))
+      expect(dropLine).toBeDefined()
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+})
+// ═══════════════════════════════════════════════════════════════════════════
+// The live region is the painter picture (nocx-zg3k3.2.5)
+// ═══════════════════════════════════════════════════════════════════════════
+// The cutover: what a person sees in the live region is the cell painter
+// drawing the backend frames, and xterm paints nothing. These tests read the
+// DOM a person eyes reach — the painted grid inside the live container, the
+// cursor overlay placed by THE mapping over the committed geometry, and the
+// occluded xterm root that must not draw. Every wait is on painted DOM
+// state, never on a duration.
+
+describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
+  const liveRegionOf = (pane: HTMLElement): HTMLElement =>
+    pane.querySelector('.xterm-live-container') as HTMLElement
+
+  it('paints frame rows into the live region with the cursor on the committed geometry', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      // Before any frame nothing is PAINTED: the painter's surface exists
+      // from mount (it is the live region's picture plane), but it holds
+      // only the cursor overlay — no rows, no xterm canvas.
+      expect(live.querySelectorAll('.term-grid-row').length).toBe(0)
+      session.fireScreenFrame(screenFrame(7, ['PROMPT$ ls', 'NOCX-PAINTED-1']))
+      // The wait is on the PAINTED state: the grid surface exists from
+      // mount, so the rows are the thing that can only be there once a
+      // frame has been applied.
+      const rows = await vi.waitFor(() => {
+        const painted = [...live.querySelectorAll('.term-grid-row')]
+        expect(painted.length).toBe(SCREEN_ROWS)
+        return painted
+      })
+      expect(rows[0].textContent?.startsWith('PROMPT$ ls')).toBe(true)
+      expect(rows[1].textContent?.includes('NOCX-PAINTED-1')).toBe(true)
+
+      // The grid is the painter's surface, inside the live container.
+      const grid = live.querySelector<HTMLElement>('.term-grid')!
+      expect(grid).not.toBeNull()
+
+      // THE CURSOR RIDES THE COMMITTED GEOMETRY: cell (0, 0) of an 8x16
+      // device-pixel frame at the fixture dpr-1 identity is a zero offset,
+      // and the overlay is exactly one CSS cell.
+      const cursor = grid.querySelector<HTMLElement>('.term-grid-cursor')
+      expect(cursor).not.toBeNull()
+      expect(cursor!.hidden).toBe(false)
+      expect(cursor!.style.left).toBe('0px')
+      expect(cursor!.style.width).toBe('8px')
+      expect(cursor!.style.height).toBe('16px')
+
+      // AND THE INPUT LAYER IS THE OCCLUDED ONE: the composition constructs
+      // xterm WITH occluded. What that option buys — no visual renderer
+      // constructed, the root marked — is asserted against the real class
+      // in renderers/xterm.test.ts; this file's renderer is the shared
+      // mock, which records how it was constructed and builds no DOM.
+      // Dynamic import because vi.mock replaces the module before static
+      // imports resolve — the file's established way to reach the mock.
+      const { XtermRenderer } = await import('./renderers/xterm')
+      expect(vi.mocked(XtermRenderer)).toHaveBeenCalledWith(
+        expect.objectContaining({ occluded: true }),
+      )
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('repaints only the rows that changed and reuses the rest', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      session.fireScreenFrame(screenFrame(7, ['PROMPT$ ls', 'NOCX-REUSE-1']))
+      await vi.waitFor(() => {
+        expect(live.querySelectorAll('.term-grid-row').length).toBe(SCREEN_ROWS)
+      })
+      const before = [...live.querySelectorAll('.term-grid-row')]
+
+      // One row changed. The changed row is rebuilt; every unchanged row
+      // keeps its DOM — the node reuse the frame budget is measured on.
+      session.fireScreenFrame(screenFrame(8, ['PROMPT$ ls', 'NOCX-REUSE-2']))
+      await vi.waitFor(() => {
+        const second = live.querySelectorAll('.term-grid-row')[1]
+        expect(second.textContent).toContain('NOCX-REUSE-2')
+      })
+      const after = [...live.querySelectorAll('.term-grid-row')]
+      expect(after.length).toBe(SCREEN_ROWS)
+      expect(after[0]).toBe(before[0])
+      expect(after[1]).not.toBe(before[1])
+      expect(after[3]).toBe(before[3])
+    } finally {
+      debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('batches a same-tick burst of frames into one painted state', async () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const live = liveRegionOf(tab.pane)
+      session.fireScreenFrame(screenFrame(7, ['BURST-BASE-0']))
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('BURST-BASE-0')
+      })
+
+      // Two frames in one tick: nothing paints synchronously, and what
+      // lands is the LATEST revision only.
+      session.fireScreenFrame(screenFrame(8, ['BURST-MID-8']))
+      session.fireScreenFrame(screenFrame(9, ['BURST-LAST-9']))
+      expect(live.textContent).not.toContain('BURST-LAST-9')
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('BURST-LAST-9')
+      })
+      expect(live.textContent).not.toContain('BURST-MID-8')
+    } finally {
+      debug.mockRestore()
       teardown()
     }
   })

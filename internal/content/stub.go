@@ -357,6 +357,29 @@ func (s *ledgerStub) CaptureOutput(_ context.Context, in CaptureOutput) (bool, e
 	return false, nil
 }
 
+func (s *ledgerStub) OpenBlockOutput(_ context.Context, in OpenBlockOutput) (string, error) {
+	s.log.Info("content stub: LedgerRepository.OpenBlockOutput",
+		"entry", in.EntryID, "artifact", in.ArtifactID)
+	return "", ErrNotImplemented
+}
+
+func (s *ledgerStub) AppendBlockRows(_ context.Context, in AppendBlockRows) error {
+	s.log.Info("content stub: LedgerRepository.AppendBlockRows",
+		"entry", in.EntryID, "artifact", in.ArtifactID, "rows", len(in.Rows))
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) CloseBlockRows(_ context.Context, in CloseBlockRows) (BlockRowsSummary, error) {
+	s.log.Info("content stub: LedgerRepository.CloseBlockRows",
+		"entry", in.EntryID, "artifact", in.ArtifactID)
+	return BlockRowsSummary{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) RecordClearBoundary(_ context.Context, in RecordClearBoundary) (ClearBoundaryRecorded, error) {
+	s.log.Info("content stub: LedgerRepository.RecordClearBoundary", "session", in.SessionID)
+	return ClearBoundaryRecorded{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, body []byte) error {
 	s.log.Info("content stub: LedgerRepository.AppendChunk",
 		"artifact", artifactID, "seq", seq, "bytes", len(body))

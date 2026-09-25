@@ -19,8 +19,6 @@ import type {
   DataCallback,
   MarkerAdapter,
   NotificationRequestCallback,
-  RenderFenceCallback,
-  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -202,26 +200,13 @@ export function parseOsc133(payload: string): CommandMarker | null {
   return marker
 }
 
-// ── Render fence parser (ADR-0024 §7 carve-out) ──────────────────────────
-// The shell writes ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER the
-// command's output and carries the same 64 hex chars in the authenticated
-// `complete` event (docs/lifecycle-protocol.md §8). The renderer reports
-// where the fence landed — a rendezvous for render ordering, never an
-// authority: a fence with no authenticated event behind it does nothing.
 // OSC 1337 is a private namespace other software also uses (iTerm2 file
-// transfer), so only an exact NOCX_FENCE; prefix with exactly 64 lowercase
-// hex chars parses; everything else is nothing.
-const FENCE_PREFIX = 'NOCX_FENCE;'
+// transfer), so only an exact nocx prefix with exactly 64 lowercase hex
+// chars parses; everything else is nothing. The command fence the shell
+// also writes here (NOCX_FENCE) is not the renderer's business any more:
+// the backend meets it with the completion and says block.closed
+// (nocx-2v80t.3.27, ADR-0066).
 const FENCE_HEX_RE = /^[0-9a-f]{64}$/
-
-/** Parses an OSC 1337 payload into the fence nonce. Returns null unless the
- *  payload is exactly `NOCX_FENCE;<64 lowercase hex>`. */
-export function parseRenderFence(payload: string): { hex: string } | null {
-  if (!payload.startsWith(FENCE_PREFIX)) return null
-  const hex = payload.slice(FENCE_PREFIX.length)
-  if (!FENCE_HEX_RE.test(hex)) return null
-  return { hex }
-}
 
 /** Parses an OSC 1337 payload into the recovery fence nonce (ADR-0024
  *  decision 8). Returns null unless the payload is exactly
@@ -259,12 +244,26 @@ export interface AcceleratedAddon extends ITerminalAddon {
 /** Construction seam. The default is production; tests inject a double. */
 export interface XtermRendererOptions {
   createWebglAddon?: () => AcceleratedAddon
+  /** THE CUTOVER'S INTERIM (nocx-zg3k3.2.5): mount as the live region's
+   *  INVISIBLE input layer. The screen arrives as frames and the cell
+   *  painter draws them; xterm keeps the byte path — the program's modes
+   *  live in its parser — and every key, IME composition, paste and pointer
+   *  event, and draws NOTHING. Drawing nothing starts with what it draws
+   *  WITH: no visual renderer is ever constructed (the WebGL factory is
+   *  never asked, the canvas fallback never attaches, and the Linux
+   *  forced-repaint pump — which exists only to push a picture to screen —
+   *  never arms), and the root is marked `xterm-occluded` for the
+   *  stylesheet's opacity rule. The mark lands on xterm's OWN root, not the
+   *  mount container: the scrollback controller rewrites the container's
+   *  class on every live-region mode change. */
+  occluded?: boolean
 }
 
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
   private webgl?: AcceleratedAddon
   private readonly _createWebglAddon: () => AcceleratedAddon
+  private readonly _occluded: boolean
   /** The live subscription to the accelerated addon's atlas-page event, held
    *  so it dies with the addon it belongs to (context-loss recovery installs
    *  a new addon, and with it a new atlas). */
@@ -283,7 +282,6 @@ export class XtermRenderer implements TerminalRenderer {
   private notifyOscDisposables: Array<{ dispose(): void }> = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
-  private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
   private recoverySubs: Array<(hex: string) => void> = []
   private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
@@ -331,8 +329,7 @@ export class XtermRenderer implements TerminalRenderer {
   /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
   private writeParsedSubs: Array<() => void> = []
   private writeParsedDisposable?: { dispose(): void }
-  /** Subscribers to the explicit clear/reset operations. */
-  private clearSubs: Array<() => void> = []
+  /** Subscribers to the explicit reset operation. */
   private resetSubs: Array<() => void> = []
   /** Writes queued via write() whose bytes have not finished parsing — the
    *  capture fence's pending count. Settled via the per-write callback, so
@@ -366,6 +363,7 @@ export class XtermRenderer implements TerminalRenderer {
 
   constructor(options: XtermRendererOptions = {}) {
     this._createWebglAddon = options.createWebglAddon ?? ((): AcceleratedAddon => new WebglAddon())
+    this._occluded = options.occluded ?? false
   }
 
   async mount(container: HTMLElement): Promise<void> {
@@ -429,6 +427,10 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+    // The occlusion mark rides xterm's OWN root (see XtermRendererOptions):
+    // only the occluded input layer carries it, never a renderer a person
+    // can see.
+    if (this._occluded) term.element?.classList.add('xterm-occluded')
 
     // Attach the frame-identity listeners now: a subscriber registered
     // before mount (the frame tracker constructs with the renderer) must
@@ -479,11 +481,17 @@ export class XtermRenderer implements TerminalRenderer {
     })
 
     await document.fonts?.ready
-    this.attachWebGL()
+    // The occluded input layer loads no visual renderer: WebGL is never
+    // asked for, and its canvas fallback with it. What remains is xterm's
+    // own DOM renderer, which the stylesheet's occlusion rule hides — the
+    // interim's accepted cost, bounded by xterm's viewport-sized row set.
+    if (!this._occluded) this.attachWebGL()
 
     // Linux/WebKitGTK: re-mark every row dirty on a timer so a render is
-    // always pending. No-op on macOS/browsers where the compositor is healthy.
-    if (isLinuxWebKit()) {
+    // always pending. No-op on macOS/browsers where the compositor is
+    // healthy. The pump exists to push a PICTURE to screen; the occluded
+    // layer has none, so it never arms.
+    if (!this._occluded && isLinuxWebKit()) {
       this.refreshTimer = setInterval(() => {
         this._repaintViewport()
       }, FORCED_REFRESH_MS)
@@ -513,12 +521,9 @@ export class XtermRenderer implements TerminalRenderer {
       return false
     })
 
-    // OSC 1337 — the render fence (ADR-0024 §7 carve-out). The shell writes
-    // NOCX_FENCE;<64hex> after a command's output; the renderer reports
-    // where it landed. Render-only: the fence matches an authenticated
-    // completion, it never creates one. Registered here (like OSC 636) and
-    // lazily in onRenderFence, so a subscriber that mounts first or last
-    // always lands on a live handler.
+    // OSC 1337 — the recovery fence (ADR-0024 decision 8). Registered here
+    // (like OSC 636) and lazily in onRecoveryFence, so a subscriber that
+    // mounts first or last always lands on a live handler.
     this._ensureFenceOsc()
     this.applyTheme(getCurrentTheme())
 
@@ -594,25 +599,12 @@ export class XtermRenderer implements TerminalRenderer {
     media.addEventListener('change', changed)
   }
 
-  /** Register the OSC 1337 fence handler exactly once, when the terminal
-   *  exists. The handler parses the payload and fans the sighting out to
-   *  the subscribers with the absolute buffer line it landed on. */
+  /** Register the OSC 1337 recovery-fence handler exactly once, when the
+   *  terminal exists. One handler owns OSC 1337 (AD-8): a second handler
+   *  for the same ident would fight for the sequence. */
   private _ensureFenceOsc(): void {
     if (this.fenceOscDisposable || !this.term) return
     this.fenceOscDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
-      const parsed = parseRenderFence(data)
-      if (parsed && this.term) {
-        const buf = this.term.buffer.active
-        const event: RenderFenceEvent = {
-          hex: parsed.hex,
-          line: buf.baseY + buf.cursorY,
-          buffer: buf.type,
-        }
-        for (const sub of this.fenceSubs) sub(event)
-      }
-      // One handler owns OSC 1337 (ADR-8): the recovery fence is the same
-      // ident with a different payload kind, so it dispatches from here —
-      // a second handler for the same ident would fight for the sequence.
       const recovery = parseRecoveryFence(data)
       if (recovery) {
         for (const sub of this.recoverySubs) sub(recovery.hex)
@@ -689,6 +681,32 @@ export class XtermRenderer implements TerminalRenderer {
       | { _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } } }
       | undefined
     const cell = core?._renderService?.dimensions?.css?.cell
+    if (cell && cell.width > 0 && cell.height > 0) return cell
+    return null
+  }
+
+  /**
+   * The cell this renderer rasterises at, in DEVICE pixels — the integer
+   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
+   * Viewport divides exactly this way). The committed cell metric travels
+   * in this unit (review round 1, nocx-zg3k3.2.9): it is the one where the
+   * cell is an integer without rounding anything, so the frame's metric
+   * and the cells the GPU actually drew never disagree by a rounding step.
+   * Null while the render service cannot measure — the same honest
+   * degrade as cellWidth's 0, never a guess.
+   */
+  deviceCellDims(): { width: number; height: number } | null {
+    const t = this.term
+    if (!t) return null
+    const internal = t as unknown as { _core: unknown }
+    const core = internal._core as
+      | {
+          _renderService?: {
+            dimensions?: { device?: { cell?: { width: number; height: number } } }
+          }
+        }
+      | undefined
+    const cell = core?._renderService?.dimensions?.device?.cell
     if (cell && cell.width > 0 && cell.height > 0) return cell
     return null
   }
@@ -970,11 +988,6 @@ export class XtermRenderer implements TerminalRenderer {
         }),
       )
     }
-  }
-
-  onRenderFence(cb: RenderFenceCallback): void {
-    this.fenceSubs.push(cb)
-    this._ensureFenceOsc()
   }
 
   /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
@@ -1263,7 +1276,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.writeParsedDisposable?.dispose()
     this.writeParsedDisposable = undefined
     this.writeParsedSubs = []
-    this.clearSubs = []
     this.resetSubs = []
     for (const d of this.programQueryHandlers) d.dispose()
     this.programQueryHandlers = []
@@ -1424,11 +1436,6 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  /** Subscribe to explicit clears — fired after clearViewport() executed. */
-  onClear(cb: () => void): void {
-    this.clearSubs.push(cb)
-  }
-
   /** Subscribe to explicit resets — fired after reset() executed. */
   onReset(cb: () => void): void {
     this.resetSubs.push(cb)
@@ -1487,19 +1494,6 @@ export class XtermRenderer implements TerminalRenderer {
   /** Column of the cursor — the column the next write lands on. */
   cursorCol(): number {
     return this.term?.buffer.active.cursorX ?? 0
-  }
-
-  /** Clear the whole buffer — "making the prompt line the new first
-   *  line" (xterm's own contract). Called at a block freeze so the rows
-   *  the DOM block now owns leave the grid; the grid only ever holds the
-   *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
-  clearViewport(): void {
-    const t = this.term
-    if (!t) return
-    t.clear()
-    // Report the explicit clear AFTER it executed, so a subscriber reading
-    // state (e.g. the frame generation) observes the post-clear buffer.
-    for (const sub of this.clearSubs) sub()
   }
 
   /** Capture the live frame of the current buffer (nocx-ljfwz): fence the

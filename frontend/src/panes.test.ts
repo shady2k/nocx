@@ -3549,7 +3549,7 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
       // Establish one session, which is what teaches this client its own
       // backend instance id (AD-7: every session on one connection shares
       // it).
-      const openPromise = realClient.openSession(80, 24)
+      const openPromise = realClient.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
       const opened = await vi.waitFor(() => {
         const req = socket.requests().find((r) => r.method === 'open')
         if (!req || req.id === undefined) throw new Error('no open request yet')
@@ -3744,7 +3744,7 @@ describe('a worker participant tab leaves when its worker is closed (nocx-xn63t.
     socket.serverAccepts()
 
     try {
-      const openPromise = realClient.openSession(80, 24)
+      const openPromise = realClient.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
       const opened = await vi.waitFor(() => {
         const req = socket.requests().find((r) => r.method === 'open')
         if (!req || req.id === undefined) throw new Error('no open request yet')

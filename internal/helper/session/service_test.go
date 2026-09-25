@@ -207,6 +207,7 @@ type recordingSink struct {
 	mu              sync.Mutex
 	frames          []proto.SessionFrame
 	lifecycleFrames []proto.SessionFrame
+	screenFrames    []proto.ScreenDataFrame
 	notes           []proto.Notification
 	err             error
 	// arrived is a generation channel — closed and replaced on every
@@ -254,6 +255,10 @@ func (s *recordingSink) SendNotification(n proto.Notification) error {
 	return nil
 }
 
+func (s *recordingSink) SendOutputRows(proto.OutputRowsFrame) error       { return nil }
+func (s *recordingSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
+func (s *recordingSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+
 func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,6 +266,17 @@ func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 		return s.err
 	}
 	s.lifecycleFrames = append(s.lifecycleFrames, f)
+	s.wake()
+	return nil
+}
+
+func (s *recordingSink) SendScreenFrame(f proto.ScreenDataFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.screenFrames = append(s.screenFrames, f)
 	s.wake()
 	return nil
 }
@@ -1070,6 +1086,17 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// hex nonce and a nullable number — scalars all, and no free-form
 		// []string, which is the rule this list exists to hold.
 		proto.OpLifecycleComplete: true,
+		// The completion downlink's sibling (nocx-2v80t.3.21): an
+		// authenticated environment entry carried DOWN the same way, with no
+		// fence to carry. Its params are a session handle and the runtime
+		// incarnation — scalars all, and no free-form []string.
+		proto.OpLifecycleEntered: true,
+		// The confirmed-written mark's acknowledgement (nocx-2v80t.3.6):
+		// the coordinator advances the helper's one record of what it
+		// holds. Its params are a session handle, a subscriber id and a
+		// row index — scalars all, and no free-form []string, which is
+		// the rule this list exists to hold.
+		proto.OpConfirmRows: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

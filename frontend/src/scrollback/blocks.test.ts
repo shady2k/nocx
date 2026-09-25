@@ -20,12 +20,16 @@ import {
   setBlockWhere,
   type BlockKind,
 } from './blocks'
+import { paintStoredRows } from './block-rows'
+import type { Row } from '../generated/ledger.blockRows'
+import { wireRowOf, type CellSpec } from '../painter/fixtures'
+import { DEFAULT_SNAPSHOT } from './serializer'
 import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
 import { clearToasts, toasts } from '../ui/toast'
-import { BufferLine, lineWith } from './test-helpers'
-import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
+import { BufferLine } from './test-helpers'
+import { _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -1075,88 +1079,6 @@ describe('BlockManager', () => {
     expect(manager.selectedBlockId).toBeNull()
     expect(rec.el.classList.contains('cmd-block-selected')).toBe(false)
   })
-
-  it('freezeBlock captures theme snapshot at freeze time', () => {
-    const themeA = {
-      foreground: '#111111',
-      background: '#000000',
-      black: '#000000',
-      red: '#aa0000',
-      green: '#00aa00',
-      yellow: '#aaaa00',
-      blue: '#0000aa',
-      magenta: '#aa00aa',
-      cyan: '#00aaaa',
-      white: '#aaaaaa',
-      brightBlack: '#555555',
-      brightRed: '#ff5555',
-      brightGreen: '#55ff55',
-      brightYellow: '#ffff55',
-      brightBlue: '#5555ff',
-      brightMagenta: '#ff55ff',
-      brightCyan: '#55ffff',
-      brightWhite: '#ffffff',
-      cursor: '#ffffff',
-      cursorAccent: '#000000',
-      selectionBackground: '#335577',
-    }
-    const themeB = {
-      foreground: '#cccccc',
-      background: '#222222',
-      black: '#222222',
-      red: '#cc0000',
-      green: '#00cc00',
-      yellow: '#cccc00',
-      blue: '#0000cc',
-      magenta: '#cc00cc',
-      cyan: '#00cccc',
-      white: '#cccccc',
-      brightBlack: '#666666',
-      brightRed: '#ff6666',
-      brightGreen: '#66ff66',
-      brightYellow: '#ffff66',
-      brightBlue: '#6666ff',
-      brightMagenta: '#ff66ff',
-      brightCyan: '#66ffff',
-      brightWhite: '#eeeeee',
-      cursor: '#eeeeee',
-      cursorAccent: '#222222',
-      selectionBackground: '#446688',
-    }
-
-    // First block with theme A
-    setCurrentTheme(themeA)
-    manager.startBlock('cmd1', '~', 0)
-    const linesA = [new BufferLine('hello', false)]
-    const recA = manager.freezeBlock((y) => linesA[y] ?? undefined, 0, 0)
-    expect(recA).not.toBeNull()
-    // Defaults are no longer baked in — plain text follows the app's colours —
-    // so what this asserts is that the block exists and carries its text, with
-    // the palette question moved to serializer.test.ts where a cell actually
-    // sets an ANSI colour (nocx-6w4z).
-    const outputA = recA!.el.querySelector('.cmd-output')
-    expect(outputA?.innerHTML).toContain('hello')
-    expect(outputA?.innerHTML).not.toContain('#111111')
-
-    // Second block with theme B
-    setCurrentTheme(themeB)
-    manager.startBlock('cmd2', '~', 0)
-    const linesB = [new BufferLine('world', false)]
-    const recB = manager.freezeBlock((y) => linesB[y] ?? undefined, 0, 0)
-    expect(recB).not.toBeNull()
-    const outputB = recB!.el.querySelector('.cmd-output')
-    expect(outputB?.innerHTML).toContain('world')
-    expect(outputB?.innerHTML).not.toContain('#cccccc')
-    expect(outputB?.innerHTML).not.toContain('#111111')
-
-    // And the first block is still untouched by theme B — which is the property
-    // this test is really about. It is asserted by absence now: neither block
-    // carries a default colour at all, so a theme change cannot reach into an
-    // old block's plain text. Frozen ANSI colours are covered in
-    // serializer.test.ts, where a cell actually sets one (nocx-6w4z).
-    expect(outputA?.innerHTML).toContain('hello')
-    expect(outputA?.innerHTML).not.toContain('#cccccc')
-  })
 })
 
 describe('overflow menu (P1-6)', () => {
@@ -1753,9 +1675,9 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(rec.el.getAttribute('data-entry-id')).toBe('att-1')
     expect(manager.blockForAttempt('att-1')).toBe(rec)
 
-    // The fence landed before the completion: the rendezvous is complete
-    // and the freeze lands at the fence's line.
-    manager.sightFence(FENCE, 8)
+    // The backend's block.closed landed before the completion: the block
+    // closes the moment the completion arrives.
+    manager.blockClosed('att-1')
     const frozen = manager.freezeFromAttempt(attempt({ exitCode: 0 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('success')
@@ -1776,7 +1698,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     // looking at, rather than only in a log.
     const rec = manager.startBlock('make deploy', '~', 0)
     manager.bindAttempt('att-1')
-    manager.sightFence(FENCE, 8)
+    manager.blockClosed('att-1')
     const frozen = manager.freezeFromAttempt(attempt({ exitCode: 1 }), () => undefined, 8)
     expect(frozen).toBe(rec)
     expect(rec.el.dataset.recorded).toBeUndefined()
@@ -1812,7 +1734,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     const rec = manager.startBlock('sleep 30', '~', 0)
     manager.bindAttempt('att-1')
     rec.stopRequested = true
-    manager.sightFence(FENCE, 8)
+    manager.blockClosed('att-1')
     const frozen = manager.freezeFromAttempt(attempt({ exitCode: 130 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('cancelled')
@@ -1830,7 +1752,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     const rec = manager.startBlock('sleep 30', '~', 0)
     manager.bindAttempt('att-1')
     expect(rec.stopRequested).toBe(false)
-    manager.sightFence(FENCE, 8)
+    manager.blockClosed('att-1')
     const frozen = manager.freezeFromAttempt(attempt({ exitCode: 130 }), () => undefined, 8)
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('failure')
@@ -1903,7 +1825,7 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
   })
 })
 
-describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)', () => {
+describe("the block's close: the completion and the backend's block.closed (nocx-2v80t.3.27)", () => {
   let manager: BlockManager
   let inner: HTMLElement
   let xtermContainer: HTMLElement
@@ -1926,163 +1848,111 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     domain: 'd1',
     epoch: 1,
   }) as IntegrationDomain
-  const FENCE_A = 'a'.repeat(64)
-  const FENCE_B = 'b'.repeat(64)
   const attempt = (over: Partial<ExecutionAttempt> = {}): ExecutionAttempt => ({
     id: 'att-1',
     domain,
     state: 'completed',
     exitCode: 0,
-    fence: FENCE_A,
+    fence: 'a'.repeat(64),
     ...over,
   })
+  const closedOnScreen = (id: string) =>
+    !manager.blockForAttempt(id)!.el.classList.contains('cmd-block-running')
 
-  /** THE acceptance case: the last output bytes land AFTER the authenticated
-   *  completion. The fence proves where the output ended, so the block
-   *  contains ALL of it — truncation is the defect this bead exists to fix.
-   *  The two halves settle at DIFFERENT times: the status flips on the
-   *  completion event alone, the output boundary only when the fence lands. */
-  it('output delayed past the completion is captured in full once the fence lands', () => {
+  it('the status lands on the completion, and the block closes on screen only on block.closed', () => {
     manager.startBlock('slow', '~', 0)
     manager.bindAttempt('att-1')
-    const lines = [new BufferLine('first'), new BufferLine('second'), new BufferLine('the tail')]
-    const getLine = (y: number) => lines[y]
 
-    // The completion event arrives while only the first two lines are in the
-    // buffer, and the fence has NOT been sighted. The LOGICAL freeze lands
-    // NOW, on the authenticated event alone: the status flips and the running
-    // slot is freed. (The deferred return means the caller keeps the live
-    // region up — the boundary is still in flight.)
-    const frozen = manager.freezeFromAttempt(attempt(), getLine, 1)
-    expect(frozen).toBeNull()
+    // The completion: the LOGICAL freeze lands now — status, exit code, the
+    // running slot freed. The deferred return tells the caller the close is
+    // still to come.
+    expect(manager.freezeFromAttempt(attempt(), () => undefined, 1)).toBeNull()
     expect(manager.runningBlock).toBeNull()
-    const block = manager.blockForAttempt('att-1')
-    expect(block).not.toBeNull()
-    expect(block!.status).toBe('success')
-    expect(block!.exitCode).toBe(0)
+    const block = manager.blockForAttempt('att-1')!
+    expect(block.status).toBe('success')
+    expect(block.exitCode).toBe(0)
+    expect(closedOnScreen('att-1')).toBe(false)
 
-    // ...but the output boundary has NOT landed yet: no rows are serialized
-    // (the running element has no output region) and the end line is still
-    // the start. Status first, boundary later — the different-times split.
-    expect(block!.el.querySelector('.cmd-output')).toBeNull()
-    expect(block!.endLine).toBe(0)
-
-    // The tail and the fence land together: the fence line IS the output
-    // end, and every line up to it is serialized into the block.
-    manager.sightFence(FENCE_A, 2)
-    expect(manager.runningBlock).toBeNull()
-    expect(block!.endLine).toBe(2)
-    const text = blockOutputText(block!.el)
-    expect(text).toContain('first')
-    expect(text).toContain('second')
-    expect(text).toContain('the tail')
+    manager.blockClosed('att-1')
+    expect(closedOnScreen('att-1')).toBe(true)
+    // The body is the backend's rows, painted when they are read — never
+    // the terminal buffer.
+    expect(blockOutputText(manager.blockForAttempt('att-1')!.el)).toBe('')
   })
 
-  it('a fence with no authenticated event behind it changes nothing at all', () => {
-    // No block, no attempt: the sighting is remembered for a future match
-    // and freezes nothing.
-    manager.sightFence(FENCE_A, 3)
-    expect(manager.runningBlock).toBeNull()
+  it('a block.closed before the completion does not end the command; the completion closes it at once', () => {
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.blockClosed('att-1')
+    // Rows whole is not the command done: nothing but the completion says
+    // how it ended.
+    expect(manager.runningBlock?.status).toBe('running')
+
+    const frozen = manager.freezeFromAttempt(attempt(), () => undefined, 4)
+    expect(frozen).not.toBeNull()
+    expect(closedOnScreen('att-1')).toBe(true)
+  })
+
+  it('a block.closed for a block this pane does not hold, or one already closed, changes nothing', () => {
+    manager.blockClosed('att-nobody')
     expect(manager.blocks).toHaveLength(0)
 
-    // Even with a block running, a foreign fence never freezes it.
     manager.startBlock('cmd', '~', 0)
     manager.bindAttempt('att-1')
-    manager.sightFence(FENCE_B, 4)
-    expect(manager.runningBlock?.status).toBe('running')
-  })
-
-  it('a replayed fence — the same value twice, or one for an already-frozen block — does nothing', () => {
-    manager.startBlock('cmd', '~', 0)
-    manager.bindAttempt('att-1')
-
-    // Sighted once, then the same bytes again: the second sighting is a
-    // replay and does nothing (the line is not even overwritten).
-    manager.sightFence(FENCE_A, 3)
-    manager.sightFence(FENCE_A, 9)
-    const frozen = manager.freezeFromAttempt(attempt(), () => undefined, 0)
-    expect(frozen).not.toBeNull()
-    expect(frozen!.endLine).toBe(3) // the ORIGINAL sighting's line, not the replay's
-
-    // The same fence again after the block froze: an already-frozen block's
-    // fence changes nothing.
-    manager.sightFence(FENCE_A, 10)
-    expect(manager.runningBlock).toBeNull()
+    manager.freezeFromAttempt(attempt(), () => undefined, 0)
+    manager.blockClosed('att-1')
+    const closedEl = manager.blockForAttempt('att-1')!.el
+    manager.blockClosed('att-1')
+    expect(manager.blockForAttempt('att-1')!.el).toBe(closedEl)
     expect(manager.blocks).toHaveLength(1)
-    expect(manager.blockForAttempt('att-1')!.endLine).toBe(3)
   })
 
-  it('a completion whose fence never arrives defers the boundary — no timer settles it, only the sighting (nocx-2v80t.3.2)', () => {
+  it('no timer closes a block — however long the pane waits, only block.closed does', () => {
     vi.useFakeTimers()
     try {
       manager.startBlock('cmd', '~', 0)
       manager.bindAttempt('att-1')
-
-      // Completion with the fence still in flight: the STATUS flips now on
-      // the event alone; the boundary defers — the block is NOT serialized
-      // at the truncated event-time end.
-      const frozen = manager.freezeFromAttempt(attempt(), () => undefined, 0)
-      expect(frozen).toBeNull()
-      expect(manager.runningBlock).toBeNull()
-      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
-
-      // NO CLOCK SETTLES THE BOUNDARY. However long the pane waits, the
-      // fence's sighting is the only thing that cuts it — a timer here
-      // would be the client deciding a boundary a second time.
+      manager.freezeFromAttempt(attempt(), () => undefined, 0)
       vi.advanceTimersByTime(60_000)
-      expect(manager.blockForAttempt('att-1')!.endLine).toBe(0)
-      expect(manager.visualFreezePending).toBe(true)
-
-      // The sighting lands: the boundary is the fence's line, in full.
-      manager.sightFence(FENCE_A, 2)
-      expect(manager.visualFreezePending).toBe(false)
-      const block = manager.blockForAttempt('att-1')!
-      expect(block.endLine).toBe(2)
+      expect(closedOnScreen('att-1')).toBe(false)
+      manager.blockClosed('att-1')
+      expect(closedOnScreen('att-1')).toBe(true)
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('two completions with both fences in flight each resolve on their own sighting', () => {
+  it('two completed blocks each close on their own block.closed', () => {
     manager.startBlock('first', '~', 0)
     manager.bindAttempt('att-1')
     expect(manager.freezeFromAttempt(attempt({ id: 'att-1' }), () => undefined, 0)).toBeNull()
     manager.startBlock('second', '~', 3)
     manager.bindAttempt('att-2')
     expect(
-      manager.freezeFromAttempt(attempt({ id: 'att-2', fence: FENCE_B }), () => undefined, 3),
+      manager.freezeFromAttempt(
+        attempt({ id: 'att-2', fence: 'b'.repeat(64) }),
+        () => undefined,
+        3,
+      ),
     ).toBeNull()
-    expect(manager.visualFreezePending).toBe(true)
 
-    // The older fence lands first (pty order): only the first block's
-    // boundary settles; the second's stays pending on its own sighting.
-    manager.sightFence(FENCE_A, 2)
-    expect(manager.blockForAttempt('att-1')!.endLine).toBe(2)
-    expect(manager.blockForAttempt('att-2')!.endLine).toBe(3)
-    expect(manager.visualFreezePending).toBe(true)
-
-    manager.sightFence(FENCE_B, 5)
-    expect(manager.blockForAttempt('att-2')!.endLine).toBe(5)
-    expect(manager.visualFreezePending).toBe(false)
+    manager.blockClosed('att-2')
+    expect(closedOnScreen('att-2')).toBe(true)
+    expect(closedOnScreen('att-1')).toBe(false)
+    manager.blockClosed('att-1')
+    expect(closedOnScreen('att-1')).toBe(true)
   })
 
-  it('a completion that carries no fence freezes visually at the event-time end — the runtime\u2019s word, not a clock (nocx-2v80t.3.2)', () => {
+  it('a completion that carries no fence closes at once — no block.closed can ever name it', () => {
     manager.startBlock('cmd', '~', 0)
     manager.bindAttempt('att-1')
-
-    // No fence on the attempt (unreachable from the kernel, which requires
-    // the nonce on completed attempts, but the manager guards callers that
-    // bypass it): no sighting could ever match a boundary like this, so
-    // there is no deferral to strand — the runtime's word alone cuts the
-    // boundary, at the event-time end. Approximate, never timed.
     const frozen = manager.freezeFromAttempt(attempt({ fence: undefined }), () => undefined, 0)
     expect(frozen).not.toBeNull()
-    expect(frozen!.endLine).toBe(0)
     expect(frozen!.status).toBe('success')
-    expect(manager.visualFreezePending).toBe(false)
+    expect(closedOnScreen('att-1')).toBe(true)
   })
 
-  it('onDeferredFreeze fires when the sighting resolves the pending freeze', () => {
+  it('onDeferredFreeze fires when block.closed closes a block whose completion was waiting', () => {
     const onDeferredFreeze = vi.fn()
     manager = new BlockManager(inner, xtermContainer, {
       now: () => 1000,
@@ -2093,75 +1963,18 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     manager.bindAttempt('att-1')
     manager.freezeFromAttempt(attempt(), () => undefined, 0)
     expect(onDeferredFreeze).not.toHaveBeenCalled()
-    manager.sightFence(FENCE_A, 4)
+    manager.blockClosed('att-1')
     expect(onDeferredFreeze).toHaveBeenCalledTimes(1)
   })
 
-  it('clearAll drops a pending boundary — the block is gone, its sighting freezes nothing', () => {
+  it('clearAll drops a block awaiting its close — a later block.closed closes nothing', () => {
     manager.startBlock('cmd', '~', 0)
     manager.bindAttempt('att-1')
     manager.freezeFromAttempt(attempt(), () => undefined, 0)
     manager.clearAll()
-    manager.sightFence(FENCE_A, 9)
+    manager.blockClosed('att-1')
     expect(manager.blocks).toHaveLength(0)
     expect(manager.runningBlock).toBeNull()
-    expect(manager.visualFreezePending).toBe(false)
-  })
-})
-
-describe('the serialized output range vs the block creation line (nocx-4yhi)', () => {
-  // The app-owned submit opens the block BEFORE the bytes go out, so the
-  // shell's echo of the typed command lands on the creation line itself.
-  // The block's OUTPUT range therefore starts one row after it — the
-  // header already shows the command, and a body that repeats it is the
-  // defect this describe pins. Shell-originated blocks open at the cursor
-  // line at fact time, which is already past the echo: their output range
-  // starts where the block opened.
-  let manager: BlockManager
-  let inner: HTMLElement
-  let xtermContainer: HTMLElement
-
-  beforeEach(() => {
-    _resetThemeState()
-    inner = document.createElement('div')
-    xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    document.body.appendChild(inner)
-    manager = new BlockManager(inner, xtermContainer, {
-      snapshotStore: freshStore(),
-    })
-  })
-
-  it('serializes from outputStart when the creation line carries the shell echo', () => {
-    const rec = manager.startBlock('ls', '~', 5, 6)
-    expect(rec.outputStart).toBe(6)
-    // Line 5 is the prompt line the echo lands on; 6-7 are the output.
-    const lines = [
-      new BufferLine('$ ls'),
-      new BufferLine('file1'),
-      new BufferLine('file2'),
-      new BufferLine(''),
-    ]
-    const getLine = (y: number) => lines[y - 5]
-    const frozen = manager.freezeBlock(getLine, 8, 0)
-    expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el)
-    expect(text).toContain('file1')
-    expect(text).toContain('file2')
-    expect(text).not.toContain('$ ls')
-  })
-
-  it('defaults the output range to the creation line — the shell-originated case', () => {
-    // The running fact lands after the echo (the user typed at the shell),
-    // so the cursor line is already past it and the block serializes from
-    // exactly where it opened.
-    const rec = manager.startBlock('pwd', '~', 7)
-    expect(rec.outputStart).toBe(7)
-    const getLine = (y: number) => (y === 7 ? new BufferLine('out1') : undefined)
-    const frozen = manager.freezeBlock(getLine, 7, 0)
-    expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el)
-    expect(text).toContain('out1')
   })
 })
 
@@ -2869,6 +2682,8 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       snapshotStore: freshStore(),
       sessionName,
       answerText,
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
     })
     return { inner, manager }
   }
@@ -3204,17 +3019,33 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     )
   })
 
-  it('a COMMAND block still copies what the terminal drew — unchanged', () => {
+  it('a COMMAND block copies backend-stored rows, not the terminal buffer', () => {
     const copied = captureClipboard()
     const { manager } = newManager(undefined, () =>
       Promise.reject(new Error('a command must never reach the ledger for its copy')),
     )
     manager.startBlock('echo hi', '/repo', 0)
-    const rec = manager.freezeBlock((y) => (y === 0 ? new BufferLine('hi') : undefined), 0, 0)!
+    manager.bindAttempt('entry-copy')
+    manager.applyStoredRows('entry-copy', {
+      lines: [
+        {
+          from: 0,
+          row: wireRowOf([
+            ['h', 1, true],
+            ['i', 1, true],
+            ['\n', 1, true],
+          ]),
+        },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    const rec = manager.freezeBlock(() => undefined, 0, 0)!
     clickMenuItem(rec.el, 'Copy output')
-    expect(copied[0]).toBe('hi')
+    expect(copied[0]).toBe('hi\n')
     clickMenuItem(rec.el, 'Copy all')
-    expect(copied[1]).toBe('echo hi\nhi')
+    expect(copied[1]).toBe('echo hi\nhi\n')
   })
 
   // The wrap override lives in the ⋮ menu because it is the exception: the
@@ -3377,78 +3208,6 @@ it('selectBlock is a non-toggle single-select: the id and the class move togethe
 })
 
 // ── What the freeze keeps for the store (nocx-2f0f) ───────────────────────
-describe('the visual freeze parks the durable bodies', () => {
-  let inner: HTMLElement
-  let xtermContainer: HTMLElement
-  let manager: BlockManager
-
-  beforeEach(() => {
-    _resetThemeState()
-    inner = document.createElement('div')
-    xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    document.body.appendChild(inner)
-    manager = new BlockManager(inner, xtermContainer, {
-      now: () => 1000,
-      snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
-    })
-  })
-
-  it('keeps the rows as SGR and as characters, with the grid it saw', () => {
-    manager.startBlock('echo hi', '~', 0)
-    const lines = [new BufferLine('hi', false)]
-    const rec = manager.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-    expect(rec).not.toBeNull()
-    expect(rec?.captured).toEqual({ sgr: 'hi', text: 'hi', cols: 100, rows: 30 })
-  })
-
-  it('keeps an EMPTY body for a command that printed nothing, rather than none', () => {
-    // An alt-screen program leaves no scrollback rows, and so does `true`.
-    // Nothing here tells them apart and nothing may: a classifier in the
-    // capture path is the defect the byte-stream design was withdrawn over.
-    // An empty body says "this printed nothing into the scrollback", which
-    // is true of both; NO artifact is reserved for "nothing was captured",
-    // which is a different sentence a restored block has to be able to say.
-    manager.startBlock('htop', '~', 0)
-    const rec = manager.freezeBlock(() => undefined, 0, 0)
-    expect(rec?.captured).toEqual({ sgr: '', text: '', cols: 100, rows: 30 })
-  })
-
-  it("gives each of two blocks frozen back to back its own rows and none of the other's", () => {
-    // The epic's own criterion, and the one a boundary bug shows up in.
-    // Asserted by FREEZING TWO BLOCKS, not by feeding frames: the boundary is
-    // the block's own line range, and a test that fed bytes would be testing
-    // the recognizer that was deleted rather than the rule that replaced it.
-    const lines = [new BufferLine('first output', false), new BufferLine('second output', false)]
-    const getLine = (y: number) => lines[y] ?? undefined
-
-    manager.startBlock('echo first', '~', 0)
-    const a = manager.freezeBlock(getLine, 0, 0)
-    manager.startBlock('echo second', '~', 1)
-    const b = manager.freezeBlock(getLine, 1, 1)
-
-    expect(a?.captured?.text).toBe('first output')
-    expect(a?.captured?.text).not.toContain('second')
-    expect(b?.captured?.text).toBe('second output')
-    expect(b?.captured?.text).not.toContain('first')
-  })
-
-  it('parks nothing when the caller supplies no grid, because provenance is not optional', () => {
-    const otherInner = document.createElement('div')
-    const otherXterm = document.createElement('div')
-    otherInner.appendChild(otherXterm)
-    document.body.appendChild(otherInner)
-    const noDims = new BlockManager(otherInner, otherXterm, {
-      now: () => 1000,
-      snapshotStore: freshStore(),
-    })
-    noDims.startBlock('echo hi', '~', 0)
-    const lines = [new BufferLine('hi', false)]
-    const rec = noDims.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-    expect(rec?.captured).toBeUndefined()
-  })
-})
 
 // ── a block is a block, whoever submitted it (nocx-9sqii, criterion 3) ────
 //
@@ -4565,65 +4324,154 @@ describe('setBlockWhere', () => {
   })
 })
 
-// ── the frozen block's runs are run-geometry's (nocx-zg3k3.7) ──────────────
-//
-// Criterion 1, end to end: the freeze path hands cell-fit's measurements to
-// run-geometry, and the letter-spacing the rule puts on a run is visible in
-// the frozen block itself — in the SAME innerHTML a person's pane shows.
+describe('backend-owned block rows', () => {
+  const row = (text: string): Row =>
+    wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec))
 
-describe('the frozen block carries per-run geometry', () => {
-  it('freezes a measured cluster onto its own spacing, through the real freeze path', () => {
+  function newManager() {
     const inner = document.createElement('div')
     const xtermContainer = document.createElement('div')
     inner.appendChild(xtermContainer)
-    // The metric the renderer would have published.
-    inner.style.setProperty('--term-cell-width', '8px')
-    inner.style.setProperty('--term-cell-delta', '-0.5px')
     document.body.appendChild(inner)
     const manager = new BlockManager(inner, xtermContainer, {
-      now: () => 1000,
       snapshotStore: freshStore(),
-      dimensions: () => ({ cols: 100, rows: 30 }),
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
     })
-    // jsdom lays nothing out, and cell-fit measures by writing probe spans
-    // and reading their rects — answer it here: あ lands exactly on its two
-    // columns (16px); single-column ASCII is never measured (calibrated).
-    const rects = vi
-      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-      .mockImplementation(function (this: HTMLElement) {
-        const width = this.textContent === 'あ' ? 16 : 8
-        return {
-          width,
-          height: 20,
-          top: 0,
-          left: 0,
-          right: width,
-          bottom: 20,
-          x: 0,
-          y: 0,
-          toJSON: () => ({}),
-        }
+    return { inner, manager }
+  }
+
+  it('paints streamed rows while running and replaces them as history grows', () => {
+    // A real row never carries a literal '\n' cell — the grid has no such
+    // glyph, the break is the ROW BOUNDARY itself — so the fixture holds
+    // plain row text and the newline blockOutputText must supply comes only
+    // from joining `.term-grid-row` elements, never from an embedded
+    // character (nocx-2v80t.3.19: a fixture that folded '\n' into the row
+    // text let this pass through the untested `.term-line`-only fallback
+    // while the painter's own rows went unread).
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.applyStoredRows('entry-stream', {
+      lines: [{ from: 0, row: row('first ') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    manager.bindAttempt('entry-stream')
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first ')
+
+    manager.applyStoredRows('entry-stream', {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    const frozen = manager.freezeBlock(() => undefined, 0, 1)!
+    expect(blockOutputText(frozen.el)).toBe('first \nsecond')
+  })
+
+  it('never lets a block.grew fetch that resolves late shrink an already-painted block', () => {
+    // terminal-content.ts refetches the whole artifact on every block.grew /
+    // block.closed and applies whatever comes back; two in-flight requests
+    // for the same entry can resolve in either order. Simulated here by
+    // calling applyStoredRows with the LARGER delivery first (as if its
+    // fetch, dispatched second, resolved first) and the smaller one after
+    // (its earlier fetch, resolving late) — the block must keep the rows it
+    // already has.
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-stream')
+
+    manager.applyStoredRows('entry-stream', {
+      lines: [
+        { from: 0, row: row('first ') },
+        { from: 1, row: row('second') },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+
+    // The stale response: only the first row, as read before the second one
+    // had appended.
+    manager.applyStoredRows('entry-stream', {
+      lines: [{ from: 0, row: row('first ') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+
+    expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
+  })
+
+  it('bounds how many never-adopted entries it remembers, evicting the oldest (a lost running fact must not leak forever)', () => {
+    // A block.grew/closed notification can arrive before bindAttempt names
+    // the block it belongs to, and applyStoredRows stashes it pending.
+    // Ordinarily bindAttempt drains it the moment binding happens — but
+    // binding never happens for an attempt whose running fact is refused,
+    // lost, or never reaches this pane, and nothing else visits the entry
+    // to remove it. Nine such orphans, one past the ring's bound (8, same
+    // as _fences): the oldest must be gone, the newest must still be here.
+    const { manager } = newManager()
+    const orphanIds = Array.from({ length: 9 }, (_, i) => `orphan-${i}`)
+    for (const id of orphanIds) {
+      manager.applyStoredRows(id, {
+        lines: [{ from: 0, row: row(id) }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
       })
-    try {
-      manager.startBlock('printf あ', '~', 0)
-      const lines = [
-        lineWith(
-          { chars: 'a', fg: 0, fgMode: 0 },
-          { chars: 'あ', width: 2, fg: 0, fgMode: 0 },
-          { chars: '', width: 0, fg: 0, fgMode: 0 },
-        ),
-      ]
-      const rec = manager.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
-      expect(rec).not.toBeNull()
-      // あ measured onto 2 × 8px exactly: its spacing is 0 — not the row
-      // default −0.5px — so the rule splits it out and declares it
-      // (ADR-0009 rules 2 and 3). The ASCII around it stays bare text
-      // inheriting the row correction, today's markup byte for byte.
-      expect(rec!.el.querySelector('.cmd-output')?.innerHTML).toBe(
-        '<span class="term-line">a<span style="letter-spacing:0px">あ</span></span>',
-      )
-    } finally {
-      rects.mockRestore()
     }
+
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt(orphanIds[0])
+    expect(manager.runningBlock!.storedRows).toBeUndefined()
+
+    manager.startBlock('printf rows', '/repo', 1)
+    manager.bindAttempt(orphanIds[orphanIds.length - 1])
+    expect(manager.runningBlock!.storedRows?.lines).toEqual([
+      { from: 0, row: row(orphanIds[orphanIds.length - 1]) },
+    ])
+  })
+
+  it('a block whose rows could not be read keeps saying so across its freeze, and a later read takes it back (nocx-2v80t.3.27)', () => {
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-unreadable')
+    manager.markRowsUnreadable('entry-unreadable', 'socket closed')
+    expect(
+      manager.runningBlock!.el.querySelector('[data-output-unreadable]')?.textContent,
+    ).toContain('could not be read')
+
+    const frozen = manager.freezeBlock(() => undefined, 0, 0)!
+    expect(frozen.el.querySelector('[data-output-unreadable]')).not.toBeNull()
+    // Said once, however many reads failed.
+    manager.markRowsUnreadable('entry-unreadable', 'socket closed again')
+    expect(frozen.el.querySelectorAll('[data-output-unreadable]')).toHaveLength(1)
+
+    manager.applyStoredRows('entry-unreadable', {
+      lines: [{ from: 0, row: row('read at last') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(frozen.rowsUnreadable).toBeUndefined()
+  })
+
+  it('does not paint terminal-buffer text when backend history is absent', () => {
+    const { manager } = newManager()
+    manager.startBlock('echo local', '/repo', 0)
+    const frozen = manager.freezeBlock(
+      (line) => (line === 0 ? new BufferLine('local') : undefined),
+      0,
+      0,
+    )!
+    expect(frozen.el.querySelector('.cmd-output')).toBeNull()
   })
 })

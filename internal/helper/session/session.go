@@ -6,11 +6,13 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
@@ -71,6 +73,13 @@ type SpawnRequest struct {
 	Env       map[string]string
 	Cols      uint16
 	Rows      uint16
+	// XPixel/YPixel are the client's cell metrics in TIOCSWINSZ's own units
+	// — the WHOLE text area in pixels — and zero means the client has not
+	// measured itself yet. They reach the pty's winsize at spawn; the
+	// per-cell metric the runtime commits is decoded at the one boundary,
+	// cellGeometry.
+	XPixel    uint16
+	YPixel    uint16
 	Lifecycle *proto.LifecycleLaunch
 	// AgentToolToken is the bearer that admits this pane's far agent, minted by
 	// the coordinator that asked for the pane (nocx-50w7p.16 for the ssh route,
@@ -229,6 +238,24 @@ type Sink interface {
 	SendSessionData(proto.SessionFrame) error
 	SendLifecycleData(proto.SessionFrame) error
 	SendNotification(proto.Notification) error
+	// SendScreenFrame writes one screen-plane frame: one part of one full
+	// snapshot the session's runtime published, for the subscriber the
+	// frame names. The drain that parks on the runtime's Ready is its only
+	// caller.
+	SendScreenFrame(proto.ScreenDataFrame) error
+	// SendOutputRows writes one rows-plane frame: one batch of the rows the
+	// session's runtime handed over as they left the screen (nocx-2v80t.3.6),
+	// for the subscriber the frame names. The pump that drains the session's
+	// row bridge is the only sender; the payload is the document bytes and
+	// the frame's own encoding happens here, at the carrier.
+	SendOutputRows(proto.OutputRowsFrame) error
+	// SendIntervalEnd writes one end marker: one interval's boundary, after
+	// every row that belongs to it, on the same ordered carrier.
+	SendIntervalEnd(proto.IntervalEndFrame) error
+	// SendClearBoundary writes one sighted erase-saved-lines
+	// (nocx-2v80t.3.17), on the same ordered carrier as the rows and the
+	// end markers, in the position it occurred.
+	SendClearBoundary(proto.ClearBoundaryFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -250,6 +277,14 @@ const creditLimit = 64 * 1024
 type subscriber struct {
 	id  proto.SubscriberID
 	raw [16]byte
+
+	// screenCons is this subscriber's own consumer of the session runtime's
+	// screen deliveries, and screenDone closes when its drain ends. One per
+	// subscriber, because what each reader of the screen is owed differs:
+	// a mid-session attacher is owed one snapshot at the current revision
+	// while an established reader is owed the stream.
+	screenCons sessionruntime.Consumer
+	screenDone chan struct{}
 
 	// sent is where this reader's pump has pushed to; acked is what the
 	// reader confirmed receiving. sent − max(acked, base) is what is in
@@ -282,6 +317,16 @@ type subscriber struct {
 	// the one it was attached on.
 	sink       Sink
 	attachment proto.AttachmentID
+}
+
+// subscribersLocked snapshots the bound subscribers under s.mu, the read the
+// row pump's fan-out starts from.
+func (s *hostSession) subscribersLocked() []*subscriber {
+	out := make([]*subscriber, 0, len(s.subs))
+	for _, sub := range s.subs {
+		out = append(out, sub)
+	}
+	return out
 }
 
 type attachment struct {
@@ -357,10 +402,40 @@ type hostSession struct {
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
 	attachments map[proto.AttachmentID]*attachment
-	writer      *proto.SubscriberID
-	writerAtt   proto.AttachmentID
-	epoch       proto.LeaseEpoch
-	exit        *proto.SessionExitStatus
+	// rowMu guards the row bridge's hand-off (rows.go): the runtime's
+	// RowStream appends one emission per drained feed under rowMu — an
+	// append never blocks the caller, unlike a full channel's send — and the
+	// pump below drains them in the same order. Every kind in the queue is
+	// bounded (nocx-2v80t.3.26): rowQueuedBatches counts the runtime's row
+	// batches against maxQueuedRowBatches, rowQueuedMarkers the end markers
+	// and clear boundaries against maxQueuedMarkers. rowsLostPending is the
+	// exact count of indices shed batches spanned, owed to the next batch or
+	// marker the bridge ACCEPTS, and rowStreamNext is the index one past the
+	// last batch the runtime handed over, accepted or shed — the position a
+	// loss-only carrier states the owed loss at.
+	rowMu            sync.Mutex
+	rowQueue         []rowEmission
+	rowQueuedBatches int
+	rowQueuedMarkers int
+	rowsLostPending  uint64
+	rowStreamNext    uint64
+	// rowWake wakes the pump when the queue was empty and a new emission
+	// arrived; capacity 1, because a pending wake means "the queue is
+	// non-empty" and coalesces the same way a watermark does — the pump
+	// drains to empty before waiting on it again, so a coalesced wake
+	// never loses an emission.
+	rowWake chan struct{}
+	// rowsDone ends the pump; rowsConfirmed is the coordinator's
+	// acknowledged "written up to here" mark; rowsDropped counts the
+	// BATCHES the bridge shed and markersDropped the MARKERS (rows.go).
+	rowsDone       chan struct{}
+	rowsConfirmed  uint64
+	rowsDropped    atomic.Uint64
+	markersDropped atomic.Uint64
+	writer         *proto.SubscriberID
+	writerAtt      proto.AttachmentID
+	epoch          proto.LeaseEpoch
+	exit           *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -595,7 +670,8 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		lifecycleSent: lifecycleResume.From, lifecycleAcked: lifecycleResume.From,
 		wake: newGate(), lifecycleWake: newGate(),
 		stop: stop, done: make(chan struct{}), lifecycleDone: make(chan struct{}),
-		sink: sink, attachment: att,
+		screenDone: make(chan struct{}),
+		sink:       sink, attachment: att,
 	}
 	s.subs[p.Subscriber] = sub
 	s.attachments[att] = &attachment{id: att, subscriber: p.Subscriber, sink: sink}
@@ -620,6 +696,17 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	s.mu.Unlock()
 	s.stopSubscriber(old)
 	go s.serve(ctx, sub, log)
+	if s.runtime != nil {
+		// The screen drain: one consumer per subscriber, because the
+		// runtime owes each reader its own stream. It ends with the
+		// attachment, and stopSubscriber releases the consumer — its held
+		// payloads refunded — so a departed reader never spends the
+		// session's allowance.
+		sub.screenCons = s.runtime.Consumers().Attach()
+		go s.serveScreen(ctx, sub, sub.screenCons)
+	} else {
+		close(sub.screenDone)
+	}
 	if s.lifecycleWin != nil {
 		go s.serveLifecycle(ctx, sub, log)
 	} else {
@@ -713,6 +800,47 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		case <-acked:
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// serveScreen is one subscriber's screen drain: it parks on the runtime's
+// Ready, Takes the full snapshots the runtime owes it, splits each for the
+// carrier and sends the parts. Take refunds the allowance, so a reader that
+// keeps up is never capped by what it has already taken away; a reader that
+// stops reading is capped, coalesced and told — the runtime's own bound, not
+// this pump's. The pump ends with its attachment; stopSubscriber then
+// detaches the consumer, which releases whatever was still held.
+func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons sessionruntime.Consumer) {
+	// The attachment context is the drain's: the logger it carries is the
+	// one the connection bound, with module and trace already on it.
+	log := nocxlog.From(ctx)
+	defer close(sub.screenDone)
+	for {
+		select {
+		case <-cons.Ready():
+		case <-ctx.Done():
+			return
+		}
+		for _, frame := range cons.Take() {
+			parts, err := proto.SplitScreenDataFrame(s.raw, sub.raw, uint64(frame.Revision), frame.Bytes)
+			if err != nil {
+				// The sender half of the carrier's named refusal: a
+				// document the carrier cannot assemble is a screen the
+				// subscriber is TOLD it lost, never a silent drop.
+				log.Warn("screen frame not carriable", "session", s.id.Session,
+					"subscriber", sub.id, "revision", uint64(frame.Revision), "err", err)
+				continue
+			}
+			for _, p := range parts {
+				if err := sub.sink.SendScreenFrame(p); err != nil {
+					// The wire died. The attachment goes; the session, the
+					// window, the process and the runtime do not (D2).
+					log.Warn("screen frame not delivered", "session", s.id.Session,
+						"subscriber", sub.id, "revision", uint64(frame.Revision), "err", err)
+					return
+				}
+			}
 		}
 	}
 }
@@ -891,6 +1019,17 @@ func (s *hostSession) stopSubscriber(sub *subscriber) {
 	sub.lifecycleWake.signal()
 	<-sub.done
 	<-sub.lifecycleDone
+	if sub.screenDone != nil {
+		<-sub.screenDone
+	}
+	// The drain has ended, so nothing holds the consumer but the session:
+	// detaching releases whatever it still held, refunded to the session's
+	// account. A departed reader never keeps spending a live one's
+	// allowance.
+	if sub.screenCons != nil && s.runtime != nil {
+		s.runtime.Consumers().Detach(sub.screenCons)
+		sub.screenCons = nil
+	}
 }
 
 // So do the attachments of every other connection, which is what makes this
@@ -1020,14 +1159,8 @@ func (s *hostSession) writeLifecycle(sink Sink, f proto.SessionFrame) error {
 // for one is owed — reaches the PTY through the SAME writer, because
 // repairLocked and CommitGeometry hand it to Session.Commit's ReplySink,
 // which is this owner.
-func (s *hostSession) resize(cols, rows uint16) error {
-	g := sessionruntime.Geometry{
-		Cols: int(cols),
-		Rows: int(rows),
-		// No cell metrics cross the wire today; see ptyTerminal.Resize.
-		CellWidthPx:  0,
-		CellHeightPx: 0,
-	}
+func (s *hostSession) resize(cols, rows, xpixel, ypixel uint16) error {
+	g := cellGeometry(cols, rows, xpixel, ypixel)
 	done, submitErr := s.owner.submit(ownerItem{kind: itemResize, resize: &g})
 	if submitErr != nil {
 		return submitErr
@@ -1068,6 +1201,11 @@ func (s *hostSession) stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
+	// The row pump first: the runtime is about to be failed, and a pump
+	// draining a closed channel delivers nothing. Residual queued emissions
+	// die with the session — it is over, and nothing it streams can be
+	// attributed to anything any more.
+	close(s.rowsDone)
 	s.releaseConnection(nil)
 	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)

@@ -16,12 +16,14 @@ import {
   answerTextForEntry,
   answerTextForTurn,
   arrangedByCause,
+  blockRowsForEntry,
   blocksForPane,
   bodyForBlock,
   restoredBody,
   type RestorableBlock,
 } from './restore-client'
 import type { WSClient } from './ipc'
+import { RpcError } from './dispatcher'
 
 /** A ledger that answers `ledger.get` with one entry's artifact list and
  *  `ledger.artifact` with the bytes of whichever id was asked for. */
@@ -86,6 +88,78 @@ describe('restore-client — one helper, two media types', () => {
     } as unknown as WSClient
     expect(await answerTextForEntry(client, 'entry-1')).toBeNull()
     expect(await bodyForBlock(client, 'entry-1')).toBeNull()
+  })
+})
+
+// ── a block's stored rows: read, absent, or unreadable (nocx-2v80t.3.27) ──
+//
+// "The store has no rows for this block" and "the rows could not be read"
+// are different facts with different sentences on the block: the first is a
+// block nothing was kept for, the second is output that exists and was lost
+// on the way. Collapsing both into null let an agent run that printed output
+// complete with empty text, indistinguishable from a command that printed
+// nothing.
+describe("restore-client — a block's stored rows say whether they were read", () => {
+  const ROW_LINE = JSON.stringify({ from: 3, row: { text: 'hi' } })
+
+  it('answers the rows when the artifact is there and well formed', async () => {
+    const { client } = fakeLedger([
+      { id: 'art-rows', mediaType: 'application/x-nocx-rows', body: `${ROW_LINE}\n` },
+    ])
+    const read = await blockRowsForEntry(client, 'entry-1')
+    expect(read.kind).toBe('rows')
+    expect(read.kind === 'rows' ? read.rows.lines.map((l) => l.from) : null).toEqual([3])
+  })
+
+  it('answers absent when the entry keeps no rows artifact at all', async () => {
+    const { client } = fakeLedger([BOTH[0]])
+    expect(await blockRowsForEntry(client, 'entry-1')).toEqual({ kind: 'absent' })
+  })
+
+  it('answers absent when the store holds no entry for the block, or has no store at all', async () => {
+    for (const refusal of [
+      new RpcError('Invalid params: no ledger entry carries id "entry-1"', -32602),
+      new RpcError('method not found: content store not wired', -32601),
+    ]) {
+      const client = {
+        call: vi.fn(() => Promise.reject(refusal)),
+      } as unknown as WSClient
+      expect(await blockRowsForEntry(client, 'entry-1')).toEqual({ kind: 'absent' })
+    }
+  })
+
+  it('answers unreadable, with the cause, when the store could not be asked', async () => {
+    const client = {
+      call: vi.fn(() => Promise.reject(new Error('socket closed'))),
+    } as unknown as WSClient
+    const read = await blockRowsForEntry(client, 'entry-1')
+    expect(read.kind).toBe('unreadable')
+    expect(read.kind === 'unreadable' ? read.reason : '').toContain('socket closed')
+  })
+
+  it('answers unreadable when the artifact read fails after the entry was found', async () => {
+    const client = {
+      call: vi.fn((method: string) =>
+        method === 'ledger.get'
+          ? Promise.resolve({
+              entry: { kind: 'shell' },
+              artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+            })
+          : Promise.reject(new Error('artifact read refused')),
+      ),
+    } as unknown as WSClient
+    const read = await blockRowsForEntry(client, 'entry-1')
+    expect(read.kind).toBe('unreadable')
+    expect(read.kind === 'unreadable' ? read.reason : '').toContain('artifact read refused')
+  })
+
+  it('answers unreadable when the stored rows are malformed', async () => {
+    const { client } = fakeLedger([
+      { id: 'art-rows', mediaType: 'application/x-nocx-rows', body: '{"from":12}\n' },
+    ])
+    const read = await blockRowsForEntry(client, 'entry-1')
+    expect(read.kind).toBe('unreadable')
+    expect(read.kind === 'unreadable' ? read.reason : '').toContain('malformed')
   })
 })
 

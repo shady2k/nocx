@@ -12,6 +12,12 @@ function line(html: string): HTMLElement {
   return el
 }
 
+function gridLine(html: string): HTMLElement {
+  const el = document.createElement('div')
+  el.innerHTML = `<span class="term-grid-row">${html}</span>`
+  return el
+}
+
 function anchors(root: Element): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(`.${LINK_CLASS}`)]
 }
@@ -146,5 +152,13 @@ describe('decorateLinks', () => {
     const root = line('')
     expect(() => decorateLinks(root)).not.toThrow()
     expect(anchors(root)).toHaveLength(0)
+  })
+
+  it('decorates .term-grid-row too — the class a stored block paints since the cutover (nocx-2v80t.3.18)', () => {
+    const root = gridLine('see docs/architecture.md:101 for more')
+    decorateLinks(root)
+    const [a] = anchors(root)
+    expect(a.textContent).toBe('docs/architecture.md:101')
+    expect(linkTargetOf(a)).toEqual({ kind: 'path', path: 'docs/architecture.md', line: 101 })
   })
 })

@@ -55,6 +55,13 @@ func realSchedules() []realSchedule {
 			},
 		},
 		{
+			name: "scheduleTheNextIntervalSettlesTheUnjoinedHalf",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleTheNextIntervalSettlesTheUnjoinedHalf(s)
+			},
+		},
+		{
 			name: "scheduleFenceSightedFirst",
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)
@@ -166,6 +173,20 @@ func realSchedules() []realSchedule {
 			run: func(t *testing.T) error {
 				s, _, _ := realRuntime(t)
 				return scheduleConsumerThatNeverReads(s)
+			},
+		},
+		{
+			name: "scheduleConsumerThatKeepsUp",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleConsumerThatKeepsUp(s)
+			},
+		},
+		{
+			name: "scheduleBaselineOnMidSessionAttach",
+			run: func(t *testing.T) error {
+				s, _, _ := realRuntime(t)
+				return scheduleBaselineOnMidSessionAttach(s)
 			},
 		},
 		{

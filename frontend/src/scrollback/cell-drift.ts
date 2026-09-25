@@ -378,8 +378,15 @@ export function measureFrozenBlock(
   m: Measurers = domMeasurers,
 ): boolean {
   if (!(cellWidth > 0)) return false
+  // A block's rows are `.term-grid-row` since the painter cutover
+  // (nocx-zg3k3.2.4); `.term-line` stays the selector too because the unit
+  // tests above build synthetic rows with it and because it remains the
+  // class an assistant's prose rows carry, which this instrument has never
+  // measured either way (a `.cmd-output` never mixes the two).
   const rows = Array.from(
-    outputEl.querySelectorAll<HTMLElement>(`:scope > .term-line:not(.${PROBE_CLASS})`),
+    outputEl.querySelectorAll<HTMLElement>(
+      `:scope > .term-line:not(.${PROBE_CLASS}), :scope > .term-grid-row:not(.${PROBE_CLASS})`,
+    ),
   )
   if (rows.length !== cols.length || rows.length === 0) return false
 
@@ -420,17 +427,27 @@ export function measureFrozenBlock(
   return true
 }
 
-/** The freeze-time entry point: measure the block that just replaced the
- *  live region. Reads the cell width from the custom property the metric
- *  publisher already puts on the scrollback container, so the instrument
- *  and the layout it is checking agree on the grid by construction. */
-export function recordFrozenBlock(blockEl: HTMLElement, cols: readonly number[]): void {
+/** The paint-time entry point (nocx-2v80t.3.18): measure a block's stored
+ *  rows against the grid width they were painted at. Reads the cell width
+ *  from the custom property the metric publisher already puts on the
+ *  scrollback container, so the instrument and the layout it is checking
+ *  agree on the grid by construction.
+ *
+ *  `cols` is ONE number for the whole block, not one per line: a stored
+ *  block pads every row out to its own widest line (block-rows.ts
+ *  blockColumnsOf), so every painted row shares that width — unlike the
+ *  retired live-buffer path (recordFrozenBlock, deleted with the freeze/
+ *  clear mechanism in nocx-2v80t.3.3), which read a column count per line
+ *  out of the xterm buffer it was serializing. This is its replacement: the
+ *  freeze-time wiring the original entry point lost when that mechanism
+ *  went, restored against the block-rows painter that replaced it. */
+export function recordStoredBlock(blockEl: HTMLElement, lineCount: number, cols: number): void {
   if (!isEnabled()) return
   const out = blockEl.querySelector<HTMLElement>('.cmd-output')
   if (!out) return
   const cellWidth = Number.parseFloat(getComputedStyle(out).getPropertyValue('--term-cell-width'))
   if (!Number.isFinite(cellWidth) || cellWidth <= 0) return
-  measureFrozenBlock(out, cols, cellWidth)
+  measureFrozenBlock(out, Array<number>(lineCount).fill(cols), cellWidth)
 }
 
 // ── The console surface ────────────────────────────────────────────────────

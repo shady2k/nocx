@@ -775,6 +775,11 @@ func New(opts ...Option) (*App, error) {
 	// registry.
 	childTransports := newTransportRegistry()
 	childSessions := newSessionRegistry()
+	// Lane -> the pane's own completion downlink (environment_entry.go,
+	// nocx-2v80t.3.21): filled in as panes spawn, consulted by the
+	// environment-entry emitter below for a lane whose child domain just
+	// took it.
+	envEntryRegistry := newEnvironmentEntryRegistry()
 	// One process observer for the whole backend, built here and injected:
 	// "is the shell we started still the process running there" is one
 	// question with one owner (nocx-cgzc), the platform half is per-OS, and
@@ -1711,7 +1716,7 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH,
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, envEntryRegistry, typedSSH,
 			// The endpoint a nested child on THIS machine is told, which is
 			// this backend's own (nocx-1n56d). Read through the opener rather
 			// than captured, because cmd/nocx-server publishes its tool socket
@@ -1736,6 +1741,7 @@ func New(opts ...Option) (*App, error) {
 	// Helper-hosted sessions use this same publisher; their byte carrier is
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
+	helperReg.environmentEntries = envEntryRegistry
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
 	// bead nocx-u7uh.4; moved onto this machine's helper by nocx-50w7p.8):
 	// the composition root implements the ssh layer's RemoteLifecycle seam
@@ -2077,6 +2083,12 @@ func New(opts ...Option) (*App, error) {
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The screen plane's transport half, bound here because the opener was
+	// built before the transport existed — the same late-binding every other
+	// opener seam below gets (nocx-zg3k3.2.2's publish).
+	localOpener.publishScreen = tp.PublishScreenFrame
+	localOpener.blockRows = tp
+	localOpener.environmentEntries = envEntryRegistry
 	// The prompt seam a helper's keyboard-interactive challenge needs is the
 	// transport's own connection-password ask — the same one the coordinator's
 	// dial path uses, so a helper's question and a dial's question raise one
@@ -2106,8 +2118,11 @@ func New(opts ...Option) (*App, error) {
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the
 	// server is built above; the window before this line is empty (no
-	// session can have spawned a shell yet).
-	lifecyclePub.SetEmitter(tp)
+	// session can have spawned a shell yet). Decorated with the
+	// environment-entry observation (nocx-2v80t.3.21): every other Emitter
+	// method still reaches tp unchanged, so this changes nothing else that
+	// already depends on tp being the registered emitter.
+	lifecyclePub.SetEmitter(newEnvironmentEntryEmitter(tp, lifecyclePub, envEntryRegistry))
 
 	// Where a pane's classification goes, bound post-construction for the
 	// same reason as the emitter above. Without this line the backend would
@@ -2992,7 +3007,7 @@ func (a *App) Start(ctx context.Context) error {
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
-			local: a.localHelper,
+			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
@@ -3090,6 +3105,8 @@ func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struc
 			&readoptPass{
 				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
 				local: a.localHelper, timeout: vaultSealedRetryAttempt,
+				publishScreen: a.Transport.PublishScreenFrame,
+				blockRows:     a.Transport,
 			},
 			content.DefaultUnreconciledRetention, a.slogger)
 		for _, inv := range a.helperRegistry.inventories() {

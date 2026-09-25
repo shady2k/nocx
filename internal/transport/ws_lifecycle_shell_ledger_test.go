@@ -20,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
@@ -175,8 +176,7 @@ func TestShellOriginatedStart_MasksTheCommandLikeHistoryRecord(t *testing.T) {
 
 // Criterion 4, the pair: with output retention off the shell-originated entry
 // is still recorded and no output is kept; with retention on the output is
-// kept as today. CaptureOutput's refusals are the store's own — the entry's
-// existence is what this change adds.
+// kept through the streamed rows lifecycle.
 func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 	t.Run("retention off: entry recorded, no output kept", func(t *testing.T) {
 		policy := content.NewPolicy()
@@ -190,20 +190,14 @@ func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 			t.Fatalf("row with retention off = phase=%q, want closed — the entry itself is kept", row.Phase)
 		}
 
-		kept, err := db.Ledger().CaptureOutput(context.Background(), content.CaptureOutput{
-			EntryID:        string(shellID),
-			ArtifactID:     shellLedgerArtifact1,
-			MediaType:      content.MediaText,
-			CaptureMethod:  content.CaptureTerminalCells,
-			CaptureVersion: 1,
-			Seq:            1,
-			Body:           []byte("the output"),
+		opened, err := db.Ledger().OpenBlockOutput(context.Background(), content.OpenBlockOutput{
+			EntryID: string(shellID), ArtifactID: shellLedgerArtifact1,
 		})
 		if err != nil {
-			t.Fatalf("CaptureOutput with retention off: %v, want nil (a refusal, not a failure)", err)
+			t.Fatalf("OpenBlockOutput with retention off: %v, want nil", err)
 		}
-		if kept {
-			t.Fatal("output kept while retention is off")
+		if opened != "" {
+			t.Fatalf("OpenBlockOutput with retention off = %q, want refusal", opened)
 		}
 	})
 
@@ -214,27 +208,45 @@ func TestShellOriginatedEntry_OutputRetentionPair(t *testing.T) {
 		shellID := lifecycle.AttemptID("att-shell-4")
 		shellStartComplete(t, pub, lane, h, 2, shellID, "cat report.txt", 0)
 
-		kept, err := db.Ledger().CaptureOutput(context.Background(), content.CaptureOutput{
-			EntryID:        string(shellID),
-			ArtifactID:     shellLedgerArtifact2,
-			MediaType:      content.MediaText,
-			CaptureMethod:  content.CaptureTerminalCells,
-			CaptureVersion: 1,
-			Seq:            1,
-			Body:           []byte("the output"),
+		opened, err := db.Ledger().OpenBlockOutput(context.Background(), content.OpenBlockOutput{
+			EntryID: string(shellID), ArtifactID: shellLedgerArtifact2,
 		})
 		if err != nil {
-			t.Fatalf("CaptureOutput with retention on: %v", err)
+			t.Fatalf("OpenBlockOutput with retention on: %v", err)
 		}
-		if !kept {
-			t.Fatal("output not kept while retention is on")
+		if opened != shellLedgerArtifact2 {
+			t.Fatalf("OpenBlockOutput = %q, want %q", opened, shellLedgerArtifact2)
+		}
+		appendErr := db.Ledger().AppendBlockRows(context.Background(), content.AppendBlockRows{
+			EntryID: string(shellID), ArtifactID: opened, FromRow: 0,
+			Rows: []emulator.Row{{
+				Cells: []emulator.Cell{{
+					Grapheme: "the output", Width: emulator.WidthNarrow, HasText: true,
+				}},
+			}},
+		})
+		if appendErr != nil {
+			t.Fatalf("AppendBlockRows: %v", appendErr)
+		}
+		_, closeErr := db.Ledger().CloseBlockRows(context.Background(), content.CloseBlockRows{
+			EntryID: string(shellID), ArtifactID: opened,
+		})
+		if closeErr != nil {
+			t.Fatalf("CloseBlockRows: %v", closeErr)
 		}
 		art, err := db.Ledger().Artifact(context.Background(), shellLedgerArtifact2)
 		if err != nil {
 			t.Fatalf("Artifact: %v", err)
 		}
-		if art == nil || len(art.Chunks) == 0 || string(art.Chunks[0]) != "the output" {
-			t.Fatalf("stored artifact = %+v, want the body readable", art)
+		if art == nil {
+			t.Fatal("stored artifact is nil, want the body readable")
+		}
+		text, err := content.BlockRowsText(art.Chunks)
+		if err != nil {
+			t.Fatalf("BlockRowsText: %v", err)
+		}
+		if text != "the output" {
+			t.Fatalf("stored artifact text = %q, want %q", text, "the output")
 		}
 	})
 }
@@ -291,54 +303,6 @@ func TestShellOriginatedStart_HistoryOffOpensNoEntry(t *testing.T) {
 // no entry ever appears. With history ON the paired behaviour is
 // TestLifecycleSubmitAttempt_OpensLedgerEntryAtAttemptIDAndMasks and
 // TestLifecycleLedgerTransitions_ListAndReadByAttemptID.
-func TestSubmitAttemptAndHistoryRecord_HistoryOffRecordNothing(t *testing.T) {
-	policy := content.NewPolicy()
-	policy.SetEnabled(false)
-	db := newLedgerStoreWithPolicy(t, policy)
-	e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
-
-	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), "deploy prod"), 41))
-	if got.ID == "" {
-		t.Fatal("history-off submit returned an empty attempt id — the command must still run")
-	}
-	if _, ok := pub.Attempt(lifecycle.AttemptID(got.ID)); !ok {
-		t.Fatal("history-off submit left no live kernel attempt")
-	}
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "deploy prod")))
-
-	recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
-		"attemptId": got.ID,
-		"command":   "deploy prod",
-		"cwd":       "/repo",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": nil,
-		"endedAt":   nil,
-		"paneId":    "01930000-0000-7000-8000-0000000000a1",
-	}, 42)
-	var recordEnvelope struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-		t.Fatalf("history.record response: %v", err)
-	}
-	if recordEnvelope.Error != nil {
-		t.Fatalf("history.record with history off: %+v", recordEnvelope.Error)
-	}
-	var ack historyRecordResponse
-	if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
-		t.Fatalf("history.record result: %v", err)
-	}
-	if ack.EntryID != "" {
-		t.Fatalf("history.record ack entry id = %q, want the empty-id signal", ack.EntryID)
-	}
-	if n := entryCount(t, db); n != 0 {
-		t.Fatalf("entry count with history off after submit + record = %d, want zero", n)
-	}
-}
 
 // Criterion 4, both completions: a row whose start was recorded while history
 // was ON closes with its real outcome even after the setting turns off. The
@@ -371,7 +335,7 @@ func TestHistoryOffMidrun_AnOpenRowStillCloses(t *testing.T) {
 		}
 	})
 
-	t.Run("history.record closes it", func(t *testing.T) {
+	t.Run("app completion closes it", func(t *testing.T) {
 		policy := content.NewPolicy()
 		db := newLedgerStoreWithPolicy(t, policy)
 		e, pub, lane, h, _, _ := newLifecycleLedgerEnvWithStore(t, db)
@@ -383,38 +347,11 @@ func TestHistoryOffMidrun_AnOpenRowStillCloses(t *testing.T) {
 		}
 
 		policy.SetEnabled(false)
-		recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
-			"attemptId": got.ID,
-			"command":   "sleep 30",
-			"cwd":       "/repo",
-			"host":      "",
-			"source":    "user",
-			"status":    "success",
-			"exitCode":  0,
-			"startedAt": nil,
-			"endedAt":   nil,
-			"paneId":    "01930000-0000-7000-8000-0000000000a1",
-		}, 42)
-		var recordEnvelope struct {
-			Result json.RawMessage  `json:"result"`
-			Error  *jsonrpcErrorObj `json:"error"`
-		}
-		if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-			t.Fatalf("history.record response: %v", err)
-		}
-		if recordEnvelope.Error != nil {
-			t.Fatalf("history.record with history off midrun: %+v", recordEnvelope.Error)
-		}
-		var ack historyRecordResponse
-		if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
-			t.Fatalf("history.record result: %v", err)
-		}
-		if ack.EntryID != got.ID {
-			t.Fatalf("history.record ack entry id = %q, want the open attempt %q", ack.EntryID, got.ID)
-		}
+		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(got.ID), 0, lifecycleFence(0x44))))
+
 		row := mustEntry(t, db, got.ID)
 		if row.Phase != content.PhaseClosed || row.Status != content.EntrySuccess {
-			t.Fatalf("row after record = phase=%q status=%q, want closed/success", row.Phase, row.Status)
+			t.Fatalf("row after completion with history off = phase=%q status=%q, want closed/success", row.Phase, row.Status)
 		}
 		if n := entryCount(t, db); n != 1 {
 			t.Fatalf("entry count = %d, want exactly the one open row, closed", n)

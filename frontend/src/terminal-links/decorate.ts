@@ -47,6 +47,15 @@ import { detectLinks, type LinkTarget } from './detect'
  *  again at each call site. */
 export const LINK_CLASS = 'term-link'
 
+/** A row this decorator walks: `.term-line`, the assistant prose class and
+ *  the frozen serializer's own before the painter cutover, and
+ *  `.term-grid-row`, the class a stored block's rows carry since
+ *  (nocx-zg3k3.2.4, ADR-0009). Both hold the same shape — text nodes and
+ *  `.term-cell` spans, one node per colour run — which is what
+ *  `flattenLine` actually walks; the class only says which surface owns
+ *  the row. */
+const ROW_SELECTOR = '.term-line, .term-grid-row'
+
 /**
  * Decorate every row under `root` (and `root` itself, when it is a row).
  *
@@ -56,8 +65,8 @@ export const LINK_CLASS = 'term-link'
  * benefit of a check that costs one selector.
  */
 export function decorateLinks(root: Element): void {
-  if (root.matches(`.term-line`)) decorateRow(root)
-  for (const row of root.querySelectorAll('.term-line')) decorateRow(row)
+  if (root.matches(ROW_SELECTOR)) decorateRow(root)
+  for (const row of root.querySelectorAll(ROW_SELECTOR)) decorateRow(row)
 }
 
 function decorateRow(row: Element): void {

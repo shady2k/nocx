@@ -638,11 +638,42 @@
   min-height: 140px;
   height: 100%;
   width: 100%;
+  /* The painter surface is positioned against THIS box: absolute (next
+     rule) so it overlays the grid instead of taking flow space — an
+     in-flow surface doubled the box the echo shift and the viewport
+     sizing were computed from, and pushed xterm's own root below the
+     pane (measured: the click point hit the container, never a cell). */
+  position: relative;
+}
+
+/* THE PAINTER'S SURFACE IN THE LIVE REGION (nocx-zg3k3.2.5). It paints
+   the committed grid at xterm-inner's origin — the same origin xterm's
+   own screen had — so the painted rows and the echo-shift transform move
+   as one, and the input layer above them keeps its hit-test area. */
+.xterm-inner > .term-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
 }
 
 /* Fullscreen: override min-height so xterm fills the viewport. */
 .xterm-inner.inner-fullscreen {
   min-height: auto;
+}
+
+/* THE OCCLUDED INPUT LAYER (nocx-zg3k3.2.5). The cutover's interim: xterm
+   stays in the live region to receive what the person does and the bytes
+   that set the program's modes, and draws NOTHING — the cell painter
+   (.term-grid) draws the screen. The mark is on xterm's own root (renderers/
+   xterm.ts), set only when the renderer was built occluded, so no renderer
+   a person can see ever carries it. `opacity` and not `display`/`visibility`:
+   the layer must keep receiving pointer events (focus, mouse reporting) and
+   keep its helper textarea focusable for IME — hidden-but-hit-testable is
+   the whole point. Its DOM renderer still maintains its viewport-sized row
+   set underneath; that bounded cost is the interim's, paid until xterm is
+   removed (ADR-0072's order). */
+.xterm.xterm-occluded {
+  opacity: 0;
 }
 
 /* Alt-screen: the pane belongs to the program, so everything the block layer
@@ -802,7 +833,14 @@
   -webkit-user-select: text;
 }
 
-.term-line {
+/* The grid row shares the TYPE CONTEXT — font, pitch, the published
+   delta, the ligature/kerning shutdown — because the live painter's rows
+   must measure exactly what cell-fit's probe measures (cell-fit.ts takes
+   its signature from a .term-line). Per ADR-0009 the LIVE GRID ROW is a
+   class of its own: .term-line is also the assistant prose's class, and
+   the grid-only rules below never land on wrapping text. */
+.term-line,
+.term-grid-row {
   display: block;
   font-size: var(--font-size-terminal);
   /* ONE FROZEN ROW IS ONE GRID ROW. The pitch is the renderer's measured cell
@@ -894,6 +932,29 @@
   /* От левого края своей колонки, по вертикали посередине строки: глиф
      начинается там, где начинается ячейка, и не съезжает вниз. */
   transform-origin: 0 50%;
+}
+
+/* THE LIVE CELL GRID (nocx-zg3k3.2.4) — the painter's surface and cursor.
+   The rows are .term-grid-row, a class of its own per ADR-0009 (the
+   shared rule above gives them the frozen rows' type context, and nothing
+   else is shared). The surface carries the mono family the probe assumes
+   and positions the cursor overlay, which is placed by THE mapping
+   (frontend/src/painter/mapping.ts) in pixels of the committed geometry —
+   never a glyph in the text flow. */
+.term-grid {
+  position: relative;
+  font-family: var(--font-family-mono);
+}
+
+.term-grid-row {
+  white-space: pre;
+}
+
+.term-grid-cursor {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  background: color-mix(in srgb, currentColor, transparent 75%);
 }
 
 /* A whole-block grant fills the block; a row grant fills only its selected

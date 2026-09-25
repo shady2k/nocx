@@ -102,7 +102,7 @@ const RECORDING_UNKNOWN: OutputRecordingSource = {
 }
 import { BlockReceipt } from './ui/block-receipt'
 import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
-import type { HistoryRecord } from './generated/history.record'
+import type { Capture, HistoryRecorded, Redaction } from './generated/history.recorded'
 import {
   blockOutputText,
   renderRecordedCommand,
@@ -128,24 +128,27 @@ import {
   type CommandRecord,
   type CommandStatus,
 } from './command-ledger'
-import { recordCommand, queryHistory } from './history-client'
-import { captureBlock } from './capture-client'
+import { queryHistory, subscribeHistoryRecorded } from './history-client'
 import {
   answerTextForEntry,
   answerTextForTurn,
   arrangedByCause,
+  blockRowsForEntry,
   blocksForPane,
   restoredBody,
   toolResultForEntry,
   type RestorableBlock,
 } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { blockColumnsOf, paintStoredRows } from './scrollback/block-rows'
+import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { BlockClosed } from './generated/block.closed'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -185,6 +188,75 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
+import { createCellModel, type CellModel, type ScreenSnapshot } from './cell-model'
+import type { SessionFrame } from './generated/session.frame'
+import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
+import { createCellFit, type CellFit } from './scrollback/cell-fit'
+
+// ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
+// An e2e spec reads the ACTIVE pane's cell model through
+// window.__nocxPaneScreen() — never xterm's DOM, which is the byte path's
+// surface, and never the model object itself, which the pane owns. The
+// registry maps session id → reader; the hook resolves "active" by the one
+// class the layout chain owns (.pane.active) together with the session id
+// the pane already publishes (data-session-id), so activity has a single
+// derivation everywhere. Read-only: it mounts nothing, mutates nothing and
+// is installed once, on the first pane that binds a session.
+
+/** What the seam answers for the active pane: the model's installed
+ *  revision and each row's text (cells joined), or nulls when the pane has
+ *  no frame yet. */
+export interface PaneScreenReading {
+  revision: number | null
+  rows: string[]
+  /** The frame's committed geometry — the per-cell metric the client's own
+   *  pixel-to-cell mapping reads. Null while no revision is installed. */
+  geometry: {
+    cols: number
+    rows: number
+    cellWidthPx: number
+    cellHeightPx: number
+  } | null
+  /** What THIS client last reported for this session, or null before its
+   *  first send. The e2e compares the frame's committed metric against the
+   *  decode of the report that produced it (nocx-zg3k3.2.9). */
+  reported: SessionSize | null
+}
+
+const paneScreenReaders = new Map<string, () => PaneScreenReading>()
+
+function readActivePaneScreen(): PaneScreenReading | null {
+  const pane = document.querySelector('.pane.active[data-session-id]')
+  if (!(pane instanceof HTMLElement)) return null
+  const sessionId = pane.getAttribute('data-session-id')
+  if (sessionId === null) return null
+  const read = paneScreenReaders.get(sessionId)
+  return read ? read() : null
+}
+
+function installPaneScreenSeam(): void {
+  const host = window as unknown as { __nocxPaneScreen?: () => PaneScreenReading | null }
+  if (!host.__nocxPaneScreen) host.__nocxPaneScreen = readActivePaneScreen
+}
+
+/** Flatten one model snapshot to the seam's reading, beside what this
+ *  window last reported. A model with no installed revision reads as
+ *  nulls, never as an empty lie. */
+function readPaneScreen(model: CellModel, reported: SessionSize | null): PaneScreenReading {
+  const snapshot = model.current()
+  if (snapshot === null) return { revision: null, rows: [], geometry: null, reported }
+  return {
+    revision: snapshot.revision,
+    rows: snapshot.rows.map((row) => row.cells.map((cell) => cell.grapheme).join('')),
+    geometry: {
+      cols: snapshot.geometry.cols,
+      rows: snapshot.geometry.rows,
+      cellWidthPx: snapshot.geometry.cellWidthPx,
+      cellHeightPx: snapshot.geometry.cellHeightPx,
+    },
+    reported,
+  }
+}
 
 // How long the grid must hold still before the PTY is told about it.
 /** The assistant's floor when the seam is dragged down: a question and one
@@ -418,7 +490,7 @@ function isTextEntry(el: Element | null, terminalSurface: Element | null = null)
  */
 export interface PaneIdentity {
   /** The renderer-minted UUIDv7 (design §7). Durable, so it cannot come from
-   *  a backend instance, and it is one identity for history.record and
+   *  a backend instance, and it is one identity for lifecycle history and
    *  secrets.paneClosed WHETHER OR NOT a row was ever written for it. */
   readonly paneId: string
   /**
@@ -929,14 +1001,18 @@ export class TerminalContent extends BasePaneContent {
     }
   >()
   /** The store's entry id for an agent run's record, keyed by the renderer's
-   *  own record id: opened at the submit (only a run needs one), filled by
-   *  the history.record ack, and removed when the run resolves. `entryId` is
-   *  null until the store has answered; '' is the store's answer that it
+   *  own record id: opened at submit (only a run needs one), filled by the
+   *  history.recorded receipt, and removed when the run resolves. `entryId`
+   *  is null until the store has answered; '' is the store's answer that it
    *  wrote no row (nocx-9sqii). */
   private readonly runEntryIds = new Map<
     number,
     { entryId: string | null; waiting: ((entryId: string) => void) | null }
   >()
+  /** Renderer record ids awaiting the backend-owned history.recorded receipt. */
+  private readonly attemptEntryIds = new Map<string, number>()
+  /** Receipts can precede the lifecycle.submitAttempt response. */
+  private readonly earlyHistoryReceipts = new Map<string, HistoryRecorded>()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
@@ -1100,6 +1176,7 @@ export class TerminalContent extends BasePaneContent {
     )
   }
   private lifecycle = new LifecycleKernel()
+  private _historyRecordedUnsub: (() => void) | null = null
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
   private indicator: TargetIndicator | null = null
@@ -1208,7 +1285,7 @@ export class TerminalContent extends BasePaneContent {
    *  the pane knew when the command was submitted and never updates it
    *  afterwards"). Keyed by id rather than a DOM attribute on `rec.el`
    *  because the freeze that settles a block REPLACES that element with
-   *  a freshly built one (BlockManager._freezeVisual) that carries no
+   *  a freshly built one (BlockManager._freezeCard) that carries no
    *  attribute of ours forward — `_onBlockFrozen` reads this map to
    *  restate the branch on the new element. */
   private readonly _blockBranch = new Map<number, string | undefined>()
@@ -1269,6 +1346,17 @@ export class TerminalContent extends BasePaneContent {
   private _awaitsIntegration = false
   /** The subscription to that status, dropped on dispose. */
   private _integrationUnsub: (() => void) | null = null
+  /** Backend block-row notification subscriptions for the current pane. */
+  private _blockRowsUnsubs: Array<() => void> = []
+  /** The most recently started rows fetch per entry, keyed by attempt id —
+   *  what a block.grew/block.closed notification only STARTS
+   *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
+   *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
+   *  than starting a second fetch for the same entry when one is already
+   *  running — block.closed's closing read above all — and starts its own (also tracked here) when nothing was; either way the
+   *  run tool's completion waits on the SAME fetch this map would otherwise
+   *  let a second caller duplicate (nocx-2v80t.3.19). */
+  private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -1296,6 +1384,25 @@ export class TerminalContent extends BasePaneContent {
   private _unreconciledNoticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
+  /** The pane's cell model (nocx-zg3k3.2.8): the client's picture of the
+   *  screen, fed by the session's screen frames — one per pane, created
+   *  when the pane binds a session, fed by nothing else. */
+  private _cellModel: CellModel | null = null
+  /** The live region's painter (nocx-zg3k3.2.5): what a person SEES of the
+   *  screen, drawing the model's revisions. Created at mount — the pane has
+   *  a live region before it has a session — and fed by the one frame
+   *  handler below. */
+  private _painter: CellPainter | null = null
+  /** The surface element the painter paints into, held for disposal. */
+  private _painterSurface: HTMLElement | null = null
+  /** THE measuring authority the frozen blocks publish for (cell-fit.ts):
+   *  one probe, one signature, shared with the freeze path. */
+  private _cellFit: CellFit | null = null
+  /** The frame batch: revisions can land several to a tick, and the DOM
+   *  work is bounded to one painted state per animation frame — the latest
+   *  revision, never an intermediate one nobody could have seen. */
+  private _pendingPaint: ScreenSnapshot | null = null
+  private _paintFrameHandle = 0
   // The last thing the backend said about REACHING this pane's host, and the
   // corner mark drawn from it. Null liveness is the ordinary state of a local
   // pane: this machine is never probed, so there is nothing to say about
@@ -1510,12 +1617,10 @@ export class TerminalContent extends BasePaneContent {
     private readonly client: WSClient,
     /** The renderer-minted per-pane identity and its row's readiness
      *  (nocx-tsajw, nocx-rtg0.29): minted once per pane by PaneManager,
-     *  never reused, carried on history.record so the backend scopes pending
-     *  captures to this pane, and on `open` so every block this session
-     *  records anchors on it. The identity replaced a bare string so the
-     *  readiness cannot be forgotten at a construction site — an optional
-     *  extra would have type-checked when omitted, which is the whole reason
-     *  the hooks below are named. */
+     *  never reused, carried on lifecycle history so the backend scopes
+     *  pending captures to this pane, and on `open` so every block this
+     *  session records anchors on it. The identity replaced a bare string
+     *  so readiness cannot be forgotten at a construction site. */
     private readonly pane: PaneIdentity,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
@@ -2182,19 +2287,22 @@ export class TerminalContent extends BasePaneContent {
    * resolves false (no layout store, or a create the backend refused) and
    * the open goes out exactly as it did before this bead, unanchored.
    */
-  private async openRequestedSession(): Promise<SessionHandle> {
+  private async openRequestedSession(renderer: TerminalRenderer): Promise<SessionHandle> {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, anchor)
+      return this.client.openSession(this._reportedSize(renderer), anchor)
     }
     if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)
+      return this.client.openSSHSession(
+        this._reportedSize(renderer),
+        this.sshOpts.profileId,
+        anchor,
+      )
     }
     return this.client.openSSHSessionByHost(
-      this.cols,
-      this.rows,
+      this._reportedSize(renderer),
       this.sshOpts.host,
       this.sshOpts.user,
       anchor,
@@ -2240,10 +2348,13 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {
+  private async openSessionWithHostKeyRecovery(
+    signal: AbortSignal,
+    renderer: TerminalRenderer,
+  ): Promise<SessionHandle> {
     for (;;) {
       try {
-        return await this.openRequestedSession()
+        return await this.openRequestedSession(renderer)
       } catch (err) {
         // The connect-time ask (ADR-0069) is checked FIRST: its shape is a
         // superset of the plain host-key failure — it carries the same
@@ -2316,7 +2427,16 @@ export class TerminalContent extends BasePaneContent {
       }
 
       log.info('nocx: creating renderer')
-      const renderer = new XtermRenderer()
+      // THE CUTOVER'S INTERIM (nocx-zg3k3.2.5): xterm is the live region's
+      // INVISIBLE input layer. The screen arrives as frames and the painter
+      // below draws them; xterm keeps the byte path — the program's modes
+      // (bracketed paste, mouse reporting, application cursor keys) live in
+      // its parser — and every keyboard, IME, paste and pointer event. It
+      // draws nothing: no visual renderer is constructed, and whatever its
+      // built-in DOM renderer still maintains is hidden by the stylesheet's
+      // occlusion rule. Removed with xterm itself when input becomes intent
+      // and selection gets its own model; nothing new builds on it.
+      const renderer = new XtermRenderer({ occluded: true })
       const agentClient = new AgentClient(this.client.dispatcher)
       this.dumpSource = (entryId) => agentClient.dump(entryId)
       // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
@@ -2350,6 +2470,26 @@ export class TerminalContent extends BasePaneContent {
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
+        paintStoredRows: (block, rows) => {
+          const fit = this._cellFit
+          const metric = fit !== null && fit.begin() ? metricOf(fit) : null
+          paintStoredRows(block, rows, {
+            metric,
+            palette: fromITheme(getCurrentTheme()),
+            // cell-fit's batch write (nocx-2v80t.3.18): warmed here, once
+            // for the whole block, so `boxOf` inside `paintRow` above is a
+            // pure cache read — `fit.warm` itself is a no-op when `begin`
+            // found nowhere to measure.
+            warm: fit ? (candidates) => fit.warm(candidates) : undefined,
+          })
+          // The frozen-line drift instrument (nocx-4n6sj, off by default):
+          // only a FROZEN block's rows are worth measuring — a running
+          // block's output is still arriving and remeasuring it on every
+          // chunk would be noise, not a sample.
+          if (!block.classList.contains('cmd-block-running')) {
+            recordStoredBlock(block, rows.lines.length, blockColumnsOf(rows.lines))
+          }
+        },
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         // The copy path is handed a TURN's entry id (blocks.ts reaches it
         // only for a block whose kind is `ask`), and a turn's answer is its
@@ -2362,6 +2502,36 @@ export class TerminalContent extends BasePaneContent {
         // bytes (nocx-hp8p2.13).
         toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
+      })
+
+      // ── THE LIVE REGION'S PAINTER (nocx-zg3k3.2.5) ─────────────────────
+      // What a person SEES in the live region is the cell painter drawing
+      // the model's revisions (the backend's frames). The surface is the
+      // FIRST child of the grid wrapper the echo shift translates
+      // (controller._applyEchoShift owns that transform), so the painted
+      // rows move with the grid; renderer.mount below appends xterm's root
+      // AFTER it, which puts the invisible input layer on top — the painter
+      // shows through it, and pointer events (focus, mouse reporting)
+      // reach xterm exactly as they did before the cutover.
+      const painterSurface = document.createElement('div')
+      const mountTarget = this.scrollback.mountTarget
+      mountTarget.insertBefore(painterSurface, mountTarget.firstChild)
+      this._painterSurface = painterSurface
+      // THE measuring authority, shared with the frozen blocks: the probe
+      // lives on the scrollback stack, where cell-metric publishes
+      // --term-cell-width / --term-cell-delta, and takes its signature from
+      // a .term-line — one owner of "does this cell land on the grid", per
+      // the design's measurement seam. begin() runs per apply: mount, font
+      // loads, zoom and dpr changes move the published numbers, and a
+      // verdict must never outlive the numbers it was measured with.
+      this._cellFit = createCellFit(() => this.scrollback?.scrollbackInner ?? null)
+      this._painter = createCellPainter({
+        surface: painterSurface,
+        metric: () => {
+          const fit = this._cellFit
+          if (fit === null || !fit.begin()) return null
+          return metricOf(fit)
+        },
       })
 
       // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
@@ -2391,13 +2561,11 @@ export class TerminalContent extends BasePaneContent {
       this.cols = renderer.cols
       this.rows = renderer.rows
 
-      // ── Command ledger (ADR-0008, severed) ──────────────────────────────
-      // The completion projection's app-owned half: records are opened at
-      // the app-owned submit (ADR-0024 §5) and read back; nothing completes
-      // them — the marker cycle is deleted — so the persistence seam
-      // (recordCommand) has no terminal caller and history recording is
-      // unavailable. The migration bead reconnects completion to
-      // authenticated domain events.
+      // ── Command ledger (ADR-0008) ───────────────────────────────────────
+      // Records open at the app-owned submit (ADR-0024 §5) and complete from
+      // authenticated lifecycle events. The backend owns durable history and
+      // sends the history.recorded receipt; the renderer only binds and paints
+      // that result.
       this.ledger = new CommandLedger({ now: () => Date.now() })
 
       // ── Wire input ownership BEFORE opening the session ─────────────────
@@ -2715,10 +2883,10 @@ export class TerminalContent extends BasePaneContent {
         {
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
           // with references is resolved through vault.resolveLine; the
-          // RESOLVED line goes to the PTY, the reference-intact line to the
-          // ledger and history.record. A sealed vault or an unresolved name
-          // is reported and the draft stays — never a silent send of a
-          // broken line (the editor's beforeSubmit seam keeps the draft on
+          // RESOLVED line goes to the PTY, the reference-intact line to
+          // lifecycle history. A sealed vault or an unresolved name is
+          // reported and the draft stays — never a silent send of a broken
+          // line (the editor's beforeSubmit seam keeps the draft on
           // false). A plain line resolves SYNCHRONOUSLY (planSubmitSync) —
           // an ordinary Enter keeps its no-gap atomic handoff. A recalled
           // masked row is refused first: the draft stays and resolution
@@ -3311,10 +3479,10 @@ export class TerminalContent extends BasePaneContent {
             this._openAuthenticatedBlock(renderer, attempt, undefined)
           },
           freezeBlock: (attempt) => {
-            // ADR-0024 §7: the visual freeze is authorized only by the
-            // authenticated completion (kernel derivation). The render-fence
-            // rendezvous is bead nocx-u7uh.8; the freeze lands on the event
-            // for now, at the current output end.
+            // ADR-0024 §7: the freeze is authorized only by the authenticated
+            // completion (kernel derivation). The block closes on screen when
+            // the backend's block.closed for it has also arrived
+            // (nocx-2v80t.3.27).
             if (!this.scrollback) return
             if (!kernelFreezeBlock(attempt, attempt.domain)) return
             this.scrollback.freezeFromAttempt(attempt, renderer.cursorLine())
@@ -3344,21 +3512,8 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback.abandonUnbound(renderer.cursorLine())
           },
         },
-        (rec, attempt) =>
-          recordCommand(this.client, this.pane.paneId, rec, attempt).then((ack) => {
-            if (ack) {
-              const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
-              this.attachRecordedAck(rec.id, block, ack)
-            }
-            // What the store made of this record, for whoever is waiting on
-            // it: the entry id it minted, or '' when it wrote no row (a
-            // dropped record answers null, which is the same fact). An
-            // agent run's resolution names this id and nothing else can
-            // (nocx-9sqii).
-            this.settleStoredEntry(rec.id, ack?.entryId ?? '')
-            return ack
-          }),
         (rec, attempt) => {
+          this.bindHistoryAttempt(attempt.id, rec.id)
           const sessionId = this.session?.sessionId
           if (!sessionId) return
           void this.client
@@ -3900,27 +4055,27 @@ export class TerminalContent extends BasePaneContent {
         this.cols = cols
         this.rows = rows
         // A grid this window BORROWED is not a measurement this window made
-        // (nocx-eidfb.3). xterm reports every grid change the same way
-        // whoever caused it, and reporting this one back would be the window
-        // claiming a size it never measured — which under nocx-eidfb.2 is a
-        // claim on the session, made on behalf of the client that actually
-        // chose it.
-        if (this.sessionGrid) return
-        clearTimeout(this.resizeTimer)
-        this.resizeTimer = window.setTimeout(() => {
-          // A resize makes the shell redraw its prompt, and that redraw arrives
-          // on `session.onData` looking exactly like output the user has not
-          // seen. It is not: we asked for it. Switching the strip from vertical
-          // to horizontal resizes every pane at once, so every inactive tab lit
-          // its activity indicator for something the user did to the WINDOW
-          // rather than to any tab (nocx-6w4z).
-          this.echoUntil = Date.now() + RESIZE_ECHO_MS
-          // this.session, never the one captured when the pane mounted: a
-          // reconnect replaces the handle underneath this callback, and a
-          // resize sent to the session that died would size nothing while
-          // the live shell kept the geometry of a window that has moved on.
-          this.session?.sendResize(cols, rows)
-        }, RESIZE_SETTLE_MS)
+        // (nocx-eidfb.3) — _scheduleResizeReport skips it — and what is
+        // reported is computed when the settle timer fires, never captured.
+        this._scheduleResizeReport()
+      })
+
+      // A ZOOM IS A RESIZE (nocx-zg3k3.2.9). onResize fires only when the
+      // grid moves, so a zoom that leaves cols and rows alone — the very
+      // case the acceptance names — would never be reported and the frames
+      // would keep the old metric. onCellDimsChange fires wherever the cell
+      // metric may have moved (mount, grid resize, device-pixel-ratio
+      // change); the client's own sendResize dedupe is on the WHOLE report,
+      // so a dims change that produced no new report sends nothing.
+      renderer.onCellDimsChange(() => {
+        this._scheduleResizeReport()
+        // AND THE PAINTED SPACING FOLLOWS THE METRIC: a changed cell metric
+        // re-verdicts every run's spacing (rule 1's output is painted
+        // output), so the installed revision is repainted under the new
+        // numbers without waiting for the runtime's next frame to re-bind
+        // the mapping.
+        const installed = this._cellModel?.current() ?? null
+        if (installed !== null) this._paintFrame(installed)
       })
 
       this.renderer = renderer
@@ -4126,6 +4281,8 @@ export class TerminalContent extends BasePaneContent {
       // delivering facts about a dead session into a live pane.
       this._lifecycleUnsub?.()
       this._lifecycleUnsub = null
+      this._historyRecordedUnsub?.()
+      this._historyRecordedUnsub = null
       this._integrationUnsub?.()
       this._integrationUnsub = null
       this._signalUndeliveredUnsub?.()
@@ -4134,6 +4291,10 @@ export class TerminalContent extends BasePaneContent {
       this._toolSurfaceUnsub = null
       this._dropToolSurfaceNotice()
       this._toolSurface = null
+      // The old session's seam reader goes with it: the new bind registers
+      // its own under the new session id, and a stale one would read the
+      // pane's CURRENT model for a session that no longer exists.
+      if (this.session) paneScreenReaders.delete(this.session.sessionId)
       this.session?.close()
       this.session = null
 
@@ -4221,6 +4382,9 @@ export class TerminalContent extends BasePaneContent {
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
     ++this._bindGeneration
+    for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
+    this._blockRowsUnsubs = []
+    this._blockRowsInFlight.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4292,8 +4456,59 @@ export class TerminalContent extends BasePaneContent {
         applied: this.lifecycle.state !== before,
       })
     })
+    const historySubscription = subscribeHistoryRecorded(this.client, (receipt) => {
+      const block = this.scrollback?.blockManager.blockForAttempt(receipt.attemptId)
+      this.attachRecordedAck(0, block, receipt)
+      const ledgerId = this.attemptEntryIds.get(receipt.attemptId)
+      if (ledgerId === undefined) {
+        this.earlyHistoryReceipts.set(receipt.attemptId, receipt)
+        return
+      }
+      this.settleStoredEntry(ledgerId, receipt.entryId)
+      this.attemptEntryIds.delete(receipt.attemptId)
+    })
+    this._historyRecordedUnsub = historySubscription.unsubscribe
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
-    const session = await this.openSessionWithHostKeyRecovery(signal)
+    const refreshBlockRows = (params: unknown): void => {
+      if (typeof params !== 'object' || params === null) return
+      if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
+        return
+      void this._refreshBlockRows(params.entryId)
+    }
+    const onBlockClosed = (params: unknown): void => {
+      // BlockClosed (contracts/block.closed.schema.json, nocx-2v80t.3.27):
+      // the backend met the command's completion with its end marker, and
+      // the block's rows are whole. It is the ONE event a finished block
+      // closes on — the renderer no longer watches the stream for a fence of
+      // its own (ADR-0066 moved that rendezvous beside the emulator). A kept
+      // block's closing read starts FIRST, so the close that follows — and
+      // an agent run waiting on it — reads the rows the close made final,
+      // never the ones an earlier block.grew left. A block the store did not
+      // keep has nothing to read.
+      if (typeof params !== 'object' || params === null) return
+      if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
+        return
+      const closed: BlockClosed = {
+        entryId: params.entryId,
+        kept: 'kept' in params && params.kept === true,
+      }
+      if (closed.kept) void this._refreshBlockRows(closed.entryId)
+      this.scrollback?.blockManager.blockClosed(closed.entryId)
+    }
+    const onBlockCleared = (params: unknown): void => {
+      // BlockCleared (contracts/block.cleared.schema.json, nocx-2v80t.3.17):
+      // the backend sighted a real erase and this is the LIVE half of it —
+      // the client no longer decides a clear from the command's text.
+      if (typeof params !== 'object' || params === null || !('keepEntryId' in params)) return
+      const keepEntryId = typeof params.keepEntryId === 'string' ? params.keepEntryId : null
+      this.scrollback?.onClearBoundary(keepEntryId)
+    }
+    this._blockRowsUnsubs.push(
+      this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
+      this.client.dispatcher.subscribe('block.closed', onBlockClosed),
+      this.client.dispatcher.subscribe('block.cleared', onBlockCleared),
+    )
+    const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
 
     if (signal.aborted) {
       session.close()
@@ -4335,6 +4550,7 @@ export class TerminalContent extends BasePaneContent {
     // like a session that printed less. Mounted here, with the session,
     // because that is where the fact arrives and where the pane is known.
     this._showRecoveryNotice(session, target)
+    historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
     // session is what the drop has to be routed to, and it does not exist
@@ -4477,6 +4693,42 @@ export class TerminalContent extends BasePaneContent {
       renderer.write(data)
       if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
         host.requestAttention()
+      }
+    })
+    // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
+    // the bind is where a pane gains the session whose screen the frames
+    // describe, and every attach is owed a baseline full snapshot, so a
+    // fresh model misses nothing and a backend restart's revision reset
+    // needs no special case. The reader joins the test seam under the
+    // session id the pane publishes; nothing paints from the model — xterm
+    // keeps the byte path exactly as it was.
+    const cellModel = createCellModel()
+    this._cellModel = cellModel
+    installPaneScreenSeam()
+    paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
+    session.onScreenFrame((frame: SessionFrame) => {
+      const model = this._cellModel
+      if (model === null) return
+      try {
+        const result = model.apply(frame)
+        if (!result.ok) {
+          log.debug('nocx: screen frame refused', {
+            pane: this.pane.paneId,
+            refusal: result.refusal,
+          })
+        } else {
+          // THE PAINTER'S ONLY FEED: one accepted revision joins the
+          // animation-frame batch. A refused frame changes nothing, here
+          // as in the model — the installed revision stays what is painted.
+          this._paintFrame(result.snapshot)
+        }
+      } catch (err) {
+        // apply refuses malformed shapes, but a document hostile enough to
+        // throw inside it must not throw out of the socket handler either.
+        log.debug('nocx: screen frame could not be applied', {
+          pane: this.pane.paneId,
+          error: err instanceof Error ? err.message : String(err),
+        })
       }
     })
     if (this._replayCapture) {
@@ -4698,6 +4950,30 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
+  /**
+   * The painter's one feed: join a revision to the batch, paint the LATEST
+   * one per animation frame.
+   *
+   * Frames arrive coalesced per revision (AD-10's delivery classes), but
+   * several can still land in one tick — a program repainting at full speed
+   * publishes faster than frames come. Painting each revision as it arrives
+   * would spend DOM work on states nobody could have seen; painting only
+   * the latest bounds the work to one pass per frame, which is the acceptance
+   * criterion's "changes batched into animation frames". The row-level diff
+   * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
+   */
+  private _paintFrame(snapshot: ScreenSnapshot): void {
+    this._pendingPaint = snapshot
+    if (this._paintFrameHandle !== 0) return
+    this._paintFrameHandle = requestAnimationFrame(() => {
+      this._paintFrameHandle = 0
+      const pending = this._pendingPaint
+      this._pendingPaint = null
+      if (pending === null || this._disposed) return
+      this._painter?.apply(pending)
+    })
+  }
+
   // ── B.5 viewport delivery ─────────────────────────────────────────────
 
   private _latestViewport: ContentViewport | null = null
@@ -4842,6 +5118,72 @@ export class TerminalContent extends BasePaneContent {
     this.sessionGrid = null
     const area = this.scrollback?.scrollbackArea
     if (area) delete area.dataset.gridOwner
+  }
+
+  /**
+   * The size report this window would send now: the grid the renderer last
+   * fitted, plus the cell metric in the wire's own unit — the WHOLE text
+   * area in DEVICE pixels, cols × the renderer's device cell
+   * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
+   * unit, the helper's cellGeometry decodes it, and nothing else converts).
+   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
+   * cell — it is the unit where the metric is exact, and the one a
+   * rounding step cannot drift (review round 1). One shape at every door —
+   * open, attach, resize (SessionSize).
+   *
+   * The renderer is a parameter because the OPEN reports before this
+   * window's renderer field exists: _bindSession runs while `renderer` is
+   * still a local, and the report it sends must come from THAT renderer,
+   * not from a field that is null for another hundred lines. Everything
+   * after the bind reads the field.
+   *
+   * Zeros while the renderer has not measured the cell yet: the report
+   * every pane sent before nocx-zg3k3.2.9, and still the honest one before
+   * first layout — an unmeasured session stays unmeasured rather than
+   * inventing a metric.
+   *
+   * Every send door (the open, the settle timer) computes the report HERE,
+   * at the moment it sends, so what this window last produced for sending
+   * is what this method last returned — the fact the pane-screen seam
+   * publishes as `reported`.
+   */
+  private _lastReport: SessionSize | null = null
+
+  private _reportedSize(renderer: TerminalRenderer | null = this.renderer): SessionSize {
+    const dims = renderer?.deviceCellDims() ?? null
+    const report = {
+      cols: this.cols,
+      rows: this.rows,
+      xpixel: dims !== null ? this.cols * dims.width : 0,
+      ypixel: dims !== null ? this.rows * dims.height : 0,
+    }
+    this._lastReport = report
+    return report
+  }
+
+  /**
+   * The one debounced report path. The report is computed when the timer
+   * FIRES, not when it is armed, so the settle window always sends what is
+   * true at the end of it; the session handle is read at the same moment,
+   * never captured — a reconnect replaces the handle underneath this
+   * callback, and a resize sent to the session that died would size
+   * nothing. A grid this window BORROWED is not a measurement this window
+   * made (nocx-eidfb.3): the schedule is skipped entirely.
+   */
+  private _scheduleResizeReport(): void {
+    if (this.sessionGrid) return
+    clearTimeout(this.resizeTimer)
+    this.resizeTimer = window.setTimeout(() => {
+      // A resize makes the shell redraw its prompt, and that redraw arrives
+      // on `session.onData` looking exactly like output the user has not
+      // seen. It is not: we asked for it. Switching the strip from vertical
+      // to horizontal resizes every pane at once, so every inactive tab lit
+      // its activity indicator for something the user did to the WINDOW
+      // rather than to any tab (nocx-6w4z). A DEDUPED report sent nothing,
+      // so it opens no echo window either — output then is output.
+      const sent = this.session?.sendResize(this._reportedSize()) ?? false
+      if (sent) this.echoUntil = Date.now() + RESIZE_ECHO_MS
+    }, RESIZE_SETTLE_MS)
   }
 
   /**
@@ -5239,6 +5581,13 @@ export class TerminalContent extends BasePaneContent {
       this.scrollback?.scrollbackInner ?? document.createElement('div')
     const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
     const snapshotStore = this.scrollback.snapshotStore
+    const fit = this._cellFit
+    const metric = fit !== null && fit.begin() ? metricOf(fit) : null
+    const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
+      const rows = bodies.get(entryId)?.rows
+      if (rows) paintStoredRows(el, rows, { metric, palette: snapshot })
+      return el
+    }
     /** One page row as the facts a restored block is built from. */
     const factsOf = (b: (typeof blocks)[number]) => ({
       command: b.command,
@@ -5250,6 +5599,7 @@ export class TerminalContent extends BasePaneContent {
       exitCode: b.exitCode,
       status: b.status,
       body: bodies.get(b.entryId)?.body ?? null,
+      rows: bodies.get(b.entryId)?.rows,
       kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
       entryId: b.entryId,
       // Who ran it, carried from the entry's OWN source column
@@ -5268,14 +5618,17 @@ export class TerminalContent extends BasePaneContent {
       const restored = bodies.get(b.entryId)
       if ((restored?.kind ?? 'command') !== 'ask') {
         els.push(
-          restoredBlock(
-            { ...factsOf(b), id: nextId() },
-            snapshot,
-            container,
-            () => {},
-            snapshotStore,
-            this.runningActions,
-            this.dumpSource ?? undefined,
+          paintRows(
+            restoredBlock(
+              { ...factsOf(b), id: nextId() },
+              snapshot,
+              container,
+              () => {},
+              snapshotStore,
+              this.runningActions,
+              this.dumpSource ?? undefined,
+            ),
+            b.entryId,
           ),
         )
         continue
@@ -5394,14 +5747,17 @@ export class TerminalContent extends BasePaneContent {
             const caused = page.get(cause.entryId)
             if (!caused || placed.has(cause.entryId)) return null
             placed.add(cause.entryId)
-            return restoredBlock(
-              { ...factsOf(caused), id: nextId() },
-              snapshot,
-              container,
-              () => {},
-              snapshotStore,
-              this.runningActions,
-              this.dumpSource ?? undefined,
+            return paintRows(
+              restoredBlock(
+                { ...factsOf(caused), id: nextId() },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+                this.runningActions,
+                this.dumpSource ?? undefined,
+              ),
+              caused.entryId,
             )
           },
           this.runningActions,
@@ -7370,9 +7726,14 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
+    this._blockRowsUnsubs = []
+    this._blockRowsInFlight.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
+    this._historyRecordedUnsub?.()
+    this._historyRecordedUnsub = null
     this._homeUnsub = null
     this.branchSource?.dispose()
     this._pendingReadFrame = null
@@ -7426,11 +7787,30 @@ export class TerminalContent extends BasePaneContent {
     }
     this._endSummon(true)
     this.session?.detach()
+    // The pane stops answering the seam with its death: a dead pane's
+    // reader has no model worth reading and no session to be found under.
+    if (this.session) paneScreenReaders.delete(this.session.sessionId)
+    this._cellModel = null
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()
     this._offer?.dispose()
     this._offer = null
+    // The painter dies before the input layer that sits above it: the
+    // batch's pending frame is cancelled (a callback landing on a disposed
+    // pane is a leak, not a paint), the fit's probe and font listener leave
+    // the DOM and the document, and the surface goes with the pane.
+    if (this._paintFrameHandle !== 0) {
+      cancelAnimationFrame(this._paintFrameHandle)
+      this._paintFrameHandle = 0
+    }
+    this._pendingPaint = null
+    this._painter?.dispose()
+    this._painter = null
+    this._painterSurface?.remove()
+    this._painterSurface = null
+    this._cellFit?.dispose()
+    this._cellFit = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()
@@ -7721,7 +8101,10 @@ export class TerminalContent extends BasePaneContent {
     // running fact arrives later over the wire, and a conventional shell
     // may never send one.
     this.pushTitle()
-    this.scrollback?.maybeClear(recordLine)
+    // NO CLEAR DECIDED HERE EITHER (nocx-2v80t.3.17): the client no longer
+    // guesses a clear from the command's text at submit time — the backend
+    // parses the real VT erase and tells attached clients over block.cleared
+    // (subscribed below, beside block.grew/block.closed).
     // NO CARD OPENS HERE (nocx-2v80t.3.2). The submit is the client's
     // guess that a command is about to run; the card's boundaries are what
     // the backend sent. The published running fact (which the backend
@@ -7752,8 +8135,6 @@ export class TerminalContent extends BasePaneContent {
     // that can cause the shell's own start are written to the pty; the
     // later authenticated start attaches to it and replaces nothing.
     // Fail-open: a refused attempt (the domain lost its prompt mid-typing)
-    // must never swallow the command — the bytes still go out and the
-    // session stays conventional.
     void new LifecycleClient(this.client.dispatcher)
       .submitAttempt({
         domain: st.domain.id,
@@ -7768,7 +8149,10 @@ export class TerminalContent extends BasePaneContent {
         ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
       .then(
-        () => write(),
+        (attempt) => {
+          if (ledgerId !== null) this.bindHistoryAttempt(attempt.id, ledgerId)
+          write()
+        },
         (err: unknown) => {
           // STILL fail-open — the bytes go out either way, and swallowing a
           // command because the control plane was busy is the worse failure.
@@ -7932,6 +8316,76 @@ export class TerminalContent extends BasePaneContent {
     return promise
   }
 
+  /** Fetch one entry's stored rows, paint them, and follow the tail —
+   *  everything a block.grew/block.closed notification's delivery does.
+   *  Tracked in `_blockRowsInFlight` so a freeze landing while this is
+   *  still running can wait for it (`_ensureBlockRows`) instead of reading
+   *  `.cmd-output` before it has anything written into it. Cleared only if
+   *  nothing newer replaced the entry — block.grew and then block.closed
+   *  for the same entry each start their own fetch, and the closing one is
+   *  the one worth waiting for; never removing a newer entry's promise out
+   *  from under it. */
+  private _refreshBlockRows(entryId: string): Promise<void> {
+    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
+      if (this._disposed) return
+      const sb = this.scrollback
+      if (!sb) return
+      // `absent` is the store keeping no rows for this block — nothing to
+      // paint, and nothing wrong. `unreadable` is output that did not reach
+      // the pane, and it is SAID, on the block and in the log, never drawn
+      // as an empty body (nocx-2v80t.3.27). Only the newest read for the
+      // entry may say it: an older fetch failing after a newer one was
+      // dispatched is not the block's current truth.
+      if (read.kind === 'absent') return
+      if (read.kind === 'unreadable') {
+        log.warn("nocx: a block's stored rows could not be read", {
+          entry: entryId,
+          reason: read.reason,
+        })
+        if (this._blockRowsInFlight.get(entryId) === fetch) {
+          sb.blockManager.markRowsUnreadable(entryId, read.reason)
+        }
+        return
+      }
+      const rows = read.rows
+      // The rows arrive asynchronously, well after the block that owns
+      // them has already been laid out — a running block's own live
+      // growth is followed inline (controller.ts's own height guard), but
+      // this delivery is a SEPARATE mutation the controller does not see
+      // on its own. Without settling around it, a block that grows once
+      // its stream lands pushes the viewport away from the tail a person
+      // was following, silently (nocx-2v80t.3.19).
+      sb.settleAround(() => {
+        sb.blockManager.applyStoredRows(entryId, rows)
+        sb.scrollToBottomIfFollowing()
+      })
+    })
+    this._blockRowsInFlight.set(entryId, fetch)
+    void fetch.finally(() => {
+      if (this._blockRowsInFlight.get(entryId) === fetch) this._blockRowsInFlight.delete(entryId)
+    })
+    return fetch
+  }
+
+  /** Guarantee this record's stored rows are being asked for, and answer
+   *  once the asking is done — successfully or not; `_refreshBlockRows`
+   *  itself decides what a failed or empty answer paints, if anything.
+   *  Reuses a fetch a notification already started — block.closed starts
+   *  the closing one before it closes the block — resolves at once when
+   *  none is in flight and the record already carries rows, and starts its
+   *  own only when neither is true (a block closed with no read behind it:
+   *  one the store did not keep, or a completion that carried no fence). */
+  private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
+    // A read in flight comes first, even when the record already holds rows:
+    // the block closes on block.closed, which starts the closing read before
+    // it closes the block (nocx-2v80t.3.27), and the rows an earlier
+    // block.grew left are not the final ones.
+    const inFlight = this._blockRowsInFlight.get(entryId)
+    if (inFlight) return inFlight
+    if (rec.storedRows) return Promise.resolve()
+    return this._refreshBlockRows(entryId)
+  }
+
   /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
    *  fixed in the DOM. Resolve the agent-run completion wait whose block
    *  this is — the same object the submission's beginBlock returned, so a
@@ -7959,69 +8413,108 @@ export class TerminalContent extends BasePaneContent {
     const waiter = this.agentRuns.get(rec)
     if (!waiter) return
     this.agentRuns.delete(rec)
-    const all = blockOutputText(rec.el)
-    const lines = all.split('\n')
-    let end = 0
-    let chars = 0
-    for (; end < lines.length; end++) {
-      const next = chars + lines[end].length + (end > 0 ? 1 : 0)
-      if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
-      chars = next
+    // `blockOutputText` reads `.cmd-output` AS IT STANDS RIGHT NOW, and at
+    // this instant the closing rows may not be painted yet: block.closed
+    // STARTS the closing read (`_refreshBlockRows`'s `blockRowsForEntry`, two
+    // more RPC round trips) and then closes the block, so the read is still
+    // in flight here. Reading now sent the run's output to the model as empty
+    // or partial text (nocx-2v80t.3.19, nocx-2v80t.3.27). `_ensureBlockRows`
+    // waits for that read, and starts one only when nothing is in flight and
+    // the record holds no rows.
+    const buildBody = (): Omit<AgentRunCompletion, 'entryId'> => {
+      const all = blockOutputText(rec.el)
+      const lines = all.split('\n')
+      let end = 0
+      let chars = 0
+      for (; end < lines.length; end++) {
+        const next = chars + lines[end].length + (end > 0 ? 1 : 0)
+        if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
+        chars = next
+      }
+      return {
+        exitCode: rec.exitCode,
+        // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
+        // own (run-command.ts): "the stopped fact is explicit renderer
+        // evidence and is never inferred from the exit code" is the SAME
+        // separation nocx-9bpeq.19 draws for the block header, the other
+        // direction — the model reads the raw exit-code truth (nonzero, so
+        // 'failure') plus `stopped` below, rather than one word standing in
+        // for both facts the way the header's `data-outcome` does.
+        status:
+          rec.status === 'running'
+            ? ('unknown' as const)
+            : rec.status === 'cancelled'
+              ? ('failure' as const)
+              : rec.status,
+        stopped: waiter.stopped,
+        total: lines.length,
+        start: 0,
+        end,
+        text: lines.slice(0, end).join('\n'),
+      }
     }
-    const body = {
-      exitCode: rec.exitCode,
-      // `AgentRunCompletion.status` deliberately has no 'cancelled' of its
-      // own (run-command.ts): "the stopped fact is explicit renderer
-      // evidence and is never inferred from the exit code" is the SAME
-      // separation nocx-9bpeq.19 draws for the block header, the other
-      // direction — the model reads the raw exit-code truth (nonzero, so
-      // 'failure') plus `stopped` below, rather than one word standing in
-      // for both facts the way the header's `data-outcome` does.
-      status:
-        rec.status === 'running'
-          ? ('unknown' as const)
-          : rec.status === 'cancelled'
-            ? ('failure' as const)
-            : rec.status,
-      stopped: waiter.stopped,
-      total: lines.length,
-      start: 0,
-      end,
-      text: lines.slice(0, end).join('\n'),
+    const rowsReady = rec.attemptId ? this._ensureBlockRows(rec.attemptId, rec) : Promise.resolve()
+    // Output that could not be read is an ERROR to the model, never empty
+    // text (nocx-2v80t.3.27): a command that printed and a command that
+    // printed nothing must not answer alike, and the cause travels with it.
+    const settle = (entryId: string): void => {
+      if (rec.rowsUnreadable !== undefined) {
+        waiter.reject(
+          new Error(`run: the command's output could not be read — ${rec.rowsUnreadable}`),
+        )
+        return
+      }
+      waiter.resolve({ entryId, ...buildBody() })
     }
-    // A cancelled block completed exactly like any other — history.record
-    // already ran for it — so it waits for the stored entry the same way
-    // success/failure do; only 'entered'/'unknown' never got one.
+    // A cancelled block completed exactly like any other — its backend
+    // history.recorded receipt already ran — so it waits for the stored
+    // entry the same way success/failure do; only 'entered'/'unknown' never
+    // got one.
     if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
-      waiter.resolve({ entryId: '', ...body })
+      void rowsReady.then(() => settle(''))
       return
     }
-    void this.storedEntryId(waiter.ledgerId).then((entryId) => {
-      waiter.resolve({ entryId, ...body })
+    void Promise.all([this.storedEntryId(waiter.ledgerId), rowsReady]).then(([entryId]) => {
+      settle(entryId)
     })
   }
 
   /**
    * The STORE's entry id for one of this pane's own records, waited for.
    *
-   * The renderer mints a record at submit and the STORE mints the row at the
-   * completion (history.record, ADR-0021's receipt round), so the two ids
-   * exist at different moments and only the second one means anything to
-   * anybody else. The ack may land before the visual freeze or after it —
-   * the record goes out on the authenticated completion while the freeze
-   * waits for its fence — so this is a rendezvous rather than a read.
+   * The renderer mints a record at submit and the store mints the row at
+   * authenticated lifecycle completion. The two ids exist at different
+   * moments and only the second one means anything to anybody else. The
+   * history.recorded receipt may land before the visual freeze or after it —
+   * the record goes out on authenticated completion while the freeze waits
+   * for its fence — so this is a rendezvous rather than a read.
    *
    * Resolves with '' when the store wrote no row: History is off, or the
    * record was dropped. That is a real state and it is not an error — the
    * command ran — so it is answered as "no entry" and the relation that
    * would have hung off it is simply not written.
    *
-   * It always settles, which is what makes the wait safe: recordCommand
-   * answers the ack or null (the outbox keeps a record it could not send and
-   * answers null now), and a socket too dead to carry the ack is one too
-   * dead to carry the resolution this feeds.
+   * It always settles, which is what makes the wait safe: history.recorded
+   * answers with the entry id or an empty id when no row was written, and a
+   * socket too dead to carry the receipt is one too dead to carry the
+   * resolution this feeds.
    */
+  private bindHistoryAttempt(attemptId: string, ledgerId: number): void {
+    this.attemptEntryIds.set(attemptId, ledgerId)
+    const early = this.earlyHistoryReceipts.get(attemptId)
+    if (early === undefined) return
+    this.earlyHistoryReceipts.delete(attemptId)
+    this.settleStoredEntry(ledgerId, early.entryId)
+  }
+
+  private settleStoredEntry(ledgerId: number, entryId: string): void {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return
+    slot.entryId = entryId
+    slot.waiting?.(entryId)
+  }
+
   private storedEntryId(ledgerId: number): Promise<string> {
     const slot = this.runEntryIds.get(ledgerId)
     if (slot === undefined) return Promise.resolve('')
@@ -8037,28 +8530,17 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
-  /** The store answered for one of this pane's records: the entry id it
-   *  minted, or '' when it wrote no row. Only an agent run has a slot here
-   *  — a person's command needs no id on the wire — so this is a no-op for
-   *  every other record, which is also what keeps the map bounded. */
-  private settleStoredEntry(ledgerId: number, entryId: string): void {
-    const slot = this.runEntryIds.get(ledgerId)
-    if (slot === undefined) return
-    slot.entryId = entryId
-    slot.waiting?.(entryId)
-  }
-
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
 
-  /** The history.record ack crossed: paint the block with what was stored
-   *  and, when captures came back, attach the receipt to THAT block. The
-   *  block identity was captured at onComplete time; a block that is gone
-   *  by now (cleared scrollback, disposed tab, or never frozen) drops the
-   *  receipt silently. */
+  /** The history.recorded receipt crossed: paint the block with what was
+   *  stored and, when captures came back, attach the receipt to THAT block.
+   *  The block identity was captured at onComplete time; a block that is
+   *  gone by now (cleared scrollback, disposed tab, or never frozen) drops
+   *  the receipt silently. */
   private attachRecordedAck(
     _recId: number,
     block: BlockRecord | null | undefined,
-    ack: HistoryRecord,
+    ack: HistoryRecorded,
   ): void {
     if (!block) return
     const blockEl = block.el
@@ -8084,32 +8566,19 @@ export class TerminalContent extends BasePaneContent {
     // land inside it (nocx-ggha).
     //
     // Parked rather than applied, because the visual freeze REPLACES el and
-    // would discard anything written now. `_freezeVisual` runs this the
+    // would discard anything written now. The card freeze runs this the
     // instant the boundary lands, and the re-entry passes the check above.
     if (blockEl.classList.contains('cmd-block-running')) {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
     }
-    // THE BODY GOES NOW, against the entry the ack has just named
-    // (nocx-2f0f). This is past the parking check above, so the visual
-    // freeze has run and `captured` is filled; when the ack raced the fence
-    // the parked re-entry brings it back here the instant the block settles,
-    // which is the same mechanism the receipt already relies on.
-    //
-    // The field is cleared before the send, so a second entry into this
-    // method — a re-recorded block, a replayed ack — cannot capture the same
-    // block twice. Fire-and-forget by design: a capture that fails costs the
-    // body and never the block (capture-client.ts).
-    if (ack.entryId !== '' && block.captured !== undefined) {
-      const body = block.captured
-      block.captured = undefined
-      void captureBlock(this.client, ack.entryId, body)
-    }
-    if (ack.redactions.length > 0) {
-      renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+    const redactions: Redaction[] = ack.redactions
+    if (redactions.length > 0) {
+      renderRecordedCommand(blockEl, ack.maskedCommand, redactions)
       this.refreshGrant(blockEl)
     }
-    if (ack.captures.length === 0) return
+    const captures: Capture[] = ack.captures
+    if (captures.length === 0) return
     // One receipt per block: a re-recorded block replaces its own, never
     // anybody else's.
     this.receipts.get(blockEl)?.destroy()

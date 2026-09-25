@@ -416,7 +416,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	var pub *lifecyclepub.Publisher
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return pub }, transports, sessions, typed,
+			func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, typed,
 			// This harness runs no coordinator tool endpoint, and the ssh
 			// child it composes names none whatever answered: its shell runs
 			// on the far host (nestedToolSocket).

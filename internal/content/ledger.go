@@ -11,15 +11,14 @@ package content
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and
-// FinishAgentRun. The READ
-// path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
-// ledger.get drives Entry plus Edges plus Caused (ws_ledger_query.go), and the query's
-// `host` field is what finally asks a resolved environment row for its host —
-// so Environment.Host has a renderer. history.record drives RecordCompleted
-// (nocx-rtg0.19), which is where a finished command lands now, under the
-// author the renderer minted (nocx-iadtt); ledger.capture drives
-// CaptureOutput.
+// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and FinishAgentRun.
+// The READ path is wired as of nocx-rtg0.20: ledger.query drives
+// QueryEntries and ledger.get drives Entry plus Edges plus Caused
+// (ws_ledger_query.go), and the query's `host` field is what finally asks a
+// resolved environment row for its host — so Environment.Host has a renderer.
+// Lifecycle submission and completion drive the command row; streamed command
+// output uses OpenBlockOutput and MediaBlockRows; CaptureOutput remains the
+// shared transactional body path for assistant/tool results.
 //
 // WHAT IS STILL TEST-REACHABLE ONLY: DeleteSession, ListEntries, DeleteEntry,
 // AppendArtifact, AddEdge and RunState. CreateSession is wired by the shipped
@@ -46,10 +45,8 @@ package content
 //
 // RewriteRedaction stopped being the awkward case when command_history went
 // (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
-// through capability.CaptureSaveService, the id router that used to choose a
-// store by parsing an integer is gone with the second store, and
-// history.record now mints the entry-keyed links that made the ledger arm
-// unreachable in production before.
+// through capability.CaptureSaveService, and the id router that used to choose
+// a store by parsing an integer is gone with the second store.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
@@ -69,6 +66,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shady2k/nocx/internal/emulator"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -1157,6 +1156,16 @@ var (
 	// cap decides how much of an output is worth keeping, this decides what a
 	// caller may make the store hold whatever any setting says.
 	ErrArtifactTooLarge = errors.New("content: artifact exceeds the per-artifact ceiling")
+	// ErrBlockRowsDiscontinuous is what an append answers when its FromRow
+	// is neither the next row nor a jump the delivery's own LostRows count
+	// accounts for — a replay from behind the cursor, or a hole nobody
+	// named. The caller had the rows; a silent gap in a command's output is
+	// the one wrong answer a restored block cannot show.
+	ErrBlockRowsDiscontinuous = errors.New("content: block rows: append does not continue the block")
+	// ErrBlockNotOpen is what an append answers when the entry carries no
+	// open block rows artifact: the keep decision refused it, or the block
+	// is already sealed. Either way there is nowhere for the rows to go.
+	ErrBlockNotOpen = errors.New("content: block rows: no open block on this entry")
 )
 
 // MaxArtifactBytes is that ceiling. Four times the per-command cap's default,
@@ -1164,19 +1173,18 @@ var (
 // accident.
 const MaxArtifactBytes = 1 << 20
 
-// CaptureOutput is one body of a frozen block arriving from the renderer
-// (nocx-2f0f, design §4). It is the only write path for what a shell command
-// printed, and it is deliberately not AppendArtifact followed by AppendChunk
-// at the caller: the two have to land in one transaction, and the execution
-// the artifact hangs on is resolved HERE — the renderer knows the entry it
-// recorded and has never seen an execution id, which is a backend integer.
+// CaptureOutput stores one transactional body for an assistant/tool result.
+// It remains separate from streamed command rows because those rows are
+// opened at command start and keep the backend's cell vocabulary. This path
+// still resolves the execution attached to the entry here: callers know the
+// entry but have never seen the backend execution id.
 //
-// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a capture whose
-// ack was lost is retried: the same id and seq is a replay that writes
-// nothing, and the same id asking for a different artifact is ErrIDConflict.
+// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a retry after a
+// lost acknowledgement is idempotent on the same id and sequence, while the
+// same id naming another artifact is ErrIDConflict.
 type CaptureOutput struct {
-	// EntryID is the row the body belongs to — what history.record answered
-	// with.
+	// EntryID is the row the body belongs to — the backend-assigned id returned
+	// by lifecycle history.
 	EntryID string
 	// ArtifactID is client-minted UUIDv7 and the idempotency key.
 	ArtifactID string
@@ -1200,6 +1208,106 @@ type CaptureOutput struct {
 	// starts.
 	Seq  int
 	Body []byte
+}
+
+// MediaBlockRows is the stored form of a streamed block's output
+// (nocx-2v80t.3.7): JSON Lines, one row of the screen frame's cell
+// vocabulary per line (contracts/ledger.blockRows.schema.json — the row
+// shape session.frame declares, self-describing per line so a stored block
+// survives without the frame it arrived in). It is a media type of its own
+// and not a convention over application/json because the database closes
+// this vocabulary, and a body a reader parses line by line is not a single
+// JSON value.
+const MediaBlockRows MediaType = "application/x-nocx-rows"
+
+// OpenBlockOutput opens the block a streamed command writes into, at the
+// command's authenticated start — BEFORE any row exists, because the whole
+// point is that a command whose output may not be kept never has a first
+// chunk to refuse. The retention, sensitivity and pinned-criticality rules
+// answer here, once per command: each refusal returns ("", nil) and NOTHING
+// is written. An ordinary command's rows artifact is created open, and its
+// id is the caller's own idempotency key; replay finds the existing block and
+// a different entry using the same id is ErrIDConflict.
+type OpenBlockOutput struct {
+	// EntryID is the command's entry — the row the authenticated start
+	// opened. Required; unknown is ErrNoSuchEntry.
+	EntryID string
+	// ArtifactID is the block's id, minted by the coordinator. Required.
+	ArtifactID string
+}
+
+// AppendBlockRows is one delivery of rows that left the screen, in order.
+// FromRow is the absolute index Rows[0] departed at — rows ever departed in
+// the session, not rows in this block — so the store can tell "the next
+// rows" from "a jump": a delivery that starts behind the cursor is a replay
+// and ErrBlockRowsDiscontinuous refuses it, and one that starts ahead must
+// carry exactly the count of indices the gap spans, or the same refusal.
+// LostRows is that count, and the block carries it to its summary. A loss
+// always spends the indices it names, so a LostRows at the cursor itself
+// names no gap and is refused too; a delivery with no rows and a loss is how
+// a hole at an interval's tail is stated, and is recorded (nocx-2v80t.3.26).
+type AppendBlockRows struct {
+	EntryID    string
+	ArtifactID string
+	FromRow    uint64
+	LostRows   uint64
+	// Rows are the departed rows in order, in the emulator's own shape. The
+	// store encodes them; a caller that serialized them first would be a
+	// second owner of the stored vocabulary.
+	Rows []emulator.Row
+}
+
+// CloseBlockRows seals the block: the end marker's rows are already in (the
+// caller appends them like any other delivery), the cap's dropped-row count
+// is derived from what the chunks actually hold, and the summary records it
+// beside the lost-row count. Idempotent: a replayed close returns the first
+// summary; an append after a close is ErrBlockNotOpen.
+type CloseBlockRows struct {
+	EntryID    string
+	ArtifactID string
+}
+
+// BlockRowsSummary is what closing a block learned. DroppedRows is how many
+// rows the per-command cap took — derived from the chunks, never
+// accumulated, so it cannot drift from them; LostRows is what the emulator
+// pruned before the coordinator could read it, which no cap chose.
+type BlockRowsSummary struct {
+	DroppedRows uint64
+	LostRows    uint64
+}
+
+// RecordClearBoundary is the coordinator sighting the program erase its own
+// saved lines inside an authenticated interval (nocx-2v80t.3.17): ED3, or a
+// full reset, either of which the emulator's own state already destroyed
+// (internal/emulator/ghostty's noteDepartedLocked) rather than something
+// this store infers from bytes. SessionID is the session that sighted it —
+// provenance, exactly as AppendBlockRows' rows belong to a session before
+// they belong to a block — and the store resolves the pane a boundary
+// actually bounds from it: entries carry both edges (design §6.1) and a
+// boundary follows the same rule, because a session-only boundary could
+// never be found again from the durable side restore reads through.
+type RecordClearBoundary struct {
+	SessionID string
+}
+
+// ClearBoundaryRecorded is what recording one answered: the boundary's own
+// id, the pane it bounds (nil when the session had no pane bound — the
+// boundary is still recorded, for provenance, but an ordinary read has
+// nothing to apply it against until a pane exists), and the cursor itself.
+//
+// IngestSeq is the highest ingest_seq among this pane's entries that had
+// already SEALED (phase = 'closed') at the instant of the sighting — never
+// the session's newest entry outright, because the command whose own output
+// triggered the erase (`clear` itself, ordinarily) already has an open entry
+// by the time its output runs, and a boundary that bounded its own command
+// would hide the very block reporting the clear. The record never deletes
+// (nocx-zg3k3.10.3's decision): this is a CURSOR a reader applies, not a
+// mark on the entries themselves, and revealing past it is a later
+// question this type does not answer.
+type ClearBoundaryRecorded struct {
+	ID        string
+	PaneID    *string
+	IngestSeq int64
 }
 
 // AppendArtifact creates one artifact of a BLOCK, with its capture
@@ -1739,11 +1847,9 @@ type LedgerRepository interface {
 	RecordObservation(ctx context.Context, obs Observation) (int64, error)
 	// RecordCompleted writes one command that has already finished — the
 	// intent, its single execution and its outcome in ONE transaction, with
-	// the entry id minted by the backend. It is what history.record lands
-	// through since nocx-rtg0.19 replaced command_history, and it exists
-	// beside Submit rather than instead of it because the two answer
-	// different questions: Submit opens a lifecycle the renderer will drive
-	// to a close, this records one that is already over.
+	// the entry id minted by the backend. Lifecycle completion normally writes
+	// through the authenticated attempt; this method remains the completed-only
+	// repository seam for callers without such an attempt.
 	RecordCompleted(ctx context.Context, in CompletedCommand) (string, error)
 	// Submit accepts an intent as an open entry and returns the
 	// backend-assigned ingest_seq. Two entries in the same millisecond
@@ -1838,18 +1944,36 @@ type LedgerRepository interface {
 	// arrives chunked). The entry owns it; the execution, when there was
 	// one, is the provenance of which attempt produced it.
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
-	// CaptureOutput records one body of a frozen block: the artifact if it
-	// is not there yet and the chunk at its seq, in one transaction against
-	// the entry's own execution. Idempotent on (artifact id, seq).
+	// CaptureOutput records one assistant/tool-result body: the artifact if
+	// it is not there yet and the chunk at its seq, in one transaction
+	// against the entry's own execution. Idempotent on (artifact id, seq).
 	//
 	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened.
 	// Output retention off, or an entry marked sensitive, returns
-	// (false, nil): the block keeps its row and keeps no body, the same shape
-	// RecordCompleted uses for history.enabled. An error there would surface
-	// in front of somebody who turned the setting off deliberately, and a
-	// bare nil would leave the caller sending the rest of a body nobody is
-	// storing.
+	// (false, nil): the result keeps its record and keeps no body. An error
+	// there would surface in front of somebody who turned the setting off
+	// deliberately, and a bare nil would leave the caller sending the rest
+	// of a body nobody is storing.
 	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
+	// OpenBlockOutput answers the one keep decision for a streamed command at
+	// its authenticated start, before any row exists. ("", nil) means the
+	// command keeps its row and keeps no body; otherwise the returned id is
+	// the caller's idempotent rows-artifact key.
+	OpenBlockOutput(ctx context.Context, in OpenBlockOutput) (string, error)
+	// AppendBlockRows appends one delivery of departed rows to the block's
+	// body, in order, under the per-command cap: the head and the tail are
+	// kept, the middle is dropped, and the drop is counted for the close.
+	AppendBlockRows(ctx context.Context, in AppendBlockRows) error
+	// CloseBlockRows seals the block and returns its summary: how many rows
+	// the cap dropped (derived from the chunks that are actually there) and
+	// how many the emulator lost before they could be read.
+	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
+	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
+	// an ordinary read applies rather than a mark on every entry it hides
+	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:
+	// every sighting is a real event and gets its own row, the way every
+	// other fact this store records does.
+	RecordClearBoundary(ctx context.Context, in RecordClearBoundary) (ClearBoundaryRecorded, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

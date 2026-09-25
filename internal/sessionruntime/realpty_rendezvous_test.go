@@ -254,22 +254,22 @@ func TestAFenceWithNoCompletionCompletesNothingOnARealPTY(t *testing.T) {
 	// BEFORE the expiry, write authority is intact: an intent commits.
 	p.mustSend(IntentKindText, []byte("x"))
 
-	// AT the expiry, the bounded wait elapses with nothing authenticated
-	// behind the sighting: the meeting ends, the pin is dropped, and
-	// completeness and write authority are UNTOUCHED — the expiry this test
+	// AT the settle, driven as a call because no wait exists to elapse
+	// (nocx-2v80t.3.9): the meeting ends, the pin is dropped, and
+	// completeness and write authority are UNTOUCHED — the settle this test
 	// once read only as a moment (nocx fix-rendezvous-8W4D: this read, taken
 	// in a runtime with no expiry configured, is how blocker 1 got through).
 	if err := p.s.ExpireRendezvous(nonce); err != nil {
 		t.Fatalf("expire the unbacked sighting: %v", err)
 	}
 	if got := rendezvousOf(p.s, nonce).State; got != RendezvousExpired {
-		t.Fatalf("the unbacked meeting is %s after its wait elapsed, want expired", rendezvousStateName(got))
+		t.Fatalf("the unbacked meeting is %s after it was settled, want expired", rendezvousStateName(got))
 	}
 	if got := p.s.Completeness(); got != CompletenessComplete {
 		t.Fatalf("expiring an unbacked sighting moved completeness to %v, want unchanged complete: a fence that authorised nothing may degrade nothing", got)
 	}
 
-	// AFTER the expiry, write authority is STILL intact — unauthenticated
+	// AFTER the settle, write authority is STILL intact — unauthenticated
 	// output must never revoke the person's ability to type, for however
 	// long the session lives.
 	p.mustSend(IntentKindText, []byte("y"))

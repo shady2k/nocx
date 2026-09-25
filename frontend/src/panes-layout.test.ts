@@ -444,7 +444,7 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
     // The id the OPEN carried is the id the CHAIN holds — one identity, not
     // two that happen to agree.
     await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(1))
-    expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: row.id })
+    expect(client.openSession.mock.calls[0][1]).toEqual({ paneId: row.id })
   })
 
   it('names the pane on a second tab too, not just the first', async () => {
@@ -459,7 +459,7 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
     await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(2))
     await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
 
-    const opened = client.openSession.mock.calls.map((c: unknown[]) => c[2])
+    const opened = client.openSession.mock.calls.map((c: unknown[]) => c[1])
     expect(opened).toEqual(backend.rows().panes.map((r) => ({ paneId: r.id })))
   })
 
@@ -477,7 +477,7 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
 
     const sshRow = backend.rows().panes.find((r) => r.kind === 'ssh')
     expect(sshRow).toBeDefined()
-    expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: sshRow!.id })
+    expect(client.openSSHSession.mock.calls[0][2]).toEqual({ paneId: sshRow!.id })
   })
 
   // Criterion 4. No layout store is a DEGRADE, never a refusal: the id is
@@ -496,7 +496,7 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
     expect(client.openSession).toHaveBeenCalledTimes(1)
     // Not `{ paneId: '' }`: an empty id is MALFORMED to validateOpenRaw and
     // refused, while an absent one is legitimate. The two must not collapse.
-    expect(client.openSession.mock.calls[0][2]).toEqual({})
+    expect(client.openSession.mock.calls[0][1]).toEqual({})
     expect(backend.rows().panes).toHaveLength(0)
   })
 
@@ -530,12 +530,12 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
     const held = backend.rows().panes.map((r) => r.id)
     expect(held).toEqual([admitted])
     for (const call of client.openSession.mock.calls as unknown[][]) {
-      const anchor = (call[2] ?? {}) as { paneId?: string }
+      const anchor = (call[1] ?? {}) as { paneId?: string }
       if (anchor.paneId !== undefined) expect(held).toContain(anchor.paneId)
     }
     // And the pane that WAS admitted is still named — the refusal of one
     // create does not unanchor the sessions around it.
-    expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: admitted })
+    expect(client.openSession.mock.calls[0][1]).toEqual({ paneId: admitted })
   })
 })
 
@@ -726,7 +726,7 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
     // the connection was opened with come back with it. The chain stores an
     // endpoint and no profile; this is where the two are matched.
     await vi.waitFor(() => expect(client.openSSHSession).toHaveBeenCalledTimes(1))
-    const [, , profileId, anchor] = client.openSSHSession.mock.calls[0] as unknown[]
+    const [, profileId, anchor] = client.openSSHSession.mock.calls[0] as unknown[]
     expect(profileId).toBe('profile-srv-01')
     // THE SAME PANE, not a new one: its blocks are found by this id, so a
     // reconnect that minted a fresh identity would restore into nothing.
@@ -751,7 +751,7 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
     // An alias or a bare host never had a profile — it is reopened the way it
     // was opened, through ~/.ssh/config on the backend.
     await vi.waitFor(() => expect(client.openSSHSessionByHost).toHaveBeenCalledTimes(1))
-    const [, , host, user, anchor] = client.openSSHSessionByHost.mock.calls[0] as unknown[]
+    const [, host, user, anchor] = client.openSSHSessionByHost.mock.calls[0] as unknown[]
     expect(host).toBe('srv-02')
     expect(user).toBe('ops')
     expect(anchor).toEqual({ paneId: 'pane-ssh' })
@@ -776,8 +776,8 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
     )
 
     await vi.waitFor(() => expect(client.openSSHSessionByHost).toHaveBeenCalledTimes(1))
-    expect(client.openSSHSessionByHost.mock.calls[0][2]).toBe('srv-01')
-    expect(client.openSSHSessionByHost.mock.calls[0][3]).toBeUndefined()
+    expect(client.openSSHSessionByHost.mock.calls[0][1]).toBe('srv-01')
+    expect(client.openSSHSessionByHost.mock.calls[0][2]).toBeUndefined()
     expect(client.openSSHSession).not.toHaveBeenCalled()
   })
 
@@ -986,7 +986,7 @@ describe('a connection opened from the palette comes back on its profile (nocx-x
     // this connection has none there — so the tab used to come back on
     // "nothing to authenticate" instead of on its host.
     await vi.waitFor(() => expect(second.client.openSSHSession).toHaveBeenCalledTimes(1))
-    const [, , profileId, anchor] = second.client.openSSHSession.mock.calls[0] as unknown[]
+    const [, profileId, anchor] = second.client.openSSHSession.mock.calls[0] as unknown[]
     expect(profileId).toBe(fixtureProfile.id)
     // THE SAME PANE, so its blocks are still found by this id.
     expect(anchor).toEqual({ paneId: stored!.id })

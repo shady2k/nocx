@@ -60,9 +60,10 @@ func (p *Policy) RetentionDays() int {
 	return p.retentionDays
 }
 
-// SetOutputEnabled flips whether command output is retained. It is the gate
-// CaptureOutput consults: off means the command keeps its row and keeps no
-// body, and the ack says so rather than failing.
+// SetOutputEnabled flips whether retained output is written. Both the
+// streamed rows path and the assistant/tool-result CaptureOutput path consult
+// it: off means the record remains but no body is kept, and the caller is
+// told so rather than receiving a failure.
 func (p *Policy) SetOutputEnabled(v bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -88,13 +89,9 @@ func (p *Policy) SetOutputCapBytes(v int) {
 	p.outputCap = v
 }
 
-// OutputCapBytes reports the per-command cap. TWO surfaces apply it, and they
-// cut the same way on purpose: the RENDERER caps a frozen block's body, which
-// it can do on a character boundary because it holds the rows (capBody in
-// capture-client.ts), and the STORE caps a session's live recording, which
-// cannot wait for the end of something that has no end
-// (session_output_sqlite.go). Both keep the head and the tail and drop the
-// middle; both take the number from here.
+// OutputCapBytes reports the per-command cap. The streamed rows store applies
+// it while the command is running, keeping the head and tail and dropping the
+// middle. The assistant/tool-result body path uses the same policy value.
 //
 // The store's own ceiling (MaxArtifactBytes) is a different number for a
 // different question and is not this.

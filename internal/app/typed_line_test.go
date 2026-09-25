@@ -167,7 +167,7 @@ func TestTypedLine_ARefusalRunsTheUsersOwnLineAndNothingElse(t *testing.T) {
 			req := typedTestRequest()
 			sessions.register(req.Lane, "aabbccddeeff00112233445566778899")
 
-			boot, err := buildSSHChildBootstrap(log.NewSlogAdapter(nil), nil, sessions, req,
+			boot, err := buildSSHChildBootstrap(log.NewSlogAdapter(nil), nil, sessions, nil, req,
 				transportKind{local: true}, runner)
 			if err != nil {
 				t.Fatalf("a refusal must not be an error; the user's line still has to run: %v", err)
@@ -213,7 +213,7 @@ func TestTypedLine_ARefusedLineParsesAndRuns(t *testing.T) {
 	sessions := newSessionRegistry()
 	req := typedTestRequest()
 	sessions.register(req.Lane, "aabbccddeeff00112233445566778899")
-	boot, err := buildSSHChildBootstrap(log.NewSlogAdapter(nil), nil, sessions, req,
+	boot, err := buildSSHChildBootstrap(log.NewSlogAdapter(nil), nil, sessions, nil, req,
 		transportKind{local: true}, runner)
 	if err != nil {
 		t.Fatalf("build: %v", err)

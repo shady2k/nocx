@@ -1319,10 +1319,24 @@ __nocx_precmd() {
 
 # Emit one OSC 133 lifecycle marker — \e]133;A, \e]133;B, \e]133;C or
 # \e]133;D[;<exit>]. A/B partition prompt bytes from output bytes for
-# rendering; C/D are the standard's command-boundary markers, kept for
-# third-party interop (ADR-0024 decision 1 leaves the decision open: nocx
-# no longer consumes them, but any other tool reading the stream still can,
-# and they carry no authority here).
+# rendering. D is the standard's command-boundary marker, kept for
+# third-party interop only (ADR-0024 decision 1: nocx does not consume it,
+# but any other tool reading the stream still can, and it carries no
+# authority here).
+#
+# C is DIFFERENT since nocx-2v80t.3.12: the emulator's port sights it
+# (internal/emulator/ghostty's scanMarkers, alongside the render fence) and
+# the runtime uses the FIRST one inside an interval to LOCATE where that
+# interval's own output begins — never to open, close or authorise an
+# interval on its own (ADR-0024 decision 1's carve-out, the same one the
+# render fence uses: a sighted marker may only locate an already-
+# authenticated event, and here the event is the interval itself, already
+# authenticated by other means). Rows above the C row — a prompt, an
+# app-submitted command's own echoed line — are that interval's prefix and
+# are never stored as its output. Only the first C per interval counts; a
+# later one (a nested command's own preexec) is ordinary output. A shell
+# without this hook, or one whose integration never activated, sights no C
+# at all, and the interval's output is everything it printed, as before.
 __nocx_marker() {
     local __kind="$1" __code="${2:-}"
     if [[ -n "$__code" ]]; then

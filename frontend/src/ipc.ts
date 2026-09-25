@@ -1,6 +1,6 @@
-import { decodeFrame, encodeFrame, isSessionID } from './frame'
+import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
+import type { DecodedFrame } from './frame'
 import { Dispatcher } from './dispatcher'
-import { historyOutbox } from './history-client'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
@@ -12,9 +12,16 @@ import type {
   Run as WireRun,
   SessionOutput,
 } from './generated/session.output'
+
+// The one report shape — grid plus whole-text-area pixels — re-exported so
+// the surfaces that compute a report spell the same type the client sends
+// (nocx-zg3k3.2.9).
+export type { SessionSize }
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionFrame } from './generated/session.frame'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
+import { log } from './log'
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
@@ -336,7 +343,7 @@ interface SessionState {
   // reclaimed by a window that has not laid it out yet. That is not a report
   // of nothing: the attach then carries no geometry at all and the backend
   // leaves the session at the size it is running at.
-  reported: { cols: number; rows: number } | null
+  reported: SessionSize | null
 
   // dataCallback receives decoded PTY output for the caller (Tab → renderer).
   // May be null briefly between session creation (open response) and the
@@ -349,6 +356,17 @@ interface SessionState {
   // response, so the initial shell prompt can race the caller's
   // session.onData() — without this buffer the prompt is silently lost.
   pendingData: string
+
+  // screenFrameCallback receives one parsed session.frame document per
+  // metadata frame (msg-type 0x02, the screen plane) for this session. It is
+  // the byte path's sibling, not its part: a frame is a full snapshot, so it
+  // never touches offset, pendingData or acks (AD-9 counts PTY bytes only),
+  // and a frame that lands in the window before registration is dropped —
+  // the next revision repaints whole, which is the same policy the
+  // backend's own queue-full drop answers to. There is no pendingData
+  // equivalent on purpose: buffering would only move the same superseded
+  // snapshot one hop.
+  screenFrameCallback: ((frame: SessionFrame) => void) | null
   // exitCallback receives the wire Exit (contracts/exit.schema.json): the
   // closed-set cause separating an authoritative shell exit (with its
   // status) from a loss. The failed-reattach path delivers a loss with the
@@ -456,8 +474,17 @@ export class SessionHandle {
     this.client.sendToSession(this.sessionId, data)
   }
 
-  sendResize(cols: number, rows: number): void {
-    this.client.sendResize(this.sessionId, cols, rows)
+  /**
+   * Report this pane's geometry: the grid plus the WHOLE text area in
+   * DEVICE pixels (TIOCSWINSZ's units; the helper decodes it into the
+   * per-cell metric the frames carry, nocx-zg3k3.2.9, review round 1).
+   *
+   * False when the client deduped it — the same report the backend already
+   * holds — so the caller marks the resize-echo window only around a
+   * resize that actually went out.
+   */
+  sendResize(size: SessionSize): boolean {
+    return this.client.sendResize(this.sessionId, size)
   }
 
   /** Address a signal to the command running in this session (nocx-23rph).
@@ -507,6 +534,14 @@ export class SessionHandle {
   onLiveness(cb: (liveness: SessionLiveness) => void): void {
     this.client.onSessionLiveness(this.sessionId, cb)
   }
+
+  /** Registers a callback for the session's screen plane: one parsed
+   *  session.frame document per metadata frame the backend publishes
+   *  (nocx-zg3k3.2.8). Full snapshots, never bytes — the model on the other
+   *  side refuses what it cannot install, and nothing here counts or acks. */
+  onScreenFrame(cb: (frame: SessionFrame) => void): void {
+    this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
 }
 
 export class WSClient {
@@ -539,16 +574,18 @@ export class WSClient {
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
-      // A socket came back, so anything the outbox kept can go now
-      // (nocx-rtg0.4). Fire-and-forget: a drain that fails leaves the queue
-      // exactly as it was and the next connect tries again, which is the
-      // whole point of keeping it.
-      void historyOutbox.drain()
       const ws = this.dispatcher.socket!
       ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
           const frame = decodeFrame(event.data)
           if (frame) {
+            // THE SCREEN PLANE routes before any byte accounting: a
+            // metadata frame is not PTY bytes — counting it would corrupt
+            // the replay offset (AD-9) and ack bytes nobody wrote.
+            if (frame.msgType === MSG_TYPE_METADATA) {
+              this._routeScreenFrame(frame)
+              return
+            }
             const state = this.sessions.get(frame.sessionId)
             if (state) {
               // Count payload bytes for the per-session offset (AD-9
@@ -877,9 +914,9 @@ export class WSClient {
 
   /** Tell the backend a pane closed, so its PENDING CAPTURES die with it
    *  (nocx-tsajw). The paneId is the pane's one identity — the same UUIDv7
-   *  the layout chain stores and history.record carries — declared once in
-   *  contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is generated
-   *  from it). Fire-and-forget: a lost notification is covered by the
+   *  the layout chain stores and lifecycle history carries — declared once
+   *  in contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is
+   *  generated from it). Fire-and-forget: a lost notification is covered by
    *  transport disconnect, which is the same destruction the pane's death
    *  implies.
    *
@@ -890,6 +927,34 @@ export class WSClient {
   notifyPaneClosed(paneId: string): void {
     const params: SecretsPaneClosed = { paneId }
     this.dispatcher.notify('secrets.paneClosed', params)
+  }
+
+  // The screen plane's demux (msg-type 0x02), the one place a session.frame
+  // document is parsed on this client. A frame for a session this client
+  // does not hold, or a payload that is not a frame document, is dropped
+  // with one debug line: neither is an error, and neither may throw out of
+  // the socket handler. Shape validation is the model's intake job — the
+  // document is handed over as parsed, refusals and all.
+  private _routeScreenFrame(frame: DecodedFrame): void {
+    const state = this.sessions.get(frame.sessionId)
+    if (!state) {
+      log.debug('nocx: screen frame dropped: unknown session', {
+        sessionId: frame.sessionId,
+      })
+      return
+    }
+    let doc: SessionFrame
+    try {
+      // Boundary assertion: the payload is wire JSON the model validates on
+      // intake; the parse here is the only shape this layer judges.
+      doc = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload))) as SessionFrame
+    } catch {
+      log.debug('nocx: screen frame dropped: payload is not a frame document', {
+        sessionId: frame.sessionId,
+      })
+      return
+    }
+    state.screenFrameCallback?.(doc)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -941,38 +1006,31 @@ export class WSClient {
   // never established a lifecycle channel and could never show a block. The
   // renderer still wires the editor BEFORE this call, so no invisible
   // prompt gap can occur (nocx-4ff.10).
-  openSession(cols: number, rows: number, anchor: OpenAnchor = {}): Promise<SessionHandle> {
+  openSession(size: SessionSize, anchor: OpenAnchor = {}): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
-        cols,
-        rows,
-        xpixel: 0,
-        ypixel: 0,
+        ...size,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result, { cols, rows }))
+      .then((result) => this._registerHandle(result, size))
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
   openSSHSession(
-    cols: number,
-    rows: number,
+    size: SessionSize,
     profileId: string,
     anchor: OpenAnchor = {},
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
-        cols,
-        rows,
-        xpixel: 0,
-        ypixel: 0,
+        ...size,
         kind: 'ssh',
         profileId,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result, { cols, rows }))
+      .then((result) => this._registerHandle(result, size))
   }
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
@@ -983,8 +1041,7 @@ export class WSClient {
   // choice onto, so a retry after the ask carries it here instead. Absent on
   // an ordinary open.
   openSSHSessionByHost(
-    cols: number,
-    rows: number,
+    size: SessionSize,
     host: string,
     user?: string,
     anchor: OpenAnchor = {},
@@ -992,26 +1049,20 @@ export class WSClient {
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
-        cols,
-        rows,
-        xpixel: 0,
-        ypixel: 0,
+        ...size,
         kind: 'ssh',
         host,
         user,
         ...(desiredMode ? { desiredMode } : {}),
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result, { cols, rows }))
+      .then((result) => this._registerHandle(result, size))
   }
 
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
    *  local, profile SSH, direct-host SSH — carries the resolved launch
    *  policy and the refusal reason alongside the id and cwd. */
-  private _registerHandle(
-    result: OpenResult,
-    reported: { cols: number; rows: number },
-  ): SessionHandle {
+  private _registerHandle(result: OpenResult, reported: SessionSize): SessionHandle {
     const sid = result?.sessionId
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
@@ -1045,13 +1096,14 @@ export class WSClient {
     sessionId: string,
     identity: { instanceId: string; sessionEpoch: number },
     offset: number,
-    reported: { cols: number; rows: number } | null = null,
+    reported: SessionSize | null = null,
   ): void {
     this.sessions.set(sessionId, {
       decoder: new UTF8StreamDecoder(),
       offset,
       reported,
       dataCallback: null,
+      screenFrameCallback: null,
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
@@ -1075,21 +1127,22 @@ export class WSClient {
     sessionId: string,
     offset: number,
     identity: { instanceId: string; sessionEpoch: number },
-    reported: { cols: number; rows: number } | null = null,
+    reported: SessionSize | null = null,
   ): Promise<AttachResult> {
     return this.dispatcher.call<AttachResult>('attach', {
       sessionId,
       offset,
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
-      // The claiming client's own geometry, when it has one. A claim takes
-      // the session AND its size — the client that attached last is the one
-      // the shared channel follows (nocx-eidfb.2) — so a reconnect that
-      // omitted it would leave the terminal at the default the backend put
-      // it on when this client went away. Omitted entirely, not sent as
-      // zeroes, when this client has never laid the session out: the backend
-      // then leaves the size alone rather than reading it as "no client".
-      ...(reported ? { cols: reported.cols, rows: reported.rows, xpixel: 0, ypixel: 0 } : {}),
+      // The claiming client's own geometry — grid and pixels, one report
+      // shape at all three doors (nocx-zg3k3.2.9). A claim takes the
+      // session AND its size — the client that attached last is the one the
+      // shared channel follows (nocx-eidfb.2) — so a reconnect that omitted
+      // it would leave the terminal at the default the backend put it on
+      // when this client went away. Omitted entirely, not sent as zeroes,
+      // when this client has never laid the session out: the backend then
+      // leaves the size alone rather than reading it as "no client".
+      ...(reported ? reported : {}),
     })
   }
 
@@ -1352,19 +1405,40 @@ export class WSClient {
     ws.send(frame)
   }
 
-  sendResize(sessionId: string, cols: number, rows: number): void {
+  /**
+   * Report one session's geometry: the grid plus the WHOLE text area in
+   * pixels — TIOCSWINSZ's own units (internal/session/size.go), which the
+   * helper decodes into the per-cell metric the frames carry
+   * (nocx-zg3k3.2.9).
+   *
+   * THE DEDUPE IS ON THE WHOLE REPORT, never on the grid alone: a zoom that
+   * changes the cell metric at the same cols and rows must still reach the
+   * backend, and a report identical to the last one must commit nothing
+   * new. False means the report was deduped; true means a resize went out.
+   *
+   * Sent whatever the backend answers, and recorded BEFORE it is sent: the
+   * report is what THIS client measured, and it is what the next attach
+   * has to carry to take the session's size back (nocx-eidfb.2).
+   */
+  sendResize(sessionId: string, size: SessionSize): boolean {
     const ws = this.dispatcher.socket
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    if (!this.sessions.has(sessionId)) return
-    // Recorded before it is sent, and recorded whatever the backend answers:
-    // this is what THIS client measured, and it is what the next attach has
-    // to report to take the session's size back (nocx-eidfb.2).
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
     const state = this.sessions.get(sessionId)
-    if (state) state.reported = { cols, rows }
+    if (!state) return false
+    const last = state.reported
+    if (
+      last !== null &&
+      last.cols === size.cols &&
+      last.rows === size.rows &&
+      last.xpixel === size.xpixel &&
+      last.ypixel === size.ypixel
+    ) {
+      return false
+    }
+    state.reported = { ...size }
     // Fire-and-forget — response is silently dropped.
-    void this.dispatcher
-      .call('resize', { sessionId, cols, rows, xpixel: 0, ypixel: 0 })
-      .catch(() => {})
+    void this.dispatcher.call('resize', { sessionId, ...size }).catch(() => {})
+    return true
   }
 
   /**
@@ -1438,6 +1512,13 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.inputStalledCallback = cb
+    }
+  }
+
+  onSessionScreenFrame(sessionId: string, cb: (frame: SessionFrame) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.screenFrameCallback = cb
     }
   }
 

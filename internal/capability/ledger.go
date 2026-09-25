@@ -64,10 +64,10 @@ type LedgerService interface {
 	// carries the id — a body retention has evicted, which the caller must
 	// render as a hole rather than as silence (ADR-0019 §7).
 	Artifact(ctx context.Context, id string) (*content.Artifact, error)
-	// CaptureOutput serves ledger.capture: one body of a frozen block,
-	// against the entry's own execution. The bool is whether the body is
-	// kept — false when output retention is off or the entry is sensitive,
-	// which is an answer and not a failure.
+	// CaptureOutput stores an assistant/tool-result body against the entry's
+	// execution. The bool is whether the body is kept — false when output
+	// retention is off or the entry is sensitive, which is an answer and not
+	// a failure.
 	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
 }
 

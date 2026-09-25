@@ -1,22 +1,34 @@
 package content
 
-// RecordCompleted — the ledger's answer to history.record (nocx-rtg0.19).
+// RecordCompleted — the ledger's completed-only write seam (nocx-rtg0.19).
 //
 // THE CUTOVER, IN ONE METHOD. command_history held "a command and what it
-// printed" and stored no output at all; the ledger is what the product object
-// actually needs. history.record's SHAPE does not change — the renderer sends
-// one message after a command ends, as it always has — and this is where that
-// message lands now.
+// printed" and stored no output at all; the lifecycle path now owns normal
+// command history. This method was kept for a completed command that has no
+// authenticated lifecycle attempt.
+//
+// ITS PRODUCTION CALLER, TODAY: none. Every command this backend actually
+// records — a shell command (lifecycle.submitAttempt → the authenticated
+// completion) and an assistant/tool command (internal/assistant's own
+// Submit → StartExecution → FinishExecution, attempt_dispatch.go and
+// kernel.go) — has an authenticated lifecycle attempt and never reaches
+// here. `deadcode -whylive` on sqliteContent.RecordCompleted answers
+// "reachable only through reflection" (stage review nocx-2v80t.3.15, finding
+// 5): the interface method is exercised only by this package's, transport's
+// and capability's own tests, as their fixture-seeding shortcut for "a
+// command that already finished" — 53 call sites across 17 test files, none
+// of them testing THIS method's own behaviour beyond a handful in
+// ledger_command_test.go. Removing it is therefore a rewrite of every one of
+// those fixtures onto Submit/StartExecution/FinishExecution, not a small
+// change, and belongs to a bead of its own rather than to a review-fix pass.
 //
 // # Why a completed command is one transaction and not three calls
 //
 // The ledger's own lifecycle is Submit → StartExecution → FinishExecution,
-// three events for a command the renderer watches happen. history.record
-// arrives AFTER the fact: there is nothing to watch, only a row to write. Made
-// of three separate calls it would leave an entry with no execution whenever
-// the second failed — a row that says a command was intended and nothing about
-// whether it ran. The startup sweep would later close it as `unknown`, which
-// is an honest answer to the wrong question.
+// three events for a command the renderer watches happen. A completed-only
+// command has no lifecycle to watch, so its intent, execution and outcome
+// commit together. The startup sweep can then distinguish this explicit
+// completed row from an open entry that became unknown.
 //
 // So the intent, its single execution and its outcome commit together. The
 // shape is CaptureFrame's (ledger_agent_sqlite.go), which does the same thing
@@ -24,10 +36,10 @@ package content
 //
 // # Why the backend mints an id when no lifecycle attempt exists
 //
-// history.record traditionally carried no id, so the backend minted one for
-// completed-only callers. A lifecycle submit now carries AttemptID; that
-// path updates the already-open row and returns its id instead. RecordCompleted
-// remains for callers that have no authenticated lifecycle attempt.
+// A lifecycle submit carries AttemptID and updates the already-open row,
+// returning its id. RecordCompleted remains for callers that have no
+// authenticated lifecycle attempt — a shape nothing in this codebase
+// currently has (see above).
 
 import (
 	"context"
@@ -36,10 +48,10 @@ import (
 	"time"
 )
 
-// CompletedCommand is one finished command, as history.record knows it.
+// CompletedCommand is one finished command for the completed-only seam.
 //
-// It carries no output: history.record never did, and inventing an empty
-// artifact would put a row in `artifacts` that claims a capture happened.
+// It carries no output: inventing an empty artifact would put a row in
+// `artifacts` that claims a capture happened.
 type CompletedCommand struct {
 	// Client binds the row to who wrote it, as every entry's does.
 	Client string
@@ -63,9 +75,8 @@ type CompletedCommand struct {
 	// caller so this method has no opinion about either.
 	Sensitivity Sensitivity
 	Payload     string
-	// Status is the outcome as the renderer reported it. `pending` is not a
-	// value history.record can send: a command it is telling us about has
-	// already ended.
+	// Status is the outcome for a completed-only command. `pending` is not
+	// valid here because this seam records commands that already ended.
 	Status EntryStatus
 	// StartedAt and EndedAt are the renderer's wall clock; DurationMs is its
 	// own measurement, never the difference of two clocks (nocx-rtg0.23).
@@ -101,7 +112,7 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		return "", fmt.Errorf("content: record: client is required — it binds the row to who wrote it")
 	}
 	if in.Status == "" || in.Status == EntryPending {
-		return "", fmt.Errorf("content: record: %q is not an outcome; history.record reports commands that ended", in.Status)
+		return "", fmt.Errorf("content: record: %q is not an outcome; completed commands must have ended", in.Status)
 	}
 	if in.Sensitivity == "" {
 		in.Sensitivity = SensitivityNormal
@@ -194,7 +205,7 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		// The anchor is RESOLVED before the write, never left to the foreign
 		// key — the same rule Submit follows — but its failure is NOT fatal
 		// here. A pane the chain does not hold costs the restore hint; the
-		// command itself is still worth recording, and history.record's
+		// command itself is still worth recording, and this completed-only
 		// caller has no way to fix the id anyway.
 		pane := in.PaneID
 		if pane != nil {
@@ -238,10 +249,10 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 			return err
 		}
 
-		// session_id is NULL above and that is deliberate: history.record
-		// does not carry one, and a session row invented here would be a
-		// second writer of the table nocx-49d4 is about. The entry keeps its
-		// pane, which is the durable anchor anyway (design §6.1).
+		// session_id is NULL above and that is deliberate: the completed-only
+		// seam does not carry one, and a session row invented here would be a
+		// second writer of the table nocx-49d4. The entry keeps its pane,
+		// which is the durable anchor anyway (design §6.1).
 		//
 		// state is NULL on the execution — the startup sweep only touches
 		// runs it might have to interrupt, and this one ended before it was

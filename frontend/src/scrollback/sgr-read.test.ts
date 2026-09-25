@@ -1,13 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { runsFromSGR } from './sgr-read'
-import {
-  serializeRangeSGR,
-  serializeRange,
-  DEFAULT_SNAPSHOT,
-  attrsToStyle,
-  paletteToRGB,
-} from './serializer'
-import { BufferLine, lineWith, XTERM_CM_P16, XTERM_CM_P256, XTERM_CM_RGB } from './test-helpers'
+import { DEFAULT_SNAPSHOT, paletteToRGB } from './serializer'
 
 const S = DEFAULT_SNAPSHOT
 
@@ -57,60 +50,5 @@ describe('runsFromSGR', () => {
   it('treats an empty parameter list as a reset, like a terminal does', () => {
     const runs = runsFromSGR(S, '\u001b[31mred\u001b[mplain')
     expect(runs[1].attrs.fg).toBeNull()
-  })
-})
-
-// THE round trip, and the reason both halves live beside each other: what a
-// restored block draws must be what the live block drew. Serialize real cells
-// to SGR (the capture path), read them back (the restore path), and render
-// both through the ONE attribute-to-style mapping.
-describe('a stored body renders as the live rows did', () => {
-  const styled = (runs: { chars: string; attrs: Parameters<typeof attrsToStyle>[1] }[]) =>
-    runs
-      .map((r) => {
-        const style = attrsToStyle(S, r.attrs)
-        return style ? `<span style="${style}">${r.chars}</span>` : r.chars
-      })
-      .join('')
-
-  it('round-trips a coloured row through capture and restore', () => {
-    const lines = [
-      lineWith(
-        { chars: 'o', fg: 2, fgMode: XTERM_CM_P16, bgMode: 0 },
-        { chars: 'k', fg: 2, fgMode: XTERM_CM_P16, bgMode: 0 },
-        { chars: '!', fgMode: 0, bgMode: 0 },
-      ),
-    ]
-    const getLine = (y: number) => lines[y]
-
-    const stored = serializeRangeSGR(getLine, 0, 0)
-    const restored = styled(runsFromSGR(S, stored))
-    const live = serializeRange(S, getLine, 0, 0)
-
-    // The live path wraps each logical row in a term-line; the comparison is
-    // of what is INSIDE it, which is what the two paths both produce.
-    expect(`<span class="term-line">${restored}</span>`).toBe(live)
-  })
-
-  it('round-trips a 256-palette and a 24-bit row', () => {
-    const lines = [
-      lineWith(
-        { chars: 'a', fg: 208, fgMode: XTERM_CM_P256, bgMode: 0 },
-        { chars: 'b', fg: 0xff8800, fgMode: XTERM_CM_RGB, bgMode: 0 },
-      ),
-    ]
-    const getLine = (y: number) => lines[y]
-    const restored = styled(runsFromSGR(S, serializeRangeSGR(getLine, 0, 0)))
-    expect(`<span class="term-line">${restored}</span>`).toBe(serializeRange(S, getLine, 0, 0))
-  })
-
-  it('round-trips a multi-row body, joined the way the walk joins it', () => {
-    const lines = [new BufferLine('first', false), new BufferLine('second', false)]
-    const getLine = (y: number) => lines[y]
-    const stored = serializeRangeSGR(getLine, 0, 1)
-    const rows = stored.split('\n').map((row) => styled(runsFromSGR(S, row)))
-    expect(rows.map((r) => `<span class="term-line">${r}</span>`).join('')).toBe(
-      serializeRange(S, getLine, 0, 1),
-    )
   })
 })

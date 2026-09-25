@@ -100,6 +100,20 @@ func TestInspectRefusesSomethingThatIsNeither(t *testing.T) {
 
 // buildTiny compiles a two-line program with cgo off (static on Linux) or on
 // (dynamically linked against libc on every platform).
+// The build does not depend on what sits above the temp directory: an empty
+// .git there is what made go's VCS stamping fail (nocx-jy8vp).
+func TestBuildTinyIgnoresARepositoryAboveTheTempDirectory(t *testing.T) {
+	// Every t.TempDir of one test sits under one per-test root, so an empty
+	// .git in that root is above the directory buildTiny builds in.
+	root := filepath.Dir(t.TempDir())
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectFile(buildTiny(t, false)); err != nil {
+		t.Fatalf("inspectFile: %v", err)
+	}
+}
+
 func buildTiny(t *testing.T, cgo bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -114,7 +128,10 @@ func buildTiny(t *testing.T, cgo bool) string {
 		t.Fatal(err)
 	}
 	out := filepath.Join(dir, "tiny")
-	cmd := exec.Command("go", "build", "-o", out, ".") //nolint:gosec // the test builds a two-line program it just wrote
+	// -buildvcs=false: a throwaway binary has no version to stamp, and without
+	// it go asks git about whatever repository sits above the temp directory
+	// (a stray /tmp/.git failed all three tests, nocx-jy8vp).
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, ".") //nolint:gosec // the test builds a two-line program it just wrote
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOFLAGS=")
 	if cgo {

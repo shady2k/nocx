@@ -99,6 +99,10 @@ const (
 const (
 	pointActive  = C.GHOSTTY_POINT_TAG_ACTIVE
 	pointHistory = C.GHOSTTY_POINT_TAG_HISTORY
+	// pointScreen spans the history and the active area as one space, which
+	// is the only one a tracked row can always be named in: a reflow or a
+	// scroll may carry it from either into the other (rowTrack.Row).
+	pointScreen = C.GHOSTTY_POINT_TAG_SCREEN
 )
 
 // terminal is one libghostty-vt terminal. It is the only implementation of
@@ -165,6 +169,19 @@ type terminal struct {
 	// adapter at all.
 	fenceIdx   int
 	fenceNonce [64]byte
+	// outputMarkIdx is the output-start mark scanner's own position
+	// (output_mark.go), tracked alongside fenceIdx in the same pass over
+	// the bytes (scanMarkers): the two sequences share a five-byte prefix
+	// and diverge at the sixth, so both need to see every byte in order to
+	// stay correct, regardless of which one (if either) a byte ends up
+	// completing.
+	outputMarkIdx int
+	// eraseIdx is the clear-boundary scanner's own position (erase.go): ED3,
+	// `ESC [ 3 J`. Its prefix (ESC `[`) does not overlap the fence's or the
+	// output mark's (ESC `]`), so it needs no shared divergence point with
+	// them — it is tracked in the same pass over the bytes purely because
+	// scanMarkers is the one place bytes are scanned at all.
+	eraseIdx int
 	// departed holds the rows that left the screen, captured at the instant
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
@@ -174,6 +191,15 @@ type terminal struct {
 	// caller with the rows that were read: a report with a hole in it is the
 	// caller's to judge, not this adapter's to pass off as whole.
 	departedErr error
+	// readScreen and readDepth are the two reads the departure capture takes,
+	// held as fields rather than calls so a test can make one fail: the
+	// torn-measurement path is otherwise unreachable (the library does not
+	// fail a read on request) and a path that cannot be tested is how a silent
+	// skip survives (nocx-2v80t.3.9). New sets both to the real reads, they
+	// take no lock of their own (the capture already holds mu), and nothing
+	// outside a test writes them.
+	readScreen func() (emulator.Screen, error)
+	readDepth  func() (int, error)
 	// sb is the scrollback baseline of each buffer, indexed by
 	// emulator.Screen: how many history rows that buffer had when last
 	// measured, and whether it has been measured at all. Departures are the
@@ -184,6 +210,17 @@ type terminal struct {
 	// terminal's zero history is a real measurement; the alternate screen's
 	// stays invalid until first read.
 	sb [2]sbBaseline
+	// tracked is every tracked grid reference this terminal has handed out and
+	// not yet had freed, keyed by its own handle. TrackRow adds to it,
+	// (*rowTrack).Release removes from it, and release (Close's own) frees
+	// whatever is left: a caller that forgets to release one, or one still
+	// held when the session ends, must not outlive the terminal that made it
+	// meaningless — ghostty_tracked_grid_ref_free is safe to call after the
+	// terminal that created the reference is gone, but nothing else is safe
+	// to call it TWICE, which is why release clears this map rather than
+	// leaving it for a (*rowTrack).Release that may still arrive after: that
+	// arrival finds t.t nil and does nothing (see (*rowTrack).Release).
+	tracked map[C.GhosttyTrackedGridRef]struct{}
 }
 
 // sbBaseline is one buffer's scrollback at its last measurement. valid is
@@ -193,6 +230,148 @@ type terminal struct {
 type sbBaseline struct {
 	rows  int
 	valid bool
+	// torn is true when a measurement FAILED: the count left behind is not a
+	// measurement, and the rows that left the screen in that feed are unread.
+	// The next measurement must REPORT that span as a gap rather than
+	// re-baseline over it in silence (noteDepartedLocked) — silence about rows
+	// a consumer never received is indistinguishable from a feed that scrolled
+	// nothing, and only one of the two is true.
+	torn bool
+	// owed is how many rows a reflow moved back INTO the screen out of the
+	// scrollback AND that the consumer has already been handed. A taller
+	// screen is refilled from history, and those rows were reported as
+	// departures the first time they left; when the screen scrolls them off
+	// again the depth grows by the same rows, which is the SAME leave and not
+	// a new one. The port's rule is explicit — "a resize reflows the screen
+	// rather than scrolling it, so reflowed rows are not departures" — so the
+	// debt is paid before any growth is reported, and a consumer's absolute
+	// row space never sees a row twice.
+	owed int
+	// pushed is this buffer's HISTORY, newest last, as far as the ledger
+	// describes it: one block per run of rows that got there, with the
+	// provenance a refill needs when it pulls them back onto the screen. Two
+	// kinds of run arrive in history, and BOTH are here because a refill takes
+	// the newest rows first and has to know what it is taking:
+	//
+	//   - a SHRINK reflows the screen's top rows into history — not a
+	//     departure, so those rows were never reported as they went. The rows
+	//     at the top of the screen a shrink pushes are first the ones an
+	//     earlier refill had pulled back (already handed to the consumer, so
+	//     their return owes a departure) and then rows nobody was ever handed
+	//     (so their return owes nothing and they are reported when they leave
+	//     for real);
+	//   - a row that LEFT the screen for real and was handed over is newer
+	//     than anything a shrink pushed before it, and every row of such a run
+	//     owes a departure when a refill pulls it back.
+	//
+	// A ledger of pushes alone cannot say where a refill's rows came from, and
+	// the failure is not subtle: a row that left normally, was handed over and
+	// was then pulled back from plain history was charged against a push block
+	// and marked "fresh" (never handed), so the emulator reported its
+	// departure a second time — measured on the e2e's resize pattern, where
+	// the frontend re-measures the pane mid-transcript (transcript-0003-069
+	// reported twice, nocx-2v80t.3.9).
+	//
+	// Bounded by the runs that can still be taken back: adjacent runs of one
+	// class merge, and the ledger keeps at most maxSbPushes blocks — the ones
+	// dropped are the oldest, deepest in history, and a refill that reaches
+	// them charges a departure that was already reported rather than swallowing
+	// one that was not, which is the conservative direction for a row-space
+	// that must not lose output.
+	pushed []sbPush
+}
+
+// sbPush is one block of rows a shrink pushed onto the top of history: how
+// many of them the consumer had already been handed, and how many it never
+// was. The handed ones are the OLDER half of the block (they are the screen's
+// topmost rows, which a refill had put back), the fresh ones the newer, so a
+// pull-back consumes fresh before handed.
+type sbPush struct {
+	handed int
+	fresh  int
+}
+
+// maxSbPushes bounds the stack. See the field's comment for what dropping the
+// oldest costs.
+const maxSbPushes = 64
+
+// takeBack consumes n rows from the newest end of the stack — the rows a
+// refill just pulled back onto the screen — and answers how many of them the
+// consumer had already been handed, which is the only part that owes a
+// departure when they leave again.
+// noteHandedLocked records that n rows left the screen for real and were handed
+// over: they are the newest rows in this buffer's history, newer than anything a
+// shrink pushed before them. See the pushed field for what a ledger without them
+// gets wrong.
+//
+// Marked where the rows are CAPTURED, which is the one instant the buffer that
+// lost them is known — the report the captures fill is the terminal's, and a
+// later drain cannot tell a primary row from an alternate-screen one. The drain
+// follows the capture inside the same ingest in this port's use, and the corner
+// where it does not is the one a refill already covers: it trims the rows still
+// sitting in the pending report before it charges the debt for what it pulled
+// back.
+func (b *sbBaseline) noteHandedLocked(n int) {
+	if n <= 0 {
+		return
+	}
+	if top := len(b.pushed) - 1; top >= 0 && b.pushed[top].fresh == 0 {
+		// Adjacent to a run that holds no un-handed rows: one run, all handed.
+		// (Within a block the debt cares only about how many rows are fresh,
+		// because a refill takes fresh before handed and nothing else about a
+		// handed row matters.)
+		b.pushed[top].handed += n
+	} else {
+		b.pushed = append(b.pushed, sbPush{handed: n})
+	}
+	if len(b.pushed) > maxSbPushes {
+		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
+	}
+}
+
+func (b *sbBaseline) takeBack(n int) int {
+	handed := 0
+	for n > 0 && len(b.pushed) > 0 {
+		seg := &b.pushed[len(b.pushed)-1]
+		if take := min(n, seg.fresh); take > 0 {
+			seg.fresh -= take
+			n -= take
+		} else {
+			take = min(n, seg.handed)
+			seg.handed -= take
+			n -= take
+			handed += take
+		}
+		if seg.fresh == 0 && seg.handed == 0 {
+			b.pushed = b.pushed[:len(b.pushed)-1]
+		}
+	}
+	// Rows older than anything the stack describes came out of history that
+	// was written before this ledger existed: they departed to get there, so
+	// they were handed over.
+	return handed + n
+}
+
+// pushReflow records n rows the screen's top just reflowed into history: the
+// ones the consumer has already been handed (at most what is owed) and the
+// rest, which nobody was ever told about. The handed half is the older half
+// of the block, so it goes first.
+func (b *sbBaseline) pushReflow(n int) {
+	handed := min(n, b.owed)
+	b.owed -= handed
+	fresh := n - handed
+	if len(b.pushed) > 0 {
+		top := &b.pushed[len(b.pushed)-1]
+		if top.fresh == 0 && top.handed > 0 && handed > 0 {
+			top.handed += handed
+			top.fresh = fresh
+			return
+		}
+	}
+	b.pushed = append(b.pushed, sbPush{handed: handed, fresh: fresh})
+	if len(b.pushed) > maxSbPushes {
+		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
+	}
 }
 
 var (
@@ -243,6 +422,10 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 		return nil, resultError("terminal_new", r)
 	}
 	t := &terminal{t: handle, geom: g}
+	// The departure capture's two reads, wired once: they are fields so a test
+	// can make a read fail and pin the torn-measurement path, which the
+	// library itself never fails on request (see the fields' own comment).
+	t.readScreen, t.readDepth = t.screenLocked, t.scrollbackLocked
 	// A fresh terminal is on the primary screen with no history, and both
 	// facts are measured rather than assumed: seeding the baseline here is
 	// what lets the FIRST feed report its departures instead of silently
@@ -260,6 +443,37 @@ func New(g emulator.Geometry) (emulator.Terminal, error) {
 	return t, nil
 }
 
+// setScrollbackBudget applies the library's two retention limits: a byte
+// limit for the scrollback's cell storage and a limit in physical lines.
+// Neither is a Go value the library can be handed directly, and each is a
+// POINTER because that is the library's shape — a NULL value removes that
+// limit, which is how install() leaves a session's history whole — so a nil
+// argument here means "no limit" and both options are named in this function
+// and nowhere else.
+//
+// A budget is a caller's decision, not a default to be inherited (see
+// install's own comment for what inheriting the library's cost), and a test
+// about the boundary states the one it means through this.
+func (t *terminal) setScrollbackBudget(maxBytes, maxLines *uint64) error {
+	var bytes, lines C.size_t
+	var bytesPtr, linesPtr unsafe.Pointer
+	if maxBytes != nil {
+		bytes = C.size_t(*maxBytes)
+		bytesPtr = unsafe.Pointer(&bytes)
+	}
+	if maxLines != nil {
+		lines = C.size_t(*maxLines)
+		linesPtr = unsafe.Pointer(&lines)
+	}
+	if r := C.ghostty_terminal_set(t.t, C.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, bytesPtr); r != C.GHOSTTY_SUCCESS {
+		return resultError("scrollback_max_bytes", r)
+	}
+	if r := C.ghostty_terminal_set(t.t, C.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, linesPtr); r != C.GHOSTTY_SUCCESS {
+		return resultError("scrollback_max_lines", r)
+	}
+	return nil
+}
+
 // install sizes the terminal and wires its callbacks. It is separate from New
 // so that every failure after the handle exists goes down one path that frees
 // it — release — rather than four that must each remember what was allocated
@@ -270,6 +484,41 @@ func (t *terminal) install(g emulator.Geometry) error {
 	// cell grid. A resize that does not change the grid still applies it — the
 	// library documents that — so this is a resize rather than a second way to
 	// construct a terminal.
+
+	// THE SESSION'S HISTORY IS NOT THE LIBRARY'S TO DELETE (nocx-2v80t.3.9).
+	//
+	// DepartedRows reads the rows that left the screen out of the buffer's
+	// scrollback depth, and the port's contract is one report per row, for as
+	// long as the session lives. A retention budget destroys the history that
+	// depth is measured against: the library prunes whole pages once the
+	// budget is reached, the depth read after the feed is then below its
+	// baseline, and the feed's own departures and the pruned pages land in one
+	// count no scalar separates — so the feed is a hole to the consumer
+	// (noteDepartedLocked's prune branch) and, when the prune is smaller than
+	// the feed's growth, the count drifts and rows are skipped with no hole at
+	// all (the residual hole emulator.Terminal.DepartedRows names).
+	//
+	// Nothing configured a budget before this: ghostty_terminal_new's nil
+	// options left the library's own in force, and that default is small in
+	// the terms that decide this. It saturates at about 80k cells, so the
+	// DEPTH it retains depends on the pane's width — measured: 1073 rows at 80
+	// columns, 873 at 100, 673 at 120, 573 at 148 — and a wide pane reaches it
+	// after a few hundred lines. At the e2e transcript's pane the seventh
+	// command of ten crossed it: one 2108-byte feed carrying a whole command's
+	// output, depth 581 -> 329, and every row of that command was gone from
+	// the transcript (nocx-2v80t.3.9).
+	//
+	// Both limits are therefore cleared: the history a session's departures
+	// are read out of lives as long as the session does, which is what the
+	// owner's decision already assumed when it made ghostty's scrollback the
+	// only buffer the helper keeps. A budget stays expressible
+	// (setScrollbackBudget) and the capture stays honest for one that prunes
+	// anyway; what cannot stand is a budget nobody chose deleting history
+	// behind the reader. Its memory is the library's to compress in place —
+	// ghostty_terminal_compress changes storage, never contents.
+	if err := t.setScrollbackBudget(nil, nil); err != nil {
+		return err
+	}
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		return resultError("terminal_resize", r)
@@ -324,6 +573,14 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 		return nil, fmt.Errorf("ghostty: %w: %dx%d cells, %dx%d px", emulator.ErrOutOfRange,
 			g.Cols, g.Rows, g.CellWidthPx, g.CellHeightPx)
 	}
+	// The depth either side of the resize is the debt: a taller screen fills
+	// itself out of history — the depth shrinks by the rows it took — and
+	// those rows must not be reported as departures when they leave the
+	// screen a second time. BOTH readings must be the same buffer's, and the
+	// debt may only be what the refill could have put back.
+	before, beforeErr := t.scrollbackLocked()
+	beforeScreen, beforeScreenErr := t.screenLocked()
+	beforeRows := t.geom.Rows
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		// The geometry in force is the one the library refused to leave, so
@@ -336,6 +593,76 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	// it reshapes did not leave the screen, so the departure baseline is
 	// taken again rather than let a reflowed count read as departures.
 	t.rebaselineLocked()
+	if after, aerr := t.scrollbackLocked(); aerr == nil {
+		if screen, serr := t.screenLocked(); serr == nil {
+			base := &t.sb[sbIndex(screen)]
+			// A REFILL is the only thing that may owe departures: the screen
+			// gained rows and took them out of history, and those rows were
+			// reported when they first left. The difference of two buffers'
+			// depths measures nothing, so a screen that is not the one the
+			// reading was taken on owes nothing; and the debt is capped by
+			// what the reflow could put back — the rows the screen gained.
+			// A larger shrink of the depth is not a refill (a rewrap of
+			// history's own line breaks, an erase, a switch), and charging it
+			// would swallow a command's own departures: the frozen count that
+			// hands one command's rows to the next block (nocx-2v80t.3.9).
+			sameBuffer := beforeErr == nil && beforeScreenErr == nil && screen == beforeScreen
+			switch grew := g.Rows - beforeRows; {
+			case !base.valid || !sameBuffer:
+			case grew > 0 && before > after:
+				_ = grew
+				// The screen grew and took its new rows out of history: the
+				// depth shrank by what the refill pulled back, and each of
+				// those rows was reported when it first left. A refill can
+				// only return the rows the screen gained — and only rows the
+				// consumer has ALREADY BEEN HANDED may be owed. A row the
+				// refill pulled back that is still in the pending report has
+				// not been reported at all yet, so charging a debt for it
+				// cancels a departure nobody received, and the debt then eats
+				// the NEXT interval's own rows: the frozen departure count
+				// that hands one command's rows to the next block
+				// (nocx-2v80t.3.9). The pending report holds the newest
+				// departures, and the refill takes the newest history rows,
+				// so the overlap is the smaller of the two.
+				refill := min(before-after, grew)
+				// The refill takes the NEWEST history rows, and the pending
+				// report holds the newest departures: a row the refill put
+				// back on the screen is still in that report, where it no
+				// longer belongs — it has not left the screen at all. Left
+				// there it is handed over AND reported again when it leaves,
+				// which shifts every later interval by the refill's size
+				// (measured: one 26-row pane grown to 40 hands each command
+				// the previous command's last 14 rows, nocx-2v80t.3.9).
+				if back := min(refill, len(t.departed)); back > 0 {
+					t.departed = t.departed[:len(t.departed)-back]
+					refill -= back
+				}
+				// What is left comes off the stack of rows an earlier shrink
+				// pushed into history: the ones the consumer was already
+				// handed owe a departure, the fresh ones owe nothing. Rows
+				// older than the stack departed to get into history, so they
+				// were handed over.
+				base.owed += base.takeBack(refill)
+			case grew < 0 && after > before:
+				// The screen shrank and reflowed its top rows INTO history:
+				// they are not on the screen any more, so none of them can
+				// leave it again — and that is not a departure either. The
+				// block goes on the stack with its provenance, because a later
+				// refill pulls it back newest-first: the handed rows first off
+				// the screen are its older members, the rows nobody was ever
+				// handed its newer ones. Bounding the block by what the depth
+				// grew keeps a rewrap of history's own line breaks out of it
+				// (nocx-2v80t.3.9).
+				base.pushReflow(min(-grew, after-before))
+			}
+			// A debt larger than the screen it sits on is not a refill at
+			// all: at most the screen's own rows can be rows that were
+			// already reported and are on it again.
+			if base.owed > g.Rows {
+				base.owed = g.Rows
+			}
+		}
+	}
 	return t.takeReplies(), nil
 }
 
@@ -349,27 +676,103 @@ func (t *terminal) Ingest(b []byte) ([]byte, error) {
 	return t.takeReplies(), nil
 }
 
-// ingestLocked feeds b to the library through the fence scanner. The
+// ingestLocked feeds b to the library through the marker scanner. The
 // invariant is the feed, not the scan: every byte reaches vt_write exactly
-// once, in arrival order, whether or not a fence is in it. The only thing a
-// fence changes is WHERE the feed splits — the bytes up to and including the
-// fence's BEL go in, the fence is sighted against the screen as it stands at
-// that instant, and only then do the bytes after it go in. A chunk with no
-// fence costs exactly one vt_write, and a fence that straddles two chunks
-// costs nothing at all: the scanner's state is a byte position, not a buffer
-// of withheld input.
+// once, in arrival order, whether or not a marker is in it. The only thing a
+// marker changes is WHERE the feed splits — the bytes up to and including
+// its terminating BEL go in, it is sighted against the screen as it stands
+// at that instant, and only then do the bytes after it go in. A chunk with
+// no marker costs exactly one vt_write, and a marker that straddles two
+// chunks costs nothing at all: the scanner's state is a byte position, not a
+// buffer of withheld input.
 func (t *terminal) ingestLocked(b []byte) {
 	for start := 0; start < len(b); {
-		n, fired := t.scanFence(b[start:])
+		n, kind := t.scanMarkers(b[start:])
 		if n > 0 {
 			C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[start])), C.size_t(n))
 			t.noteDepartedLocked()
 		}
-		if fired {
+		switch kind {
+		case markKindFence:
 			t.sightFence()
+		case markKindOutputMark:
+			t.sightOutputMark()
+		case markKindClearBoundary:
+			t.sightEraseSavedLines()
 		}
 		start += n
 	}
+}
+
+// markKind is which sighted marker scanMarkers found, if any.
+type markKind int
+
+const (
+	markKindNone markKind = iota
+	markKindFence
+	markKindOutputMark
+	markKindClearBoundary
+)
+
+// scanMarkers advances the fence scanner (fence.go), the output-mark scanner
+// (output_mark.go) and the clear-boundary scanner (erase.go) together, byte
+// by byte, and answers how many bytes of b may be fed to the library before
+// ANY of them completes — whichever comes first — and which one that was.
+//
+// The fence and the output mark share a five-byte prefix (ESC ] 1 3 3) and
+// diverge at the sixth ('7' for the fence, ';' for the output mark); the
+// clear boundary's prefix is ESC `[`, which shares only the leading ESC with
+// the other two. All three are scanned in one pass rather than as
+// independent scans of the same slice, for the reason the fence/output-mark
+// pair already states: a second, independent scan would advance another
+// candidate's position past bytes the caller only committed the FIRST
+// candidate's length to vt_write, corrupting it for the next call. Scanning
+// once, updating every candidate's state from the same byte, is what keeps
+// each one's position exactly as far as this scan actually returns.
+func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
+	for i, c := range b {
+		if fenceMatches(t.fenceIdx, c) {
+			if t.fenceIdx == fenceLen-1 {
+				t.fenceIdx = 0
+				return i + 1, markKindFence
+			}
+			if t.fenceIdx >= len(fenceFixed) {
+				t.fenceNonce[t.fenceIdx-len(fenceFixed)] = c
+			}
+			t.fenceIdx++
+		} else if c == fenceFixed[0] {
+			// The candidate dies at this byte, and the byte itself may begin
+			// the next one: an ESC in the stream is always a potential fence.
+			t.fenceIdx = 1
+		} else {
+			t.fenceIdx = 0
+		}
+
+		if outputMarkMatches(t.outputMarkIdx, c) {
+			if t.outputMarkIdx == len(outputMarkFixed)-1 {
+				t.outputMarkIdx = 0
+				return i + 1, markKindOutputMark
+			}
+			t.outputMarkIdx++
+		} else if c == outputMarkFixed[0] {
+			t.outputMarkIdx = 1
+		} else {
+			t.outputMarkIdx = 0
+		}
+
+		if eraseSavedLinesMatches(t.eraseIdx, c) {
+			if t.eraseIdx == len(eraseSavedLinesFixed)-1 {
+				t.eraseIdx = 0
+				return i + 1, markKindClearBoundary
+			}
+			t.eraseIdx++
+		} else if c == eraseSavedLinesFixed[0] {
+			t.eraseIdx = 1
+		} else {
+			t.eraseIdx = 0
+		}
+	}
+	return len(b), markKindNone
 }
 
 // The departure capture. Rows leave one at a time, off the top, and the
@@ -407,23 +810,50 @@ func (t *terminal) scrollbackLocked() (int, error) {
 // depth reading, and that interval is flagged incomplete rather than
 // reported whole.
 func (t *terminal) noteDepartedLocked() {
-	screen, err := t.screenLocked()
+	screen, err := t.readScreen()
 	h := 0
 	if err == nil {
-		h, err = t.scrollbackLocked()
+		h, err = t.readDepth()
 	}
 	base := &t.sb[sbIndex(screen)]
 	if err != nil {
 		// The buffer's depth is unknown, so no delta can be taken: mark the
 		// gap in the report rather than guess, and let the next feed
-		// re-baseline from a fresh measurement.
+		// re-baseline from a fresh measurement — which REPORTS the span it
+		// could not read rather than measuring over it, below.
 		base.valid = false
+		base.torn = true
 		t.failDeparted(fmt.Errorf("ghostty: departed rows unmeasured: %w", err))
 		return
 	}
+	if base.torn {
+		// The measurement that failed took no count, so the rows that left the
+		// screen while it was failing are unread — and they cannot be separated
+		// from this feed's own departures, because both are growth in a count
+		// nobody could take across the two. A gap is the honest answer and
+		// silence is not: re-baselining here with no report claims the span
+		// held nothing, which is how a whole feed's departures disappeared
+		// while every feed after it read clean (nocx-2v80t.3.9). The count
+		// still re-baselines below, so the NEXT feed measures normally.
+		t.failDeparted(fmt.Errorf(
+			"ghostty: departed rows unmeasured across a torn measurement (depth %d -> %d): what left the screen while the depth was unreadable cannot be read",
+			base.rows, h))
+	}
 	if base.valid {
 		if d := h - base.rows; d > 0 {
-			t.captureDepartedLocked(h-d, h)
+			// The growth a reflow's rows make when they leave a second time
+			// is not a departure: they are already reported, and their debt
+			// is paid first. Only what is left after it is new output
+			// leaving, and those are the newest rows of the growth.
+			fresh := d
+			if fresh > base.owed {
+				fresh -= base.owed
+				base.owed = 0
+				t.captureDepartedLocked(h-fresh, h)
+				base.noteHandedLocked(fresh)
+			} else {
+				base.owed -= fresh
+			}
 		} else if d < 0 && h > 0 {
 			// The depth shrank while rows were still retained: the
 			// library's retention budget pruned whole pages inside this
@@ -442,8 +872,18 @@ func (t *terminal) noteDepartedLocked() {
 		// screen — they ceased. The baseline follows the buffer down
 		// without a report, exactly as it does for d == 0, the feed that
 		// scrolls nothing.
+		//
+		// ED3 ITSELF IS SIGHTED SEPARATELY, BY SCANNING (erase.go), NOT
+		// FROM THIS DELTA. A depth transition can only report an erase
+		// that had something to erase — and the common case this feature
+		// exists for is a short session whose live rows never scrolled
+		// into history at all (depth was already 0, so ED3 leaves it at
+		// 0): measured on the e2e, nocx-2v80t.3.17, where a single `echo`
+		// followed by `clear` never moved the depth and a depth-based
+		// signal fired for zero of the runs that mattered. The scanner
+		// below fires on the SEQUENCE, not on its effect on this counter.
 	}
-	base.rows, base.valid = h, true
+	base.rows, base.valid, base.torn = h, true, false
 }
 
 // captureDepartedLocked copies history rows [from, to) — the rows that just
@@ -495,18 +935,62 @@ func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 // be, so its next measurement starts a fresh baseline instead of a delta —
 // which is also why the check rides the feed and nothing else.
 func (t *terminal) rebaselineLocked() {
-	screen, err := t.screenLocked()
+	// Read through the same two injectable seams noteDepartedLocked does
+	// (readScreen/readDepth): the library never fails either on request, so
+	// a test that wants THIS function's own read-failure path — as opposed
+	// to a resize's refusal, which is a different call entirely — has no
+	// other way to reach it (nocx-2v80t.3.10; the two fields' own comment).
+	screen, err := t.readScreen()
 	if err != nil {
-		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		t.invalidateBaselinesLocked()
 		return
 	}
-	h, err := t.scrollbackLocked()
+	h, err := t.readDepth()
 	if err != nil {
-		t.sb[0], t.sb[1] = sbBaseline{}, sbBaseline{}
+		t.invalidateBaselinesLocked()
 		return
 	}
-	t.sb = [2]sbBaseline{}
-	t.sb[sbIndex(screen)] = sbBaseline{rows: h, valid: true}
+	// The debt SURVIVES a re-baseline. It is a fact about rows that are on the
+	// screen and have already been reported as departed; re-seeding the count
+	// does not un-report them, and zeroing it here is how a row comes back
+	// reported twice — the reflowed row's second leave reads as new output
+	// because the next growth had no debt to pay (nocx-2v80t.3.9).
+	// Both the debt and the stack of rows the screen has already pushed into
+	// history survive the re-baseline: they are facts about rows that are out
+	// of the screen's sight one way or another, and re-seeding the depth does
+	// not un-report them or un-push them.
+	//
+	// That holds for BOTH buffers, not only the one this call measured
+	// (nocx-2v80t.3.10). A resize taken while the ALTERNATE screen owns the
+	// pane still reflows the PRIMARY's geometry underneath it — ghostty
+	// carries a size per buffer — and the debt a primary refill owed before
+	// that resize is exactly as unpaid after it: the rows it names have not
+	// left the screen a second time merely because the pane the resize was
+	// read on was the other one. Discarding it here, on every resize rather
+	// than only the ones this buffer happens to be active for, was measured
+	// reporting a refilled row twice the next time it left — a double count
+	// this port exists to prevent, on the buffer this call never touches
+	// only because it never has reason to invalidate what it never read.
+	active := sbIndex(screen)
+	t.sb[active].rows = h
+	t.sb[active].valid = true
+	t.sb[active].torn = false
+	// The hidden buffer cannot be measured from here — this read is per
+	// ACTIVE buffer, exactly as scrollbackLocked's own doc says — so its
+	// depth is unmeasured rather than assumed; only that changes.
+	t.sb[1-active].valid = false
+}
+
+// invalidateBaselinesLocked marks both buffers unmeasured without discarding
+// the debt or the pushed-history ledger either carries. A failed measurement
+// destroys neither (nocx-2v80t.3.10, the same finding as rebaselineLocked's
+// own comment): the rows a debt or a pushed block names are exactly as real
+// when a read fails as when it succeeds, and zeroing them here is the same
+// double-count this function exists to prevent, just reached by a different
+// door.
+func (t *terminal) invalidateBaselinesLocked() {
+	t.sb[0].valid = false
+	t.sb[1].valid = false
 }
 
 // sbIndex maps a screen to its baseline slot.
@@ -546,6 +1030,44 @@ func (t *terminal) DepartedRows() ([]emulator.Row, error) {
 	err := t.departedErr
 	t.departedErr = nil
 	return out, err
+}
+
+// HistoryRows reads a range of the active buffer's scrollback by position:
+// what exists of the range, with the retention total alongside. The bounds
+// are the method's own, stated on the port; the lock spans the whole read,
+// so the page's total and its rows describe one instant of the buffer even
+// though the walk is per row.
+func (t *terminal) HistoryRows(start, count int) (emulator.HistoryPage, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return emulator.HistoryPage{}, emulator.ErrClosed
+	}
+	if start < 0 || count < 0 {
+		return emulator.HistoryPage{}, fmt.Errorf("ghostty: history range start %d count %d: %w",
+			start, count, emulator.ErrOutOfRange)
+	}
+	total, err := t.scrollbackLocked()
+	if err != nil {
+		return emulator.HistoryPage{}, err
+	}
+	end := total
+	if count < total-start {
+		end = start + count
+	}
+	rows := make([]emulator.Row, 0, max(end-start, 0))
+	for y := start; y < end; y++ {
+		row, err := t.historyRow(y)
+		if err != nil {
+			// The rows read so far go out with the failure, exactly as a
+			// departure report does: what was read is ordered, and the
+			// caller judges what the rest is worth.
+			return emulator.HistoryPage{Start: start, Rows: rows, Total: total},
+				fmt.Errorf("ghostty: history row %d of %d..%d: %w", y, start, end, err)
+		}
+		rows = append(rows, row)
+	}
+	return emulator.HistoryPage{Start: start, Rows: rows, Total: total}, nil
 }
 
 func (t *terminal) Screen() (emulator.Screen, error) {
@@ -619,6 +1141,114 @@ func (t *terminal) cursorLocked() (emulator.Cursor, error) {
 		return emulator.Cursor{}, resultError("cursor_visible", r)
 	}
 	return emulator.Cursor{X: int(x), Y: int(y), Visible: bool(visible)}, nil
+}
+
+// TrackRow builds a TRACKED grid reference at column 0 of active row y and
+// wraps it in a [rowTrack]. The library's own bookkeeping keeps it pointed at
+// the same physical row as the terminal mutates (grid_ref_tracked.h); nothing
+// on this side re-derives that, which is the whole reason to use it rather
+// than an index or a serial this adapter would have to keep in step itself.
+func (t *terminal) TrackRow(y int) (emulator.RowTrack, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return nil, emulator.ErrClosed
+	}
+	if y < 0 || y >= t.geom.Rows {
+		return nil, fmt.Errorf("ghostty: row %d of %d: %w", y, t.geom.Rows, emulator.ErrOutOfRange)
+	}
+	var ref C.GhosttyTrackedGridRef
+	if r := C.nocxTrackRowAt(t.t, pointActive, C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
+		return nil, resultError("grid_ref_track", r)
+	}
+	if t.tracked == nil {
+		t.tracked = make(map[C.GhosttyTrackedGridRef]struct{})
+	}
+	t.tracked[ref] = struct{}{}
+	return &rowTrack{term: t, ref: ref}, nil
+}
+
+// rowTrack is the [emulator.RowTrack] this port hands out: the terminal that
+// made the reference, and the reference itself. Every method takes the
+// terminal's own lock, exactly as every other read and mutation here does —
+// the library is not reentrant, and a tracked reference is no exception.
+type rowTrack struct {
+	term *terminal
+	ref  C.GhosttyTrackedGridRef
+	// released is set the instant THIS handle's own Release runs, which is
+	// what makes Alive answer false rather than ask the library about a
+	// reference this same call already freed. The terminal's own release()
+	// (Close's) may ALSO free ref, on a DIFFERENT rowTrack's behalf never on
+	// this field — see its own comment for why checking t.t is what guards
+	// that side.
+	released bool
+}
+
+// Alive reports whether the row this handle names can still be named at all.
+// A closed terminal, or a handle Release has already run on, answers false
+// without touching ref: both mean the library has already freed it — Close's
+// own sweep frees whatever a caller left outstanding — and asking the library
+// about a freed handle is the one thing that is never safe to do.
+func (rt *rowTrack) Alive() bool {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	if rt.term.t == nil || rt.released {
+		return false
+	}
+	return bool(C.ghostty_tracked_grid_ref_has_value(rt.ref))
+}
+
+// Row reads the tracked row as it stands now. The library resolves the
+// reference to wherever its bookkeeping has since carried it — the reflow and
+// scroll it follows, nothing re-derived here — in the screen space, which
+// covers both the active area and the history, and the row is read there the
+// way every other row of this port is (rowAt).
+//
+// The reference is resolved against the page list that owns it, and a read
+// through a coordinate resolves against the screen that is ACTIVE: while the
+// alternate screen holds the pane the two are different buffers, so the read
+// is refused rather than answered from the wrong one.
+func (rt *rowTrack) Row() (emulator.Row, error) {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	t := rt.term
+	if t.t == nil {
+		return emulator.Row{}, emulator.ErrClosed
+	}
+	if rt.released {
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row released: %w", emulator.ErrOutOfRange)
+	}
+	screen, err := t.screenLocked()
+	if err != nil {
+		return emulator.Row{}, err
+	}
+	if screen != emulator.ScreenPrimary {
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row read while the alternate screen is active: %w", emulator.ErrUnsupported)
+	}
+	var pt C.GhosttyPointCoordinate
+	switch r := C.ghostty_tracked_grid_ref_point(rt.ref, pointScreen, &pt); r {
+	case C.GHOSTTY_SUCCESS:
+	case C.GHOSTTY_NO_VALUE:
+		return emulator.Row{}, fmt.Errorf("ghostty: tracked row no longer named: %w", emulator.ErrOutOfRange)
+	default:
+		return emulator.Row{}, resultError("tracked_grid_ref_point", r)
+	}
+	return t.rowAt(pointScreen, int(pt.y))
+}
+
+// Release frees the handle and forgets it, so the terminal's own close does
+// not try to free it a second time. Idempotent — a second call finds
+// released already true and does nothing — and safe after the terminal has
+// already closed and swept it, for the same reason Alive is.
+func (rt *rowTrack) Release() {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	if rt.term.t == nil || rt.released {
+		return
+	}
+	rt.released = true
+	delete(rt.term.tracked, rt.ref)
+	C.ghostty_tracked_grid_ref_free(rt.ref)
 }
 
 func (t *terminal) Row(y int) (emulator.Row, error) {
@@ -755,6 +1385,65 @@ func (t *terminal) readGrapheme(ref *C.GhosttyGridRef) (string, error) {
 		sb.WriteRune(rune(cp))
 	}
 	return sb.String(), nil
+}
+
+// historyRow reads one row of the active buffer's scrollback through the
+// bridge's row traversal. The bridge resolves the row ONCE — the page-list
+// walk a history lookup pays — and reads every cell of the row off the
+// resolved reference, so a row of N columns costs one grid-reference
+// resolution and not N. Bounds belong to the caller, as rowAt's do: history
+// is bounded by what has not been evicted, and only the caller knows the
+// range it asked for.
+func (t *terminal) historyRow(y int) (emulator.Row, error) {
+	cols := t.geom.Cols
+	cells := make([]C.nocxRowCellFacts, cols)
+	var wrap, cont C.bool
+	// Clusters ride one row-wide UTF-8 buffer. The first budget is what a
+	// full row of the port's largest clusters costs; a row of clusters past
+	// even that re-runs the whole traversal on a fourfold budget rather than
+	// truncating — the bridge holds no state between attempts, and each
+	// attempt pays its own one resolution.
+	graphemes := make([]C.uint8_t, cols*maxGraphemeCodepoints*4)
+	for {
+		r := C.nocxHistoryRow(t.t, C.uint32_t(y), C.uint16_t(cols), &cells[0],
+			&graphemes[0], C.size_t(len(graphemes)), &wrap, &cont)
+		if r == C.GHOSTTY_OUT_OF_SPACE {
+			if len(graphemes) >= cols*maxGraphemeCodepoints*64 {
+				return emulator.Row{}, fmt.Errorf("ghostty: history row %d utf8 budget %d: %w",
+					y, len(graphemes), emulator.ErrExhausted)
+			}
+			graphemes = make([]C.uint8_t, len(graphemes)*4)
+			continue
+		}
+		if r != C.GHOSTTY_SUCCESS {
+			return emulator.Row{}, resultError("history_row", r)
+		}
+		break
+	}
+	out := make([]emulator.Cell, cols)
+	for x := range cols {
+		f := &cells[x]
+		cell := emulator.Cell{
+			Width:   cellWidth(f.wide),
+			HasText: bool(f.has_text),
+		}
+		// A cell the terminal carries unstyled reads as the default style —
+		// the value a full style read produces for it — so the style is
+		// materialised only for the cells that have one.
+		if f.styled {
+			style, err := styleOf(f.style)
+			if err != nil {
+				return emulator.Row{}, err
+			}
+			cell.Style = style
+		}
+		if cell.HasText {
+			off, n := int(f.grapheme_off), int(f.grapheme_len)
+			cell.Grapheme = string(C.GoBytes(unsafe.Pointer(&graphemes[off]), C.int(n)))
+		}
+		out[x] = cell
+	}
+	return emulator.Row{Cells: out, Wrap: bool(wrap), Continuation: bool(cont)}, nil
 }
 
 func (t *terminal) EncodeKey(ev emulator.KeyEvent) ([]byte, error) {
@@ -1079,6 +1768,17 @@ func (t *terminal) release() {
 		C.ghostty_mouse_encoder_free(t.menc)
 		t.menc = nil
 	}
+	// Every tracked reference a caller left outstanding is freed here rather
+	// than left to leak: a caller that forgot to release one, or one still
+	// held for a window in force when the session ends, must not outlive the
+	// terminal it names. t.t is set nil below BEFORE this map is cleared in
+	// the caller's eyes — (*rowTrack).Alive and .Release both check t.t first
+	// and touch ref only when it is still set, so a release arriving after
+	// this point finds nothing to double free.
+	for ref := range t.tracked {
+		C.ghostty_tracked_grid_ref_free(ref)
+	}
+	t.tracked = nil
 	C.ghostty_terminal_free(t.t)
 	t.t = nil
 	t.replies = nil

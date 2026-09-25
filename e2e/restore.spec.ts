@@ -110,9 +110,18 @@ async function stored(
         const row = (page1.entries ?? []).find((e) => e.intent === command)
         if (!row) return false
         const detail = (await rpc(page, ep, 'ledger.get', { id: row.id })) as {
-          artifacts?: { mediaType: string }[]
+          artifacts?: { mediaType: string; state: string }[]
         }
-        return (detail.artifacts ?? []).some((a) => a.mediaType === 'application/vt')
+        // The streamed block rows artifact (nocx-2v80t.3.7) replaced the
+        // retired serializer's `application/vt` capture for a shell block:
+        // OpenBlockOutput reserves the artifact row at the command's
+        // authenticated START (state 'open'), so its mere existence is true
+        // long before the write this precondition is about. 'sealed' is
+        // CloseBlockRows's own mark of "this command's body is durably
+        // written" — the same moment `application/vt` used to answer for.
+        return (detail.artifacts ?? []).some(
+          (a) => a.mediaType === 'application/x-nocx-rows' && a.state === 'sealed',
+        )
       },
       { timeout: 60_000, message: `the store never took "${command}"` },
     )

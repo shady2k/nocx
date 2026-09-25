@@ -12,6 +12,7 @@ import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockActions } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
+import type { StoredBlockRows } from './block-rows'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
@@ -44,6 +45,8 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** Paints backend-owned rows through the shared row painter. */
+  paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
   /** What a session is called to a person — passed straight to the block
    *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
    *  This controller neither derives nor caches it. */
@@ -88,6 +91,10 @@ export class ScrollbackController {
   private _blockManager: BlockManager
   private _renderer: TerminalRenderer
   private _mode: LiveRegionMode = 'idle'
+  /** A ready prompt asked for the idle layout while a completed block was
+   *  still waiting for its block.closed; applied when the close lands, and
+   *  dropped the moment a command owns the live region again. */
+  private _idleRequested = false
   /**
    * Sticky for the life of the command. Once a program has filled the pane the
    * flag stays set until the next idle or the next command start, so it cannot
@@ -183,16 +190,19 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
-      // A DEFERRED freeze landed inside the manager (the fence's sighting
-      // arrived): hand the block's rows to the
-      // DOM and settle the live region exactly like a direct freeze, since
-      // freezeFromAttempt already returned.
-      onDeferredFreeze: (rec) => this._settleFrozen(rec),
+      // A DEFERRED freeze landed inside the manager (the backend's
+      // block.closed met the completion): settle the block the way a direct
+      // freeze does — the pet
+      // learns the verdict. Nothing clears: the grid is the frame the
+      // backend diffs against (nocx-2v80t.3.3).
+      onDeferredFreeze: (rec) => {
+        this._finishFreeze(rec)
+        // The idle layout a ready prompt asked for while this close was
+        // pending is applied now that nothing is waiting (see setIdle).
+        if (this._idleRequested && this._blockManager.runningBlock === null) this.setIdle()
+      },
       onBlockFrozen: opts.onBlockFrozen,
-      // Read at freeze time rather than captured at construction: a pane is
-      // resized, and the provenance must say what the serializer actually
-      // saw.
-      dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
+      paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
       dump: opts.dump,
@@ -212,17 +222,6 @@ export class ScrollbackController {
     // deliberate, see the module comment.
     this._renderer.onCellDimsChange?.(() => this._republishCellMetric())
     this._republishCellMetric()
-
-    // ── Render fence rendezvous (nocx-u7uh.8, ADR-0024 §7 carve-out) ────
-    // The renderer reports where the fence landed; the block manager matches
-    // it against the pending authenticated completion. A fence in the
-    // alternate buffer has no scrollback line to serialize — ignored here.
-    // Optional on the renderer: without it, every freeze takes the defined
-    // no-fence path (defer, then settle at the current output end).
-    opts.renderer.onRenderFence?.((ev) => {
-      if (ev.buffer !== 'normal') return
-      this._blockManager.sightFence(ev.hex, ev.line)
-    })
 
     // ── Follow state ─────────────────────────────────────────────────────
     // Whether the end of the live output is on screen. Not "did the last scroll
@@ -273,9 +272,17 @@ export class ScrollbackController {
 
   // ── Live region visibility ────────────────────────────────────────────
 
-  /** Collapse the live region only after its rows belong to the DOM block. */
+  /** Collapse the live region only once no finished block still waits for
+   *  its block.closed: until then its closing rows are in the live terminal
+   *  and not yet in the block, and collapsing would hide them. The request
+   *  is remembered and applied when the close lands (nocx-2v80t.3.27). */
   setIdle(): void {
-    if (this._mode === 'fullscreen' || this._blockManager.visualFreezePending) return
+    if (this._mode === 'fullscreen') return
+    if (this._blockManager.closePending) {
+      this._idleRequested = true
+      return
+    }
+    this._idleRequested = false
     this._mode = 'idle'
     // Both inline heights have to go: running content height and its clip
     // otherwise outrank the idle/fullscreen mode classes.
@@ -291,6 +298,7 @@ export class ScrollbackController {
 
   /** Show live output below the running block. */
   setRunning(): void {
+    this._idleRequested = false
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
     if (entering) this._runningCap = undefined
@@ -611,6 +619,7 @@ export class ScrollbackController {
    * preserves your scrollback (nocx-6w4z).
    */
   enterFullscreen(): void {
+    this._idleRequested = false
     this._mode = 'fullscreen'
     this._runningCap = undefined
     this.xtermLiveViewport.style.height = ''
@@ -703,29 +712,11 @@ export class ScrollbackController {
   }
 
   /**
-   * Hand a frozen block's rows back to the DOM: the block's element now
-   * owns them, so they must leave the grid — otherwise the live region
-   * re-displays them below the block, and on a grid that has never
-   * scrolled every finished command's rows appear a second time inside
-   * the running one (nocx-m87n). The marker paths cleared the viewport at
-   * every freeze before the attempt-driven lifecycle; restoring that is
-   * this call.
-   *
-   * Guarded two ways. No NEWER command may own the running slot: a newer
-   * command's rows sit BELOW the frozen ones in the same buffer, and
-   * clearing would wipe its still-unserialized serialization window (the
-   * deferred-fence overlap, nocx-m87n). And an alt-screen program owns
-   * the pane: clearing would blank its screen.
-   */
-  private _clearFrozenRows(): void {
-    if (this._blockManager.runningBlock !== null) return
-    if (this._mode === 'fullscreen') return
-    this._renderer.clearViewport()
-  }
-
-  /**
-   * Called on OSC 133 D: serialize output, freeze the block.
-   * @param getLine Accessor for xterm buffer lines.
+   * Called on OSC 133 D: freeze the block. The boundary is the runtime's
+   * authenticated completion (ADR-0024 §7); this marker path paints the
+   * same verdict without reading the grid.
+   * @param getLine Accessor for xterm buffer lines — the durable capture
+   *   reads the rows the boundary fixes.
    * @param endLine Absolute buffer line of the OSC 133 D marker.
    * @param exitCode Optional exit code from the D payload.
    */
@@ -733,69 +724,36 @@ export class ScrollbackController {
     const followIntent = this._followIntent()
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
-      this._settleFrozen(rec, followIntent)
+      this._finishFreeze(rec, followIntent)
     }
   }
 
-  /**
-   * Put the END of the finished command's block at the bottom of the view.
-   *
-   * Nothing scrolled here at all before, so the view stayed wherever the
-   * running command had left it. A block taller than the viewport therefore
-   * left its prompt far below the fold. The current decision is to land at the
-   * block's END instead: the prompt is immediately visible, at the cost of
-   * making the first lines of long output require an upward scroll. This
-   * reverses the former start-anchor decision, which showed the first screen
-   * but left the prompt far below.
-   *
-   * A frame late on purpose. `setIdle` has just collapsed the live region and
-   * the block was inserted in the same tick, so the scroller's height is still
-   * the old one until layout runs.
-   */
-  private _scrollToLastBlockEnd(target: HTMLElement): void {
-    requestAnimationFrame(() => {
-      if (!this._tail.following) return
-      const last = target
-      if (!last || !this.scrollbackInner.contains(last)) return
-      // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
-      // whole on screen whenever we are following: `scrollToBottom` has put
-      // the scroller at its live end, and a block no taller than the
-      // viewport is entirely inside that window whether the stack above it
-      // is short (top-aligned, decision §1 item 1 — nothing above it moves
-      // the scroll at all) or long enough to have pushed scrollTop down to
-      // reach here. Either way there is nothing to bring into view, and
-      // asking anyway would put a second owner on the scroll position
-      // beside the settle that was still unwinding (nocx-i4h04.2:
-      // `scrollIntoView` reads the transformed box, and in the container it
-      // scrolled a row it then had to give back).
-      if (last.getBoundingClientRect().height <= this.scrollbackArea.clientHeight) return
-      // Through the glide: the freeze's own settle may still be unwinding,
-      // and a scroll that lands as a jump in the middle of it is the twitch
-      // this whole seam exists to remove.
-      this._glide(() => {
-        last.scrollIntoView({ block: 'end', behavior: 'instant' })
-      })
-    })
-  }
-
-  // ── clear handling ────────────────────────────────────────────────────
+  // ── the backend's clear boundary (nocx-2v80t.3.17) ───────────────────
 
   /**
-   * Check if a command was `clear` (or starts with `clear`). If so, clear
-   * all DOM blocks. The xterm viewport is already cleared by the escape
-   * sequence `clear` emits — we just clean up our blocks.
+   * The backend sighted a clear boundary: the program erased the display
+   * and its saved lines (ED3 — the sequence `clear` emits, never plain ED2
+   * alone, which a full-screen program redrawing sends). This is never a
+   * guess from the command's text — the client no longer decides a clear by
+   * what was typed, which is what this replaces (the removed maybeClear
+   * matched the literal word `clear`, guessing at SUBMIT time, before the
+   * command had even run). The backend parses the real VT erase in the
+   * emulator it owns (ADR-0066) and this is purely a rendezvous with that
+   * fact.
+   *
+   * keepEntryId is the block whose interval the erase happened inside —
+   * almost always the `clear` command's own, still running — which must
+   * stay open and keep receiving rows normally; every other block is
+   * removed. Null means nothing was open at the sighting, and every block
+   * is removed. The xterm viewport is already cleared by the escape
+   * sequence itself — this only cleans up the DOM blocks.
    */
-  maybeClear(command: string): void {
-    const trimmed = command.trim()
-    const firstWord = trimmed.split(/\s+/)[0] ?? ''
-    const isClear = firstWord === 'clear' || firstWord.endsWith('/clear')
-    if (isClear) {
-      this._blockManager.clearAll()
-      this._updateSeparator()
-      // The ask chip's block went with the blocks: close the mode, or the
-      // chip's owner would hold a scope that no longer exists (nocx-x8s2.2).
-      this._onClear?.()
-    }
+  onClearBoundary(keepEntryId: string | null): void {
+    this._blockManager.applyClearBoundary(keepEntryId)
+    this._updateSeparator()
+    // The ask chip's block went with the blocks: close the mode, or the
+    // chip's owner would hold a scope that no longer exists (nocx-x8s2.2).
+    this._onClear?.()
   }
 
   /** Preserve follow intent across a synchronous DOM mutation. The geometry
@@ -1023,7 +981,12 @@ export class ScrollbackController {
       this._painting = true
       try {
         this._paintedTop = this.scrollbackInner.getBoundingClientRect().top
-        if (this._mode === 'running' || this._settleAnimations.size > 0) {
+        // A command's life, not a layout class. The freeze no longer leaves
+        // `running` behind — nothing clears the terminal, so the whole
+        // surface stays up (nocx-2v80t.3.3) — and a watcher keyed on the
+        // mode would spin forever after the last command. The running BLOCK
+        // is the output; the settle animation is the playback.
+        if (this._blockManager.runningBlock !== null || this._settleAnimations.size > 0) {
           this._paintWatch = requestAnimationFrame(tick)
           return
         }
@@ -1045,46 +1008,50 @@ export class ScrollbackController {
     return mq ? !mq.matches : true
   }
 
-  /**
-   * The block has taken its rows. Hand them back to the DOM, collapse the
-   * live region and bring the block's start into view — as ONE settle.
+  /** The freeze landed: play back the card's displacement and tell the pet
+   *  how the command went.
    *
-   * Six paths freeze a block (the marker path, the attempt, two
-   * abandonments, an entered environment, and the deferred fence), and every
-   * one of them did these three calls in the same order by hand. That is one
-   * behaviour with six copies: the glide had to be added in six places, and
-   * the seventh path to arrive would have been written without it.
-   */
-  private _settleFrozen(rec: BlockRecord, followIntent = this._followIntent()): void {
-    // Every freeze path arrives here — the attempt-driven one, the abandoned
-    // one, the environment entry — so this is where the pet learns how the
-    // command went. `onCommandEnd` looks like the obvious place and is not:
-    // nothing calls it in the current wiring, and a reaction hung there fires
-    // never (AGENTS.md: a method on main is not a feature).
-    //
-    // 'entered' and 'unknown' are neither success nor failure and must not be
-    // read as one: a pet that sulked at every ssh and every abandoned attempt
-    // would sulk most of the time.
-    // The author is the block's own, minted at submit and never derived: the
-    // animal answers your command differently from the assistant's, and
-    // guessing which lane a finished block came from is exactly the kind of
-    // derivation the ledger exists to make unnecessary.
+   *  Every freeze path arrives here — the attempt-driven one, the abandoned
+   *  one, the environment entry, the deferred close. What the settle used to
+   *  do is mostly gone: nothing clears the terminal and the live region
+   *  never collapses — the whole surface is the session's terminal now
+   *  (nocx-2v80t.3.3), and the rows a command printed stay on it. What
+   *  survives is the two things the swap above the terminal still owes:
+   *  the glide that plays back the running card → frozen card height
+   *  change, so the terminal's own rows hold still for the person reading
+   *  them; and the pet, whose only view of a command's verdict is this
+   *  moment.
+   *
+   *  'entered' and 'unknown' are neither success nor failure and must not be
+   *  read as one: a pet that sulked at every ssh and every abandoned attempt
+   *  would sulk most of the time. The author is the block's own, minted at
+   *  submit and never derived: the animal answers your command differently
+   *  from the assistant's, and guessing which lane a finished block came
+   *  from is exactly the kind of derivation the ledger exists to make
+   *  unnecessary. */
+  private _finishFreeze(rec: BlockRecord, followIntent = this._followIntent()): void {
     windowPet()?.reactTo(
       rec.status === 'success' || rec.status === 'failure' ? rec.status : 'unknown',
       rec.author,
     )
     // And if something is STILL running, the animal goes back to watching it.
-    // A freeze waits on a render fence and a start does not, so the verdict
+    // A freeze waits on the backend's block.closed and a start does not, so the verdict
     // on the last command routinely arrives after the next one has begun;
     // without this the pet stopped attending the moment it answered, and the
     // command actually in flight had nobody watching it.
     const stillRunning = this._blockManager.runningBlock
     if (stillRunning) windowPet()?.attendTo(stillRunning.author)
+    // The echo shift belonged to the block that just froze; with the
+    // running slot empty it computes to zero, and this is the moment it is
+    // released. Inside the mutate: the transform is part of the frame the
+    // glide plays back, not a second movement after it.
+    // The mutate is otherwise empty on purpose: the card swap already
+    // happened inside the manager, and the glide's painted-frame origin
+    // (see _glide) is what lets it play that swap back without
+    // re-measuring mid-flight.
     this._glide(() => {
-      this._clearFrozenRows()
-      this.setIdle()
+      this._applyEchoShift()
     }, followIntent)
-    this._scrollToLastBlockEnd(rec.el)
   }
 
   private _updateSeparator(): void {
@@ -1092,20 +1059,18 @@ export class ScrollbackController {
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
   }
 
-  /** The attempt-driven freeze (ADR-0024 §7 projection, bead nocx-u7uh.8):
-   *  the LOGICAL freeze (status, exit code) has already landed on the
-   *  authenticated event; only the VISUAL boundary (which rows belong to
-   *  the block) waits for the matching render fence. When the fence bytes
-   *  have not arrived, this returns false and the live region stays up —
-   *  the manager's onDeferredFreeze settles it on the sighting, and on
-   *  nothing else (nocx-2v80t.3.2). The
+  /** The attempt-driven freeze (ADR-0024 §7 projection): the LOGICAL
+   *  freeze (status, exit code) lands on the authenticated event; the
+   *  VISUAL one waits for the backend's block.closed for the entry. When it
+   *  has not arrived, this returns false — the manager's onDeferredFreeze
+   *  settles it when it does, and on nothing else (nocx-2v80t.3.27). The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec, followIntent)
+      this._finishFreeze(rec, followIntent)
       return true
     }
     return false
@@ -1118,7 +1083,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec, followIntent)
+      this._finishFreeze(rec, followIntent)
       return true
     }
     return false
@@ -1132,7 +1097,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonUnbound(getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec, followIntent)
+      this._finishFreeze(rec, followIntent)
       return true
     }
     return false
@@ -1146,7 +1111,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeEntered(getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec, followIntent)
+      this._finishFreeze(rec, followIntent)
       return true
     }
     return false

@@ -174,7 +174,13 @@
         },
         "mediaType": {
           "description": "What the content is.",
-          "enum": ["application/vt", "text/plain", "text/markdown", "application/json"]
+          "enum": [
+            "application/vt",
+            "text/plain",
+            "text/markdown",
+            "application/json",
+            "application/x-nocx-rows"
+          ]
         },
         "derivedFrom": {
           "description": "The artifact this one was derived from, or null when it is the original capture.",

@@ -117,7 +117,7 @@ export interface CapturedFrame {
  *
  *  XtermRenderer satisfies this structurally (the same event shapes as
  *  TerminalRenderer). The tracker requires the WHOLE contract: a source that
- *  cannot report clear/reset/write-pending would silently under-count the
+ *  cannot report reset/write-pending would silently under-count the
  *  generation, which is exactly the false "unchanged" the spec forbids.
  */
 export interface CaptureEventSource {
@@ -128,8 +128,6 @@ export interface CaptureEventSource {
   onWriteParsed(cb: () => void): void
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void
   onResize(cb: (cols: number, rows: number) => void): void
-  /** Fired AFTER the renderer executed a full clear (clearViewport). */
-  onClear(cb: () => void): void
   /** Fired AFTER the renderer executed a full reset. */
   onReset(cb: () => void): void
   /** Fires when the source is disposed (tab close, renderer replacement) —

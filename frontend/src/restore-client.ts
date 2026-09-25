@@ -11,10 +11,12 @@
 // a person reads their past downwards. Nothing here filters, ranks or
 // merges.
 import type { WSClient } from './ipc'
+import { RpcError } from './dispatcher'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
 import type { Caused, LedgerGet } from './generated/ledger.get'
+import { parseStoredBlockRows, type StoredBlockRows } from './scrollback/block-rows'
 
 /** How many blocks a pane comes back with.
  *
@@ -151,24 +153,96 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
  * NULL IS TWO DIFFERENT FACTS: retention evicted the artifact, or the store
  * could not be reached. They are collapsed here on purpose — every caller
  * has to say the same thing for both ("this is not here"), and a caller that
- * could tell them apart would still have nothing different to do.
+ * could tell them apart would still have nothing different to do. The one
+ * read for which that is NOT true — a live block's stored rows, where
+ * "nothing is kept" and "it could not be read" are different sentences —
+ * does not come through here (`blockRowsForEntry` below).
  */
+interface FetchedArtifact {
+  readonly metadata: LedgerGet['artifacts'][number]
+  readonly body: string
+}
+
+async function readArtifact(
+  client: WSClient,
+  entryId: string,
+  mediaType: string,
+): Promise<FetchedArtifact | null> {
+  try {
+    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const metadata = entry.artifacts.find((a) => a.mediaType === mediaType)
+    if (!metadata) return null
+    const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
+    return { metadata, body: artifact.body }
+  } catch {
+    return null
+  }
+}
+
 async function artifactBody(
   client: WSClient,
   entryId: string,
   mediaType: string,
 ): Promise<string | null> {
+  return (await readArtifact(client, entryId, mediaType))?.body ?? null
+}
+
+/**
+ * What one read of a block's stored rows found (nocx-2v80t.3.27).
+ *
+ * THREE ANSWERS, NOT TWO, and this is the one read that may not collapse
+ * them the way `readArtifact` does. `absent` is the store saying it keeps
+ * no rows for this block — the keep decision refused it, or the entry has
+ * none — which is a block with nothing to paint. `unreadable` is rows that
+ * exist, or may, and did not reach the renderer: the store could not be
+ * asked, the artifact read failed, or what came back does not parse. A
+ * block that could not be read says so, and an agent run whose output could
+ * not be read reports an error; drawing either as an empty body is what
+ * made a command that printed output indistinguishable from one that
+ * printed nothing, with the cause lost. `reason` is for the log and the
+ * run's error, never parsed.
+ */
+export type BlockRowsRead =
+  | { readonly kind: 'rows'; readonly rows: StoredBlockRows }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly reason: string }
+
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** The two refusals of `ledger.get` that are the store ANSWERING, not
+ *  failing to: -32602 is "no ledger entry carries id" — the backend reports
+ *  an id no row carries as invalid params, by its own comment never as an
+ *  empty success — which is what History off, or a dropped record, leaves
+ *  behind; -32601 is a backend with no content store wired at all. Both mean
+ *  nothing is kept for this block. Every other failure (a socket that
+ *  closed, a server fault) is a read that did not happen. */
+function storeKeepsNothing(err: unknown): boolean {
+  return err instanceof RpcError && (err.code === -32602 || err.code === -32601)
+}
+
+export async function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+  let artifact: FetchedArtifact
   try {
-    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
-    const artifact = entry.artifacts.find((a) => a.mediaType === mediaType)
-    if (!artifact) return null
-    const body = await client.call<LedgerArtifact>('ledger.artifact', { id: artifact.id })
-    return body.body
-  } catch {
-    // Quiet by design: a pane restoring fifty blocks would otherwise log
-    // fifty times for one store that is down, and the caller already says
-    // once, in the product, that history is unavailable.
-    return null
+    let entry: LedgerGet
+    try {
+      entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    } catch (err) {
+      if (storeKeepsNothing(err)) return { kind: 'absent' }
+      throw err
+    }
+    const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+    if (!metadata) return { kind: 'absent' }
+    const read = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
+    artifact = { metadata, body: read.body }
+  } catch (err) {
+    return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
+  }
+  try {
+    return { kind: 'rows', rows: parseStoredBlockRows(artifact.body, artifact.metadata) }
+  } catch (err) {
+    return { kind: 'unreadable', reason: reasonOf(err) }
   }
 }
 
@@ -286,6 +360,8 @@ export type RestoredCause = Caused
 export interface RestoredBody {
   kind: 'command' | 'ask'
   body: string | null
+  /** Stored terminal rows, when the backend captured the block-row artifact. */
+  rows?: StoredBlockRows
   /**
    * Whether the prose of THIS RUN is no longer kept (ADR-0040's retention
    * rule, ADR-0019 §7): retention took the bodies of the turn's `text`
@@ -338,29 +414,21 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
     const caused = entry.caused ?? []
+    const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+    if (entry.entry.kind !== 'ask' && rows) {
+      const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: rows.id })
+      return {
+        kind: 'command',
+        body: null,
+        rows: parseStoredBlockRows(artifact.body, rows),
+        caused,
+        proseEvicted: !!entry.proseEvicted,
+      }
+    }
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    // What the block DRAWS with: a command's grid is the vt, and its plain
-    // copy beside it is the fallback when retention took the grid.
-    //
-    // A TURN DRAWS WITH NOTHING OF ITS OWN. Since ADR-0040 its prose is
-    // `text` children with seats, so an ask entry has no body artifact —
-    // and the artifacts it DOES carry are the provider wiretap captures
-    // (internal/app/assistant_wire_capture.go: the raw request and the raw
-    // response, both text/plain). Picking a turn's body by media type
-    // therefore drew the chat-completions request — system prompt, every
-    // tool schema, stream_options — above the real prose, on restore only,
-    // because the live path never reads artifacts (nocx-3dteo).
-    //
-    // Not filtered by capture method, but not chosen at all: a filter would
-    // still be asking an entry for a body it does not have, and the next
-    // artifact hung on a turn would arrive as the next wrong answer.
     const chosen = entry.entry.kind === 'ask' ? undefined : (vt ?? text)
     if (!chosen) {
-      // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
-      // artifact survived: since ADR-0040 a turn carries NO artifact of its
-      // own (its prose is a `text` child), so an empty artifact list is the
-      // ordinary shape of a whole turn, not evidence it was a command.
       return {
         kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
         body: null,
@@ -369,9 +437,6 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       }
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
-    // The kind is the ENTRY's, whatever artifact survived: an ask entry
-    // is a turn, everything else is a command. The VT choice above decided
-    // which artifact is the BODY to draw with, not what the block is.
     return {
       kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
       body: body.body,
@@ -379,9 +444,6 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       proseEvicted: !!entry.proseEvicted,
     }
   } catch {
-    // Quiet for the same reason bodyForBlock is: fifty restoring blocks
-    // would otherwise log fifty times for one dead socket, and the pane
-    // already says its past could not be read.
     return { kind: 'command', body: null, caused: [], proseEvicted: false }
   }
 }

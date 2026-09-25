@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.output-rows.schema.json",
+  "title": "HelperSessionOutputRows",
+  "description": "One batch of the rows that left a session's screen, streamed from the helper the moment they left it (nocx-2v80t.3.6). The owner's decision gives the helper no copy of departed rows — ghostty's own scrollback is the buffer — so this document is the only place the rows go. The rows ride in the frame contract's row vocabulary (nocx-zg3k3.2.12: a row as its text in column order, a sparse list of the positions whose codepoint count or column footprint departs from the default, and style runs measured in columns), encoded by the runtime's own row encoder, so what a coordinator stores from the stream and what it paints live are one shape. Every row is carried exactly once, in stream order; a batch names the absolute index its first row holds, counting every row the session has ever seen depart, so the order is checkable rather than trusted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fromRow", "lostRows", "rows"],
+  "properties": {
+    "fromRow": {
+      "description": "The absolute index of this batch's first row: the count of rows the session had seen depart before it, whether or not any consumer was bound when they did. Indices are the session's, never the consumer's, so a consumer that attaches late continues where the session left off and a confirmed-written mark names a position both ends can check.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "lostRows": {
+      "description": "Two sources add into one count, and together they are EXACTLY this batch's fromRow minus the row count after the delivery before it: every loss spends the indices it names (nocx-2v80t.3.26), so fromRow minus lostRows is where the batch before ended, and a nonzero lostRows at a fromRow with no gap is a loss attributed to the wrong position, which the coordinator's store refuses (content.AppendBlockRows). The first is the FEEDS the emulator struck immediately before this batch's first row: the ABI carries no departure counter, and a prune inside a feed mixes with that feed's own departures in one depth reading, so the rows a prune took are unknowable by contract — one struck feed reads as one and spends one index, a deliberately symbolic count rather than a manufactured row estimate. The second is an exact row count: rows the session's own bridge had to shed before they ever reached a batch, because the wire had fallen a whole queue behind (nocx-2v80t.3.15) — attached to the first batch the bridge accepted AFTER the shed, never to one queued before it. An ordinary batch, with a keeping-up wire and no struck feed, carries none.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "rows": {
+      "description": "The rows that left, oldest first, in the frame contract's row shape. The array is carried whole: a batch with no rows and a loss is how a hole with nothing after it is stated — at the very end of an interval, or where the bridge shed rows ahead of an end marker or a clear boundary — and it sits at the END of the gap it names, so an empty array is an answer and not an absence.",
+      "type": "array",
+      "items": {
+        "$ref": "https://nocx.local/contracts/session.frame.schema.json#/$defs/row"
+      }
+    }
+  }
+}

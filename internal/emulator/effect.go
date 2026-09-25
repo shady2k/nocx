@@ -59,6 +59,46 @@ const (
 	// can overwrite or scroll those rows before the authenticated half
 	// arrives, and the content must not change when it does.
 	EffectFence
+	// EffectOutputMark is the shell's output-start mark (nocx-2v80t.3.12):
+	// OSC 133 C, unconditionally written by nocx.bash's preexec hook before
+	// every command a shell with authenticated integration hands off, with
+	// no payload. Body is always empty.
+	//
+	// Like EffectFence it LOCATES rather than authorises (ADR-0024 decision
+	// 1 — "C and D have no meaning" as lifecycle authority, and still do
+	// not): it only tells sessionruntime where, inside an interval it has
+	// already authenticated by other means, that interval's own output
+	// begins. It opens nothing, closes nothing and assigns no status; a
+	// sighting with no interval in flight to locate anything in does
+	// nothing at all.
+	EffectOutputMark
+	// EffectClearBoundary is the program erasing the display AND its saved
+	// lines: ED3, `CSI 3 J`, written to the pty after `CSI H` and `CSI 2 J`
+	// — exactly what `clear(1)` emits (nocx-zg3k3.10.3's owner decision,
+	// verified). Body is always empty.
+	//
+	// It is SCANNED for, the way the fence is (fence.go), rather than read
+	// off a side effect of the library's own state: a first attempt read it
+	// off the scrollback depth collapsing to zero (the depth
+	// noteDepartedLocked already measures every feed) and measured wrong on
+	// the e2e (nocx-2v80t.3.17) — a short session whose live rows never
+	// scrolled into history has a depth of zero BEFORE the erase too, so
+	// the transition never fires for the case this effect exists to catch:
+	// a person runs one command, the screen is nowhere near full, and
+	// `clear` tidies up blocks that are still on screen and never
+	// departed. The library still parses and executes ED3 exactly as
+	// before; scanning only locates where it sits in the feed, the way the
+	// fence's own scanner does, and plain ED2 alone (a full-screen program
+	// redrawing) never matches the scanned sequence at all.
+	//
+	// Like EffectFence and EffectOutputMark this is not a lifecycle
+	// authority (ADR-0024 decision 1): it authorises nothing, opens nothing
+	// and completes nothing. Unlike them it locates no event authenticated
+	// elsewhere — ED3 is a real, standard VT operation the library executes
+	// as part of the very vt_write that carries it (ADR-0066: the backend
+	// owns the whole VT grammar now, not a private second reading), so the
+	// sighting IS the fact rather than a location for one.
+	EffectClearBoundary
 )
 
 // Effect is one non-visual effect the program asked for: a thing that

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"time"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/emulator/ghostty"
@@ -73,12 +72,10 @@ func (t ptyTerminal) Write(p []byte) (int, error) { return t.proc.Write(p) }
 // this process owns, and there is no partial state for a cancellation to leave
 // behind.
 //
-// The pixel dimensions are zero, and that is the honest value rather than a
-// placeholder: nothing on the wire between the coordinator and this helper
-// carries the client's cell metrics today (proto.ResizeParams is cols and rows;
-// the client sends xpixel/ypixel as 0), so the geometry the runtime holds
-// carries no cell size either. A real cell size is the client epic's
-// (nocx-zg3k3) and arrives through Session.ReportGeometry.
+// The ioctl's pixel fields are the WHOLE text area (TIOCSWINSZ's
+// ws_xpixel/ws_ypixel), while the committed geometry's are PER CELL — the
+// reverse half of the one conversion cellGeometry owns, and the reason the
+// multiplication happens here rather than at the commit.
 func (t ptyTerminal) Resize(g emulator.Geometry) error {
 	cols, err := ptyDimension(g.Cols)
 	if err != nil {
@@ -88,7 +85,15 @@ func (t ptyTerminal) Resize(g emulator.Geometry) error {
 	if err != nil {
 		return err
 	}
-	return t.proc.Resize(context.Background(), cols, rows, 0, 0)
+	xpixel, err := ptyDimension(g.CellWidthPx * g.Cols)
+	if err != nil {
+		return err
+	}
+	ypixel, err := ptyDimension(g.CellHeightPx * g.Rows)
+	if err != nil {
+		return err
+	}
+	return t.proc.Resize(context.Background(), cols, rows, xpixel, ypixel)
 }
 
 // ptyDimension converts a committed cell count to the width the kernel's own
@@ -103,6 +108,34 @@ func ptyDimension(n int) (uint16, error) {
 	return uint16(n), nil
 }
 
+// cellGeometry turns a client's reported size — cells plus TIOCSWINSZ's
+// whole-text-area pixels, zero meaning "not measured yet" — into the
+// geometry the runtime commits, whose pixel fields are PER CELL. This is the
+// ONE boundary between the two units: the wire (proto.SpawnParams,
+// proto.ResizeParams) and the pty's winsize speak whole-area pixels because
+// that is what TIOCSWINSZ defines, and everything downstream of a commit —
+// the emulator's own size answers, the published frames, the client's
+// pixel-to-cell mapping — speaks per cell.
+//
+// The pixels that arrive are DEVICE pixels (review round 1, nocx-zg3k3.2.9):
+// the client multiplies its renderer's integer device cell by the grid
+// count, so a well-formed report decodes EXACTLY — whole ÷ count is the
+// device cell again, no rounding. The round below remains for honesty about
+// degenerate reports (a fraction the uint16 wire could only have carried
+// rounded), never because a well-formed one needs it. Zeros decode to zeros
+// and are legitimate: a client that has not measured itself reports no
+// metric, and the session keeps running with none rather than inventing one.
+func cellGeometry(cols, rows, xpixel, ypixel uint16) sessionruntime.Geometry {
+	g := sessionruntime.Geometry{Cols: int(cols), Rows: int(rows)}
+	if cols > 0 && xpixel > 0 {
+		g.CellWidthPx = int(math.Round(float64(xpixel) / float64(cols)))
+	}
+	if rows > 0 && ypixel > 0 {
+		g.CellHeightPx = int(math.Round(float64(ypixel) / float64(rows)))
+	}
+	return g
+}
+
 // newSessionRuntime builds the runtime a spawned session is directed by, over
 // the PTY it was just started on, and answers the screen as well because the
 // caller owns that object's lifetime.
@@ -113,12 +146,13 @@ func ptyDimension(n int) (uint16, error) {
 // byte — and it is the reason the runtime is created HERE rather than lazily
 // on the first attach, where a program's question asked before anybody
 // attached would have been answered by nobody.
-// expireIn and expireAfter are the bounded missing-fence wait the runtime's
-// rendezvous runs under (design §6.4) — the service's Options threading,
-// handed down so the policy is stated at the composition root and a test's
-// trigger is the one the session actually arms.
-func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows uint16, expireIn time.Duration, expireAfter func(d time.Duration, f func()) (stop func() bool)) (*sessionruntime.Session, emulator.Terminal, error) {
-	g := sessionruntime.Geometry{Cols: int(cols), Rows: int(rows)}
+//
+// The runtime is built with no missing-fence policy to state: the rendezvous
+// arms no wait at all (ADR-0074, nocx-2v80t.3.9). A meeting left with one half missing
+// is settled by an EVENT, inside the runtime — the next interval's start or
+// the session's end — so the composition root has nothing to inject here.
+func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, rows, xpixel, ypixel uint16) (*sessionruntime.Session, emulator.Terminal, error) {
+	g := cellGeometry(cols, rows, xpixel, ypixel)
 	screen, err := newScreen(g)
 	if err != nil {
 		return nil, nil, err
@@ -131,12 +165,10 @@ func newSessionRuntime(newScreen ScreenFactory, proc Process, id string, cols, r
 			Session:    sessionruntime.SessionID(id),
 			Generation: 1,
 		},
-		Geometry:         g,
-		Terminal:         ptyTerminal{proc: proc},
-		Emulator:         screen,
-		Completeness:     sessionruntime.CompletenessComplete,
-		RendezvousExpiry: expireIn,
-		ExpireAfter:      expireAfter,
+		Geometry:     g,
+		Terminal:     ptyTerminal{proc: proc},
+		Emulator:     screen,
+		Completeness: sessionruntime.CompletenessComplete,
 	})
 	if err != nil {
 		// The screen was built and the runtime refused it, so the screen is

@@ -64,20 +64,24 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		conn:           cfg.Exec,
-		cfg:            cfg,
-		log:            cfg.Log,
-		nonce:          nonce,
-		pending:        make(map[uint64]chan proto.Response),
-		streams:        make(map[uint64]*chunkStream),
-		attachments:    make(map[[16]byte]*AttachedSession),
-		channels:       make(map[proto.ChannelID]*ChannelStream),
-		parkedChannels: make(map[proto.ChannelID][][]byte),
-		parkedEnds:     make(map[proto.ChannelID]parkedEnd),
-		forwards:       make(map[proto.ForwardID]*Forward),
-		parkedForwards: make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
-		done:           make(chan struct{}),
-		hsCh:           make(chan error, 1),
+		conn:        cfg.Exec,
+		cfg:         cfg,
+		log:         cfg.Log,
+		nonce:       nonce,
+		pending:     make(map[uint64]chan proto.Response),
+		streams:     make(map[uint64]*chunkStream),
+		attachments: make(map[[16]byte]*AttachedSession),
+		// The screen plane's reassembly state is the connection's, keyed by
+		// session and subscriber inside: one connection, one bound, and the
+		// bounds' own comments say why per connection is the honest unit.
+		screenAssembler: proto.NewScreenAssembler(),
+		channels:        make(map[proto.ChannelID]*ChannelStream),
+		parkedChannels:  make(map[proto.ChannelID][][]byte),
+		parkedEnds:      make(map[proto.ChannelID]parkedEnd),
+		forwards:        make(map[proto.ForwardID]*Forward),
+		parkedForwards:  make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
+		done:            make(chan struct{}),
+		hsCh:            make(chan error, 1),
 	}
 	// The reverse handlers' lifetime (reverse.go): the CONNECTION's, not the
 	// handshake's. Dial's own ctx governs bringing the helper up and is

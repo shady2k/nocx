@@ -57,26 +57,6 @@ export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 // supplied, and never where the message should go.
 export type NotificationRequestCallback = (request: OscNotification) => void
 
-// RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
-// ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
-// carries the same 64 hex chars in the authenticated `complete` event. The
-// renderer parses the OSC and reports WHERE the fence landed (render-only —
-// a fence carries no authority; see ADR-0024 decision 1). The block model
-// matches the fence hex against the authenticated completion to freeze the
-// block at the true output end instead of truncating the in-flight tail.
-export interface RenderFenceEvent {
-  /** 64 lowercase hex chars — the nonce the shell generated at completion. */
-  hex: string
-  /** Absolute buffer line the fence sequence was parsed on. The command's
-   *  last output byte is on this line or the one above it. */
-  line: number
-  /** Active buffer at parse time. A fence in the alternate buffer has no
-   *  scrollback line to serialize — the consumer ignores it. */
-  buffer: 'normal' | 'alternate'
-}
-
-export type RenderFenceCallback = (event: RenderFenceEvent) => void
-
 // ── Links (nocx-8yg.8) ────────────────────────────────────────────────────
 
 /** A half-open [from, to) range of UTF-16 offsets into one row's text. */
@@ -188,20 +168,12 @@ export interface TerminalRenderer {
   // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
-  // onRenderFence registers a callback that fires when the shell emits the
-  // private render fence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out).
-  // Parse-and-report only: the renderer says where the fence landed; the
-  // consumer matches it against the authenticated completion. Optional so a
-  // renderer that does not parse fences degrades to the documented
-  // no-fence deferral instead of failing to mount.
-  onRenderFence?(cb: RenderFenceCallback): void
-
   // onNotification registers a callback that fires when a program asks nocx
   // to present a message (ADR-0047) — OSC 9 or OSC 777, two spellings of one
   // request, fanned out identically so nothing downstream depends on which
   // one a program chose. Parse-and-report only: the renderer says a program
   // asked and never says where the message goes; the backend's router is the
-  // only holder of that. Optional, like onRenderFence, so a renderer that
+  // only holder of that. Optional, so a renderer that
   // does not parse these degrades to raising nothing rather than failing to
   // mount.
   onNotification?(cb: NotificationRequestCallback): void
@@ -334,6 +306,18 @@ export interface TerminalRenderer {
   readonly cellWidth: number
 
   /**
+   * The cell the renderer rasterises at, in DEVICE pixels — the integer
+   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
+   * Viewport divides exactly this way). The committed cell metric travels
+   * in this unit (review round 1, nocx-zg3k3.2.9): device pixels are where
+   * the cell is an integer without rounding anything, and a program asking
+   * its size gets physical pixels, as native terminals report on
+   * high-density screens. Null while the renderer cannot measure — the
+   * same honest degrade as cellWidth's 0.
+   */
+  deviceCellDims(): { width: number; height: number } | null
+
+  /**
    * Subscribe to "the cell dimensions MAY have changed" — fired at mount
    *  (after the fonts load), on grid resize and on device-pixel-ratio
    *  change, the three places xterm re-measures its char size. The
@@ -362,10 +346,10 @@ export interface TerminalRenderer {
   // fence is awaitWriteBarrier().
   onWriteParsed(cb: () => void): void
 
-  // onClear/onReset fire AFTER the renderer executed a full clear
-  // (clearViewport) or a full reset — the explicit state-changing
-  // operations that advance the frame generation alongside onWriteParsed.
-  onClear(cb: () => void): void
+  // onReset fires AFTER the renderer executed a full reset — the backend
+  // ordered a resync (the frame contract re-declares the screen), and that
+  // explicit state change advances the frame generation alongside
+  // onWriteParsed.
   onReset(cb: () => void): void
 
   /** True while bytes queued via write() have not finished parsing, tracked
@@ -404,17 +388,6 @@ export interface TerminalRenderer {
   cursorLine(): number
   /** Column of the cursor — the column the next write lands on. */
   cursorCol(): number
-
-  /**
-   * Clear the visible xterm viewport. Used after freezing a block, so the
-   * rows the block's DOM element now owns do not stay in the grid and get
-   * re-displayed by the live region (nocx-m87n). The underlying
-   * `Terminal.clear()` clears the whole buffer — "making the prompt line
-   * the new first line" — which is exactly what the DOM block model
-   * wants: the DOM owns the scrollback now, and the grid only ever holds
-   * the running command's rows.
-   */
-  clearViewport(): void
 }
 
 /** Adapter over an xterm IMarker, exposing only what the gutter needs. */

@@ -32,6 +32,24 @@ func departedTerm(t *testing.T, cols, rows int) emulator.Terminal {
 	return term
 }
 
+// departedRetention configures the library's scrollback budget on a terminal
+// this package built: a line limit, which is the boundary the prune tests are
+// about. The adapter itself CLEARS both limits where the terminal is made
+// (terminal.go's install) — a session's history is what its departures are
+// read out of, and it must outlive the session — so a test that wants a
+// boundary states the one it means rather than inheriting whatever the
+// library's default happens to be today.
+func departedRetention(t *testing.T, term emulator.Terminal, lines uint64) {
+	t.Helper()
+	gt, ok := term.(*terminal)
+	if !ok {
+		t.Fatalf("the port is %T, not the ghostty terminal", term)
+	}
+	if err := gt.setScrollbackBudget(nil, &lines); err != nil {
+		t.Fatalf("configure the retention: %v", err)
+	}
+}
+
 // departedFeed feeds s as the program's output.
 func departedFeed(t *testing.T, term emulator.Terminal, s string) {
 	t.Helper()
@@ -270,11 +288,18 @@ func TestDepartedRowsRefuseAClosedTerminal(t *testing.T) {
 // the truth, an interval flagged incomplete, never an empty success: a
 // consumer can carry "output was lost" honestly, but it cannot carry a lie.
 // This test feeds past the boundary and demands that accounting.
+//
+// The boundary is the test's OWN (departedRetention): the adapter clears both
+// budgets where a terminal is built, because inheriting the library's default
+// is what cost the e2e a whole command's rows (terminal.go's install,
+// nocx-2v80t.3.9). This is the port's answer for a terminal that DOES carry a
+// budget — the honest fallback, kept rather than removed.
 func TestDepartedRowsFlagRetentionLossPastTheBoundary(t *testing.T) {
 	term := departedTerm(t, 10, 5)
+	departedRetention(t, term, 50_000)
 
 	const chunkLines = 1000
-	const chunks = 60 // measured: pruning begins near 47k retained rows
+	const chunks = 60 // the boundary is crossed inside this volume: 50k lines retained
 
 	flagged := 0
 	reported := 0

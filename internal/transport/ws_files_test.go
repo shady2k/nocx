@@ -1545,10 +1545,23 @@ func TestFilesPoll_ListActionResetsLadder(t *testing.T) {
 // TestFilesPoll_FailureLadderUsesRealListingErrors proves a provider listing
 // failure reaches the separate retry ladder, and that a later successful
 // listing returns to the responsive idle ladder.
+//
+// The dispatch is driven directly through filesPollPath — the same seam
+// TestFilesPoll_PerPathLaddersAreIndependent and
+// TestFilesPoll_FailedListDoesNotResetPath use — rather than waiting on the
+// background loop's real timer. filesPollInterval is set to an hour so that
+// loop's own dueAt lands far in the future and it never dispatches on its
+// own; every listing below is the one this goroutine asked for, so no
+// further poll can land between "the ladder recorded a result" and "the
+// test reads it". The original version read w.paths[dir] a second time,
+// under its own lock, after waittest.WaitForTimeout had already observed the
+// post-failure success — and on a loaded machine one or more further idle
+// polls advanced idleStep in between, so filesPollWait's multiplier no
+// longer matched what the test asserted.
 func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
 	e, provider := newBlockingCountingFilesEnv(t)
 	const base = 5 * time.Millisecond
-	e.ws.filesPollInterval = base
+	e.ws.filesPollInterval = time.Hour
 	sid := e.openSession(t, 1)
 	root := t.TempDir()
 	dir := filepath.Join(root, "watched")
@@ -1558,37 +1571,40 @@ func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
 	bid := e.openBinding(t, sid, root, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
 	p := provider()
-	beforeFailure := p.count(dir)
-	p.failNext(errors.New("synthetic listing failure"))
 
-	waittest.WaitForTimeout(t, "the failure ladder to record the failed listing", wantWithin,
-		func() bool {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			entry := w.paths[dir]
-			return entry != nil && entry.failureStep >= 1
-		})
 	w.mu.Lock()
 	entry := w.paths[dir]
+	generation := entry.generation
+	h := w.handle
+	w.mu.Unlock()
+
+	p.failNext(errors.New("synthetic listing failure"))
+	selection := &filesPollSelection{path: dir, entry: entry, generation: generation}
+	if result := e.ws.filesPollPath(w, h, selection); result != filesPollPathFailed {
+		t.Fatalf("failing dispatch result = %v, want failed", result)
+	}
+	w.mu.Lock()
+	if entry.failureStep != 1 {
+		w.mu.Unlock()
+		t.Fatalf("failureStep after the synthetic failure = %d, want 1", entry.failureStep)
+	}
 	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 20*base {
 		w.mu.Unlock()
 		t.Fatalf("first failure wait = %s, want %s", got, 20*base)
 	}
 	w.mu.Unlock()
-	waittest.WaitForTimeout(t, "a successful listing after the failure", wantWithin,
-		func() bool {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			current := w.paths[dir]
-			return current != nil && current.failureStep == 0 && p.count(dir) > beforeFailure
-		})
+
+	if result := e.ws.filesPollPath(w, h, selection); result != filesPollPathOK {
+		t.Fatalf("recovering dispatch result = %v, want ok", result)
+	}
 	w.mu.Lock()
-	entry = w.paths[dir]
+	defer w.mu.Unlock()
+	if entry.failureStep != 0 {
+		t.Fatalf("failureStep after the recovering listing = %d, want 0", entry.failureStep)
+	}
 	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 2*base {
-		w.mu.Unlock()
 		t.Fatalf("post-failure idle wait = %s, want %s", got, 2*base)
 	}
-	w.mu.Unlock()
 }
 
 // newBlockingCountingFilesEnv exposes the counting provider's one-shot List

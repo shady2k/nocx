@@ -17,8 +17,10 @@ type Size struct {
 
 // Valid reports whether s names a grid a channel can be created at. Pixels
 // are deliberately not part of it: a client that knows its cell grid and
-// not its pixel geometry has reported a usable size, and every caller in
-// this repo sends 0 for both pixel fields today.
+// not its pixel geometry has reported a usable size. Since nocx-zg3k3.2.9
+// the client that has laid a pane out reports BOTH pixel fields, in
+// TIOCSWINSZ's whole-text-area units; zero means "not measured yet" and is
+// still a valid report.
 func (s Size) Valid() bool { return s.Cols > 0 && s.Rows > 0 }
 
 // defaultCols/defaultRows are the size a session runs at while no client

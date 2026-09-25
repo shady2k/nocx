@@ -11,12 +11,12 @@ package transport
 // The result shape is declared once in contracts/vault.resolveLine.schema.json.
 //
 // The invariant, and the whole point of the method: the resolved value goes
-// to the caller for the PTY write and nowhere else. history.record receives
-// the line with the REFERENCE intact — a command carrying a reference moves
-// to another machine and resolves that machine's secret; a command carrying
-// a pasted key is both dead and dangerous. The value is never logged, never
-// persisted, never put in a finding or a ref — the refs list carries only
-// the name and whether it resolved.
+// to the caller for the PTY write and nowhere else. Lifecycle submission
+// receives the line with the REFERENCE intact — a command carrying a
+// reference moves to another machine and resolves that machine's secret;
+// a command carrying a pasted key is both dead and dangerous. The value is
+// never logged, persisted, put in a finding or placed in a ref — the refs
+// list carries only the name and whether it resolved.
 
 import (
 	"context"

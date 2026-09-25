@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -43,29 +45,67 @@ func waitPastMilli(ms int64) {
 	}
 }
 
-// captureBody attaches a plain body to a recorded block, the way the
-// renderer's capture does (the derived text/plain artifact is the one search,
-// copy and the block tools read).
-func captureBody(t *testing.T, db content.ContentDB, entryID, artifactID, body string) {
+// recordRowsBody attaches a plain body to a recorded block through the
+// lifecycle used by the renderer: open the rows artifact, append the rows,
+// then close it. The block reader is therefore tested against the artifact
+// the product now writes, not the retired text capture method.
+func recordRowsBody(t *testing.T, db content.ContentDB, entryID, artifactID, body string) {
 	t.Helper()
-	cols, rows := 80, 24
-	kept, err := db.Ledger().CaptureOutput(context.Background(), content.CaptureOutput{
-		EntryID:        entryID,
-		ArtifactID:     artifactID,
-		MediaType:      content.MediaText,
-		CaptureMethod:  content.CaptureTerminalCells,
-		CaptureVersion: 1,
-		TerminalCols:   &cols,
-		TerminalRows:   &rows,
-		Seq:            1,
-		Body:           []byte(body),
+	ctx := context.Background()
+	opened, err := db.Ledger().OpenBlockOutput(ctx, content.OpenBlockOutput{
+		EntryID: entryID, ArtifactID: artifactID,
 	})
 	if err != nil {
-		t.Fatalf("CaptureOutput(%s): %v", entryID, err)
+		t.Fatalf("OpenBlockOutput(%s): %v", entryID, err)
 	}
-	if !kept {
-		t.Fatalf("CaptureOutput(%s) did not keep the body", entryID)
+	if opened == "" {
+		t.Fatalf("OpenBlockOutput(%s) did not keep the body", entryID)
 	}
+	if body != "" {
+		rows := make([]emulator.Row, 0, strings.Count(body, "\n")+1)
+		for _, line := range strings.Split(body, "\n") {
+			row := emulator.Row{}
+			for _, r := range line {
+				row.Cells = append(row.Cells, emulator.Cell{
+					Grapheme: string(r), Width: emulator.WidthNarrow, HasText: true,
+				})
+			}
+			rows = append(rows, row)
+		}
+		if err := db.Ledger().AppendBlockRows(ctx, content.AppendBlockRows{
+			EntryID: entryID, ArtifactID: opened, FromRow: 0, Rows: rows,
+		}); err != nil {
+			t.Fatalf("AppendBlockRows(%s): %v", entryID, err)
+		}
+	}
+	if _, err := db.Ledger().CloseBlockRows(ctx, content.CloseBlockRows{
+		EntryID: entryID, ArtifactID: opened,
+	}); err != nil {
+		t.Fatalf("CloseBlockRows(%s): %v", entryID, err)
+	}
+}
+
+// newLedgerStoreWithPolicy is the ordinary test store with the History policy
+// handed in — the one decision that controls whether a body is kept.
+func newLedgerStoreWithPolicy(t *testing.T, policy *content.Policy) content.ContentDB {
+	t.Helper()
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	db, err := content.Open(context.Background(), content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    key,
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger: log.NewSlogAdapter(nil),
+		Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }
 
 // recordBlockWithBody records one finished command in a pane and gives it an
@@ -88,7 +128,7 @@ func recordBlockWithBody(t *testing.T, db content.ContentDB, paneID, intent, art
 	if id == "" {
 		t.Fatalf("RecordCompleted(%q) recorded nothing", intent)
 	}
-	captureBody(t, db, id, artifactID, body)
+	recordRowsBody(t, db, id, artifactID, body)
 	// Leave the millisecond this row was stamped with before returning. The
 	// session floor is a wall-clock millisecond and the comparison includes
 	// it, so a fixture that records "before the session" and then opens the

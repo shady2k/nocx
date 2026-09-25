@@ -98,10 +98,12 @@ func capabilityFromHex(t *testing.T, spelling string) lifecycle.Capability {
 // real framing.
 type recordingSession struct {
 	*session.Service
-	mu        sync.Mutex
-	got       []proto.LifecycleCompleteParams
-	rawParams []json.RawMessage
-	seen      chan struct{}
+	mu          sync.Mutex
+	got         []proto.LifecycleCompleteParams
+	rawParams   []json.RawMessage
+	seen        chan struct{}
+	gotEntered  []proto.LifecycleEnteredParams
+	seenEntered chan struct{}
 }
 
 func (r *recordingSession) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
@@ -119,6 +121,18 @@ func (r *recordingSession) Call(ctx context.Context, op string, params json.RawM
 		r.mu.Unlock()
 		r.seen <- struct{}{}
 	}
+	if op == proto.OpLifecycleEntered {
+		var p proto.LifecycleEnteredParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		r.mu.Lock()
+		r.gotEntered = append(r.gotEntered, p)
+		r.mu.Unlock()
+		if r.seenEntered != nil {
+			r.seenEntered <- struct{}{}
+		}
+	}
 	return r.Service.Call(ctx, op, params)
 }
 
@@ -126,6 +140,12 @@ func (r *recordingSession) received() []proto.LifecycleCompleteParams {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]proto.LifecycleCompleteParams(nil), r.got...)
+}
+
+func (r *recordingSession) receivedEntered() []proto.LifecycleEnteredParams {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proto.LifecycleEnteredParams(nil), r.gotEntered...)
 }
 
 // completionStand builds the helper peer with the real session service over
@@ -234,14 +254,14 @@ func awaitCompletion(t *testing.T, rec *recordingSession) proto.LifecycleComplet
 // receives exactly ONE completion, naming the session the spawn returned,
 // the runtime incarnation that generation mints ({session, 1} — the fact
 // TestTheRuntimeIncarnationIsTheSessionAtGenerationOne pins), the kernel's
-// nonce, and the shell's exit code. The report seam stays silent: the
-// normal path succeeds, which is the paired half of criterion 3.
+// nonce, and the shell's exit code. Nothing is logged lost: the normal path
+// succeeds, which is the paired half of criterion 3.
 func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	var reported []error
-	downlink := client.NewCompletionDownlink(c, ctx, func(err error) { reported = append(reported, err) })
+	dctx, sl := downlinkLog(t)
+	downlink := client.NewCompletionDownlink(c, dctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -278,8 +298,95 @@ func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	if state, _ := pub.Attempt(att.ID); state.State != lifecycle.AttemptCompleted {
 		t.Fatalf("the kernel's attempt is %v after a successful downlink, want untouched AttemptCompleted", state.State)
 	}
-	if len(reported) != 0 {
-		t.Fatalf("the normal path reported %v, want a silent report seam", reported)
+	if lost := lostLines(sl); len(lost) != 0 {
+		t.Fatalf("the normal path logged a loss: %v", lost)
+	}
+}
+
+// TestObserveEnvironmentEntryRidesDownToTheSpawnedSession pins the downlink's
+// own half of nocx-2v80t.3.21's wire: ObserveEnvironmentEntry — called by
+// internal/app's environmentEntryEmitter, which decorates the ONE
+// lifecyclepub.Emitter every lane's Ingest reports to regardless of which
+// transport carried the frame (a local nested shell's hello shares the
+// parent's own descriptor; an ssh child's hello arrives on a forwarded
+// connection of its own, a listener CompletionObservingKernel never wraps —
+// which is why this is not exercised through Ingest the way Observe is) —
+// reaches the helper session as lifecycle-entered, exactly once, addressing
+// the spawned session, and completes nothing: the running attempt this entry
+// seals a block for stays open for its own real completion (measured in
+// internal/app's
+// TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent:
+// "the parent comes back and completes its own block with the status the
+// ssh client really exited with").
+func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
+	c, rec, _ := completionStand(t, nil)
+	rec.seenEntered = make(chan struct{}, 1)
+	ctx := context.Background()
+
+	downlink := client.NewCompletionDownlink(c, ctx)
+
+	spawned, err := c.Spawn(ctx, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-under-test", Domain: "dom-under-test", Epoch: 7, Capability: hex.EncodeToString(make([]byte, 32))},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	downlink.Bind(spawned.HostSessionID)
+
+	downlink.ObserveEnvironmentEntry("dom-child")
+
+	select {
+	case <-rec.seenEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the environment entry never reached the helper session")
+	}
+	got := rec.receivedEntered()
+	if len(got) != 1 {
+		t.Fatalf("%d environment entries crossed the wire, want exactly 1", len(got))
+	}
+	if got[0].Session.Session != spawned.HostSessionID.Session || string(got[0].Session.Generation) != spawned.HostSessionID.Generation {
+		t.Fatalf("the entry named %+v, want the spawned session %+v", got[0].Session, spawned.HostSessionID)
+	}
+	wantInc := proto.Incarnation{Session: spawned.HostSessionID.Session, Generation: 1}
+	if got[0].Incarnation != wantInc {
+		t.Fatalf("the entry's incarnation was %+v, want %+v", got[0].Incarnation, wantInc)
+	}
+	if got[0].Entry != "dom-child" {
+		t.Fatalf("the entry crossed the wire named %q, want the child domain %q", got[0].Entry, "dom-child")
+	}
+	if len(rec.received()) != 0 {
+		t.Fatalf("an environment entry sent %d completions down, want none", len(rec.received()))
+	}
+}
+
+// An environment entry observed before Bind is buffered exactly like a
+// completion, and delivered once the session is named — the same ordering
+// race Bind's own doc names, now with two kinds of fact sharing one queue.
+func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testing.T) {
+	c, rec, _ := completionStand(t, nil)
+	rec.seenEntered = make(chan struct{}, 1)
+	ctx := context.Background()
+
+	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink.ObserveEnvironmentEntry("dom-child")
+
+	spawned, err := c.Spawn(ctx, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-under-test", Domain: "dom-under-test", Epoch: 7, Capability: hex.EncodeToString(make([]byte, 32))},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	downlink.Bind(spawned.HostSessionID)
+
+	select {
+	case <-rec.seenEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the buffered environment entry never reached the helper session")
+	}
+	if got := rec.receivedEntered(); len(got) != 1 {
+		t.Fatalf("%d environment entries crossed the wire, want exactly 1", len(got))
 	}
 }
 
@@ -292,7 +399,7 @@ func TestAnAcceptedCompletionRidesDownToAnSSHHostedPane(t *testing.T) {
 	c, rec, pub := completionStand(t, spawner)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.SpawnSSH(ctx, proto.SSHSpawnParams{
@@ -333,7 +440,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink := client.NewCompletionDownlink(c, ctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -400,14 +507,14 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 
 // TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt is criterion 3's
 // failure half: the helper session is gone when the completion fires, the
-// delivery fails, the failure is reported — and the kernel's execution
+// delivery is refused, the loss is logged — and the kernel's execution
 // state is exactly what the kernel set when it accepted the completion.
 func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	var reported []error
-	downlink := client.NewCompletionDownlink(c, ctx, func(err error) { reported = append(reported, err) })
+	dctx, sl := downlinkLog(t)
+	downlink := client.NewCompletionDownlink(c, dctx)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -454,8 +561,8 @@ func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	code := 1
 	prompt(6, lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id2, ExitCode: &code, Fence: lifecycle.FenceNonce(fence2)}})
 
-	if len(reported) == 0 {
-		t.Fatal("the delivery to a closed session was not reported")
+	if err := awaitLost(t, sl); err == nil {
+		t.Fatal("the delivery to a closed session was logged without its cause")
 	}
 	got, ok := pub.Attempt(att2.ID)
 	if !ok || got.State != lifecycle.AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 1 {

@@ -179,8 +179,12 @@ async function rpc(
  * `seats` names the child kinds in order. A `text` child's body is its
  * text/plain artifact; the command's (kind `shell` — the run tool submits
  * through the same path a person's line takes, and `source` carries who ran
- * it) is application/vt; an
- * `action` has no artifact (its facts are in the entry's payload).
+ * it) is streamed into history as `application/x-nocx-rows` — the block-rows
+ * artifact `OpenBlockOutput`/`MediaBlockRows` writes for every authenticated
+ * command regardless of who ran it (ledger.go: "streamed command output uses
+ * OpenBlockOutput and MediaBlockRows; CaptureOutput remains the shared
+ * transactional body path for assistant/tool results"); an `action` has no
+ * artifact (its facts are in the entry's payload).
  */
 async function storedTurn(
   page: Page,
@@ -212,7 +216,7 @@ async function storedTurn(
           const child = (await rpc(page, ep, 'ledger.get', {
             id: caused[i].entryId,
           })) as { artifacts?: { mediaType: string }[] }
-          const mediaType = spec.kind === 'text' ? 'text/plain' : 'application/vt'
+          const mediaType = spec.kind === 'text' ? 'text/plain' : 'application/x-nocx-rows'
           if (!(child.artifacts ?? []).some((a) => a.mediaType === mediaType)) return false
         }
         return true

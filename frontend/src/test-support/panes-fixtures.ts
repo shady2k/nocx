@@ -8,12 +8,11 @@
 // open. The fake must carry both.
 import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
+import type { SessionFrame } from '../generated/session.frame'
 import type {
   CommandMarkerCallback,
   CwdCallback,
   DataCallback,
-  RenderFenceCallback,
-  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -22,7 +21,7 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import { LayoutStore } from '../layout/layout-store'
 import { UIStateClient } from '../uistate-client'
 import type { UIState } from '../generated/uistate'
-import type { Dispatcher } from '../dispatcher'
+import { RpcError, type Dispatcher } from '../dispatcher'
 import type { LayoutClientLike } from '../layout/layout-client'
 import type {
   Tab as LayoutTab,
@@ -206,8 +205,6 @@ export interface RendererMock extends TerminalRenderer {
   _fireClipboardWrite(text: string): void
   /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
   _fireRecoveryFence(hex: string): void
-  /** Fire a render-fence sighting (ADR-0024 §7 carve-out, u7uh.8). */
-  _fireRenderFence(ev: RenderFenceEvent): void
   /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
   _fireData(data: string): void
 }
@@ -220,7 +217,6 @@ export interface RendererMock extends TerminalRenderer {
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const recoverySubs: Array<(hex: string) => void> = []
-  const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
   let snippetChordCb: (() => void) | null = null
   let activeBuffer: 'normal' | 'alternate' = 'normal'
   const mock: Record<string, unknown> = {
@@ -257,9 +253,6 @@ export function createRendererMock(): RendererMock {
     activeBufferKind: vi.fn(() => activeBuffer),
     onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
       recoverySubs.push(cb)
-    }),
-    onRenderFence: vi.fn((cb: RenderFenceCallback) => {
-      fenceSubs.push(cb)
     }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
@@ -306,6 +299,10 @@ export function createRendererMock(): RendererMock {
     cellHeight: 16,
     viewportTopLine: 0,
     cellWidth: 8,
+    // The device cell the committed metric travels in (review round 1):
+    // dpr-1 identity with the CSS cell above, so existing expectations
+    // hold; a test about a dense display overrides this mock.
+    deviceCellDims: vi.fn(() => ({ width: 8, height: 16 })),
     onCellDimsChange: vi.fn(),
     onScroll: vi.fn(),
     onRender: vi.fn(),
@@ -318,7 +315,6 @@ export function createRendererMock(): RendererMock {
     paneElement: document.createElement('div'),
     getBufferLine: vi.fn().mockReturnValue(undefined),
     cursorLine: vi.fn().mockReturnValue(0),
-    clearViewport: vi.fn(),
     // NULL means "cannot measure", which the caller treats as "keep the current
     // height" — so a fixture that does not care about live-region sizing gets
     // the same behaviour as before this method existed. Zero would be a
@@ -364,9 +360,6 @@ export function createRendererMock(): RendererMock {
     /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
     _fireRecoveryFence(hex: string) {
       for (const sub of recoverySubs) sub(hex)
-    },
-    _fireRenderFence(ev: RenderFenceEvent) {
-      for (const sub of fenceSubs) sub(ev)
     },
     /** A keystroke reaching the grid in raw mode — what xterm's onData
      *  fires once stdin is enabled. The real renderer drops these while
@@ -437,6 +430,11 @@ export interface SessionFake {
   /** What an enrolled pane's driver says its screen is inviting
    *  (nocx-szb40.3). */
   onObservation: ReturnType<typeof vi.fn>
+  /** The screen plane (nocx-zg3k3.2.8): one parsed session.frame document
+   *  per metadata frame the backend publishes. */
+  onScreenFrame: ReturnType<typeof vi.fn>
+  /** Fire the registered screen-frame callback with one document. */
+  fireScreenFrame(frame: SessionFrame): void
   /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
    *  undefined for a handle that was opened rather than taken back. `size` is
    *  the grid the BACKEND says the session runs at — the one the recovered
@@ -470,6 +468,7 @@ export interface SessionFake {
  */
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
+  let screenCb: ((frame: SessionFrame) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
@@ -504,6 +503,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onObservation: vi.fn((cb: (o: SessionObservationChanged) => void) => {
       observationCb = cb
     }),
+    onScreenFrame: vi.fn((cb: (frame: SessionFrame) => void) => {
+      screenCb = cb
+    }),
     fireData: (data: string) => {
       dataCb?.(data)
     },
@@ -516,6 +518,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
         state,
         progress: 'moving',
       })
+    },
+    fireScreenFrame: (frame: SessionFrame) => {
+      screenCb?.(frame)
     },
     fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {
       livenessCb?.({
@@ -685,6 +690,30 @@ export function lifecycleHandler(
     deliver({ ...params, sessionId })
   }
 }
+/** The backend's block.closed (contracts/block.closed.schema.json): the one
+ *  event a finished command's block closes on (nocx-2v80t.3.27). Tests name
+ *  the entry; `kept` defaults to false — no rows to fetch — so a test that is
+ *  not about stored rows does not have to fake a store read. */
+export function blockClosedHandler(client: ClientFake): (entryId: string, kept?: boolean) => void {
+  const deliver = notificationHandler(client, 'block.closed')
+  return (entryId: string, kept = false): void => deliver({ entryId, kept })
+}
+
+/** The backend-owned history receipt notification. */
+export function historyRecordedHandler(
+  client: ClientFake,
+  sessionId = client._sessions[0]?.sessionId,
+): (params: unknown) => void {
+  if (!sessionId) throw new Error('no session available for history.recorded')
+  const deliver = notificationHandler(client, 'history.recorded')
+  return (params: unknown): void => {
+    if (!params || typeof params !== 'object') {
+      deliver(params)
+      return
+    }
+    deliver({ ...params, sessionId })
+  }
+}
 
 /**
  * A pane whose row the chain ALREADY HOLDS — what every test that is not
@@ -780,7 +809,11 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
         startedAt: '2026-08-08T12:00:00Z',
       }),
     },
-    call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
+    // What the backend answers when no content store is wired: a JSON-RPC
+    // -32601, not a transport failure — a reader that tells "the store
+    // keeps nothing" from "the read failed" (restore-client's
+    // blockRowsForEntry, nocx-2v80t.3.27) must see the same refusal here.
+    call: vi.fn().mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
     get connected() {
       return true
     },

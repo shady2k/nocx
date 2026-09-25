@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -32,7 +33,7 @@ func newLifecycleLedgerEnv(t *testing.T, withStore bool) (*lifecycleTestEnv, *li
 // handed in — the one thing a caller that needs a specific History policy
 // (output retention, for instance) controls. A nil db is the store-unavailable
 // env.
-func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB) (*lifecycleTestEnv, *lifecyclepub.Publisher, lifecycle.LaneID, lifecycle.DomainHandle, string, content.ContentDB) {
+func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB, extra ...WSServerOption) (*lifecycleTestEnv, *lifecyclepub.Publisher, lifecycle.LaneID, lifecycle.DomainHandle, string, content.ContentDB) {
 	t.Helper()
 	if db != nil {
 		if _, err := db.Layout().CreateWorkspace(context.Background(),
@@ -44,7 +45,8 @@ func newLifecycleLedgerEnvWithStore(t *testing.T, db content.ContentDB) (*lifecy
 	}
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t, WithContentDB(db), WithLifecyclePublisher(pub))
+	opts := append([]WSServerOption{WithContentDB(db), WithLifecyclePublisher(pub)}, extra...)
+	e := newLifecycleTestEnv(t, opts...)
 	pub.SetEmitter(e.ws)
 	sid := openLifecycleLedgerSession(t, e, "01930000-0000-7000-8000-0000000000a1")
 	const lane = lifecycle.LaneID("lane-lifecycle")
@@ -208,46 +210,7 @@ func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 	if row.Phase != content.PhaseClosed || row.Status != content.EntryFailure {
 		t.Fatalf("after completion row = phase=%q status=%q, want closed/failure", row.Phase, row.Status)
 	}
-	recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
-		"attemptId": got.ID,
-		"command":   command,
-		"cwd":       "/repo",
-		"host":      "",
-		"source":    "user",
-		"status":    "failure",
-		"exitCode":  7,
-		"startedAt": nil,
-		"endedAt":   nil,
-		"paneId":    "01930000-0000-7000-8000-0000000000a1",
-	}, 42)
-	var recordEnvelope struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if unmarshalErr := json.Unmarshal(recordResp, &recordEnvelope); unmarshalErr != nil {
-		t.Fatalf("history.record response: %v", unmarshalErr)
-	}
-	if recordEnvelope.Error != nil {
-		t.Fatalf("history.record: %+v", recordEnvelope.Error)
-	}
-	var ack historyRecordResponse
-	if ackErr := json.Unmarshal(recordEnvelope.Result, &ack); ackErr != nil {
-		t.Fatalf("history.record result: %v", ackErr)
-	}
-	if ack.EntryID != got.ID {
-		t.Fatalf("history.record entry id = %q, want attempt id %q", ack.EntryID, got.ID)
-	}
-	entries, err := db.Ledger().ListEntries(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("ListEntries: %v", err)
-	}
-	if len(entries) != 1 || entries[0].ID != got.ID {
-		t.Fatalf("history.record rows = %+v, want one row under %q", entries, got.ID)
-	}
-	finalRow := mustEntry(t, db, got.ID)
-	if strings.Contains(finalRow.Intent, secret) || !strings.Contains(finalRow.Intent, "sk-a...GHIJ") {
-		t.Fatalf("completed row intent = %q, want masked command", finalRow.Intent)
-	}
+	finalRow := row
 	items, err = e.ws.ListSessionItems(context.Background(), sid, 10)
 	if err != nil {
 		t.Fatalf("ListSessionItems after completion: %v", err)
@@ -425,28 +388,10 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 		t.Fatal("fake model never received the running session.read result")
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, domain, 3, lifecycleCompleteEvt(attemptID, 7, lifecycleFence(0x55))))
-	recordResp := jsonrpcCallWithID(t, h.conn, "history.record", map[string]any{
-		"attemptId": submitted.ID,
-		"command":   command,
-		"cwd":       "/repo",
-		"host":      "",
-		"source":    "user",
-		"status":    "failure",
-		"exitCode":  7,
-		"startedAt": nil,
-		"endedAt":   nil,
-		"paneId":    askPaneID,
-	}, 43)
-	var recordEnvelope struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-		t.Fatalf("history.record response: %v", err)
-	}
-	if recordEnvelope.Error != nil {
-		t.Fatalf("history.record: %+v", recordEnvelope.Error)
-	}
-	captureBody(t, h.db, submitted.ID, "artifact-block-read", "finished block output")
+	// Lifecycle completion now closes and records the attempt itself. The
+	// durable row is ready before the next agent read, so this test no longer
+	// calls the retired history.record RPC.
+	recordRowsBody(t, h.db, submitted.ID, "artifact-block-read", "finished block output")
 	close(provider.releaseSecond)
 
 	secondCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)
@@ -701,5 +646,204 @@ func TestLifecycleSubmitAttempt_RefusesASourceOutsideTheVocabulary(t *testing.T)
 				t.Fatalf("error message = %q, want it to name source", errObj.Message)
 			}
 		})
+	}
+}
+
+func TestLifecycleCompletion_RecordsAndPublishesReceipt(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" //nolint:gosec // synthetic detector fixture
+	command := "deploy --token=" + secret
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), command), 41))
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, command)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt.ID), 0, lifecycleFence(0x44))))
+
+	raw := readNotification(t, e.conn, "history.recorded", 5*time.Second)
+	validateJSON(t, loadSchema(t, "history.recorded.schema.json"), raw, "history.recorded params")
+	var receipt struct {
+		SessionID     string   `json:"sessionId"`
+		AttemptID     string   `json:"attemptId"`
+		EntryID       string   `json:"entryId"`
+		Source        string   `json:"source"`
+		MaskedCommand string   `json:"maskedCommand"`
+		MaskedCount   int      `json:"maskedCount"`
+		MaskedKinds   []string `json:"maskedKinds"`
+		Redactions    []struct {
+			Kind  string `json:"kind"`
+			Start int    `json:"start"`
+			End   int    `json:"end"`
+		} `json:"redactions"`
+		Captures []struct {
+			ID      string `json:"id"`
+			EntryID string `json:"entryId"`
+		} `json:"captures"`
+	}
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatalf("history.recorded: %v", err)
+	}
+	if receipt.SessionID != sid || receipt.AttemptID != attempt.ID {
+		t.Fatalf("receipt identity = session %q attempt %q, want %q %q", receipt.SessionID, receipt.AttemptID, sid, attempt.ID)
+	}
+	if receipt.EntryID != attempt.ID || receipt.Source != "user" {
+		t.Fatalf("receipt row = entry %q source %q, want %q user", receipt.EntryID, receipt.Source, attempt.ID)
+	}
+	if receipt.MaskedCount != 1 || len(receipt.MaskedKinds) != 1 || len(receipt.Redactions) != 1 {
+		t.Fatalf("receipt masking = count %d kinds %v redactions %v, want one of each", receipt.MaskedCount, receipt.MaskedKinds, receipt.Redactions)
+	}
+	if len(receipt.Captures) != 1 || receipt.Captures[0].ID == "" || receipt.Captures[0].EntryID != attempt.ID {
+		t.Fatalf("receipt captures = %+v, want one offer linked to %q", receipt.Captures, attempt.ID)
+	}
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntrySuccess {
+		t.Fatalf("stored row = phase=%q status=%q, want closed/success", row.Phase, row.Status)
+	}
+	query := decodeHistoryResult(t, vaultCall(t, e.conn, "history.query",
+		map[string]any{"scope": "everywhere", "text": "deploy"}, 42))
+	found := false
+	for _, entry := range query.Entries {
+		if entry.ID == attempt.ID && strings.Contains(entry.Command, "deploy") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("history.query did not return completed attempt %q: %+v", attempt.ID, query.Entries)
+	}
+}
+
+func TestLifecycleCompletion_RaisesAttestedBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "false"), 41))
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "false")))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt.ID), 1, lifecycleFence(0x45))))
+	events := raiser.captured()
+	if len(events) != 1 {
+		t.Fatalf("raised %d events, want one", len(events))
+	}
+	event := events[0]
+	if event.SessionID != sid || event.Kind != notify.KindBlockFinished {
+		t.Fatalf("event = %+v, want attested block.finished for session %q", event, sid)
+	}
+	if event.Title != "false failed" {
+		t.Fatalf("event title = %q, want false failed", event.Title)
+	}
+}
+
+// TestLifecycleUnknownOnRootDomain_SuppressesBlockFinished is the coordinator's
+// decision for nocx-2v80t.3.22 ("one fact, one notification"): a session that
+// dies mid-command used to raise BOTH the session's own "ended" notification
+// and a "<command> finished" for the attempt its own death left unknown — the
+// bell read 2 for one death. The root domain (no parent) is the session's own
+// shell; once IT loses its transport there is nothing left on the lane to run
+// anything, and monitorExit's own KindSessionEnded already names the fact.
+func TestLifecycleUnknownOnRootDomain_SuppressesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "sleep 1000"), 41))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 1000")))
+
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+
+	// The ledger still closes the row as unknown — this bug is about the
+	// NOTIFICATION, never about losing the record of what happened.
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished {
+			t.Fatalf("root domain's own transport loss raised %+v; the session's own "+
+				"end already says the command stopped (nocx-2v80t.3.22)", ev)
+		}
+	}
+}
+
+// TestLifecycleUnknownOnRootDomain_DomainClosedAlsoSuppressesBlockFinished
+// drives the ACTUAL mechanism measured on 2026-09-25 against a real shell: a
+// process dying mid-command (`exit 1`, a signal, a crash) runs the shell
+// integration's own EXIT trap first (nocx.bash's __nocx_exit_cleanup), which
+// sends domain_closed over the still-open side channel before the process's
+// own exit closes it — "stream ordering guarantees it precedes EOF"
+// (lifecyclechannel/adapter.go). So the attempt goes Unknown through the
+// kernel's ordinary domain-close path, never through TransportLost at all,
+// and the suppression has to hold for this path too.
+func TestLifecycleUnknownOnRootDomain_DomainClosedAlsoSuppressesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, _, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h.Domain), "while true; do sleep 1; done; exit 1"), 41))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2,
+		lifecycleStartEvt(nil, "while true; do sleep 1; done; exit 1")))
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{},
+	}))
+
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished {
+			t.Fatalf("the shell's own exit-trap domain_closed raised %+v; monitorExit's "+
+				"session.ended already names the same death (nocx-2v80t.3.22)", ev)
+		}
+	}
+}
+
+// TestLifecycleUnknownOnNestedDomain_StillRaisesBlockFinished is the other
+// half of the same decision: an ssh hop whose connection drops leaves the
+// PARENT shell running the lane — the session lives on, per nocx-ictcq — so
+// the command's own "finished" notification is the only word anybody gets
+// that it stopped, and it must still be raised.
+func TestLifecycleUnknownOnNestedDomain_StillRaisesBlockFinished(t *testing.T) {
+	raiser := &fakeNotifyRaiser{}
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnvWithStore(t, newLedgerStore(t), WithNotifyRaiser(raiser))
+
+	if err := pub.BindTransport("T2", noopPort{}); err != nil {
+		t.Fatalf("BindTransport T2: %v", err)
+	}
+	h2, err := pub.RequestDomain(lane, &h.Domain, "T2")
+	if err != nil {
+		t.Fatalf("RequestDomain nested: %v", err)
+	}
+	// The parent yields the lane before the child can establish (kernel.go's
+	// applyHello: a child's parent must be DomainSuspended) — exactly what a
+	// real `ssh` command does to its own local domain once the far shell
+	// takes the terminal.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h2, e.conn)
+
+	attempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		lifecycleSubmitParams(string(h2.Domain), "sleep 1000"), 41))
+	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 2, lifecycleStartEvt(nil, "sleep 1000")))
+
+	if err := pub.TransportLost("T2"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+
+	row := mustEntry(t, db, attempt.ID)
+	if row.Phase != content.PhaseClosed || row.Status != content.EntryUnknown {
+		t.Fatalf("row = phase=%q status=%q, want closed/unknown", row.Phase, row.Status)
+	}
+	found := false
+	for _, ev := range raiser.captured() {
+		if ev.Kind == notify.KindBlockFinished && ev.SessionID == sid {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a nested domain's transport loss raised no block.finished for session %q "+
+			"(events=%+v); the session lives on and this is the only word anyone gets that "+
+			"the command stopped (nocx-ictcq)", sid, raiser.captured())
 	}
 }

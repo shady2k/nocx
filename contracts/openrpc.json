@@ -4362,55 +4362,6 @@
       }
     },
     {
-      "name": "history.record",
-      "params": [
-        {
-          "name": "params",
-          "required": false,
-          "schema": {
-            "$ref": "https://nocx.local/contracts/history.record.params.schema.json"
-          }
-        }
-      ],
-      "errors": [
-        {
-          "code": -32601,
-          "message": "Method not found",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32602,
-          "message": "Invalid params",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32603,
-          "message": "Internal error",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32004,
-          "message": "Control plane busy",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        }
-      ],
-      "x-nocx-agent-disposition": "operation-owned",
-      "result": {
-        "name": "history.recordResult",
-        "schema": {
-          "$ref": "https://nocx.local/contracts/history.record.schema.json"
-        }
-      }
-    },
-    {
       "name": "history.status",
       "params": [
         {
@@ -4701,55 +4652,6 @@
         "name": "ledger.bindResult",
         "schema": {
           "$ref": "https://nocx.local/contracts/ledger.bind.schema.json"
-        }
-      }
-    },
-    {
-      "name": "ledger.capture",
-      "params": [
-        {
-          "name": "params",
-          "required": false,
-          "schema": {
-            "$ref": "https://nocx.local/contracts/ledger.capture.params.schema.json"
-          }
-        }
-      ],
-      "errors": [
-        {
-          "code": -32601,
-          "message": "Method not found",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32602,
-          "message": "Invalid params",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32603,
-          "message": "Internal error",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        },
-        {
-          "code": -32004,
-          "message": "Control plane busy",
-          "x-nocx-errorSchema": {
-            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
-          }
-        }
-      ],
-      "x-nocx-agent-disposition": "operation-owned",
-      "result": {
-        "name": "ledger.captureResult",
-        "schema": {
-          "$ref": "https://nocx.local/contracts/ledger.capture.schema.json"
         }
       }
     },
@@ -10915,6 +10817,15 @@
       "$ref": "https://nocx.local/contracts/backup.saveToFile.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/block.cleared.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/block.closed.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/block.grew.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/checkouts.status.schema.json"
     },
     {
@@ -11071,7 +10982,7 @@
       "$ref": "https://nocx.local/contracts/history.query.schema.json"
     },
     {
-      "$ref": "https://nocx.local/contracts/history.record.schema.json"
+      "$ref": "https://nocx.local/contracts/history.recorded.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/history.status.schema.json"
@@ -11095,7 +11006,7 @@
       "$ref": "https://nocx.local/contracts/ledger.bind.schema.json"
     },
     {
-      "$ref": "https://nocx.local/contracts/ledger.capture.schema.json"
+      "$ref": "https://nocx.local/contracts/ledger.blockRows.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/ledger.close.schema.json"

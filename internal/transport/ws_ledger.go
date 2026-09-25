@@ -118,9 +118,9 @@ type ledgerBindParams struct {
 //
 // `trusted` and `markers`, which design §3.3 puts beside exitCode in the shell
 // arm, are NOT here. ADR-0024 deleted the trusted boolean, its laundering rule
-// and trusted as a field crossing to history.record, and with it the anonymous
-// marker cycle a MarkerTrace was read from. Neither has a source in the
-// renderer any more, so accepting them would be asking for a guess.
+// and trusted as a field crossing into durable history, and with it the
+// anonymous marker cycle a MarkerTrace was read from. Neither has a source in
+// the renderer any more, so accepting them would be asking for a guess.
 type ledgerCloseFacts struct {
 	TerminationReason string `json:"terminationReason"`
 	ExitCode          *int   `json:"exitCode"`
@@ -166,10 +166,12 @@ const (
 
 // ── ingress bounds ────────────────────────────────────────────────────────
 
-// maxLedgerIntentRunes bounds the envelope's intent. It is deliberately
-// maxRecordCommandRunes: intent is the same product object history.record
-// calls `command`, and two bounds on one concept is how they drift apart.
+// maxLedgerIntentRunes bounds the envelope's intent. It shares the command
+// bound with the durable history path so one product fact has one limit.
 const maxLedgerIntentRunes = maxRecordCommandRunes
+
+// epochFloor rejects monotonic page timestamps at the ledger boundary.
+const epochFloor int64 = 1_577_836_800_000
 
 // maxExecutorRunes bounds the bind's executor identity — a name, never a
 // document.
@@ -235,6 +237,11 @@ type ledgerHandlers struct {
 	broker   *Broker
 	r        Responder
 
+	// openRows retries the block stream after the durable bind. Lifecycle
+	// publication can race the renderer's ledger.bind, so the first open may
+	// legitimately see no ledger row yet.
+	openRows func(session.ID, string)
+
 	// raiser is the notification pipeline's ingress (ADR-0029); nil when the
 	// host built no pipeline, which every headless test server is. The close
 	// is the ONLY one of the three lifecycle methods that holds it: an open
@@ -289,7 +296,10 @@ func (h ledgerHandlers) handleBind(ctx context.Context, req jsonrpcRequest) {
 	if h.broker != nil {
 		h.broker.startRunLeaseForAttempt(p.Envelope.AttemptID)
 	}
-	h.apply(ctx, req, cmd)
+	_, ok := h.apply(ctx, req, cmd)
+	if ok && h.openRows != nil {
+		h.openRows(session.ID(p.Envelope.SessionID), p.Envelope.AttemptID)
+	}
 }
 
 func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
@@ -355,17 +365,12 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 	if out.Outcome != ledgerApplied || out.Phase != string(content.PhaseClosed) {
 		return
 	}
-	// THE OTHER RAISE IS IN handleHistoryRecord, and this is not a duplicate
-	// (nocx-n3nfg). The two are the ledger's two durable writers of one
-	// product object — the split `command` below already documents — and a
-	// command travels exactly one of them: today's renderer sends
-	// history.record and never a close, and a client that sends closes is on
-	// the fuller lifecycle protocol and sends no record. Two raises for one
-	// command would need one client doing both, which nothing does. Deleting
-	// this one instead would leave `ledger.close` — a contracted method with
-	// its own schema, its own create-the-row-from-the-envelope path and a
-	// renderer migration still ahead of it — silently unable to tell anybody
-	// that a command ended.
+	// This lifecycle close is the sole durable writer for this path. The
+	// renderer no longer submits a separate history-record request, so this
+	// applied close is also the single place that raises completion here.
+	// Deleting this raise would leave ledger.close — a contracted method with
+	// its own schema and create-the-row-from-the-envelope path — unable to tell
+	// anybody that a command ended.
 	// Background, deliberately, and for the reason ws.go's session.ended
 	// raise gives at the same seam. Owner: this handler, which runs once per
 	// applied close on the content queue. Closing event: the return of
@@ -398,11 +403,10 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 	}
 	env := environmentForSession(sess)
 
-	// Mask before the text is durable. history.record already writes command
-	// text to this database and masks it at the wire "in exactly one place,
-	// because the durable command is always the masked one"; this method is
-	// the second durable writer of the same product object, so it masks
-	// through the SAME owner rather than growing a second policy. A detection
+	// Mask before the text is durable. The lifecycle command path writes
+	// command text to this database and masks it at the wire "in exactly one
+	// place, because the durable command is always the masked one"; this method
+	// uses the SAME owner rather than growing a second policy. A detection
 	// failure fails CLOSED — the raw text must not reach a row.
 	maskedResult, err := maskLedgerCommand(e.Intent)
 	if err != nil {
@@ -816,11 +820,11 @@ func validateLedgerCloseRaw(raw json.RawMessage) string {
 	if p.DurationMs != nil && *p.DurationMs < 0 {
 		return "durationMs must not be negative"
 	}
-	// startedAt is a WALL clock and is checked by the floor history.record
-	// already uses, because it is the same product fact reaching the same
-	// database: a performance.now() reading lands in January 1970, and there
-	// the retention sweep deletes the row microseconds after it is written
-	// (nocx-rtg0.16). One owner for "is this a wall clock", not two.
+	// startedAt is a WALL clock and is checked by the ledger close path,
+	// because it is the same product fact reaching the same database: a
+	// performance.now() reading lands in January 1970, and the retention sweep
+	// deletes the row microseconds after it is written (nocx-rtg0.16). One
+	// owner for "is this a wall clock", not two.
 	if p.StartedAt != nil && *p.StartedAt < epochFloor {
 		return fmt.Sprintf("startedAt must be epoch milliseconds on or after 2020-01-01 (got %d)", *p.StartedAt)
 	}
@@ -853,8 +857,11 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			// store refuses a replayed id whose content changed.
 			clientID: connectionID(w),
 			r:        r,
-			raiser:   s.notifyRaiser,
-			broker:   s.broker,
+			openRows: func(sid session.ID, attempt string) {
+				s.blockStream.openAttemptFor(s, sid, attempt)
+			},
+			raiser: s.notifyRaiser,
+			broker: s.broker,
 		}
 	}
 	return []methodSpec{
@@ -882,16 +889,10 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			h := ledgerReadHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGet(ctx, req) }
 		}),
-		// The capture path (nocx-2f0f). It takes no connection either, for
-		// the same reason: a body belongs to an ENTRY, and an entry outlives
-		// the session it ran in.
+		// Artifact bodies are fetched separately so recall never hauls bytes.
 		regResponder(contentSub, "ledger.artifact", params(validateLedgerArtifactRaw), func(r Responder) handlerFunc {
 			h := ledgerReadHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleArtifact(ctx, req) }
-		}),
-		regResponder(contentSub, "ledger.capture", params(validateLedgerCaptureRaw), func(r Responder) handlerFunc {
-			h := ledgerCaptureHandlers{op: op, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 	}
 }

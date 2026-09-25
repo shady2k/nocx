@@ -10,7 +10,30 @@
  */
 
 /**
- * One full screen of cells, as the session runtime already holds it — the shape the client will paint instead of parsing terminal bytes (nocx-zg3k3.2.1). Every name and semantic here is taken from the Go types the frame is read from: Snapshot (internal/sessionruntime/contract.go) for revision, rows, cursor and committed geometry, and emulator.Row, Cell, Style, Color, Cursor, Width (internal/emulator/emulator.go) for the cells themselves. Nothing sends this yet; the task that makes the runtime send a frame inherits this declaration rather than coining a second one. A cell-shaped wire format already exists — contracts/helper/identities.schema.json $defs screenCell and screenFrame, the FROZEN coordinator-to-helper ABI — and it was considered and does not fit: it carries no style and no has-text fact, so a cell painted with a background and no text loses both; its rows carry no wrap/continuation, which is what lets a scrollback renderer join the physical lines of one logical line; and its width vocabulary is 0-2, while emulator.Width is a five-value enumeration whose spacer head the helper ABI has no spelling for. Extending a frozen ABI for a renderer need was the wrong direction, so this schema declares the renderer's own vocabulary once, from the same Go source the helper's was derived from.
+ * One position whose codepoint count or column width departs from the default (1, 1): [position, codepoints, width].
+ *
+ * @minItems 3
+ * @maxItems 3
+ */
+export type Mark = [number, number, 1 | 2 | 4]
+/**
+ * One maximal stretch of adjacent columns that share one style: [style, length], the style first and the number of columns it covers second. Length is at least 1 — a run that covered nothing would be sender noise, and two adjacent runs are never the same style.
+ *
+ * @minItems 2
+ * @maxItems 2
+ */
+export type Run = [Style, number]
+/**
+ * The complete visual style of one run (emulator.Style), shared across every column the run covers rather than repeated per cell. Either the bare integer 0 — every field is the zero value, the terminal's own default colours, no attributes, no underline, by far the common case for plain output — or the 5-element tuple [foreground, background, underlineColor, attributes, underline] when anything departs from that.
+ */
+export type Style = 0 | [Color, Color, Color, number, 0 | 1 | 2 | 3 | 4 | 5]
+/**
+ * One style colour, packed into a single integer (emulator.Color) rather than a named-field object — the distinction between a palette index, an exact RGB value and the terminal's own default is load-bearing (a palette index repaints when the theme changes, RGB does not), but at a run per style change spelling it as three ranges of one integer costs nothing a receiver cannot undo cheaply. 0 is the terminal's own default colour for the role (emulator.ColorDefault, the zero value an unstyled style holds). 1 through 256 is a palette index plus one (emulator.ColorPalette, the index is the value minus one) — shifted up because 0 is taken by default. 257 and above is an exact colour (emulator.ColorRGB): subtract 257 and read the low 24 bits as r<<16 | g<<8 | b, one byte per channel.
+ */
+export type Color = number
+
+/**
+ * One full screen of cells, as the session runtime already holds it — the shape the client will paint instead of parsing terminal bytes (nocx-zg3k3.2.1). Every name and semantic here is taken from the Go types the frame is read from: Snapshot (internal/sessionruntime/contract.go) for revision, rows, cursor and committed geometry, and emulator.Row, Cell, Style, Color, Cursor, Width (internal/emulator/emulator.go) for the cells themselves. A cell-shaped wire format already exists — contracts/helper/identities.schema.json $defs screenCell and screenFrame, the FROZEN coordinator-to-helper ABI — and it was considered and does not fit: it carries no style and no has-text fact, so a cell painted with a background and no text loses both; its rows carry no wrap/continuation, which is what lets a scrollback renderer join the physical lines of one logical line; and its width vocabulary is 0-2, while emulator.Width is a five-value enumeration whose spacer head the helper ABI has no spelling for. Extending a frozen ABI for a renderer need was the wrong direction, so this schema declares the renderer's own vocabulary once, from the same Go source the helper's was derived from. SHAPE (nocx-zg3k3.2.12, superseding nocx-zg3k3.2.6's per-column tuple): a row rides as its TEXT — the clusters in column order, the spacer after a wide cluster not repeated — a sparse list of the positions whose codepoint count or column footprint departs from the default (one codepoint, one column), and style runs measured in columns; a trailing run of ordinary default blank cells is not sent, implied by the row's own (shorter) length against the frame's geometry. Measured 2026-09-22 against a realistic dense screen (prompt, coloured output, truecolour banner, CJK wide clusters, ZWJ emoji, cell-fit-boxed glyph, inverse status bar) under the PRIOR per-column-tuple shape: with a per-cell style object a frame was 521,989 B at 80x24, 1,303,538 B at 120x40 and 2,713,770 B at 200x50 — over the 256 KiB lifecycle bound (internal/lifecycle/protocol.go MaxFrameBytes) at EVERY geometry and over the 1 MiB helper bound (internal/helper/proto/frame.go MaxFrameBytes) at 120x40 and 200x50; cells as named-field objects with per-row style runs still measured 444,433 B at 200x50; a [grapheme, width, hasText] positional tuple per column brought that to 35,967 / 81,124 / 152,937 B, comfortably under both bounds — but an 18-character row on that shape still stored at 542 B once trimmed, ~30x its own text, because a row still carried one entry per COLUMN (blanks included) and a style rode as a five-field named object (220 B for the all-default style alone) even where nothing needed one. This record's shape removes both costs: an 18-character plain row (no styling, no wide or combining cluster) now stores at the size internal/content/block_rows_encode_test.go measures, under 3x its own text, and internal/sessionruntime/frame_test.go's TestFrameSizeAtRealGeometry re-measures the three geometries under this shape. A style now rides as the bare integer 0 (the zero value, by far the common case) or a 5-element tuple [foreground, background, underlineColor, attributes, underline] with each colour packed into one integer (0 default, 1-256 a palette index plus one, 257+ a packed RGB triple); a row whose runs would be exactly one default-style run covering its whole explicit width omits `runs` entirely, and a row with no cluster departing from (one codepoint, one column) omits `marks` entirely — a receiver treats either absence as its stated default. This schema declares the draft-07 dialect because positional tuples are how draft-07 spells a fixed-shape array (items as a schema list, additionalItems: false) — the same declaration agent.dump.schema.json already carries — and the type generator (json-schema-to-typescript) emits tuple types only for that spelling.
  */
 export interface SessionFrame {
   /**
@@ -18,7 +41,7 @@ export interface SessionFrame {
    */
   revision: number
   /**
-   * The committed geometry (sessionruntime.GeometryCommit, emulator.Geometry): a size the PTY and the emulator BOTH took, and the geometry every cell of this frame was read at. The pixel size travels because it is not decoration — the emulator answers a program's own size queries from it, so a frame without it forces the receiver to invent a cell size. A rows array whose length is not this rows count, or a row whose cells are not this cols long, is malformed at the source.
+   * The committed geometry (sessionruntime.GeometryCommit, emulator.Geometry): a size the PTY and the emulator BOTH took, and the geometry every cell of this frame was read at. The pixel size travels because it is not decoration — the emulator answers a program's own size queries from it, so a frame without it forces the receiver to invent a cell size. A rows array whose length is not this rows count is malformed at the source; a row's OWN explicit content may be shorter than cols (a trailing run of default blanks is implied, not sent) but never longer.
    */
   geometry: {
     /**
@@ -30,11 +53,11 @@ export interface SessionFrame {
      */
     rows: number
     /**
-     * One cell's width in pixels.
+     * One cell's width in DEVICE pixels — the integer cell the client's renderer rasterises at, and the unit in which the metric is exact (css = device / dpr, the derivation xterm itself uses). A CSS-pixel consumer divides by its display's ratio; a program asking its terminal's size is answered in physical pixels, as native terminals report on high-density screens (review round 1, nocx-zg3k3.2.9).
      */
     cellWidthPx: number
     /**
-     * One cell's height in pixels.
+     * One cell's height in DEVICE pixels, same unit rule as cellWidthPx.
      */
     cellHeightPx: number
     /**
@@ -60,79 +83,32 @@ export interface SessionFrame {
     visible: boolean
   }
   /**
-   * Every row of the active screen (Snapshot.Rows), in order, as the emulator holds it: a RECTANGLE and not trimmed text — the array is geometry.rows long and every row's cells is geometry.cols long, so a receiver can index a column without knowing where a program stopped writing.
+   * Every row of the active screen (Snapshot.Rows), in order, as the emulator holds it: the array is geometry.rows long, and each row's OWN explicit content is at most geometry.cols columns — a receiver pads a shorter row with the default style to reach cols, since a trailing run of default blanks is implied rather than sent.
    */
   rows: Row[]
 }
 /**
- * One physical line of the screen (emulator.Row).
+ * One physical line of the screen (emulator.Row), in the compact text+marks+runs shape (nocx-zg3k3.2.12). A POSITION is one surviving column-owning entry once the spacer that follows a wide cluster is folded away — text and marks are indexed by position. A COLUMN is the grid's own unit — runs are measured in columns, and a wide cluster is one position but two columns. `text`, `marks` and `runs` together decode against nothing outside themselves (self-describing), which is what lets a stored row (scrollback) survive without the frame it arrived in; the ONLY external fact a receiver needs is geometry.cols, to pad the implied trailing default blanks a shorter row does not carry.
  */
 export interface Row {
   /**
-   * One entry per column, including the spacers of wide clusters and the blank cells of trailing space (emulator.Row.Cells): geometry.cols long, every row, every frame. A receiver that wants text skips the spacer cells rather than receiving a shorter array.
+   * The row's clusters, in column order, concatenated: one grapheme per surviving position (a wide cluster's spacer is not repeated, and a position with no text — Cell.HasText false — contributes nothing, an empty string). A receiver splits this back into per-position graphemes using `marks`' codepoint counts (default one codepoint per position) and Unicode CODEPOINTS as the unit — Go's []rune and JavaScript's Array.from agree on that unit without either re-deriving cluster boundaries the runtime already decided (ADR-0065). A trailing run of ordinary default blank positions is not represented here at all: the row's explicit position count (derived from this string's length and `marks`) may be less than geometry.cols, and the remainder is implied.
    */
-  cells: Cell[]
+  text: string
   /**
-   * The row is not the last physical line of its logical line: a program's output wrapped here. Together with continuation this is what lets a receiver join the physical lines of one logical line without losing a hard newline.
+   * The sparse positions whose codepoint count or column footprint is not the default (one codepoint, one column): [position, codepoints, width] triples, position 0-based into the surviving-position sequence `text` encodes. codepoints is the position's grapheme length in Unicode codepoints — 0 for a cell with no text (Cell.HasText false; its grapheme is the empty string), 2 or more for a cluster built of several codepoints (a combining mark, a ZWJ sequence). width is the cell's column footprint (Cell.Width, emulator.Width): 2 wide (the position occupies this column and the next, whose own spacer contributes no position of its own) or 4 spacerHead (the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered) — 1 narrow is the default and never appears here, and 3 spacerTail never appears here because a spacer is not a position at all in this vocabulary, only the extra column its preceding wide cluster's mark declares. Absent (or a position it does not name) means (1, 1): one codepoint, one column. A malformed row (a mark whose codepoints exceeds what `text` has left, or two marks for the same position) is malformed at the source.
    */
-  wrap: boolean
+  marks?: Mark[]
   /**
-   * The row continues the logical line of the row above it. Wrap and continuation are not each other's negation: the last row of a wrapped sequence has wrap false and continuation true, and the row before it has wrap true and continuation false.
+   * The styles of this row as [style, length] tuples, length measured in COLUMNS (a wide cluster's synthesised spacer column counts, and carries the SAME style its cluster's run covers it with — the two are read independently at the source and a run is who says whether they in fact agree). Each run covers that many consecutive columns starting where the previous run ended, and the lengths sum to the row's own explicit column count (positions, plus one more for every wide-marked position) — never geometry.cols, which a shorter row does not reach. Maximal by construction: two adjacent runs never carry the same style, or the sender would have merged them. Absent means the implicit single run: the row's whole explicit width, in the default style (the bare integer 0) — the shortcut a fully unstyled row, or the unstyled remainder of an otherwise-trimmed one, takes. A malformed row (present runs whose lengths do not sum to the explicit column count) is malformed at the source.
    */
-  continuation: boolean
-}
-/**
- * One grid position, copied out of the emulator (emulator.Cell).
- */
-export interface Cell {
+  runs?: Run[]
   /**
-   * The whole cluster — the base codepoint followed by every combining codepoint the terminal assembled into it — and not one rune (Cell.Grapheme). Empty for a blank cell or a continuation column. A receiver that wants a character takes this; one that wants a position takes the column index, because width says how many columns this cell occupies and the next cell may be its spacer.
+   * The row is not the last physical line of its logical line: a program's output wrapped here. Together with continuation this is what lets a receiver join the physical lines of one logical line without losing a hard newline. Absent means false.
    */
-  grapheme: string
+  wrap?: boolean
   /**
-   * The cell's column footprint (Cell.Width, emulator.Width) — the thing a renderer must have right and the thing a font measurement must never be asked about. The enumeration mirrors the Go constants exactly: 0 unknown, the zero value of a cell that was never read and one a committed frame does not carry; 1 narrow, one column; 2 wide, two columns, the cell after it the continuation; 3 spacerTail, the second column of a wide cluster, not rendered because the cluster to its left already covered it; 4 spacerHead, the column a wide cluster would have needed at the end of a soft-wrapped line, carries nothing, is not rendered.
+   * The row continues the logical line of the row above it. Wrap and continuation are not each other's negation: the last row of a wrapped sequence has wrap false and continuation true, and the row before it has wrap true and continuation false. Absent means false.
    */
-  width: 0 | 1 | 2 | 3 | 4
-  /**
-   * Separate from grapheme being empty because the two are different facts (Cell.HasText): a cell can carry a background colour and no text, and a renderer must paint the first and not the second.
-   */
-  hasText: boolean
-  style: Style
-}
-/**
- * The complete visual style of one cell (emulator.Style).
- */
-export interface Style {
-  foreground: Color
-  background: Color
-  underlineColor: Color
-  /**
-   * The on/off text decorations as one bitset (emulator.Attributes, uint16) — a bitset rather than eight booleans because that is how they are compared, stored and sent, and because the set is closed: a terminal has these eight and no ninth. Bit 0 bold, 1 italic, 2 faint, 3 blink, 4 inverse, 5 invisible, 6 strikethrough, 7 overline.
-   */
-  attributes: number
-  /**
-   * The shape of the underline decoration, which SGR 4:0-4:5 can choose and which is not a boolean (emulator.Underline). 0 none, 1 single, 2 double, 3 curly, 4 dotted, 5 dashed.
-   */
-  underline: 0 | 1 | 2 | 3 | 4 | 5
-}
-/**
- * One style colour, in whichever of the three shapes it is in (emulator.Color). The distinction is load-bearing rather than decorative: a palette index means 'this theme's colour N' and repaints when the theme changes, an RGB value means 'exactly this' and does not, and a default colour means the theme's own choice for the role. The fields not named by kind are meaningless and ride the wire zeroed, exactly as the Go struct holds them; a receiver reads a colour through its kind.
- */
-export interface Color {
-  /**
-   * Which of the three shapes this colour is in (emulator.ColorKind). 0 default, the terminal's own colour for the role and the zero value an unstyled cell holds; 1 palette, an index into the terminal's 256-colour palette; 2 rgb, an exact colour.
-   */
-  kind: 0 | 1 | 2
-  /**
-   * The palette index, meaningful when kind is 1.
-   */
-  palette: number
-  /**
-   * An exact colour, one byte per channel (emulator.RGB), meaningful when kind is 2.
-   */
-  rgb: {
-    r: number
-    g: number
-    b: number
-  }
+  continuation?: boolean
 }

@@ -50,6 +50,14 @@ export interface GridCell<A> {
 export interface RunMetric {
   readonly cellWidth: number
   readonly defaultSpacing: number
+  /** Rule 4's measured vertical padding — half the difference between the
+   *  row's pitch and the font's content box, published beside the cell
+   *  metric (ADR-0009:136-144). The painter puts it on runs carrying a
+   *  background, so the background covers the cell's rectangle and adjacent
+   *  rows meet. Optional until a publisher measures it: absent, a
+   *  background covers the content box, exactly as the frozen blocks ship
+   *  today. */
+  readonly padY?: number
   advanceOf(chars: string, cols: number, face: FitFace): number | null
   boxOf?(chars: string, cols: number, face: FitFace): CellBox | null
 }

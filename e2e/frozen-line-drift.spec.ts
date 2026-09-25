@@ -83,16 +83,31 @@ test('drift is zero on the row the grid was calibrated on', async ({ page }) => 
 
 test('drift and the offending glyphs are reported on a row with symbols', async ({ page }) => {
   await page.goto('/')
-  // Scoped to `.cell-drift-probe .term-line` — the instrument's own
-  // measurement host (cell-drift.ts), never the live row and never
-  // cell-fit's separate `.cell-fit-probe`. One whole cell of extra
-  // tracking per character is a miss no font can accidentally cancel: it
-  // does not depend on what ⬢, ⟳ or 🗑 measure natively on this host, only
-  // on whether the probe's own getBoundingClientRect read comes back
-  // reflecting it.
+  // Scoped to `.cell-drift-probe` — the instrument's own measurement host
+  // (cell-drift.ts), never the live row and never cell-fit's separate
+  // `.cell-fit-probe`. One whole cell of extra tracking per character is a
+  // miss no font can accidentally cancel: it does not depend on what ⬢, ⟳
+  // or 🗑 measure natively on this host, only on whether the probe's own
+  // getBoundingClientRect read comes back reflecting it.
+  //
+  // TWO rules, not one, since cell-fit's box mechanism (nocx-ec18) started
+  // actually firing for a stored block (nocx-2v80t.3.18 rewired `warm` into
+  // the paint path it had gone dead in): a glyph this far off its cell now
+  // lands in a `.term-cell` on this container's real metric too, and
+  // `.term-cell` declares its OWN `letter-spacing: 0` (style.css) — an
+  // element's own declaration for an inherited property always wins over
+  // an ancestor's, `!important` on the ancestor notwithstanding. So the
+  // first rule alone stopped moving a boxed glyph the day boxing started
+  // working; the second targets the box's WIDTH instead, which cell-fit
+  // draws from this same custom property and which letter-spacing cannot
+  // touch either way. Together they force the row off its columns whether
+  // a character lands as an ordinary run or as a box — same amount, same
+  // property the row's own arithmetic reads.
   await page.addStyleTag({
-    content:
-      '.cell-drift-probe .term-line { letter-spacing: calc(var(--term-cell-delta, 0px) + var(--term-cell-width, 1px)) !important; }',
+    content: `
+      .cell-drift-probe .term-line { letter-spacing: calc(var(--term-cell-delta, 0px) + var(--term-cell-width, 1px)) !important; }
+      .cell-drift-probe .term-cell { width: calc(var(--term-cell-width, 1ch) + var(--term-cell-width, 1px)) !important; }
+    `,
   })
   await promptReady(page)
   const marker = `DS-${Date.now().toString(36)}`

@@ -70,7 +70,7 @@ func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() str
 	// typed is nil: it is the SSH child's delivery seam, and these tests
 	// compose the sudo/su child, which never reaches for it.
 	builder := newChildGrantBuilder(logger,
-		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, endpoint, localHelper)
+		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, nil, endpoint, localHelper)
 	pub = lifecyclepub.New(k, lifecyclepub.WithGrantBuilder(builder))
 
 	parentLn, err := lifecyclechannel.NewListener(logger, pub)

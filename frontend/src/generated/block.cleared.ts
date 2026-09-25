@@ -1,0 +1,20 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/block.cleared.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Params of the block.cleared server-to-client notification (nocx-2v80t.3.17): the backend saw the program erase the display AND its saved lines — ED3, the sequence `clear` emits after homing the cursor and erasing the display, never plain ED2 alone (a full-screen program redrawing hides nothing). The record is never deleted (nocx-zg3k3.10.3's owner decision): the coordinator recorded a cursor a later read applies, and this notification is the LIVE half of that fact — every block the attached client currently shows is removed from the DOM, except the one named by keepEntryId. A reload or restore reads the same cursor through ledger.query and shows nothing before it either, so the two halves — the live removal here and the read-time exclusion there — never disagree about what is visible.
+ */
+export interface BlockCleared {
+  /**
+   * The block whose interval the erase happened inside — almost always the `clear` command's own block, still running and never hidden by its own report of the clear. Null when no interval was open at the sighting, in which case every block the client currently shows is removed.
+   */
+  keepEntryId: string | null
+}

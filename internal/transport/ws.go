@@ -625,6 +625,10 @@ type WSServer struct {
 	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+	// blockRowsStore is the narrow rows-store seam. Production normally derives
+	// it from contentDB; tests can inject failure behavior without replacing
+	// the rest of ContentDB.
+	blockRowsStore blockOutputStore
 	// skillChecks is where skills.audit files what a model concluded, once
 	// it has answered (ws_skill_audit.go). When nil, an audit still returns
 	// its report and says stored:"no" — a store failure or a missing store
@@ -813,6 +817,23 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// historySources preserves the submitting target and capture scope for an
+	// app attempt when history policy suppresses its row before completion.
+	historySources map[string]historyAttemptScope
+	// pendingHistoryReceipts stashes a completed attempt's history.recorded
+	// data computed by publishClosedAttemptHistory (the transition report
+	// path, which runs BEFORE the lane's own completing fact — see
+	// lifecyclepub.Publisher.Ingest) until PublishLifecycle sends that fact
+	// and flushes it right after — never before (nocx-2v80t.3.22). Keyed by
+	// attempt id, which is never reused.
+	pendingHistoryReceipts map[lifecycle.AttemptID]historyRecordedData
+	// nextHistoryGeneration supplies a non-zero scope generation for commands
+	// whose lifecycle started from the native shell rather than a renderer
+	// submit.
+	nextHistoryGeneration atomic.Uint64
+	// (nocx-2v80t.3.7, ws_block_rows.go). Constructed always; inert until a
+	// rows source is attached.
+	blockStream *blockStream
 	// heldMu guards heldStops, and the lock ORDER is heldMu → lifecycleMu →
 	// the kernel's own lock, because the one read that both arms a hold and
 	// answers what it is for (sessionProtectedForeground.StopTarget) runs
@@ -1655,6 +1676,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		filesBindings:              make(map[string]*filesBinding),
 		filesBySession:             make(map[session.ID]map[string]struct{}),
 		lanes:                      make(map[session.ID]*sessionLane),
+		historySources:             make(map[string]historyAttemptScope),
 		filesPollInterval:          defaultFilesPollInterval,
 		filesRefreshStateThreshold: defaultFilesRefreshStateThreshold,
 		laneCapacity:               DefaultControlLaneCapacity,
@@ -1667,6 +1689,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		gitBindings:                make(map[string]*gitBinding),
 		gitBySession:               make(map[session.ID]map[string]struct{}),
 		paneObserverSweep:          DefaultPaneObserverSweep,
+		blockStream:                &blockStream{},
 	}
 	// The mint's emitter is this server: a drop is told to the renderer
 	// over this socket. Constructed here so there is exactly one store per
@@ -2409,40 +2432,6 @@ func (c *connState) get(id session.ID) (session.Session, bool) {
 // files.* call (D15). One line of forwarding; the authorisation answer
 // still comes from the one place that already owns it.
 func (c *connState) Owns(id session.ID) bool { return c.has(id) }
-
-// sessionForPane returns the connection's session that is the pipe of pane.
-//
-// It exists because history.record names a PANE and no session (the pane id
-// is that method's one deliberate renderer-minted identity, ws_history_record
-// .go), while a notification's attribution may only come from the session the
-// backend holds — never from the renderer's claim about where it is (AD-7).
-// Session.PaneID is what makes the walk possible and immutable: "a session is
-// the pipe of one pane for its whole life" (internal/session/session.go).
-//
-// AMBIGUITY IS A NO, never a guess. An empty pane matches nothing — a session
-// attached to no recorded pane is a legitimate state and it is not "the pane
-// with no id" — and two sessions claiming one pane is a state this walk must
-// not resolve by picking, for the same reason sessionIDsOf falls back rather
-// than guessing. Both answer false, and the caller's feature is absent rather
-// than wrong.
-func (c *connState) sessionForPane(pane string) (session.Session, bool) {
-	if pane == "" {
-		return nil, false
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var found session.Session
-	for _, s := range c.sessions {
-		if s.PaneID() != pane {
-			continue
-		}
-		if found != nil {
-			return nil, false
-		}
-		found = s
-	}
-	return found, found != nil
-}
 
 // --- JSON-RPC types -------------------------------------------------------
 
@@ -3875,6 +3864,11 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// (ws_sessionpolicy.go).
 	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
+	// A receipt stashed for one of this session's attempts, waiting on a fact
+	// that unregistering the lane above just made undeliverable, goes with it
+	// (nocx-2v80t.3.23) — the same rule dropStopStatesFor and dropHeldStopsFor
+	// apply below.
+	s.dropPendingHistoryReceiptsFor(sid)
 	// The Stop records go with the session, like the holds they describe.
 	s.dropStopStatesFor(sid)
 	// A held Stop belongs to an attempt, and an attempt belongs to a session:

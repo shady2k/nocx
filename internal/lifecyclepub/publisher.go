@@ -657,24 +657,6 @@ func (p *Publisher) closeQuestion(asked lifecycle.Outbound, rid lifecycle.Reques
 	}
 }
 
-// projection, ordering the replies: mutation → publish → deliver. Published
-// on failure as well as success: the one mutation a kernel makes on a
-// rejected frame (the domain is closed and the lane falls to native while
-// the frame is being quarantined) is a state change the renderer must see.
-// Every other rejection leaves the projection unchanged and the change-dedupe
-// suppresses the emission.
-//
-// ADR-0062 retired the wait this comment used to describe: an accept-
-// producing hello used to open an establishment episode and hold the accept
-// until a renderer acknowledgement flushed it, so a pane the backend itself
-// opened — which subscribes nobody — could never establish. The accept now
-// goes out with refresh_request in the same delivery pass below, on the
-// backend's own authority, as soon as the kernel has minted it. Nothing
-// about the ORDER changed: publish still precedes delivery, and
-// refresh_request is still never deferred behind it — it restores authority
-// and visible-prompt behaviour, grants no suppression authority, and
-// delaying it behind frontend publication can only prolong a
-// desynchronization.
 func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
 	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil || env.Event.Start.AttemptID != nil {
 		return false
@@ -722,9 +704,25 @@ func (p *Publisher) openAttemptsIn(snap lifecycle.LaneSnapshot) map[lifecycle.At
 
 // transitionsBelow reports to the emitter every transition of the attempts in
 // `before` that the published Fact cannot carry, and it is the ONLY place
-// either one is reported from, whatever mutation caused it. It runs after that
-// mutation succeeded, outside every lock, and reads nothing further when the
-// emitter has not asked for these transitions.
+// either one is reported from, whatever mutation caused it. It runs after
+// that mutation succeeded, outside every lock, and reads nothing further when
+// the emitter has not asked for these transitions.
+//
+// IT RUNS BEFORE THE CALLER'S OWN publishLane/publishLaneProjection, and that
+// is load-bearing: PublishAttemptClosed is the ONLY path that raises the
+// attempt's completion notification (block-finished; history.recorded is
+// PART of that report too, historically), so a lane fact that beats it to
+// closing the ledger row leaves nothing for it to report — the notification
+// is silently never raised at all, not merely late (measured: swapping this
+// order once made TestLifecycleCompletion_RaisesAttestedBlockFinished
+// observe zero events instead of one). What DOES need to wait for the lane's
+// own fact is only the WIRE DELIVERY of history.recorded, which the emitter
+// (PublishAttemptClosed → publishClosedAttemptHistory, ws_lifecycle.go)
+// defers by stashing it for PublishLifecycle to flush right after it sends
+// the fact naming the same attempt's completion (nocx-2v80t.3.22) — a
+// renderer that read the receipt before that fact still held the attempt
+// open, and a receipt naming an open attempt attaches to nothing and is
+// dropped for good.
 func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
 	if len(before) == 0 {
 		return
@@ -787,6 +785,12 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// beat the watch it was promised. That is the byte-zero guarantee
 			// the whole grid rests on.
 			p.answerAgentEnrolment(env, out)
+		case lifecycle.KindAccept:
+			// The shell must receive ACCEPT before the lifecycle.changed
+			// prompt_ready publication. Otherwise a renderer can submit
+			// against the prompt_ready fact while the domain still waits
+			// for the shell's authenticated admission.
+			p.deliverAccept(out)
 		}
 	}
 	p.transitionsBelow(before)
@@ -796,12 +800,8 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 	p.publishLane(env.Lane)
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
-		case lifecycle.KindDomainGrant,
-			lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
+		case lifecycle.KindDomainGrant, lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn, lifecycle.KindAccept:
 			continue // already delivered above, with their answers
-		case lifecycle.KindAccept:
-			p.deliverAccept(out)
-			continue
 		}
 		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 	}

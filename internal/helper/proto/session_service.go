@@ -106,6 +106,17 @@ const (
 	// unknown_op, which is the sentence a coordinator already reads as "this
 	// machine's helper is older than this app".
 	OpLifecycleComplete = "lifecycle-complete"
+	// OpLifecycleEntered carries one authenticated environment entry DOWN to
+	// the session that owns the pane (nocx-2v80t.3.21): the coordinator's
+	// kernel accepted a confirmed environment change — a nested domain
+	// taking the lane — while this session's local command was still open,
+	// and the owner's decision is that this ends its interval exactly as its
+	// own end marker would. There is no fence for this boundary — the shell
+	// that would have printed one is no longer the one holding the terminal
+	// — so this op carries none: the helper hands it to the session
+	// runtime's SealEnvironmentEntry, which reads the screen at the entry
+	// itself, bounded the same way as any other closing screen.
+	OpLifecycleEntered = "lifecycle-entered"
 )
 
 // Incarnation is a session runtime's identity on the wire: the session the
@@ -162,6 +173,32 @@ type LifecycleCompleteParams struct {
 // error. It exists so the op has a result type at all, the way every other
 // op does.
 type LifecycleCompleteResult struct{}
+
+// LifecycleEnteredParams carries one authenticated environment entry down to
+// the session that owns the pane. It names no fence: there is none for this
+// boundary (OpLifecycleEntered's own doc), so the runtime seals the interval
+// in flight against its own screen rather than a rendezvous nothing sighted.
+type LifecycleEnteredParams struct {
+	// Session addresses the helper session, generation-qualified like every
+	// other op on this service.
+	Session HostSessionID `json:"session"`
+	// Incarnation is the runtime incarnation the sender believes is live, the
+	// same guard LifecycleCompleteParams carries and for the same reason: a
+	// stale sender is refused by the runtime rather than applied late.
+	Incarnation Incarnation `json:"incarnation"`
+	// Entry is the entry's identity: the child domain whose establishment
+	// took the lane (the kernel's DomainID). It is what makes the op
+	// idempotent (nocx-2v80t.3.28): the coordinator retries a delivery whose
+	// attempt timed out, that attempt may already have landed, and the
+	// runtime seals one interval per entry rather than one per delivery.
+	// Required and never empty — an entry with no identity could not be told
+	// from its own retry, so the helper refuses it as malformed.
+	Entry string `json:"entry"`
+}
+
+// LifecycleEnteredResult is deliberately empty, like LifecycleCompleteResult:
+// the answer to "did the entry land" is the absence of an error.
+type LifecycleEnteredResult struct{}
 
 // AdoptLifecycleParams names the session whose lifecycle identity the caller
 // intends to take over.
@@ -294,9 +331,17 @@ type SpawnParams struct {
 	// caller can smuggle argv through it, and a duplicate key is impossible
 	// rather than last-wins.
 	Env map[string]string `json:"env,omitempty"`
-	// Cols and Rows are the initial window size.
-	Cols uint16 `json:"cols"`
-	Rows uint16 `json:"rows"`
+	// Cols and Rows are the initial window size. XPixel and YPixel are the
+	// client's cell metrics in TIOCSWINSZ's own units — the WHOLE text area
+	// in DEVICE pixels (cols × the renderer's integer device cell, rows ×
+	// its height; review round 1) — and zero means the client has not
+	// measured itself yet. The helper decodes them into the
+	// per-cell metric the runtime commits, at exactly one boundary
+	// (internal/helper/session.cellGeometry).
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 	// WindowBytes is the bound on this session's output window (D8). The
 	// coordinator decides and the helper applies, clamped to the helper's own
 	// floor, ceiling and aggregate budget — and the session keeps the bound it
@@ -500,9 +545,16 @@ type SSHSpawnParams struct {
 	// `cwd` key for a remote session for the same reason: this helper resolved
 	// no directory, so it reports none.
 	Cwd string `json:"cwd"`
-	// Cols and Rows are the size the channel's pty is requested at.
-	Cols uint16 `json:"cols"`
-	Rows uint16 `json:"rows"`
+	// Cols and Rows are the size the channel's pty is requested at. XPixel
+	// and YPixel are the client's cell metrics in TIOCSWINSZ's whole-area
+	// DEVICE pixels (review round 1), and zero means not measured. They reach the helper's runtime
+	// geometry — what the published frames carry — and not the far pty,
+	// whose window-change carries no pixel fields at all (x/crypto/ssh has
+	// none to send).
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 	// WindowBytes is the bound on this session's output window, clamped by the
 	// helper exactly as SpawnParams' is. Zero means the helper's default.
 	WindowBytes int64 `json:"windowBytes"`
@@ -1074,11 +1126,16 @@ type SessionLiveness struct {
 // decoder has to special-case.
 type AckResult struct{}
 
-// ResizeParams sets one session's window size.
+// ResizeParams sets one session's window size. XPixel and YPixel carry the
+// client's cell metrics in TIOCSWINSZ's whole-text-area DEVICE pixels, and
+// zero means not measured — the session keeps running with no cell metric
+// rather than inventing one.
 type ResizeParams struct {
 	Session HostSessionID `json:"session"`
 	Cols    uint16        `json:"cols"`
 	Rows    uint16        `json:"rows"`
+	XPixel  uint16        `json:"xpixel"`
+	YPixel  uint16        `json:"ypixel"`
 }
 
 // ResizeResult is deliberately empty: the answer to "did the resize land" is

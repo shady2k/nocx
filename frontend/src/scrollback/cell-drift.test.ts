@@ -20,6 +20,7 @@ import {
   setEnabled,
   MAX_GLYPHS,
   measureFrozenBlock,
+  recordStoredBlock,
   type Measurers,
   STORAGE_KEY,
   ENABLED_KEY,
@@ -264,5 +265,73 @@ describe('measureFrozenBlock', () => {
     measureFrozenBlock(block('b ⬢'), [3], 8, counting)
     expect(probes).toBe(1)
     expect(report(loadState()).offenders[0].lines).toBe(2)
+  })
+
+  it('measures rows painted as .term-grid-row (nocx-zg3k3.2.4), not only .term-line', () => {
+    // The painter cutover draws a stored block's rows as .term-grid-row
+    // (paint-row.ts), never .term-line. If this selector regressed to only
+    // the retired class, the instrument would silently measure nothing —
+    // exactly the failure recordStoredBlock's own e2e spec caught.
+    const out = document.createElement('div')
+    out.className = 'cmd-output'
+    for (const l of ['aaaa', 'bbbb']) {
+      const row = document.createElement('span')
+      row.className = 'term-grid-row'
+      row.textContent = l
+      out.appendChild(row)
+    }
+    document.body.appendChild(out)
+    expect(measureFrozenBlock(out, [4, 4], 8, fixed(32, 8))).toBe(true)
+    expect(loadState().lines).toBe(2)
+  })
+})
+
+describe('recordStoredBlock', () => {
+  beforeEach(() => localStorage.clear())
+
+  function storedBlock(lines: string[], cellWidthPx: number): HTMLElement {
+    const wrapper = document.createElement('div')
+    wrapper.className = 'cmd-block'
+    const out = document.createElement('div')
+    out.className = 'cmd-output'
+    out.style.setProperty('--term-cell-width', `${cellWidthPx}px`)
+    for (const l of lines) {
+      const row = document.createElement('span')
+      row.className = 'term-grid-row'
+      row.textContent = l
+      out.appendChild(row)
+    }
+    wrapper.appendChild(out)
+    document.body.appendChild(wrapper)
+    return wrapper
+  }
+
+  it('records nothing while the instrument is off', () => {
+    const block = storedBlock(['aaaa', 'bbbb'], 8)
+    recordStoredBlock(block, 2, 4)
+    expect(loadState().lines).toBe(0)
+  })
+
+  it("measures a frozen block's painted rows, one shared column count for every line", () => {
+    setEnabled(true)
+    const block = storedBlock(['aaaa', 'bbbb'], 8)
+    recordStoredBlock(block, 2, 4)
+    expect(loadState().lines).toBe(2)
+  })
+
+  it('does nothing for a block with no painted .cmd-output', () => {
+    setEnabled(true)
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    document.body.appendChild(block)
+    recordStoredBlock(block, 2, 4)
+    expect(loadState().lines).toBe(0)
+  })
+
+  it('does nothing when the published cell width is missing or zero', () => {
+    setEnabled(true)
+    const block = storedBlock(['aaaa'], 0)
+    recordStoredBlock(block, 1, 4)
+    expect(loadState().lines).toBe(0)
   })
 })

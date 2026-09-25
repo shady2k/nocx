@@ -848,11 +848,10 @@ func TestNonConflictingOperationsOverlap(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- contentOp.Run(context.Background(), func(ctx context.Context, svc capability.ContentService) error {
+		done <- contentOp.Run(context.Background(), func(_ context.Context, _ capability.ContentService) error {
 			close(started)
 			<-release
-			_, err := svc.RecordCommand(ctx, content.CompletedCommand{})
-			return err
+			return nil
 		})
 	}()
 	<-started // the content operation holds the content gate now

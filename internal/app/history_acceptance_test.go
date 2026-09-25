@@ -23,20 +23,25 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
+	"github.com/shady2k/nocx/internal/transport"
 
 	"github.com/gorilla/websocket"
 )
 
 func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
-	storagetest.Isolate(t)
+	src := realHelperArtifacts(t)
+	home := storagetest.IsolateWithHome(t)
+	binary := filepath.Join(helperRoot(home, src.hash()), "nocx-helper")
+	t.Cleanup(func() { endTheDaemon(t, binary) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	a, err := newTestApp(t)
+	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -66,29 +71,17 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 		t.Fatalf("content.db not created in data dir: %v", statErr)
 	}
 
-	// Run a command: the frontend's exact call over the real socket.
-	conn := dialAppWS(t, a)
-	if resp := callAppWS(t, conn, "history.record", map[string]any{
-		"command":   "echo survived",
-		"cwd":       "/srv",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": int64(1_750_000_000_000),
-		"endedAt":   int64(1_750_000_000_100),
-		"trusted":   true,
-		"paneId":    "pane-acceptance",
-	}, 1); resp.Error != nil {
-		t.Fatalf("history.record: %+v", resp.Error)
-	}
-	_ = conn.Close()
+	// Run a command through the authenticated lifecycle path. The receipt is
+	// server-owned and arrives only after the shell completion closes the row.
+	lifecycle := openLifecycleAppSession(t, a)
+	_ = lifecycle.record(t, "echo survived", "/srv", 2)
+	_ = lifecycle.conn.Close()
 
 	// Restart: shut the first composition root down and build a second one
 	// over the same directories — the process equivalent of quitting and
 	// relaunching the app.
 	a.Shutdown(ctx)
-	a2, err := newTestApp(t)
+	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}
@@ -166,9 +159,12 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 	// earlier id after a later request was sent): read until the response
 	// for THIS id shows up.
 	for {
-		_, raw, err := conn.ReadMessage()
+		messageType, raw, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read %s response: %v", method, err)
+		}
+		if messageType != websocket.TextMessage {
+			continue
 		}
 		var resp wsRPCResult
 		if err := json.Unmarshal(raw, &resp); err != nil {
@@ -180,6 +176,231 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 	}
 }
 
+type lifecycleAppSession struct {
+	conn   *websocket.Conn
+	id     string
+	domain string
+}
+
+func openLifecycleAppSession(t *testing.T, a *App) lifecycleAppSession {
+	t.Helper()
+	conn := dialAppWS(t, a)
+	open := callAppWS(t, conn, "open", map[string]any{
+		"cols": 80,
+		"rows": 24,
+	}, 1)
+	if open.Error != nil {
+		t.Fatalf("open: %+v", open.Error)
+	}
+	var opened struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(open.Result, &opened); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	if opened.SessionID == "" {
+		t.Fatal("open returned no session id")
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("wait for lifecycle prompt: %v", err)
+		}
+		var notification struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(raw, &notification) != nil || notification.Method != "lifecycle.changed" {
+			continue
+		}
+		var fact struct {
+			Lifecycle string `json:"lifecycle"`
+			Domain    string `json:"domain"`
+		}
+		if json.Unmarshal(notification.Params, &fact) == nil &&
+			fact.Lifecycle == "prompt_ready" && fact.Domain != "" {
+			return lifecycleAppSession{conn: conn, id: opened.SessionID, domain: fact.Domain}
+		}
+	}
+}
+
+type appHistoryCapture struct {
+	ID            string `json:"id"`
+	SuggestedName string `json:"suggestedName"`
+}
+
+type appHistoryReceipt struct {
+	AttemptID   string `json:"attemptId"`
+	EntryID     string `json:"entryId"`
+	MaskedCount int    `json:"maskedCount"`
+	Redactions  []struct {
+		Kind   string `json:"kind"`
+		Prefix string `json:"prefix"`
+		Suffix string `json:"suffix"`
+	} `json:"redactions"`
+	Captures []appHistoryCapture `json:"captures"`
+}
+
+func (s lifecycleAppSession) record(t *testing.T, command, cwd string, id int) appHistoryReceipt {
+	t.Helper()
+	submit := callAppWS(t, s.conn, "lifecycle.submitAttempt", map[string]any{
+		"domain":  s.domain,
+		"command": command,
+		"cwd":     cwd,
+		"source":  "user",
+	}, id)
+	if submit.Error != nil {
+		t.Fatalf("lifecycle.submitAttempt: %+v", submit.Error)
+	}
+	var attempt struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(submit.Result, &attempt); err != nil {
+		t.Fatalf("decode lifecycle.submitAttempt: %v", err)
+	}
+	if attempt.ID == "" {
+		t.Fatal("lifecycle.submitAttempt returned no attempt id")
+	}
+	sidBytes, err := session.IDToBytes(session.ID(s.id))
+	if err != nil {
+		t.Fatalf("session id: %v", err)
+	}
+	frame := transport.Frame{
+		Version:   transport.FrameVersion,
+		MsgType:   transport.MsgTypeData,
+		SessionID: sidBytes,
+		Payload:   []byte(command + "\r"),
+	}
+	if err := s.conn.WriteMessage(websocket.BinaryMessage, frame.Encode()); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	_ = s.conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	receipt, ok := awaitRecordedReceipt(func() (string, json.RawMessage, bool) {
+		_, raw, err := s.conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("wait for history.recorded: %v", err)
+		}
+		var notification struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if json.Unmarshal(raw, &notification) != nil {
+			return "", nil, true // not a decodable notification; keep reading
+		}
+		return notification.Method, notification.Params, true
+	}, attempt.ID, s.domain)
+	if !ok {
+		t.Fatal("connection closed before the receipt and its prompt_ready arrived")
+	}
+	return receipt
+}
+
+// awaitRecordedReceipt scans notifications for the receipt of one attempt —
+// history.recorded matching attemptID — and the lifecycle.changed prompt_ready
+// that closes it, returning once both have been seen. `next` returns ("", …,
+// true) for a message that decoded to nothing this scan cares about, and
+// (_, _, false) when there is nothing left to read.
+//
+// A prompt_ready for the right domain is accepted ONLY once the receipt has
+// already been seen — never before. Before that, it may be a STALE fact: the
+// kernel primes an app-submitted attempt that has not yet started when the
+// shell's own PROMPT_COMMAND races its DEBUG trap for the very same command
+// (lifecycle/kernel.go's applyPromptReady, case 1, "the DEBUG trap's start is
+// a few milliseconds behind PROMPT_COMMAND's own prompt_ready"), and that
+// priming publishes prompt_ready for the domain while the submitted command
+// has not run at all. Requiring the receipt first is the identity check the
+// brief asked for: this attempt's own completion is known BEFORE any
+// prompt_ready may count as the one that follows it — the kernel's own event
+// order guarantees a genuine completion's history.recorded is published
+// (via Ingest's transitionsBelow) strictly before the later, separate
+// Ingest of the shell's real prompt_ready envelope, so the ordering the
+// guard relies on is not a race of its own (nocx-2v80t.3.14).
+func awaitRecordedReceipt(next func() (method string, params json.RawMessage, ok bool), attemptID, domain string) (appHistoryReceipt, bool) {
+	var receipt *appHistoryReceipt
+	promptReady := false
+	for {
+		method, raw, ok := next()
+		if !ok {
+			return appHistoryReceipt{}, false
+		}
+		switch method {
+		case "history.recorded":
+			var got appHistoryReceipt
+			if json.Unmarshal(raw, &got) == nil && got.AttemptID == attemptID {
+				receipt = &got
+			}
+		case "lifecycle.changed":
+			var fact struct {
+				Lifecycle string `json:"lifecycle"`
+				Domain    string `json:"domain"`
+			}
+			if json.Unmarshal(raw, &fact) == nil &&
+				fact.Lifecycle == "prompt_ready" && fact.Domain == domain && receipt != nil {
+				promptReady = true
+			}
+		}
+		if receipt != nil && promptReady {
+			return *receipt, true
+		}
+	}
+}
+
+// TestAwaitRecordedReceipt_IgnoresPromptReadyBeforeCompletion pins
+// nocx-2v80t.3.14 with the exact interleaving `make ci-full`'s `go test
+// -race` measured over the real socket (capture_acceptance_test.go:119): the
+// kernel primes the just-submitted, not-yet-started attempt when the shell's
+// own PROMPT_COMMAND races its DEBUG trap for the very same command
+// (lifecycle/kernel.go's applyPromptReady, case 1) and publishes a
+// prompt_ready fact for the domain BEFORE the command has run at all. A
+// helper that counts any domain-matching prompt_ready toward readiness
+// returns as soon as history.recorded arrives — four messages in, having
+// never seen the prompt_ready that actually follows the completion — and the
+// next lifecycle.submitAttempt then races a lane the kernel has not yet
+// settled: -32602 "no prompt is ready".
+//
+// This is deterministic (a canned sequence of five decoded notifications,
+// no socket, no timing): reverting the `receipt != nil` guard in
+// awaitRecordedReceipt makes it fail — it returns after the 4th message
+// (i == 4) instead of consuming the trailing, genuine prompt_ready (i == 5).
+func TestAwaitRecordedReceipt_IgnoresPromptReadyBeforeCompletion(t *testing.T) {
+	const attemptID = "att-1"
+	const domain = "dom-1"
+
+	type msg struct {
+		method string
+		params string
+	}
+	messages := []msg{
+		{"lifecycle.changed", `{"lifecycle":"running","domain":"` + domain + `"}`},      // submitAttempt's own transition
+		{"lifecycle.changed", `{"lifecycle":"prompt_ready","domain":"` + domain + `"}`}, // STALE: raced, before Start
+		{"lifecycle.changed", `{"lifecycle":"running","domain":"` + domain + `"}`},      // Start attaches; back to running
+		{"history.recorded", `{"attemptId":"` + attemptID + `","entryId":"e1"}`},        // the real completion
+		{"lifecycle.changed", `{"lifecycle":"prompt_ready","domain":"` + domain + `"}`}, // the real prompt_ready
+	}
+	i := 0
+	next := func() (string, json.RawMessage, bool) {
+		if i >= len(messages) {
+			return "", nil, false
+		}
+		m := messages[i]
+		i++
+		return m.method, json.RawMessage(m.params), true
+	}
+
+	receipt, ok := awaitRecordedReceipt(next, attemptID, domain)
+	if !ok {
+		t.Fatal("awaitRecordedReceipt reported no receipt, want the one following the trailing prompt_ready")
+	}
+	if receipt.EntryID != "e1" {
+		t.Fatalf("receipt = %+v, want entryId e1", receipt)
+	}
+	if i != len(messages) {
+		t.Fatalf("awaitRecordedReceipt consumed %d of %d messages; it returned on the stale "+
+			"prompt_ready instead of waiting for the one that follows the completion", i, len(messages))
+	}
+}
+
 // The guard, end to end, in the owner's words: a command carrying a real key
 // shape is recorded masked, and the fact of the masking survives a restart
 // with the row. Record a curl with a Bearer key over the real socket,
@@ -187,7 +408,10 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 // the row reads sk-p...7890, the entry says one secret was masked and of
 // what kind, and the raw key appears nowhere in the marshalled result.
 func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
-	storagetest.Isolate(t)
+	src := realHelperArtifacts(t)
+	home := storagetest.IsolateWithHome(t)
+	binary := filepath.Join(helperRoot(home, src.hash()), "nocx-helper")
+	t.Cleanup(func() { endTheDaemon(t, binary) })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -195,7 +419,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	rawKey := "sk-proj-abcdef1234567890"
 	command := `curl -H "Authorization: Bearer ` + rawKey + `" https://api.example.com`
 
-	a, err := newTestApp(t)
+	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -203,40 +427,17 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 		t.Fatalf("Start: %v", startErr)
 	}
 
-	conn := dialAppWS(t, a)
-	rec := callAppWS(t, conn, "history.record", map[string]any{
-		"command":   command,
-		"cwd":       "/srv",
-		"host":      "",
-		"source":    "user",
-		"status":    "success",
-		"exitCode":  0,
-		"startedAt": int64(1_750_000_000_000),
-		"endedAt":   int64(1_750_000_000_100),
-		"trusted":   true,
-		"paneId":    "pane-acceptance",
-	}, 1)
-	if rec.Error != nil {
-		t.Fatalf("history.record: %+v", rec.Error)
+	lifecycle := openLifecycleAppSession(t, a)
+	receipt := lifecycle.record(t, command, "/srv", 1)
+	if receipt.MaskedCount != 1 || len(receipt.Redactions) != 1 {
+		t.Fatalf("receipt facts = %+v, want one mask and redaction", receipt)
 	}
-	// The ack itself reports the masking — the block can say "1 secret
-	// masked: openai" without re-deriving anything.
-	var ack struct {
-		MaskedCount int      `json:"maskedCount"`
-		MaskedKinds []string `json:"maskedKinds"`
-	}
-	if decodeErr := json.Unmarshal(rec.Result, &ack); decodeErr != nil {
-		t.Fatalf("decode ack: %v (raw %s)", decodeErr, rec.Result)
-	}
-	if ack.MaskedCount != 1 || len(ack.MaskedKinds) != 1 || ack.MaskedKinds[0] != "openai" {
-		t.Fatalf("ack facts = %d %v, want 1 [openai]", ack.MaskedCount, ack.MaskedKinds)
-	}
-	_ = conn.Close()
+	_ = lifecycle.conn.Close()
 
 	// Restart: the row must read masked from the encrypted store, with the
 	// facts intact — the durable text is the masked one, by construction.
 	a.Shutdown(ctx)
-	a2, err := newTestApp(t)
+	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}

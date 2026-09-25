@@ -231,4 +231,32 @@ package proto
 // older than this app" and keeps relaying the lifecycle bytes without the
 // downlink. Nothing shipped at 15 carries a session entry or a spawn result
 // the op changes, so no shape moved with it.
+// This is still 15, widened in place for the same reason: the wire grew the
+// SCREEN plane, `TypeScreenFrame` — its identity, header and continuation
+// are decided in ADR-0073
+// (docs/decisions/0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md).
+// A generation that does not know the type byte would resync THROUGH a live
+// screen stream rather than drop one frame, which is why the byte is
+// announced here even widened in place.
+// This is still 15, widened in place for the same reason: the wire grew the
+// ROW STREAM plane, `TypeOutputRows` and `TypeIntervalEnd` — the rows a
+// session's runtime hands over as they leave the screen, and the interval
+// end markers that close them (nocx-2v80t.3.6). Their identity and header
+// follow the screen frame's own (ADR-0073), and the bytes announce here for
+// the reason the screen byte did: a generation that did not know the type
+// bytes would resync through a live row stream rather than drop one frame.
+// This is still 15, widened in place for the same reason: `session.resize
+// .params` and both spawn shapes gained `xpixel` and `ypixel` — the client's
+// cell metrics in TIOCSWINSZ's whole-text-area DEVICE pixels, which the
+// helper decodes into the per-cell metric the runtime commits and every
+// published frame carries (nocx-zg3k3.2.9, review round 1). Zero means unmeasured and is the shape
+// every older caller already sent. Nothing has shipped at 15, so the round
+// that follows widens it rather than bumping again.
+// This is still 15, widened in place for the same reason: the wire grew a
+// THIRD member of the row stream plane, `TypeClearBoundary` — one sighted
+// erase-saved-lines, on the same ordered carrier the rows and their end
+// markers already share (nocx-2v80t.3.17). It carries no row index and no
+// document, only the header the other two already announce here, and the
+// byte is announced for the reason theirs was: a generation that did not
+// know it would resync through a live row stream rather than drop one frame.
 const Version = "15"

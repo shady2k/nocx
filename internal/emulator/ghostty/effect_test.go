@@ -131,6 +131,10 @@ func effectKindName(k emulator.EffectKind) string {
 		return "cwd"
 	case emulator.EffectFence:
 		return "fence"
+	case emulator.EffectOutputMark:
+		return "output-mark"
+	case emulator.EffectClearBoundary:
+		return "clear-boundary"
 	default:
 		return fmt.Sprintf("none(%d)", k)
 	}

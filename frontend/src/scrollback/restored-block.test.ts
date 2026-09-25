@@ -9,8 +9,7 @@ import {
   type RestoredTurnFacts,
 } from './restored-block'
 import type { RunningBlockActions } from './blocks'
-import { DEFAULT_SNAPSHOT, serializeRange, serializeRangeSGR } from './serializer'
-import { BufferLine, lineWith, XTERM_CM_P16 } from './test-helpers'
+import { DEFAULT_SNAPSHOT } from './serializer'
 import { CommandSnapshotStore } from '../command-snapshot'
 
 const S = DEFAULT_SNAPSHOT
@@ -33,16 +32,18 @@ const facts = (over: Partial<Parameters<typeof restoredBlock>[0]> = {}) => ({
 })
 
 describe('a block built from the store', () => {
-  it('renders the stored rows exactly as the live path rendered them', () => {
-    const lines = [
-      lineWith(
-        { chars: 'o', fg: 2, fgMode: XTERM_CM_P16, bgMode: 0 },
-        { chars: 'k', fg: 2, fgMode: XTERM_CM_P16, bgMode: 0 },
-      ),
-      new BufferLine('second', false),
-    ]
-    const getLine = (y: number) => lines[y]
-    expect(bodyToHTML(S, serializeRangeSGR(getLine, 0, 1))).toBe(serializeRange(S, getLine, 0, 1))
+  it('renders a stored SGR body as coloured term-line rows, one per line', () => {
+    // The stored body is what sgr-read.ts's `runsFromSGR` reads back
+    // (nocx-cjct0, design §6) — the same colour a live cell would have
+    // carried, styled through the ONE attribute-to-style mapping
+    // (serializer.ts's attrsToStyle) that both the live path and this one
+    // use, so a restored block never looks different from the one a person
+    // saw. \u001b[32m is ANSI green (palette index 2).
+    const body = 'o\u001b[32mk\u001b[0m!\nsecond'
+    expect(bodyToHTML(S, body)).toBe(
+      `<span class="term-line">o<span style="color:${S.palette[2]}">k</span>!</span>` +
+        '<span class="term-line">second</span>',
+    )
   })
 
   it('says it is restored, in the DOM a gate can read', () => {

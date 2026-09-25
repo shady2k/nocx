@@ -12,12 +12,6 @@ import (
 
 // ── history.* ingress bounds and validators (the per-field sweep) ─────────
 
-// maxRecordCommandRunes bounds the command text history.record accepts: a
-// command record line — far above any real command a terminal submits (the
-// lifecycle kernel bounds the same product class at 4096 bytes), and the
-// per-field wire-cost ceiling under the 64 KiB frame budget.
-const maxRecordCommandRunes = 16_384
-
 // maxSearchTextRunes bounds the history.query search filter: a substring
 // over command, so a filter longer than the longest recordable command can
 // never match anything.
@@ -67,32 +61,6 @@ func validateHistoryQueryRaw(raw json.RawMessage) string {
 	return ""
 }
 
-// validateHistoryRecordRaw checks history.record: the handler's own check
-// (validateHistoryRecord — one owner) moved before the handler, plus the
-// per-field length bounds that check does not carry.
-func validateHistoryRecordRaw(raw json.RawMessage) string {
-	var p historyRecordParams
-	if msg := decodeParams(raw, &p); msg != "" {
-		return msg
-	}
-	if msg := validateHistoryRecord(p); msg != "" {
-		return msg
-	}
-	if utf8.RuneCountInString(p.Command) > maxRecordCommandRunes {
-		return fmt.Sprintf("command exceeds %d characters", maxRecordCommandRunes)
-	}
-	if utf8.RuneCountInString(p.PaneID) > maxPaneIDRunes {
-		return fmt.Sprintf("paneId exceeds %d characters", maxPaneIDRunes)
-	}
-	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
-		return "cwd exceeds the length bound"
-	}
-	if utf8.RuneCountInString(p.Host) > maxHostRunes {
-		return "host exceeds the length bound"
-	}
-	return ""
-}
-
 func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admission, contentSub control.Submission) []methodSpec {
 	var contentOp capability.ContentOperation
 	if s.contentDB != nil {
@@ -102,12 +70,6 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 		regResponder(contentSub, "history.query", params(validateHistoryQueryRaw), func(r Responder) handlerFunc {
 			h := historyQueryHandlers{op: contentOp, durable: s.historyDurableAvailable, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
-		}),
-		reg(contentSub, "history.record", params(validateHistoryRecordRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, status: s.historyStatus, clientID: connectionID(w), raiser: s.notifyRaiser, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) {
-				h.handleHistoryRecord(ctx, w, state, req)
-			}
 		}),
 	}
 	return specs

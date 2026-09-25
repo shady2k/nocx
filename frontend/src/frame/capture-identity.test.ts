@@ -67,17 +67,17 @@ describe('CaptureIdentityTracker — the generation', () => {
     expect(tracker.identity().generation).toBe(before.generation + 1)
   })
 
-  it('advances on the explicit state-changing operations: clear and reset', () => {
+  it('advances on the explicit state-changing operation: reset', () => {
+    // The client-side clear is gone (nocx-2v80t.3.3): the only explicit
+    // mutation left is the backend-ordered reset, and the generation still
+    // follows it.
     const source = new FakeSource()
     source.seed(['rows'])
     const tracker = new CaptureIdentityTracker(source)
     const before = tracker.identity()
 
-    source.clear()
-    expect(tracker.identity().generation).toBe(before.generation + 1)
-
     source.reset()
-    expect(tracker.identity().generation).toBe(before.generation + 2)
+    expect(tracker.identity().generation).toBe(before.generation + 1)
   })
 })
 
@@ -147,13 +147,13 @@ describe('CaptureIdentityTracker — comparability, not staleness', () => {
     expect(after.generation).toBe(before.generation + 1)
   })
 
-  it('a clear or reset leaves the SAME buffer instance comparable but moved', () => {
+  it('a reset leaves the SAME buffer instance comparable but moved', () => {
     const source = new FakeSource()
     source.seed(['x'])
     const tracker = new CaptureIdentityTracker(source)
     const before = tracker.identity()
 
-    source.clear()
+    source.reset()
     expect(tracker.compareIdentity(before)).toEqual({ status: 'moved' })
   })
 })

@@ -9,8 +9,8 @@ import (
 
 // ContentService is the content domain surface: the durable command-history
 // store (ADR-0011 §5). It is what a ContentOperation hands its callback.
-// Read policy: reads participate in the content gate — the store is one
-// database and history.record writes rows the query reads.
+// Reads participate in the content gate — the store is one database and
+// history.query reads the rows lifecycle history writes.
 type ContentService interface {
 	// QueryHistory serves history.query: one page of the recall ladder,
 	// answered FROM THE LEDGER since nocx-rtg0.19 retired command_history.
@@ -18,12 +18,6 @@ type ContentService interface {
 	// the ledger's own query — the transport owns the translation, because
 	// it owns the wire's vocabulary and this layer owns none of it.
 	QueryHistory(ctx context.Context, q content.LedgerQuery) (content.LedgerPage, error)
-	// RecordCommand stores one completed command (history.record) and
-	// returns the entry id the backend minted for it. When the live History
-	// policy is off it succeeds and returns ("", nil) — a command runs and
-	// no row appears, never an error, and the empty id says there is
-	// nothing to reference.
-	RecordCommand(ctx context.Context, in content.CompletedCommand) (string, error)
 	// The capture-save link rewrite is NOT here. It is one behaviour with
 	// one seam — CaptureSaveService.RewriteRedaction, which is the only
 	// thing secrets.captureSave ever reached — and the copy that used to sit
@@ -60,11 +54,4 @@ func (s *contentService) QueryHistory(ctx context.Context, q content.LedgerQuery
 		return content.LedgerPage{}, err
 	}
 	return s.db.Ledger().QueryEntries(ctx, q)
-}
-
-func (s *contentService) RecordCommand(ctx context.Context, in content.CompletedCommand) (string, error) {
-	if err := s.guard.check(); err != nil {
-		return "", err
-	}
-	return s.db.Ledger().RecordCompleted(ctx, in)
 }

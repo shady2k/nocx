@@ -65,7 +65,25 @@ type hostedSpawn struct {
 	// same adapter. Zero keeps the adapter's default, which is what the
 	// remote hosted route has always used.
 	helloTimeout time.Duration
-	log          *slog.Logger
+	// publishScreen is the screen plane's transport half: one reassembled
+	// session.frame document, published to the pane's subscriber on the
+	// data plane's reserved seat. Nil is a legitimate wiring — a server
+	// built without a transport — and registers no observer rather than
+	// dropping frames nobody asked for.
+	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	// blockRows is the streamed block output's transport half
+	// (helper_block_rows.go): the rows that leave the screen and each
+	// command's end become the command's block in history. Nil wires nothing.
+	blockRows blockRowsSink
+	// environmentEntries registers this pane's lane against its own
+	// completion downlink (environment_entry.go, nocx-2v80t.3.21), so a
+	// LATER child domain's hello — authenticated on a transport of its own
+	// (an ssh child's forwarded listener, never this pane's own descriptor)
+	// — can still be told down to the SAME runtime that owns this pane's
+	// PTY. Nil wires nothing, the same shape blockRows and publishScreen
+	// already have.
+	environmentEntries *environmentEntryRegistry
+	log                *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -160,12 +178,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		// goroutine waits on the same Done.
 		sessionCtx, cancelSession := context.WithCancel(context.WithoutCancel(ctx))
 		stopDownlink = cancelSession
-		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx, func(err error) {
-			// The kernel's execution state stands exactly as it set it; the
-			// report is the whole of a failed delivery's handling.
-			log.NewSlogAdapter(h.log).WithContext(ctx).Warn(
-				"helper: the completion the kernel accepted did not reach the helper session", "err", err)
-		})
+		// A delivery that fails is retried, and one that is lost is logged
+		// by the downlink itself, through log.From on this same context.
+		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx)
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()
@@ -248,13 +263,37 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		})
 	}
 
+	// THE SCREEN DRAIN'S PUBLISH (nocx-zg3k3.2.2): every full snapshot the
+	// runtime publishes for this subscriber goes to the transport's screen
+	// plane, named by the session the pane is adopted under — which is this
+	// helper session's own id, the one the adoption carries. The carrier's
+	// own losses are not silent either: they are logged here, with the
+	// assembler's named reason, at the one place that knows both ends.
+	if h.publishScreen != nil {
+		screenSid := session.ID(entry.HostSessionID.Session)
+		attached.OnScreenFrame(func(revision uint64, doc []byte) {
+			h.publishScreen(screenSid, revision, doc)
+		})
+		attached.OnScreenLost(func(reason string) {
+			log.From(ctx).Warn("screen assembly lost on the carrier",
+				"session", string(screenSid), "reason", reason)
+		})
+	}
+
+	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
+	// adopt, like the screen drain, so no row the runtime streams from its
+	// first output is dropped at a door nobody opened yet.
+	stopBlockRows := bindBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached)
+
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {
+		stopBlockRows()
 		_ = attached.Close()
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
+	bindDownlinkToSession(sess, stopBlockRows)
 	if stopDownlink != nil {
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
 		// the delivery context ends when it does.
@@ -268,6 +307,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	if lifecycleAdapter != nil {
 		out.LifecycleLane = lifecycleAdapter.Lane()
 		out.LifecycleTransport = lifecycleAdapter.TransportID()
+		if h.environmentEntries != nil && downlink != nil {
+			h.environmentEntries.register(out.LifecycleLane, downlink)
+		}
 		var startOnce sync.Once
 		out.StartLifecycle = func() {
 			startOnce.Do(func() {

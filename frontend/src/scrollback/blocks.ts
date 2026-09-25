@@ -2055,7 +2055,17 @@ export class BlockManager {
       seat = seat.parentElement
     }
     if (seat.parentElement !== this._scrollbackInner) return
+    // A move is a removal and an insertion, and a removal drops the focus of
+    // anything inside the region to <body>. The region is re-seated at the
+    // authenticated start, when the grid has held the keyboard since the
+    // submit and the person may be typing into the program that just
+    // started — so every key between this move and the next focus call was
+    // lost (nocx-askcb). The focus goes back where it was, in the same task,
+    // and only if the region held it.
+    const focused = document.activeElement
+    const heldFocus = focused instanceof HTMLElement && this._xtermContainer.contains(focused)
     this._scrollbackInner.insertBefore(this._xtermContainer, seat.nextSibling)
+    if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
   /** The last element belonging to `el`: its live output when the live

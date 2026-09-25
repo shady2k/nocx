@@ -93,11 +93,24 @@ function tasks(exportAt) {
   let rows
   if (exportAt) rows = readExport(exportAt)
   else {
-    let path = '.beads/issues.jsonl'
+    // The pending message is checked against br's own export, which holds a
+    // task filed a minute ago that no commit carries yet. Without br there is
+    // no such export, and the tree's copy would refuse that task as unknown
+    // for a reason nobody could see, so a missing br is an error, not a
+    // fallback.
     const where = spawnSync('br', ['where', '--json'], { encoding: 'utf8' })
-    if (where.status === 0) path = JSON.parse(where.stdout).jsonl_path
-    rows = readExport(null, path)
+    if (where.error)
+      throw new Error(
+        `br could not be run (${where.error.code}); run make connect, which names what is missing`,
+      )
+    if (where.status !== 0)
+      throw new Error(
+        `br where failed: ${(where.stderr || '').trim() || `exit ${where.status}`}; run make connect`,
+      )
+    rows = readExport(null, JSON.parse(where.stdout).jsonl_path)
   }
+  if (!rows.length)
+    throw new Error('the export holds no task; run make connect to import the backlog')
   return normalize(rows).map((i) => ({ id: i.id, type: i.type, parent: i.parent }))
 }
 
@@ -223,7 +236,7 @@ function main() {
       )
       if (report.violations.length) {
         console.log(
-          'Name a leaf task, "(nocx-…)" at the end of the subject. No task for it? br create one — a stage or an epic is not a task.',
+          'Name a leaf task, "(nocx-…)" at the end of the subject. No task for it? File one through /shady2k-skills:to-backlog — a stage or an epic is not a task.',
         )
       }
     } else if (report?.error) console.log(report.error)

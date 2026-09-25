@@ -1,4 +1,4 @@
-.PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
+.PHONY: all init build build-server dev dev-web lint format test clean connect ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
         helpers helper-local helpers-this-machine \
         require-local-helper \
@@ -443,14 +443,8 @@ clean:
 # The issue database no longer needs bootstrapping: `.beads/issues.jsonl` is a
 # tracked file, so the clone already has the backlog and `br` builds its SQLite
 # from it on the first command. What a clone can still lack is `br` itself —
-# git carries the data, not the tool.
-init: hooks
-	@if ! command -v br >/dev/null 2>&1; then \
-		echo "=== issue tracker: br not installed, skipping (see README) ==="; \
-	else \
-		echo "=== issue tracker: importing .beads/issues.jsonl ==="; \
-		br sync --import-only; \
-	fi
+# git carries the data, not the tool — and then `connect` refuses, naming it.
+init: connect
 	@echo "=== e2e dependencies ==="
 	npm ci
 	@echo "=== frontend dependencies ==="
@@ -458,20 +452,11 @@ init: hooks
 	@echo ""
 	@echo "Ready. Run 'make dev' to start the app, 'br ready' for the backlog."
 
-# Per-clone git configuration: git behaviour this repo needs that a clone cannot
-# carry by itself.
-#
-# The --unset lines clean up after the beads merge driver, which used to resolve
-# `.beads/issues.jsonl` by regenerating it with `bd export`. Both the driver and
-# `bd` are gone; the line stays because an old clone still carries the config,
-# and a driver pointing at a binary that no longer exists fails every merge that
-# touches the file — which, now that it is tracked again, is a merge that can
-# actually happen.
-hooks:
-	git config core.hooksPath .githooks
-	-@git config --unset merge.beads-export.driver 2>/dev/null || true
-	-@git config --unset merge.beads-export.name 2>/dev/null || true
-	@echo "git hooks installed from .githooks/"
+# Connect this clone: the hooks, the backlog import and a check of every local
+# input a hook reads, failing with everything missing rather than connecting
+# half. The one command a fresh clone needs before its first commit.
+connect:
+	@sh scripts/connect-clone.sh
 
 # `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the
 # host's copy of the `frontend` job. It is the fast gate, and it is deliberately

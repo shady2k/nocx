@@ -2,6 +2,7 @@ package sessionruntime
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -1289,7 +1290,9 @@ func (e *rendezvousEntry) pending() bool {
 }
 
 // SealEnvironmentEntry seals the interval in flight at an authenticated
-// environment entry (nocx-2v80t.3.21): the coordinator's kernel accepted a
+// environment entry (nocx-2v80t.3.21), or answers ctx's error and seals
+// nothing when the caller gave up before the seal could be taken
+// (nocx-2v80t.3.31): the coordinator's kernel accepted a
 // confirmed environment change — a nested domain taking the lane, which
 // abandons whatever local attempt was running under it (ADR-0024 §5,
 // internal/lifecycle's applySuspend) — while this session's command was
@@ -1318,11 +1321,23 @@ func (e *rendezvousEntry) pending() bool {
 // closing screen (ADR-0074's "the next event... seals it"), before the
 // interval that follows — the one an environment entry actually ends — seals
 // with its own.
-func (s *Session) SealEnvironmentEntry(at Incarnation, entry EnvironmentEntryID) {
+func (s *Session) SealEnvironmentEntry(ctx context.Context, at Incarnation, entry EnvironmentEntryID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.avail != AvailabilityAvailable || at != s.inc {
-		return
+		return nil
+	}
+	// A caller that has given up — its attempt timed out and was cancelled,
+	// or its transport ended — has already sent, or will send, the retry
+	// that stands for it; a handler scheduled only now must change nothing
+	// (nocx-2v80t.3.31). Judged here, under the lock the seal itself takes,
+	// so nothing can slip between the check and the seal, and before the
+	// entry's id is spent, so the retry that stands for it still seals. The
+	// dedupe below is what catches a retry of an attempt that DID land; it
+	// no longer has to catch a late one, so its bounded memory is never the
+	// thing standing between an abandoned delivery and a second seal.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	// The same entry a second time is the same event again — a delivery
 	// retried after an attempt that timed out but landed — and seals
@@ -1330,7 +1345,7 @@ func (s *Session) SealEnvironmentEntry(at Incarnation, entry EnvironmentEntryID)
 	// flight now is the child's, which no entry of this id ends
 	// (nocx-2v80t.3.28). Keyed by the entry, never by elapsed time.
 	if slices.Contains(s.entriesSealed, entry) {
-		return
+		return nil
 	}
 	s.entriesSealed = append(s.entriesSealed, entry)
 	if excess := len(s.entriesSealed) - MaxRememberedEnvironmentEntries; excess > 0 {
@@ -1339,6 +1354,7 @@ func (s *Session) SealEnvironmentEntry(at Incarnation, entry EnvironmentEntryID)
 	s.settlePendingLocked(FenceNonce{})
 	s.tick()
 	s.sealObservationLocked(FenceNonce{})
+	return nil
 }
 
 // Completed is the authenticated half arriving. It authenticates nothing: the

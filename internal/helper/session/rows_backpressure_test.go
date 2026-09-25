@@ -32,6 +32,10 @@ type recordedDelivery struct {
 	fromRow  uint64
 	lostRows uint64
 	rows     int
+	// An end marker's own document: the fence it names and whether it was
+	// settled without one — a gap the coordinator stores as one.
+	nonce   string
+	noFence bool
 }
 
 // orderedStallingSink is a Sink whose first SendOutputRows call parks until
@@ -88,7 +92,11 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 }
 
 func (s *orderedStallingSink) SendIntervalEnd(f proto.IntervalEndFrame) error {
-	s.record(recordedDelivery{end: true, fromRow: f.EndRow})
+	var doc proto.IntervalEndDoc
+	if err := json.Unmarshal(f.Payload, &doc); err != nil {
+		return err
+	}
+	s.record(recordedDelivery{end: true, fromRow: f.EndRow, nonce: doc.Nonce, noFence: doc.NoFence})
 	return nil
 }
 
@@ -297,12 +305,13 @@ func TestABridgeDropIsStatedWhereItHappened(t *testing.T) {
 	assertLossesNameTheirGaps(t, log)
 }
 
-// The marker queue is bounded under a wedged sink (nocx-2v80t.3.26, finding
-// 5, AD-10): end markers and clear boundaries used to append unconditionally,
-// so a wedged wire and a shell ending commands — or a program repeating ED3
-// — grew the queue without limit. A run of clears with nothing between them
-// is one fact and folds into one; past the marker budget an end marker is
-// shed and COUNTED; and every hand-off still returns at once.
+// The marker queue is bounded under a wedged sink (nocx-2v80t.3.26, AD-10),
+// and past its budget NO end marker and NO clear is lost (nocx-2v80t.3.31):
+// the ones that do not fit are folded into one bounded record, and each end
+// reaches the coordinator as a settled-without-fence end — the gap its block
+// is stored as — while the clears among them reach it as the one clear that
+// hides everything the others would have. A run of clears with nothing
+// between them is one fact either way.
 func TestTheMarkerQueueIsBoundedUnderAWedgedSink(t *testing.T) {
 	sink := newOrderedStallingSink()
 	hs := newBridgeOnlySession(t, sink)
@@ -317,32 +326,103 @@ func TestTheMarkerQueueIsBoundedUnderAWedgedSink(t *testing.T) {
 			bridge.ClearBoundary()
 		}
 		for i := range ends {
-			bridge.IntervalEnd(endNonce(byte(i)), 1, []emulator.Row{textRow("closing")}, false)
+			bridge.IntervalEnd(endNonce(byte(i+1)), 1, []emulator.Row{textRow("closing")}, false)
 		}
 	})
 
 	hs.rowMu.Lock()
 	queued := len(hs.rowQueue)
 	hs.rowMu.Unlock()
-	if queued > maxQueuedRowBatches+2*maxQueuedMarkers {
-		t.Fatalf("the queue holds %d emissions behind a wedged sink, want at most %d", queued, maxQueuedRowBatches+2*maxQueuedMarkers)
-	}
-	// One clear (the thousand folded) and maxQueuedMarkers-1 ends fit; the
-	// rest of the ends are shed and counted.
-	if got, want := hs.markersDropped.Load(), uint64(ends-(maxQueuedMarkers-1)); got != want {
-		t.Fatalf("markersDropped = %d, want %d — every marker past the budget is counted, and a folded clear is not one", got, want)
+	if bound := maxQueuedRowBatches + 2*maxQueuedMarkers + 1; queued > bound {
+		t.Fatalf("the queue holds %d emissions behind a wedged sink, want at most %d", queued, bound)
 	}
 
 	close(sink.release)
-	log := sink.waitUntil(func(log []recordedDelivery) bool { return len(log) == 1+maxQueuedMarkers })
+	// The stalled batch, the one clear the run folded into, and every end.
+	log := sink.waitUntil(func(log []recordedDelivery) bool { return len(log) == 2+ends })
 	if !log[1].clear {
 		t.Fatalf("the first marker delivered is %+v, want the one clear the run folded into", log[1])
 	}
+	fenced, gaps := 0, 0
 	for i, d := range log[2:] {
 		if !d.end {
 			t.Fatalf("delivery %d is %+v, want an end marker", i+2, d)
 		}
+		if d.noFence {
+			gaps++
+		} else {
+			fenced++
+		}
 	}
+	if fenced != maxQueuedMarkers-1 || gaps != ends-(maxQueuedMarkers-1) {
+		t.Fatalf("%d ends arrived with their fence and %d as gaps, want %d and %d — every end that did not fit is stated, none dropped",
+			fenced, gaps, maxQueuedMarkers-1, ends-(maxQueuedMarkers-1))
+	}
+}
+
+// What the budget could not keep keeps its order and its losses
+// (nocx-2v80t.3.31): ends before the last folded clear arrive before it, ends
+// after it arrive after it, and the rows shed while the wire was wedged are
+// stated as ONE loss at the gap they left, ahead of the ends that settle
+// their blocks — whatever the number of markers, the memory it takes does
+// not grow.
+func TestMarkersPastTheBudgetKeepTheirOrderAndTheirLoss(t *testing.T) {
+	sink := newOrderedStallingSink()
+	hs := newBridgeOnlySession(t, sink)
+	go hs.serveRows()
+	t.Cleanup(func() { close(hs.rowsDone) })
+	bridge := &rowBridge{hs: hs}
+	stallThePump(t, sink, bridge)
+
+	// Fill the budget with fenced ends, then — past it — ten thousand more
+	// hand-offs: ends, rows, a clear, more ends, more rows.
+	row := []emulator.Row{textRow("x")}
+	for i := range maxQueuedMarkers {
+		bridge.IntervalEnd(endNonce(byte(i+1)), 1, nil, false)
+	}
+	var next uint64 = 1
+	returnsAtOnce(t, "the flood past the budget", func() {
+		for range 3000 {
+			bridge.IntervalEnd(endNonce(0xEE), next, nil, false)
+			bridge.OutputRows(next, row, 0)
+			next++
+		}
+		bridge.ClearBoundary()
+		for range 2000 {
+			bridge.OutputRows(next, row, 0)
+			next++
+			bridge.IntervalEnd(endNonce(0xEF), next, nil, false)
+		}
+	})
+	hs.rowMu.Lock()
+	queued := len(hs.rowQueue)
+	hs.rowMu.Unlock()
+	if bound := maxQueuedRowBatches + 2*maxQueuedMarkers + 1; queued > bound {
+		t.Fatalf("the queue holds %d emissions after ten thousand hand-offs, want at most %d", queued, bound)
+	}
+
+	close(sink.release)
+	const want = 1 + maxQueuedMarkers + 1 + 3000 + 1 + 2000 // batch, fenced ends, carrier, ends, clear, ends
+	log := sink.waitUntil(func(log []recordedDelivery) bool { return len(log) == want })
+	tail := log[1+maxQueuedMarkers:]
+	carrier := tail[0]
+	if carrier.end || carrier.clear || carrier.rows != 0 || carrier.lostRows != 5000 || carrier.fromRow != next {
+		t.Fatalf("the shed rows were stated as %+v, want one loss-only delivery of 5000 at %d", carrier, next)
+	}
+	for i, d := range tail[1:3001] {
+		if !d.end || !d.noFence {
+			t.Fatalf("delivery %d before the clear is %+v, want an end settled as a gap", i, d)
+		}
+	}
+	if !tail[3001].clear {
+		t.Fatalf("delivery after the first 3000 ends is %+v, want the clear", tail[3001])
+	}
+	for i, d := range tail[3002:] {
+		if !d.end || !d.noFence {
+			t.Fatalf("delivery %d after the clear is %+v, want an end settled as a gap", i, d)
+		}
+	}
+	assertLossesNameTheirGaps(t, log)
 }
 
 // Paired with the bound above: markers within the budget, behind the same
@@ -365,8 +445,8 @@ func TestMarkersWithinTheBudgetAllReachTheWire(t *testing.T) {
 			t.Fatalf("delivery %d is %+v, want an end marker", i+1, d)
 		}
 	}
-	if got := hs.markersDropped.Load(); got != 0 {
-		t.Fatalf("markersDropped = %d within the budget, want 0", got)
+	if got := hs.markersFolded.Load(); got != 0 {
+		t.Fatalf("markersFolded = %d within the budget, want 0", got)
 	}
 }
 
@@ -389,8 +469,8 @@ func TestBridgeDropsNothingUnderOrdinaryLoad(t *testing.T) {
 	if got := hs.rowsDropped.Load(); got != 0 {
 		t.Fatalf("rowsDropped = %d under ordinary load, want 0", got)
 	}
-	if got := hs.markersDropped.Load(); got != 0 {
-		t.Fatalf("markersDropped = %d under ordinary load, want 0", got)
+	if got := hs.markersFolded.Load(); got != 0 {
+		t.Fatalf("markersFolded = %d under ordinary load, want 0", got)
 	}
 	hs.rowMu.Lock()
 	pending := hs.rowsLostPending

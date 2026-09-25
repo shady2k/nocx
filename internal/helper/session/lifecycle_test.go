@@ -20,6 +20,7 @@ func TestSpawnCarriesLifecycleLaunchWithoutSecretInProcessMetadata(t *testing.T)
 		Limits: Limits{
 			DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024,
 			MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024,
+			MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024,
 		},
 		NewID: func() ([16]byte, error) { return [16]byte{1}, nil },
 	})
@@ -89,6 +90,7 @@ func TestTheHelperGivesBackTheLifecycleLaunchItSpawnedTheShellWith(t *testing.T)
 		Limits: Limits{
 			DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024,
 			MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024,
+			MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024,
 		},
 		NewID: func() ([16]byte, error) { return [16]byte{1}, nil },
 	})
@@ -131,6 +133,7 @@ func TestTheHelperAnswersNoLaunchForAConventionalSession(t *testing.T) {
 		Limits: Limits{
 			DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024,
 			MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024,
+			MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024,
 		},
 		NewID: func() ([16]byte, error) { return [16]byte{2}, nil },
 	})
@@ -164,6 +167,7 @@ func TestAdoptLifecycleRefusesASessionThisGenerationDoesNotHold(t *testing.T) {
 		Limits: Limits{
 			DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024,
 			MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024,
+			MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024,
 		},
 		NewID: func() ([16]byte, error) { return [16]byte{3}, nil },
 	})
@@ -207,6 +211,7 @@ func TestTheHelperAnswersNoLaunchWhenTheShellNeverGotAChannel(t *testing.T) {
 		Limits: Limits{
 			DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024,
 			MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024,
+			MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024,
 		},
 		NewID: func() ([16]byte, error) { return [16]byte{4}, nil },
 	})

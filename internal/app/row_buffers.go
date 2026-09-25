@@ -1,6 +1,7 @@
 package app
 
 import (
+	"math"
 	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/settings"
@@ -34,11 +35,17 @@ type coordinatorBuffer interface {
 // applyRowBuffers reads both settings into their owners.
 func applyRowBuffers(reg *settings.Registry, b *rowBuffers, tp coordinatorBuffer) {
 	if v, err := reg.GetNumber(settings.HistoryHelperBufferMB); err == nil {
-		b.helper.Store(int64(v) << 20)
+		b.helper.Store(megabytes(v))
 	}
 	if v, err := reg.GetNumber(settings.HistoryCoordinatorBufferMB); err == nil {
-		tp.SetBlockRowsBufferBytes(int64(v) << 20)
+		tp.SetBlockRowsBufferBytes(megabytes(v))
 	}
+}
+
+// megabytes converts a setting in MB to bytes, keeping a fraction the person
+// typed (nocx-2v80t.3.38): 4.5 MB is 4.5 MiB, never 4. Rounded to the byte.
+func megabytes(v float64) int64 {
+	return int64(math.Round(v * (1 << 20)))
 }
 
 // watchRowBuffers applies both now and again whenever either changes.

@@ -831,7 +831,11 @@ var HistoryOutputCapKB = MustRegisterNumber(NumberSpec{
 //
 // The defaults are sized from the limits they replace: the helper's queue of
 // 256 batches, a batch being about one 80-column screen of cells, is ≈ 20 MB,
-// and nocx's buffer holds what that queue sends.
+// and nocx's buffer holds what that queue sends. The bounds are the helper's
+// own (internal/helper/session's MinRowBufferBytes and MaxRowBufferBytes):
+// 4 MB holds one closing screen of 400 × 250 cells, so a buffer can always
+// carry one end marker whole, and 256 MB is half the helper's aggregate
+// budget. A fraction is kept to the byte, never truncated.
 var HistoryHelperBufferMB = MustRegisterNumber(NumberSpec{
 	Key:         "history.helperBufferMB",
 	Section:     "History",
@@ -839,8 +843,8 @@ var HistoryHelperBufferMB = MustRegisterNumber(NumberSpec{
 	Description: "How much command output the machine running the shell holds for nocx while the connection is slow, per session. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies to sessions opened after the change.",
 	DataClass:   PublicConfig,
 	Default:     20,
-	Min:         fp(1),
-	Max:         fp(1024),
+	Min:         fp(4),
+	Max:         fp(256),
 	Unit:        "MB",
 })
 
@@ -851,8 +855,8 @@ var HistoryCoordinatorBufferMB = MustRegisterNumber(NumberSpec{
 	Description: "How much command output nocx holds in memory while saving it to history is slow, per session. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies to sessions opened after the change.",
 	DataClass:   PublicConfig,
 	Default:     20,
-	Min:         fp(1),
-	Max:         fp(1024),
+	Min:         fp(4),
+	Max:         fp(256),
 	Unit:        "MB",
 })
 

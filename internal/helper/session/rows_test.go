@@ -415,3 +415,20 @@ func rowsPending(t *testing.T, hs *hostSession) uint64 {
 	}
 	return departed - hs.rowsConfirmed
 }
+
+// The contract forbids rows on an incomplete marker (nocx-2v80t.3.38): the
+// marker states that nothing more is recorded, so a document carrying both is
+// a contradiction the schema refuses. Paired with the marker as the bridge
+// sends it, with no rows, which the schema accepts.
+func TestTheRowsContractRefusesRowsOnAnIncompleteMarker(t *testing.T) {
+	schema := loadRowSchema(t, "session.output-rows.schema.json")
+	validateRowSchema(t, schema, []byte(`{"fromRow":3,"lostRows":0,"rows":[],"incomplete":true}`))
+	doc, err := jsonschema.UnmarshalJSON(strings.NewReader(
+		`{"fromRow":3,"lostRows":0,"rows":[{"text":"x"}],"incomplete":true}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := schema.Validate(doc); err == nil {
+		t.Fatal("the contract accepted an incomplete marker carrying rows")
+	}
+}

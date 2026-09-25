@@ -36,15 +36,15 @@ func TestTheRowBufferIsTheOneTheSpawnNamed(t *testing.T) {
 	svc := New(Options{Generation: "gen-under-test", Spawner: &lcSpawner{}, Log: lcTestLog()})
 	t.Cleanup(svc.Close)
 
-	first := spawnWithBuffer(t, svc, 3<<20)
-	second := spawnWithBuffer(t, svc, 5<<20)
-	if first.rowBufferBytes != 3<<20 {
-		t.Fatalf("the first session's buffer is %d bytes, want the 3 MB its spawn named", first.rowBufferBytes)
+	first := spawnWithBuffer(t, svc, 5<<20)
+	second := spawnWithBuffer(t, svc, 7<<20)
+	if first.rowBufferBytes != 5<<20 {
+		t.Fatalf("the first session's buffer is %d bytes, want the 5 MB its spawn named", first.rowBufferBytes)
 	}
-	if second.rowBufferBytes != 5<<20 {
-		t.Fatalf("a session spawned after the value changed has %d bytes, want the new 5 MB", second.rowBufferBytes)
+	if second.rowBufferBytes != 7<<20 {
+		t.Fatalf("a session spawned after the value changed has %d bytes, want the new 7 MB", second.rowBufferBytes)
 	}
-	if first.rowBufferBytes != 3<<20 {
+	if first.rowBufferBytes != 5<<20 {
 		t.Fatal("a later spawn changed a running session's buffer")
 	}
 }
@@ -61,5 +61,54 @@ func TestARowBufferNamedByNobodyIsTheDefaultAndOneTooLargeIsClamped(t *testing.T
 	}
 	if got := spawnWithBuffer(t, svc, 1<<40).rowBufferBytes; got != MaxRowBufferBytes {
 		t.Fatalf("a spawn naming 1 TB got %d bytes, want the ceiling %d", got, MaxRowBufferBytes)
+	}
+}
+
+// The helper owns a floor (nocx-2v80t.3.38): a request below it — one byte —
+// gets the floor, because a buffer that cannot hold one closing screen would
+// end every block incomplete on its first end marker. Paired with a request
+// above the floor, which is kept (TestTheRowBufferIsTheOneTheSpawnNamed).
+func TestARowBufferBelowTheFloorIsRaisedToIt(t *testing.T) {
+	svc := New(Options{Generation: "gen-under-test", Spawner: &lcSpawner{}, Log: lcTestLog()})
+	t.Cleanup(svc.Close)
+
+	hs := spawnWithBuffer(t, svc, 1)
+	if hs.rowBufferBytes != MinRowBufferBytes {
+		t.Fatalf("a 1-byte request got %d bytes, want the floor %d", hs.rowBufferBytes, MinRowBufferBytes)
+	}
+	if got := hs.launch.RowBufferBytes(); got != MinRowBufferBytes {
+		t.Fatalf("the launch record reports %d bytes, want what the session got, %d", got, MinRowBufferBytes)
+	}
+}
+
+// The row buffer is spent on the helper's machine, so it counts against the
+// helper-wide aggregate the output window does (AD-10, nocx-2v80t.3.38): a
+// session within the budget gets what it asked for; one asking for more than
+// is left gets what is left, never below the floor; and each reports what it
+// actually got.
+func TestTheRowBufferCountsAgainstTheAggregateBudget(t *testing.T) {
+	// Each spawn here names a lifecycle, so its window is reserved twice at
+	// the spawn; the test spawner grants no lifecycle carrier, so the second
+	// reservation is returned once the session exists.
+	window := DefaultLimits().DefaultWindowBytes
+	budget := (window + 6<<20) + (2*window + 5<<20)
+	svc := New(Options{
+		Generation: "gen-under-test", Spawner: &lcSpawner{}, Log: lcTestLog(),
+		Limits: Limits{BudgetBytes: budget},
+	})
+	t.Cleanup(svc.Close)
+
+	within := spawnWithBuffer(t, svc, 6<<20)
+	if within.rowBufferBytes != 6<<20 || within.launch.RowBufferBytes() != 6<<20 {
+		t.Fatalf("a session within the budget got %d bytes (record %d), want the 6 MB it asked for",
+			within.rowBufferBytes, within.launch.RowBufferBytes())
+	}
+	clamped := spawnWithBuffer(t, svc, 10<<20)
+	if clamped.rowBufferBytes != 5<<20 || clamped.launch.RowBufferBytes() != 5<<20 {
+		t.Fatalf("a session past the budget got %d bytes (record %d), want the 5 MB that was left",
+			clamped.rowBufferBytes, clamped.launch.RowBufferBytes())
+	}
+	if got, want := svc.WindowBytesInUse(), 2*window+6<<20+5<<20; got != want {
+		t.Fatalf("the helper has %d bytes committed, want %d — both windows and both row buffers", got, want)
 	}
 }

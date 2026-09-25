@@ -176,6 +176,12 @@ type blockStream struct {
 // the helper's buffer sends.
 const DefaultBlockRowsBufferBytes int64 = 20 << 20
 
+// MinBlockRowsBufferBytes is the coordinator buffer's floor
+// (nocx-2v80t.3.38), the helper's own (internal/helper/session's
+// MinRowBufferBytes): 4 MiB holds one closing screen of 400 × 250 cells, so
+// an end marker can always be held whole. A setting below it gets it.
+const MinBlockRowsBufferBytes int64 = 4 << 20
+
 // heldRowsBytes is what rows cost the coordinator's buffer: the cells as the
 // emulator hands them over, plus the row headers — the helper's own measure
 // (internal/helper/session's emissionBytes), so both buffers count alike.
@@ -201,10 +207,32 @@ func (bs *blockStream) heldBytesLocked(sid session.ID) int64 {
 			n += heldRowsBytes(d.rows)
 		}
 	}
-	for _, e := range bs.pendingCloses[sid] {
-		n += heldRowsBytes(e.closing)
+	for _, set := range [][]pendingEnd{bs.pendingCloses[sid], bs.ends[sid], bs.queuedEnds[sid]} {
+		for _, e := range set {
+			n += heldRowsBytes(e.closing)
+		}
 	}
 	return n
+}
+
+// holdEndLocked is holdLocked for an end about to be queued — parked for its
+// completion, held behind a deferred append, or queued for a block not yet
+// current (nocx-2v80t.3.38). An end is never dropped: it is the boundary of a
+// real command. What the buffer cannot hold is its closing screen, so an end
+// whose screen would take the buffer past its bound is kept without it and
+// closes its block incomplete — the owner's rule, for the block in flight.
+func (s *WSServer) holdEndLocked(sid session.ID, e *pendingEnd) {
+	if len(e.closing) == 0 {
+		return
+	}
+	bs := s.blockStream
+	if bs.heldBytesLocked(sid)+heldRowsBytes(e.closing) <= bs.budgets[sid] {
+		return
+	}
+	s.log.Warn("block rows buffer overflowed: an end's closing screen is not kept, its block ends incomplete",
+		"session", sid, "endRow", e.endRow, "closingRows", len(e.closing), "bufferBytes", bs.budgets[sid])
+	e.closing = nil
+	e.incomplete = true
 }
 
 // holdLocked answers whether rows may be held for the session: false when
@@ -243,16 +271,41 @@ func (s *WSServer) SetBlockRowsBufferBytes(n int64) {
 // the stream is healthy. No block is resolved here — "whichever is current"
 // is not an answer while another close may be in flight — so each is settled
 // by its own fence: from its completion, or by the first end that follows.
+//
+// A completion may arrive BEFORE its output does (ADR-0024 decision 7), so
+// its fence may already be here, waiting for an end marker, when this marker
+// arrives (nocx-2v80t.3.38). The marker comes in stream order after every
+// end the helper did deliver, so a fence still waiting now is an interval
+// whose end the overflow took: it is settled here, incomplete, by its own
+// fence — and its end, should the helper ever carry one, is dropped as a
+// lost fence's. Otherwise that block would stay current and take the rows
+// of the next command after recovery.
 func (s *WSServer) BlockOutputIncomplete(sid session.ID, fromRow uint64) {
 	bs := s.blockStream
 	bs.mu.Lock()
-	defer bs.mu.Unlock()
 	if _, sourced := bs.sources[sid]; !sourced {
+		bs.mu.Unlock()
 		return
 	}
 	bs.markUnrecordedLocked(sid, fromRow)
+	type waiting struct{ attempt, fence string }
+	var settle []waiting
+	for fence, attempt := range bs.fences[sid] {
+		if attempt == "" || bs.isLostLocked(sid, fence) {
+			continue
+		}
+		if block := bs.open[sid][attempt]; block == nil || block.settled {
+			continue
+		}
+		bs.rememberLostLocked(sid, fence)
+		settle = append(settle, waiting{attempt: attempt, fence: fence})
+	}
+	bs.mu.Unlock()
 	s.log.Warn("helper row buffer overflowed: the block in flight ends incomplete",
-		"session", sid, "fromRow", fromRow)
+		"session", sid, "fromRow", fromRow, "settledByFence", len(settle))
+	for _, w := range settle {
+		s.closeBlockRows(sid, w.attempt, fromRow, nil, w.fence, true)
+	}
 }
 
 type openBlock struct {
@@ -434,10 +487,11 @@ func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(
 
 // blockRowsBuffer is the buffer a session attached now gets.
 func (s *WSServer) blockRowsBuffer() int64 {
-	if n := s.blockRowsBufferBytes.Load(); n > 0 {
-		return n
+	n := s.blockRowsBufferBytes.Load()
+	if n <= 0 {
+		return DefaultBlockRowsBufferBytes
 	}
-	return DefaultBlockRowsBufferBytes
+	return max(n, MinBlockRowsBufferBytes)
 }
 
 func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64) {
@@ -837,7 +891,9 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 			return
 		}
 		bs.mu.Lock()
-		ends := append(bs.ends[sid], pendingEnd{nonce: hexNonce, endRow: endRow, closing: closing, incomplete: noFence})
+		parked := pendingEnd{nonce: hexNonce, endRow: endRow, closing: closing, incomplete: noFence}
+		s.holdEndLocked(sid, &parked)
+		ends := append(bs.ends[sid], parked)
 		if len(ends) > maxPendingEnds {
 			ends = ends[len(ends)-maxPendingEnds:]
 			s.log.Warn("block interval ends parked past the bound; the oldest is dropped", "session", sid)
@@ -1022,6 +1078,7 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 			bs.pending[sid] = remaining
 		}
 		if len(toFlush) > 0 {
+			s.holdEndLocked(sid, &end)
 			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
 			bs.flushing[sid] = true
 			confirm := bs.confirmers[sid]
@@ -1035,11 +1092,13 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 		return
 	}
 	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
+		s.holdEndLocked(sid, &end)
 		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
 		bs.mu.Unlock()
 		return
 	}
 	if bs.queued[sid] == attempt && current != nil && current.attempt != attempt {
+		s.holdEndLocked(sid, &end)
 		bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
 		bs.mu.Unlock()
 		return
@@ -1199,10 +1258,12 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		tries[hexNonce]++
 		spent := tries[hexNonce]
 		if spent < maxCloseAttempts {
-			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
+			retry := pendingEnd{
 				attempt: attempt, nonce: hexNonce, endRow: endRow,
 				closing: append([]emulator.Row(nil), closing...), incomplete: incomplete,
-			})
+			}
+			s.holdEndLocked(sid, &retry)
+			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], retry)
 		} else {
 			delete(tries, hexNonce)
 		}
@@ -1715,6 +1776,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 			current := bs.current[sid]
 			queued := bs.queued[sid]
 			if queued == end.attempt && current != nil && current.attempt != end.attempt {
+				s.holdEndLocked(sid, &end)
 				bs.queuedEnds[sid] = append(bs.queuedEnds[sid], end)
 				bs.mu.Unlock()
 				continue

@@ -441,10 +441,13 @@ func TestASpawnThatFailsLeavesNothingBehind(t *testing.T) {
 func TestTheBudgetIsCheckedBeforeAnythingIsForked(t *testing.T) {
 	spawner := &fakeSpawner{}
 	svc := newService(t, newSink(), spawner, session.Limits{
-		DefaultWindowBytes: 256 << 10,
-		MinWindowBytes:     256 << 10,
-		MaxWindowBytes:     256 << 10,
-		BudgetBytes:        256 << 10, // room for exactly one session
+		DefaultWindowBytes:    256 << 10,
+		MinWindowBytes:        256 << 10,
+		MaxWindowBytes:        256 << 10,
+		BudgetBytes:           256<<10 + testRowBufferBytes, // room for exactly one session
+		DefaultRowBufferBytes: testRowBufferBytes,
+		MinRowBufferBytes:     testRowBufferBytes,
+		MaxRowBufferBytes:     testRowBufferBytes,
 	})
 
 	spawnOne(t, svc)

@@ -35,6 +35,12 @@ type fakeClock struct {
 	now time.Time
 }
 
+// testRowBufferBytes is the row buffer every session in these budget tests
+// reserves beside its window: the row buffer draws on the same aggregate
+// (AD-10, nocx-2v80t.3.38), so "room for N sessions" is N windows AND N row
+// buffers.
+const testRowBufferBytes = 64 << 10
+
 func newFakeClock(start time.Time) *fakeClock { return &fakeClock{now: start} }
 
 func (c *fakeClock) Now() time.Time {
@@ -86,11 +92,14 @@ func TestAnExitedUnattachedSessionExpiresAfterItsTTLAndNotBefore(t *testing.T) {
 	clock := newFakeClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	ttl := 24 * time.Hour
 	svc := newServiceWithClock(t, sink, spawner, session.Limits{
-		DefaultWindowBytes:  256 << 10,
-		MinWindowBytes:      256 << 10,
-		MaxWindowBytes:      256 << 10,
-		BudgetBytes:         1 << 20,
-		UnclaimedSessionTTL: ttl,
+		DefaultWindowBytes:    256 << 10,
+		MinWindowBytes:        256 << 10,
+		MaxWindowBytes:        256 << 10,
+		BudgetBytes:           1 << 20,
+		DefaultRowBufferBytes: testRowBufferBytes,
+		MinRowBufferBytes:     testRowBufferBytes,
+		MaxRowBufferBytes:     testRowBufferBytes,
+		UnclaimedSessionTTL:   ttl,
 	}, clock.Now)
 
 	spawnOne(t, svc)
@@ -136,11 +145,14 @@ func TestASpawnEvictsExitedUnattachedSessionsOldestExitFirst(t *testing.T) {
 	// budget arithmetic it never actually ran under.
 	const windowBytes = 2 * 64 << 10 // 128 KiB, the floor
 	svc := newServiceWithClock(t, sink, spawner, session.Limits{
-		DefaultWindowBytes:  windowBytes,
-		MinWindowBytes:      windowBytes,
-		MaxWindowBytes:      windowBytes,
-		BudgetBytes:         2 * windowBytes, // room for exactly two sessions
-		UnclaimedSessionTTL: 24 * time.Hour,
+		DefaultWindowBytes:    windowBytes,
+		MinWindowBytes:        windowBytes,
+		MaxWindowBytes:        windowBytes,
+		BudgetBytes:           2 * (windowBytes + testRowBufferBytes), // room for exactly two sessions
+		DefaultRowBufferBytes: testRowBufferBytes,
+		MinRowBufferBytes:     testRowBufferBytes,
+		MaxRowBufferBytes:     testRowBufferBytes,
+		UnclaimedSessionTTL:   24 * time.Hour,
 	}, clock.Now)
 
 	oldest := spawnOne(t, svc)
@@ -189,10 +201,13 @@ func TestASpawnNeverEvictsALiveSession(t *testing.T) {
 	sink := newSink()
 	const windowBytes = 2 * 64 << 10 // 128 KiB, D8's floor (session.go)
 	svc := newService(t, sink, spawner, session.Limits{
-		DefaultWindowBytes: windowBytes,
-		MinWindowBytes:     windowBytes,
-		MaxWindowBytes:     windowBytes,
-		BudgetBytes:        windowBytes, // room for exactly one
+		DefaultWindowBytes:    windowBytes,
+		MinWindowBytes:        windowBytes,
+		MaxWindowBytes:        windowBytes,
+		BudgetBytes:           windowBytes + testRowBufferBytes, // room for exactly one
+		DefaultRowBufferBytes: testRowBufferBytes,
+		MinRowBufferBytes:     testRowBufferBytes,
+		MaxRowBufferBytes:     testRowBufferBytes,
 	})
 
 	live := spawnOne(t, svc)
@@ -232,10 +247,13 @@ func TestASpawnNeverEvictsAnExitedSessionACoordinatorIsAttachedTo(t *testing.T) 
 	sink := newSink()
 	const windowBytes = 2 * 64 << 10 // 128 KiB, D8's floor (session.go)
 	svc := newService(t, sink, spawner, session.Limits{
-		DefaultWindowBytes: windowBytes,
-		MinWindowBytes:     windowBytes,
-		MaxWindowBytes:     windowBytes,
-		BudgetBytes:        windowBytes,
+		DefaultWindowBytes:    windowBytes,
+		MinWindowBytes:        windowBytes,
+		MaxWindowBytes:        windowBytes,
+		BudgetBytes:           windowBytes + testRowBufferBytes,
+		DefaultRowBufferBytes: testRowBufferBytes,
+		MinRowBufferBytes:     testRowBufferBytes,
+		MaxRowBufferBytes:     testRowBufferBytes,
 	})
 
 	entry := spawnOne(t, svc)
@@ -300,11 +318,14 @@ func TestTheScheduledSweepReleasesAnOrphanedSessionOnItsOwn(t *testing.T) {
 		Log:        discardLog(),
 		Now:        clock.Now,
 		Limits: session.Limits{
-			DefaultWindowBytes:  windowBytes,
-			MinWindowBytes:      windowBytes,
-			MaxWindowBytes:      windowBytes,
-			BudgetBytes:         windowBytes,
-			UnclaimedSessionTTL: time.Hour,
+			DefaultWindowBytes:    windowBytes,
+			MinWindowBytes:        windowBytes,
+			MaxWindowBytes:        windowBytes,
+			BudgetBytes:           windowBytes + testRowBufferBytes,
+			DefaultRowBufferBytes: testRowBufferBytes,
+			MinRowBufferBytes:     testRowBufferBytes,
+			MaxRowBufferBytes:     testRowBufferBytes,
+			UnclaimedSessionTTL:   time.Hour,
 		},
 		// Real wall-clock time, deliberately short — this is the SCHEDULE,
 		// answered independently of the fake clock, which only ever answers

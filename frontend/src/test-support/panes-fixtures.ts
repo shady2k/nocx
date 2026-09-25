@@ -23,7 +23,7 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import { LayoutStore } from '../layout/layout-store'
 import { UIStateClient } from '../uistate-client'
 import type { UIState } from '../generated/uistate'
-import type { Dispatcher } from '../dispatcher'
+import { RpcError, type Dispatcher } from '../dispatcher'
 import type { LayoutClientLike } from '../layout/layout-client'
 import type {
   Tab as LayoutTab,
@@ -811,7 +811,11 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
         startedAt: '2026-08-08T12:00:00Z',
       }),
     },
-    call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
+    // What the backend answers when no content store is wired: a JSON-RPC
+    // -32601, not a transport failure — a reader that tells "the store
+    // keeps nothing" from "the read failed" (restore-client's
+    // blockRowsForEntry, nocx-2v80t.3.27) must see the same refusal here.
+    call: vi.fn().mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
     get connected() {
       return true
     },

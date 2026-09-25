@@ -6,6 +6,7 @@ import { decorateLinks } from '../terminal-links/decorate'
 import type { FitCandidate } from './cell-fit'
 import type { RunMetric } from './run-geometry'
 import type { TerminalSnapshot } from './serializer'
+import { BlockNotice } from '../ui/block-notice'
 
 export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
@@ -139,7 +140,9 @@ export function paintStoredRows(
   opts: StoredBlockPaintOptions,
 ): void {
   block
-    .querySelectorAll(':scope > .cmd-output, :scope > [data-output-incomplete]')
+    .querySelectorAll(
+      ':scope > .cmd-output, :scope > [data-output-incomplete], :scope > [data-output-unreadable]',
+    )
     .forEach((el) => el.remove())
   const snapshot = snapshotForRows(stored.lines)
   if (snapshot !== null) {
@@ -179,4 +182,21 @@ export function paintStoredRows(
           : 'Output incomplete'
     block.appendChild(notice)
   }
+}
+
+/** Say, on the block, that its stored rows could not be read
+ *  (nocx-2v80t.3.27): the store could not be asked, the artifact read
+ *  failed, or what came back does not parse. It is NOT the same sentence as
+ *  an empty body — a command that printed output and a command that printed
+ *  nothing must not look alike — and not "incomplete" either, which is a
+ *  fact the store counted about rows it holds. Whatever rows an earlier read
+ *  painted stay: they are true, only the rest is missing. The next read that
+ *  succeeds replaces this with what it read (`paintStoredRows` removes it).
+ *  One notice per block, by its data attribute: a second failed read
+ *  restates it rather than stacking a second line. */
+export function paintUnreadableRows(block: HTMLElement): void {
+  block.querySelectorAll(':scope > [data-output-unreadable]').forEach((el) => el.remove())
+  const notice = new BlockNotice({ text: 'Output could not be read', tone: 'warning' })
+  notice.root.dataset.outputUnreadable = 'true'
+  notice.mount(block)
 }

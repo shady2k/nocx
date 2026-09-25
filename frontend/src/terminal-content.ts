@@ -8306,10 +8306,28 @@ export class TerminalContent extends BasePaneContent {
    *  the one worth waiting for; never removing a newer entry's promise out
    *  from under it. */
   private _refreshBlockRows(entryId: string): Promise<void> {
-    const fetch = blockRowsForEntry(this.client, entryId).then((rows) => {
-      if (rows === null || this._disposed) return
+    const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
+      if (this._disposed) return
       const sb = this.scrollback
       if (!sb) return
+      // `absent` is the store keeping no rows for this block — nothing to
+      // paint, and nothing wrong. `unreadable` is output that did not reach
+      // the pane, and it is SAID, on the block and in the log, never drawn
+      // as an empty body (nocx-2v80t.3.27). Only the newest read for the
+      // entry may say it: an older fetch failing after a newer one was
+      // dispatched is not the block's current truth.
+      if (read.kind === 'absent') return
+      if (read.kind === 'unreadable') {
+        log.warn("nocx: a block's stored rows could not be read", {
+          entry: entryId,
+          reason: read.reason,
+        })
+        if (this._blockRowsInFlight.get(entryId) === fetch) {
+          sb.blockManager.markRowsUnreadable(entryId, read.reason)
+        }
+        return
+      }
+      const rows = read.rows
       // The rows arrive asynchronously, well after the block that owns
       // them has already been laid out — a running block's own live
       // growth is followed inline (controller.ts's own height guard), but
@@ -8423,17 +8441,29 @@ export class TerminalContent extends BasePaneContent {
       }
     }
     const rowsReady = rec.attemptId ? this._ensureBlockRows(rec.attemptId, rec) : Promise.resolve()
+    // Output that could not be read is an ERROR to the model, never empty
+    // text (nocx-2v80t.3.27): a command that printed and a command that
+    // printed nothing must not answer alike, and the cause travels with it.
+    const settle = (entryId: string): void => {
+      if (rec.rowsUnreadable !== undefined) {
+        waiter.reject(
+          new Error(`run: the command's output could not be read — ${rec.rowsUnreadable}`),
+        )
+        return
+      }
+      waiter.resolve({ entryId, ...buildBody() })
+    }
     // A cancelled block completed exactly like any other — its backend
     // history.recorded receipt already ran — so it waits for the stored
     // entry the same way success/failure do; only 'entered'/'unknown' never
     // got one.
     if (rec.status !== 'success' && rec.status !== 'failure' && rec.status !== 'cancelled') {
       this.runEntryIds.delete(waiter.ledgerId)
-      void rowsReady.then(() => waiter.resolve({ entryId: '', ...buildBody() }))
+      void rowsReady.then(() => settle(''))
       return
     }
     void Promise.all([this.storedEntryId(waiter.ledgerId), rowsReady]).then(([entryId]) => {
-      waiter.resolve({ entryId, ...buildBody() })
+      settle(entryId)
     })
   }
 

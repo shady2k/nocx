@@ -11,6 +11,7 @@
 // a person reads their past downwards. Nothing here filters, ranks or
 // merges.
 import type { WSClient } from './ipc'
+import { RpcError } from './dispatcher'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
@@ -152,7 +153,10 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
  * NULL IS TWO DIFFERENT FACTS: retention evicted the artifact, or the store
  * could not be reached. They are collapsed here on purpose — every caller
  * has to say the same thing for both ("this is not here"), and a caller that
- * could tell them apart would still have nothing different to do.
+ * could tell them apart would still have nothing different to do. The one
+ * read for which that is NOT true — a live block's stored rows, where
+ * "nothing is kept" and "it could not be read" are different sentences —
+ * does not come through here (`blockRowsForEntry` below).
  */
 interface FetchedArtifact {
   readonly metadata: LedgerGet['artifacts'][number]
@@ -183,16 +187,62 @@ async function artifactBody(
   return (await readArtifact(client, entryId, mediaType))?.body ?? null
 }
 
-export async function blockRowsForEntry(
-  client: WSClient,
-  entryId: string,
-): Promise<StoredBlockRows | null> {
-  const artifact = await readArtifact(client, entryId, 'application/x-nocx-rows')
-  if (!artifact) return null
+/**
+ * What one read of a block's stored rows found (nocx-2v80t.3.27).
+ *
+ * THREE ANSWERS, NOT TWO, and this is the one read that may not collapse
+ * them the way `readArtifact` does. `absent` is the store saying it keeps
+ * no rows for this block — the keep decision refused it, or the entry has
+ * none — which is a block with nothing to paint. `unreadable` is rows that
+ * exist, or may, and did not reach the renderer: the store could not be
+ * asked, the artifact read failed, or what came back does not parse. A
+ * block that could not be read says so, and an agent run whose output could
+ * not be read reports an error; drawing either as an empty body is what
+ * made a command that printed output indistinguishable from one that
+ * printed nothing, with the cause lost. `reason` is for the log and the
+ * run's error, never parsed.
+ */
+export type BlockRowsRead =
+  | { readonly kind: 'rows'; readonly rows: StoredBlockRows }
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly reason: string }
+
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** The two refusals of `ledger.get` that are the store ANSWERING, not
+ *  failing to: -32602 is "no ledger entry carries id" — the backend reports
+ *  an id no row carries as invalid params, by its own comment never as an
+ *  empty success — which is what History off, or a dropped record, leaves
+ *  behind; -32601 is a backend with no content store wired at all. Both mean
+ *  nothing is kept for this block. Every other failure (a socket that
+ *  closed, a server fault) is a read that did not happen. */
+function storeKeepsNothing(err: unknown): boolean {
+  return err instanceof RpcError && (err.code === -32602 || err.code === -32601)
+}
+
+export async function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+  let artifact: FetchedArtifact
   try {
-    return parseStoredBlockRows(artifact.body, artifact.metadata)
-  } catch {
-    return null
+    let entry: LedgerGet
+    try {
+      entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    } catch (err) {
+      if (storeKeepsNothing(err)) return { kind: 'absent' }
+      throw err
+    }
+    const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
+    if (!metadata) return { kind: 'absent' }
+    const read = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
+    artifact = { metadata, body: read.body }
+  } catch (err) {
+    return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
+  }
+  try {
+    return { kind: 'rows', rows: parseStoredBlockRows(artifact.body, artifact.metadata) }
+  } catch (err) {
+    return { kind: 'unreadable', reason: reasonOf(err) }
   }
 }
 

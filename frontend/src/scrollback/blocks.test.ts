@@ -4492,6 +4492,30 @@ describe('backend-owned block rows', () => {
     ])
   })
 
+  it('a block whose rows could not be read keeps saying so across its freeze, and a later read takes it back (nocx-2v80t.3.27)', () => {
+    const { manager } = newManager()
+    manager.startBlock('printf rows', '/repo', 0)
+    manager.bindAttempt('entry-unreadable')
+    manager.markRowsUnreadable('entry-unreadable', 'socket closed')
+    expect(
+      manager.runningBlock!.el.querySelector('[data-output-unreadable]')?.textContent,
+    ).toContain('could not be read')
+
+    const frozen = manager.freezeBlock(() => undefined, 0, 0)!
+    expect(frozen.el.querySelector('[data-output-unreadable]')).not.toBeNull()
+    // Said once, however many reads failed.
+    manager.markRowsUnreadable('entry-unreadable', 'socket closed again')
+    expect(frozen.el.querySelectorAll('[data-output-unreadable]')).toHaveLength(1)
+
+    manager.applyStoredRows('entry-unreadable', {
+      lines: [{ from: 0, row: row('read at last') }],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    })
+    expect(frozen.rowsUnreadable).toBeUndefined()
+  })
+
   it('does not paint terminal-buffer text when backend history is absent', () => {
     const { manager } = newManager()
     manager.startBlock('echo local', '/repo', 0)

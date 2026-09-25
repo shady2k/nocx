@@ -351,6 +351,13 @@ type SpawnParams struct {
 	// int64 rather than int so the conversion on a 32-bit host cannot
 	// overflow, which D8 asks for by name. Zero means the helper's default.
 	WindowBytes int64 `json:"windowBytes"`
+	// RowBufferBytes is the bound on this session's row buffer: the rows and
+	// markers the helper holds for the coordinator while the wire is slow
+	// (nocx-2v80t.3.36). It is the person's setting, read by the coordinator
+	// at spawn, so a changed value applies to the next session and never a
+	// running one; the helper clamps it to its own ceiling. Past it the block
+	// in flight ends incomplete. Zero means the helper's default.
+	RowBufferBytes int64 `json:"rowBufferBytes"`
 	// Lifecycle is optional for conventional sessions. When present, the
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.
@@ -558,6 +565,9 @@ type SSHSpawnParams struct {
 	// WindowBytes is the bound on this session's output window, clamped by the
 	// helper exactly as SpawnParams' is. Zero means the helper's default.
 	WindowBytes int64 `json:"windowBytes"`
+	// RowBufferBytes is the row buffer's bound, exactly as SpawnParams
+	// carries it (nocx-2v80t.3.36).
+	RowBufferBytes int64 `json:"rowBufferBytes"`
 	// Lifecycle is optional, on the same terms as SpawnParams'.
 	//
 	// WHAT THE HELPER DOES WITH IT, stated rather than implied: it asks the far

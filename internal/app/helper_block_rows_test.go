@@ -20,9 +20,11 @@ type fakeSink struct {
 	rows     []client.OutputRows
 	ends     []client.IntervalEnd
 	clears   []session.ID
-	lost     []lostBoundary
-	lostCh   chan struct{} // signalled on every BlockBoundaryLost, when set
-	answer   func(fromRow uint64, n int) (uint64, bool)
+	// incomplete are the helper's overflow markers, by the row they name.
+	incomplete []uint64
+	lost       []lostBoundary
+	lostCh     chan struct{} // signalled on every BlockBoundaryLost, when set
+	answer     func(fromRow uint64, n int) (uint64, bool)
 }
 
 func (f *fakeSink) AttachBlockRows(sid session.ID) {
@@ -70,6 +72,12 @@ func (f *fakeSink) BlockClearBoundary(sid session.ID) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.clears = append(f.clears, sid)
+}
+
+func (f *fakeSink) BlockOutputIncomplete(_ session.ID, fromRow uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.incomplete = append(f.incomplete, fromRow)
 }
 
 // fakeSource is the attachment's registration half.
@@ -249,4 +257,27 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 func TestANilSinkWiresNothing(t *testing.T) {
 	stop := bindBlockRows(context.Background(), nil, "s1", nil)
 	stop()
+}
+
+// The helper's overflow marker (nocx-2v80t.3.36) reaches the transport as
+// what it is — the block in flight ending incomplete — and never as a row
+// delivery; an ordinary delivery still goes to BlockRowsArrived.
+func TestAnIncompleteMarkerIsNotARowDelivery(t *testing.T) {
+	sink := &fakeSink{answer: func(from uint64, n int) (uint64, bool) { return from + uint64(n), true }} //nolint:gosec // a test's row count
+	src := &fakeSource{}
+	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
+	close(conf.release)
+	stop := bindBlockRowsTo(context.Background(), sink, "s1", src, conf)
+	defer stop()
+
+	src.deliverRows(client.OutputRows{FromRow: 0, Rows: rowsN(2)})
+	src.deliverRows(client.OutputRows{FromRow: 2, Incomplete: true})
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.rows) != 1 {
+		t.Fatalf("the transport received %d row deliveries, want the one ordinary batch", len(sink.rows))
+	}
+	if len(sink.incomplete) != 1 || sink.incomplete[0] != 2 {
+		t.Fatalf("the incomplete marker reached the transport as %v, want once at row 2", sink.incomplete)
+	}
 }

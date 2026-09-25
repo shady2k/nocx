@@ -834,6 +834,9 @@ type WSServer struct {
 	// (nocx-2v80t.3.7, ws_block_rows.go). Constructed always; inert until a
 	// rows source is attached.
 	blockStream *blockStream
+	// blockRowsBufferBytes is the coordinator's row buffer for sessions
+	// attached from now on (SetBlockRowsBufferBytes, nocx-2v80t.3.36).
+	blockRowsBufferBytes atomic.Int64
 	// heldMu guards heldStops, and the lock ORDER is heldMu → lifecycleMu →
 	// the kernel's own lock, because the one read that both arms a hold and
 	// answers what it is for (sessionProtectedForeground.StopTarget) runs

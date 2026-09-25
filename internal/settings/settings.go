@@ -819,6 +819,43 @@ var HistoryOutputCapKB = MustRegisterNumber(NumberSpec{
 	Unit:        "KB",
 })
 
+// HistoryHelperBufferMB and HistoryCoordinatorBufferMB are the two row
+// buffers a streamed block's output passes through (nocx-2v80t.3.36): the
+// helper's, on the machine the shell runs on, holding rows while the
+// connection to nocx is slow; and nocx's own, holding them while the history
+// store is slow. The owner's decision is that these are the person's to set —
+// "we do not decide for the user" — so both are settings, in plain units,
+// per session. A changed value applies to sessions opened after the change.
+// Past either one the command running through the overflow is stored as
+// "Output incomplete", and output is recorded again from the next command.
+//
+// The defaults are sized from the limits they replace: the helper's queue of
+// 256 batches, a batch being about one 80-column screen of cells, is ≈ 20 MB,
+// and nocx's buffer holds what that queue sends.
+var HistoryHelperBufferMB = MustRegisterNumber(NumberSpec{
+	Key:         "history.helperBufferMB",
+	Section:     "History",
+	Label:       "Output buffer on the shell's machine",
+	Description: "How much command output the machine running the shell holds for nocx while the connection is slow, per session. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies to sessions opened after the change.",
+	DataClass:   PublicConfig,
+	Default:     20,
+	Min:         fp(1),
+	Max:         fp(1024),
+	Unit:        "MB",
+})
+
+var HistoryCoordinatorBufferMB = MustRegisterNumber(NumberSpec{
+	Key:         "history.coordinatorBufferMB",
+	Section:     "History",
+	Label:       "Output buffer in nocx",
+	Description: "How much command output nocx holds in memory while saving it to history is slow, per session. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies to sessions opened after the change.",
+	DataClass:   PublicConfig,
+	Default:     20,
+	Min:         fp(1),
+	Max:         fp(1024),
+	Unit:        "MB",
+})
+
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
 // OSC 52 clipboard permission banner. Currently in-memory only
 // (ClipboardGate._suppressed in frontend/src/clipboard.ts); making it

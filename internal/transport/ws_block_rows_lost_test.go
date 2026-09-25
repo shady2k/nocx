@@ -242,8 +242,9 @@ func (s *detachDuringCloseStore) CloseBlockRows(ctx context.Context, in content.
 }
 
 // The same, interleaved: the session's detach lands while the loss is still
-// sealing the block. The detach finds the block unsettled and settles it; the
-// loss's own seal then changes nothing, and it does not say closed again.
+// sealing the block. The detach finds that seal in flight and leaves the
+// block to it (nocx-2v80t.3.37): the loss's seal is the one the block gets,
+// and it is said closed once.
 func TestADetachDuringALostBoundarysSealSaysClosedOnce(t *testing.T) {
 	fence := lifecycleFence(0x67)
 	e, sid, attempt, db := completedWithRows(t, fence)

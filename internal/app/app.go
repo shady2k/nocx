@@ -2088,6 +2088,12 @@ func New(opts ...Option) (*App, error) {
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
 	localOpener.publishScreen = tp.PublishScreenFrame
 	localOpener.blockRows = tp
+	// The two row buffers are the person's settings (nocx-2v80t.3.36): the
+	// helper's rides each spawn, the coordinator's is the transport's for
+	// every session it attaches next; both follow a change for the NEXT
+	// session only.
+	localOpener.rowBuffers = &rowBuffers{}
+	watchRowBuffers(settingsRegistry, localOpener.rowBuffers, tp)
 	localOpener.environmentEntries = envEntryRegistry
 	// The prompt seam a helper's keyboard-interactive challenge needs is the
 	// transport's own connection-password ask — the same one the coordinator's

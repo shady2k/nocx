@@ -1966,10 +1966,14 @@ export class BlockManager {
   private _attemptId: string | null = null
   /** Completions whose LOGICAL freeze has landed and whose block waits for
    *  the backend's block.closed, keyed by entry (the attempt id). Closed by
-   *  `blockClosed` and by NOTHING else: a timer here would be the client
-   *  deciding the end a second time, so an entry the backend never closes
-   *  stays open, which is the honest state of a block whose rows are not
-   *  known to be whole. */
+   *  `blockClosed`, and by exactly one other path: `settleWithoutBackend`,
+   *  when the session that would send block.closed is gone from this pane,
+   *  so nothing ever will. Nothing closes one on a timer — that would be
+   *  the client deciding the end a second time — so while the session is
+   *  this pane's, an entry the backend never closes stays open, which is the
+   *  honest state of a block whose rows are not known to be whole. Clearing
+   *  the scrollback (`clearAll`, a clear boundary) forgets waiters along
+   *  with their blocks; it closes none. */
   private _awaitingClose = new Map<
     string,
     {

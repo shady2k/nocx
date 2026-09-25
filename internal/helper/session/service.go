@@ -924,7 +924,8 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
+		rowBuffer: clampRowBuffer(p.RowBufferBytes), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1101,7 +1102,8 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
+		rowBuffer: clampRowBuffer(p.RowBufferBytes), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1159,6 +1161,29 @@ func shellKindOrAuto(kind proto.SSHShellKind) proto.SSHShellKind {
 	return kind
 }
 
+// The row buffer's bounds (nocx-2v80t.3.36). The value is the person's
+// setting and travels at spawn; these are what the helper does with it.
+// DefaultRowBufferBytes is what a spawn naming none gets, sized from the
+// queue it replaces: 256 batches of one feed's departures, a feed departing
+// about one 80-column screen, is 256 × 24 rows × 80 cells × 40 bytes ≈ 20 MB.
+// MaxRowBufferBytes is the ceiling, because the memory is spent on the
+// machine the helper runs on, whatever the coordinator asks for.
+const (
+	DefaultRowBufferBytes int64 = 20 << 20
+	MaxRowBufferBytes     int64 = 1 << 30
+)
+
+// clampRowBuffer applies the helper's bounds to a spawn's requested buffer.
+func clampRowBuffer(requested int64) int64 {
+	switch {
+	case requested <= 0:
+		return DefaultRowBufferBytes
+	case requested > MaxRowBufferBytes:
+		return MaxRowBufferBytes
+	}
+	return requested
+}
+
 // spawnShape is everything finishSpawn needs that is not the process itself:
 // the identity the session is registered under, the window accounting already
 // reserved, and the lifecycle request (which decides whether a second window is
@@ -1178,10 +1203,12 @@ type spawnShape struct {
 	// xpixel/ypixel are the client's cell metrics in TIOCSWINSZ's whole-area
 	// units, zero meaning unmeasured. They reach the one decode,
 	// cellGeometry, in finishSpawn.
-	xpixel    uint16
-	ypixel    uint16
-	bound     int64
-	reserved  int64
+	xpixel   uint16
+	ypixel   uint16
+	bound    int64
+	reserved int64
+	// rowBuffer is the session's row buffer bound, clamped (nocx-2v80t.3.36).
+	rowBuffer int64
 	lifecycle *proto.LifecycleLaunch
 }
 
@@ -1290,6 +1317,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		attachments:     make(map[proto.AttachmentID]*attachment),
 		rowWake:         make(chan struct{}, 1),
 		rowsDone:        make(chan struct{}),
+		rowBufferBytes:  shape.rowBuffer,
 	}
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.

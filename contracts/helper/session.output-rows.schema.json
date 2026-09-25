@@ -5,7 +5,7 @@
   "description": "One batch of the rows that left a session's screen, streamed from the helper the moment they left it (nocx-2v80t.3.6). The owner's decision gives the helper no copy of departed rows — ghostty's own scrollback is the buffer — so this document is the only place the rows go. The rows ride in the frame contract's row vocabulary (nocx-zg3k3.2.12: a row as its text in column order, a sparse list of the positions whose codepoint count or column footprint departs from the default, and style runs measured in columns), encoded by the runtime's own row encoder, so what a coordinator stores from the stream and what it paints live are one shape. Every row is carried exactly once, in stream order; a batch names the absolute index its first row holds, counting every row the session has ever seen depart, so the order is checkable rather than trusted.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["fromRow", "lostRows", "rows"],
+  "required": ["fromRow", "lostRows", "rows", "incomplete"],
   "properties": {
     "fromRow": {
       "description": "The absolute index of this batch's first row: the count of rows the session had seen depart before it, whether or not any consumer was bound when they did. Indices are the session's, never the consumer's, so a consumer that attaches late continues where the session left off and a confirmed-written mark names a position both ends can check.",
@@ -23,6 +23,10 @@
       "items": {
         "$ref": "https://nocx.local/contracts/session.frame.schema.json#/$defs/row"
       }
+    },
+    "incomplete": {
+      "description": "The helper's one marker that its row buffer overflowed (nocx-2v80t.3.36): the block in flight ends here, incomplete, and nothing the session departs is recorded again until the next command starts after the stream is healthy. The helper keeps this one marker rather than the rows and markers it could not hold, and no end or clear from inside the overflow is sent in their place. A document carrying it has no rows, and fromRow is the first row that was not recorded. False on every ordinary batch.",
+      "type": "boolean"
     }
   }
 }

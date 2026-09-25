@@ -337,6 +337,9 @@ type localHelperOpener struct {
 	// the same reason publishScreen is (helper_block_rows.go). Nil wires
 	// nothing.
 	blockRows blockRowsSink
+	// rowBuffers carries the helper's row buffer setting to each spawn
+	// (nocx-2v80t.3.36). Nil sends zero, the helper's default.
+	rowBuffers *rowBuffers
 	// environmentEntries is the lane -> downlink registry
 	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
 	// reason blockRows is. Nil wires nothing.
@@ -678,6 +681,9 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 				XPixel: cfg.XPixel, YPixel: cfg.YPixel,
 				Lifecycle:      life,
 				IdempotencyKey: claim,
+				// The person's row buffer setting, as it reads now: a
+				// changed value applies to the next pane (nocx-2v80t.3.36).
+				RowBufferBytes: o.rowBuffers.helperBytes(),
 				// THIS backend's own tool endpoint, carried per pane
 				// (nocx-50w7p.18): the pane's tools belong to the coordinator
 				// that opened it, and the daemon cannot know which of its
@@ -907,6 +913,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		}
 	}
 	params := proto.SSHSpawnParams{
+		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
+		RowBufferBytes: o.rowBuffers.helperBytes(),
 		// ConnectionName and ProfileID ride on WireDestination itself now
 		// (internal/ssh's resolveDialEndpoint reads them off the resolved
 		// config), so every destination this coordinator builds — this

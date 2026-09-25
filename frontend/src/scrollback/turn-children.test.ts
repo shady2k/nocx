@@ -20,6 +20,7 @@
 import { afterEach, describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { closeRunningBlock } from '../test-support/block-close'
 
 // Every manager a test built is disposed after it: a block still running when
 // the test ends keeps its 100ms duration ticker alive, and that timer would
@@ -178,7 +179,7 @@ describe('a turn draws the blocks it caused, in order', () => {
     expect(rec.el.querySelector(':scope > .cmd-header [data-block-actions]')).not.toBeNull()
 
     // And it freezes with its own exit status, in place.
-    const frozen = manager.freezeBlock(() => undefined, 0, 3)
+    const frozen = closeRunningBlock(manager, 3)
     expect(frozen).not.toBeNull()
     const cmd = box.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')!
     expect(cmd.dataset.outcome).toBe('failure')

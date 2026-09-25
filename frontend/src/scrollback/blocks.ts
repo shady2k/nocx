@@ -2634,14 +2634,6 @@ export class BlockManager {
       this._tickerDocument = null
     }
   }
-  freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {
-    const rec = this._runningBlock
-    if (!rec) return null
-    const status = this._logicalFreeze(rec, exitCode, exitCode === 0 ? 'success' : 'failure')
-    this._freezeCard(rec, getLine, endLine, status)
-    return rec
-  }
-
   /**
    * Freeze the running block on environment entry (N6): the ssh block freezes
    * with NO exit code, painted as neither success nor failure, and the

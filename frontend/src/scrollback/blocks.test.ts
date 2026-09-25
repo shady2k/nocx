@@ -34,6 +34,7 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AppVisibility } from '../app-visible'
+import { closeRunningBlock } from '../test-support/block-close'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -828,7 +829,7 @@ describe('BlockManager', () => {
       expect(vi.getTimerCount()).toBe(1)
 
       fixedNow = 2_250
-      const frozen = manager.freezeBlock(() => undefined, 10, 0)
+      const frozen = closeRunningBlock(manager)
       expect(frozen?.durationMs).toBe(1_250)
       expect(vi.getTimerCount()).toBe(0)
 
@@ -1036,7 +1037,7 @@ describe('BlockManager', () => {
   })
 
   it('freezeBlock returns null when no running block', () => {
-    const result = manager.freezeBlock(() => undefined, 20, 0)
+    const result = closeRunningBlock(manager)
     expect(result).toBeNull()
   })
 
@@ -1044,7 +1045,7 @@ describe('BlockManager', () => {
     const rec = manager.startBlock('ls', '~', 0, undefined, 'agent')
     expect(rec.author).toBe('agent')
     expect(rec.el.querySelector('.ui-badge[data-author="agent"]')).not.toBeNull()
-    manager.freezeBlock((y) => new BufferLine('out' + y), 1, 0)
+    closeRunningBlock(manager)
     const frozen = manager.blocks[0]
     expect(frozen?.author).toBe('agent')
     // The visual freeze REPLACES the element — the mark must be re-rendered
@@ -1625,7 +1626,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     manager.startBlock('ssh pi@192.168.0.93', '~', 0)
     manager.freezeEntered(() => undefined, 3)
     manager.startBlock('pwd', '~', 5)
-    const done = manager.freezeBlock(() => undefined, 8, 0)
+    const done = closeRunningBlock(manager)
     expect(done!.status).toBe('success')
     expect(done!.exitCode).toBe(0)
     expect(done!.el.dataset.outcome).toBe('success')
@@ -2524,7 +2525,7 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('true', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
-    manager.freezeBlock(() => undefined, 2, 0)
+    closeRunningBlock(manager)
 
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
     manager.dispose()
@@ -2535,7 +2536,7 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('sleep 5', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
-    manager.freezeBlock(() => undefined, 2, 0)
+    closeRunningBlock(manager)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
     manager.dispose()
@@ -2767,7 +2768,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     const { manager } = newManager()
     const answer = manager.addAnswerBlock('question?', '/')
     manager.startBlock('ls', '~', 0)
-    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    const frozen = closeRunningBlock(manager)
     expect(answer.el.dataset.blockKind).toBe('ask')
     expect(frozen!.el.dataset.blockKind).toBe('command')
     // The visible difference in the flow: the ask block's header names its
@@ -3116,7 +3117,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       lostRows: 0,
       truncated: null,
     })
-    const rec = manager.freezeBlock(() => undefined, 0, 0)!
+    const rec = closeRunningBlock(manager)!
     clickMenuItem(rec.el, 'Copy output')
     expect(copied[0]).toBe('hi\n')
     clickMenuItem(rec.el, 'Copy all')
@@ -3201,7 +3202,7 @@ describe('no finished block renders an ask control (nocx-4wtlh)', () => {
     inner.appendChild(xtermContainer)
     const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
     manager.startBlock('ls', '~', 0)
-    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    const frozen = closeRunningBlock(manager)
     expect(frozen).not.toBeNull()
     expect(frozen!.el.querySelector('.cmd-ask-btn')).toBeNull()
     const answer = manager.addAnswerBlock('a question', '/')
@@ -3217,7 +3218,7 @@ it('closes every body-level overflow menu when its pane is hidden', () => {
   const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
   try {
     manager.startBlock('ls', '~', 0)
-    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    const frozen = closeRunningBlock(manager)
     expect(frozen).not.toBeNull()
     const button = frozen!.el.querySelector<HTMLButtonElement>('[data-block-actions]')!
 
@@ -3263,9 +3264,9 @@ it('selectBlock is a non-toggle single-select: the id and the class move togethe
   inner.appendChild(xtermContainer)
   const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
   manager.startBlock('a', '~', 0)
-  const a = manager.freezeBlock((y) => (y === 0 ? new BufferLine('a') : undefined), 0, 0)!.el
+  const a = closeRunningBlock(manager)!.el
   manager.startBlock('b', '~', 0)
-  const b = manager.freezeBlock((y) => (y === 0 ? new BufferLine('b') : undefined), 0, 0)!.el
+  const b = closeRunningBlock(manager)!.el
 
   manager.selectBlock(a)
   expect(a.classList.contains('cmd-block-selected')).toBe(true)
@@ -4446,7 +4447,7 @@ describe('backend-owned block rows', () => {
     })
     expect(blockOutputText(manager.runningBlock!.el)).toBe('first \nsecond')
 
-    const frozen = manager.freezeBlock(() => undefined, 0, 1)!
+    const frozen = closeRunningBlock(manager, 1)!
     expect(blockOutputText(frozen.el)).toBe('first \nsecond')
   })
 
@@ -4524,7 +4525,7 @@ describe('backend-owned block rows', () => {
       manager.runningBlock!.el.querySelector('[data-output-unreadable]')?.textContent,
     ).toContain('could not be read')
 
-    const frozen = manager.freezeBlock(() => undefined, 0, 0)!
+    const frozen = closeRunningBlock(manager)!
     expect(frozen.el.querySelector('[data-output-unreadable]')).not.toBeNull()
     // Said once, however many reads failed.
     manager.markRowsUnreadable('entry-unreadable', 'socket closed again')
@@ -4542,10 +4543,8 @@ describe('backend-owned block rows', () => {
   it('does not paint terminal-buffer text when backend history is absent', () => {
     const { manager } = newManager()
     manager.startBlock('echo local', '/repo', 0)
-    const frozen = manager.freezeBlock(
-      (line) => (line === 0 ? new BufferLine('local') : undefined),
-      0,
-      0,
+    const frozen = closeRunningBlock(manager, 0, (line) =>
+      line === 0 ? new BufferLine('local') : undefined,
     )!
     expect(frozen.el.querySelector('.cmd-output')).toBeNull()
   })

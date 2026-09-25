@@ -6,10 +6,10 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
-import { BufferLine } from './test-helpers'
 import { PetOverlay } from '../pets/overlay'
 import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
 import { XtermRenderer } from '../renderers/xterm'
+import { closeRunningBlock } from '../test-support/block-close'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -181,7 +181,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
     const { controller } = makeRestoredController()
     controller.restorePast([restored('old')])
     controller.blockManager.startBlock('ls', '~', 0)
-    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    closeRunningBlock(controller.blockManager)
     expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(2)
 
     controller.onClearBoundary(null)
@@ -216,7 +216,7 @@ describe('clear empties the whole scrollback, restored blocks included (nocx-0zb
   it('a clear in a pane with NO restored past still clears exactly what it did before', () => {
     const { controller } = makeRestoredController()
     controller.blockManager.startBlock('ls', '~', 0)
-    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    closeRunningBlock(controller.blockManager)
     controller.blockManager.startBlock('clear', '~', 0)
 
     controller.onClearBoundary(null)
@@ -257,7 +257,7 @@ describe('onClearBoundary keeps the block reporting the clear (nocx-2v80t.3.17)'
   it('keeps the running command bound to keepEntryId and removes every other block', () => {
     const { controller } = makeController()
     controller.blockManager.startBlock('make watch', '~', 0)
-    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    closeRunningBlock(controller.blockManager)
     const running = controller.blockManager.startBlock('clear', '~', 0)
     controller.blockManager.bindAttempt('attempt-clear-1')
 
@@ -293,7 +293,7 @@ describe('onClearBoundary keeps the block reporting the clear (nocx-2v80t.3.17)'
   it('a keepEntryId this pane does not own falls back to clearing everything', () => {
     const { controller } = makeController()
     controller.blockManager.startBlock('ls', '~', 0)
-    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    closeRunningBlock(controller.blockManager)
 
     controller.onClearBoundary('some-other-panes-attempt')
 
@@ -1283,14 +1283,24 @@ describe('follow intent survives block geometry changes (nocx-n5q44)', () => {
     geometry.scrollTo.mockClear()
 
     geometry.setScrollHeight(1400)
-    controller.onCommandEnd(
-      () => {
-        observerReports(false)
-        return new BufferLine('tool output')
-      },
-      2,
-      0,
-    )
+    // The real close: the completion, then the backend's block.closed, which
+    // swaps the running element for the frozen one.
+    const running = controller.blockManager.runningBlock!
+    controller.blockManager.bindAttempt('att-tail')
+    const domain = mintDomain({
+      lane: 'l',
+      lifecycle: 'prompt_ready',
+      domain: 'd1',
+      epoch: 1,
+    }) as IntegrationDomain
+    expect(
+      controller.freezeFromAttempt(
+        { id: 'att-tail', domain, state: 'completed', exitCode: 0, fence: 'f'.repeat(64) },
+        2,
+      ),
+    ).toBe(false)
+    controller.blockManager.blockClosed('att-tail')
+    expect(running.el.isConnected).toBe(false)
 
     expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
   })

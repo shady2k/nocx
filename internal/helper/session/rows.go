@@ -5,30 +5,37 @@ package session
 // they leave the screen, under its own lock; this bridge is the RowStream,
 // and its whole job is to move each hand-off to the wire without ever
 // blocking the ingest that produced it and without keeping a copy — the
-// owner's decision gives the helper no second buffer, so a ROW BATCH the
-// pump cannot carry when the time comes is dropped, counted and folded into
-// the LostRows of whichever row batch reaches the wire next.
+// owner's decision gives the helper no second buffer, so what the pump
+// cannot carry when the time comes is shed, counted, and — for rows — stated
+// on the wire as a loss AT THE POSITION it happened.
 //
-// An END MARKER is never one of those drops (nocx-2v80t.3.15, the stage
-// review's blocker): a dropped end marker would leave the coordinator's
-// block open forever, with nothing left in the stream that could ever close
-// it, so enqueueRowEmission always queues one, whatever the queue holds. The
-// queue is therefore a plain FIFO guarded by a mutex rather than a bounded
-// channel — an append never blocks, so the runtime's lock is never held
-// waiting on a slow pump — and only ROW BATCHES are bounded and droppable;
-// an end marker's append is unconditional.
+// The queue is a plain FIFO guarded by a mutex rather than a channel — an
+// append never blocks, so the runtime's lock is never held waiting on a slow
+// pump — and EVERY kind in it is bounded (nocx-2v80t.3.26, AD-10): row
+// batches by maxQueuedRowBatches, end markers and clear boundaries together
+// by maxQueuedMarkers. The two bounds are separate because what each costs
+// to shed is different. A row batch shed is an exact, positioned loss the
+// coordinator records. A marker is a fact with no row count: an end marker
+// closes a command's block (nocx-2v80t.3.15), a clear boundary records an
+// erase (nocx-2v80t.3.17), so markers keep a budget of their own that a
+// flood of rows can never spend — only a flood of MARKERS behind a wedged
+// wire reaches it, and past it a marker is shed, counted and logged rather
+// than growing the queue without limit. Two clear boundaries with nothing
+// between them are one fact, and the second is folded into the first
+// without being counted as a shed.
 //
 // Order is the invariant the bridge exists to keep: the runtime emits rows
-// and end markers in stream order, one FIFO queue preserves it exactly as
+// and markers in stream order, one FIFO queue preserves it exactly as
 // produced, and one pump per session writes the frames in the order it
-// dequeues them. A row can never be attributed to the wrong interval,
-// because nothing between the runtime and the wire reorders, and a dropped
-// row batch cannot open a gap the next delivery does not name: the runtime's
-// own FromRow already advanced past what was dropped, so the drop is
-// reported as an EXACT LostRows count on the next row batch actually sent,
-// never invented and never rounded (ws_block_rows.go's discontinuity check
-// is exact about it — content.AppendBlockRows refuses a FromRow gap whose
-// LostRows does not measure it precisely).
+// dequeues them. A shed batch's loss is attached AT ENQUEUE, to the next
+// batch the bridge accepts — never to the next one it happens to DELIVER,
+// which may have been queued before the drop — so every delivered batch's
+// FromRow minus its LostRows is exactly where the batch before it ended
+// (content.AppendBlockRows refuses a loss that names no gap). A marker
+// accepted while a loss is still owed is preceded by a loss-only carrier at
+// the end of the gap, so the loss lands inside the interval it happened in,
+// and an end marker's closing screen lands after it rather than at a
+// shortened cursor.
 
 import (
 	"encoding/hex"
@@ -50,25 +57,43 @@ import (
 // must reach the coordinator, so the bound bounds only the split.
 const rowsPerFrame = 32
 
-// maxQueuedRowBatches bounds the FIFO's row batches (never its end markers):
-// the same depth the channel this replaces carried, so a queue this deep
-// behind a wedged pump is still the bridge falling a whole queue behind, not
-// a new threshold.
+// maxQueuedRowBatches bounds the FIFO's row batches: the same depth the
+// channel this replaces carried, so a queue this deep behind a wedged pump is
+// still the bridge falling a whole queue behind, not a new threshold.
 const maxQueuedRowBatches = 256
 
+// maxQueuedMarkers bounds the FIFO's end markers and clear boundaries
+// together (nocx-2v80t.3.26). An ordinary session queues one per command
+// end or erase and the pump drains them as fast as rows; sixty-four behind a
+// wedged wire is sixty-four commands that ended with nothing delivered,
+// which is the wire having stopped, not a slow moment. Each accepted marker
+// may bring one loss-only carrier ahead of it, so the queue never holds more
+// than maxQueuedRowBatches + 2*maxQueuedMarkers emissions.
+const maxQueuedMarkers = 64
+
 // rowEmission is one hand-off from the runtime: a row batch, an interval's
-// end marker, or a sighted clear boundary. The rows are the runtime's gift —
-// freshly copied by the emulator's report, owned by whoever takes them next
-// — so the pump marshals them OFF the runtime's lock.
+// end marker, or a sighted clear boundary — or the bridge's own loss-only
+// carrier, which states a shed loss ahead of a marker. The rows are the
+// runtime's gift — freshly copied by the emulator's report, owned by whoever
+// takes them next — so the pump marshals them OFF the runtime's lock.
 type rowEmission struct {
 	end     bool
 	clear   bool
+	carrier bool
 	nonce   sessionruntime.FenceNonce
 	from    uint64
 	lost    uint64
 	rows    []emulator.Row
 	closing []emulator.Row
 }
+
+// batch is whether this emission is a runtime row batch: bounded by
+// maxQueuedRowBatches, and shed as a positioned loss. A carrier is not one —
+// it rides its marker's budget.
+func (em rowEmission) batch() bool { return !em.end && !em.clear && !em.carrier }
+
+// marker is whether this emission spends maxQueuedMarkers.
+func (em rowEmission) marker() bool { return em.end || em.clear }
 
 // rowBridge is the session's sessionruntime.RowStream. All three methods are
 // called with the runtime's lock held: they must not block, must not call
@@ -91,39 +116,60 @@ func (b *rowBridge) ClearBoundary() {
 	b.hs.enqueueRowEmission(rowEmission{clear: true})
 }
 
-// enqueueRowEmission appends one emission to the FIFO, or — for a ROW BATCH
-// only, and only past maxQueuedRowBatches — drops it. Dropping is the honest
-// answer to a wedged wire: blocking would stall the PTY's ingest under the
-// runtime's lock, and keeping a copy is what the owner's decision forbids.
-// It is a COUNTED and RECONCILED answer, never a silent one: the exact
-// number of rows this batch carried joins rowsLostPending, which the next
-// row batch actually delivered reports as its own LostRows (deliverRowEmission),
-// so the coordinator sees precisely the gap the drop opened rather than a
-// FromRow that jumped for no stated reason.
+// enqueueRowEmission appends one emission to the FIFO, or sheds it past its
+// kind's bound. Shedding is the honest answer to a wedged wire: blocking
+// would stall the PTY's ingest under the runtime's lock, and keeping a copy
+// is what the owner's decision forbids. It is a COUNTED answer, never a
+// silent one.
 //
-// An END MARKER, and a CLEAR BOUNDARY beside it, never take this path: they
-// always append, because the bound exists to shed load, and shedding the one
-// frame that closes a command's block — or the one frame recording that its
-// saved lines were erased — would either leave that block open forever with
-// nothing left in the stream that could ever close it (nocx-2v80t.3.15), or
-// leave a real erase unrecorded, which the record-never-deletes design
-// (nocx-zg3k3.10.3) makes the ONLY chance to hide what it bounds. Neither
-// append can block — it is a mutex-guarded slice append, not an I/O wait —
-// so exempting them costs the ingest nothing.
+// A ROW BATCH shed joins rowsLostPending — its rows AND whatever loss it was
+// itself carrying, because every loss spends the indices it names — and
+// the next batch ACCEPTED carries the whole gap as its LostRows. A MARKER
+// accepted while a loss is owed is preceded by a loss-only carrier at the
+// end of the gap (rowStreamNext), so the loss is stated inside the interval
+// it happened in. A MARKER shed past maxQueuedMarkers is counted in
+// markersDropped and logged; nothing on the wire can carry a marker's
+// absence, so the count and the log line are its report.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	s.rowMu.Lock()
-	if !em.end && !em.clear && s.rowQueuedBatches >= maxQueuedRowBatches {
-		s.rowMu.Unlock()
-		s.rowsDropped.Add(1)
-		s.rowsLostPending.Add(uint64(len(em.rows))) //nolint:gosec // a row count, not a byte count
-		s.log.Warn("session rows not streamed: the bridge queue is full",
-			"session", s.id.Session, "fromRow", em.from, "rowsDropped", len(em.rows),
-			"droppedBatchesTotal", s.rowsDropped.Load())
-		return
-	}
-	s.rowQueue = append(s.rowQueue, em)
-	if !em.end && !em.clear {
+	switch {
+	case em.batch():
+		s.rowStreamNext = em.from + uint64(len(em.rows)) // #nosec G115 -- len is never negative
+		if s.rowQueuedBatches >= maxQueuedRowBatches {
+			s.rowsLostPending += em.lost + uint64(len(em.rows)) // #nosec G115 -- len is never negative
+			pending := s.rowsLostPending
+			s.rowMu.Unlock()
+			s.rowsDropped.Add(1)
+			s.log.Warn("session rows not streamed: the bridge queue is full",
+				"session", s.id.Session, "fromRow", em.from, "rowsDropped", len(em.rows),
+				"lostPending", pending, "droppedBatchesTotal", s.rowsDropped.Load())
+			return
+		}
+		em.lost += s.rowsLostPending
+		s.rowsLostPending = 0
+		s.rowQueue = append(s.rowQueue, em)
 		s.rowQueuedBatches++
+	case em.clear && s.rowsLostPending == 0 && len(s.rowQueue) > 0 && s.rowQueue[len(s.rowQueue)-1].clear:
+		// The same erase twice with nothing between: one fact, already
+		// queued. Folding it sheds nothing.
+		s.rowMu.Unlock()
+		return
+	case s.rowQueuedMarkers >= maxQueuedMarkers:
+		s.rowMu.Unlock()
+		s.markersDropped.Add(1)
+		s.log.Warn("session marker not streamed: the bridge's marker budget is full",
+			"session", s.id.Session, "endMarker", em.end, "clearBoundary", em.clear,
+			"endRow", em.from, "droppedMarkersTotal", s.markersDropped.Load())
+		return
+	default:
+		if s.rowsLostPending > 0 {
+			s.rowQueue = append(s.rowQueue, rowEmission{
+				carrier: true, from: s.rowStreamNext, lost: s.rowsLostPending,
+			})
+			s.rowsLostPending = 0
+		}
+		s.rowQueue = append(s.rowQueue, em)
+		s.rowQueuedMarkers++
 	}
 	s.rowMu.Unlock()
 	// A buffered wake of one: a pending signal already says "the queue is
@@ -147,8 +193,11 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 	em := s.rowQueue[0]
 	s.rowQueue[0] = rowEmission{}
 	s.rowQueue = s.rowQueue[1:]
-	if !em.end && !em.clear {
+	switch {
+	case em.batch():
 		s.rowQueuedBatches--
+	case em.marker():
+		s.rowQueuedMarkers--
 	}
 	return em, true
 }
@@ -227,15 +276,12 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		}
 		return
 	}
-	// LostRows carries two facts folded into one count, both exact: the
-	// runtime's own em.lost (a struck feed immediately before em.from) and
-	// whatever the bridge itself dropped since the last row batch it
-	// actually delivered (rowsLostPending, swapped and cleared here so a
-	// drop is reported exactly once, on the very next delivery). Both name
-	// the same gap — rows the coordinator's FromRow arithmetic must account
-	// for or refuse the delivery as discontinuous — so they add.
-	lost := em.lost + s.rowsLostPending.Swap(0)
-	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: lost}
+	// LostRows carries two facts folded into one count, both spending the
+	// indices they name: the runtime's own loss (a struck feed immediately
+	// before em.from) and whatever the bridge shed between the batch
+	// before this one and this one — attached at ENQUEUE, so it is this
+	// batch's gap and no other's (enqueueRowEmission).
+	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: em.lost}
 	for start := 0; start <= len(em.rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
 		if stop > len(em.rows) {

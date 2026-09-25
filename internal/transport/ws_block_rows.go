@@ -44,6 +44,7 @@ import (
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -233,6 +234,15 @@ func splitPendingRowsAt(deliveries []pendingRows, endRow uint64) (before, after 
 	for _, delivery := range deliveries {
 		deliveryEnd := delivery.from + uint64(len(delivery.rows)) // #nosec G115 -- row count arithmetic
 		switch {
+		case len(delivery.rows) == 0:
+			// A loss-only delivery sits at the END of the gap it names, so
+			// one AT the end row is a hole inside the interval that end
+			// closes — its tail — never the next interval's (nocx-2v80t.3.26).
+			if delivery.from <= endRow {
+				before = append(before, delivery)
+			} else {
+				after = append(after, delivery)
+			}
 		case delivery.from >= endRow:
 			after = append(after, delivery)
 		case deliveryEnd <= endRow:
@@ -402,8 +412,15 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) {
 // confirmed and dropped; rows of a kept block are appended first; a store
 // failure is the one answer that withholds the confirmation, so the helper's
 // mark never claims bytes the store does not hold.
+//
+// A delivery with no rows and a loss is a LOSS-ONLY delivery
+// (nocx-2v80t.3.26): the helper's statement of a hole with nothing after it —
+// at the very end of an interval, or where the bridge dropped rows ahead of
+// an end marker. It takes the same path as any other delivery, so the loss
+// reaches the block's summary and the block's cursor moves to the end of the
+// gap, where the closing screen then lands.
 func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool) {
-	if len(rows) == 0 {
+	if len(rows) == 0 && lost == 0 {
 		return 0, false
 	}
 	bs := s.blockStream
@@ -527,9 +544,12 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Lock()
 	block.rows = writtenUpTo
 	bs.mu.Unlock()
-	s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
-		EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
-	})
+	if len(rows) > 0 {
+		// A loss-only delivery stored no row, so nothing grew.
+		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+			EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
+		})
+	}
 	return writtenUpTo, true
 }
 
@@ -619,19 +639,28 @@ type blockClearedParams struct {
 // (nocx-2v80t.3.17): the store records the cursor an ordinary read applies —
 // the record itself is never touched (nocx-zg3k3.10.3's decision) — and the
 // attached client is told to remove every block it currently shows except
-// the one whose interval the erase happened inside, if one is open. Without
-// a store, or without a block to bound, the client is still told: the LIVE
-// removal is not conditioned on the durable half succeeding, because a user
-// who just watched their screen clear must not go on looking at blocks the
-// product itself just erased.
+// the one whose interval the erase happened inside, if one is open.
+//
+// The client is told ONLY what the store now says (nocx-2v80t.3.26): a live
+// removal the durable half did not record would be undone by the next
+// reconnect, which reads the same cursor through ledger.query and would show
+// every block the removal hid — the two halves disagreeing about what is
+// visible, the one thing block.cleared's contract says they never do. So a
+// failed write is announced to nobody: the client goes on showing what a
+// reload would show, and the failure is logged where the product's own log
+// carries it. With no store wired at all there is no read-time half to
+// disagree with, and the live removal stands alone.
 func (s *WSServer) BlockClearBoundary(sid session.ID) {
+	// Owner: this stream, inside the helper's clear-boundary callback.
+	// Closing event: the one store write below, nothing held past it — the
+	// same shape BlockRowsArrived's own AppendBlockRows call has.
+	ctx := log.WithLogger(context.Background(), s.log)
 	if store := s.blockStore(); store != nil {
-		// Owner: this stream, inside the helper's clear-boundary callback.
-		// Closing event: the one store write below, nothing held past it —
-		// the same shape BlockRowsArrived's own AppendBlockRows call has.
-		if _, err := store.RecordClearBoundary(context.Background(),
+		if _, err := store.RecordClearBoundary(ctx,
 			content.RecordClearBoundary{SessionID: string(sid)}); err != nil {
-			s.log.Warn("clear boundary not recorded", "session", sid, "error", err)
+			log.From(ctx).Warn("clear boundary not recorded; the client is not told it happened",
+				"session", sid, "error", err)
+			return
 		}
 	}
 	bs := s.blockStream
@@ -1201,9 +1230,11 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 		bs.mu.Lock()
 		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
 		bs.mu.Unlock()
-		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
-			EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
-		})
+		if len(delivery.rows) > 0 {
+			s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
+			})
+		}
 		confirmPendingRows(confirm, delivery)
 	}
 	next := bs.takePendingRows(sid, block.attempt)

@@ -27,7 +27,11 @@ import "github.com/shady2k/nocx/internal/emulator"
 // by contract (emulator.Terminal.DepartedRows). One struck feed reads as
 // lost=1 immediately before FromRow; an ordinary feed carries none. The
 // exact-row spelling of this field would be a manufactured count, and no
-// count is manufactured here.
+// count is manufactured here. The count SPENDS the index it names
+// (nocx-2v80t.3.26): FromRow minus LostRows is exactly where the batch before
+// ended, so a consumer holds the hole to the position it happened at, and a
+// batch with no rows and a loss is how a hole at an interval's very end is
+// stated — at the position the interval's end marker then names.
 type RowStream interface {
 	// OutputRows carries one feed's departed rows, oldest first, with the
 	// absolute index of the first and the struck-feed count immediately
@@ -55,8 +59,8 @@ type RowStream interface {
 }
 
 // DepartedRowCount is how many departed rows this session has read off the
-// emulator's report — the absolute index space the stream's FromRow and an
-// end marker's EndRow answer to. It is what the helper checks a
+// emulator's report, plus one index for every struck feed — the absolute
+// index space the stream's FromRow and an end marker's EndRow answer to. It is what the helper checks a
 // coordinator's confirmed-written mark against: a mark naming rows the
 // session never departed would make the next resend skip output nobody
 // holds.

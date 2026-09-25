@@ -402,20 +402,23 @@ type hostSession struct {
 	mu          sync.Mutex
 	subs        map[proto.SubscriberID]*subscriber
 	attachments map[proto.AttachmentID]*attachment
-	// rowMu, rowQueue and rowQueuedBatches are the row bridge's hand-off
-	// (rows.go): the runtime's RowStream appends one emission per drained
-	// feed under rowMu — an append never blocks the caller, unlike a full
-	// channel's send — and the pump below drains them in the same order.
-	// rowQueuedBatches counts the queued emissions that are NOT an
-	// interval's end marker, and is what enqueueRowEmission bounds: an end
-	// marker always appends, whatever the count, because a dropped end
-	// marker leaves the coordinator's block open forever (nocx-2v80t.3.15).
-	// A dropped row batch is counted into rowsLostPending instead, which
-	// the next row batch actually delivered carries as its own LostRows —
-	// the drop is never silent.
+	// rowMu guards the row bridge's hand-off (rows.go): the runtime's
+	// RowStream appends one emission per drained feed under rowMu — an
+	// append never blocks the caller, unlike a full channel's send — and the
+	// pump below drains them in the same order. Every kind in the queue is
+	// bounded (nocx-2v80t.3.26): rowQueuedBatches counts the runtime's row
+	// batches against maxQueuedRowBatches, rowQueuedMarkers the end markers
+	// and clear boundaries against maxQueuedMarkers. rowsLostPending is the
+	// exact count of indices shed batches spanned, owed to the next batch or
+	// marker the bridge ACCEPTS, and rowStreamNext is the index one past the
+	// last batch the runtime handed over, accepted or shed — the position a
+	// loss-only carrier states the owed loss at.
 	rowMu            sync.Mutex
 	rowQueue         []rowEmission
 	rowQueuedBatches int
+	rowQueuedMarkers int
+	rowsLostPending  uint64
+	rowStreamNext    uint64
 	// rowWake wakes the pump when the queue was empty and a new emission
 	// arrived; capacity 1, because a pending wake means "the queue is
 	// non-empty" and coalesces the same way a watermark does — the pump
@@ -424,17 +427,15 @@ type hostSession struct {
 	rowWake chan struct{}
 	// rowsDone ends the pump; rowsConfirmed is the coordinator's
 	// acknowledged "written up to here" mark; rowsDropped counts the
-	// BATCHES the bridge could not queue, and rowsLostPending is the exact
-	// row count they carried, still owed to the next row batch that reaches
-	// the wire (rows.go).
-	rowsDone        chan struct{}
-	rowsConfirmed   uint64
-	rowsDropped     atomic.Uint64
-	rowsLostPending atomic.Uint64
-	writer          *proto.SubscriberID
-	writerAtt       proto.AttachmentID
-	epoch           proto.LeaseEpoch
-	exit            *proto.SessionExitStatus
+	// BATCHES the bridge shed and markersDropped the MARKERS (rows.go).
+	rowsDone       chan struct{}
+	rowsConfirmed  uint64
+	rowsDropped    atomic.Uint64
+	markersDropped atomic.Uint64
+	writer         *proto.SubscriberID
+	writerAtt      proto.AttachmentID
+	epoch          proto.LeaseEpoch
+	exit           *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while

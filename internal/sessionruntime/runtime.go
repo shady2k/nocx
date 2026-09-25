@@ -259,10 +259,11 @@ type Session struct {
 	// tell "nothing left the screen" from "rows were held back".
 	suppressedScreenRows uint64
 	// departedRows is how many departed rows this session has READ off the
-	// emulator's report, in the order it read them. It is the absolute
-	// index space the stream's FromRow and endRow name rows by — the
-	// session's, not any consumer's, so it advances whether or not a row
-	// stream is bound.
+	// emulator's report, in the order it read them, plus one index for every
+	// struck feed (a loss spends the index it names, nocx-2v80t.3.26). It is
+	// the absolute index space the stream's FromRow and endRow name rows by
+	// — the session's, not any consumer's, so it advances whether or not a
+	// row stream is bound.
 	departedRows uint64
 	// screenDepartedRows is how many rows have left the TOP of the screen,
 	// as the emulator reported them — every row departedRows counts, plus

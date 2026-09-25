@@ -1241,8 +1241,11 @@ type OpenBlockOutput struct {
 // the session, not rows in this block — so the store can tell "the next
 // rows" from "a jump": a delivery that starts behind the cursor is a replay
 // and ErrBlockRowsDiscontinuous refuses it, and one that starts ahead must
-// carry the count of rows the emulator pruned in the gap, or the same
-// refusal. LostRows is that count, and the block carries it to its summary.
+// carry exactly the count of indices the gap spans, or the same refusal.
+// LostRows is that count, and the block carries it to its summary. A loss
+// always spends the indices it names, so a LostRows at the cursor itself
+// names no gap and is refused too; a delivery with no rows and a loss is how
+// a hole at an interval's tail is stated, and is recorded (nocx-2v80t.3.26).
 type AppendBlockRows struct {
 	EntryID    string
 	ArtifactID string

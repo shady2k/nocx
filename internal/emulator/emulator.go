@@ -266,16 +266,32 @@ type HistoryPage struct {
 // that was there before.
 type RowTrack interface {
 	// Alive reports whether the row this handle names can still be named at
-	// all. It goes false the instant the row is DESTROYED — an erase, a
-	// reset, or the library's own retention pruning it beyond recall — and
-	// never true again afterward: a destroyed row does not come back, and
-	// nor does its identity. A row that merely reflows, scrolls, or is later
-	// reported by [Terminal.DepartedRows] keeps Alive true throughout,
-	// whatever it now reads: it is the same physical row the whole time.
+	// all. It goes false the instant the row is DISCARDED — a reset, or the
+	// library's own retention pruning it beyond recall — and never true again
+	// afterward: a discarded row does not come back, and nor does its
+	// identity. A row that merely reflows, scrolls, or is later reported by
+	// [Terminal.DepartedRows] keeps Alive true throughout, whatever it now
+	// reads: it is the same physical row the whole time. So does a row an
+	// ordinary erase (CSI 2 J) blanked IN PLACE: its slot is not discarded,
+	// only its content rewritten, and [RowTrack.Row] is how a caller sees that
+	// (nocx-2v80t.3.13).
 	//
 	// A closed terminal answers false, exactly as a destroyed row would: a
 	// terminal that is gone can name nothing.
 	Alive() bool
+	// Row reads the row this handle names as it stands NOW, wherever a
+	// reflow or a scroll has since carried it — on the screen or in the
+	// history. It is the content half of the identity: the handle says which
+	// row, and the read says whether that row still carries what it did, the
+	// one thing an in-place rewrite (an erase, a program drawing over it)
+	// changes without disturbing [RowTrack.Alive].
+	//
+	// A handle whose row is no longer alive, or that was released, answers
+	// [ErrOutOfRange]; a closed terminal answers [ErrClosed]; and while the
+	// alternate screen holds the pane the primary's row is not the screen a
+	// read reaches, so the port answers [ErrUnsupported] rather than read
+	// the wrong buffer. A caller treats every error as "cannot confirm".
+	Row() (Row, error)
 	// Release frees the handle. It is idempotent, and safe to call after the
 	// terminal that created it has closed — the terminal's own close frees
 	// whatever a caller left outstanding, so a caller who also released

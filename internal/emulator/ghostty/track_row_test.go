@@ -2,6 +2,7 @@ package ghostty
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -84,7 +85,8 @@ func TestTrackRowDiesOnAFullReset(t *testing.T) {
 // reports it alive throughout. Content is what changed, and identity alone
 // cannot see that; sessionruntime's reconcilePendingScreenLocked
 // (observation.go, nocx-2v80t.3.10) is what closes that gap, by re-reading
-// content when geometry has not moved since capture.
+// the row's content through the handle (RowTrack.Row, nocx-2v80t.3.13 —
+// TestTrackRowReadsAPlainEraseAsBlank).
 func TestTrackRowStaysAliveThroughAPlainErase(t *testing.T) {
 	term := departedTerm(t, 80, 24)
 	if _, err := term.Ingest([]byte("hello-row\r\n")); err != nil {
@@ -164,5 +166,189 @@ func TestTrackRowOnAClosedTerminalIsRefused(t *testing.T) {
 	term.Close()
 	if _, err := term.TrackRow(0); !errors.Is(err, emulator.ErrClosed) {
 		t.Fatalf("TrackRow on a closed terminal = %v, want %v", err, emulator.ErrClosed)
+	}
+}
+
+// trackedText reads a tracked row's visible text, trailing blanks dropped.
+func trackedText(t *testing.T, track emulator.RowTrack) (string, emulator.Row) {
+	t.Helper()
+	row, err := track.Row()
+	if err != nil {
+		t.Fatalf("read the tracked row: %v", err)
+	}
+	var sb strings.Builder
+	for _, c := range row.Cells {
+		sb.WriteString(c.Grapheme)
+	}
+	return strings.TrimRight(sb.String(), " "), row
+}
+
+// TestTrackRowReadsItsRowWhereverAReflowCarriedIt is the content half of the
+// identity (nocx-2v80t.3.13): a read through the handle reaches the same
+// row after a resize re-laid the screen out and after scrolling carried it
+// into the history, and reads what that row carries.
+func TestTrackRowReadsItsRowWhereverAReflowCarriedIt(t *testing.T) {
+	term := departedTerm(t, 80, 24)
+	if _, err := term.Ingest([]byte("first\r\nhello-row\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	track, err := term.TrackRow(1)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	defer track.Release()
+	if got, _ := trackedText(t, track); got != "hello-row" {
+		t.Fatalf("the freshly tracked row reads %q, want %q", got, "hello-row")
+	}
+	for _, g := range []emulator.Geometry{
+		{Cols: 148, Rows: 33, CellWidthPx: 10, CellHeightPx: 20},
+		{Cols: 40, Rows: 10, CellWidthPx: 10, CellHeightPx: 20},
+		{Cols: 80, Rows: 24, CellWidthPx: 10, CellHeightPx: 20},
+	} {
+		if _, err := term.Resize(g); err != nil {
+			t.Fatalf("resize to %dx%d: %v", g.Cols, g.Rows, err)
+		}
+		if got, _ := trackedText(t, track); got != "hello-row" {
+			t.Fatalf("after a reflow to %dx%d the tracked row reads %q, want %q", g.Cols, g.Rows, got, "hello-row")
+		}
+	}
+	// Scroll it off the top: it is in the history now, and still the row.
+	var sb strings.Builder
+	for range 40 {
+		sb.WriteString("filler\r\n")
+	}
+	if _, err := term.Ingest([]byte(sb.String())); err != nil {
+		t.Fatalf("scroll: %v", err)
+	}
+	if got, _ := trackedText(t, track); got != "hello-row" {
+		t.Fatalf("scrolled into the history the tracked row reads %q, want %q", got, "hello-row")
+	}
+}
+
+// TestTrackRowReadsAPlainEraseAsBlank pairs TestTrackRowStaysAliveThroughAPlainErase:
+// the handle stays alive, and its read is what shows the row was rewritten —
+// before a reflow and after one.
+func TestTrackRowReadsAPlainEraseAsBlank(t *testing.T) {
+	term := departedTerm(t, 80, 24)
+	if _, err := term.Ingest([]byte("hello-row\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	track, err := term.TrackRow(0)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	defer track.Release()
+	if _, err := term.Ingest([]byte("\x1b[H\x1b[2J")); err != nil {
+		t.Fatalf("erase: %v", err)
+	}
+	if got, _ := trackedText(t, track); got != "" {
+		t.Fatalf("an erased row reads %q through its handle, want it blank", got)
+	}
+	if _, err := term.Resize(emulator.Geometry{Cols: 148, Rows: 33, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	if got, _ := trackedText(t, track); got != "" {
+		t.Fatalf("an erased row reads %q through its handle after a reflow, want it blank", got)
+	}
+}
+
+// TestTrackRowReadRefusesWhatItCannotName: a discarded row, a released
+// handle, the alternate screen and a closed terminal each answer an error,
+// never a row read from somewhere else.
+func TestTrackRowReadRefusesWhatItCannotName(t *testing.T) {
+	term := departedTerm(t, 80, 24)
+	if _, err := term.Ingest([]byte("hello-row\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	released, err := term.TrackRow(0)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	released.Release()
+	if _, err = released.Row(); !errors.Is(err, emulator.ErrOutOfRange) {
+		t.Fatalf("a released handle's read = %v, want %v", err, emulator.ErrOutOfRange)
+	}
+
+	alt, err := term.TrackRow(0)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	defer alt.Release()
+	if _, err = term.Ingest([]byte("\x1b[?1049h")); err != nil {
+		t.Fatalf("enter the alternate screen: %v", err)
+	}
+	if _, err = alt.Row(); !errors.Is(err, emulator.ErrUnsupported) {
+		t.Fatalf("a read while the alternate screen is active = %v, want %v", err, emulator.ErrUnsupported)
+	}
+	if _, err = term.Ingest([]byte("\x1b[?1049l")); err != nil {
+		t.Fatalf("leave the alternate screen: %v", err)
+	}
+	if got, _ := trackedText(t, alt); got != "hello-row" {
+		t.Fatalf("back on the primary screen the tracked row reads %q, want %q", got, "hello-row")
+	}
+
+	if _, err = term.Ingest([]byte("\x1bc")); err != nil { // RIS
+		t.Fatalf("reset: %v", err)
+	}
+	if _, err = alt.Row(); !errors.Is(err, emulator.ErrOutOfRange) {
+		t.Fatalf("a discarded row's read = %v, want %v", err, emulator.ErrOutOfRange)
+	}
+
+	closing, err := term.TrackRow(0)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	term.Close()
+	if _, err = closing.Row(); !errors.Is(err, emulator.ErrClosed) {
+		t.Fatalf("a read after close = %v, want %v", err, emulator.ErrClosed)
+	}
+	closing.Release()
+}
+
+// TestTrackRowReadAcrossARewrap measures what a reflow does to a tracked
+// row's read when it re-cuts a soft-wrapped line: narrowing, the handle
+// (column 0 of the row) reads the FIRST piece, flagged as wrapped; widening,
+// a row that was a continuation is merged into the line's one row, and the
+// read is that whole row. sessionruntime's reconciliation accepts exactly
+// those shapes as unwritten (stillReadsAsCaptured).
+func TestTrackRowReadAcrossARewrap(t *testing.T) {
+	t.Run("widening merges a continuation into its line", func(t *testing.T) {
+		term := departedTerm(t, 80, 24)
+		line := strings.Repeat("0123456789", 10) // a hundred characters
+		if _, err := term.Ingest([]byte(line + "\r\n")); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+		track, err := term.TrackRow(1)
+		if err != nil {
+			t.Fatalf("TrackRow: %v", err)
+		}
+		defer track.Release()
+		if got, row := trackedText(t, track); got != line[80:] || !row.Continuation {
+			t.Fatalf("the continuation reads %q (continuation=%v), want %q", got, row.Continuation, line[80:])
+		}
+		if _, err := term.Resize(emulator.Geometry{Cols: 148, Rows: 24, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+			t.Fatalf("resize: %v", err)
+		}
+		if got, _ := trackedText(t, track); got != line {
+			t.Fatalf("after widening the tracked continuation reads %q, want the whole line %q", got, line)
+		}
+	})
+
+	term := departedTerm(t, 80, 24)
+	line := strings.Repeat("abcdefghij", 6) // sixty characters
+	if _, err := term.Ingest([]byte(line + "\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	track, err := term.TrackRow(0)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	defer track.Release()
+	if _, err := term.Resize(emulator.Geometry{Cols: 40, Rows: 24, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	got, row := trackedText(t, track)
+	if got != line[:40] || !row.Wrap {
+		t.Fatalf("after narrowing the tracked row reads %q (wrap=%v), want %q wrapped", got, row.Wrap, line[:40])
 	}
 }

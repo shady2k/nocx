@@ -247,16 +247,6 @@ type Session struct {
 	// released the moment the entry is consumed, dropped, or the whole
 	// window is replaced or cleared, so none outlives the window it names.
 	pendingScreen []pendingBoundaryRow
-	// pendingScreenGeom is the geometry [pendingScreen] was captured or last
-	// reconciled at. A settle with no screen (sealPendingWithoutScreenLocked)
-	// reconciles the window against a screen it reads fresh rather than
-	// leaving stale content standing (nocx-2v80t.3.10) — but only when the
-	// geometry has not moved since: a reflow already changes which index
-	// holds which row (departed_window_geometry_test.go), and reconciling
-	// positionally across one would repeat that exact defect. Zero value
-	// compares unequal to any real geometry, so a window nobody has captured
-	// yet is never mistaken for one captured at a zero size.
-	pendingScreenGeom Geometry
 	// pendingEntered is whether a row has matched that window yet. Before it
 	// has, an arriving row that matches nothing is a row from ABOVE the
 	// boundary's screen (history a geometry commit pulled back), not the next

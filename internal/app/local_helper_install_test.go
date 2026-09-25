@@ -47,11 +47,31 @@ import (
 type fakeArtifacts struct {
 	payload []byte
 	err     error
+	// packed, when set, is payload already gzipped and sum its content hash:
+	// the built helper is megabytes, and compressing and hashing it again on
+	// every App.Start cost seconds per test under -race (nocx-2v80t.3.34).
+	packed []byte
+	sum    string
+}
+
+// packArtifacts compresses and hashes payload once, for a payload many tests
+// install.
+func packArtifacts(payload []byte) (fakeArtifacts, error) {
+	f := fakeArtifacts{payload: payload}
+	packed, sum, err := f.Artifact(deploy.Platform{})
+	if err != nil {
+		return fakeArtifacts{}, err
+	}
+	f.packed, f.sum = packed, sum
+	return f, nil
 }
 
 func (f fakeArtifacts) Artifact(deploy.Platform) ([]byte, string, error) {
 	if f.err != nil {
 		return nil, "", f.err
+	}
+	if f.packed != nil {
+		return f.packed, f.sum, nil
 	}
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
@@ -66,6 +86,9 @@ func (f fakeArtifacts) Artifact(deploy.Platform) ([]byte, string, error) {
 }
 
 func (f fakeArtifacts) hash() string {
+	if f.sum != "" {
+		return f.sum
+	}
 	sum := sha256.Sum256(f.payload)
 	return hex.EncodeToString(sum[:])
 }

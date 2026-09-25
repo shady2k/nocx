@@ -52,7 +52,7 @@ import (
 
 var (
 	helperBuildOnce sync.Once
-	builtHelper     []byte
+	builtHelper     fakeArtifacts
 	helperBuildErr  error
 )
 
@@ -84,12 +84,17 @@ func realHelperArtifacts(t *testing.T) fakeArtifacts {
 			helperBuildErr = errors.New(string(out))
 			return
 		}
-		builtHelper, helperBuildErr = os.ReadFile(bin) // #nosec G304 — this test's own build output
+		raw, err := os.ReadFile(bin) // #nosec G304 — this test's own build output
+		if err != nil {
+			helperBuildErr = err
+			return
+		}
+		builtHelper, helperBuildErr = packArtifacts(raw)
 	})
 	if helperBuildErr != nil {
 		t.Fatalf("building cmd/nocx-helper: %v", helperBuildErr)
 	}
-	return fakeArtifacts{payload: builtHelper}
+	return builtHelper
 }
 
 // newLocalPaneApp boots the shipped composition root over an isolated home,

@@ -10,7 +10,7 @@
 
 import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
-import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockActions } from './blocks'
+import { BlockManager, type BlockRecord, type RunningBlockActions } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { StoredBlockRows } from './block-rows'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
@@ -709,23 +709,6 @@ export class ScrollbackController {
       windowPet()?.attendTo(author)
       this.setRunning()
     })
-  }
-
-  /**
-   * Called on OSC 133 D: freeze the block. The boundary is the runtime's
-   * authenticated completion (ADR-0024 §7); this marker path paints the
-   * same verdict without reading the grid.
-   * @param getLine Accessor for xterm buffer lines — the durable capture
-   *   reads the rows the boundary fixes.
-   * @param endLine Absolute buffer line of the OSC 133 D marker.
-   * @param exitCode Optional exit code from the D payload.
-   */
-  onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
-    const followIntent = this._followIntent()
-    const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
-    if (rec) {
-      this._finishFreeze(rec, followIntent)
-    }
   }
 
   // ── the backend's clear boundary (nocx-2v80t.3.17) ───────────────────

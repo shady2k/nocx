@@ -97,6 +97,7 @@ import { BufferLine } from './scrollback/test-helpers'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource, BranchRequest } from './where/branch-source'
 import type { FilesOpenResult } from './generated/files.open'
+import { closeRunningBlock } from './test-support/block-close'
 
 const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
 vi.mock('./capability', async () => {
@@ -10810,7 +10811,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       scrollback.beginBlock('top', '~', 0)
       scrollback.blockManager.bindAttempt('att-run')
-      scrollback.blockManager.freezeBlock(() => undefined, 0, 0)
+      closeRunningBlock(scrollback.blockManager)
       const renderer = rendererOf(content)
       renderer._fireBufferChange('alternate')
       renderer._fireWriteParsed()
@@ -11344,7 +11345,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       manager.startBlock(command, '~', 0)
       manager.bindAttempt(`att-chord-${manager.blocks.length}`)
       const lines = output.map((t) => new BufferLine(t))
-      const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
+      const frozen = closeRunningBlock(manager, 0, (y) => lines[y])
       expect(frozen).not.toBeNull()
       return frozen!.el
     }

@@ -24,14 +24,254 @@
       "symbol": "AuthMethodEditor"
     },
     {
-      "kind": "types",
-      "file": "src/authentication-editor.tsx",
-      "symbol": "AuthMethodEditorProps"
-    },
-    {
       "kind": "exports",
       "file": "src/connections.tsx",
       "symbol": "sourceLabel"
+    },
+    {
+      "kind": "exports",
+      "file": "src/password-editor.tsx",
+      "symbol": "generatePassword"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ports-client.ts",
+      "symbol": "PortsClient"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "isRecallShortcut"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "MIN_USEFUL_ROWS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "nextScope"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "SCOPE_LABELS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/renderers/theme-adapter.ts",
+      "symbol": "resolveCssToken"
+    },
+    {
+      "kind": "exports",
+      "file": "src/renderers/theme-bootstrap.ts",
+      "symbol": "cacheThemeId"
+    },
+    {
+      "kind": "exports",
+      "file": "src/renderers/theme-bootstrap.ts",
+      "symbol": "STORAGE_KEY"
+    },
+    {
+      "kind": "exports",
+      "file": "src/secret-kind.ts",
+      "symbol": "KIND_LOUDNESS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/secret-reference.ts",
+      "symbol": "REFERENCE_RE"
+    },
+    {
+      "kind": "exports",
+      "file": "src/settings.tsx",
+      "symbol": "keyToDomId"
+    },
+    {
+      "kind": "exports",
+      "file": "src/shell-highlight.ts",
+      "symbol": "verdictForCommand"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ssh-transition.ts",
+      "symbol": "isSshPlan"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "AcceptedSnapshot"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "applyAcceptedSnapshot"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "canResetSetting"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "createBannerState"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "createMirror"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "createProfileLists"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "createSidebarState"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "monotonicRevisionPolicy"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "reconnectRevisionPolicy"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "recordSaveOutcome"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/index.ts",
+      "symbol": "setProfileLists"
+    },
+    {
+      "kind": "exports",
+      "file": "src/state/settings-model.ts",
+      "symbol": "AcceptedSnapshot"
+    },
+    {
+      "kind": "exports",
+      "file": "src/submit.ts",
+      "symbol": "isSealedError"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/index.ts",
+      "symbol": "PauseIcon"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/index.ts",
+      "symbol": "PlayIcon"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PauseIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PlayIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/unresolved-redactions.ts",
+      "symbol": "hasUnresolved"
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/block.cleared.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/block.grew.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.bind.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.close.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.open.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/open.helperConsent.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/panes.move.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/profiles.effective.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/secrets.saveKeyPassphrase.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/secrets.savePassword.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/vault.createSecret.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/vault.deleteSecret.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/vault.renameSecret.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/vault.replaceSecret.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/vault.unlockRequest.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/ui/overlay/index.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "types",
+      "file": "src/authentication-editor.tsx",
+      "symbol": "AuthMethodEditorProps"
     },
     {
       "kind": "types",
@@ -52,21 +292,6 @@
       "kind": "types",
       "file": "src/generated/backup.restore.ts",
       "symbol": "ProfileRef"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/block.cleared.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/block.closed.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/block.grew.ts",
-      "symbol": ""
     },
     {
       "kind": "types",
@@ -135,28 +360,8 @@
     },
     {
       "kind": "types",
-      "file": "src/generated/history.record.ts",
-      "symbol": "Redaction"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/ledger.bind.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "types",
-      "file": "src/generated/ledger.blockRows.ts",
-      "symbol": "Cell"
-    },
-    {
-      "kind": "types",
       "file": "src/generated/ledger.blockRows.ts",
       "symbol": "Color"
-    },
-    {
-      "kind": "types",
-      "file": "src/generated/ledger.blockRows.ts",
-      "symbol": "Row"
     },
     {
       "kind": "types",
@@ -167,11 +372,6 @@
       "kind": "types",
       "file": "src/generated/ledger.blockRows.ts",
       "symbol": "Style"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/ledger.close.ts",
-      "symbol": ""
     },
     {
       "kind": "types",
@@ -199,11 +399,6 @@
       "symbol": "Redaction"
     },
     {
-      "kind": "files",
-      "file": "src/generated/ledger.open.ts",
-      "symbol": ""
-    },
-    {
       "kind": "types",
       "file": "src/generated/ledger.query.ts",
       "symbol": "Entry"
@@ -214,39 +409,14 @@
       "symbol": "Redaction"
     },
     {
-      "kind": "files",
-      "file": "src/generated/open.helperConsent.ts",
-      "symbol": ""
-    },
-    {
       "kind": "types",
       "file": "src/generated/panes.create.ts",
       "symbol": "Pane"
     },
     {
-      "kind": "files",
-      "file": "src/generated/panes.move.ts",
-      "symbol": ""
-    },
-    {
       "kind": "types",
       "file": "src/generated/panes.setCwd.ts",
       "symbol": "Pane"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/profiles.effective.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/secrets.saveKeyPassphrase.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/secrets.savePassword.ts",
-      "symbol": ""
     },
     {
       "kind": "types",
@@ -282,31 +452,6 @@
       "kind": "types",
       "file": "src/generated/tabs.reorder.ts",
       "symbol": "Tab"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/vault.createSecret.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/vault.deleteSecret.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/vault.renameSecret.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/vault.replaceSecret.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/vault.unlockRequest.ts",
-      "symbol": ""
     },
     {
       "kind": "types",
@@ -350,23 +495,8 @@
     },
     {
       "kind": "types",
-      "file": "src/history-client.ts",
-      "symbol": "HistoryRecordParams"
-    },
-    {
-      "kind": "types",
       "file": "src/input-target.ts",
       "symbol": "SubmitContext"
-    },
-    {
-      "kind": "exports",
-      "file": "src/password-editor.tsx",
-      "symbol": "generatePassword"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ports-client.ts",
-      "symbol": "PortsClient"
     },
     {
       "kind": "types",
@@ -444,44 +574,9 @@
       "symbol": "DraftSnapshot"
     },
     {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "MIN_USEFUL_ROWS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "SCOPE_LABELS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "isRecallShortcut"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "nextScope"
-    },
-    {
       "kind": "types",
       "file": "src/renderers/theme-adapter.ts",
       "symbol": "TerminalToken"
-    },
-    {
-      "kind": "exports",
-      "file": "src/renderers/theme-adapter.ts",
-      "symbol": "resolveCssToken"
-    },
-    {
-      "kind": "exports",
-      "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "STORAGE_KEY"
-    },
-    {
-      "kind": "exports",
-      "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "cacheThemeId"
     },
     {
       "kind": "types",
@@ -492,16 +587,6 @@
       "kind": "types",
       "file": "src/scrollback/serializer.ts",
       "symbol": "AnsiPalette"
-    },
-    {
-      "kind": "exports",
-      "file": "src/secret-kind.ts",
-      "symbol": "KIND_LOUDNESS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/secret-reference.ts",
-      "symbol": "REFERENCE_RE"
     },
     {
       "kind": "types",
@@ -524,19 +609,9 @@
       "symbol": "SettingsChangeParams"
     },
     {
-      "kind": "exports",
-      "file": "src/settings.tsx",
-      "symbol": "keyToDomId"
-    },
-    {
       "kind": "types",
       "file": "src/shell-highlight.ts",
       "symbol": "CommandVerdict"
-    },
-    {
-      "kind": "exports",
-      "file": "src/shell-highlight.ts",
-      "symbol": "verdictForCommand"
     },
     {
       "kind": "types",
@@ -547,16 +622,6 @@
       "kind": "types",
       "file": "src/ssh-transition.ts",
       "symbol": "SshRefusal"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ssh-transition.ts",
-      "symbol": "isSshPlan"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "AcceptedSnapshot"
     },
     {
       "kind": "types",
@@ -614,61 +679,6 @@
       "symbol": "SidebarState"
     },
     {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "applyAcceptedSnapshot"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "canResetSetting"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "createBannerState"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "createMirror"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "createProfileLists"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "createSidebarState"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "monotonicRevisionPolicy"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "reconnectRevisionPolicy"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "recordSaveOutcome"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "setProfileLists"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/settings-model.ts",
-      "symbol": "AcceptedSnapshot"
-    },
-    {
       "kind": "types",
       "file": "src/state/settings-model.ts",
       "symbol": "ResetAllowed"
@@ -704,11 +714,6 @@
       "symbol": "SettingsMirror"
     },
     {
-      "kind": "exports",
-      "file": "src/submit.ts",
-      "symbol": "isSealedError"
-    },
-    {
       "kind": "types",
       "file": "src/suggest/candidate.ts",
       "symbol": "CandidateScope"
@@ -735,41 +740,6 @@
     },
     {
       "kind": "types",
-      "file": "src/ui/button.tsx",
-      "symbol": "ButtonSize"
-    },
-    {
-      "kind": "types",
-      "file": "src/ui/button.tsx",
-      "symbol": "ButtonVariant"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/PauseIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/PlayIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/index.ts",
-      "symbol": "PauseIcon"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/index.ts",
-      "symbol": "PlayIcon"
-    },
-    {
-      "kind": "files",
-      "file": "src/ui/overlay/index.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "types",
       "file": "src/ui/secret-chip.ts",
       "symbol": "SecretChipVariant"
     },
@@ -782,11 +752,6 @@
       "kind": "types",
       "file": "src/ui/tabs.tsx",
       "symbol": "TabItem"
-    },
-    {
-      "kind": "exports",
-      "file": "src/unresolved-redactions.ts",
-      "symbol": "hasUnresolved"
     },
     {
       "kind": "types",

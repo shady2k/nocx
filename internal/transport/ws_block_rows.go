@@ -383,7 +383,11 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 	// on it (ADR-0074 decision 3), and nothing after it can send block.closed
 	// — so it is said here, for each, or the renderer, which finishes a block
 	// on that notification alone, shows it running forever (nocx-2v80t.3.27).
-	for _, closed := range s.blockStream.detach(log.WithLogger(context.Background(), s.log), s.blockStore(), sid) {
+	//
+	// Owner: this stream, on behalf of the detached session.
+	// Closing event: the detach's own seals — nothing is held past them.
+	ctx := log.WithLogger(context.Background(), s.log)
+	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
 	}
 }
@@ -659,9 +663,26 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 		return
 	}
 	if nonce == noFenceNonce {
-		if cur := bs.current[sid]; cur != nil {
+		// The zero nonce is an environment entry's own end, or an end the
+		// helper's row bridge folded past its budget (nocx-2v80t.3.31) — no
+		// longer rare. It ends the CURRENT block; with none current, the
+		// block queued next is the one whose interval is running, its
+		// promotion held back by an open still in flight, and dropping the
+		// end would leave it open for good (nocx-2v80t.3.32).
+		cur := bs.current[sid]
+		if cur == nil {
+			if queued := bs.queued[sid]; queued != "" {
+				cur = bs.open[sid][queued]
+			}
+		}
+		if cur != nil {
 			attempt, resolved = cur.attempt, true
-			bs.markEnteredLocked(sid, attempt)
+			// Only an entry's end is an entry: the attempt runs on under the
+			// child and must not open a second block. A folded end, settled
+			// without its fence, ends its attempt's block like any other end.
+			if !noFence {
+				bs.markEnteredLocked(sid, attempt)
+			}
 		}
 	} else {
 		attempt, resolved = bs.fences[sid][hexNonce]
@@ -929,6 +950,15 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		delete(bs.open[sid], attempt)
 		delete(bs.fences[sid], hexNonce)
+		// A block settled by any other end than its own fence's — the zero
+		// nonce, a lost boundary — leaves that fence behind with no end ever
+		// coming to take it (nocx-2v80t.3.32); the block's end is its fence's
+		// end too.
+		for f, a := range bs.fences[sid] {
+			if a == attempt {
+				delete(bs.fences[sid], f)
+			}
+		}
 		if queued == attempt {
 			delete(bs.queued, sid)
 		}

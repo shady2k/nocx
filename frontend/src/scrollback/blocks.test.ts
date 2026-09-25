@@ -1972,6 +1972,17 @@ describe("the block's close: the completion and the backend's block.closed (nocx
     expect(closedOnScreen('att-ssh')).toBe(true)
   })
 
+  it('an entered block is labelled where it ran, not where the pane stands by its block.closed', () => {
+    manager.startBlock('ssh far', '~', 0)
+    manager.bindAttempt('att-ssh')
+    manager.freezeEntered(() => undefined, 3)
+    // The far session begins before the local block's close arrives.
+    manager.setLocation('dev@far-host')
+    manager.blockClosed('att-ssh')
+    const header = manager.blockForAttempt('att-ssh')!.el.querySelector('.cmd-header')!
+    expect(header.textContent).not.toContain('far-host')
+  })
+
   it('an environment entry whose block.closed came first closes at once', () => {
     manager.startBlock('ssh host', '~', 0)
     manager.bindAttempt('att-ssh')

@@ -1981,6 +1981,10 @@ export class BlockManager {
       status: FrozenStatus
       getLine: GetLineFn
       endLine: number
+      /** Where the block ran, as the pane stood when it ENDED: by its
+       *  block.closed an environment entry has moved the pane to the far
+       *  host, and the local `ssh` block must not be labelled with it. */
+      location: string
     }
   >()
   /** block.closed notifications that arrived BEFORE their completion — the
@@ -2670,7 +2674,7 @@ export class BlockManager {
       this._freezeCard(rec, getLine, endLine, status)
       return true
     }
-    this._awaitingClose.set(id, { rec, status, getLine, endLine })
+    this._awaitingClose.set(id, { rec, status, getLine, endLine, location: this._location })
     return false
   }
 
@@ -2683,7 +2687,13 @@ export class BlockManager {
     for (const [id, waiting] of [...this._awaitingClose]) {
       this._awaitingClose.delete(id)
       if (!this._blocks.includes(waiting.rec)) continue
-      this._freezeCard(waiting.rec, waiting.getLine, waiting.endLine, waiting.status)
+      this._freezeCard(
+        waiting.rec,
+        waiting.getLine,
+        waiting.endLine,
+        waiting.status,
+        waiting.location,
+      )
     }
     this._closedEarly.clear()
   }
@@ -2721,6 +2731,7 @@ export class BlockManager {
     _getLine: GetLineFn,
     endLine: number,
     status: FrozenStatus,
+    location = this._location,
   ): void {
     rec.endLine = endLine
 
@@ -2729,7 +2740,7 @@ export class BlockManager {
       rec.id,
       rec.command,
       rec.cwd,
-      this._location,
+      location,
       '',
       rec.durationMs ?? 0,
       rec.exitCode,
@@ -2831,7 +2842,13 @@ export class BlockManager {
       this._awaitingClose.delete(entryId)
       // A block cleared since its completion has nothing left to close.
       if (!this._blocks.includes(waiting.rec)) return
-      this._freezeCard(waiting.rec, waiting.getLine, waiting.endLine, waiting.status)
+      this._freezeCard(
+        waiting.rec,
+        waiting.getLine,
+        waiting.endLine,
+        waiting.status,
+        waiting.location,
+      )
       // Settle around it only if no newer command owns the running slot.
       if (this._runningBlock === null) this._onDeferredFreeze?.(waiting.rec)
       return

@@ -45,3 +45,30 @@ _Avoid_: inbox (as a noun for the store), queue, holdings
 One line nocx types into an idle coordinator saying its mailbox has something new. It
 carries a pointer, never a worker's words.
 _Avoid_: notification, prompt, nudge
+
+## The terminal
+
+**Block**:
+One command in a pane's transcript: its header, its outcome and its output
+(ADR-0008). The output comes from the backend, never from what the client's screen
+happened to hold.
+_Avoid_: card, cell, entry (for what a person sees; the history record behind a block is
+an entry)
+
+**Live region**:
+The part of a pane showing the terminal as it is now, painted from the backend's screen
+frames. Blocks sit above it.
+_Avoid_: prompt area, viewport, live block
+
+**Helper**:
+The process that runs where the shell runs — this machine or a remote host — and owns
+the PTY and the terminal emulator (ghostty): the screen, its scrollback and which rows
+left the screen. It keeps no history and no disk.
+_Avoid_: agent, daemon, remote
+
+**Coordinator** (process):
+The nocx backend process on the machine the app connects to. It owns history (the
+encrypted store on its disk), authenticates each command's start and end, and decides
+what may be kept. Not the same thing as a coordinating agent above; say "backend" where
+the two could be confused.
+_Avoid_: server (when a helper is meant), host

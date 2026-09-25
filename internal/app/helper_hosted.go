@@ -75,7 +75,15 @@ type hostedSpawn struct {
 	// (helper_block_rows.go): the rows that leave the screen and each
 	// command's end become the command's block in history. Nil wires nothing.
 	blockRows blockRowsSink
-	log       *slog.Logger
+	// environmentEntries registers this pane's lane against its own
+	// completion downlink (environment_entry.go, nocx-2v80t.3.21), so a
+	// LATER child domain's hello — authenticated on a transport of its own
+	// (an ssh child's forwarded listener, never this pane's own descriptor)
+	// — can still be told down to the SAME runtime that owns this pane's
+	// PTY. Nil wires nothing, the same shape blockRows and publishScreen
+	// already have.
+	environmentEntries *environmentEntryRegistry
+	log                *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -302,6 +310,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	if lifecycleAdapter != nil {
 		out.LifecycleLane = lifecycleAdapter.Lane()
 		out.LifecycleTransport = lifecycleAdapter.TransportID()
+		if h.environmentEntries != nil && downlink != nil {
+			h.environmentEntries.register(out.LifecycleLane, downlink)
+		}
 		var startOnce sync.Once
 		out.StartLifecycle = func() {
 			startOnce.Do(func() {

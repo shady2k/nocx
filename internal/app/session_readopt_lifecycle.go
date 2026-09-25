@@ -169,6 +169,9 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 			reason: ssh.ReasonChannelUnavailable,
 		}
 	}
+	if rp.registry.environmentEntries != nil {
+		rp.registry.environmentEntries.register(adapter.Lane(), downlink)
+	}
 	return lifecycleAdoption{
 		// STARTING and not INTEGRATED, even though the domain is already
 		// Established: "a domain is live" is the kernel's word, and the axis

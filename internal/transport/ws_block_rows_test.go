@@ -771,6 +771,56 @@ func TestBlockIntervalEnded_SealsWhenTheCompletionArrivedFirst(t *testing.T) {
 	}
 }
 
+// THE END, no fence at all: an authenticated environment entry
+// (nocx-2v80t.3.21) has none to carry — the shell that would have printed
+// one is no longer the one holding the terminal — so it resolves to the
+// session's CURRENT block directly rather than waiting for a fence that can
+// never arrive.
+func TestBlockIntervalEnded_NoFenceResolvesToTheCurrentBlock(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("Welcome")}); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+
+	var noFence [32]byte
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 1, []emulator.Row{aStreamRow("password:")})
+
+	kept := streamRows(t, db, attempt)
+	if len(kept) != 2 || kept[1].From != 1 || kept[1].Text != "password:" {
+		t.Fatalf("the sealed block's rows = %+v, want the streamed row and the entry's closing screen", kept)
+	}
+	assertBlockSealed(t, db, attempt)
+
+	deadline := time.Now().Add(wantWithin)
+	if _, err := awaitFrame(e.conn, deadline, isNotification("block.closed")); err != nil {
+		t.Fatalf("no block.closed reached the subscriber: %v", err)
+	}
+}
+
+// With no current block to seal, the zero-nonce end is dropped rather than
+// parked: parking it would wait forever for a fence a zero nonce can never
+// carry, which is exactly the shape nocx-2v80t.3.9's own bound exists to
+// end for an ordinary fence — extended here to the one case that bound
+// cannot reach, because there is no fence to ever resolve at all.
+func TestBlockIntervalEnded_NoFenceWithNoCurrentBlockIsDropped(t *testing.T) {
+	e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	var noFence [32]byte
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, nil)
+
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	parked := len(bs.ends[session.ID(sid)])
+	bs.mu.Unlock()
+	if parked != 0 {
+		t.Fatalf("a fenceless end with nothing to close was parked (%d ends), want dropped", parked)
+	}
+}
+
 // TestBlockGrewAndClosed_OverTheWireConformsToContract is the stage review's
 // finding 4 (nocx-2v80t.3.15): block.grew and block.closed were only ever
 // awaited by their method name (isNotification), never validated against

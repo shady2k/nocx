@@ -1086,6 +1086,11 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// hex nonce and a nullable number — scalars all, and no free-form
 		// []string, which is the rule this list exists to hold.
 		proto.OpLifecycleComplete: true,
+		// The completion downlink's sibling (nocx-2v80t.3.21): an
+		// authenticated environment entry carried DOWN the same way, with no
+		// fence to carry. Its params are a session handle and the runtime
+		// incarnation — scalars all, and no free-form []string.
+		proto.OpLifecycleEntered: true,
 		// The confirmed-written mark's acknowledgement (nocx-2v80t.3.6):
 		// the coordinator advances the helper's one record of what it
 		// holds. Its params are a session handle, a subscriber id and a

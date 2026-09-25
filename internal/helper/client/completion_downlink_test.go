@@ -98,10 +98,12 @@ func capabilityFromHex(t *testing.T, spelling string) lifecycle.Capability {
 // real framing.
 type recordingSession struct {
 	*session.Service
-	mu        sync.Mutex
-	got       []proto.LifecycleCompleteParams
-	rawParams []json.RawMessage
-	seen      chan struct{}
+	mu          sync.Mutex
+	got         []proto.LifecycleCompleteParams
+	rawParams   []json.RawMessage
+	seen        chan struct{}
+	gotEntered  []proto.LifecycleEnteredParams
+	seenEntered chan struct{}
 }
 
 func (r *recordingSession) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
@@ -119,6 +121,18 @@ func (r *recordingSession) Call(ctx context.Context, op string, params json.RawM
 		r.mu.Unlock()
 		r.seen <- struct{}{}
 	}
+	if op == proto.OpLifecycleEntered {
+		var p proto.LifecycleEnteredParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		r.mu.Lock()
+		r.gotEntered = append(r.gotEntered, p)
+		r.mu.Unlock()
+		if r.seenEntered != nil {
+			r.seenEntered <- struct{}{}
+		}
+	}
 	return r.Service.Call(ctx, op, params)
 }
 
@@ -126,6 +140,12 @@ func (r *recordingSession) received() []proto.LifecycleCompleteParams {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]proto.LifecycleCompleteParams(nil), r.got...)
+}
+
+func (r *recordingSession) receivedEntered() []proto.LifecycleEnteredParams {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]proto.LifecycleEnteredParams(nil), r.gotEntered...)
 }
 
 // completionStand builds the helper peer with the real session service over
@@ -280,6 +300,90 @@ func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	}
 	if len(reported) != 0 {
 		t.Fatalf("the normal path reported %v, want a silent report seam", reported)
+	}
+}
+
+// TestObserveEnvironmentEntryRidesDownToTheSpawnedSession pins the downlink's
+// own half of nocx-2v80t.3.21's wire: ObserveEnvironmentEntry — called by
+// internal/app's environmentEntryEmitter, which decorates the ONE
+// lifecyclepub.Emitter every lane's Ingest reports to regardless of which
+// transport carried the frame (a local nested shell's hello shares the
+// parent's own descriptor; an ssh child's hello arrives on a forwarded
+// connection of its own, a listener CompletionObservingKernel never wraps —
+// which is why this is not exercised through Ingest the way Observe is) —
+// reaches the helper session as lifecycle-entered, exactly once, addressing
+// the spawned session, and completes nothing: the running attempt this entry
+// seals a block for stays open for its own real completion (measured in
+// internal/app's
+// TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent:
+// "the parent comes back and completes its own block with the status the
+// ssh client really exited with").
+func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
+	c, rec, _ := completionStand(t, nil)
+	rec.seenEntered = make(chan struct{}, 1)
+	ctx := context.Background()
+
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
+
+	spawned, err := c.Spawn(ctx, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-under-test", Domain: "dom-under-test", Epoch: 7, Capability: hex.EncodeToString(make([]byte, 32))},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	downlink.Bind(spawned.HostSessionID)
+
+	downlink.ObserveEnvironmentEntry()
+
+	select {
+	case <-rec.seenEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the environment entry never reached the helper session")
+	}
+	got := rec.receivedEntered()
+	if len(got) != 1 {
+		t.Fatalf("%d environment entries crossed the wire, want exactly 1", len(got))
+	}
+	if got[0].Session.Session != spawned.HostSessionID.Session || string(got[0].Session.Generation) != spawned.HostSessionID.Generation {
+		t.Fatalf("the entry named %+v, want the spawned session %+v", got[0].Session, spawned.HostSessionID)
+	}
+	wantInc := proto.Incarnation{Session: spawned.HostSessionID.Session, Generation: 1}
+	if got[0].Incarnation != wantInc {
+		t.Fatalf("the entry's incarnation was %+v, want %+v", got[0].Incarnation, wantInc)
+	}
+	if len(rec.received()) != 0 {
+		t.Fatalf("an environment entry sent %d completions down, want none", len(rec.received()))
+	}
+}
+
+// An environment entry observed before Bind is buffered exactly like a
+// completion, and delivered once the session is named — the same ordering
+// race Bind's own doc names, now with two kinds of fact sharing one queue.
+func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testing.T) {
+	c, rec, _ := completionStand(t, nil)
+	rec.seenEntered = make(chan struct{}, 1)
+	ctx := context.Background()
+
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
+	downlink.ObserveEnvironmentEntry()
+
+	spawned, err := c.Spawn(ctx, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-under-test", Domain: "dom-under-test", Epoch: 7, Capability: hex.EncodeToString(make([]byte, 32))},
+	})
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	downlink.Bind(spawned.HostSessionID)
+
+	select {
+	case <-rec.seenEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the buffered environment entry never reached the helper session")
+	}
+	if got := rec.receivedEntered(); len(got) != 1 {
+		t.Fatalf("%d environment entries crossed the wire, want exactly 1", len(got))
 	}
 }
 

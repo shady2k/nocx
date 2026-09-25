@@ -274,6 +274,12 @@ func (r *countingLocalRoute) LifecycleComplete(context.Context, proto.LifecycleC
 	panic("the local carrier was asked to deliver a completion for a binding that is not this machine's")
 }
 
+// LifecycleEntered is hostedCarrier's fourth property (nocx-2v80t.3.21),
+// unreachable here for the same reason as its neighbours above.
+func (r *countingLocalRoute) LifecycleEntered(context.Context, proto.LifecycleEnteredParams) error {
+	panic("the local carrier was asked to deliver an environment entry for a binding that is not this machine's")
+}
+
 func (r *countingLocalRoute) Release(string) {
 	panic("the local carrier was asked to release a connection for a binding that is not this machine's")
 }

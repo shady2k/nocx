@@ -90,6 +90,12 @@ func (b *blockingSender) LifecycleComplete(ctx context.Context, p proto.Lifecycl
 	return nil
 }
 
+// LifecycleEntered is never exercised by this file's schedules — they drive
+// completions only — so it need not share the blocking behaviour above.
+func (b *blockingSender) LifecycleEntered(ctx context.Context, p proto.LifecycleEnteredParams) error {
+	return nil
+}
+
 func (b *blockingSender) delivered() []proto.LifecycleCompleteParams {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -161,6 +167,19 @@ type deadlineSender struct {
 }
 
 func (d *deadlineSender) LifecycleComplete(ctx context.Context, _ proto.LifecycleCompleteParams) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if at, ok := ctx.Deadline(); ok {
+		d.deadlines = append(d.deadlines, at)
+	} else {
+		d.hadNone++
+	}
+	return nil
+}
+
+// LifecycleEntered records its deadline the same way: this schedule cares
+// about the bound every delivery carries, not which op carries it.
+func (d *deadlineSender) LifecycleEntered(ctx context.Context, _ proto.LifecycleEnteredParams) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if at, ok := ctx.Deadline(); ok {

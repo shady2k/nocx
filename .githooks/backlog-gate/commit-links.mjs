@@ -134,7 +134,15 @@ function main() {
     return 2
   }
 
-  const config = JSON.parse(readFileSync(join(HERE, 'config.json'), 'utf8'))
+  let config
+  try {
+    config = JSON.parse(readFileSync(join(HERE, 'config.json'), 'utf8'))
+  } catch (e) {
+    console.error(
+      `commit-links.mjs: config.json could not be read (${e.code || e.message}); run make connect, which names what is missing`,
+    )
+    return 2
+  }
   const from = Date.parse(config.commitLinksFrom)
   if (!Number.isFinite(from)) {
     console.error('commit-links.mjs: config.json has no readable commitLinksFrom')

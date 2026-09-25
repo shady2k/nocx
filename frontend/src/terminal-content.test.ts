@@ -51,6 +51,7 @@ import {
   lifecycleHandler,
   signalUndeliveredHandler,
   historyRecordedHandler,
+  blockClosedHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -3437,7 +3438,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
           completedAt: '2026-09-15T00:00:00Z',
         },
       })
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-branch')
       expect(branchSource.requests).toHaveLength(2)
       expect(branchSource.requests[1]).toMatchObject({
         sessionId,
@@ -3799,7 +3800,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const recorded = historyRecordedHandler(client)
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
-    const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
@@ -3892,7 +3892,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       // The fence lands and the visual freeze replaces the element. The
       // receipt must be on the NEW element — the one the user is looking at.
-      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-g')
       expect(rec.el.classList.contains('cmd-block-running')).toBe(false)
       await vi.waitFor(() => expect(rec.el.querySelector('.ui-block-receipt')).not.toBeNull())
       expect(
@@ -4140,7 +4140,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       // The shell's fence lands after the output (the nonce row), then the
       // authenticated completion closes the card — with its body.
-      renderer._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -4465,7 +4465,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
 
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const run = await pending
       // THE ENTRY ID IS THE STORE'S, and it is the one completion receipt
       // named (nocx-9sqii). It used to be `String(rec.id)` — the renderer's
@@ -4581,7 +4581,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       // The fence — nothing else — settles the visual boundary; no
       // block.grew or block.closed notification is ever dispatched here.
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const run = await pending
       expect(run.text).toBe('the real output')
     } finally {
@@ -4589,6 +4589,255 @@ describe('the projections consume the kernel through the composition root (ADR-0
       Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
+  })
+
+  // ── the block closes on the backend's block.closed, and on nothing else ──
+  // (nocx-2v80t.3.27, ADR-0066). The renderer's own fence sighting used to
+  // decide when a finished command's block closed: a fence callback that
+  // never came, or a fence in the alternate buffer (ignored), left the
+  // backend's block sealed while the block on screen and an agent run's
+  // completion waited forever.
+  describe("a block closes on the backend's block.closed alone (nocx-2v80t.3.27)", () => {
+    async function runToCompletion(opts: { alternate?: boolean } = {}) {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const run = content.submitAgentCommand('vim notes.txt')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'vim notes.txt',
+        },
+      })
+      // A full-screen program owns the terminal when its command ends.
+      if (opts.alternate) rendererOf(content)._fireBufferChange('alternate')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'c'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      historyRecordedHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        attemptId: 'att-1',
+        maskedCount: 0,
+        maskedKinds: [],
+        entryId: 'e1',
+        source: 'assistant',
+        redactions: [],
+        maskedCommand: 'vim notes.txt',
+        captures: [],
+      })
+      const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+      return { client, run, block, teardown }
+    }
+
+    it('with no fence callback at all, the block finishes when the backend says block.closed', async () => {
+      const { client, run, block, teardown } = await runToCompletion()
+      try {
+        // The block is logically done, and not yet closed on screen: the
+        // backend has not said its rows are whole.
+        expect(block().status).toBe('success')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(true)
+
+        blockClosedHandler(client)('att-1')
+
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        const done = await run
+        expect(done.status).toBe('success')
+        expect(done.exitCode).toBe(0)
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a command that ends inside the alternate buffer still finishes on block.closed', async () => {
+      const { client, run, block, teardown } = await runToCompletion({ alternate: true })
+      try {
+        blockClosedHandler(client)('att-1')
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        expect((await run).status).toBe('success')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('a block.closed that arrives before the completion closes the block the moment the completion lands', async () => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const run = content.submitAgentCommand('true')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'true',
+          },
+        })
+        blockClosedHandler(client)('att-1')
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+        // Rows whole is not the command done: the block keeps running until
+        // the authenticated completion says how it ended.
+        expect(block().status).toBe('running')
+
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'completed',
+            exitCode: 0,
+            fence: 'd'.repeat(64),
+            completedAt: '2026-08-08T12:00:02Z',
+          },
+        })
+        historyRecordedHandler(client)({
+          sessionId: client._sessions[0].sessionId,
+          attemptId: 'att-1',
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          maskedCommand: 'true',
+          captures: [],
+        })
+        expect(block().el.classList.contains('cmd-block-running')).toBe(false)
+        expect((await run).status).toBe('success')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('an agent run on a kept block reports the rows the closing read returned, not the ones it already had', async () => {
+      // The block already holds rows from a block.grew when it completes; an
+      // answer read from those would miss the closing screen.
+      let final = false
+      const rowsBody = (text: string) =>
+        `${JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
+        })}\n`
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          const body = rowsBody(final ? 'closing screen' : 'partial')
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body,
+            truncated: null,
+            byteLen: body.length,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const run = content.submitAgentCommand('make')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+        const grew = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'block.grew',
+        )?.[1] as (params: unknown) => void
+        grew({ entryId: 'att-1', from: 0, count: 1 })
+        const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!
+        await vi.waitFor(() => expect(block().storedRows).toBeDefined())
+
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'completed',
+            exitCode: 0,
+            fence: 'e'.repeat(64),
+            completedAt: '2026-08-08T12:00:02Z',
+          },
+        })
+        historyRecordedHandler(client)({
+          sessionId: client._sessions[0].sessionId,
+          attemptId: 'att-1',
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          maskedCommand: 'make',
+          captures: [],
+        })
+        final = true
+        blockClosedHandler(client)('att-1', true)
+        expect((await run).text).toBe('closing screen')
+      } finally {
+        teardown()
+      }
+    })
   })
 
   // ── a stored-rows read that failed is said, never drawn as empty ──────
@@ -4659,7 +4908,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
         maskedCommand: 'printf the-real-output',
         captures: [],
       })
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const withScrollback = content as unknown as { scrollback: ScrollbackController }
       const block = () => withScrollback.scrollback.blockManager.blockForAttempt('att-1')!.el
       return { run, block, teardown }
@@ -4768,7 +5017,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
         )
 
         fail = false
-        notify('block.closed')({ entryId: 'att-1' })
+        notify('block.closed')({ entryId: 'att-1', kept: true })
         await vi.waitFor(() => expect(blockOutputText(block())).toBe('the real output'))
         expect(block().querySelector('[data-output-unreadable]')).toBeNull()
       } finally {
@@ -4840,7 +5089,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const run = await pending
       expect(run.entryId).toBe('')
       // And the command's own outcome is unaffected: a missing row costs
@@ -4915,7 +5164,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'a'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       await pendingAgent
 
       // The human's command, through the same content's editor: still the
@@ -5083,7 +5332,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       // The shell's fence lands after the output — the sighting the visual
       // boundary resolves on, and the only thing that cuts it (nocx-2v80t.3.2).
-      rendererOf(content)._fireRenderFence({ hex: 'b'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-1')
       const frozen = withScrollback.scrollback.blockManager.blocks[0]
       expect(frozen.status).toBe('failure')
       expect(frozen.exitCode).toBe(1)
@@ -5601,15 +5850,10 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // The first fence lands while the second command runs: the first
       // block freezes with its own exit status, the second stays running,
       // and the live region belongs to the second command.
-      rendererOf(content)._fireRenderFence({
-        hex: 'f'.repeat(64),
-        line: 3,
-        buffer: 'normal',
-      })
+      blockClosedHandler(client)('att-1')
       const firstAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
       expect(firstAfter?.status).toBe('failure')
       expect(firstAfter?.exitCode).toBe(130)
-      expect(firstAfter?.endLine).toBe(3)
       expect(firstAfter?.el.classList.contains('cmd-block-running')).toBe(false)
       const secondAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
       expect(secondAfter?.status).toBe('running')
@@ -12158,7 +12402,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '9'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '9'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-stop-19')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12240,7 +12484,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '7'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '7'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-held-19')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12318,7 +12562,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '5'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '5'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-undelivered-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12460,7 +12704,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '3'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '3'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-state-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12520,7 +12764,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '4'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '4'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-state-20')
       expect(rec.status).toBe('cancelled')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -12593,7 +12837,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '6'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '6'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-retry-21')
       expect(rec.status).toBe('cancelled')
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
       expect(rec.el.dataset.outcome).toBe('cancelled')
@@ -12657,7 +12901,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           fence: '1'.repeat(64),
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: '1'.repeat(64), line: 2, buffer: 'normal' })
+      blockClosedHandler(client)('att-self-19')
       expect(rec.status).toBe('failure')
 
       await vi.waitFor(() => expect(rec.el.classList.contains('cmd-block-running')).toBe(false))
@@ -13706,7 +13950,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-28T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
@@ -13774,7 +14018,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
 
@@ -13827,7 +14071,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:01Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: firstCallFence, line: 4, buffer: 'normal' })
+      blockClosedHandler(client)('att-first')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
       await expect(firstCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
@@ -13878,7 +14122,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:02Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: secondCallFence, line: 5, buffer: 'normal' })
+      blockClosedHandler(client)('att-second')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(false)
       await expect(secondCall).resolves.toEqual(expect.objectContaining({ status: 'success' }))
@@ -14143,11 +14387,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-27T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({
-        hex: commandFence,
-        line: 3,
-        buffer: 'normal',
-      })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
@@ -14226,7 +14466,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-31T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
       const area = scrollbackFor(content).scrollbackArea
@@ -14568,7 +14808,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           completedAt: '2026-08-28T12:00:00Z',
         },
       })
-      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      blockClosedHandler(client)('att-run')
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       const frozen = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
       const afterFreeze = Array.from(inner.children)

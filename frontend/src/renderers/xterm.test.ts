@@ -1,12 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import {
-  parseOsc7,
-  parseOsc133,
-  parseRecoveryFence,
-  parseRenderFence,
-  XtermRenderer,
-} from './xterm'
+import { parseOsc7, parseOsc133, parseRecoveryFence, XtermRenderer } from './xterm'
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -522,28 +516,6 @@ describe('OSC 636 command-existence snapshot', () => {
   })
 })
 
-describe('parseRenderFence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out)', () => {
-  const FENCE = 'ab'.repeat(32) // 64 hex chars, what the shell generates
-
-  it('parses a well-formed fence payload', () => {
-    expect(parseRenderFence(`NOCX_FENCE;${FENCE}`)).toEqual({ hex: FENCE })
-  })
-
-  it('rejects payloads without the NOCX_FENCE; prefix (foreign OSC 1337)', () => {
-    expect(parseRenderFence(`File=name;size=42`)).toBeNull() // iTerm2 file transfer
-    expect(parseRenderFence(`NOCX_IB_READY`)).toBeNull()
-    expect(parseRenderFence('')).toBeNull()
-  })
-
-  it('rejects a non-hex, short, long or empty nonce — only exactly 64 lowercase hex', () => {
-    expect(parseRenderFence(`NOCX_FENCE;deadbeef`)).toBeNull() // 8 chars, not 64
-    expect(parseRenderFence(`NOCX_FENCE;${'g'.repeat(64)}`)).toBeNull()
-    expect(parseRenderFence(`NOCX_FENCE;${'A'.repeat(64)}`)).toBeNull() // uppercase
-    expect(parseRenderFence(`NOCX_FENCE;${FENCE}x`)).toBeNull() // 65 chars
-    expect(parseRenderFence(`NOCX_FENCE;`)).toBeNull()
-  })
-})
-
 describe('parseRecoveryFence (OSC 1337 NOCX_RECOVERY — ADR-0024 decision 8)', () => {
   const NONCE = 'ab'.repeat(32)
 
@@ -561,7 +533,7 @@ describe('parseRecoveryFence (OSC 1337 NOCX_RECOVERY — ADR-0024 decision 8)', 
   })
 })
 
-describe('XtermRenderer fence delivery through the real parser', () => {
+describe('XtermRenderer recovery-fence delivery through the real parser', () => {
   const stubBrowser = () => {
     window.matchMedia = (query: string) => ({
       matches: false,
@@ -590,53 +562,7 @@ describe('XtermRenderer fence delivery through the real parser', () => {
     return r
   }
 
-  const FENCE = 'cd'.repeat(32)
-
-  it('reports the fence and the line it landed on', async () => {
-    const r = await mountRenderer()
-    let seen: { hex: string; line: number } | null = null
-    r.onRenderFence((ev) => {
-      seen = { hex: ev.hex, line: ev.line }
-    })
-
-    // The 133 marker after the 1337 bytes is a stream-order sync point:
-    // writes are async, and the fence callback has no other completion
-    // signal. When the marker lands, the fence before it has been parsed.
-    let markerDone: () => void
-    const marker = new Promise<void>((resolve) => {
-      markerDone = resolve
-    })
-    r.onCommandMarker(() => markerDone())
-
-    r.write(`\x1b]1337;NOCX_FENCE;${FENCE}\x07`)
-    r.write('\x1b]133;A\x07')
-    await marker
-
-    expect(seen).toEqual({ hex: FENCE, line: 0 })
-    r.dispose()
-  })
-
-  it('a malformed or foreign OSC 1337 never fires the callback', async () => {
-    const r = await mountRenderer()
-    const cb = vi.fn()
-    r.onRenderFence(cb)
-
-    let markerDone: () => void
-    const marker = new Promise<void>((resolve) => {
-      markerDone = resolve
-    })
-    r.onCommandMarker(() => markerDone())
-
-    r.write(`\x1b]1337;NOCX_FENCE;deadbeef\x07`) // not 64 hex
-    r.write('\x1b]1337;File=name;size=42\x07') // iTerm2's 1337, not ours
-    r.write('\x1b]133;A\x07')
-    await marker
-
-    expect(cb).not.toHaveBeenCalled()
-    r.dispose()
-  })
-
-  it('delivers a recovery fence through the OSC path — the same handler as the render fence (nocx-u7uh.24)', async () => {
+  it('delivers a recovery fence through the OSC path (nocx-u7uh.24)', async () => {
     const r = await mountRenderer()
     const NONCE = 'ef'.repeat(32)
     const seen: string[] = []
@@ -659,7 +585,6 @@ describe('XtermRenderer fence delivery through the real parser', () => {
     // The completion fence is a different payload kind on the same ident:
     // it must NOT fan out to recovery subscribers.
     seen.length = 0
-    r.onRenderFence(() => {})
     let fenceMarkerDone: () => void
     const fenceMarker = new Promise<void>((resolve) => {
       fenceMarkerDone = resolve

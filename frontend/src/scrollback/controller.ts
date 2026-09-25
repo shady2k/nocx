@@ -91,6 +91,10 @@ export class ScrollbackController {
   private _blockManager: BlockManager
   private _renderer: TerminalRenderer
   private _mode: LiveRegionMode = 'idle'
+  /** A ready prompt asked for the idle layout while a completed block was
+   *  still waiting for its block.closed; applied when the close lands, and
+   *  dropped the moment a command owns the live region again. */
+  private _idleRequested = false
   /**
    * Sticky for the life of the command. Once a program has filled the pane the
    * flag stays set until the next idle or the next command start, so it cannot
@@ -186,11 +190,17 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
-      // A DEFERRED freeze landed inside the manager (the fence's sighting
-      // arrived): settle the block the way a direct freeze does — the pet
+      // A DEFERRED freeze landed inside the manager (the backend's
+      // block.closed met the completion): settle the block the way a direct
+      // freeze does — the pet
       // learns the verdict. Nothing clears: the grid is the frame the
       // backend diffs against (nocx-2v80t.3.3).
-      onDeferredFreeze: (rec) => this._finishFreeze(rec),
+      onDeferredFreeze: (rec) => {
+        this._finishFreeze(rec)
+        // The idle layout a ready prompt asked for while this close was
+        // pending is applied now that nothing is waiting (see setIdle).
+        if (this._idleRequested && this._blockManager.runningBlock === null) this.setIdle()
+      },
       onBlockFrozen: opts.onBlockFrozen,
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
@@ -212,17 +222,6 @@ export class ScrollbackController {
     // deliberate, see the module comment.
     this._renderer.onCellDimsChange?.(() => this._republishCellMetric())
     this._republishCellMetric()
-
-    // ── Render fence rendezvous (nocx-u7uh.8, ADR-0024 §7 carve-out) ────
-    // The renderer reports where the fence landed; the block manager matches
-    // it against the pending authenticated completion. A fence in the
-    // alternate buffer has no scrollback line to serialize — ignored here.
-    // Optional on the renderer: without it, every freeze takes the defined
-    // no-fence path (defer, then settle at the current output end).
-    opts.renderer.onRenderFence?.((ev) => {
-      if (ev.buffer !== 'normal') return
-      this._blockManager.sightFence(ev.hex, ev.line)
-    })
 
     // ── Follow state ─────────────────────────────────────────────────────
     // Whether the end of the live output is on screen. Not "did the last scroll
@@ -273,9 +272,17 @@ export class ScrollbackController {
 
   // ── Live region visibility ────────────────────────────────────────────
 
-  /** Collapse the live region only after its rows belong to the DOM block. */
+  /** Collapse the live region only once no finished block still waits for
+   *  its block.closed: until then its closing rows are in the live terminal
+   *  and not yet in the block, and collapsing would hide them. The request
+   *  is remembered and applied when the close lands (nocx-2v80t.3.27). */
   setIdle(): void {
-    if (this._mode === 'fullscreen' || this._blockManager.visualFreezePending) return
+    if (this._mode === 'fullscreen') return
+    if (this._blockManager.closePending) {
+      this._idleRequested = true
+      return
+    }
+    this._idleRequested = false
     this._mode = 'idle'
     // Both inline heights have to go: running content height and its clip
     // otherwise outrank the idle/fullscreen mode classes.
@@ -291,6 +298,7 @@ export class ScrollbackController {
 
   /** Show live output below the running block. */
   setRunning(): void {
+    this._idleRequested = false
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
     if (entering) this._runningCap = undefined
@@ -611,6 +619,7 @@ export class ScrollbackController {
    * preserves your scrollback (nocx-6w4z).
    */
   enterFullscreen(): void {
+    this._idleRequested = false
     this._mode = 'fullscreen'
     this._runningCap = undefined
     this.xtermLiveViewport.style.height = ''
@@ -1003,7 +1012,7 @@ export class ScrollbackController {
    *  how the command went.
    *
    *  Every freeze path arrives here — the attempt-driven one, the abandoned
-   *  one, the environment entry, the deferred fence. What the settle used to
+   *  one, the environment entry, the deferred close. What the settle used to
    *  do is mostly gone: nothing clears the terminal and the live region
    *  never collapses — the whole surface is the session's terminal now
    *  (nocx-2v80t.3.3), and the rows a command printed stay on it. What
@@ -1026,7 +1035,7 @@ export class ScrollbackController {
       rec.author,
     )
     // And if something is STILL running, the animal goes back to watching it.
-    // A freeze waits on a render fence and a start does not, so the verdict
+    // A freeze waits on the backend's block.closed and a start does not, so the verdict
     // on the last command routinely arrives after the next one has begun;
     // without this the pet stopped attending the moment it answered, and the
     // command actually in flight had nobody watching it.
@@ -1050,13 +1059,11 @@ export class ScrollbackController {
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
   }
 
-  /** The attempt-driven freeze (ADR-0024 §7 projection, bead nocx-u7uh.8):
-   *  the LOGICAL freeze (status, exit code) has already landed on the
-   *  authenticated event; only the VISUAL boundary (which rows belong to
-   *  the block) waits for the matching render fence. When the fence bytes
-   *  have not arrived, this returns false and the live region stays up —
-   *  the manager's onDeferredFreeze settles it on the sighting, and on
-   *  nothing else (nocx-2v80t.3.2). The
+  /** The attempt-driven freeze (ADR-0024 §7 projection): the LOGICAL
+   *  freeze (status, exit code) lands on the authenticated event; the
+   *  VISUAL one waits for the backend's block.closed for the entry. When it
+   *  has not arrived, this returns false — the manager's onDeferredFreeze
+   *  settles it when it does, and on nothing else (nocx-2v80t.3.27). The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const followIntent = this._followIntent()

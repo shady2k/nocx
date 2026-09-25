@@ -13,8 +13,6 @@ import type {
   CommandMarkerCallback,
   CwdCallback,
   DataCallback,
-  RenderFenceCallback,
-  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -207,8 +205,6 @@ export interface RendererMock extends TerminalRenderer {
   _fireClipboardWrite(text: string): void
   /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
   _fireRecoveryFence(hex: string): void
-  /** Fire a render-fence sighting (ADR-0024 §7 carve-out, u7uh.8). */
-  _fireRenderFence(ev: RenderFenceEvent): void
   /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
   _fireData(data: string): void
 }
@@ -221,7 +217,6 @@ export interface RendererMock extends TerminalRenderer {
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const recoverySubs: Array<(hex: string) => void> = []
-  const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
   let snippetChordCb: (() => void) | null = null
   let activeBuffer: 'normal' | 'alternate' = 'normal'
   const mock: Record<string, unknown> = {
@@ -258,9 +253,6 @@ export function createRendererMock(): RendererMock {
     activeBufferKind: vi.fn(() => activeBuffer),
     onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
       recoverySubs.push(cb)
-    }),
-    onRenderFence: vi.fn((cb: RenderFenceCallback) => {
-      fenceSubs.push(cb)
     }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
@@ -368,9 +360,6 @@ export function createRendererMock(): RendererMock {
     /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
     _fireRecoveryFence(hex: string) {
       for (const sub of recoverySubs) sub(hex)
-    },
-    _fireRenderFence(ev: RenderFenceEvent) {
-      for (const sub of fenceSubs) sub(ev)
     },
     /** A keystroke reaching the grid in raw mode — what xterm's onData
      *  fires once stdin is enabled. The real renderer drops these while
@@ -701,6 +690,15 @@ export function lifecycleHandler(
     deliver({ ...params, sessionId })
   }
 }
+/** The backend's block.closed (contracts/block.closed.schema.json): the one
+ *  event a finished command's block closes on (nocx-2v80t.3.27). Tests name
+ *  the entry; `kept` defaults to false — no rows to fetch — so a test that is
+ *  not about stored rows does not have to fake a store read. */
+export function blockClosedHandler(client: ClientFake): (entryId: string, kept?: boolean) => void {
+  const deliver = notificationHandler(client, 'block.closed')
+  return (entryId: string, kept = false): void => deliver({ entryId, kept })
+}
+
 /** The backend-owned history receipt notification. */
 export function historyRecordedHandler(
   client: ClientFake,

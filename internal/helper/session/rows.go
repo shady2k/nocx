@@ -19,10 +19,12 @@ package session
 // closes a command's block (nocx-2v80t.3.15), a clear boundary records an
 // erase (nocx-2v80t.3.17), so markers keep a budget of their own that a
 // flood of rows can never spend — only a flood of MARKERS behind a wedged
-// wire reaches it, and past it a marker is shed, counted and logged rather
-// than growing the queue without limit. Two clear boundaries with nothing
-// between them are one fact, and the second is folded into the first
-// without being counted as a shed.
+// wire reaches it. Past it nothing is dropped (nocx-2v80t.3.31): what
+// follows folds into one overflow record of fixed size, and every end in it
+// still reaches the coordinator — without its fence and closing screen, as
+// an end its block is stored as a gap for — and every clear in it is stated
+// by the last one. Two clear boundaries with nothing between them are one
+// fact, and the second is folded into the first.
 //
 // Order is the invariant the bridge exists to keep: the runtime emits rows
 // and markers in stream order, one FIFO queue preserves it exactly as
@@ -67,9 +69,37 @@ const maxQueuedRowBatches = 256
 // end or erase and the pump drains them as fast as rows; sixty-four behind a
 // wedged wire is sixty-four commands that ended with nothing delivered,
 // which is the wire having stopped, not a slow moment. Each accepted marker
-// may bring one loss-only carrier ahead of it, so the queue never holds more
-// than maxQueuedRowBatches + 2*maxQueuedMarkers emissions.
+// may bring one loss-only carrier ahead of it, and what arrives past the
+// budget folds into ONE overflow record (markerOverflow), so the queue never
+// holds more than maxQueuedRowBatches + 2*maxQueuedMarkers + 1 emissions.
 const maxQueuedMarkers = 64
+
+// markerOverflow is everything the bridge was handed after the marker budget
+// filled, folded into one record of fixed size (nocx-2v80t.3.31). Nothing in
+// it is dropped: it keeps what each kind needs to be STATED on the wire,
+// which is less than the kind itself carried.
+//
+//   - An END keeps only that it happened. Its fence and its closing screen
+//     are what cost memory, and without them it is still a boundary: it is
+//     delivered as an end settled WITHOUT its fence (the zero nonce,
+//     noFence), which the coordinator resolves to the block then current and
+//     stores as a gap — the block says output may be missing, which is true.
+//     The alternative, dropping the end, left that block open until detach
+//     with every later block queued behind it.
+//   - A CLEAR keeps only the LAST one, and which ends came before it: a
+//     later erase hides everything an earlier one hid, so the last clear
+//     between two ends states them all, in its place among the ends.
+//   - ROWS keep their count: every row folded here is shed, and the whole
+//     gap is stated once, ahead of the ends, at the end of the gap
+//     (rowStreamNext), so the store's arithmetic still names it exactly.
+type markerOverflow struct {
+	lost       uint64
+	next       uint64
+	endRow     uint64
+	endsBefore uint64
+	clear      bool
+	endsAfter  uint64
+}
 
 // rowEmission is one hand-off from the runtime: a row batch, an interval's
 // end marker, or a sighted clear boundary — or the bridge's own loss-only
@@ -87,12 +117,17 @@ type rowEmission struct {
 	closing []emulator.Row
 	// noFence is an end marker's settledWithoutFence (nocx-2v80t.3.29).
 	noFence bool
+	// overflow, when set, makes this emission the queue's one fold of what
+	// arrived past the marker budget (nocx-2v80t.3.31).
+	overflow *markerOverflow
 }
 
 // batch is whether this emission is a runtime row batch: bounded by
 // maxQueuedRowBatches, and shed as a positioned loss. A carrier is not one —
 // it rides its marker's budget.
-func (em rowEmission) batch() bool { return !em.end && !em.clear && !em.carrier }
+func (em rowEmission) batch() bool {
+	return !em.end && !em.clear && !em.carrier && em.overflow == nil
+}
 
 // marker is whether this emission spends maxQueuedMarkers.
 func (em rowEmission) marker() bool { return em.end || em.clear }
@@ -129,11 +164,17 @@ func (b *rowBridge) ClearBoundary() {
 // the next batch ACCEPTED carries the whole gap as its LostRows. A MARKER
 // accepted while a loss is owed is preceded by a loss-only carrier at the
 // end of the gap (rowStreamNext), so the loss is stated inside the interval
-// it happened in. A MARKER shed past maxQueuedMarkers is counted in
-// markersDropped and logged; nothing on the wire can carry a marker's
-// absence, so the count and the log line are its report.
+// it happened in. A MARKER past maxQueuedMarkers is never shed
+// (nocx-2v80t.3.31): it opens the queue's overflow record, and from then
+// until the pump reaches that record everything handed over folds into it
+// (foldOverflowLocked), so order is kept and the memory is one record.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	s.rowMu.Lock()
+	if n := len(s.rowQueue); n > 0 && s.rowQueue[n-1].overflow != nil {
+		s.foldOverflowLocked(s.rowQueue[n-1].overflow, em)
+		s.rowMu.Unlock()
+		return
+	}
 	switch {
 	case em.batch():
 		s.rowStreamNext = em.from + uint64(len(em.rows)) // #nosec G115 -- len is never negative
@@ -157,12 +198,12 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowMu.Unlock()
 		return
 	case s.rowQueuedMarkers >= maxQueuedMarkers:
-		s.rowMu.Unlock()
-		s.markersDropped.Add(1)
-		s.log.Warn("session marker not streamed: the bridge's marker budget is full",
-			"session", s.id.Session, "endMarker", em.end, "clearBoundary", em.clear,
-			"endRow", em.from, "droppedMarkersTotal", s.markersDropped.Load())
-		return
+		o := &markerOverflow{lost: s.rowsLostPending, next: s.rowStreamNext}
+		s.rowsLostPending = 0
+		s.rowQueue = append(s.rowQueue, rowEmission{overflow: o})
+		s.foldOverflowLocked(o, em)
+		s.log.Warn("session markers past the bridge's budget: folding what follows until the wire drains",
+			"session", s.id.Session, "endMarker", em.end, "clearBoundary", em.clear, "endRow", em.from)
 	default:
 		if s.rowsLostPending > 0 {
 			s.rowQueue = append(s.rowQueue, rowEmission{
@@ -181,6 +222,33 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	select {
 	case s.rowWake <- struct{}{}:
 	default:
+	}
+}
+
+// foldOverflowLocked folds one hand-off into the overflow record at the
+// queue's tail (markerOverflow says what each kind keeps). Called under rowMu.
+func (s *hostSession) foldOverflowLocked(o *markerOverflow, em rowEmission) {
+	s.markersFolded.Add(1)
+	switch {
+	case em.end:
+		if em.from > o.endRow {
+			o.endRow = em.from
+		}
+		if o.clear {
+			o.endsAfter++
+		} else {
+			o.endsBefore++
+		}
+	case em.clear:
+		// Every end folded so far came before THIS clear, the one that
+		// stands for all of them.
+		o.endsBefore += o.endsAfter
+		o.endsAfter = 0
+		o.clear = true
+	default:
+		s.rowStreamNext = em.from + uint64(len(em.rows)) // #nosec G115 -- len is never negative
+		o.lost += em.lost + uint64(len(em.rows))         // #nosec G115 -- len is never negative
+		o.next = s.rowStreamNext
 	}
 }
 
@@ -229,6 +297,10 @@ func (s *hostSession) serveRows() {
 // dying, and releaseConnection does the teardown — one dead reader must not
 // take the others' frames with it.
 func (s *hostSession) deliverRowEmission(em rowEmission) {
+	if o := em.overflow; o != nil {
+		s.deliverOverflow(o)
+		return
+	}
 	if em.clear {
 		payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
 		if err != nil {
@@ -324,6 +396,29 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		// loss again for every split and fail the coordinator's exact
 		// FromRow-minus-LostRows check).
 		doc.LostRows = 0
+	}
+}
+
+// deliverOverflow states everything the overflow record folded, in the
+// order that keeps it true (markerOverflow): the shed rows as one loss at the
+// end of their gap, then every end that came before the last clear, the
+// clear, and every end after it. Each end is settled WITHOUT its fence — the
+// zero nonce the coordinator resolves to its current block, and noFence, so
+// that block is stored as the gap it is. The record is the pump's alone once
+// dequeued: a fold only ever reaches the queue's tail, under rowMu.
+func (s *hostSession) deliverOverflow(o *markerOverflow) {
+	if o.lost > 0 {
+		s.deliverRowEmission(rowEmission{carrier: true, from: o.next, lost: o.lost})
+	}
+	end := rowEmission{end: true, from: max(o.endRow, o.next), noFence: true}
+	for range o.endsBefore {
+		s.deliverRowEmission(end)
+	}
+	if o.clear {
+		s.deliverRowEmission(rowEmission{clear: true})
+	}
+	for range o.endsAfter {
+		s.deliverRowEmission(end)
 	}
 }
 

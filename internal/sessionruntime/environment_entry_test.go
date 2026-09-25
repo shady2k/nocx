@@ -1,6 +1,9 @@
 package sessionruntime
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // SealEnvironmentEntry (nocx-2v80t.3.21): an authenticated environment
 // entry — the coordinator's kernel accepting a confirmed environment change
@@ -28,7 +31,9 @@ func TestSealEnvironmentEntrySealsTheOpenIntervalAtItsOwnScreen(t *testing.T) {
 		t.Fatalf("ingest the banner and password prompt: %v", err)
 	}
 
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 
 	var end *rowEvent
 	for _, e := range rs.snapshot() {
@@ -93,7 +98,9 @@ func TestSealEnvironmentEntryRefusesAStaleIncarnation(t *testing.T) {
 
 	stale := s.Incarnation()
 	stale.Generation++
-	s.SealEnvironmentEntry(stale, "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), stale, "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 
 	for _, e := range rs.snapshot() {
 		if e.kind == "end" {
@@ -135,11 +142,15 @@ func TestTheSameEnvironmentEntryDeliveredTwiceSealsOneInterval(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))
 	enterAndPrint(t, s)
 
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 	if err := s.Ingest([]byte("remote$ ls\r\nfile-a\r\n")); err != nil {
 		t.Fatalf("ingest the remote output: %v", err)
 	}
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 
 	if got := entryEnds(rs); got != 1 {
 		t.Fatalf("one environment entry delivered twice sealed %d intervals, want 1", got)
@@ -153,13 +164,50 @@ func TestTwoDistinctEnvironmentEntriesSealTwoIntervals(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))
 	enterAndPrint(t, s)
 
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-child")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 	if err := s.Ingest([]byte("remote$ ssh inner\r\nWelcome to inner\r\n")); err != nil {
 		t.Fatalf("ingest the nested ssh: %v", err)
 	}
-	s.SealEnvironmentEntry(s.Incarnation(), "dom-grandchild")
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-grandchild"); err != nil {
+		t.Fatalf("seal the entry: %v", err)
+	}
 
 	if got := entryEnds(rs); got != 2 {
 		t.Fatalf("two distinct environment entries sealed %d intervals, want 2", got)
+	}
+}
+
+// An entry whose caller has given up seals nothing (nocx-2v80t.3.31): the
+// context is judged under the same lock the seal takes, so a handler that
+// runs after its caller's cancel changes nothing however many entries were
+// sealed since — the dedupe's memory is not what refuses it. Paired with the
+// same entry under a live context, which seals.
+func TestAnEntryWhoseCallerGaveUpSealsNothing(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	obsFeed(t, s, 0, 30)
+
+	gaveUp, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.SealEnvironmentEntry(gaveUp, s.Incarnation(), "dom-child"); err == nil {
+		t.Fatal("an entry whose caller gave up was answered as sealed")
+	}
+	for _, e := range rs.snapshot() {
+		if e.kind == "end" {
+			t.Fatal("an entry whose caller gave up ended an interval")
+		}
+	}
+	if err := s.SealEnvironmentEntry(context.Background(), s.Incarnation(), "dom-child"); err != nil {
+		t.Fatalf("the live delivery: %v", err)
+	}
+	ends := 0
+	for _, e := range rs.snapshot() {
+		if e.kind == "end" {
+			ends++
+		}
+	}
+	if ends != 1 {
+		t.Fatalf("the live delivery ended %d intervals, want 1 — the refused one must not have spent the entry's id", ends)
 	}
 }

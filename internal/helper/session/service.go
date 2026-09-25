@@ -716,7 +716,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.lifecycleEntered(p)
+		return s.lifecycleEntered(ctx, p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -1842,7 +1842,13 @@ func (s *Service) lifecycleComplete(p proto.LifecycleCompleteParams) (proto.Life
 // that timed out but landed seals nothing a second time. An entry with no
 // identity could not be told from its own retry, and is refused as malformed
 // rather than sealed on trust.
-func (s *Service) lifecycleEntered(p proto.LifecycleEnteredParams) (proto.LifecycleEnteredResult, error) {
+//
+// ctx is the request's own context, and it is HONOURED (nocx-2v80t.3.31):
+// every request runs on a goroutine of its own, so the handler of an attempt
+// the downlink timed out and cancelled can run after that attempt's retry
+// landed, and after further entries — and must then change nothing. The
+// runtime judges the context under the lock the seal takes.
+func (s *Service) lifecycleEntered(ctx context.Context, p proto.LifecycleEnteredParams) (proto.LifecycleEnteredResult, error) {
 	hs, err := s.find(p.Session)
 	if err != nil {
 		return proto.LifecycleEnteredResult{}, err
@@ -1850,10 +1856,12 @@ func (s *Service) lifecycleEntered(p proto.LifecycleEnteredParams) (proto.Lifecy
 	if p.Entry == "" {
 		return proto.LifecycleEnteredResult{}, errBadEntry
 	}
-	hs.runtime.SealEnvironmentEntry(sessionruntime.Incarnation{
+	if err := hs.runtime.SealEnvironmentEntry(ctx, sessionruntime.Incarnation{
 		Session:    sessionruntime.SessionID(p.Incarnation.Session),
 		Generation: sessionruntime.Generation(p.Incarnation.Generation),
-	}, sessionruntime.EnvironmentEntryID(p.Entry))
+	}, sessionruntime.EnvironmentEntryID(p.Entry)); err != nil {
+		return proto.LifecycleEnteredResult{}, err
+	}
 	return proto.LifecycleEnteredResult{}, nil
 }
 

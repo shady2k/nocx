@@ -1399,3 +1399,157 @@ func rowsArtifactID(t *testing.T, db content.ContentDB, entryID string) string {
 	t.Fatalf("entry %s carries no block rows artifact", entryID)
 	return ""
 }
+
+// blockRowsSummaryOf reads a sealed block's summary the way a reader does:
+// the artifact's payload, which the close rewrote to it.
+func blockRowsSummaryOf(t *testing.T, db content.ContentDB, entryID string) (lost, dropped uint64) {
+	t.Helper()
+	row, err := db.Ledger().Entry(context.Background(), entryID)
+	if err != nil {
+		t.Fatalf("Entry(%s): %v", entryID, err)
+	}
+	for _, ex := range row.Executions {
+		for _, artifact := range ex.Artifacts {
+			if artifact.MediaType != content.MediaBlockRows {
+				continue
+			}
+			stored, err := db.Ledger().Artifact(context.Background(), artifact.ID)
+			if err != nil {
+				t.Fatalf("Artifact(%s): %v", artifact.ID, err)
+			}
+			var summary struct {
+				LostRows    uint64 `json:"lostRows"`
+				DroppedRows uint64 `json:"droppedRows"`
+			}
+			if err := json.Unmarshal([]byte(stored.Payload), &summary); err != nil {
+				t.Fatalf("decode the block's summary %q: %v", stored.Payload, err)
+			}
+			return summary.LostRows, summary.DroppedRows
+		}
+	}
+	t.Fatalf("entry %s has no block rows artifact", entryID)
+	return 0, 0
+}
+
+// A loss-only delivery (nocx-2v80t.3.26, finding 4) — no rows, a loss at the
+// gap it names — is how the helper states a hole at the very end of an
+// interval. It used to be discarded here before it reached the store, so the
+// block's summary said nothing was lost. It reaches the summary, the ack
+// moves to the end of the gap, and the closing screen lands after the hole.
+// Paired with the ordinary tail, which records no loss.
+func TestBlockRowsArrived_ALossOnlyDeliveryReachesTheSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		hole     bool
+		wantLost uint64
+	}{
+		{name: "a hole at the tail", hole: true, wantLost: 1},
+		{name: "the ordinary tail", hole: false, wantLost: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+			e.ws.AttachBlockRows(session.ID(sid))
+			attempt := startsACommand(t, e, pub, lane, h, 2, "cat big")
+
+			if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+				aStreamRow("one"), aStreamRow("two"),
+			}); !confirm {
+				t.Fatal("the ordinary rows were not confirmed")
+			}
+			endRow := uint64(2)
+			if tc.hole {
+				written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 1, nil)
+				if !confirm || written != 3 {
+					t.Fatalf("the loss-only delivery was answered (%d, %v), want confirmed through 3", written, confirm)
+				}
+				endRow = 3
+			}
+			fence := lifecycleFence(0x61)
+			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
+			e.ws.BlockIntervalEnded(session.ID(sid), fence, endRow, []emulator.Row{aStreamRow("$ ")})
+
+			assertBlockSealed(t, db, attempt)
+			lost, dropped := blockRowsSummaryOf(t, db, attempt)
+			if lost != tc.wantLost || dropped != 0 {
+				t.Fatalf("summary lost=%d dropped=%d, want lost=%d dropped=0", lost, dropped, tc.wantLost)
+			}
+			rows := streamRows(t, db, attempt)
+			if len(rows) != 3 || rows[2].Text != "$ " || rows[2].From != endRow {
+				t.Fatalf("stored rows = %+v, want one, two and the closing screen at %d", rows, endRow)
+			}
+		})
+	}
+}
+
+// The same loss-only tail, arriving while an earlier append is still being
+// flushed, is held with the rows and split to the interval it ends — a hole
+// at the end row belongs to the interval that END closes, never to the next.
+func TestBlockRowsPendingLossOnlyTailStaysWithItsInterval(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	first := startsACommand(t, e, pub, lane, h, 2, "printf first")
+	firstFence := lifecycleFence(0x71)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	e.ws.blockStream.mu.Unlock()
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-tail")}); confirm {
+		t.Fatal("rows queued behind a flush were acknowledged early")
+	}
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 1, nil); confirm {
+		t.Fatal("a loss queued behind a flush was acknowledged early")
+	}
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = false
+	e.ws.blockStream.mu.Unlock()
+
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")})
+
+	assertBlockSealed(t, db, first)
+	if lost, _ := blockRowsSummaryOf(t, db, first); lost != 1 {
+		t.Fatalf("the first block's summary names %d lost, want the tail's 1", lost)
+	}
+	rows := streamRows(t, db, first)
+	if len(rows) != 2 || rows[1].Text != "first-final" || rows[1].From != 2 {
+		t.Fatalf("first block rows = %+v, want first-tail and the closing screen at 2", rows)
+	}
+}
+
+// A clear whose durable half failed is not announced as done (nocx-2v80t.3.26,
+// finding 7): the store never recorded the cursor, so a reconnect would show
+// every block the live removal hid, and the live half and the read-time half
+// would disagree about what is visible — the one thing block.cleared's
+// contract says they never do. Paired with TestBlockClearBoundary_Keeps…,
+// where the write succeeds and the notification follows.
+func TestBlockClearBoundary_AClearThatDidNotPersistIsNotAnnounced(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	createSessionRow(t, db, sid)
+	e.ws.blockRowsStore = &clearFailureBlockStore{closeFailureBlockStore{ledger: db.Ledger()}}
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "clear")
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	// An observable event AFTER the clear on the same ordered socket: once
+	// block.grew has arrived, anything the clear sent is already in the inbox.
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("after")}); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	if _, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.grew")); err != nil {
+		t.Fatalf("no block.grew reached the subscriber: %v", err)
+	}
+	if msg, ok := inboxOf(e.conn).take(isNotification("block.cleared")); ok {
+		t.Fatalf("a clear the store never recorded was announced as done: %s", msg)
+	}
+	if rows := streamRows(t, db, attempt); len(rows) != 1 {
+		t.Fatalf("the running block holds %d rows, want 1", len(rows))
+	}
+}
+
+type clearFailureBlockStore struct{ closeFailureBlockStore }
+
+func (s *clearFailureBlockStore) RecordClearBoundary(context.Context, content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
+	return content.ClearBoundaryRecorded{}, fmt.Errorf("injected clear boundary failure")
+}

@@ -42,10 +42,21 @@ const FRAME_SAMPLES = 180
 // missed frame is one interval at about twice the display's — so the criterion
 // is stated against the interval the run actually scheduled: the median within
 // a quarter of it, and no more than one dropped-frame-scale outlier at p95.
+//
+// The interval is read as the TENTH PERCENTILE of the intervals, not the single
+// fastest (nocx-2v80t.3.35). Headless WebKit reports whole milliseconds and now
+// and then delivers two callbacks a few milliseconds apart: measured at 200
+// blocks, intervals of 16 and 17 ms with a median of 16 and one of 3 ms (4 ms in
+// another run), which made the "display interval" 3 ms and failed a scroll that
+// dropped no frame. One early callback is not the display; a tenth of the
+// samples is, and a run whose frames are ALL slow still reports its slow
+// interval here, exactly as the fastest one did.
+const VSYNC_PERCENTILE = 0.1
 const FRAME_TOLERANCE = 1.25
 const P95_TOLERANCE = 2
 const INPUT = '.pane.active .nocx-editor-input'
 const BLOCK = '.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-running)'
+const RUNNING_BLOCK = '.pane.active .scrollback-inner > .cmd-block.cmd-block-running'
 const SCROLLER = '.pane.active .scrollback-area'
 const ROW = `${BLOCK} .cmd-output .term-grid-row`
 interface TranscriptMetrics {
@@ -56,7 +67,8 @@ interface TranscriptMetrics {
   clientHeight: number
   maxScrollTop: number
   frameSamples: number
-  /** The display's OWN frame interval this run scheduled, as the fastest one seen. */
+  /** The display's OWN frame interval this run scheduled, as the tenth percentile
+   *  of the intervals seen (VSYNC_PERCENTILE). */
   vsyncMs: number
   medianMs: number
   p95Ms: number
@@ -79,14 +91,29 @@ interface FindEvidence {
 
 const test = base
 
+// THE TRACE KEEPS ITS ACTION LOG AND LOSES ITS DOM SNAPSHOTS (nocx-2v80t.3.35).
+// Playwright's tracer serialises the whole document before and after every
+// action, and this spec takes a few thousand actions over a document that grows
+// to 60,000 nodes: profiled in Chromium at 158 blocks, the snapshotter was 3.5 s
+// of 7.5 s of main-thread time across eight commands, and it grew with every
+// block — the harness was making each command cost more than the last. The
+// failure-context block (e2e/failure-context.ts) takes its own ARIA snapshot at
+// the moment of failure, so nothing a failure needs is lost.
+test.use({ trace: { mode: 'retain-on-failure', snapshots: false } })
+
 test.describe('long transcript scroll budget', () => {
   // 500 blocks means 500 real PTY round trips (fill, Enter, wait for freeze),
-  // each paying full backend + browser overhead in the container: measured
-  // here at ~1.55 s/block, so building the transcript alone wants ~13 minutes
-  // before the scroll measurement and the store-vs-DOM read-back even start.
-  // 10 minutes cut the run off mid-build (block 384/500) on an unloaded host;
-  // 16 minutes leaves headroom without hiding a real per-block stall, which is
-  // still bounded per block by the 60 s wait below.
+  // each paying full backend + browser overhead in the container. What a block
+  // costs must not grow with the blocks above it, and it did: 0.19 s at block 1
+  // and 1.12 s at block 276 in Chromium, 3.5 s at block 273 in WebKit, which
+  // ran the build past this budget in both browsers in CI (nocx-2v80t.3.35).
+  // Three causes, each measured and removed at its owner: the trace snapshots
+  // above and the wait below (harness), a settle that toggled the scroller's
+  // overflow (scrollback/controller.ts `_glide`) and xterm's DOM renderer
+  // rewriting identical stylesheets (renderers/xterm.ts
+  // `holdIdenticalStyleText`) — each of the last two restyled every block in
+  // the transcript, several times per command. 16 minutes stays: it bounds a
+  // real per-block stall, still bounded per block by the 60 s wait below.
   test.setTimeout(16 * 60_000)
 
   let home: DisposableRoot
@@ -109,25 +136,39 @@ test.describe('long transcript scroll budget', () => {
     await page.keyboard.press('Enter')
 
     // Positional, not `hasText`: a text filter re-scans every already-frozen
-    // block's content on every poll, which is O(existing blocks x their rows)
-    // and made each new command slower than the last as the transcript grew
-    // (measured: ~1.55 s/block around block 380, ~3.3-4.1 s/block around
-    // block 480 — the run timed out mid-build at 16 minutes because of this,
-    // not because of a real per-command stall). Blocks freeze in order and
-    // are never removed, so the index-th command is the index-th frozen block
-    // by position; `nth()` only counts elements, it does not read their text.
-    const block = page.locator(BLOCK).nth(index - 1)
-    await expect(block, `the command ${marker} never froze`).toBeVisible({
-      timeout: 60_000,
-    })
-    await expect(block).toContainText(`${marker}-001`, { timeout: 60_000 })
-    await expect(
-      page.locator('.pane.active .scrollback-inner > .cmd-block.cmd-block-running'),
-    ).toHaveCount(0, { timeout: 60_000 })
+    // block's content on every poll. Blocks freeze in order and are never
+    // removed, so the index-th command is the index-th frozen block.
+    //
+    // ONE IN-PAGE PREDICATE, NOT THREE LOCATOR ASSERTIONS (nocx-2v80t.3.35).
+    // Every poll of `expect(locator).toBeVisible()` that does not match yet —
+    // most of them, while the command runs — makes Playwright render an ARIA
+    // snapshot of the whole body for its error message, and its selector
+    // engine resolves `nth()` by walking the document: both are O(document)
+    // per poll, and together they grew each command's cost with the
+    // transcript. The same three facts — the index-th frozen block is visible,
+    // it holds its command's first row, and no block is running — are read
+    // natively here, in the page, once per frame.
+    await page
+      .waitForFunction(
+        ({ frozen, running, n, first }) => {
+          const block = document.querySelectorAll<HTMLElement>(frozen)[n - 1]
+          return (
+            block !== undefined &&
+            block.checkVisibility() &&
+            (block.textContent ?? '').includes(first) &&
+            document.querySelector(running) === null
+          )
+        },
+        { frozen: BLOCK, running: RUNNING_BLOCK, n: index, first: `${marker}-001` },
+        { timeout: 60_000 },
+      )
+      .catch((error: unknown) => {
+        throw new Error(`the command ${marker} never froze as block ${index}: ${String(error)}`)
+      })
   }
   async function measure(page: Page): Promise<TranscriptMetrics> {
     return page.evaluate(
-      async ({ blockSelector, rowSelector, scrollerSelector, frameSamples }) => {
+      async ({ blockSelector, rowSelector, scrollerSelector, frameSamples, vsyncPercentile }) => {
         const scroller = document.querySelector<HTMLElement>(scrollerSelector)
         if (!scroller) throw new Error(`missing transcript scroller: ${scrollerSelector}`)
 
@@ -164,7 +205,7 @@ test.describe('long transcript scroll budget', () => {
           clientHeight: scroller.clientHeight,
           maxScrollTop,
           frameSamples: frameTimes.length,
-          vsyncMs: sorted[0] ?? 0,
+          vsyncMs: percentile(vsyncPercentile),
           medianMs: percentile(0.5),
           p95Ms: percentile(0.95),
         }
@@ -174,6 +215,7 @@ test.describe('long transcript scroll budget', () => {
         rowSelector: ROW,
         scrollerSelector: SCROLLER,
         frameSamples: FRAME_SAMPLES,
+        vsyncPercentile: VSYNC_PERCENTILE,
       },
     )
   }

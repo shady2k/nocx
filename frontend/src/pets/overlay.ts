@@ -74,9 +74,9 @@ export interface LedgeSource {
  *  Blocks are taken from the ACTIVE pane only. A pet standing on a block in a
  *  pane you cannot see would be a pet you cannot see.
  */
-/** The full terrain sweep reads every block and chip of the active pane, so
- *  it is rate-limited. Between sweeps the animal still follows the ledge it
- *  is standing on, one rectangle per frame. */
+/** The full terrain sweep reads every block and chip of the active pane that
+ *  is on the screen (`_near`), and it is still rate-limited. Between sweeps
+ *  the animal follows the ledge it is standing on, one rectangle per frame. */
 
 const SWEEP_INTERVAL_MS = 100
 
@@ -396,11 +396,31 @@ export class PetOverlay {
     this._stop()
     for (const o of this._observers) o.disconnect()
     this._observers.length = 0
+    this._nearWatched.clear()
+    this._near?.clear()
   }
 
   // ── geometry ─────────────────────────────────────────────────────────────
 
   private _watched = false
+
+  /** The ledge elements on (or about to come on) the screen, kept by an
+   *  IntersectionObserver — or null where there is none (jsdom), and then a
+   *  sweep reads every match as it always did (nocx-2v80t.3.35).
+   *
+   *  A sweep used to read the rectangle of EVERY block and chip under the
+   *  host: three selector scans and three rectangles per block, every 100 ms
+   *  while anything scrolled or printed. Only a ledge on the screen can be
+   *  stood on (`deriveTerrain` drops the rest), so on a transcript of 500
+   *  blocks that was 1,500 rectangles to keep perhaps five — measured in
+   *  WebKit, 34 ms per sweep, a dropped frame every sixth frame of a scroll,
+   *  and a cost every new block made larger. The browser already tracks which
+   *  elements are on the screen, off the main thread's critical path; the
+   *  sweep asks it instead of measuring the whole transcript to find out. */
+  private _near: Set<Element> | null = null
+  private _nearWatch: IntersectionObserver | null = null
+  /** Every element the near-watch observes, so a removed one is let go. */
+  private readonly _nearWatched = new Set<Element>()
 
   private _watch(): void {
     if (this._watched) return
@@ -411,8 +431,25 @@ export class PetOverlay {
       ro.observe(this._host)
       this._observers.push(ro)
     }
+    if (typeof IntersectionObserver !== 'undefined') {
+      const near = new Set<Element>()
+      const io = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) near.add(entry.target)
+          else near.delete(entry.target)
+        }
+        this.invalidate()
+      })
+      this._near = near
+      this._nearWatch = io
+      this._observers.push(io)
+      this._discover(this._blocks)
+    }
     if (typeof MutationObserver !== 'undefined') {
-      const mo = new MutationObserver(mark)
+      const mo = new MutationObserver((records) => {
+        this._rediscover(records)
+        mark()
+      })
       // `class` as well as childList: which pane is active is a CLASS, so
       // without it switching tabs left the animal walking on the geometry of
       // a pane nobody can see. The filter is what keeps this affordable —
@@ -466,6 +503,61 @@ export class PetOverlay {
     })
   }
 
+  /** Start watching every ledge at or under `root`. Cost is the size of
+   *  `root`: a new block's own subtree, or a pane whose class changed. */
+  private _discover(root: Element): void {
+    const io = this._nearWatch
+    if (!io) return
+    const watch = (el: Element): void => {
+      if (this._nearWatched.has(el)) return
+      this._nearWatched.add(el)
+      io.observe(el)
+    }
+    for (const source of this._opts.ledges ?? DEFAULT_LEDGES) {
+      if (root.matches(source.selector)) watch(root)
+      for (const el of root.querySelectorAll(source.selector)) watch(el)
+    }
+  }
+
+  /** Follow the DOM's changes into the near-watch: what arrived is watched,
+   *  what left is let go, and an element whose class changed — a pane
+   *  becoming the active one — is searched again, since a selector that did
+   *  not match it before may now. */
+  private _rediscover(records: readonly MutationRecord[]): void {
+    const io = this._nearWatch
+    if (!io) return
+    let removed = false
+    for (const record of records) {
+      if (record.type === 'attributes') {
+        if (record.target instanceof Element) this._discover(record.target)
+        continue
+      }
+      for (const node of record.addedNodes) {
+        if (node instanceof Element) this._discover(node)
+      }
+      if (record.removedNodes.length > 0) removed = true
+    }
+    if (!removed) return
+    for (const el of this._nearWatched) {
+      if (el.isConnected) continue
+      io.unobserve(el)
+      this._nearWatched.delete(el)
+      this._near?.delete(el)
+    }
+  }
+
+  /** The elements a sweep reads for one ledge source: the near ones that
+   *  still match it, or every match where nothing tracks nearness. */
+  private _ledgesOf(source: LedgeSource): Iterable<HTMLElement> {
+    const near = this._near
+    if (near === null) return this._blocks.querySelectorAll<HTMLElement>(source.selector)
+    const out: HTMLElement[] = []
+    for (const el of near) {
+      if (el instanceof HTMLElement && el.matches(source.selector)) out.push(el)
+    }
+    return out
+  }
+
   private _measure(): void {
     const host = this._host.getBoundingClientRect()
     this._hostLeft = host.left
@@ -473,7 +565,7 @@ export class PetOverlay {
     const candidates: LedgeCandidate[] = []
     this._standingOn = null
     for (const source of this._opts.ledges ?? DEFAULT_LEDGES) {
-      for (const el of this._blocks.querySelectorAll<HTMLElement>(source.selector)) {
+      for (const el of this._ledgesOf(source)) {
         const r = el.getBoundingClientRect()
         if (r.width === 0 && r.height === 0) continue
         // Minted here rather than read off the element: the pet needs an

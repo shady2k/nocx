@@ -104,6 +104,48 @@ const OSC4_REPORT_RE = /^\d+;\?(?:;\d+;\?)*$/
 // the default-state byte identity this hook preserves.
 const SHIFT_ENTER_SEQUENCE = '\x1b\r'
 
+const heldStyles = new WeakSet<HTMLStyleElement>()
+
+/**
+ * Make every `<style>` under `root` ignore a write of the text it already
+ * holds (nocx-2v80t.3.35).
+ *
+ * xterm 5.5's DOM renderer — the one the occluded input layer always runs,
+ * and every renderer's fallback — rewrites both of its style elements
+ * (`_updateDimensions`, `_injectCss`) on EVERY option change and every
+ * resize, whatever changed and whether anything did. A submit alone changes
+ * `disableStdin` twice (`paste` below), and the grid resizes as a command's
+ * output grows. The text is identical each time, but assigning a style
+ * element's text replaces its sheet, and an engine answers a new sheet by
+ * restyling the document — every row of every block in the transcript.
+ * Measured in WebKit at 181 blocks: 156 ms for one rewrite of a style
+ * element's text, and six identical rewrites per command, so each new
+ * command cost more than the last.
+ *
+ * Upstream owns this (it should compare before it writes); until it does,
+ * the renderer module owns what its engine costs the page. The guard is on
+ * the instances only, never on the prototype: a write that CHANGES the text
+ * — a theme, a font size, a real resize — goes through exactly as before.
+ */
+function holdIdenticalStyleText(root: ParentNode): void {
+  // The prototype's own accessor, invoked with the element as receiver: the
+  // instance property below shadows it, and this is how it still reaches it.
+  const read = (el: HTMLStyleElement): unknown => Reflect.get(Node.prototype, 'textContent', el)
+  for (const el of root.querySelectorAll('style')) {
+    if (heldStyles.has(el)) continue
+    heldStyles.add(el)
+    Object.defineProperty(el, 'textContent', {
+      configurable: true,
+      enumerable: true,
+      get: () => read(el),
+      set: (value: string | null) => {
+        if (value === read(el)) return
+        Reflect.set(Node.prototype, 'textContent', value, el)
+      },
+    })
+  }
+}
+
 function isLinuxWebKit(): boolean {
   if (typeof navigator === 'undefined') return false
   // Wails on Linux embeds a WebKitGTK webview. The platform is Linux and the
@@ -427,6 +469,7 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+    holdIdenticalStyleText(container)
     // The occlusion mark rides xterm's OWN root (see XtermRendererOptions):
     // only the occluded input layer carries it, never a renderer a person
     // can see.
@@ -842,6 +885,9 @@ export class XtermRenderer implements TerminalRenderer {
     this._atlasPageDisposable = undefined
     this.webgl?.dispose()
     this.webgl = undefined
+    // Disposing the addon hands the terminal back to a NEW DOM renderer,
+    // with style elements of its own (see holdIdenticalStyleText).
+    if (this.container) holdIdenticalStyleText(this.container)
     const recoverable =
       !!this.container && this.container.offsetParent !== null && document.hasFocus()
     if (this.recoveryAttempts < MAX_WEBGL_RECOVERY_ATTEMPTS && recoverable) {

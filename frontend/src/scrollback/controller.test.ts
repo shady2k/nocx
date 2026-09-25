@@ -933,6 +933,39 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
     controller.blockManager.clearAll()
   })
 
+  it('leaves the scroller alone when the transcript already has a bar, however long it is (nocx-2v80t.3.35)', async () => {
+    // Toggling `overflow` on the scroller restyles and re-lays out every
+    // block under it — 218 ms per toggle in WebKit at 181 blocks, about seven
+    // settles per command — so a settle that toggled it made each new command
+    // cost more than the last. A transcript that already overflows shows its
+    // bar before, during and after the settle: there is no flash to hide, and
+    // the settle's work on the scroller must not depend on how many blocks
+    // sit above the live end. Counted as writes, not timed.
+    for (const blocks of [1, 50, 500]) {
+      const { controller, frames } = movingController([500, 440])
+      Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+        value: 600 + blocks * 2000,
+        configurable: true,
+      })
+      const written: MutationRecord[] = []
+      const writes = new MutationObserver((records) => written.push(...records))
+      writes.observe(controller.scrollbackArea, { attributes: true, attributeFilter: ['class'] })
+
+      controller.beginBlock('ls', '~', 0, 1)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The stack still settles — the glide is the point — and the scroller
+      // was never written to.
+      expect(frames.map((f) => f.el)).toEqual(['inner'])
+      written.push(...writes.takeRecords())
+      expect(written).toEqual([])
+      expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(false)
+      writes.disconnect()
+      controller.blockManager.clearAll()
+    }
+  })
+
   it('answers "am I following the output" from outside the stack it moves', () => {
     // The observer reports the TRANSFORMED box. While the settle displaces the
     // stack, anything inside it is out of the scroller — and the live region,

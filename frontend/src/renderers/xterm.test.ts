@@ -2157,3 +2157,68 @@ describe('the occluded input layer (nocx-zg3k3.2.5)', () => {
     r.dispose()
   })
 })
+
+describe("xterm's own stylesheets are rewritten only when their text changes (nocx-2v80t.3.35)", () => {
+  // xterm 5.5's DOM renderer — what the occluded input layer always runs —
+  // rewrites both of its style elements on every option change, and a submit
+  // changes `disableStdin` twice. An identical rewrite still replaces the
+  // sheet, and the engine answers by restyling the whole document: every row
+  // of every block in the transcript. So the work a submit does to the page
+  // must not include a sheet replacement at all. Counted as mutations of the
+  // style elements, not timed.
+  async function mounted() {
+    stubBrowser()
+    // The occluded input layer: the renderer every pane runs, and the one that
+    // never trades xterm's DOM renderer for an accelerated one.
+    const r = new XtermRenderer({ occluded: true })
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    document.body.appendChild(container)
+    await r.mount(container)
+    const styles = [...container.querySelectorAll('style')]
+    const written: MutationRecord[] = []
+    const watch = new MutationObserver((records) => written.push(...records))
+    for (const el of styles) {
+      watch.observe(el, { childList: true, characterData: true, subtree: true })
+    }
+    const drain = (): MutationRecord[] => {
+      written.push(...watch.takeRecords())
+      return written.splice(0)
+    }
+    return { r, container, styles, drain }
+  }
+
+  it('a submit rewrites none of them', async () => {
+    const { r, container, styles, drain } = await mounted()
+    // The renderer this guards is really there: without its sheets the
+    // assertion below would pass on an empty list.
+    expect(styles.length).toBeGreaterThan(0)
+
+    r.setReadOnly(true)
+    r.paste('echo hi')
+    r.setReadOnly(false)
+    r.setReadOnly(true)
+
+    expect(drain()).toEqual([])
+    r.dispose()
+    container.remove()
+  })
+
+  it('and a change that alters the text still reaches the sheet', async () => {
+    const { r, container, styles, drain } = await mounted()
+    const before = styles.map((el) => el.textContent)
+
+    // Through the engine's own option, not applyTheme: its full-viewport
+    // repaint needs a layout jsdom does not have. The sheet is written by the
+    // option change either way.
+    const term = (r as unknown as { term: { options: { theme: object } } }).term
+    term.options.theme = { ...getCurrentTheme(), foreground: '#123456' }
+
+    expect(drain().length).toBeGreaterThan(0)
+    expect(styles.map((el) => el.textContent)).not.toEqual(before)
+    expect(styles.some((el) => el.textContent?.includes('#123456'))).toBe(true)
+    r.dispose()
+    container.remove()
+  })
+})

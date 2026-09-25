@@ -6,7 +6,7 @@
 // top edge, and finishing a command visibly changes what it is doing. jsdom
 // computes no layout, so the rectangles are stated — the arithmetic they feed
 // is what is under test, and the pixels are confirmed in the browser.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { PetOverlay, timingFrom, DEFAULT_LEDGES } from './overlay'
 import { loadPack, type ImageSource, type PetPack } from './pack'
 import { DEFAULT_TUNING, type PetTuning } from './pet'
@@ -838,5 +838,103 @@ describe('the composer is not ground (spec §5.5)', () => {
     }
     ed.dispose()
     pane.remove()
+  })
+})
+
+describe('a sweep reads only the ground on the screen (nocx-2v80t.3.35)', () => {
+  /** The browser's own record of which elements are on the screen, played by
+   *  the test: it says which of the observed elements intersect. */
+  class ScreenWatch {
+    static current: ScreenWatch | null = null
+    readonly watched = new Set<Element>()
+    constructor(private readonly cb: IntersectionObserverCallback) {
+      ScreenWatch.current = this
+    }
+    observe(el: Element): void {
+      this.watched.add(el)
+    }
+    unobserve(el: Element): void {
+      this.watched.delete(el)
+    }
+    disconnect(): void {
+      this.watched.clear()
+    }
+    show(onScreen: readonly Element[]): void {
+      const entries = [...this.watched].map(
+        (target) =>
+          ({ target, isIntersecting: onScreen.includes(target) }) as IntersectionObserverEntry,
+      )
+      this.cb(entries, this as unknown as IntersectionObserver)
+    }
+  }
+
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    vi.stubGlobal('IntersectionObserver', ScreenWatch)
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    ScreenWatch.current = null
+  })
+
+  it('reads the same number of rectangles over 1, 50 or 500 blocks above the screen', async () => {
+    // A sweep that measured every block cost more with every block the
+    // transcript held — 1,500 rectangles at 500 blocks, 34 ms in WebKit, a
+    // dropped frame every sixth frame of a scroll. Only a ledge on the screen
+    // can be stood on, so only those are read. Counted, not timed.
+    const readsPerSweep: number[] = []
+    for (const above of [1, 50, 500]) {
+      const s = stand([])
+      const reads = { n: 0 }
+      const counted = (top: number): HTMLElement => {
+        const b = addBlock(s, top)
+        const own = b.getBoundingClientRect.bind(b)
+        b.getBoundingClientRect = () => {
+          reads.n++
+          return own()
+        }
+        return b
+      }
+      for (let i = 0; i < above; i++) counted(-10_000 - i * 50)
+      const onScreen = [counted(150), counted(300)]
+      const pet = overlayOn(s)
+      await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+      ScreenWatch.current?.show(onScreen)
+      // Something moved — a scroll, a new row — so the next frame sweeps.
+      pet.invalidate()
+      reads.n = 0
+      s.pump(0.2)
+      readsPerSweep.push(reads.n)
+      // And the ground it did read is the ground on the screen: the animal
+      // still comes to rest on a block.
+      s.pump(3)
+      expect(onScreen.map((b) => b.dataset.petLedge).every((id) => id !== undefined)).toBe(true)
+      s.host.remove()
+    }
+    expect(readsPerSweep[0]).toBeGreaterThan(0)
+    expect(readsPerSweep).toEqual([readsPerSweep[0], readsPerSweep[0], readsPerSweep[0]])
+  })
+
+  it('a block that arrives on the screen becomes ground, and one that leaves is let go', async () => {
+    const s = stand([150])
+    overlayOn(s)
+    await vi.waitFor(() => expect(s.frames.length).toBeGreaterThan(0))
+    // The overlay asks the browser what is on the screen at all.
+    expect(ScreenWatch.current).not.toBeNull()
+    const watch = ScreenWatch.current!
+    const first = s.blocks.querySelector('.cmd-block')!
+    expect(watch.watched.has(first)).toBe(true)
+
+    const later = addBlock(s, 300)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(watch.watched.has(later)).toBe(true)
+    watch.show([first, later])
+    s.pump(0.3)
+    expect(later.dataset.petLedge).toBeDefined()
+
+    later.remove()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(watch.watched.has(later)).toBe(false)
+    s.host.remove()
   })
 })

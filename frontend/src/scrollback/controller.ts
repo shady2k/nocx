@@ -912,7 +912,19 @@ export class ScrollbackController {
     // `scrollbar-gutter: stable` means no width changes hands either way. The
     // cost is named: a wheel during the settle is ignored, for the ~140ms it
     // lasts, and only when the person was already following the output.
-    this.scrollbackArea.classList.add('is-settling')
+    //
+    // AND ONLY WHILE THERE IS NO BAR TO FLASH (nocx-2v80t.3.35). A transcript
+    // that already overflows the scroller shows its bar before, during and
+    // after the settle, so hiding it buys nothing — and toggling `overflow`
+    // on the scroller is not a cheap class: both engines treat it as a
+    // change to the whole scrolling subtree and restyle and re-lay out every
+    // block in it. Measured in WebKit at 181 blocks: 218 ms per toggle, and a
+    // command settles about seven times, so the transcript made every new
+    // command cost more than the last. A transcript that fits is short, which
+    // is exactly when the toggle is cheap. Layout is clean here — the rect
+    // read above settled it — so this read costs nothing.
+    const hidesBar = this.scrollbackArea.scrollHeight <= this.scrollbackArea.clientHeight
+    if (hidesBar) this.scrollbackArea.classList.add('is-settling')
     for (const el of [this.scrollbackInner]) {
       const anim = el.animate(
         [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0px)' }],
@@ -922,9 +934,7 @@ export class ScrollbackController {
       anim.finished.then(
         () => {
           if (this._settleAnimations.get(el) === anim) this._settleAnimations.delete(el)
-          if (this._settleAnimations.size === 0) {
-            this.scrollbackArea.classList.remove('is-settling')
-          }
+          if (this._settleAnimations.size === 0) this._releaseSettlingBar()
         },
         () => {
           /* cancelled by the next glide — the next one owns the element */
@@ -936,7 +946,16 @@ export class ScrollbackController {
   private _cancelGlides(): void {
     for (const anim of this._settleAnimations.values()) anim.cancel()
     this._settleAnimations.clear()
-    this.scrollbackArea.classList.remove('is-settling')
+    this._releaseSettlingBar()
+  }
+
+  /** Give the scroller its bar back — and write nothing when it was never
+   *  taken: every glide begins by cancelling the last one, and a class write
+   *  on the scroller is not free (see `_glide`). */
+  private _releaseSettlingBar(): void {
+    if (this.scrollbackArea.classList.contains('is-settling')) {
+      this.scrollbackArea.classList.remove('is-settling')
+    }
   }
 
   /**

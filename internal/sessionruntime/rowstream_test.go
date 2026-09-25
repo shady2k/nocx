@@ -32,6 +32,7 @@ type rowEvent struct {
 	nonce   FenceNonce
 	endRow  uint64
 	closing []emulator.Row
+	noFence bool
 }
 
 // recordingRowStream is a RowStream that records emissions in arrival order.
@@ -46,10 +47,10 @@ func (r *recordingRowStream) OutputRows(from uint64, rows []emulator.Row, lost u
 	r.events = append(r.events, rowEvent{kind: "rows", from: from, lost: lost, rows: rows})
 }
 
-func (r *recordingRowStream) IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row) {
+func (r *recordingRowStream) IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.events = append(r.events, rowEvent{kind: "end", nonce: nonce, endRow: endRow, closing: closing})
+	r.events = append(r.events, rowEvent{kind: "end", nonce: nonce, endRow: endRow, closing: closing, noFence: settledWithoutFence})
 }
 
 func (r *recordingRowStream) ClearBoundary() {

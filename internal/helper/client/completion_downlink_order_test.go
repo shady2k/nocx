@@ -149,7 +149,7 @@ func TestCompletionsFromBothSourcesReachTheRuntimeInAcceptanceOrder(t *testing.T
 func newOrderedDownlink(t *testing.T, sender client.CompletionSender) *client.CompletionDownlink {
 	t.Helper()
 	ctx, _ := downlinkLog(t)
-	return client.NewCompletionDownlink(sender, ctx)
+	return client.NewCompletionDownlink(sender, ctx, nil)
 }
 
 // downlinkLog is the context a test builds a downlink over: its logger is

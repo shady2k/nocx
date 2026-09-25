@@ -489,3 +489,87 @@ func TestARetriedEnvironmentEntryCarriesTheSameIdentityOnEveryAttempt(t *testing
 		t.Fatalf("attempts named %q, want %q", attempts, want)
 	}
 }
+
+// lostSink records every boundary the downlink reports lost.
+type lostSink struct {
+	mu     sync.Mutex
+	events []struct {
+		session string
+		fence   [32]byte
+	}
+}
+
+func (l *lostSink) report(session string, fence [32]byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, struct {
+		session string
+		fence   [32]byte
+	}{session, fence})
+}
+
+func (l *lostSink) snapshot() []struct {
+	session string
+	fence   [32]byte
+} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]struct {
+		session string
+		fence   [32]byte
+	}(nil), l.events...)
+}
+
+// A boundary whose delivery FINALLY failed is reported to the pane, not only
+// logged (nocx-2v80t.3.29): the helper can never seal that interval, so the
+// coordinator settles the block it would have closed as incomplete. The
+// report names the session and the fence — the zero fence for an entry — and
+// is made once per lost boundary, in the order they were lost. The one
+// behind it that landed is not reported.
+func TestAFinallyRefusedSendIsReportedLostWithItsFence(t *testing.T) {
+	const sessionID = "0123456789abcdef0123456789abcdef"
+	refused, next := [32]byte{1}, [32]byte{2}
+	spy := newSpy()
+	spy.fail = func(_ int, fence [32]byte) error {
+		if fence == refused {
+			return &RefusalError{Code: "no_such_session", Message: "no such session"}
+		}
+		return nil
+	}
+	sink := &lostSink{}
+	dl, _ := newTestDownlink(t, spy)
+	dl.onLost = sink.report
+	dl.Bind(HostSessionID{Session: sessionID})
+
+	accept(t, dl, refused, nil)
+	accept(t, dl, next, nil)
+	awaitLanded(t, spy, 1)
+
+	got := sink.snapshot()
+	if len(got) != 1 || got[0].session != sessionID || got[0].fence != refused {
+		t.Fatalf("reported lost %+v, want the refused fence once, on session %s", got, sessionID)
+	}
+}
+
+// Paired: an ordinary delivery, and one that lands on a retry, report nothing.
+func TestADeliveredBoundaryIsNotReportedLost(t *testing.T) {
+	spy := newSpy()
+	spy.fail = func(attempt int, _ [32]byte) error {
+		if attempt == 1 {
+			return fmt.Errorf("one attempt's bound passed: %w", context.DeadlineExceeded)
+		}
+		return nil
+	}
+	sink := &lostSink{}
+	dl, _ := newTestDownlink(t, spy)
+	dl.onLost = sink.report
+	dl.Bind(HostSessionID{Session: "0123456789abcdef0123456789abcdef"})
+
+	accept(t, dl, [32]byte{3}, nil)
+	accept(t, dl, [32]byte{4}, nil)
+	awaitLanded(t, spy, 2)
+
+	if got := sink.snapshot(); len(got) != 0 {
+		t.Fatalf("delivered boundaries were reported lost: %+v", got)
+	}
+}

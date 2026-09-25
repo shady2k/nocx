@@ -1265,6 +1265,14 @@ type AppendBlockRows struct {
 type CloseBlockRows struct {
 	EntryID    string
 	ArtifactID string
+	// Incomplete says the interval's boundary never arrived whole
+	// (nocx-2v80t.3.29): its completion was lost on the way to the helper, or
+	// it was settled without its fence ever being sighted (ADR-0074 decision
+	// 3), so a range of what the command printed — its closing screen at the
+	// least — is not in the artifact. The seal records truncated 'gap' unless
+	// the cap already names a primary reason; nothing else about the seal
+	// changes.
+	Incomplete bool
 }
 
 // BlockRowsSummary is what closing a block learned. DroppedRows is how many

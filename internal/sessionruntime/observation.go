@@ -590,7 +590,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	}
 	skip := outputMarkSkipLocked(o.OutputStartRow, o.OutputMarkDeparted, s.screenDepartedRows)
 	s.expectBoundaryScreenLocked(rec.Closing)
-	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip))
+	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip), false)
 	// The next interval opens on the boundary screen, at the boundary
 	// revision.
 	s.observation = &observationOpen{Opened: rec.Sealed, Opening: rec.Closing}
@@ -668,7 +668,10 @@ func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *obser
 	// nocx-2v80t.3.9). The rule is that an end marker is never less than what
 	// the interval streamed: the rows it covers are the interval's own, and
 	// the closing screen stays empty because no screen was ever read.
-	s.emitIntervalEndLocked(nonce, max(s.departedRows, parked.EndRow), nil)
+	// And the marker says the fence never arrived (nocx-2v80t.3.29): the
+	// record's no-fence is the runtime's own, and the block the coordinator
+	// stores from this marker is the only place the person can see it.
+	s.emitIntervalEndLocked(nonce, max(s.departedRows, parked.EndRow), nil, true)
 	// The next record opens on the screen read at the settle event — one
 	// read under the lock, at the event's instant — never on the parked
 	// interval's Opening: the parked opening predates the boundary's own
@@ -1140,9 +1143,9 @@ func outputMarkSkipLocked(startRow int, markDeparted, departed uint64) int {
 // nonce, the absolute row index one past the interval's last departed row,
 // and the closing screen's rows. It is called with the session lock held,
 // after the rows — the emission order is the stream's order (rowstream.go).
-func (s *Session) emitIntervalEndLocked(nonce FenceNonce, endRow uint64, closing []emulator.Row) {
+func (s *Session) emitIntervalEndLocked(nonce FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool) {
 	if rs := s.rowStream; rs != nil {
-		rs.IntervalEnd(nonce, endRow, closing)
+		rs.IntervalEnd(nonce, endRow, closing, settledWithoutFence)
 	}
 }
 
@@ -1255,7 +1258,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 	}
 	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.ScreenDeparted)
 	s.expectBoundaryScreenLocked(cap.Closing)
-	s.emitIntervalEndLocked(nonce, cap.EndRow, closingRowsForStream(cap.Closing, skip))
+	s.emitIntervalEndLocked(nonce, cap.EndRow, closingRowsForStream(cap.Closing, skip), false)
 	s.storeSealedObservationLocked(rec)
 }
 

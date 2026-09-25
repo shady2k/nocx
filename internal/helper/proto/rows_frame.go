@@ -262,9 +262,15 @@ type ClearBoundaryDoc struct {
 // the absolute row index one past the interval's last departed row, and the
 // screen as the boundary sat on it — the same rows vocabulary, and null when
 // the screen could not be read, because honest silence and an empty screen
-// are different answers.
+// are different answers. NoFence says the interval was settled without its
+// fence ever being sighted (ADR-0074 decision 3, nocx-2v80t.3.29): its
+// completion arrived, the next event proved the fence would not, and it
+// ended with no closing screen — so the block it closes may be missing
+// output, and the coordinator stores it that way. Always present: false is
+// an answer.
 type IntervalEndDoc struct {
 	Nonce   string          `json:"nonce"`
 	EndRow  uint64          `json:"endRow"`
 	Closing json.RawMessage `json:"closing"`
+	NoFence bool            `json:"noFence"`
 }

@@ -259,4 +259,8 @@ package proto
 // document, only the header the other two already announce here, and the
 // byte is announced for the reason theirs was: a generation that did not
 // know it would resync through a live row stream rather than drop one frame.
+// This is still 15, widened in place for the same reason: the interval end
+// document gained `noFence`, whether the runtime settled the interval
+// without its fence (nocx-2v80t.3.29), and `session.lifecycle-entered` its
+// `entry` identity (nocx-2v80t.3.28). Nothing has shipped at 15.
 const Version = "15"

@@ -261,7 +261,7 @@ func TestAnAcceptedCompletionRidesDownToLocalPaneExactlyOnce(t *testing.T) {
 	ctx := context.Background()
 
 	dctx, sl := downlinkLog(t)
-	downlink := client.NewCompletionDownlink(c, dctx)
+	downlink := client.NewCompletionDownlink(c, dctx, nil)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -323,7 +323,7 @@ func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
 	rec.seenEntered = make(chan struct{}, 1)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
 		Cols: 80, Rows: 24,
@@ -368,7 +368,7 @@ func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testi
 	rec.seenEntered = make(chan struct{}, 1)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
 	downlink.ObserveEnvironmentEntry("dom-child")
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -399,7 +399,7 @@ func TestAnAcceptedCompletionRidesDownToAnSSHHostedPane(t *testing.T) {
 	c, rec, pub := completionStand(t, spawner)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.SpawnSSH(ctx, proto.SSHSpawnParams{
@@ -440,7 +440,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	c, rec, pub := completionStand(t, nil)
 	ctx := context.Background()
 
-	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -514,7 +514,7 @@ func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	ctx := context.Background()
 
 	dctx, sl := downlinkLog(t)
-	downlink := client.NewCompletionDownlink(c, dctx)
+	downlink := client.NewCompletionDownlink(c, dctx, nil)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{

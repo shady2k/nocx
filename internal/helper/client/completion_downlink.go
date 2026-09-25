@@ -95,6 +95,9 @@ type CompletionDownlink struct {
 	// can retry without a clock; production uses waitToRetry.
 	retryWait func(ctx context.Context, attempt int) error
 	ctx       context.Context
+	// onLost hears of every accepted boundary that finally did not reach the
+	// helper session (nocx-2v80t.3.29). Nil hears nothing.
+	onLost BoundaryLost
 
 	// accept orders acceptance: held across the kernel's Ingest and the
 	// enqueue it leads to, and never across a send.
@@ -136,6 +139,18 @@ const firstRetryPause = 100 * time.Millisecond
 // full before Bind has named the session.
 var errNeverBound = errors.New("the helper session's identity was never bound and the queue is full")
 
+// BoundaryLost is told of one accepted boundary the helper session will never
+// hear of (nocx-2v80t.3.29): the helper refused it, the connection was lost,
+// the request could not fit a frame, or the session ended first. session is
+// the helper session the downlink was bound to, and fence is the lost
+// completion's fence — the zero value for a lost environment entry, which has
+// none. The helper can never seal that interval, so the block it would have
+// closed is settled by the coordinator instead, and says its output is
+// incomplete (transport's BlockBoundaryLost). A boundary lost before Bind
+// named a session is not reported: nothing on the coordinator streams that
+// session's blocks yet.
+type BoundaryLost func(session string, fence [32]byte)
+
 // CompletionSender is what the downlink needs from the pane's client: the
 // carrier ops the already-authenticated completion, and an authenticated
 // environment entry beside it (nocx-2v80t.3.21), travel down on. *Client is
@@ -154,14 +169,18 @@ type CompletionSender interface {
 // deliberately lives on (AD-9), and a completion the kernel accepts after
 // that must still reach the helper session. It is also where the downlink's
 // logger comes from (log.From). Cancelling it stops the worker Bind starts.
-func NewCompletionDownlink(c CompletionSender, ctx context.Context) *CompletionDownlink {
-	return newCompletionDownlink(ctx,
+// onLost is told of every boundary that finally did not land; nil tells
+// nobody.
+func NewCompletionDownlink(c CompletionSender, ctx context.Context, onLost BoundaryLost) *CompletionDownlink {
+	d := newCompletionDownlink(ctx,
 		func(ctx context.Context, params proto.LifecycleCompleteParams) error {
 			return c.LifecycleComplete(ctx, params)
 		},
 		func(ctx context.Context, params proto.LifecycleEnteredParams) error {
 			return c.LifecycleEntered(ctx, params)
 		})
+	d.onLost = onLost
+	return d
 }
 
 func newCompletionDownlink(
@@ -406,11 +425,18 @@ func waitToRetry(ctx context.Context, attempt int) error {
 // lost reports one accepted fact that did not reach the helper session. The
 // kernel's execution state is exactly what it set when it accepted the fact,
 // and nothing here reaches back into it; what is lost is the runtime's
-// boundary, and the log line — with the cause chain intact — is how anybody
-// learns of it.
+// boundary. The log line — with the cause chain intact — is how an operator
+// learns of it, and onLost is how the pane does: the block the boundary
+// would have closed is settled as incomplete (nocx-2v80t.3.29).
 func (d *CompletionDownlink) lost(c pendingCompletion, cause error) {
 	log.From(d.ctx).Warn("helper: the "+c.kind()+" the kernel accepted did not reach the helper session",
 		"err", fmt.Errorf("%s not delivered: %w", c.kind(), cause))
+	d.mu.Lock()
+	bound, session := d.bound, d.entry.Session
+	d.mu.Unlock()
+	if bound && d.onLost != nil {
+		d.onLost(session, c.fence)
+	}
 }
 
 func (c pendingCompletion) kind() string {

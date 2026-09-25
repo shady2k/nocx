@@ -211,7 +211,7 @@ func TestBlockRowsArrived_WaitsForPriorIntervalBeforeNextOpen(t *testing.T) {
 	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("first-departed")}); !confirm {
 		t.Fatal("the first interval's delayed row was not confirmed")
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")}, false)
 
 	// A replay from below the closed interval's own boundary is confirmed at
 	// that boundary — so the helper's mark may advance — and enters no block.
@@ -266,7 +266,7 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{
 		aStreamRow("first-3"), aStreamRow("first-4"),
-	})
+	}, false)
 
 	// A replay of the closed interval's own departed rows is confirmed and
 	// stored nowhere. Its closing screen never arrives again at all: the
@@ -280,7 +280,7 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-1")}); !confirm || written != 5 {
 		t.Fatalf("second rows ack = (%d, %v), want the successor's first row written at 4", written, confirm)
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-2")})
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-2")}, false)
 
 	firstRows := streamRows(t, db, first)
 	wantFirst := []struct {
@@ -333,7 +333,7 @@ func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *tes
 	}); !confirm || written != 2 {
 		t.Fatalf("first rows ack = (%d, %v), want rows 0..1 written", written, confirm)
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-screen")}, false)
 
 	// The shell has moved on and its next command's output is already
 	// leaving the screen, while the completion is still on its way. None of
@@ -373,7 +373,7 @@ func TestBlockRowsArrived_RowsAfterAParkedEndMarkerWaitForTheNextInterval(t *tes
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 4, 0, []emulator.Row{aStreamRow("second-3")}); !confirm || written != 5 {
 		t.Fatalf("second rows ack = (%d, %v), want row 4 written", written, confirm)
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 5, []emulator.Row{aStreamRow("second-screen")}, false)
 
 	secondRows := streamRows(t, db, second)
 	wantSecond := []struct {
@@ -406,7 +406,7 @@ func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
 	secondFence := lifecycleFence(0x72)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
 
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil, false)
 	e.ws.blockStream.mu.Lock()
 	current := e.ws.blockStream.current[session.ID(sid)]
 	queuedEndCount := len(e.ws.blockStream.queuedEnds[session.ID(sid)])
@@ -421,7 +421,7 @@ func TestBlockRowsQueuedEndWaitsForPriorInterval(t *testing.T) {
 		t.Fatalf("queued end count = %d, want 1", queuedEndCount)
 	}
 
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, nil, false)
 	assertBlockSealed(t, db, first)
 	assertBlockSealed(t, db, second)
 }
@@ -484,7 +484,7 @@ func TestBlockRowsUnknownAttemptOnNestedDomainClose_DoesNotStickTheQueue(t *test
 	next := startsACommand(t, e, pub, lane, h, 4, "printf next")
 	nextFence := lifecycleFence(0x93)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 5, lifecycleCompleteEvt(lifecycle.AttemptID(next), 0, nextFence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 1, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 1, nil, false)
 
 	assertBlockSealed(t, db, exitAttempt.ID)
 	assertBlockSealed(t, db, next)
@@ -553,13 +553,13 @@ func TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 1, lifecycleHelloEvt()))
 	ackEstablishmentFrom(t, pub, lane, h2, e.conn)
 	var noFence [32]byte
-	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, []emulator.Row{aStreamRow("password:")})
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, []emulator.Row{aStreamRow("password:")}, false)
 
 	// A remote command, completed on the child's transport.
 	remote := submitsInChild(t, e, pub, lane, h2, "T2", 2, "echo journey-1-ok")
 	remoteFence := lifecycleFence(0xa1)
 	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 3, lifecycleCompleteEvt(lifecycle.AttemptID(remote), 0, remoteFence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), remoteFence, 0, []emulator.Row{aStreamRow("journey-1-ok")})
+	e.ws.BlockIntervalEnded(session.ID(sid), remoteFence, 0, []emulator.Row{aStreamRow("journey-1-ok")}, false)
 
 	// The remote `exit`: its start reaches the kernel, its shell dies.
 	mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lane, h2, 4, lifecyclePromptEvt()))
@@ -576,14 +576,14 @@ func TestBlockRowsSshJourney_EveryBlockKeepsItsOwnRows(t *testing.T) {
 	sshFence := lifecycleFence(0xa2)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 5, lifecycleCompleteEvt(lifecycle.AttemptID(sshAttempt), 0, sshFence)))
 	e.ws.BlockIntervalEnded(session.ID(sid), sshFence, 0,
-		[]emulator.Row{aStreamRow("exit"), aStreamRow("Connection to host closed.")})
+		[]emulator.Row{aStreamRow("exit"), aStreamRow("Connection to host closed.")}, false)
 
 	// The next local command gets its own block, with its own rows.
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecyclePromptEvt()))
 	next := startsACommand(t, e, pub, lane, h, 7, "echo local-after-exit")
 	nextFence := lifecycleFence(0xa3)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 8, lifecycleCompleteEvt(lifecycle.AttemptID(next), 0, nextFence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 0, []emulator.Row{aStreamRow("local-after-exit")})
+	e.ws.BlockIntervalEnded(session.ID(sid), nextFence, 0, []emulator.Row{aStreamRow("local-after-exit")}, false)
 
 	if n := blockRowsArtifactCount(t, db, sshAttempt); n != 1 {
 		t.Fatalf("the entered ssh block has %d rows artifacts, want exactly the one sealed at the entry", n)
@@ -633,8 +633,8 @@ func TestBlockRowsPendingRowsSplitAtPriorEnd(t *testing.T) {
 	e.ws.blockStream.flushing[session.ID(sid)] = false
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil)
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 2, nil, false)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 1, []emulator.Row{aStreamRow("first-final")}, false)
 
 	firstRows := streamRows(t, db, first)
 	if len(firstRows) != 2 || firstRows[0].Text != "first-tail" || firstRows[1].Text != "first-final" {
@@ -663,7 +663,7 @@ func TestBlockRowsCloseFailureRetainsCurrentForRetry(t *testing.T) {
 	secondFence := lifecycleFence(0x92)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
 
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil, false)
 	e.ws.blockStream.mu.Lock()
 	current := e.ws.blockStream.current[session.ID(sid)]
 	queued := e.ws.blockStream.queued[session.ID(sid)]
@@ -681,8 +681,8 @@ func TestBlockRowsCloseFailureRetainsCurrentForRetry(t *testing.T) {
 	}
 
 	failing.fail = false
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil)
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, nil, false)
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil, false)
 	assertBlockSealed(t, db, first)
 	assertBlockSealed(t, db, second)
 	e.ws.blockStream.mu.Lock()
@@ -709,7 +709,7 @@ func TestBlockRowsClosingAppendFailureRetainsCurrentForRetry(t *testing.T) {
 	secondFence := lifecycleFence(0x94)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
 
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")}, false)
 	e.ws.blockStream.mu.Lock()
 	current := e.ws.blockStream.current[session.ID(sid)]
 	pending := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
@@ -719,8 +719,8 @@ func TestBlockRowsClosingAppendFailureRetainsCurrentForRetry(t *testing.T) {
 	}
 
 	failing.appendFail = false
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")})
-	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 0, []emulator.Row{aStreamRow("first-final")}, false)
+	e.ws.BlockIntervalEnded(session.ID(sid), secondFence, 0, nil, false)
 	assertBlockSealed(t, db, first)
 	assertBlockSealed(t, db, second)
 }
@@ -788,7 +788,7 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	e.ws.blockStream.flushing[session.ID(sid)] = true
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.closeBlockRows(session.ID(sid), attempt, from+1, []emulator.Row{aStreamRow("closing")}, "deferred-close")
+	e.ws.closeBlockRows(session.ID(sid), attempt, from+1, []emulator.Row{aStreamRow("closing")}, "deferred-close", false)
 	e.ws.blockStream.mu.Lock()
 	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
 	stillOpen := e.ws.blockStream.open[session.ID(sid)][attempt] != nil
@@ -850,7 +850,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 		t.Fatal("first block was not open")
 	}
 
-	e.ws.closeBlockRows(session.ID(sid), second, 2, []emulator.Row{aStreamRow("second-final")}, "second-close")
+	e.ws.closeBlockRows(session.ID(sid), second, 2, []emulator.Row{aStreamRow("second-final")}, "second-close", false)
 	e.ws.blockStream.mu.Lock()
 	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
 	e.ws.blockStream.mu.Unlock()
@@ -863,7 +863,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	e.ws.blockStream.mu.Unlock()
 	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), firstBlock, pending, nil)
 
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")}, false)
 	assertBlockSealed(t, db, first)
 	assertBlockSealed(t, db, second)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, lifecycleFence(0x42))))
@@ -877,7 +877,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 		}
 		fence := lifecycleFence(byte(i))
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, nextSeq+1, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-		e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final")})
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final")}, false)
 		assertBlockSealed(t, db, attempt)
 		if i < 30 {
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, nextSeq+2, lifecyclePromptEvt()))
@@ -924,7 +924,7 @@ func TestBlockIntervalEnded_SealsWhenTheCompletionArrivedFirst(t *testing.T) {
 
 	// The end marker arrives AFTER its completion and must still be
 	// authenticated by it.
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 2 || kept[1].From != 1 || kept[1].Text != "final screen" {
@@ -969,7 +969,7 @@ func TestBlockIntervalEnded_NoFenceResolvesToTheCurrentBlock(t *testing.T) {
 	}
 
 	var noFence [32]byte
-	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 1, []emulator.Row{aStreamRow("password:")})
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 1, []emulator.Row{aStreamRow("password:")}, false)
 
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 2 || kept[1].From != 1 || kept[1].Text != "password:" {
@@ -993,7 +993,7 @@ func TestBlockIntervalEnded_NoFenceWithNoCurrentBlockIsDropped(t *testing.T) {
 	e.ws.AttachBlockRows(session.ID(sid))
 
 	var noFence [32]byte
-	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, nil)
+	e.ws.BlockIntervalEnded(session.ID(sid), noFence, 0, nil, false)
 
 	bs := e.ws.blockStream
 	bs.mu.Lock()
@@ -1023,7 +1023,7 @@ func TestBlockGrewAndClosed_OverTheWireConformsToContract(t *testing.T) {
 
 	fence := lifecycleFence(0x47)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 
 	deadline := time.Now().Add(wantWithin)
 	grewMsg, err := awaitFrame(e.conn, deadline, isNotification("block.grew"))
@@ -1081,7 +1081,7 @@ func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
 	}
 	fence := lifecycleFence(0x51)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(before), 0, fence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 	deadline := time.Now().Add(wantWithin)
 	if _, err := awaitFrame(e.conn, deadline, isNotification("block.closed")); err != nil {
 		t.Fatalf("the earlier command never closed: %v", err)
@@ -1215,7 +1215,7 @@ func TestBlockIntervalEnded_WaitsForTheCompletionThatNamesIt(t *testing.T) {
 
 	fence := lifecycleFence(0x45)
 	// The end arrives while the kernel holds no fence for anyone.
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 	if body := blockRowsBody(t, db, attempt); strings.Contains(body, "final screen") {
 		t.Fatal("an unauthenticated end marker appended the closing rows")
 	}
@@ -1318,7 +1318,7 @@ func TestBlockRowsReadBack_OverTheWireConformsToContract(t *testing.T) {
 	}
 	fence := lifecycleFence(0x46)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 2, []emulator.Row{aStreamRow("done")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 2, []emulator.Row{aStreamRow("done")}, false)
 
 	// The artifact id, off ledger.get's metadata (what a restored block's
 	// client reads first).
@@ -1466,7 +1466,7 @@ func TestBlockRowsArrived_ALossOnlyDeliveryReachesTheSummary(t *testing.T) {
 			}
 			fence := lifecycleFence(0x61)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-			e.ws.BlockIntervalEnded(session.ID(sid), fence, endRow, []emulator.Row{aStreamRow("$ ")})
+			e.ws.BlockIntervalEnded(session.ID(sid), fence, endRow, []emulator.Row{aStreamRow("$ ")}, false)
 
 			assertBlockSealed(t, db, attempt)
 			lost, dropped := blockRowsSummaryOf(t, db, attempt)
@@ -1504,7 +1504,7 @@ func TestBlockRowsPendingLossOnlyTailStaysWithItsInterval(t *testing.T) {
 	e.ws.blockStream.flushing[session.ID(sid)] = false
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")})
+	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")}, false)
 
 	assertBlockSealed(t, db, first)
 	if lost, _ := blockRowsSummaryOf(t, db, first); lost != 1 {
@@ -1586,7 +1586,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 		attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
 		fence := lifecycleFence(0x51)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("done")})
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("done")}, false)
 
 		got := awaitBlockClosed(t, e)
 		if got.EntryID != attempt || !got.Kept {
@@ -1603,7 +1603,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 		attempt := startsACommand(t, e, pub, lane, h, 2, "make secret")
 		fence := lifecycleFence(0x52)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("classified")})
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("classified")}, false)
 
 		got := awaitBlockClosed(t, e)
 		if got.EntryID != attempt || got.Kept {
@@ -1619,7 +1619,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "ls")))
 		// The end marker first this time: it parks until the completion
 		// names its fence, and the meeting is what closes it.
-		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("a b c")})
+		e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("a b c")}, false)
 		mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(shellID, 0, fence)))
 
 		got := awaitBlockClosed(t, e)

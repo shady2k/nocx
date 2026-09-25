@@ -20,6 +20,8 @@ type fakeSink struct {
 	rows     []client.OutputRows
 	ends     []client.IntervalEnd
 	clears   []session.ID
+	lost     []lostBoundary
+	lostCh   chan struct{} // signalled on every BlockBoundaryLost, when set
 	answer   func(fromRow uint64, n int) (uint64, bool)
 }
 
@@ -43,10 +45,25 @@ func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []e
 	return answer(fromRow, len(rows))
 }
 
-func (f *fakeSink) BlockIntervalEnded(_ session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row) {
+func (f *fakeSink) BlockIntervalEnded(_ session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row, noFence bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.ends = append(f.ends, client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: endRow, Closing: closing})
+	f.ends = append(f.ends, client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: endRow, Closing: closing, NoFence: noFence})
+}
+
+func (f *fakeSink) BlockBoundaryLost(sid session.ID, nonce [32]byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lost = append(f.lost, lostBoundary{sid: sid, nonce: nonce})
+	if f.lostCh != nil {
+		f.lostCh <- struct{}{}
+	}
+}
+
+// lostBoundary is one BlockBoundaryLost the sink was told of.
+type lostBoundary struct {
+	sid   session.ID
+	nonce [32]byte
 }
 
 func (f *fakeSink) BlockClearBoundary(sid session.ID) {

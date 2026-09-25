@@ -356,10 +356,14 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows}
 
 		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows}
+		// The PRIMARY reason, one of them: the cap names rows it dropped by
+		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
-		if dropped > 0 {
-			t := TruncCap
-			truncated = string(t)
+		switch {
+		case dropped > 0:
+			truncated = string(TruncCap)
+		case in.Incomplete:
+			truncated = string(TruncGap)
 		}
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE artifacts SET state = ?, truncated = COALESCE(?, truncated), payload = ? WHERE id = ?`,

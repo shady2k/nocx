@@ -963,7 +963,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		stopDownlink = cancelSession
 		// A delivery that fails is retried, and one that is lost is logged
 		// by the downlink itself, through log.From on this same context.
-		downlink = client.NewCompletionDownlink(c, sessionCtx)
+		// This route streams no block rows, so a lost boundary has no block
+		// to settle here.
+		downlink = client.NewCompletionDownlink(c, sessionCtx, nil)
 		driveKernel := client.NewCompletionObservingKernel(r.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()

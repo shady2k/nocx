@@ -41,8 +41,14 @@ type RowStream interface {
 	// belongs to it: endRow is the absolute index one past the interval's
 	// last departed row, and closing is the screen as the boundary sat on
 	// it (nil when the screen could not be read — the same honest silence
-	// every screen read keeps).
-	IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row)
+	// every screen read keeps). settledWithoutFence says the interval's
+	// authenticated completion arrived and its fence was never sighted, so
+	// it was settled by the next event with no closing screen (ADR-0074
+	// decision 3) and its record reads [CompletenessNoFence]: the block
+	// this closes may be missing output, and the consumer stores it so
+	// (nocx-2v80t.3.29). False for every boundary that joined its fence, and
+	// for an environment entry, which has no fence by design.
+	IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool)
 	// ClearBoundary reports that the program erased the display and its
 	// saved lines (nocx-2v80t.3.17): a real VT fact the emulator itself
 	// observed (emulator.EffectClearBoundary), never an authenticated

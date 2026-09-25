@@ -54,6 +54,10 @@ type IntervalEnd struct {
 	Nonce   sessionruntime.FenceNonce
 	EndRow  uint64
 	Closing []emulator.Row
+	// NoFence says the helper settled the interval without its fence ever
+	// being sighted (ADR-0074 decision 3): the block it closes may be missing
+	// output (nocx-2v80t.3.29).
+	NoFence bool
 }
 
 // OnOutputRows registers the coordinator's consumer for this session's
@@ -208,7 +212,7 @@ func (c *Client) intervalEnd(payload []byte) {
 			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 		return
 	}
-	a.deliverIntervalEnd(IntervalEnd{Nonce: nonce, EndRow: doc.EndRow, Closing: closing})
+	a.deliverIntervalEnd(IntervalEnd{Nonce: nonce, EndRow: doc.EndRow, Closing: closing, NoFence: doc.NoFence})
 }
 
 // clearBoundary is one TypeClearBoundary frame arriving, on the same terms

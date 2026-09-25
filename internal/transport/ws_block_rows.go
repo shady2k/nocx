@@ -148,6 +148,14 @@ type blockStream struct {
 	// time. Cleared by the attempt's own completion or abandonment, and by
 	// detach.
 	entered map[session.ID]map[string]struct{}
+	// lost are the fences whose boundary this coordinator accepted and could
+	// never tell the helper (nocx-2v80t.3.29), newest last, bounded by
+	// maxPendingEnds. A block whose fence is here was sealed as a gap, or is
+	// sealed as one the moment its fence is published; an end marker that
+	// names one after all (an attempt that timed out had landed) is dropped,
+	// never parked — a parked end holds every later row back as the next
+	// interval's. Cleared by detach.
+	lost map[session.ID][]string
 }
 
 type openBlock struct {
@@ -163,6 +171,11 @@ type openBlock struct {
 	// rather than where the interval's index says it should be
 	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
 	rows uint64
+	// settled is whether this block has been said closed — by its own end,
+	// a lost boundary or the session's detach, whichever came first. The
+	// one that sets it seals and says block.closed; any other finds it set
+	// and does neither (nocx-2v80t.3.29). Guarded by blockStream.mu.
+	settled bool
 	// closingIn is whether this interval's closing screen already reached
 	// the artifact. A close that committed its closing rows and then failed
 	// to seal must not append them a second time: the retry places them at
@@ -182,6 +195,9 @@ type pendingEnd struct {
 	nonce   string // hex, the completion's own spelling
 	endRow  uint64
 	closing []emulator.Row
+	// incomplete seals the block as a gap: its boundary was settled without
+	// its fence, or its delivery was lost (nocx-2v80t.3.29).
+	incomplete bool
 }
 
 // parkedBoundary is the boundary an interval end marker has already stated
@@ -379,10 +395,17 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClo
 	bs.mu.Lock()
 	opens := bs.open[sid]
 	var owed []blockClosedParams
+	var unsettled []*openBlock
 	said := make(map[string]bool)
 	for _, b := range opens {
-		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: b.kept})
 		said[b.entry] = true
+		if b.settled {
+			// Its own end, or its lost boundary, is sealing it and says so.
+			continue
+		}
+		b.settled = true
+		unsettled = append(unsettled, b)
+		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: b.kept})
 	}
 	for _, attempt := range bs.fences[sid] {
 		if attempt != "" && !said[attempt] {
@@ -409,8 +432,9 @@ func (bs *blockStream) detach(store blockOutputStore, sid session.ID) []blockClo
 	delete(bs.closing, sid)
 	delete(bs.closeTries, sid)
 	delete(bs.entered, sid)
+	delete(bs.lost, sid)
 	bs.mu.Unlock()
-	for _, b := range opens {
+	for _, b := range unsettled {
 		if !b.kept {
 			continue
 		}
@@ -597,29 +621,32 @@ var noFenceNonce [32]byte
 // from the kernel waits (bounded) for it, and one whose fence resolves
 // appends the closing rows and seals the block.
 //
+// noFence says the helper settled the interval without its fence ever being
+// sighted (ADR-0074 decision 3): the block is sealed as a gap, which is how
+// the renderer comes to say its output may be incomplete (nocx-2v80t.3.29).
+// An end whose fence was already settled as lost is dropped (blockStream.lost).
+//
 // nonce == noFenceNonce is the one exception: an authenticated environment
 // entry ends the local interval with no fence at all (nocx-2v80t.3.21), so
 // it is resolved to the session's CURRENT block directly rather than parked
 // waiting for a fence that will never arrive. With no current block there is
 // nothing to seal, and the end is dropped rather than parked — parking it
 // would wait forever for a fence noFenceNonce can never resolve.
-func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row) {
+func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row, noFence bool) {
 	hexNonce := hex.EncodeToString(nonce[:])
 	bs := s.blockStream
 	bs.mu.Lock()
 	_, sourced := bs.sources[sid]
 	var attempt string
 	var resolved bool
+	if nonce != noFenceNonce && bs.forgetLostLocked(sid, hexNonce) {
+		bs.mu.Unlock()
+		return
+	}
 	if nonce == noFenceNonce {
 		if cur := bs.current[sid]; cur != nil {
 			attempt, resolved = cur.attempt, true
-			if bs.entered == nil {
-				bs.entered = make(map[session.ID]map[string]struct{})
-			}
-			if bs.entered[sid] == nil {
-				bs.entered[sid] = make(map[string]struct{})
-			}
-			bs.entered[sid][attempt] = struct{}{}
+			bs.markEnteredLocked(sid, attempt)
 		}
 	} else {
 		attempt, resolved = bs.fences[sid][hexNonce]
@@ -640,7 +667,7 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 			return
 		}
 		bs.mu.Lock()
-		ends := append(bs.ends[sid], pendingEnd{nonce: hexNonce, endRow: endRow, closing: closing})
+		ends := append(bs.ends[sid], pendingEnd{nonce: hexNonce, endRow: endRow, closing: closing, incomplete: noFence})
 		if len(ends) > maxPendingEnds {
 			ends = ends[len(ends)-maxPendingEnds:]
 			s.log.Warn("block interval ends parked past the bound; the oldest is dropped", "session", sid)
@@ -649,7 +676,113 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 		bs.mu.Unlock()
 		return
 	}
-	s.closeBlockRows(sid, attempt, endRow, closing, hexNonce)
+	s.closeBlockRows(sid, attempt, endRow, closing, hexNonce, noFence)
+}
+
+// BlockBoundaryLost settles the block a boundary would have closed, when the
+// boundary was accepted here and its delivery to the helper finally failed
+// (nocx-2v80t.3.29): the helper refused it, the connection was lost, the
+// request could not fit a frame, or the session ended first. The helper can
+// never seal that interval, so no end marker will come for it, and the block
+// is settled here instead: sealed at what reached the store, with no closing
+// screen, stored as a gap, and said closed once.
+//
+// nonce is the completion's fence, or noFenceNonce for a lost environment
+// entry, which ends whichever block is current — the same resolution
+// BlockIntervalEnded gives an entry's own end. A fence not yet published is
+// remembered, and its block is settled the moment the fence is. Nothing here
+// runs for a session with no rows source: a detached session's blocks were
+// settled by the detach.
+func (s *WSServer) BlockBoundaryLost(sid session.ID, nonce [32]byte) {
+	hexNonce := hex.EncodeToString(nonce[:])
+	bs := s.blockStream
+	bs.mu.Lock()
+	if _, sourced := bs.sources[sid]; !sourced {
+		bs.mu.Unlock()
+		return
+	}
+	var block *openBlock
+	var attempt string
+	if nonce == noFenceNonce {
+		block = bs.current[sid]
+		if block == nil {
+			bs.mu.Unlock()
+			return
+		}
+		attempt = block.attempt
+		bs.markEnteredLocked(sid, attempt)
+	} else {
+		var known bool
+		attempt, known = bs.fences[sid][hexNonce]
+		if !known {
+			// The completion's fact has not published its fence yet:
+			// publishFence settles the block when it does.
+			bs.rememberLostLocked(sid, hexNonce)
+			bs.mu.Unlock()
+			return
+		}
+		bs.rememberLostLocked(sid, hexNonce)
+		block = bs.open[sid][attempt]
+	}
+	var endRow uint64
+	if block != nil {
+		endRow = block.rows
+	}
+	bs.mu.Unlock()
+	s.closeBlockRows(sid, attempt, endRow, nil, hexNonce, true)
+}
+
+// markEnteredLocked records that an environment entry sealed the attempt's
+// block while the attempt runs on (see blockStream.entered).
+func (bs *blockStream) markEnteredLocked(sid session.ID, attempt string) {
+	if bs.entered == nil {
+		bs.entered = make(map[session.ID]map[string]struct{})
+	}
+	if bs.entered[sid] == nil {
+		bs.entered[sid] = make(map[string]struct{})
+	}
+	bs.entered[sid][attempt] = struct{}{}
+}
+
+// rememberLostLocked adds a lost fence, the oldest forgotten past the bound.
+func (bs *blockStream) rememberLostLocked(sid session.ID, hexNonce string) {
+	if bs.isLostLocked(sid, hexNonce) {
+		return
+	}
+	if bs.lost == nil {
+		bs.lost = make(map[session.ID][]string)
+	}
+	lost := append(bs.lost[sid], hexNonce)
+	if len(lost) > maxPendingEnds {
+		lost = lost[len(lost)-maxPendingEnds:]
+	}
+	bs.lost[sid] = lost
+}
+
+// forgetLostLocked answers whether the fence was lost, and forgets it: a
+// lost fence drops at most one end marker.
+func (bs *blockStream) forgetLostLocked(sid session.ID, hexNonce string) bool {
+	lost := bs.lost[sid]
+	for i, f := range lost {
+		if f == hexNonce {
+			bs.lost[sid] = append(lost[:i:i], lost[i+1:]...)
+			if len(bs.lost[sid]) == 0 {
+				delete(bs.lost, sid)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// isLostLocked answers whether the fence was lost, keeping it.
+func (bs *blockStream) isLostLocked(sid session.ID, hexNonce string) bool {
+	for _, f := range bs.lost[sid] {
+		if f == hexNonce {
+			return true
+		}
+	}
+	return false
 }
 
 // blockClearedParams is block.cleared's payload — see contracts/block.cleared.schema.json.
@@ -703,12 +836,12 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 // closeBlockRows appends the closing rows and seals the block an interval
 // leaves behind, then says so. A deferred append owns the interval until it
 // finishes; the close is parked rather than racing the append.
-func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) {
+func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string, incomplete bool) {
 	bs := s.blockStream
 	bs.mu.Lock()
 	end := pendingEnd{
 		attempt: attempt, nonce: hexNonce, endRow: endRow,
-		closing: append([]emulator.Row(nil), closing...),
+		closing: append([]emulator.Row(nil), closing...), incomplete: incomplete,
 	}
 	current := bs.current[sid]
 	if len(bs.pending[sid]) > 0 && !bs.flushing[sid] && !bs.closing[sid] &&
@@ -728,7 +861,7 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 		}
 		bs.closing[sid] = true
 		bs.mu.Unlock()
-		s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce)
+		s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete)
 		return
 	}
 	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
@@ -743,10 +876,10 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 	}
 	bs.closing[sid] = true
 	bs.mu.Unlock()
-	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce)
+	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete)
 }
 
-func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string) bool {
+func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string, incomplete bool) bool {
 	bs := s.blockStream
 	bs.mu.Lock()
 	block := bs.open[sid][attempt]
@@ -807,6 +940,20 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		bs.mu.Unlock()
 	}
+	// claim takes the right to say this block closed. The session's detach
+	// can settle a block while this close is still writing it
+	// (blockStream.detach), and then the detach has said it: this close
+	// finishes its bookkeeping and says nothing a second time
+	// (nocx-2v80t.3.29).
+	claim := func() bool {
+		bs.mu.Lock()
+		defer bs.mu.Unlock()
+		if block.settled {
+			return false
+		}
+		block.settled = true
+		return true
+	}
 	// fail records one failed close attempt and answers whether the end is
 	// still worth retrying.
 	//
@@ -838,7 +985,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		if spent < maxCloseAttempts {
 			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], pendingEnd{
 				attempt: attempt, nonce: hexNonce, endRow: endRow,
-				closing: append([]emulator.Row(nil), closing...),
+				closing: append([]emulator.Row(nil), closing...), incomplete: incomplete,
 			})
 		} else {
 			delete(tries, hexNonce)
@@ -861,7 +1008,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 			"droppedClosingRows", len(closing))
 		if store != nil {
 			if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
-				EntryID: block.entry, ArtifactID: block.artifactID,
+				EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
 			}); err != nil {
 				// Refused even here: the artifact stands as it is, and the
 				// block is settled anyway — the rows it holds are readable,
@@ -877,7 +1024,9 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		bs.mu.Unlock()
 		finish()
-		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+		if claim() {
+			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+		}
 		promote()
 	}
 	// EVERY END THE COORDINATOR RESOLVES IS SAID (nocx-2v80t.3.27), kept or
@@ -895,7 +1044,9 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	}
 	if !block.kept {
 		finish()
-		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: false})
+		if claim() {
+			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: false})
+		}
 		promote()
 		return true
 	}
@@ -964,7 +1115,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		})
 	}
 	if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
-		EntryID: block.entry, ArtifactID: block.artifactID,
+		EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
 	}); err != nil {
 		s.log.Warn("block rows close failed", "session", sid, "entry", block.entry, "error", err)
 		if !fail() {
@@ -989,7 +1140,9 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	}
 	bs.mu.Unlock()
 	finish()
-	s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+	if claim() {
+		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+	}
 	promote()
 	return true
 }
@@ -1018,7 +1171,7 @@ func (bs *blockStream) drainQueuedEnd(s *WSServer, sid session.ID, attempt strin
 	}
 	bs.mu.Unlock()
 	if found {
-		s.closeBlockRows(sid, end.attempt, end.endRow, end.closing, end.nonce)
+		s.closeBlockRows(sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete)
 	}
 }
 
@@ -1107,7 +1260,7 @@ func (bs *blockStream) abandonAttempt(s *WSServer, sid session.ID, attempt strin
 	// screen — the same shape an abandoned block-close retry settles for
 	// (closeBlockRowsNow's own "abandon"), reached directly here because
 	// there is no fence for a retry to ever resolve.
-	s.closeBlockRows(sid, attempt, rows, nil, "")
+	s.closeBlockRows(sid, attempt, rows, nil, "", false)
 }
 
 // openAttemptFor answers the keep decision for one authenticated start the
@@ -1306,7 +1459,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 				continue
 			}
 			bs.mu.Unlock()
-			if !s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce) {
+			if !s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete) {
 				return
 			}
 		}
@@ -1356,9 +1509,18 @@ func (bs *blockStream) publishFence(s *WSServer, sid session.ID, hexNonce, attem
 			break
 		}
 	}
+	// A boundary already reported lost before its fence was published here
+	// (BlockBoundaryLost) is settled now, as a gap, at what reached the store.
+	if len(parked) == 0 && bs.isLostLocked(sid, hexNonce) {
+		var endRow uint64
+		if block := bs.open[sid][attempt]; block != nil {
+			endRow = block.rows
+		}
+		parked = append(parked, pendingEnd{nonce: hexNonce, endRow: endRow, incomplete: true})
+	}
 	bs.mu.Unlock()
 	for _, e := range parked {
-		s.closeBlockRows(sid, attempt, e.endRow, e.closing, e.nonce)
+		s.closeBlockRows(sid, attempt, e.endRow, e.closing, e.nonce, e.incomplete)
 	}
 }
 

@@ -5,7 +5,7 @@
   "description": "The end marker of one authenticated execution interval, sent on the same ordered carrier as the interval's rows and AFTER the last of them (nocx-2v80t.3.6). The nonce is what makes the marker a boundary and not just a line in a stream: the coordinator authenticates it against the meeting its own kernel recorded, exactly as it authenticated the completion, so an interval nobody ran can close nobody's block. Rows that departed after the interval's boundary was taken — while the authenticated half was still on its way — stream after this marker and belong to the interval that follows; EndRow is what tells the two apart.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["nonce", "endRow", "closing"],
+  "required": ["nonce", "endRow", "closing", "noFence"],
   "properties": {
     "nonce": {
       "description": "The boundary's meeting, as 64 lowercase hex characters — the fixed spelling the lifecycle downlink's nonce already uses. The rendezvous matched on it exactly; a decoder that tolerated another spelling would attribute rows to a boundary nobody authenticated.",
@@ -20,6 +20,10 @@
     "closing": {
       "description": "The screen as the boundary sat on it, in the frame contract's row shape — the rows a block closes with, and never a later read of a screen the stream has since moved past. Null when the screen could not be read: a screen nobody read is not a screen nobody may be told about, and null is an answer rather than an absence.",
       "$ref": "#/$defs/rowsOrNull"
+    },
+    "noFence": {
+      "description": "Whether the interval was settled WITHOUT its fence (ADR-0074 decision 3, nocx-2v80t.3.29): its authenticated completion arrived, the next event proved its fence would never be sighted, and it ended with no closing screen. The block it closes may be missing output, and the coordinator stores it as a gap so the block says so. False for every boundary that joined its fence, and for an environment entry, which has no fence by design. Always present: false is an answer.",
+      "type": "boolean"
     }
   },
   "$defs": {

@@ -47,7 +47,7 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows); !confirm || written != 20 {
 		t.Fatalf("rows ack = (%d, %v), want the exclusive end 20 confirmed", written, confirm)
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")}, false)
 
 	// The block seals: this is the state the client's `cmd-block-running` waits
 	// on, and the e2e's whole failure.
@@ -84,7 +84,7 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("row-00")}); !confirm {
 		t.Fatal("a replay below the closed boundary was not confirmed")
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")}, false)
 	if again := streamRows(t, db, attempt); len(again) != 21 {
 		t.Fatalf("a later delivery changed the sealed block: %d rows (%+v)", len(again), again)
 	}
@@ -121,7 +121,7 @@ func TestBlockIntervalEnded_SealsWithoutClaimingRowsItNeverReceived(t *testing.T
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows); !confirm || written != 10 {
 		t.Fatalf("rows ack = (%d, %v), want the exclusive end 10 confirmed", written, confirm)
 	}
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 40, []emulator.Row{aStreamRow("closing")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 40, []emulator.Row{aStreamRow("closing")}, false)
 
 	assertBlockSealed(t, db, attempt)
 	kept := streamRows(t, db, attempt)
@@ -175,7 +175,7 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 
 	// The first attempt is the close itself; every later delivery retries the
 	// end while it is still parked. maxCloseAttempts bounds that.
-	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")})
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 	for i := range maxCloseAttempts {
 		from := uint64(i + 1) //nolint:gosec // a row index, never negative
 		e.ws.BlockRowsArrived(session.ID(sid), from, 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))})

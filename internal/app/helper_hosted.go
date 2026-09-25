@@ -180,7 +180,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		stopDownlink = cancelSession
 		// A delivery that fails is retried, and one that is lost is logged
 		// by the downlink itself, through log.From on this same context.
-		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx)
+		downlink = helperclient.NewCompletionDownlink(h.client, sessionCtx, boundaryLossTo(h.blockRows))
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()

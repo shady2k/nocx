@@ -33,7 +33,7 @@ func TestADownlinkStoppedByItsContextReportsAndLeavesTheKernelState(t *testing.T
 	logCtx, sl := downlinkLog(t)
 	ctx, stop := context.WithCancel(logCtx)
 
-	downlink := client.NewCompletionDownlink(c, ctx)
+	downlink := client.NewCompletionDownlink(c, ctx, nil)
 	observing := client.NewCompletionObservingKernel(pub, downlink)
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
@@ -122,7 +122,7 @@ func TestADeliveryOnTheWireFinishesAndTheNextOneNeverStarts(t *testing.T) {
 	ctx, stop := context.WithCancel(logCtx)
 	defer stop()
 
-	downlink := client.NewCompletionDownlink(sender, ctx)
+	downlink := client.NewCompletionDownlink(sender, ctx, nil)
 	downlink.Bind(client.HostSessionID{Generation: "gen-1", Session: "sess-1"})
 
 	code := 0
@@ -195,7 +195,7 @@ func (d *deadlineSender) LifecycleEntered(ctx context.Context, _ proto.Lifecycle
 func TestEveryDeliveryIsBoundedSoAWedgedHelperCannotStallTheLifecycleStream(t *testing.T) {
 	sender := &deadlineSender{got: make(chan struct{}, 1)}
 	ctx, _ := downlinkLog(t)
-	downlink := client.NewCompletionDownlink(sender, ctx)
+	downlink := client.NewCompletionDownlink(sender, ctx, nil)
 	downlink.Bind(client.HostSessionID{Generation: "gen-1", Session: "sess-1"})
 
 	code := 0

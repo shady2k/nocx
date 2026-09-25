@@ -222,7 +222,7 @@ func TestEndMarkerNeverDropsUnderBackpressure(t *testing.T) {
 
 	const endRow = maxQueuedRowBatches + overflow + 1
 	returnsAtOnce(t, "IntervalEnd", func() {
-		bridge.IntervalEnd(endNonce(0xCD), endRow, []emulator.Row{textRow("closing")})
+		bridge.IntervalEnd(endNonce(0xCD), endRow, []emulator.Row{textRow("closing")}, false)
 	})
 
 	close(sink.release)
@@ -317,7 +317,7 @@ func TestTheMarkerQueueIsBoundedUnderAWedgedSink(t *testing.T) {
 			bridge.ClearBoundary()
 		}
 		for i := range ends {
-			bridge.IntervalEnd(endNonce(byte(i)), 1, []emulator.Row{textRow("closing")})
+			bridge.IntervalEnd(endNonce(byte(i)), 1, []emulator.Row{textRow("closing")}, false)
 		}
 	})
 
@@ -356,7 +356,7 @@ func TestMarkersWithinTheBudgetAllReachTheWire(t *testing.T) {
 	stallThePump(t, sink, bridge)
 
 	for i := range maxQueuedMarkers {
-		bridge.IntervalEnd(endNonce(byte(i)), 1, nil)
+		bridge.IntervalEnd(endNonce(byte(i)), 1, nil, false)
 	}
 	close(sink.release)
 	log := sink.waitUntil(func(log []recordedDelivery) bool { return len(log) == 1+maxQueuedMarkers })

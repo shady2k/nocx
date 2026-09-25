@@ -85,6 +85,8 @@ type rowEmission struct {
 	lost    uint64
 	rows    []emulator.Row
 	closing []emulator.Row
+	// noFence is an end marker's settledWithoutFence (nocx-2v80t.3.29).
+	noFence bool
 }
 
 // batch is whether this emission is a runtime row batch: bounded by
@@ -104,8 +106,8 @@ func (b *rowBridge) OutputRows(from uint64, rows []emulator.Row, lost uint64) {
 	b.hs.enqueueRowEmission(rowEmission{from: from, lost: lost, rows: rows})
 }
 
-func (b *rowBridge) IntervalEnd(nonce sessionruntime.FenceNonce, endRow uint64, closing []emulator.Row) {
-	b.hs.enqueueRowEmission(rowEmission{end: true, nonce: nonce, from: endRow, closing: closing})
+func (b *rowBridge) IntervalEnd(nonce sessionruntime.FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool) {
+	b.hs.enqueueRowEmission(rowEmission{end: true, nonce: nonce, from: endRow, closing: closing, noFence: settledWithoutFence})
 }
 
 // ClearBoundary hands off one sighted erase-saved-lines (nocx-2v80t.3.17), on
@@ -256,6 +258,7 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 			Nonce:   hex.EncodeToString(em.nonce[:]),
 			EndRow:  em.from,
 			Closing: closing,
+			NoFence: em.noFence,
 		})
 		if err != nil {
 			s.log.Warn("session interval end not encodable", "session", s.id.Session, "err", err)

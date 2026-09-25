@@ -34,7 +34,11 @@ type blockRowsSink interface {
 	AttachBlockRows(sid session.ID)
 	DetachBlockRows(sid session.ID)
 	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool)
-	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row)
+	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row, noFence bool)
+	// BlockBoundaryLost settles the block a boundary would have closed when
+	// its delivery to the helper finally failed (nocx-2v80t.3.29); the pane's
+	// completion downlink reports it (boundaryLossTo).
+	BlockBoundaryLost(sid session.ID, nonce [32]byte)
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
@@ -97,7 +101,7 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 		}
 	})
 	src.OnIntervalEnd(func(e client.IntervalEnd) {
-		sink.BlockIntervalEnded(sid, [32]byte(e.Nonce), e.EndRow, e.Closing)
+		sink.BlockIntervalEnded(sid, [32]byte(e.Nonce), e.EndRow, e.Closing, e.NoFence)
 	})
 	src.OnClearBoundary(func() {
 		sink.BlockClearBoundary(sid)
@@ -112,6 +116,20 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 			sink.DetachBlockRows(sid)
 			cancel()
 		})
+	}
+}
+
+// boundaryLossTo is the completion downlink's report of a lost boundary,
+// routed to the transport's block stream for the session the downlink was
+// bound to — the helper session id, which is the transport's session id for
+// a hosted pane (bindBlockRows' own sid). A nil sink routes nothing: a pane
+// whose rows are not streamed has no block for a loss to settle.
+func boundaryLossTo(sink blockRowsSink) client.BoundaryLost {
+	if sink == nil {
+		return nil
+	}
+	return func(sessionID string, fence [32]byte) {
+		sink.BlockBoundaryLost(session.ID(sessionID), fence)
 	}
 }
 

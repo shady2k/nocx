@@ -939,6 +939,11 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if frozen {
 			return n, nil
 		}
+		// This ack is for the LIFECYCLE cursor. The PTY offset rides along
+		// only because the wire requires it; a helper that knows
+		// lifecycleOffset neither judges nor applies it, since the PTY reader
+		// acks that cursor itself and may already have passed this value
+		// (nocx-2v80t.3.44).
 		if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
 			proto.AckParams{
 				Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),

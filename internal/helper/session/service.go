@@ -665,13 +665,24 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		sink, _ := host.ConnectionFrom(ctx).(Sink)
-		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
-			return nil, err
-		}
+		// ONE READER OWNS EACH CURSOR (nocx-2v80t.3.44). An ack that names a
+		// lifecycle offset is the LIFECYCLE reader's, and it acks that cursor
+		// alone. Its Offset is the PTY position it read beside the lifecycle
+		// one, carried because the wire has always required the field, and
+		// the PTY reader acks that cursor itself, concurrently: when the PTY
+		// reader's newer ack lands first, the piggybacked offset is behind
+		// the cursor, and judging it refused the whole ack and lost the
+		// lifecycle offset it was sent for. So it is not judged and not
+		// applied here. The field stays on the wire for the generations that
+		// still apply it.
 		if p.LifecycleOffset != nil {
 			if err := hs.ackLifecycle(sink, p.Subscriber, *p.LifecycleOffset); err != nil {
 				return nil, err
 			}
+			return proto.AckResult{}, nil
+		}
+		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
+			return nil, err
 		}
 		return proto.AckResult{}, nil
 	case proto.OpConfirmRows:

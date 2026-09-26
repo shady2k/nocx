@@ -167,6 +167,15 @@ func TestHelperAckDetachAndResetDTOsConformToContract(t *testing.T) {
 	})); err != nil {
 		t.Errorf("ack params: %v", err)
 	}
+	// The lifecycle reader's ack (nocx-2v80t.3.44): it names the lifecycle
+	// cursor, and has since the lifecycle channel was carried through helper
+	// sessions — the contract has to declare the field it sends.
+	lifecycleOffset := proto.StreamOffset(7)
+	if err := validateHelperJSON(ack, mustMarshal(t, proto.AckParams{
+		Subscriber: "pane-a", Session: abiSession, Offset: 1 << 40, LifecycleOffset: &lifecycleOffset,
+	})); err != nil {
+		t.Errorf("the lifecycle reader's ack params: %v", err)
+	}
 
 	detachParams := loadHelperSchema(t, "session.detach.params.schema.json")
 	if err := validateHelperJSON(detachParams, mustMarshal(t, proto.DetachParams{Attachment: "att-1"})); err != nil {

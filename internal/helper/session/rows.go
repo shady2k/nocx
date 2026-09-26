@@ -226,7 +226,18 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 func (s *hostSession) serveRows() {
 	for {
 		if em, ok := s.dequeueRowEmission(); ok {
-			s.deliverRowEmission(em)
+			// The incomplete marker is the only statement of a loss
+			// (nocx-2v80t.3.38): one that no subscriber took — its send
+			// failed, or nobody was bound — is still owed, and is stated
+			// before the next thing delivered, which is what closes the
+			// interval that ran through the overflow.
+			if s.owedMarker != nil && s.deliverRowEmission(*s.owedMarker) {
+				s.owedMarker = nil
+			}
+			if !s.deliverRowEmission(em) && em.incomplete {
+				owed := em
+				s.owedMarker = &owed
+			}
 			continue
 		}
 		select {
@@ -237,16 +248,17 @@ func (s *hostSession) serveRows() {
 	}
 }
 
-// deliverRowEmission marshals once and sends per subscriber. A send error
+// deliverRowEmission marshals once and sends per subscriber, and answers
+// whether at least one subscriber took every frame of it. A send error
 // ends nothing here: it already means the connection under that sink is
 // dying, and releaseConnection does the teardown — one dead reader must not
 // take the others' frames with it.
-func (s *hostSession) deliverRowEmission(em rowEmission) {
+func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 	if em.clear {
 		payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
 		if err != nil {
 			s.log.Warn("session clear boundary not encodable", "session", s.id.Session, "err", err)
-			return
+			return false
 		}
 		s.mu.Lock()
 		subs := s.subscribersLocked()
@@ -259,13 +271,13 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 					"subscriber", sub.id, "err", err)
 			}
 		}
-		return
+		return len(subs) > 0
 	}
 	if em.end {
 		closing, err := encodedRowsOrNothing(em.closing)
 		if err != nil {
 			s.log.Warn("session closing screen not encodable", "session", s.id.Session, "err", err)
-			return
+			return false
 		}
 		payload, err := json.Marshal(proto.IntervalEndDoc{
 			Nonce:   hex.EncodeToString(em.nonce[:]),
@@ -275,7 +287,7 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		})
 		if err != nil {
 			s.log.Warn("session interval end not encodable", "session", s.id.Session, "err", err)
-			return
+			return false
 		}
 		s.mu.Lock()
 		subs := s.subscribersLocked()
@@ -290,11 +302,12 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 					"subscriber", sub.id, "endRow", em.from, "err", err)
 			}
 		}
-		return
+		return len(subs) > 0
 	}
 	// LostRows is the runtime's own loss (a struck feed immediately before
 	// em.from); the incomplete marker carries no rows and says so.
 	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: em.lost, Incomplete: em.incomplete}
+	delivered := true
 	for start := 0; start <= len(em.rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
 		if stop > len(em.rows) {
@@ -304,26 +317,30 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		doc.Rows, err = sessionruntime.EncodeRows(em.rows[start:stop])
 		if err != nil {
 			s.log.Warn("session rows not encodable", "session", s.id.Session, "err", err)
-			return
+			return false
 		}
 		payload, err := json.Marshal(doc)
 		if err != nil {
 			s.log.Warn("session rows not encodable", "session", s.id.Session, "err", err)
-			return
+			return false
 		}
 		s.mu.Lock()
 		subs := s.subscribersLocked()
 		s.mu.Unlock()
+		taken := 0
 		for _, sub := range subs {
 			if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{
 				Session: s.raw, Subscriber: sub.raw, FromRow: doc.FromRow, Payload: payload,
 			}); err != nil {
 				s.log.Warn("session rows not delivered", "session", s.id.Session,
 					"subscriber", sub.id, "fromRow", doc.FromRow, "err", err)
+				continue
 			}
+			taken++
 		}
+		delivered = delivered && taken > 0
 		if stop == len(em.rows) {
-			return
+			return delivered
 		}
 		doc.FromRow += uint64(stop - start) // #nosec G115 -- slice arithmetic, never negative
 		// The gap LostRows states sits immediately before em.from — the
@@ -335,6 +352,7 @@ func (s *hostSession) deliverRowEmission(em rowEmission) {
 		// FromRow-minus-LostRows check).
 		doc.LostRows = 0
 	}
+	return delivered
 }
 
 // encodedRowsOrNothing encodes closing rows for an end marker, or nothing:

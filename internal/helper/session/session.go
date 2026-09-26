@@ -425,6 +425,9 @@ type hostSession struct {
 	// set at spawn from the person's setting (nocx-2v80t.3.36) — and
 	// rowQueuedBytes is what it holds now; rowsIncomplete counts the times
 	// it overflowed and ended a block incomplete.
+	// owedMarker is an incomplete marker no subscriber took, stated before
+	// the next delivery (rows.go, nocx-2v80t.3.38). The pump's alone.
+	owedMarker     *rowEmission
 	rowBufferBytes int64
 	rowQueuedBytes int64
 	rowsIncomplete atomic.Uint64

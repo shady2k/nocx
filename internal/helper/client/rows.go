@@ -167,6 +167,15 @@ func (c *Client) outputRows(payload []byte) {
 			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 		return
 	}
+	if doc.Incomplete && len(rows) > 0 {
+		// The contract's own rule (session.output-rows, nocx-2v80t.3.38): the
+		// marker says recording stopped, so it carries no rows. A document
+		// claiming both is refused rather than half-believed.
+		c.log.Warn("malformed rows document: an incomplete marker carries rows",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+			"rows", len(rows))
+		return
+	}
 	c.mu.Lock()
 	a := c.attachments[f.Subscriber]
 	c.mu.Unlock()

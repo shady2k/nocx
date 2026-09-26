@@ -147,6 +147,14 @@ type Limits struct {
 	// clock, because D5 forbids the helper deciding anything about a block's
 	// result, not running a timer — see SweepInterval's own doc.
 	UnclaimedSessionTTL time.Duration
+	// DefaultRowBufferBytes, MinRowBufferBytes and MaxRowBufferBytes are
+	// the row buffer's bounds (nocx-2v80t.3.38): what a spawn naming none
+	// gets, the floor a request is raised to, and the ceiling. The buffer
+	// draws on BudgetBytes with the window (AD-10). Zero takes the package
+	// defaults of the same names.
+	DefaultRowBufferBytes int64
+	MinRowBufferBytes     int64
+	MaxRowBufferBytes     int64
 }
 
 // unclaimedSessionTTLDefault is D-amendment 3's number: a session nobody has
@@ -164,6 +172,10 @@ func DefaultLimits() Limits {
 		MaxWindowBytes:      64 << 20,
 		BudgetBytes:         512 << 20,
 		UnclaimedSessionTTL: unclaimedSessionTTLDefault,
+		// The row buffer (nocx-2v80t.3.38): see the constants' own comment.
+		DefaultRowBufferBytes: DefaultRowBufferBytes,
+		MinRowBufferBytes:     MinRowBufferBytes,
+		MaxRowBufferBytes:     MaxRowBufferBytes,
 	}
 }
 
@@ -184,6 +196,19 @@ func (l Limits) withDefaults() Limits {
 	if l.UnclaimedSessionTTL <= 0 {
 		l.UnclaimedSessionTTL = d.UnclaimedSessionTTL
 	}
+	if l.MinRowBufferBytes <= 0 {
+		l.MinRowBufferBytes = d.MinRowBufferBytes
+	}
+	if l.MaxRowBufferBytes <= 0 {
+		l.MaxRowBufferBytes = d.MaxRowBufferBytes
+	}
+	if l.DefaultRowBufferBytes <= 0 {
+		l.DefaultRowBufferBytes = d.DefaultRowBufferBytes
+	}
+	if l.MaxRowBufferBytes < l.MinRowBufferBytes {
+		l.MaxRowBufferBytes = l.MinRowBufferBytes
+	}
+	l.DefaultRowBufferBytes = min(max(l.DefaultRowBufferBytes, l.MinRowBufferBytes), l.MaxRowBufferBytes)
 	// D8's floor is ENFORCED, not merely documented, and the reason is
 	// measurable rather than aesthetic. The per-subscriber pump runs at most
 	// creditLimit ahead of the reader's acks, so with a window no larger than
@@ -844,17 +869,19 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
+	rowBuffer := s.clampRowBuffer(p.RowBufferBytes)
 
 	// Eviction under pressure (nocx-isjh4): closes exited, unattached
 	// sessions oldest-exit-first when reserved would not otherwise fit,
 	// BEFORE the refusal below is decided — so a spawn that fits once they
 	// are gone never sees ErrBudget at all. A live shell, or an exited
 	// session a coordinator still holds, is never touched here.
-	s.evictForBudget(reserved)
+	s.evictForBudget(reserved + rowBuffer)
 
 	s.mu.Lock()
 	committed := s.budget
-	if committed+reserved > s.limits.BudgetBytes {
+	rowBuffer, fits := s.fitRowBufferLocked(reserved, rowBuffer)
+	if !fits {
 		s.mu.Unlock()
 		// The total is read UNDER the lock and carried out of it: reporting it
 		// from the field after unlocking is a read of shared state that another
@@ -862,6 +889,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// prints.
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
+	reserved += rowBuffer
 	s.budget += reserved
 	s.mu.Unlock()
 
@@ -914,18 +942,19 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindLocal,
 		Local: &proto.LocalLaunchRecord{
-			Shell:       proc.Shell(),
-			Cwd:         resolvedCwd(p.Cwd, proc),
-			Pid:         proc.Pid(),
-			Pgid:        processGroup(proc),
-			Cols:        cols,
-			Rows:        rows,
-			WindowBytes: bound,
+			Shell:          proc.Shell(),
+			Cwd:            resolvedCwd(p.Cwd, proc),
+			Pid:            proc.Pid(),
+			Pgid:           processGroup(proc),
+			Cols:           cols,
+			Rows:           rows,
+			WindowBytes:    bound,
+			RowBufferBytes: rowBuffer,
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: clampRowBuffer(p.RowBufferBytes), lifecycle: p.Lifecycle,
+		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -991,14 +1020,16 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
+	rowBuffer := s.clampRowBuffer(p.RowBufferBytes)
 
 	// See spawn's identical step: eviction under pressure runs before the
 	// refusal below is decided (nocx-isjh4).
-	s.evictForBudget(reserved)
+	s.evictForBudget(reserved + rowBuffer)
 
 	s.mu.Lock()
 	committed := s.budget
-	if committed+reserved > s.limits.BudgetBytes {
+	rowBuffer, fits := s.fitRowBufferLocked(reserved, rowBuffer)
+	if !fits {
 		s.mu.Unlock()
 		// The total is read UNDER the lock and carried out of it: reporting it
 		// from the field after unlocking is a read of shared state that another
@@ -1006,6 +1037,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// prints.
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
+	reserved += rowBuffer
 	s.budget += reserved
 	s.mu.Unlock()
 
@@ -1095,15 +1127,16 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 			Shell:       string(shellKindOrAuto(p.Shell)),
 			// Empty, always: this helper resolved no directory on the far
 			// side. See proto.SSHLaunchRecord.
-			Cwd:         "",
-			Cols:        cols,
-			Rows:        rows,
-			WindowBytes: bound,
+			Cwd:            "",
+			Cols:           cols,
+			Rows:           rows,
+			WindowBytes:    bound,
+			RowBufferBytes: rowBuffer,
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: clampRowBuffer(p.RowBufferBytes), lifecycle: p.Lifecycle,
+		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1167,21 +1200,51 @@ func shellKindOrAuto(kind proto.SSHShellKind) proto.SSHShellKind {
 // queue it replaces: 256 batches of one feed's departures, a feed departing
 // about one 80-column screen, is 256 × 24 rows × 80 cells × 40 bytes ≈ 20 MB.
 // MaxRowBufferBytes is the ceiling, because the memory is spent on the
-// machine the helper runs on, whatever the coordinator asks for.
+// machine the helper runs on, whatever the coordinator asks for: 256 MiB,
+// half the default aggregate budget, so one session can never take it all.
+//
+// MinRowBufferBytes is the floor (nocx-2v80t.3.38): 4 MiB holds one closing
+// screen of 400 columns × 250 rows — 100,000 cells at about 41 bytes each
+// (emissionBytes: a 40-byte cell and its grapheme), ≈ 3.9 MiB — with the
+// incomplete marker beside it. A smaller buffer could not carry one end
+// marker whole, and every block would end incomplete at its first boundary.
+// A request below it is raised to it; the aggregate budget never shrinks a
+// buffer below it either, and a spawn that cannot fit it is refused. These
+// are DefaultLimits' values; Limits carries them so the composition root
+// owns them like the window's.
 const (
 	DefaultRowBufferBytes int64 = 20 << 20
-	MaxRowBufferBytes     int64 = 1 << 30
+	MinRowBufferBytes     int64 = 4 << 20
+	MaxRowBufferBytes     int64 = 256 << 20
 )
 
-// clampRowBuffer applies the helper's bounds to a spawn's requested buffer.
-func clampRowBuffer(requested int64) int64 {
+// clampRowBuffer applies the helper's floor and ceiling to a spawn's
+// requested buffer; the aggregate budget is applied where the budget is
+// committed (fitRowBufferLocked).
+func (s *Service) clampRowBuffer(requested int64) int64 {
 	switch {
 	case requested <= 0:
-		return DefaultRowBufferBytes
-	case requested > MaxRowBufferBytes:
-		return MaxRowBufferBytes
+		return s.limits.DefaultRowBufferBytes
+	case requested < s.limits.MinRowBufferBytes:
+		return s.limits.MinRowBufferBytes
+	case requested > s.limits.MaxRowBufferBytes:
+		return s.limits.MaxRowBufferBytes
 	}
 	return requested
+}
+
+// fitRowBufferLocked applies the helper-wide aggregate to a clamped row
+// buffer, after the window's own reservation (AD-10, nocx-2v80t.3.38): the
+// row buffer is spent on this machine exactly as the window is, so it counts
+// against the same budget. A session asking for more than is left gets what
+// is left, never below the floor; with less than the floor left, it does not
+// fit. Called under s.mu.
+func (s *Service) fitRowBufferLocked(reserved, want int64) (int64, bool) {
+	left := s.limits.BudgetBytes - s.budget - reserved
+	if left < s.limits.MinRowBufferBytes {
+		return 0, false
+	}
+	return min(want, left), true
 }
 
 // spawnShape is everything finishSpawn needs that is not the process itself:
@@ -1510,7 +1573,7 @@ func (s *Service) removeSession(hs *hostSession, reason string) {
 				delete(s.keys, hs.key)
 			}
 		}
-		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget
+		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget + hs.rowBufferBytes
 	}
 	s.mu.Unlock()
 }
@@ -1583,7 +1646,7 @@ func (s *Service) evictForBudget(reserved int64) {
 		if !exited || attached {
 			continue
 		}
-		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget})
+		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget + hs.rowBufferBytes})
 	}
 	sort.Slice(pool, func(i, j int) bool { return pool[i].at.Before(pool[j].at) })
 

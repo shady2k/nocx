@@ -253,20 +253,27 @@ func TestTheBridgeCarriesRowsInOrderAndTheEndAfterThem(t *testing.T) {
 		t.Fatalf("ingest the fence: %v", err)
 	}
 	rt.Completed(rt.Incarnation(), nonce, 0)
+	// The next command: thirty lines push the fenced screen off and then
+	// leave rows of their own.
+	rowsFeed(t, rt, 100, 30)
 
 	sink.waitFor(2, 1, 0)
 
-	// Two batches: the flood's seven departures, then one more row the
-	// trailing "tail\r\n" scrolls off — a row the flood itself had not yet
-	// departed, unrelated to "tail" or "prompt", and NOT this boundary's:
-	// it streams because it left the screen, but the end marker below
-	// excludes it from the interval that just closed.
+	// Two batches: the flood's seven departures, then the next command's own
+	// rows from index 7. The row the trailing "tail\r\n" scrolled off, and
+	// every other row of the fenced screen as the next command pushes it
+	// off, is this boundary's closing screen: the end marker carries it, so
+	// it streams nowhere else — before the end marker it would be stored in
+	// that block twice (nocx-2v80t.3.41).
 	frames := sink.rowFrames()
 	if len(frames) != 2 {
 		t.Fatalf("the pump sent %d row frames, want 2", len(frames))
 	}
 	if frames[0].FromRow != 0 || frames[1].FromRow != 7 {
 		t.Fatalf("the frames name FromRow %d and %d, want 0 and 7 — the index never skips", frames[0].FromRow, frames[1].FromRow)
+	}
+	if !strings.Contains(string(frames[1].Payload), "L000100") {
+		t.Fatalf("the second batch does not start the next command's own rows: %s", frames[1].Payload)
 	}
 	if string(frames[0].Payload) == "" || string(frames[1].Payload) == "" {
 		t.Fatal("a frame carries no payload")

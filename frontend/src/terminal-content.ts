@@ -5247,23 +5247,87 @@ export class TerminalContent extends BasePaneContent {
     this.renderer.fitViewport(usable)
   }
 
+  /**
+   * What the running block's header and the ProcessBar took off the pane's
+   * terminal area the last time a command ran here: the pane's terminal area
+   * less the running cap. Null until a command has run (nocx-2v80t.3.46).
+   */
+  private _runningChromePx: number | null = null
+
+  /**
+   * The pane's TERMINAL AREA: the scroller plus whichever lifecycle chrome is
+   * in the flow beside it right now — the inline composer at a prompt, the
+   * ProcessBar while a command runs, neither in the frame between. Those two
+   * trade places at every command and the scroller absorbs the difference,
+   * so the scroller alone is a different number at the prompt, while running
+   * and in between; this sum is the same number in all three, and changes
+   * only when the pane (or chrome that is not the lifecycle's) does.
+   */
+  private _terminalAreaPx(area: HTMLElement): number {
+    const outer = (el: HTMLElement | null | undefined): number => {
+      if (!el || !el.isConnected || el.hidden) return 0
+      const box = el.getBoundingClientRect().height
+      if (box <= 0) return 0
+      const cs = getComputedStyle(el)
+      const margin = parseFloat(cs.marginTop) + parseFloat(cs.marginBottom)
+      return box + (Number.isFinite(margin) ? margin : 0)
+    }
+    const composer = this.editor?.root
+    const inFlow = composer && composer.dataset.placement !== 'overlay' ? composer : null
+    return area.clientHeight + outer(inFlow) + outer(this.processBar)
+  }
+
+  /**
+   * The height the grid is fitted to (nocx-2v80t.3.46).
+   *
+   * While a command runs it is the live region's CAP, not the bare scroller:
+   * setLiveHeight clamps the live box to scroller minus the running block's
+   * header, and a grid fitted to the full scroller is taller than the box
+   * that displays it — its last rows are clipped by the box's overflow and
+   * nothing scrolls them, so the bottom of a tall inline TUI (its composer)
+   * is unreachable (nocx-zn4d).
+   *
+   * AT THE PROMPT IT IS THE SAME NUMBER, not the scroller. The grid is not on
+   * screen there (the live region is `height: 0`), and fitting it to the
+   * scroller made it breathe with the lifecycle: the composer at the prompt,
+   * nothing in the frame after a freeze, the ProcessBar and the header while
+   * running — 546, 676 and 560 px in one pane, 27, 33 and 28 rows, 221
+   * resizes in 500 commands. A resize that lands at a submit makes bash
+   * redraw its line with no newline, and the command's output then begins on
+   * that row, so a block's first row carried the command line. So the prompt
+   * keeps the grid a command will run in: the terminal area less the chrome
+   * the last command took. A pane that did not change size fits the same
+   * rectangle, which the guard in fitUsableViewport turns into no resize at
+   * all; a pane that did change moves the terminal area, and the grid with
+   * it, at once.
+   *
+   * The terminal owning the pane (fullscreen, unstructured) is sized from
+   * the scroller, as before.
+   */
+  private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
+    const scroller = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
+    const sb = this.scrollback
+    if (!sb || !area || area.clientHeight <= 0) return sb?.runningLiveCap ?? scroller
+    const mode = sb.mode
+    if (mode !== 'running' && mode !== 'idle') return scroller
+    const cap = sb.runningLiveCap
+    if (cap !== null) {
+      this._runningChromePx = this._terminalAreaPx(area) - cap
+      return cap
+    }
+    if (mode === 'idle' && this._runningChromePx !== null) {
+      return this._terminalAreaPx(area) - this._runningChromePx
+    }
+    return scroller
+  }
+
   private usableViewport(viewport: ContentViewport): ContentViewport {
     const area = this.scrollback?.scrollbackArea
     // Zero before first layout — the delivered box is the better guess then,
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
-    //
-    // While a command runs, the height is the live region's CAP, not the bare
-    // scroller: setLiveHeight clamps the live box to scroller minus the
-    // running block's header, and a grid fitted to the full scroller is taller
-    // than the box that displays it — its last rows are clipped by the box's
-    // overflow and nothing scrolls them, so the bottom of a tall inline TUI
-    // (its composer) is unreachable (nocx-zn4d). Fitting the grid to the same
-    // cap makes the box and the grid agree; output past the grid goes into
-    // xterm's own scrollback and is reachable through its viewport. Outside
-    // `running` the cap is null and the delivered/scroller height applies.
-    const cap = this.scrollback?.runningLiveCap
-    const height = cap ?? (area && area.clientHeight > 0 ? area.clientHeight : viewport.height)
+    // The height is `_gridHeight`'s: the running cap, held at the prompt.
+    const height = this._gridHeight(area, viewport)
     // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8). Rows carry
     // the pane gutter, the live region included, so the scroller's clientWidth
     // is the grid width PLUS that inset — fitting to clientWidth would put the

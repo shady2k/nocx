@@ -149,6 +149,14 @@ type blockStream struct {
 	// time. Cleared by the attempt's own completion or abandonment, and by
 	// detach.
 	entered map[session.ID]map[string]struct{}
+	// reopen names an open asked for while another was in flight
+	// (nocx-2v80t.3.42). Three callers ask for a block's open — the submit,
+	// the shell's authenticated start and the ledger.bind that makes the row
+	// durable — and the store answers ErrNoSuchEntry until the bind has
+	// landed, so the request that arrives during an open is often the only
+	// one that can succeed. It is asked again when the open in flight
+	// finishes, never dropped. Cleared by that retry and by detach.
+	reopen map[session.ID]string
 	// lost are the fences whose boundary this coordinator accepted and could
 	// never tell the helper (nocx-2v80t.3.29), newest last, bounded by
 	// maxPendingEnds. A block whose fence is here was sealed as a gap, or is
@@ -556,6 +564,7 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	delete(bs.closeTries, sid)
 	delete(bs.entered, sid)
 	delete(bs.lost, sid)
+	delete(bs.reopen, sid)
 	delete(bs.unrecorded, sid)
 	delete(bs.budgets, sid)
 	bs.mu.Unlock()
@@ -1526,6 +1535,13 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		return
 	}
 	if bs.opening[sid] {
+		// Not dropped: the open in flight may be reading a store that cannot
+		// see this row yet, and this request may be the bind that lets it.
+		// It is made again when the one in flight finishes (openFinished).
+		if bs.reopen == nil {
+			bs.reopen = make(map[session.ID]string)
+		}
+		bs.reopen[sid] = attempt
 		bs.mu.Unlock()
 		return
 	}
@@ -1578,7 +1594,7 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		_, sourced := bs.sources[sid]
 		bs.mu.Unlock()
 		if !sourced {
-			bs.clearOpening(sid)
+			bs.openFinished(s, sid)
 			return
 		}
 	}
@@ -1586,7 +1602,7 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		v7, mintErr := uuid.NewV7()
 		if mintErr != nil {
 			s.log.Warn("block rows artifact id mint failed", "session", sid, "entry", attempt, "error", mintErr)
-			bs.clearOpening(sid)
+			bs.openFinished(s, sid)
 			return
 		}
 		// Owner: this stream, at the command's authenticated start.
@@ -1599,8 +1615,9 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 			if !errors.Is(err, content.ErrNoSuchEntry) {
 				s.log.Warn("block rows open failed", "session", sid, "entry", attempt, "error", err)
 			}
-			bs.clearOpening(sid)
-			// Keep waiting reserved. The ledger.bind retry owns the next open.
+			// Keep waiting reserved. The ledger.bind retry owns the next open —
+			// and when it arrived while this one was in flight, it is made now.
+			bs.openFinished(s, sid)
 			return
 		}
 		openArtifact = opened
@@ -1637,16 +1654,31 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	if len(pending) > 0 {
 		bs.flushing[sid] = true
 	}
+	again, owed := bs.reopen[sid]
+	delete(bs.reopen, sid)
 	bs.mu.Unlock()
 	if len(pending) > 0 {
 		bs.flushPendingRows(s, sid, b, pending, confirm)
 	}
+	// An open for ANOTHER attempt asked for while this one was in flight: a
+	// later command's start. It is made now rather than lost; for this same
+	// attempt the open just done answers it (openAttemptFor's existing path).
+	if owed && again != attempt {
+		bs.openAttemptFor(s, sid, again)
+	}
 }
 
-func (bs *blockStream) clearOpening(sid session.ID) {
+// openFinished ends an open that did not produce a block, and makes the open
+// that was asked for while it was in flight, if one was (blockStream.reopen).
+func (bs *blockStream) openFinished(s *WSServer, sid session.ID) {
 	bs.mu.Lock()
 	delete(bs.opening, sid)
+	again, owed := bs.reopen[sid]
+	delete(bs.reopen, sid)
 	bs.mu.Unlock()
+	if owed {
+		bs.openAttemptFor(s, sid, again)
+	}
 }
 
 func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {

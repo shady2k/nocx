@@ -9,10 +9,9 @@ import (
 	"github.com/shady2k/nocx/internal/emulator"
 )
 
-// rebaselineLocked's own comment says the debt and the pushed-history ledger
-// SURVIVE a re-baseline: they are facts about rows that are out of the
-// screen's sight, and re-seeding the depth does not un-report or un-push
-// them. Measured during nocx-2v80t.3.10's review: that held only for the
+// rebaselineLocked's own comment says the debt SURVIVES a re-baseline: it is
+// a fact about rows already reported, and re-seeding the depth does not
+// un-report them. Measured during nocx-2v80t.3.10's review: that held only for the
 // buffer the resize happened to measure. The two tests below are the review's
 // own findings, red before the fix (`t.sb[active]` mutated in place rather
 // than `t.sb = [2]sbBaseline{}` discarding both) and green after it.
@@ -65,12 +64,12 @@ func rebaselineIncurOwed(t *testing.T) *terminal {
 // finding: a resize taken while the ALTERNATE screen owns the pane still
 // rebaselines — ghostty carries a size per buffer, so the primary reflows
 // underneath the alternate exactly as it would on its own — and the old code
-// discarded BOTH buffers' owed debt and pushed ledger regardless of which one
+// discarded BOTH buffers' owed debt regardless of which one
 // it had just measured, keeping only the one it read. The primary's debt is
 // exactly as unpaid after a resize read on the other buffer as before it.
 func TestRebaselineOnTheAlternateScreenKeepsThePrimarysOwedDebt(t *testing.T) {
 	term := rebaselineIncurOwed(t)
-	owedBefore, pushedBefore := term.sb[0].owed, len(term.sb[0].pushed)
+	owedBefore := term.sb[0].owed
 
 	if _, err := term.Ingest([]byte("\x1b[?1049h")); err != nil { // enter the alternate screen
 		t.Fatalf("enter the alternate screen: %v", err)
@@ -82,11 +81,6 @@ func TestRebaselineOnTheAlternateScreenKeepsThePrimarysOwedDebt(t *testing.T) {
 		t.Fatalf("primary owed %d before the alternate-screen resize, %d after: "+
 			"a resize taken on the OTHER buffer must not touch this one's debt", owedBefore, got)
 	}
-	if got := len(term.sb[0].pushed); got != pushedBefore {
-		t.Fatalf("primary's pushed ledger held %d blocks before the alternate-screen resize, %d after",
-			pushedBefore, got)
-	}
-
 	// Behavioural proof, not just the ledger's own numbers: back on the
 	// primary, push the still-owed rows off again and confirm none of them
 	// is reported a second time.
@@ -111,7 +105,7 @@ func TestRebaselineOnTheAlternateScreenKeepsThePrimarysOwedDebt(t *testing.T) {
 	}
 }
 
-// TestRebaselineOnAFailedReadKeepsOwedAndThePushedLedger is the second
+// TestRebaselineOnAFailedReadKeepsOwed is the second
 // finding: rebaselineLocked's own two read failures — the screen could not be
 // read, or the scrollback depth could not be — used to zero BOTH buffers
 // wholesale, exactly the same defect as the alternate-screen case reached
@@ -123,9 +117,9 @@ func TestRebaselineOnTheAlternateScreenKeepsThePrimarysOwedDebt(t *testing.T) {
 // routes rebaselineLocked through the same two injectable fields
 // (readScreen/readDepth) that function already uses — the fix that makes the
 // failure path reachable at all, and part of what closes this finding.
-func TestRebaselineOnAFailedReadKeepsOwedAndThePushedLedger(t *testing.T) {
+func TestRebaselineOnAFailedReadKeepsOwed(t *testing.T) {
 	term := rebaselineIncurOwed(t)
-	owedBefore, pushedBefore := term.sb[0].owed, len(term.sb[0].pushed)
+	owedBefore := term.sb[0].owed
 
 	boom := errors.New("the depth could not be read")
 	term.readDepth = func() (int, error) { return 0, boom }
@@ -136,10 +130,6 @@ func TestRebaselineOnAFailedReadKeepsOwedAndThePushedLedger(t *testing.T) {
 
 	if got := term.sb[0].owed; got != owedBefore {
 		t.Fatalf("owed changed from %d to %d across a rebaseline whose depth read failed", owedBefore, got)
-	}
-	if got := len(term.sb[0].pushed); got != pushedBefore {
-		t.Fatalf("the pushed ledger held %d blocks before the failed rebaseline, %d after",
-			pushedBefore, got)
 	}
 	if term.sb[0].valid {
 		t.Fatal("a rebaseline whose read failed must leave the buffer unmeasured (valid=false), " +

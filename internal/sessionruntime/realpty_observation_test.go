@@ -167,9 +167,11 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 	// L000000..L000076, the flood whole and NOTHING of what came after the
 	// fence. The sentinel line and its newline belong to the next interval.
 	// The rows the flood departed streamed once each, in order, and the
-	// interval's end marker followed them stopping at row 77. The rows that
-	// departed after the capture (the sentinel's) stream after the end
-	// marker: they are the next interval's.
+	// interval's end marker followed them stopping at row 77. The row the
+	// sentinel pushed off after the capture is L000077 — the top of the
+	// fenced screen, which the end marker carries as its closing screen — so
+	// it streams NOWHERE: not before the end marker, where the block would
+	// store it twice, and not after it (nocx-2v80t.3.41).
 	in, end, after, streamed := streamedInterval(rs)
 	if !streamed {
 		t.Fatal("no end marker ever streamed: the interval closed with nothing on the stream")
@@ -183,8 +185,11 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 	if end.nonce != nonce {
 		t.Fatalf("the end marker names nonce %v, want the sealed boundary's", end.nonce)
 	}
-	if len(after) == 0 {
-		t.Fatal("the sentinel's departure never streamed after the end marker: the stream's order lies about which interval rows belong to")
+	if len(after) != 0 {
+		t.Fatalf("the stream carried %q after the interval's own rows: the fenced screen's top row leaving before the completion is its closing screen, stored once", after)
+	}
+	if got := p.s.SuppressedScreenRows(); got != 1 {
+		t.Fatalf("the runtime withheld %d rows, want the one the sentinel pushed off the fenced screen", got)
 	}
 
 	// And the closing screen is the screen AT the fence — the flood's tail,

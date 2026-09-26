@@ -249,6 +249,12 @@ type Session struct {
 	// released the moment the entry is consumed, dropped, or the whole
 	// window is replaced or cleared, so none outlives the window it names.
 	pendingScreen []pendingBoundaryRow
+	// pendingCapture is the fence sighting whose capture installed
+	// [pendingScreen] while its completion is still on the way
+	// (nocx-2v80t.3.41): until then the window only holds what it matches,
+	// on the capture. Nil for every other window, and cleared whenever the
+	// window is replaced or released.
+	pendingCapture *observationCapture
 	// pendingEntered is whether a row has matched that window yet. Before it
 	// has, an arriving row that matches nothing is a row from ABOVE the
 	// boundary's screen (history a geometry commit pulled back), not the next
@@ -1038,6 +1044,13 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 		// The terminal already took a size that is not going to be committed.
 		return s.geom, errors.Join(err, s.repairLocked())
 	}
+	// A pane that shrank reflowed its top rows into the history, and those
+	// rows LEFT the screen at this instant (emulator.Terminal.DepartedRows,
+	// nocx-2v80t.3.41): they belong to the interval in flight now, so they
+	// are drained now, exactly as a feed's own departures are drained at the
+	// feed — not at whichever ingest comes next, which may carry the fence
+	// that closes this interval, or open another one.
+	s.drainObservationLocked(0)
 	if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
 		// Both sides took it, but the program's own report of the new size
 		// never reached it: the attempt did not complete, so it does not

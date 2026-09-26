@@ -318,9 +318,12 @@ func fmt6(i int) string {
 
 // The fence-first seal stays correct in the streaming world: the capture at
 // a parking sighting fixes where the interval's rows STOP at that instant,
-// and rows that depart after the sighting belong to the interval that
-// follows — the end marker joins with the pre-sighting count even though
-// more rows streamed while the authenticated half was on its way.
+// and rows that depart after the sighting are not the fenced interval's —
+// the end marker joins with the pre-sighting count even though more rows
+// left while the authenticated half was on its way. The rows that left are
+// the fenced screen's own (its closing screen, which the end marker carries),
+// so they stream nowhere at all: streaming them ahead of the end marker is
+// how a block came to store its closing rows twice (nocx-2v80t.3.41).
 func TestRowsAfterTheFenceSightingDoNotJoinTheFencedInterval(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))
 	nonce := obsNonce(7)
@@ -334,7 +337,7 @@ func TestRowsAfterTheFenceSightingDoNotJoinTheFencedInterval(t *testing.T) {
 	}
 
 	// Twenty more lines while the completion is still away: seven rows
-	// leave the screen and stream now — they are the NEXT interval's rows.
+	// leave the screen — the fenced screen's own top seven.
 	obsFeed(t, s, 10, 20)
 
 	s.Completed(s.Incarnation(), nonce, 0)
@@ -343,24 +346,113 @@ func TestRowsAfterTheFenceSightingDoNotJoinTheFencedInterval(t *testing.T) {
 	}
 
 	events := rs.snapshot()
-	if len(events) != 2 {
-		t.Fatalf("the stream carries %d events, want 2 (the post-sighting rows, then the fenced interval's end)", len(events))
+	if len(events) != 1 {
+		t.Fatalf("the stream carries %d events %v, want only the fenced interval's end", len(events), eventKinds(events))
 	}
-	batch, end := events[0], events[1]
-	if batch.kind != "rows" {
-		t.Fatalf("the first event is %q, want the post-sighting row batch", batch.kind)
-	}
-	if len(batch.rows) != 7 || batch.from != 0 {
-		t.Fatalf("the batch carries %d rows from %d, want 7 rows from 0", len(batch.rows), batch.from)
-	}
+	end := events[0]
 	if end.kind != "end" || end.nonce != nonce {
-		t.Fatalf("the second event is %q for nonce %v, want the fenced interval's end", end.kind, end.nonce)
+		t.Fatalf("the event is %q for nonce %v, want the fenced interval's end", end.kind, end.nonce)
 	}
 	if end.endRow != 0 {
 		t.Fatalf("the fenced interval's end stops at row %d, want 0 — no row had left when the sighting took the capture", end.endRow)
 	}
-	if last := streamLastText(end.closing); last != "L000009" {
-		t.Fatalf("the closing screen ends at %q, want L000009 — the screen AS the fence sat on it", last)
+	if first, last := streamRowText(end.closing[0]), streamLastText(end.closing); first != "L000000" || last != "L000009" {
+		t.Fatalf("the closing screen runs %q..%q, want L000000..L000009 — the screen AS the fence sat on it", first, last)
+	}
+	if got := s.SuppressedScreenRows(); got != 7 {
+		t.Fatalf("the runtime withheld %d rows, want the seven of the fenced screen that left before the completion", got)
+	}
+}
+
+// A SIGHTING NOBODY AUTHENTICATES DROPS NOTHING (nocx-2v80t.3.41; ADR-0024
+// decision 1). The window a fence's sighting installs only HOLDS the rows it
+// matches until the completion claims them. When no completion ever does,
+// what it held is the interval's own output and is given back — in order,
+// whether the moment comes because a later row has to stream, or because the
+// meeting is settled while the window still holds.
+func TestASightingNobodyAuthenticatesDropsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// rows is how many rows must stream, L000000 onwards, each once, in
+		// order.
+		rows   int
+		settle func(t *testing.T, s *Session, nonce FenceNonce)
+	}{
+		{name: "a later row has to stream", rows: 17, settle: func(t *testing.T, s *Session, _ FenceNonce) {
+			// Seventeen rows leave: the ten the window names and the cursor's
+			// row are held, then L000011 is not the screen's and must stream.
+			obsFeed(t, s, 10, 30)
+		}},
+		{name: "the meeting expires while the window holds", rows: 7, settle: func(t *testing.T, s *Session, nonce FenceNonce) {
+			obsFeed(t, s, 10, 20) // seven rows leave, every one of them held
+			if err := s.ExpireRendezvous(nonce); err != nil {
+				t.Fatalf("expire the forged fence's meeting: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, rs := streamSession(t, harnessGeometry(80, 24))
+			forged := obsNonce(9)
+
+			obsFeed(t, s, 0, 10)
+			if err := s.SightFence(forged, []byte("fence-source")); err != nil {
+				t.Fatalf("sight a fence nobody will authenticate: %v", err)
+			}
+			tc.settle(t, s, forged)
+
+			got := streamedTexts(rs)
+			if len(got) != tc.rows {
+				t.Fatalf("the stream carries %d rows %q, want %d: what the window held given back, then what followed", len(got), got, tc.rows)
+			}
+			for i := range tc.rows {
+				if want := "L" + fmt6(i); got[i] != want {
+					t.Fatalf("streamed row %d is %q, want %q: a sighting nobody authenticated dropped or reordered output (%q)", i, got[i], want, got)
+				}
+			}
+			if n := s.SuppressedScreenRows(); n != 0 {
+				t.Fatalf("the runtime counts %d rows withheld, want none: nothing was a boundary's", n)
+			}
+		})
+	}
+}
+
+// A held row that can no longer be put back in its place is a counted loss,
+// never a reordered row (nocx-2v80t.3.41). The sighting's window held what
+// it matched; then another window replaced it (the next command's output
+// mark) and the stream moved on; when the sighting finally settles
+// unauthenticated, the rows it held preceded rows the stream may already
+// have carried, so they are stated as a loss at the position the stream has
+// reached rather than streamed out of order.
+func TestHeldRowsThatCannotBePutBackAreACountedLoss(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	forged := obsNonce(9)
+
+	obsFeed(t, s, 0, 10)
+	if err := s.SightFence(forged, []byte("fence-source")); err != nil {
+		t.Fatalf("sight a fence nobody will authenticate: %v", err)
+	}
+	obsFeed(t, s, 10, 20) // seven rows leave, every one of them held
+	if err := s.Ingest([]byte(outputMarkerFixed)); err != nil {
+		t.Fatalf("sight the output mark that replaces the window: %v", err)
+	}
+	if err := s.ExpireRendezvous(forged); err != nil {
+		t.Fatalf("expire the forged fence's meeting: %v", err)
+	}
+
+	var lost uint64
+	for _, e := range rs.snapshot() {
+		if e.kind == "rows" {
+			if len(e.rows) != 0 {
+				t.Fatalf("the stream carried rows %v: held rows came out of their place", streamedTexts(rs))
+			}
+			lost += e.lost
+		}
+	}
+	if lost != 7 {
+		t.Fatalf("the stream states %d rows lost, want the 7 the unauthenticated window held", lost)
+	}
+	if got := s.DepartedRowCount(); got != 7 {
+		t.Fatalf("the stream's index stands at %d, want 7: a loss spends the indices it names", got)
 	}
 }
 

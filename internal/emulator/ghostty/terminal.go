@@ -237,141 +237,16 @@ type sbBaseline struct {
 	// a consumer never received is indistinguishable from a feed that scrolled
 	// nothing, and only one of the two is true.
 	torn bool
-	// owed is how many rows a reflow moved back INTO the screen out of the
-	// scrollback AND that the consumer has already been handed. A taller
-	// screen is refilled from history, and those rows were reported as
-	// departures the first time they left; when the screen scrolls them off
-	// again the depth grows by the same rows, which is the SAME leave and not
-	// a new one. The port's rule is explicit — "a resize reflows the screen
-	// rather than scrolling it, so reflowed rows are not departures" — so the
-	// debt is paid before any growth is reported, and a consumer's absolute
-	// row space never sees a row twice.
+	// owed is how many rows at the TOP of the screen a growing pane pulled
+	// back out of the scrollback. Every row in the history was reported when
+	// it got there — it scrolled off, or a shrink reflowed it off
+	// (nocx-2v80t.3.41) — so when the screen scrolls one of these off again
+	// the depth grows by the same row, which is the SAME leave and not a new
+	// one: the debt is paid before any growth is reported, and a consumer's
+	// absolute row space never sees a row twice. It is also what
+	// ReportedRowsOnScreen answers, because a consumer reading the screen as
+	// rows still to come must skip exactly these.
 	owed int
-	// pushed is this buffer's HISTORY, newest last, as far as the ledger
-	// describes it: one block per run of rows that got there, with the
-	// provenance a refill needs when it pulls them back onto the screen. Two
-	// kinds of run arrive in history, and BOTH are here because a refill takes
-	// the newest rows first and has to know what it is taking:
-	//
-	//   - a SHRINK reflows the screen's top rows into history — not a
-	//     departure, so those rows were never reported as they went. The rows
-	//     at the top of the screen a shrink pushes are first the ones an
-	//     earlier refill had pulled back (already handed to the consumer, so
-	//     their return owes a departure) and then rows nobody was ever handed
-	//     (so their return owes nothing and they are reported when they leave
-	//     for real);
-	//   - a row that LEFT the screen for real and was handed over is newer
-	//     than anything a shrink pushed before it, and every row of such a run
-	//     owes a departure when a refill pulls it back.
-	//
-	// A ledger of pushes alone cannot say where a refill's rows came from, and
-	// the failure is not subtle: a row that left normally, was handed over and
-	// was then pulled back from plain history was charged against a push block
-	// and marked "fresh" (never handed), so the emulator reported its
-	// departure a second time — measured on the e2e's resize pattern, where
-	// the frontend re-measures the pane mid-transcript (transcript-0003-069
-	// reported twice, nocx-2v80t.3.9).
-	//
-	// Bounded by the runs that can still be taken back: adjacent runs of one
-	// class merge, and the ledger keeps at most maxSbPushes blocks — the ones
-	// dropped are the oldest, deepest in history, and a refill that reaches
-	// them charges a departure that was already reported rather than swallowing
-	// one that was not, which is the conservative direction for a row-space
-	// that must not lose output.
-	pushed []sbPush
-}
-
-// sbPush is one block of rows a shrink pushed onto the top of history: how
-// many of them the consumer had already been handed, and how many it never
-// was. The handed ones are the OLDER half of the block (they are the screen's
-// topmost rows, which a refill had put back), the fresh ones the newer, so a
-// pull-back consumes fresh before handed.
-type sbPush struct {
-	handed int
-	fresh  int
-}
-
-// maxSbPushes bounds the stack. See the field's comment for what dropping the
-// oldest costs.
-const maxSbPushes = 64
-
-// takeBack consumes n rows from the newest end of the stack — the rows a
-// refill just pulled back onto the screen — and answers how many of them the
-// consumer had already been handed, which is the only part that owes a
-// departure when they leave again.
-// noteHandedLocked records that n rows left the screen for real and were handed
-// over: they are the newest rows in this buffer's history, newer than anything a
-// shrink pushed before them. See the pushed field for what a ledger without them
-// gets wrong.
-//
-// Marked where the rows are CAPTURED, which is the one instant the buffer that
-// lost them is known — the report the captures fill is the terminal's, and a
-// later drain cannot tell a primary row from an alternate-screen one. The drain
-// follows the capture inside the same ingest in this port's use, and the corner
-// where it does not is the one a refill already covers: it trims the rows still
-// sitting in the pending report before it charges the debt for what it pulled
-// back.
-func (b *sbBaseline) noteHandedLocked(n int) {
-	if n <= 0 {
-		return
-	}
-	if top := len(b.pushed) - 1; top >= 0 && b.pushed[top].fresh == 0 {
-		// Adjacent to a run that holds no un-handed rows: one run, all handed.
-		// (Within a block the debt cares only about how many rows are fresh,
-		// because a refill takes fresh before handed and nothing else about a
-		// handed row matters.)
-		b.pushed[top].handed += n
-	} else {
-		b.pushed = append(b.pushed, sbPush{handed: n})
-	}
-	if len(b.pushed) > maxSbPushes {
-		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
-	}
-}
-
-func (b *sbBaseline) takeBack(n int) int {
-	handed := 0
-	for n > 0 && len(b.pushed) > 0 {
-		seg := &b.pushed[len(b.pushed)-1]
-		if take := min(n, seg.fresh); take > 0 {
-			seg.fresh -= take
-			n -= take
-		} else {
-			take = min(n, seg.handed)
-			seg.handed -= take
-			n -= take
-			handed += take
-		}
-		if seg.fresh == 0 && seg.handed == 0 {
-			b.pushed = b.pushed[:len(b.pushed)-1]
-		}
-	}
-	// Rows older than anything the stack describes came out of history that
-	// was written before this ledger existed: they departed to get there, so
-	// they were handed over.
-	return handed + n
-}
-
-// pushReflow records n rows the screen's top just reflowed into history: the
-// ones the consumer has already been handed (at most what is owed) and the
-// rest, which nobody was ever told about. The handed half is the older half
-// of the block, so it goes first.
-func (b *sbBaseline) pushReflow(n int) {
-	handed := min(n, b.owed)
-	b.owed -= handed
-	fresh := n - handed
-	if len(b.pushed) > 0 {
-		top := &b.pushed[len(b.pushed)-1]
-		if top.fresh == 0 && top.handed > 0 && handed > 0 {
-			top.handed += handed
-			top.fresh = fresh
-			return
-		}
-	}
-	b.pushed = append(b.pushed, sbPush{handed: handed, fresh: fresh})
-	if len(b.pushed) > maxSbPushes {
-		b.pushed = b.pushed[len(b.pushed)-maxSbPushes:]
-	}
 }
 
 var (
@@ -637,23 +512,32 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 					t.departed = t.departed[:len(t.departed)-back]
 					refill -= back
 				}
-				// What is left comes off the stack of rows an earlier shrink
-				// pushed into history: the ones the consumer was already
-				// handed owe a departure, the fresh ones owe nothing. Rows
-				// older than the stack departed to get into history, so they
-				// were handed over.
-				base.owed += base.takeBack(refill)
+				// What is left was handed over when it went into history —
+				// every row there was, whether it scrolled off or a shrink
+				// reflowed it off (below) — so each owes the departure it
+				// will not report again.
+				base.owed += refill
 			case grew < 0 && after > before:
 				// The screen shrank and reflowed its top rows INTO history:
-				// they are not on the screen any more, so none of them can
-				// leave it again — and that is not a departure either. The
-				// block goes on the stack with its provenance, because a later
-				// refill pulls it back newest-first: the handed rows first off
-				// the screen are its older members, the rows nobody was ever
-				// handed its newer ones. Bounding the block by what the depth
-				// grew keeps a rewrap of history's own line breaks out of it
+				// they have left the screen as surely as a scrolled row has,
+				// and they are on no later screen either, so a consumer that
+				// keeps what leaves is told now or never. Not reporting them
+				// is how a block lost its row: measured on the
+				// transcript-budget e2e, a pane going 28 -> 27 rows between a
+				// command's output and its fence, and transcript-0151-074 was
+				// neither streamed nor on the closing screen
+				// (nocx-2v80t.3.41). The top rows are the oldest: the ones a
+				// refill had pulled back were reported already and only pay
+				// their debt back, the rest are the newest history rows now
+				// and depart. Bounding the push by what the depth grew keeps
+				// a rewrap of history's own line breaks out of it
 				// (nocx-2v80t.3.9).
-				base.pushReflow(min(-grew, after-before))
+				pushed := min(-grew, after-before)
+				again := min(pushed, base.owed)
+				base.owed -= again
+				if fresh := pushed - again; fresh > 0 {
+					t.captureDepartedLocked(after-fresh, after)
+				}
 			}
 			// A debt larger than the screen it sits on is not a refill at
 			// all: at most the screen's own rows can be rows that were
@@ -850,7 +734,6 @@ func (t *terminal) noteDepartedLocked() {
 				fresh -= base.owed
 				base.owed = 0
 				t.captureDepartedLocked(h-fresh, h)
-				base.noteHandedLocked(fresh)
 			} else {
 				base.owed -= fresh
 			}
@@ -955,10 +838,6 @@ func (t *terminal) rebaselineLocked() {
 	// does not un-report them, and zeroing it here is how a row comes back
 	// reported twice — the reflowed row's second leave reads as new output
 	// because the next growth had no debt to pay (nocx-2v80t.3.9).
-	// Both the debt and the stack of rows the screen has already pushed into
-	// history survive the re-baseline: they are facts about rows that are out
-	// of the screen's sight one way or another, and re-seeding the depth does
-	// not un-report them or un-push them.
 	//
 	// That holds for BOTH buffers, not only the one this call measured
 	// (nocx-2v80t.3.10). A resize taken while the ALTERNATE screen owns the
@@ -982,12 +861,11 @@ func (t *terminal) rebaselineLocked() {
 }
 
 // invalidateBaselinesLocked marks both buffers unmeasured without discarding
-// the debt or the pushed-history ledger either carries. A failed measurement
-// destroys neither (nocx-2v80t.3.10, the same finding as rebaselineLocked's
-// own comment): the rows a debt or a pushed block names are exactly as real
-// when a read fails as when it succeeds, and zeroing them here is the same
-// double-count this function exists to prevent, just reached by a different
-// door.
+// the debt either carries. A failed measurement does not destroy it
+// (nocx-2v80t.3.10, the same finding as rebaselineLocked's own comment): the
+// rows a debt names are exactly as real when a read fails as when it
+// succeeds, and zeroing it here is the same double-count this function exists
+// to prevent, just reached by a different door.
 func (t *terminal) invalidateBaselinesLocked() {
 	t.sb[0].valid = false
 	t.sb[1].valid = false
@@ -1141,6 +1019,26 @@ func (t *terminal) cursorLocked() (emulator.Cursor, error) {
 		return emulator.Cursor{}, resultError("cursor_visible", r)
 	}
 	return emulator.Cursor{X: int(x), Y: int(y), Visible: bool(visible)}, nil
+}
+
+// ReportedRowsOnScreen answers the active buffer's debt: the rows at the top
+// of the screen a growing pane pulled back out of history, each reported
+// already (sbBaseline.owed). The alternate screen has no history, so it owes
+// nothing; a debt larger than the screen cannot be on it.
+func (t *terminal) ReportedRowsOnScreen() (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return 0, emulator.ErrClosed
+	}
+	screen, err := t.screenLocked()
+	if err != nil {
+		return 0, err
+	}
+	if screen != emulator.ScreenPrimary {
+		return 0, nil
+	}
+	return min(t.sb[sbIndex(screen)].owed, t.geom.Rows), nil
 }
 
 // TrackRow builds a TRACKED grid reference at column 0 of active row y and

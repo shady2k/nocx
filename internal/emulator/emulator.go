@@ -426,15 +426,38 @@ type Terminal interface {
 	// an effect is read exactly once and by one reader.
 	Effects() []Effect
 
+	// ReportedRowsOnScreen answers how many rows at the TOP of the active
+	// area [Terminal.DepartedRows] has already reported: rows a growing pane
+	// pulled back out of the history (nocx-2v80t.3.41). They are on the
+	// screen, and they are not rows still to leave it as far as the report is
+	// concerned — when they scroll off again nothing is reported for them — so
+	// a caller that reads the screen as "what has not been reported yet"
+	// starts below them. It is zero until a pane grows, and it falls as those
+	// rows leave again, as a shrink reflows them back into the history, or as
+	// the alternate screen, which has no history, takes the pane.
+	//
+	// A closed terminal answers [ErrClosed].
+	ReportedRowsOnScreen() (int, error)
+
 	// DepartedRows returns the rows that LEFT the screen since the previous
 	// call, oldest first, and starts a fresh list.
 	//
-	// A row departs when the program's output pushes it off the top of the
-	// active area into scrollback — the one leave the screen has. A row a
-	// scroll region moved within the screen never left it; a row an erase or
-	// a reset destroyed ceased rather than left; and a resize reflows the
-	// screen rather than scrolling it, so reflowed rows are not departures
-	// either — the report re-baselines across [Terminal.Resize].
+	// A row departs when it goes off the top of the active area into
+	// scrollback: the program's output pushes it there, or a pane that
+	// SHRINKS reflows it there (nocx-2v80t.3.41). Either way it is no longer
+	// on the screen and is in the history, and a caller that keeps what left
+	// the screen — a block's rows — loses it for good if it is not reported:
+	// it is not on any later screen either. A row a scroll region moved
+	// within the screen never left it, and a row an erase or a reset
+	// destroyed ceased rather than left.
+	//
+	// A pane that GROWS pulls rows back out of the history onto the top of
+	// the screen. Every one of them was reported when it went there, so none
+	// is reported again when it leaves a second time, and until it does it is
+	// counted by [Terminal.ReportedRowsOnScreen]: a caller reading the screen
+	// as rows still to come skips them. Beyond that, a resize reflows the
+	// screen rather than scrolling it, and the report re-baselines across
+	// [Terminal.Resize].
 	//
 	// The alternate screen has no history, so nothing departs while a
 	// full-screen program owns the pane. A terminal reports scrollback per

@@ -336,9 +336,13 @@ func TestRevokingOneAgentLeavesAnotherAgentsSessionAdmitted(t *testing.T) {
 	// AND THE OTHER AGENT'S WORK IS UNTOUCHED: its connection was not closed,
 	// its interval is intact, and it goes on being served.
 	callOverEndpoint(t, secondConn, "still-working")
-	if got := endpoint.AdmittedSessions(); len(got) != 1 || got[0] != string(second.ID()) {
-		t.Fatalf("admitted sessions after the revoke = %v, want only %s", got, second.ID())
-	}
+	// The endpoint's book drops a closed connection when that connection's
+	// serve loop ends — a moment AFTER the client sees the close — so it is
+	// awaited as the observable it is, not read once: read once, it still
+	// named the revoked session 6 runs in 200 under -race (nocx-2v80t.3.43).
+	// The other session staying in it is the assertion that carries the
+	// spared agent.
+	awaitAdmittedSession(t, endpoint, second.ID())
 }
 
 // multiRootPinner pins more than one root, which the single-root fixture cannot:

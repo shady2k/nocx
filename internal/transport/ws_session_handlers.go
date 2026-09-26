@@ -493,6 +493,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// NOTIFICATION waits for AD-7. This is the first fact this session's
 	// subscriber can hear, so it runs once the subscriber above is attached.
 	h.sess.emitIntegration(sess.ID())
+	// The retained tool-surface state is replayed here too (nocx-2v80t.3.45),
+	// for the reason the lifecycle replay above is: a fact published after
+	// the session existed and before this subscriber was installed found
+	// nobody to tell and was only retained, and the attach path's replay
+	// never runs for the connection that opened the session. Measured: a
+	// broadcast right after the open result was lost 4 runs in 300 under
+	// -race.
+	h.sess.replayToolSurface(sess.ID())
 
 	// Stored forwards (nocx-wzc4.5): replay the profile's configured
 	// forwards onto the connection. Deliberately ASYNC and only after the

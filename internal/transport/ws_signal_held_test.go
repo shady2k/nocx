@@ -1040,21 +1040,45 @@ func TestHeldStop_ASessionThatIsGoneSettlesWithoutANotice(t *testing.T) {
 
 	// The session goes before anything could deliver for it. The registry is
 	// the authority ForSession consults, so this is exactly the case.
-	if err := stand.ws.registry.Close(session.ID(stand.sid)); err != nil {
-		t.Fatalf("registry.Close: %v", err)
+	//
+	// Closing it also starts the session's own teardown on ANOTHER goroutine
+	// (monitorExit), which takes the session's Stop records with it
+	// (dropStopStatesFor). That teardown is the session's closing event for
+	// the record, and this test used to race it: read before the teardown
+	// ran, the record said "undelivered"; read after, it was gone and said
+	// nothing — 2 runs in 200 under -race (nocx-2v80t.3.43). So the test waits
+	// for the teardown itself, on the record's own change signal, which the
+	// drop closes — an observable, never a duration — and the delivery then
+	// runs against a session whose records are gone, as it does whenever the
+	// lane reaches it after the session ended.
+	stand.ws.stopStateMu.Lock()
+	rec := stand.ws.stopStates[attempt]
+	stand.ws.stopStateMu.Unlock()
+	if rec == nil {
+		t.Fatal("the held Stop has no record")
 	}
-	// The delivery runs as the lane task runs it: the claim first, and the
-	// delivery settles what it claimed.
+	// The lane task has claimed the hold — the claim comes first, and the
+	// delivery settles what it claimed — and the session goes before it
+	// delivers.
 	sid, ok := stand.ws.claimHeldStop(attempt)
 	if !ok || sid != session.ID(stand.sid) {
 		t.Fatalf("claimHeldStop = (%q, %v), want the stand's session", sid, ok)
 	}
+	stand.ws.stopStateMu.Lock()
+	dropped := rec.changed
+	stand.ws.stopStateMu.Unlock()
+	if err := stand.ws.registry.Close(session.ID(stand.sid)); err != nil {
+		t.Fatalf("registry.Close: %v", err)
+	}
+	<-dropped
 	stand.ws.deliverHeldStop(t.Context(), sid, attempt)
 
+	// Nothing claims a Stop landed for a session that no longer exists: the
+	// record went with its session, and no delivery resurrected it.
 	if got := stand.ws.signalDeliveryFor(lifecyclepub.Fact{
 		Attempt: &lifecyclepub.Attempt{ID: stand.appAttemptID, State: lifecyclepub.AttemptCompleted},
-	}); got != signalDeliveryUndelivered {
-		t.Fatalf("the record settled as %q, want %q", got, signalDeliveryUndelivered)
+	}); got != "" {
+		t.Fatalf("the record of a gone session says %q, want nothing — it goes with its session", got)
 	}
 	// And the silence is the correct outcome, not an oversight: there is no
 	// subscriber to have been told. It is read straight off the socket with NO

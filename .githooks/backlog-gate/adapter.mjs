@@ -45,6 +45,12 @@
  * earlier marker, so the issue is active again. On any other status the
  * markers are history and read as nothing.
  *
+ * WORK RECORDS. A comment whose text starts with `[shady2k-time` is a claim or
+ * time record printed by the set's run script. Every one goes out RAW and
+ * whole, damaged or not, with the tracker's comment id, time and author: the
+ * gate judges a record, and one this file dropped or tidied would be time lost
+ * with nothing to say so. Other comments are left out.
+ *
  * Usage:
  *   node .githooks/backlog-gate/adapter.mjs [--at <git-rev>] [--export <path>]
  *
@@ -67,6 +73,13 @@ const STATUS = {
 }
 const MARKER = /^(submitted|implemented|reopened):\s*(.*)$/s
 const RECORD = /^(\S+)\s+--\s+(\S[\s\S]*)$/
+const WORK_RECORD = '[shady2k-time'
+
+export function workRecords(comments) {
+  return (comments || [])
+    .filter((c) => typeof c.text === 'string' && c.text.startsWith(WORK_RECORD))
+    .map((c) => ({ id: String(c.id), at: c.created_at, author: c.author, body: c.text }))
+}
 
 // The latest execution marker's status and its record, or null for none.
 export function execution(comments) {
@@ -127,6 +140,7 @@ export function normalize(rows) {
       updatedAt: r.updated_at,
       createdAt: r.created_at,
       holder: r.assignee || null,
+      comments: workRecords(r.comments),
       ...(delivery && { delivery }),
       ...(integration && { integration }),
     })

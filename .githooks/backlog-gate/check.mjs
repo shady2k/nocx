@@ -64,6 +64,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spansOf } from './time-format.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -135,13 +136,34 @@ const hasCriterion = (i) => {
   });
 };
 
+// A span that has ended with no receipt: its session claimed something else,
+// its item was claimed again, or its item is no longer being worked on. One
+// still active and claimed by nobody since may simply still be running.
+function unreceipted(m) {
+  const { spans } = spansOf(m);
+  return spans.filter((s) => s.claim && !s.receipt && !s.conflict.length).flatMap((s) => {
+    const item = m.by.get(s.item);
+    const later = spans.find((o) => o !== s && o.claim && o.item === s.item && o.start > s.start);
+    const why = s.next ? `the same session claimed ${s.next.item} at ${s.next.claim.fields.at}`
+      : later ? `${s.item} was claimed again at ${later.claim.fields.at}`
+      : item && item.status !== 'active' ? `${s.item} is ${item.status}` : null;
+    return why ? [{ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} has ended with no receipt: ${why}` }] : [];
+  });
+}
+
+function unclaimedWork(m) {
+  const claimed = new Set(spansOf(m).spans.filter((s) => s.claim).map((s) => s.item));
+  return m.issues.filter((i) => ['submitted', 'implemented'].includes(i.status) && i.type !== 'epic' && !m.children.has(i.id) && !claimed.has(i.id))
+    .map((i) => ({ id: i.id, note: `${i.status} with no claim recorded on it` }));
+}
+
 // ---------------------------------------------------------------- checks
 
 const CHECKS = [
   {
     id: 'idea-blocks-work',
     severity: 'error',
-    why: 'An idea that blocks a build is not an idea, it is an undecided question, and it belongs in the work it is blocking. Five brainstorms were found holding live epics.',
+    why: 'An idea that blocks a build is not an idea, it is an undecided question, and it belongs in the work it is blocking.',
     fix: 'Either the question is on the path — file it as work under the epic it gates — or it is not, and the edge goes.',
     run: (m, cfg) =>
       m.issues.flatMap((i) =>
@@ -155,7 +177,7 @@ const CHECKS = [
   {
     id: 'idea-in-queue',
     severity: 'error',
-    why: 'An idea reachable as work is offered as work. Three reached the queue through provenance edges, which gate nothing and so never stopped them.',
+    why: 'An idea reachable as work is offered as work. An edge that only records where it came from gates nothing, so it does not stop that.',
     fix: 'Defer it. An idea costs nothing while it waits and is closed without regret when it stops being interesting.',
     run: (m, cfg) =>
       m.issues
@@ -197,7 +219,7 @@ const CHECKS = [
   {
     id: 'off-milestone-open',
     severity: 'error',
-    why: 'Everything live belongs to the current milestone; whatever does not is deferred. Otherwise the queue offers next quarter\'s feature as today\'s work, and a parentless issue filed by hand is how a groomed backlog grows back into 665 roots while every other check stays green. 802 issues were deferred in one pass for having been planned past that horizon.',
+    why: 'Everything live belongs to the current milestone; whatever does not is deferred. Otherwise the queue offers next quarter\'s feature as today\'s work, and a parentless issue filed by hand is how a groomed backlog grows back into a heap of roots while every other check stays green.',
     fix: 'Defer it, with its own milestone label intact if it has one, so it comes back whole. If it is on the current milestone\'s path, give it the parent it serves.',
     run: (m, cfg) =>
       m.issues.flatMap((i) => {
@@ -212,7 +234,7 @@ const CHECKS = [
   {
     id: 'stale-hold',
     severity: 'error',
-    why: 'Active means somebody is holding it now. An unheld issue left active is invisible to the ready queue and to every colleague looking for work; 82 of 83 were stale.',
+    why: 'Active means somebody is holding it now. An unheld issue left active is invisible to the ready queue and to every colleague looking for work.',
     fix: 'Set it back to open the minute you stop holding it.',
     run: (m, cfg, ctx) =>
       m.issues.flatMap((i) => {
@@ -238,7 +260,7 @@ const CHECKS = [
   {
     id: 'label-vocabulary',
     severity: 'error',
-    why: 'A vocabulary enforced only by prose drifts. One repository declared a closed list in its contract and held about seventy labels in the tree.',
+    why: 'A vocabulary enforced only by prose drifts. A closed list declared only in a document is soon outgrown by the labels actually used.',
     fix: 'Map it onto a declared label, or add it to the config deliberately.',
     run: (m, cfg) => {
       const known = new Set([
@@ -276,7 +298,7 @@ const CHECKS = [
     id: 'finding-budget',
     severity: 'error',
     why: 'Bugs and debt found mid-milestone go to the front one at a time, each reasonable, and push the feature out by a fortnight nobody decided on. The charter declares how many the milestone absorbs.',
-    fix: 'The ways that do the work are the owner\'s to give: displace named planned work and raise the budget in config and the charter decision, open the next milestone for it, or hold it knowingly with a review date. Deferring it yourself to make the number fit, dropping its milestone label or narrowing it shrinks the count instead, and leaves a record saying the fault is not there. A repair a required check forced on the way to a merge is not intake at all: file it under the work whose merge it blocked, with no finding label. Deferring planned work alone does not change this count.',
+    fix: 'The ways that do the work are the owner\'s to give: displace named planned work and raise the budget in config and the charter decision, open the next milestone for it, or hold it knowingly with a review date. Deferring it yourself to make the number fit, dropping its milestone label or narrowing it shrinks the count instead, and leaves a record saying the fault is not there. A repair a required check forced on the way to a merge, and upkeep of the set\'s own checks, hooks and their CI wiring, are not intake at all: file them under the work whose merge they block, or under the setup task, with no finding label. Deferring planned work alone does not change this count.',
     run: (m, cfg) => {
       if (cfg.findingBudget == null) return [];
       const marks = cfg.findingLabels || [];
@@ -365,6 +387,50 @@ const CHECKS = [
         return [];
       }),
   },
+  {
+    id: 'time-record-damaged',
+    severity: 'error',
+    why: 'A record of how the work went that does not parse, or whose table does not add up, is not counted by anyone, so the time it held is lost while the item looks recorded.',
+    fix: 'Post the record again exactly as the run script printed it, and delete the damaged one. The numbers come from the script; a hand-edited table is what this catches.',
+    run: (m) => spansOf(m).damaged.map((r) => ({ id: r.item, ref: `comment:${r.comment}`, note: r.problems.slice(0, 2).join('; ') })),
+  },
+  {
+    id: 'time-span-conflict',
+    severity: 'error',
+    why: 'One span has one claim and one receipt. Two different ones mean the same minutes are recorded twice, or a receipt was written for someone else\'s span, and no total built on them can be trusted.',
+    fix: 'Keep the record the script printed for this span and delete the other. The same record posted twice by a retry is not a conflict and needs nothing.',
+    run: (m) => spansOf(m).spans.filter((s) => s.conflict.length || (s.claim && s.receipt && Date.parse(s.receipt.fields.from) !== s.start))
+      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: s.conflict.length ? `span ${s.id}: ${s.conflict.join('; ')}` : `span ${s.id}: its receipt starts at ${s.receipt.fields.from}, its claim at ${s.claim.fields.at}` })),
+  },
+  {
+    id: 'time-span-unclaimed',
+    severity: 'error',
+    why: 'A receipt or event whose span was never claimed belongs to no session and no item start, so nothing can say whose time it is or whether it overlaps other work.',
+    fix: 'Post the span\'s claim where it was taken, or remove a record written against a span id that does not exist.',
+    run: (m) => spansOf(m).spans.filter((s) => !s.claim && !s.conflict.length).map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} has records but no claim` })),
+  },
+  {
+    id: 'time-span-overlap',
+    severity: 'error',
+    why: 'A session works on one item at a time: taking the next ends the one before. A receipt reaching past the session\'s next claim counts the same minutes on two items.',
+    fix: 'Write the receipt again with the run script, which ends the span where the session\'s next claim begins, and delete the one that overlaps.',
+    run: (m) => spansOf(m).spans.filter((s) => s.receipt && s.next && s.end > s.next.start + 60e3)
+      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} ends ${s.receipt.fields.to}, after the same session claimed ${s.next.item} at ${s.next.claim.fields.at}` })),
+  },
+  {
+    id: 'time-span-unreceipted',
+    severity: 'error',
+    why: 'A span that has ended with no receipt is time spent and never recorded. Reports then give a total that looks complete and is not.',
+    fix: 'Write its receipt with the run script on the machine that holds the session\'s transcript, with the end it had. Where no machine has it, say so to the owner; the time stays unknown, not zero.',
+    run: (m) => unreceipted(m),
+  },
+  {
+    id: 'time-work-unclaimed',
+    severity: 'error',
+    why: 'A result handed in with no claim on its task was worked on by nobody the record knows: its time cannot be found, and the gate cannot tell it from work that took none.',
+    fix: 'Post the claim the session made, with its real start, and the receipt for it from the machine that holds the transcript. Work nobody claimed is the gap this names; closing the task does not fill it.',
+    run: (m) => unclaimedWork(m),
+  },
 ];
 
 function bulkClusters(m, threshold) {
@@ -384,7 +450,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.26.0';
+const RULES_VERSION = '0.29.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
@@ -420,6 +486,7 @@ function checkedConfig(raw, where) {
 function checkedBacklog(raw, where) {
   if (!raw || !Array.isArray(raw.issues)) throw new Misuse(`${where}: not a normalized backlog (no "issues" list); see model.md`);
   const seen = new Set();
+  const comments = new Set();
   for (const i of raw.issues) {
     if (!i || typeof i.id !== 'string' || !i.id) throw new Misuse(`${where}: an issue has no id`);
     if (seen.has(i.id)) throw new Misuse(`${where}: the id ${i.id} appears twice`);
@@ -429,6 +496,15 @@ function checkedBacklog(raw, where) {
       throw new Misuse(`${where}: ${i.id} blockedBy must be a list of ids`);
     // An unreadable date makes every age comparison false, which reads as "fresh".
     if (LIVE(i.status) && !Number.isFinite(Date.parse(i.updatedAt))) throw new Misuse(`${where}: ${i.id} has no readable updatedAt`);
+    // A record's violations are known by its comment's id, so a new damaged
+    // record is never mistaken for an old one: every comment carries its own.
+    if (i.comments != null && (!Array.isArray(i.comments) || i.comments.some((c) => !c || typeof c.body !== 'string'
+      || typeof c.id !== 'string' || !c.id || typeof c.author !== 'string' || !Number.isFinite(Date.parse(c.at)))))
+      throw new Misuse(`${where}: ${i.id} comments must be a list of { id, at, author, body }, each with its tracker's id, time and author`);
+    for (const c of i.comments || []) {
+      if (comments.has(c.id)) throw new Misuse(`${where}: the comment id ${c.id} appears twice`);
+      comments.add(c.id);
+    }
   }
   return raw;
 }
@@ -666,6 +742,7 @@ function runSelftest(cfg, projectConfigPath) {
     ['an unknown --only', 2, ['--config', fixtureCfg, '--strength', 'block', '--only', 'no-such-check', stale]],
     ['an empty backlog file', 2, ['--config', fixtureCfg, '--strength', 'block', put('empty.json', '')]],
     ['a config that is not an object', 2, ['--config', put('cfg.json', '[]'), '--strength', 'block', stale]],
+    ['a record comment without its tracker id', 2, ['--config', fixtureCfg, '--strength', 'block', put('noid.json', { issues: [{ id: 'A', status: 'closed', comments: [{ at: '2026-01-01T00:00:00Z', author: 'x', body: '[shady2k-time v1] claim' }] }] })]],
     ['a live issue with an unreadable date', 2, ['--config', fixtureCfg, '--strength', 'block', put('nodate.json', { issues: [{ id: 'A', status: 'active', updatedAt: 'not-a-date' }] })]],
     ['no strength chosen anywhere', 2, ['--config', fixtureCfg, stale]],
     ['an unpaired age snapshot', 2, ['--config', fixtureCfg, '--strength', 'block', '--ages-from', stale, stale]],

@@ -27,7 +27,7 @@ gate=.githooks/backlog-gate
 for f in pre-commit commit-msg pre-merge-commit pre-push; do
     [ -f ".githooks/$f" ] || need ".githooks/$f is missing from this checkout"
 done
-for f in adapter.mjs check.mjs check-commits.mjs commit-links.mjs config.json; do
+for f in adapter.mjs check.mjs time-format.mjs merge-gate.mjs check-commits.mjs commit-links.mjs config.json; do
     [ -f "$gate/$f" ] || need "$gate/$f is missing from this checkout"
 done
 [ -f .beads/issues.jsonl ] || need ".beads/issues.jsonl is missing from this checkout"

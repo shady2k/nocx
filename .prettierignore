@@ -53,7 +53,7 @@ eslint-fixtures/
 # .beads/ выше: это вывод инструмента, а не текст, который кто-то писал руками.
 .cass/playbook.yaml
 
-# The backlog gate's three checks, vendored byte for byte from the
+# The backlog gate's three checks and the record format they read, vendored byte for byte from the
 # shady2k-skills plugin by its own installer and never edited here — their
 # provenance is in docs/agents/backlog.md, and adapter.mjs, commit-links.mjs
 # and config.json beside them, which ARE this repository's, stay formatted. Letting
@@ -64,6 +64,7 @@ eslint-fixtures/
 .githooks/backlog-gate/check.mjs
 .githooks/backlog-gate/check-commits.mjs
 .githooks/backlog-gate/check-docs.mjs
+.githooks/backlog-gate/time-format.mjs
 
 # Image-generation scratch: prompts and renders written by an agent session, in
 # a directory nothing in the repository reads and git does not track. Same class

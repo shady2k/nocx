@@ -345,8 +345,35 @@ if [ -n "$CHANGED" ]; then
     esac
 fi
 
+# The other parent of the merge being committed, or failure when this is not a
+# merge or it cannot be named. A merge committed after a stop (conflicts,
+# --no-commit) has MERGE_HEAD. One `git merge` commits by itself runs
+# pre-merge-commit BEFORE writing MERGE_HEAD (measured, git 2.55), and names what
+# it merges only in GIT_REFLOG_ACTION: "merge <rev>", or "pull" for FETCH_HEAD.
+# An octopus or anything unreadable falls back to HEAD alone, the stricter answer.
+merge_other_parent() {
+    if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+        git rev-parse MERGE_HEAD
+        return
+    fi
+    case "${GIT_REFLOG_ACTION:-}" in
+        "merge "*" "*) return 1 ;;
+        "merge "*) git rev-parse -q --verify "${GIT_REFLOG_ACTION#merge }^{commit}" ;;
+        pull*) git rev-parse -q --verify "FETCH_HEAD^{commit}" ;;
+        *) return 1 ;;
+    esac
+}
+
 backlog_gate() {
     _gate=.githooks/backlog-gate
+    # A missing input refuses by name: without time-format.mjs check.mjs dies
+    # on a module import, which says nothing about how to repair the clone.
+    for _f in adapter.mjs check.mjs time-format.mjs merge-gate.mjs config.json; do
+        if [ ! -f "$_gate/$_f" ]; then
+            printf '%s is missing from this checkout; run make connect\n' "$_gate/$_f"
+            return 2
+        fi
+    done
     _baseline=$(mktemp)
     if ! node "$_gate/adapter.mjs" --at HEAD >"$_baseline"; then
         rm -f "$_baseline"
@@ -361,6 +388,29 @@ backlog_gate() {
     set --
     if git show "HEAD:$_gate/config.json" >"$_baseline_config" 2>/dev/null; then
         set -- --baseline-config "$_baseline_config"
+    fi
+    # A merge is judged against both parents (merge-gate.mjs says why): debt
+    # the other parent already carried is not new because HEAD lacked it.
+    if _merge_other=$(merge_other_parent); then
+        _staged=$(mktemp)
+        _other=$(mktemp)
+        _other_config=$(mktemp)
+        _vs_head=$(mktemp)
+        _vs_other=$(mktemp)
+        set -- "$@" --json
+        if node "$_gate/adapter.mjs" --at :0 >"$_staged" &&
+            node "$_gate/adapter.mjs" --at "$_merge_other" >"$_other" &&
+            git show "$_merge_other:$_gate/config.json" >"$_other_config"; then
+            node "$_gate/check.mjs" --config "$_gate/config.json" --baseline "$_baseline" "$@" "$_staged" >"$_vs_head"
+            node "$_gate/check.mjs" --config "$_gate/config.json" --baseline "$_other" \
+                --baseline-config "$_other_config" --json "$_staged" >"$_vs_other"
+            if node "$_gate/merge-gate.mjs" "$_vs_head" "$_vs_other"; then _rc=0; else _rc=$?; fi
+        else
+            printf 'the backlog of the merge could not be read\n'
+            _rc=2
+        fi
+        rm -f "$_baseline" "$_baseline_config" "$_staged" "$_other" "$_other_config" "$_vs_head" "$_vs_other"
+        return $_rc
     fi
     # Exit 1 is red and exit 2 is misuse — a gate that cannot run is red, not
     # green, so both reach host_gate as a failure.

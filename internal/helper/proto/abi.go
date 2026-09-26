@@ -283,6 +283,13 @@ type AckParams struct {
 	// LifecycleOffset, when present, advances the separate lifecycle reader.
 	// A pointer keeps conventional clients' existing acknowledgement shape
 	// unchanged while allowing zero as a legitimate initial offset.
+	//
+	// An ack that carries it is the LIFECYCLE reader's and acks that cursor
+	// alone (nocx-2v80t.3.44): its Offset is not judged or applied, because
+	// the PTY reader acks the PTY cursor itself, concurrently, and a
+	// piggybacked PTY offset behind that reader's newer ack used to get the
+	// whole ack refused. Offset stays required for the generations that still
+	// apply it.
 	LifecycleOffset *StreamOffset `json:"lifecycleOffset,omitempty"`
 }
 

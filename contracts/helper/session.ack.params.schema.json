@@ -16,6 +16,10 @@
     "offset": {
       "description": "The furthest offset this subscriber confirms having received. It is the same coordinate the recording keys on and the same one attach answers with, so a recording can be checked against what a reader received by offset rather than by eye.",
       "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/streamOffset"
+    },
+    "lifecycleOffset": {
+      "description": "Present only on the LIFECYCLE reader's ack: the furthest offset of the session's lifecycle stream this subscriber confirms having received. Each cursor has one reader that acks it (nocx-2v80t.3.44): an ack that names a lifecycleOffset acks the lifecycle cursor alone, and its `offset` — the PTY position that reader saw beside it, carried because the field has always been required — is neither judged nor applied by a helper that knows this field, since the PTY reader acks that cursor itself and may already have passed it. Absent, the ack is the PTY reader's, exactly as before. Zero is a legitimate offset, so the field is omitted rather than zero when the reader is not the lifecycle one.",
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/streamOffset"
     }
   }
 }

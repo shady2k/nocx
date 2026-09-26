@@ -198,7 +198,7 @@ keeps every later change.
 - **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
   and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
-  `commit-links.mjs` without `br` or with an empty export, the backlog gate without its
+  `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
   config (exit 2). The one pass is a tree that never had the installation (no
   `commit-links.mjs`), and it says so.
 - **Connecting a clone:** `make connect` (`scripts/connect-clone.sh`), which `make init`

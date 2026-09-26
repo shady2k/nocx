@@ -347,6 +347,14 @@ fi
 
 backlog_gate() {
     _gate=.githooks/backlog-gate
+    # A missing input refuses by name: without time-format.mjs check.mjs dies
+    # on a module import, which says nothing about how to repair the clone.
+    for _f in adapter.mjs check.mjs time-format.mjs config.json; do
+        if [ ! -f "$_gate/$_f" ]; then
+            printf '%s is missing from this checkout; run make connect\n' "$_gate/$_f"
+            return 2
+        fi
+    done
     _baseline=$(mktemp)
     if ! node "$_gate/adapter.mjs" --at HEAD >"$_baseline"; then
         rm -f "$_baseline"

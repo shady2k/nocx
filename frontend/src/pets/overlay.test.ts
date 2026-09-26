@@ -850,11 +850,31 @@ describe('a sweep reads only the ground on the screen (nocx-2v80t.3.35)', () => 
     constructor(private readonly cb: IntersectionObserverCallback) {
       ScreenWatch.current = this
     }
+    /** Waiters on the watched set, each settled by the observe or unobserve
+     *  that makes `el`'s membership what it asked for. */
+    private readonly waiters: Array<{ el: Element; watched: boolean; done: () => void }> = []
     observe(el: Element): void {
       this.watched.add(el)
+      this.settle()
     }
     unobserve(el: Element): void {
       this.watched.delete(el)
+      this.settle()
+    }
+    /** Resolves once `el` is (or is no longer) watched — the observable change
+     *  the overlay's mutation handling makes, not a turn of the event loop. */
+    until(el: Element, watched: boolean): Promise<void> {
+      return new Promise((done) => {
+        this.waiters.push({ el, watched, done })
+        this.settle()
+      })
+    }
+    private settle(): void {
+      for (const w of [...this.waiters]) {
+        if (this.watched.has(w.el) !== w.watched) continue
+        this.waiters.splice(this.waiters.indexOf(w), 1)
+        w.done()
+      }
     }
     disconnect(): void {
       this.watched.clear()
@@ -926,15 +946,13 @@ describe('a sweep reads only the ground on the screen (nocx-2v80t.3.35)', () => 
     expect(watch.watched.has(first)).toBe(true)
 
     const later = addBlock(s, 300)
-    await new Promise((r) => setTimeout(r, 0))
-    expect(watch.watched.has(later)).toBe(true)
+    await watch.until(later, true)
     watch.show([first, later])
     s.pump(0.3)
     expect(later.dataset.petLedge).toBeDefined()
 
     later.remove()
-    await new Promise((r) => setTimeout(r, 0))
-    expect(watch.watched.has(later)).toBe(false)
+    await watch.until(later, false)
     s.host.remove()
   })
 })

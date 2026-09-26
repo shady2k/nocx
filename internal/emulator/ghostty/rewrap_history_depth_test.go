@@ -31,9 +31,9 @@ func zzUniqueStream(counter *int, lineLen, n int) string {
 // the adapter's refill/push accounting is keyed ONLY on the ROW count
 // (Resize's `grew := g.Rows - beforeRows`, terminal.go), so a pure width
 // change fires neither its shrink-push nor its grow-refill branch at all.
-// rebaselineLocked re-baselines the new depth and carries owed/pushed
+// rebaselineLocked re-baselines the new depth and carries the owed debt
 // forward UNCHANGED; this measures whether that is honest once a LATER
-// row-count change puts the carried-forward ledger to work
+// row-count change puts the carried-forward debt to work
 // (nocx-2v80t.3.10 asks this to be measured, not assumed).
 func TestARewrapThatMovesHistoryDepthReportsEveryRowOnce(t *testing.T) {
 	port, err := New(emulator.Geometry{Cols: 20, Rows: 5, CellWidthPx: 10, CellHeightPx: 20})

@@ -48,6 +48,12 @@ type ObservationScreen struct {
 	AltScreen bool
 	Cursor    emulator.Cursor
 	Lines     []emulator.Row
+	// Reported is how many of Lines, from the top, the row stream had
+	// already carried when the screen was read: rows a growing pane pulled
+	// back out of the history (emulator.Terminal.ReportedRowsOnScreen,
+	// nocx-2v80t.3.41). They are in the screen, and they are not rows still
+	// to leave it (boundaryRowsThatLeave).
+	Reported int
 }
 
 // ObservationLoss is what the interval could not hand anyone. Each field
@@ -202,10 +208,15 @@ func (s *Session) takeObservationScreenLocked() (ObservationScreen, bool) {
 	if err != nil {
 		return ObservationScreen{}, false
 	}
+	reported, err := s.emulator.ReportedRowsOnScreen()
+	if err != nil {
+		return ObservationScreen{}, false
+	}
 	screen := ObservationScreen{
 		Geometry:  geom,
 		AltScreen: alt == emulator.ScreenAlternate,
 		Cursor:    cursor,
+		Reported:  reported,
 	}
 	grid := make([]emulator.Row, geom.Rows)
 	for y := range grid {
@@ -292,6 +303,7 @@ func (s *Session) releasePendingScreenLocked() {
 	}
 	s.pendingScreen = nil
 	s.pendingEntered = false
+	s.pendingCapture = nil
 }
 
 // purgeDestroyedPendingScreenLocked drops, and releases, every window entry
@@ -339,10 +351,11 @@ func (s *Session) purgeDestroyedPendingScreenLocked() {
 //
 // The window is that boundary's screen, and a candidate row is matched BY
 // CONTENT rather than by position, because a geometry commit can land between
-// the boundary and the rows that leave next: a pane that SHRINKS pushes the
-// screen's top row into history WITHOUT it departing (the port's rule — a
-// pushed row is not a departure), so the first row that leaves is not the
-// window's first row. Matching only the head is what this used to do, and a
+// the boundary and the rows that leave next and move which row leaves first:
+// a pane that grows pulls rows back in ABOVE the window's head, and when the
+// port still counted a shrink's pushed rows as no departure at all (before
+// nocx-2v80t.3.41), the window's own head could vanish into the history
+// unreported. Matching only the head is what this used to do, and a
 // commit therefore killed the whole window on its first comparison: the
 // closing screen the block before already holds was streamed again into the
 // block after it, 26 and 27 rows at a time on the e2e, and deterministically
@@ -434,7 +447,14 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 			t.Release()
 		}
 		s.pendingScreen = append(s.pendingScreen[:at], s.pendingScreen[at+1:]...)
-		s.suppressedScreenRows++
+		if c := s.pendingCapture; c != nil {
+			// The window is a sighting's, and nobody has authenticated it
+			// yet: the row is HELD, not dropped, until the completion says
+			// whose it was (splitObservationAtFenceLocked, nocx-2v80t.3.41).
+			c.Held = append(c.Held, row)
+		} else {
+			s.suppressedScreenRows++
+		}
 		s.pendingEntered = true
 	}
 	return kept
@@ -492,6 +512,7 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 	// (nocx-2v80t.3.9). A struck feed suppresses nothing: the hole it names
 	// rides the batch that follows it, and a batch withheld whole would
 	// swallow that marker.
+	holder := s.pendingCapture
 	if lost == 0 {
 		rows = s.suppressBoundaryScreenLocked(rows)
 	}
@@ -500,15 +521,30 @@ func (s *Session) drainObservationLocked(feedBytes int) {
 		// batch withheld whole would swallow the hole it names.
 		return
 	}
+	if holder != nil && holder.Holding {
+		// A row must stream while a sighting's window still holds rows its
+		// completion has not claimed yet: it cannot wait any longer without
+		// the stream's order breaking, so what the window holds is given back
+		// first — through the window it replaced, which still withholds
+		// whatever was that boundary's — and streams ahead of this batch.
+		if owed := s.restorePriorWindowLocked(holder); len(owed) > 0 {
+			s.streamRowsLocked(owed, 0)
+		}
+	}
 	s.releasePendingScreenLocked()
-	// A loss SPENDS the indices it names (nocx-2v80t.3.26): the struck
-	// feed's symbolic count advances the index before this batch's first
-	// row, so every consumer reads FromRow minus LostRows as exactly where
-	// the delivery before it ended, and one arithmetic holds for this hole
-	// and for a bridge's drop alike. A loss-only emission (no rows) then
-	// has a position of its own — the end of the hole — and the interval's
-	// end marker, read from the same counter, agrees with it, so a hole at
-	// an interval's tail is carried rather than lost between two readers.
+	s.streamRowsLocked(rows, lost)
+}
+
+// streamRowsLocked hands one batch to the row stream at the session's own
+// index. A loss SPENDS the indices it names (nocx-2v80t.3.26): the struck
+// feed's symbolic count advances the index before this batch's first row,
+// so every consumer reads FromRow minus LostRows as exactly where the
+// delivery before it ended, and one arithmetic holds for this hole and for
+// a bridge's drop alike. A loss-only emission (no rows) then has a position
+// of its own — the end of the hole — and the interval's end marker, read
+// from the same counter, agrees with it, so a hole at an interval's tail is
+// carried rather than lost between two readers.
+func (s *Session) streamRowsLocked(rows []emulator.Row, lost uint64) {
 	s.departedRows += lost
 	from := s.departedRows
 	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
@@ -832,7 +868,7 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 // holding the interval before's twenty-nine closing rows, the block after it
 // starting at the very row the window should have held (nocx-2v80t.3.9).
 func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
-	s.installPendingScreenLocked(boundaryRowsThatLeave(screen), true)
+	s.installPendingScreenLocked(boundaryRowsThatLeave(screen), boundaryRowsTop(screen), true)
 }
 
 // installPendingScreenLocked is the one place s.pendingScreen is ever
@@ -843,13 +879,15 @@ func (s *Session) expectBoundaryScreenLocked(screen ObservationScreen) {
 // differ there). rows carries whichever of those a caller already decided
 // on; includeCursor only controls whether its LAST entry is flagged as the
 // wildcard candidate, since rows itself has already been trimmed or not by
-// the caller.
+// the caller. top is the screen row rows[0] was read from, which is where
+// each entry's pin is taken: below the rows a growing pane pulled back
+// (boundaryRowsTop), never at the screen's first row regardless.
 //
 // A caller that hands in no rows leaves the window IN FORCE rather than
 // clearing it: the rows an earlier boundary left may still be about to
 // leave, and wiping them on an empty expectation is how a whole closing
 // screen was stored a second time (nocx-2v80t.3.9).
-func (s *Session) installPendingScreenLocked(rows []emulator.Row, includeCursor bool) {
+func (s *Session) installPendingScreenLocked(rows []emulator.Row, top int, includeCursor bool) {
 	if len(rows) == 0 {
 		return
 	}
@@ -863,7 +901,7 @@ func (s *Session) installPendingScreenLocked(rows []emulator.Row, includeCursor 
 		// carried as an entry with no pin: pendingBoundaryRow.alive treats a
 		// nil Track as already dead, so it is dropped by the very next purge
 		// rather than trusted on content alone.
-		track, err := s.emulator.TrackRow(i)
+		track, err := s.emulator.TrackRow(top + i)
 		if err != nil {
 			track = nil
 		}
@@ -947,7 +985,7 @@ func (s *Session) sightOutputMarkLocked() {
 		// stands exactly as it was.
 		return
 	}
-	s.installPendingScreenLocked(rows[:len(rows)-1], false)
+	s.installPendingScreenLocked(rows[:len(rows)-1], boundaryRowsTop(scr), false)
 }
 
 // sightClearBoundaryLocked joins a sighted EffectClearBoundary: the program
@@ -1054,7 +1092,20 @@ func boundaryRowsThatLeave(scr ObservationScreen) []emulator.Row {
 	if end <= 0 || end > len(scr.Lines) {
 		end = len(scr.Lines)
 	}
-	return scr.Lines[:end]
+	return scr.Lines[min(boundaryRowsTop(scr), end):end]
+}
+
+// boundaryRowsTop is the screen row boundaryRowsThatLeave starts at. The
+// screen's top Reported rows were pulled back out of the history by a growing
+// pane: the stream carried each of them when it went there, and nothing will
+// be reported for them when they leave again
+// (emulator.Terminal.ReportedRowsOnScreen). They are not rows still to leave,
+// and a closing screen that carried them stored them a second time — 069..074
+// twice in a hundred-row block on the e2e, the pane going 27 -> 33 rows
+// between the output and the fence (nocx-2v80t.3.41). A window pinning the
+// rows it names pins them from here too (installPendingScreenLocked).
+func boundaryRowsTop(scr ObservationScreen) int {
+	return min(max(scr.Reported, 0), len(scr.Lines))
 }
 
 // closingRowsForStream is the rows a boundary's own end marker actually
@@ -1203,6 +1254,24 @@ type observationCapture struct {
 	// the suppression window withheld as well as the ones it streamed
 	// (nocx-2v80t.3.24).
 	ScreenDeparted uint64
+	// Holding says this capture installed the suppression window at its
+	// sighting and its completion has not settled it yet
+	// (splitObservationAtFenceLocked, nocx-2v80t.3.41). A sighting authorises
+	// nothing (ADR-0024 decision 1), so until then its window only HOLDS the
+	// rows it matches; it drops nothing.
+	Holding bool
+	// Prior is the suppression window that was in force when this capture
+	// installed its own, kept with its pins while Holding: released when the
+	// completion authenticates the boundary, put back when the held rows are
+	// given back (restorePriorWindowLocked). PriorEntered is its
+	// pendingEntered.
+	Prior        []pendingBoundaryRow
+	PriorEntered bool
+	// Held is every departing row this capture's window matched while
+	// Holding — bounded by the window, which is one screen. Authenticated,
+	// they are the closing screen the end marker carries and are dropped;
+	// otherwise they were never a boundary's and are owed to the stream.
+	Held []emulator.Row
 }
 
 // splitObservationAtFenceLocked takes the boundary capture at a parking
@@ -1233,6 +1302,30 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
 	}
+	// The screen the fence sits on is this boundary's closing screen, and its
+	// rows can start leaving before the completion that authenticates the
+	// boundary arrives — it rides another carrier. A pane that shrinks in
+	// that gap pushes the screen's top rows into the history, which departs
+	// them (emulator.Terminal.DepartedRows); so does the next command's
+	// output. Either way the row leaving is the fenced block's closing screen,
+	// exactly as it is after the seal, and streaming it puts it in that block
+	// twice: the consumer holds every row that arrives before a block's end
+	// marker as that block's and appends the closing screen after it
+	// (nocx-2v80t.3.41; measured on the e2e, a shrink between the sighting
+	// and the completion three times in one 500-command run). So the window
+	// is this capture's from the SIGHTING, as it already is in the
+	// completion-first order, where the seal is at the sighting too
+	// (sealObservationLocked). A sighting authorises nothing (ADR-0024
+	// decision 1), so the window it installs only holds: the one it replaced
+	// is kept, and what it matches is kept, until the completion settles
+	// whose rows they were (confirmCaptureWindowLocked,
+	// unwindCaptureWindowLocked).
+	if rows := boundaryRowsThatLeave(cap.Closing); len(rows) > 0 {
+		cap.Prior, cap.PriorEntered = s.pendingScreen, s.pendingEntered
+		s.pendingScreen, s.pendingEntered, s.pendingCapture = nil, false, nil
+		s.installPendingScreenLocked(rows, boundaryRowsTop(cap.Closing), true)
+		s.pendingCapture, cap.Holding = cap, true
+	}
 	s.observation = &observationOpen{Opened: s.rev, Opening: cap.Closing, Rebased: rebase}
 	return cap
 }
@@ -1257,9 +1350,85 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Loss:         cap.Loss,
 	}
 	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.ScreenDeparted)
-	s.expectBoundaryScreenLocked(cap.Closing)
+	// The window was installed at the sighting (splitObservationAtFenceLocked)
+	// and has been doing its work since: installing it again here would name
+	// rows that may already have left, and pin whatever row now sits where
+	// they were. Authenticated, it simply stops being provisional.
+	s.confirmCaptureWindowLocked(cap)
 	s.emitIntervalEndLocked(nonce, cap.EndRow, closingRowsForStream(cap.Closing, skip), false)
 	s.storeSealedObservationLocked(rec)
+}
+
+// confirmCaptureWindowLocked settles a capture's window as the boundary's:
+// the rows it held were the closing screen the end marker carries, so they
+// are dropped — counted as suppressed, like every row the window withholds —
+// and the window it replaced is released for good.
+func (s *Session) confirmCaptureWindowLocked(cap *observationCapture) {
+	if !cap.Holding {
+		return
+	}
+	if s.pendingCapture == cap {
+		s.pendingCapture = nil
+	}
+	s.suppressedScreenRows += uint64(len(cap.Held)) // #nosec G115 -- len is never negative
+	releaseBoundaryRows(cap.Prior)
+	cap.Holding, cap.Prior, cap.Held = false, nil, nil
+}
+
+// restorePriorWindowLocked gives a Holding capture's rows back: its window
+// comes down, the window it replaced goes back into force, and the held rows
+// are met by that one exactly as they would have been had the sighting never
+// installed anything — what was ITS boundary's is still withheld, and the
+// rest is answered, in order, as owed to the stream. The caller has
+// established that the window in force, if any, is this capture's.
+func (s *Session) restorePriorWindowLocked(cap *observationCapture) []emulator.Row {
+	held, prior, entered := cap.Held, cap.Prior, cap.PriorEntered
+	cap.Holding, cap.Prior, cap.Held = false, nil, nil
+	s.releasePendingScreenLocked()
+	s.pendingScreen, s.pendingEntered = prior, entered
+	return s.suppressBoundaryScreenLocked(held)
+}
+
+// unwindCaptureWindowLocked un-does a capture's window when nobody
+// authenticated its fence: the screen it named was never a boundary's.
+//
+// While its window is still the one in force nothing has streamed since the
+// sighting (a streaming row gives the held rows back first,
+// drainObservationLocked), so the held rows are given back and stream now,
+// in order, with nothing after them yet. If another window has replaced it,
+// rows have been met since that the held ones preceded, and a held row can
+// no longer be put back in its place: the ones the prior window would not
+// have withheld are carried as a counted loss rather than streamed out of
+// order.
+func (s *Session) unwindCaptureWindowLocked(cap *observationCapture) {
+	if !cap.Holding {
+		return
+	}
+	if s.pendingCapture == cap {
+		if owed := s.restorePriorWindowLocked(cap); len(owed) > 0 {
+			s.releasePendingScreenLocked()
+			s.streamRowsLocked(owed, 0)
+		}
+		return
+	}
+	window, entered, owner := s.pendingScreen, s.pendingEntered, s.pendingCapture
+	s.pendingScreen, s.pendingEntered, s.pendingCapture = nil, false, nil
+	owed := s.restorePriorWindowLocked(cap)
+	s.releasePendingScreenLocked()
+	s.pendingScreen, s.pendingEntered, s.pendingCapture = window, entered, owner
+	if len(owed) > 0 {
+		s.streamRowsLocked(nil, uint64(len(owed))) // #nosec G115 -- len is never negative
+	}
+}
+
+// releaseBoundaryRows frees the pins of window entries that are no longer
+// any window's.
+func releaseBoundaryRows(rows []pendingBoundaryRow) {
+	for _, p := range rows {
+		if p.Track != nil {
+			p.Track.Release()
+		}
+	}
 }
 
 // returnObservationCaptureLocked hands a capture nobody authenticated back
@@ -1271,6 +1440,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 // the interval's end marker will stop at whatever the session has departed
 // to when that boundary finally arrives.
 func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
+	s.unwindCaptureWindowLocked(cap)
 	o := s.observation
 	if o == nil {
 		s.observation = &observationOpen{

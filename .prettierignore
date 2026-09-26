@@ -64,6 +64,7 @@ eslint-fixtures/
 .githooks/backlog-gate/check.mjs
 .githooks/backlog-gate/check-commits.mjs
 .githooks/backlog-gate/check-docs.mjs
+.githooks/backlog-gate/time-format.mjs
 
 # Image-generation scratch: prompts and renders written by an agent session, in
 # a directory nothing in the repository reads and git does not track. Same class

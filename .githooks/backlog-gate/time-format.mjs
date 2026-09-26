@@ -64,7 +64,7 @@ const oneOf = (list) => ({ list });
 export const SCHEMA = {
   claim: {
     need: { span: TEXT, at: TIME, session: TEXT, agent: TEXT, role: oneOf(ROLES) },
-    may: { due: TIME, away: INT, tasks: INT, stages: INT, basis: TEXT, note: TEXT },
+    may: { due: TIME, away: INT, tasks: INT, stages: INT, basis: TEXT, note: TEXT, recovered: TIME },
     table: { columns: ['forecast'], optional: true },
   },
   receipt: {

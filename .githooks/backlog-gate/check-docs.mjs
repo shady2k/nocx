@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.29.0';
+export const RULES_VERSION = '0.30.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)

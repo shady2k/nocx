@@ -1,8 +1,8 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.29.0 on 2026-09-26 by its setup task, "The backlog tooling here matches shady2k-skills
-0.29.0 and is proved from main" (nocx-q8yjf.10). The protocol itself ships with the skills
+0.30.0 on 2026-09-26 by its setup task, "The backlog tooling here matches shady2k-skills
+0.30.0 and is proved from main" (nocx-q8yjf.12). The protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
@@ -129,8 +129,8 @@ keeps every later change.
   [`time-format.mjs`](../../.githooks/backlog-gate/time-format.mjs) beside it, which it reads
   work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.29.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.29.0`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.30.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.30.0`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -145,6 +145,14 @@ keeps every later change.
   with `br comments add <id> -f <file holding the printed body> --actor <agent>`; `-m` with a
   shell-quoted multi-line string is where a record gets reflowed. Proved 2026-09-26 on the
   setup task: posted, exported, byte-identical.
+- **Time records adopted 2026-09-26** (nocx-q8yjf.12). The 61 leaves in flight then —
+  active, submitted or implemented with no claim record, almost all of them the stages "The
+  frontend stops deciding blocks" and "The runtime's cells reach the client" — are listed
+  in the config's `timeRecordsExempt`, and their time is unknown. Their coordinators'
+  transcripts are on the VM, but each held twenty to forty items at once, so claims
+  recovered one at a time would have cut its hours by pick-up order into figures that look
+  measured and are not; the owner chose the exemption. The list only shrinks: work handed
+  in unclaimed later gets the rule's own fix, never a place on it.
 - **Tracker layout:** the store is the SQLite database of the main checkout, outside git;
   `br` resolves it from every worktree. Its export `.beads/issues.jsonl` is a tracked file,
   and each publish commits the WHOLE export on whichever branch commits it — a code branch
@@ -204,7 +212,7 @@ keeps every later change.
 - **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
   and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
-  `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
+  the adapter, `check-commits.mjs` or the config, `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
   config (exit 2). The one pass is a tree that never had the installation (no
   `commit-links.mjs`), and it says so.
 - **Connecting a clone:** `make connect` (`scripts/connect-clone.sh`), which `make init`

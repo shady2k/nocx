@@ -151,9 +151,22 @@ function unreceipted(m) {
   });
 }
 
-function unclaimedWork(m) {
+// Work in flight when time records were adopted was begun by sessions that
+// could not write a claim. Setup lists it, and the exemption follows the task
+// tree, so a task split afterwards keeps it.
+function exemptFromRecords(m, cfg, id) {
+  const listed = new Set(cfg.timeRecordsExempt || []);
+  const seen = new Set();
+  for (let cur = id; cur && !seen.has(cur); cur = m.by.get(cur)?.parent) {
+    if (listed.has(cur)) return true;
+    seen.add(cur);
+  }
+  return false;
+}
+
+function unclaimedWork(m, cfg) {
   const claimed = new Set(spansOf(m).spans.filter((s) => s.claim).map((s) => s.item));
-  return m.issues.filter((i) => ['submitted', 'implemented'].includes(i.status) && i.type !== 'epic' && !m.children.has(i.id) && !claimed.has(i.id))
+  return m.issues.filter((i) => ['submitted', 'implemented'].includes(i.status) && i.type !== 'epic' && !m.children.has(i.id) && !claimed.has(i.id) && !exemptFromRecords(m, cfg, i.id))
     .map((i) => ({ id: i.id, note: `${i.status} with no claim recorded on it` }));
 }
 
@@ -428,8 +441,8 @@ const CHECKS = [
     id: 'time-work-unclaimed',
     severity: 'error',
     why: 'A result handed in with no claim on its task was worked on by nobody the record knows: its time cannot be found, and the gate cannot tell it from work that took none.',
-    fix: 'Post the claim the session made, with its real start, and the receipt for it from the machine that holds the transcript. Work nobody claimed is the gap this names; closing the task does not fill it.',
-    run: (m) => unclaimedWork(m),
+    fix: 'On the machine that holds the session\'s transcript, recover its claim with the run script, at the start the transcript shows, and then its receipt. Where no machine has it, say so to the owner; the time stays unknown. Work in flight when time records were adopted is listed as exempt by setup at that moment, never later to quiet this. Closing the task does not fill the gap.',
+    run: (m, cfg) => unclaimedWork(m, cfg),
   },
 ];
 
@@ -450,14 +463,14 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.29.0';
+const RULES_VERSION = '0.30.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
 /** Thrown for anything that is the caller's mistake; main turns it into exit 2. */
 class Misuse extends Error {}
 
-const LIST_KEYS = ['areaLabels', 'milestoneLabels', 'roadmapLabels', 'triageLabels', 'ideaLabels', 'ideaTitlePrefixes', 'findingLabels'];
+const LIST_KEYS = ['areaLabels', 'milestoneLabels', 'roadmapLabels', 'triageLabels', 'ideaLabels', 'ideaTitlePrefixes', 'findingLabels', 'timeRecordsExempt'];
 const NUMBER_KEYS = { staleDays: 14, holdDays: 2, bulkCluster: 20 };
 
 /**
@@ -719,6 +732,11 @@ function runSelftest(cfg, projectConfigPath) {
     const seen = v.results.some((r) => r.violations.length);
     say(v.failed === red && seen, `strength ${strength} on ${what} → ${v.failed ? 'red' : 'green'}, report ${seen ? 'kept' : 'LOST'}`);
   }
+  // Work in flight at adoption is exempt, and so is what it was split into;
+  // other unclaimed work is still named.
+  const unclaimed = load('bad', 'time-work-unclaimed.json');
+  const named = (exempt) => evaluate(unclaimed, { ...cfg, timeRecordsExempt: exempt }, ['time-work-unclaimed']).results[0].violations.length;
+  say(named(['A']) === 0 && named(['S']) === 0 && named(['B']) === 1, 'time records: work listed at adoption, and its descendants, are exempt; nothing else is');
   // A bulk edit made every issue look touched today, which hides the stale
   // hold. Ages from the snapshot taken before it bring the violation back.
   const edited = { ...dirty, issues: dirty.issues.map((i) => ({ ...i, updatedAt: dirty.generatedAt })) };

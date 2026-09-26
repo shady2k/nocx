@@ -420,6 +420,13 @@ test.describe('long transcript scroll budget', () => {
     let painted = 0
     for (let i = 0; i < dom.length; i += 1) {
       const own = dom[i].own
+      // NO OUTPUT ON THE COMMAND'S OWN LINE (nocx-2v80t.3.46). A resize that
+      // lands at the submit makes bash redraw its line with no newline, and
+      // the command's first output row then continues on it — a stored row
+      // that is the command line AND a numbered row. Named before the counts
+      // below, which would only report that one row went missing.
+      const joined = stored[i].filter((row) => /printf .*transcript-\d{4}-\d{3}/.test(row))
+      expect(joined, `block ${i + 1} carries its command line in an output row`).toEqual([])
       const inStore = numbered(stored[i], own)
       expect(inStore.mine, `block ${i + 1} holds ${inStore.mine} of its own stored rows`).toBe(
         ROWS_PER_BLOCK,

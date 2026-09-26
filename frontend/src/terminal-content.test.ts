@@ -16252,3 +16252,163 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
     }
   })
 })
+
+describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', () => {
+  // The pane's lifecycle chrome trades places at every command: the composer
+  // at the prompt, nothing in the frame after it leaves, the ProcessBar and
+  // the running block's header while the command runs. The scroller absorbs
+  // each swap, and fitting the grid to the scroller resized the pty twice a
+  // command — 221 geometry commits in 500 commands, the grid stepping between
+  // 27, 28 and 33 rows. A resize that lands at a submit makes bash redraw its
+  // line with no newline, and the command's output then begins on that row.
+  //
+  // The layout below is the one measured in the e2e container (546 px of
+  // scroller at the prompt under a 130 px composer, 620 px while running
+  // above a 56 px ProcessBar, 676 px in between, a 60 px running header),
+  // played by the test because jsdom lays nothing out.
+  const COMPOSER = 130
+  const BAR = 56
+  const HEADER = 60
+
+  async function paneWithLayout() {
+    const client = makeClient()
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    const { content } = mounted
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    const inner = content as unknown as {
+      scrollback: ScrollbackController
+      editor: CommandEditor
+      processBar: HTMLElement
+    }
+    const sb = inner.scrollback
+    let pane = 676
+    const composerShown = (): boolean =>
+      inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
+    const barShown = (): boolean => !inner.processBar.hidden
+    Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      get: () => pane - (composerShown() ? COMPOSER : 0) - (barShown() ? BAR : 0),
+    })
+    Object.defineProperty(sb.scrollbackArea, 'clientWidth', { configurable: true, value: 926 })
+    const rect = (height: number): DOMRect =>
+      ({ height, width: 926, top: 0, left: 0, right: 926, bottom: height, x: 0, y: 0 }) as DOMRect
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoRect = Element.prototype.getBoundingClientRect
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
+      if (this === inner.processBar) return rect(barShown() ? BAR : 0)
+      if (this.classList.contains('cmd-block')) return rect(HEADER)
+      return rect(0)
+    }
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    const restore = (): void => {
+      Element.prototype.getBoundingClientRect = protoRect
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      globalThis.requestAnimationFrame = raf
+      mounted.teardown()
+    }
+
+    let n = 0
+    /** One ordinary command, through the composer, to its block's close. */
+    const runCommand = (): void => {
+      n += 1
+      const id = `att-${n}`
+      mounted.ed.insertText(`printf ${n}`)
+      mounted.view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id,
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: `printf ${n}`,
+        },
+      })
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(100)
+      client._sessions[0].fireData(`out ${n}\r\n`)
+      renderer._fireWriteParsed()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id,
+          state: 'completed',
+          exitCode: 0,
+          fence: 'f'.repeat(64),
+          completedAt: '2026-09-26T00:00:00Z',
+        },
+      })
+      blockClosedHandler(client)(id)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The prompt's own redraw is output too, and re-measures like any.
+      client._sessions[0].fireData('$ ')
+      renderer._fireWriteParsed()
+    }
+    const resize = (height: number): void => {
+      pane = height
+      content.viewportChanged({ width: 936, height })
+    }
+
+    content.setVisible(true)
+    content.viewportChanged({ width: 936, height: pane })
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    /** Every rectangle the grid was fitted to — each one a pty resize. */
+    const fits = (): Array<{ width: number; height: number }> =>
+      (renderer.fitViewport as Mock).mock.calls.map(
+        (call) => call[0] as { width: number; height: number },
+      )
+    return { sb, fits, runCommand, resize, restore }
+  }
+
+  it('commits no geometry across twenty commands in a pane whose size did not change', async () => {
+    const { sb, fits, runCommand, restore } = await paneWithLayout()
+    try {
+      // The pane's first command settles what a command takes off the pane.
+      runCommand()
+      expect(sb.mode).toBe('idle')
+      const before = fits().length
+      for (let i = 0; i < 20; i++) runCommand()
+      expect(fits().slice(before)).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('and a real resize commits once, at the resize, and not again at the next command', async () => {
+    const { fits, runCommand, resize, restore } = await paneWithLayout()
+    try {
+      runCommand()
+      const last = (): number => fits()[fits().length - 1]?.height ?? 0
+      const running = last()
+      const before = fits().length
+
+      resize(776)
+      expect(fits().length).toBe(before + 1)
+      expect(last()).toBe(running + 100)
+
+      for (let i = 0; i < 5; i++) runCommand()
+      expect(fits().length).toBe(before + 1)
+    } finally {
+      restore()
+    }
+  })
+})

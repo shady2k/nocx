@@ -186,7 +186,13 @@ keeps every later change.
   It compares the staged export against HEAD, never the working tree: `br` rewrites the
   export on almost every command. The baseline is judged by its own day's config, so a
   config change that creates violations is new. The hook runs only when the export or the
-  gate itself is staged.
+  gate itself is staged. A merge is judged against BOTH parents by
+  [`merge-gate.mjs`](../../.githooks/backlog-gate/merge-gate.mjs): an error is new only when
+  it is new against HEAD and against the other parent, which the hook takes from `MERGE_HEAD`
+  or, for a merge `git merge` commits by itself, from `GIT_REFLOG_ACTION` (git runs
+  pre-merge-commit before it writes `MERGE_HEAD`). Without it, merging `main` into a branch
+  was refused for debt `main` already carried (measured 2026-09-26). Its test:
+  `node --test .githooks/backlog-gate/merge-gate.test.mjs`.
 
 - **JSON report:** add `--json` to the `check.mjs` line.
 - **Commit-link check:** [`commit-links.mjs`](../../.githooks/backlog-gate/commit-links.mjs)

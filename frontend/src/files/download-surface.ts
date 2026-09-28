@@ -41,10 +41,10 @@ export interface DownloadSurface {
 /** Not exported: `downloadSurfaceFor` is the only way in, because a second
  *  surface for the same dispatcher is the two-stores defect this module
  *  exists to prevent. */
-function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
+function createDownloadSurface(dispatcher: Dispatcher, native: () => boolean): DownloadSurface {
   const services = createDownloadServices(dispatcher)
   const store = createDownloadStore({ services })
-  const saver = hasWailsWebview()
+  const saver = native()
     ? createNativeDownloadSaver((transferId) => services.saveNative(transferId))
     : createBrowserDownloadSaver()
   const flow = createDownloadFlow({
@@ -61,10 +61,13 @@ function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
  *  surface, while a test that makes its own gets its own. */
 const surfaces = new WeakMap<Dispatcher, DownloadSurface>()
 
-export function downloadSurfaceFor(dispatcher: Dispatcher): DownloadSurface {
+export function downloadSurfaceFor(
+  dispatcher: Dispatcher,
+  native: () => boolean = hasWailsWebview,
+): DownloadSurface {
   const existing = surfaces.get(dispatcher)
   if (existing !== undefined) return existing
-  const created = createDownloadSurface(dispatcher)
+  const created = createDownloadSurface(dispatcher, native)
   surfaces.set(dispatcher, created)
   return created
 }

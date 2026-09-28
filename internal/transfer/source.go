@@ -118,11 +118,9 @@ type Download struct {
 	r  RemoteReader
 }
 
-// Close lets go of the pinned handle and may race the one active Get. That
-// race is intentional: RemoteReader has no context, so closing it is the only
-// way cancellation or a failed destination can unblock a Read already in
-// flight. The mutex protects handle ownership; the underlying reader's Close
-// provides the interruption. Later defensive/deferred closes are no-ops.
+// Close releases the pinned handle. The caller owns it and closes it after
+// Get returns; a remote reader may serialize Close behind an in-flight Read,
+// so Close is not a cancellation mechanism.
 func (d *Download) Close() error {
 	if d == nil {
 		return nil
@@ -184,6 +182,18 @@ type Source interface {
 	Get(ctx context.Context, d *Download, w io.Writer, progress func(total int64)) (int64, error)
 }
 
+// DestinationError marks a failure from the local Sink. Its error may name a
+// local path and must not be sent over the control plane.
+type DestinationError struct{ Err error }
+
+func (e *DestinationError) Error() string { return e.Err.Error() }
+func (e *DestinationError) Unwrap() error { return e.Err }
+
+type sourceFailure struct{ err error }
+
+func (e sourceFailure) Error() string { return e.err.Error() }
+func (e sourceFailure) Unwrap() error { return e.err }
+
 type saveDownloadResult struct {
 	outcome Outcome
 	err     error
@@ -204,7 +214,6 @@ func SaveDownload(
 	reader, writer := io.Pipe()
 	stopOnCancel := context.AfterFunc(ctx, func() {
 		err := ctx.Err()
-		_ = download.Close()
 		_ = writer.CloseWithError(err)
 		_ = reader.CloseWithError(err)
 	})
@@ -213,23 +222,25 @@ func SaveDownload(
 	sinkDone := make(chan saveDownloadResult, 1)
 	go func() {
 		outcome, err := sink.Put(ctx, upload, reader, nil)
-		if err != nil {
-			// Sink.Put may fail before Source.Get reaches its first pipe
-			// Write. Closing the pipe cannot interrupt a remote Read, but
-			// closing the pinned handle can.
-			_ = download.Close()
-		}
 		_ = reader.CloseWithError(err)
 		sinkDone <- saveDownloadResult{outcome: outcome, err: err}
 	}()
 
 	sent, sourceErr := source.Get(ctx, download, writer, progress)
-	_ = writer.CloseWithError(sourceErr)
+	var pipeErr error
+	if sourceErr != nil {
+		pipeErr = sourceFailure{err: sourceErr}
+	}
+	_ = writer.CloseWithError(pipeErr)
 	sinkResult := <-sinkDone
 	if sinkResult.err != nil {
+		var sourceFailureErr sourceFailure
+		if errors.As(sinkResult.err, &sourceFailureErr) {
+			return sent, sinkResult.outcome, sourceFailureErr.err
+		}
 		// The reader-close error is fallout from a failed destination; keep
-		// the Sink error as the causal diagnostic.
-		return sent, sinkResult.outcome, sinkResult.err
+		// the Sink error as the causal diagnostic and identify its trust boundary.
+		return sent, sinkResult.outcome, &DestinationError{Err: sinkResult.err}
 	}
 	return sent, sinkResult.outcome, sourceErr
 }

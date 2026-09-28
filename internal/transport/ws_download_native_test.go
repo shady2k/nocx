@@ -72,6 +72,12 @@ func (s *countingNativeSink) callCount() int {
 	return s.calls
 }
 
+type failingNativeSink struct{ err error }
+
+func (s failingNativeSink) Put(context.Context, transfer.Upload, io.Reader, func(int64)) (transfer.Outcome, error) {
+	return transfer.Outcome{Stranded: []string{"/private/native-temp"}}, s.err
+}
+
 type fixedDownloadSaveMachine struct {
 	rt      *runningTransfer
 	claims  int
@@ -218,7 +224,12 @@ func TestFilesDownloadSave_DisconnectAfterClaimNeverClosesRemoteOnReadLoop(t *te
 	}
 	requestCtx, cancelRequest := context.WithCancel(context.Background())
 	machine := &fixedDownloadSaveMachine{rt: rt, onClaim: cancelRequest}
-	h := downloadSaveHandlers{machine: machine, r: &spyResponder{}}
+	var service DialogService = &nativeDownloadPicker{}
+	var dialogMu sync.RWMutex
+	h := downloadSaveHandlers{
+		dialog:  &dialogServiceHolder{mu: &dialogMu, svc: &service},
+		machine: machine, r: &spyResponder{},
+	}
 	returned := make(chan struct{})
 	go func() {
 		h.handleDownloadSave(requestCtx, &connState{}, jsonrpcRequest{
@@ -292,7 +303,7 @@ func TestFilesDownloadSave_MultiChunkAtomicReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	picker := &nativeDownloadPicker{target: &DownloadSaveTarget{
-		Sink:   filesystemlocal.New().DurableSink(),
+		Sink:   filesystemlocal.New().Sink(),
 		Upload: transfer.Upload{DestDir: destinationDir, Name: "chosen.bin", Size: int64(len(body)), OnExists: transfer.Overwrite},
 	}}
 	e.ws.SetDialogService(picker)
@@ -334,7 +345,7 @@ func TestFilesDownloadSave_RemoteFailurePreservesExistingDestinationAndCleansTem
 		t.Fatal(err)
 	}
 	e.ws.SetDialogService(&nativeDownloadPicker{target: &DownloadSaveTarget{
-		Sink: filesystemlocal.New().DurableSink(),
+		Sink: filesystemlocal.New().Sink(),
 		Upload: transfer.Upload{
 			DestDir: destinationDir, Name: "chosen.bin", Size: started.Size, OnExists: transfer.Overwrite,
 		},
@@ -344,6 +355,14 @@ func TestFilesDownloadSave_RemoteFailurePreservesExistingDestinationAndCleansTem
 	}
 	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
 		t.Fatalf("state = %q, want failed", state)
+	}
+	raw := readNotification(t, e.conn, "files.downloadDone", wantWithin)
+	var done filesDownloadDoneParams
+	if err := json.Unmarshal(raw, &done); err != nil {
+		t.Fatal(err)
+	}
+	if done.Error != remoteErr.Error() {
+		t.Fatalf("download error = %q; want source reason %q", done.Error, remoteErr)
 	}
 	got, err := os.ReadFile(destination) //nolint:gosec // destination is under the test's own temporary directory
 	if err != nil {
@@ -467,15 +486,46 @@ func TestFilesDownloadSave_LocalPathNeverCrossesTheWireOnFailure(t *testing.T) {
 	}
 }
 
-func TestFilesDownloadSave_UnavailableCapabilityFailsWithoutWaitingForTTL(t *testing.T) {
+func TestFilesDownloadSave_LocalDestinationFailureIsRedacted(t *testing.T) {
+	const privatePath = "/private/home/alice/native-temp"
+	e := newDownloadTestEnv(t)
+	started := startNativeDownload(t, e, "bytes")
+	e.ws.SetDialogService(&nativeDownloadPicker{target: &DownloadSaveTarget{
+		Sink: failingNativeSink{err: errors.New("create " + privatePath + ": denied")},
+		Upload: transfer.Upload{
+			DestDir: "/private/home/alice", Name: "chosen.bin",
+			Size: started.Size, OnExists: transfer.Overwrite,
+		},
+	}})
+	if response := callDownloadSave(t, e.conn, started.TransferID, 4); response.Error != nil {
+		t.Fatalf("files.downloadSave: %+v", response.Error)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
+		t.Fatalf("state = %q, want failed", state)
+	}
+	raw := readNotification(t, e.conn, "files.downloadDone", wantWithin)
+	var done filesDownloadDoneParams
+	if err := json.Unmarshal(raw, &done); err != nil {
+		t.Fatal(err)
+	}
+	if done.Error != errNativeDownloadSaveWire.Error() || strings.Contains(string(raw), privatePath) {
+		t.Fatalf("download outcome leaked destination details: %s", raw)
+	}
+}
+
+func TestFilesDownloadSave_UnavailableCapabilityLeavesTicketClaimableByBrowser(t *testing.T) {
 	e := newDownloadTestEnv(t)
 	started := startNativeDownload(t, e, "bytes")
 	response := callDownloadSave(t, e.conn, started.TransferID, 4)
 	if response.Error == nil || response.Error.Code != -32601 {
 		t.Fatalf("response = %+v, want unavailable", response)
 	}
-	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
-		t.Fatalf("state = %q, want failed", state)
+	status, body := getDownloadRaw(e.ws, started.Ticket)
+	if status != 200 || body != "bytes" {
+		t.Fatalf("browser fetch = (%d, %q); want original ticket to return the file", status, body)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateSent {
+		t.Fatalf("state = %q, want browser-owned transfer to finish", state)
 	}
 }
 
@@ -545,29 +595,48 @@ func TestNativeDownloadPipe_AppliesBackpressure(t *testing.T) {
 	}
 }
 
-var errImmediateNativeSink = errors.New("native sink create failed")
+var errImmediateNativeSink = errors.New("create /private/native-temp: permission denied")
 
-type blockingNativeReadFS struct {
-	started chan struct{}
-	closed  chan struct{}
-	start   sync.Once
-	close   sync.Once
+type serializedNativeReadFS struct {
+	lane        chan struct{}
+	started     chan struct{}
+	release     chan struct{}
+	closeStart  chan struct{}
+	readStarted sync.Once
+	closeCalled sync.Once
+	readDone    bool
 }
 
-func (f *blockingNativeReadFS) Open(string) (transfer.RemoteReader, int64, error) {
-	return &blockingNativeReader{fs: f}, 1, nil
+func newSerializedNativeReadFS() *serializedNativeReadFS {
+	return &serializedNativeReadFS{
+		lane: make(chan struct{}, 1), started: make(chan struct{}),
+		release: make(chan struct{}), closeStart: make(chan struct{}),
+	}
 }
 
-type blockingNativeReader struct{ fs *blockingNativeReadFS }
-
-func (r *blockingNativeReader) Read([]byte) (int, error) {
-	r.fs.start.Do(func() { close(r.fs.started) })
-	<-r.fs.closed
-	return 0, errors.New("remote reader was closed")
+func (f *serializedNativeReadFS) Open(string) (transfer.RemoteReader, int64, error) {
+	return &serializedNativeReader{fs: f}, 1, nil
 }
 
-func (r *blockingNativeReader) Close() error {
-	r.fs.close.Do(func() { close(r.fs.closed) })
+type serializedNativeReader struct{ fs *serializedNativeReadFS }
+
+func (r *serializedNativeReader) Read(p []byte) (int, error) {
+	r.fs.lane <- struct{}{}
+	defer func() { <-r.fs.lane }()
+	r.fs.readStarted.Do(func() { close(r.fs.started) })
+	<-r.fs.release
+	if r.fs.readDone {
+		return 0, io.EOF
+	}
+	r.fs.readDone = true
+	p[0] = 'x'
+	return 1, nil
+}
+
+func (r *serializedNativeReader) Close() error {
+	r.fs.lane <- struct{}{}
+	defer func() { <-r.fs.lane }()
+	r.fs.closeCalled.Do(func() { close(r.fs.closeStart) })
 	return nil
 }
 
@@ -578,8 +647,56 @@ func (s immediateFailNativeSink) Put(context.Context, transfer.Upload, io.Reader
 	return transfer.Outcome{Stranded: []string{"/private/native-temp"}}, errImmediateNativeSink
 }
 
-func TestNativeDownloadPipe_SinkFailureInterruptsTheFirstRemoteRead(t *testing.T) {
-	fsys := &blockingNativeReadFS{started: make(chan struct{}), closed: make(chan struct{})}
+func TestRunningDownloadStopDoesNotCloseRemoteReadSynchronously(t *testing.T) {
+	fsys := newSerializedNativeReadFS()
+	source := transfer.NewSource(fsys, transfer.DefaultChunk)
+	download, err := source.Open("/srv/blocked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	rt := &runningTransfer{dir: dirDownload, download: download, ctx: ctx, cancel: cancel}
+	readDone := make(chan error, 1)
+	go func() {
+		_, getErr := source.Get(ctx, download, io.Discard, nil)
+		readDone <- getErr
+	}()
+	<-fsys.started
+
+	stopDone := make(chan struct{})
+	go func() {
+		rt.stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		close(fsys.release)
+		<-stopDone
+		t.Fatal("stop waited for Close serialized behind remote Read")
+	}
+	select {
+	case <-fsys.closeStart:
+		t.Fatal("stop closed a remote handle while its Read was in flight")
+	default:
+	}
+
+	close(fsys.release)
+	if err := <-readDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Get error = %v, want context cancellation after the bounded read", err)
+	}
+	if err := download.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fsys.closeStart:
+	default:
+		t.Fatal("the caller did not close the remote handle after Get returned")
+	}
+}
+
+func TestNativeDownloadPipe_SinkFailureDoesNotPretendToInterruptRemoteRead(t *testing.T) {
+	fsys := newSerializedNativeReadFS()
 	source := transfer.NewSource(fsys, transfer.DefaultChunk)
 	download, err := source.Open("/srv/blocked")
 	if err != nil {
@@ -591,17 +708,36 @@ func TestNativeDownloadPipe_SinkFailureInterruptsTheFirstRemoteRead(t *testing.T
 	}}
 	done := make(chan downloadDestinationResult, 1)
 	go func() { done <- destination.receive(context.Background(), source, download, nil) }()
+	<-fsys.started
+	select {
+	case <-done:
+		t.Fatal("sink failure falsely interrupted a remote Read serialized with Close")
+	default:
+	}
+	select {
+	case <-fsys.closeStart:
+		t.Fatal("sink failure attempted a blocking remote Close")
+	default:
+	}
 
+	close(fsys.release)
 	select {
 	case result := <-done:
-		if result.state != downloadStateFailed || !errors.Is(result.err, errImmediateNativeSink) {
-			t.Fatalf("result = %+v, want causal sink failure", result)
+		var destinationErr *transfer.DestinationError
+		if result.state != downloadStateFailed || !errors.As(result.err, &destinationErr) {
+			t.Fatalf("result = %+v, want classified destination failure", result)
+		}
+		if result.wireErr != errNativeDownloadSaveWire {
+			t.Fatalf("wire error = %v, want path-free native failure", result.wireErr)
 		}
 		if len(result.outcome.Stranded) != 1 {
 			t.Fatalf("stranded = %#v, want backend accounting", result.outcome.Stranded)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("sink failure left the first remote Read blocked")
+		t.Fatal("native save did not unwind after the bounded remote read completed")
+	}
+	if err := download.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

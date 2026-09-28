@@ -97,7 +97,8 @@ func (d sinkDownloadDestination) receive(
 	)
 	state := downloadStateOf(err, ctx.Err())
 	wireErr := err
-	if state == downloadStateFailed {
+	var destinationErr *transfer.DestinationError
+	if errors.As(err, &destinationErr) {
 		wireErr = errNativeDownloadSaveWire
 	}
 	return downloadDestinationResult{
@@ -158,6 +159,15 @@ func (h downloadSaveHandlers) handleDownloadSave(ctx context.Context, state *con
 		return
 	}
 
+	var picker DownloadSavePicker
+	if h.dialog != nil {
+		picker, _ = h.dialog.get().(DownloadSavePicker)
+	}
+	if picker == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "native download save not available"})
+		return
+	}
+
 	// This handler runs through ImmediateSubmission and does only the cheap
 	// linearization here. Claiming before the rejectable dialog queue means a
 	// saturated queue cannot leave a pinned handle waiting for ticket TTL.
@@ -171,14 +181,6 @@ func (h downloadSaveHandlers) handleDownloadSave(ctx context.Context, state *con
 		// nonblocking; runDownload owns closing the pinned remote handle on its
 		// goroutine. rt.stop would perform unconstrained SSH Close I/O here.
 		rt.cancel()
-		return
-	}
-
-	picker, ok := h.dialog.get().(DownloadSavePicker)
-	if !ok {
-		err := errors.New("native download save not available")
-		rt.attachDestination(failedDownloadDestination{err: err})
-		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: err.Error()})
 		return
 	}
 

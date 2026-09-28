@@ -191,18 +191,25 @@ Cancel, a short or failed remote read, local write failure, connection loss and
 shutdown therefore leave the previous destination unchanged; the Sink removes
 its temporary file or records a cleanup failure only in the backend log.
 
-The native method claims the ticket before opening the dialog. That closes the
-unclaimed-ticket TTL without extending it, and makes the HTTP/native race use
-the same four claim states. `files.downloadSave` takes exactly `transferId`;
-binding/session ownership is re-checked from the transfer, and no ticket,
-source path, destination path or URL can be supplied by the renderer. The
-dialog runs under the existing capacity-one off-read-loop admission.
+The handler checks for the native picker before claiming. If it is unavailable,
+the request is refused without spending the ticket, so the browser route remains
+usable. When the capability exists, the native method claims before opening the
+dialog. That closes the unclaimed-ticket TTL without extending it, and makes the
+HTTP/native race use the same four claim states. `files.downloadSave` takes
+exactly `transferId`; binding/session ownership is re-checked from the transfer,
+and no ticket, source path, destination path or URL can be supplied by the
+renderer. The dialog runs under the existing capacity-one off-read-loop
+admission.
 
 Wails v3's synchronous save dialog exposes no dismissal handle. Cancellation
-still closes the pinned source, aborts the temporary destination and prevents a
-later dialog result from attaching or promoting anything. The capacity-one
-dialog permit remains held until the person closes the still-visible prompt;
-releasing it earlier would allow a second native dialog to stack over the first.
+aborts the temporary destination and prevents a later dialog result from
+attaching or promoting anything. It does not synchronously close a remote SFTP
+read: `Read` and `Close` serialize on the pinned file, so an in-flight read
+finishes under the source lease's per-call watchdog before the handle closes.
+The capacity-one dialog permit remains held until the person closes the
+still-visible prompt; releasing it earlier would allow a second native dialog
+to stack over the first. Local destination failures are redacted because their
+errors can name a private local path; source-read failures remain visible.
 
 ### The route sets its own deadline, and it is a WRITE deadline
 

@@ -10,7 +10,7 @@ import (
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
-func TestDurableSink_CancelPreservesExistingDestinationAndCleansTemp(t *testing.T) {
+func TestSink_CancelPreservesExistingDestinationAndCleansTemp(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chosen.bin")
 	if err := os.WriteFile(path, []byte("existing"), 0o600); err != nil {
@@ -18,14 +18,14 @@ func TestDurableSink_CancelPreservesExistingDestinationAndCleansTemp(t *testing.
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := New().DurableSink().Put(ctx, transfer.Upload{
+	_, err := New().Sink().Put(ctx, transfer.Upload{
 		DestDir:  dir,
 		Name:     "chosen.bin",
 		Size:     7,
 		OnExists: transfer.Overwrite,
 	}, bytes.NewReader([]byte("replace")), nil)
 	if err == nil {
-		t.Fatal("cancelled durable write succeeded")
+		t.Fatal("cancelled write succeeded")
 	}
 	got, readErr := os.ReadFile(path) //nolint:gosec // path is under the test's own temporary directory
 	if readErr != nil {
@@ -43,10 +43,10 @@ func TestDurableSink_CancelPreservesExistingDestinationAndCleansTemp(t *testing.
 	}
 }
 
-func TestDurableSink_MultiChunkBytesPromoteExactly(t *testing.T) {
+func TestSink_MultiChunkBytesPromoteExactly(t *testing.T) {
 	dir := t.TempDir()
 	body := bytes.Repeat([]byte("bounded-chunk"), transfer.DefaultChunk/4)
-	outcome, err := New().DurableSink().Put(context.Background(), transfer.Upload{
+	outcome, err := New().Sink().Put(context.Background(), transfer.Upload{
 		DestDir:  dir,
 		Name:     "chosen.bin",
 		Size:     int64(len(body)),

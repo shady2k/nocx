@@ -247,7 +247,7 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		// which is the SAME store the window drop mints into and the same
 		// one a later files.upload claims from. One mint, one owner.
 		sources:      w.backend.UploadSources,
-		downloadSink: filesystemlocal.New().DurableSink(),
+		downloadSink: filesystemlocal.New().Sink(),
 	})
 
 	// The native browser-open is the same control-plane shape as the file
@@ -589,6 +589,9 @@ func (d *wailsDialogService) PickDownloadSave(
 	if path == "" {
 		return nil, nil
 	}
+	// This is the OS save dialog's local filesystem path. The transport's
+	// path validator applies to remote SFTP paths and intentionally does not
+	// interpret local filepath syntax; split and validate the local path here.
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(path) || clean != path || filepath.Dir(path) == path {
 		return nil, errors.New("save dialog returned an invalid destination")
@@ -601,9 +604,6 @@ func (d *wailsDialogService) PickDownloadSave(
 			Size:     size,
 			OnExists: transfer.Overwrite,
 		},
-	}
-	if err := target.Upload.Validate(); err != nil {
-		return nil, errors.New("save dialog returned an invalid destination")
 	}
 	return target, nil
 }

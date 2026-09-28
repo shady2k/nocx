@@ -101,7 +101,7 @@ func TestOSFS_CreateRefusesAnExistingPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f, err := osFS{}.Create(p)
+	f, err := (durableOSFS{}).Create(p)
 	if err == nil {
 		_ = f.Close()
 		t.Fatal("Create on a taken name succeeded; O_EXCL is what makes the reservation an arbiter")

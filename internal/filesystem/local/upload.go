@@ -59,41 +59,32 @@ const newFileMode = 0o666
 // implementation for both providers. A second sink here would be two
 // owners of one behaviour (AGENTS.md), and the two would agree until the
 // day they did not.
-func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}, transfer.DefaultChunk) }
-
-// DurableSink is the local destination used when a native download crosses
-// from a remote Source into this machine. It is the existing atomic sink with
-// one stronger close boundary: the temporary file is synced before it is
-// closed and promoted, so a successful native save means the bytes reached
-// stable storage rather than only the page cache.
-func (p *Provider) DurableSink() transfer.Sink {
+func (p *Provider) Sink() transfer.Sink {
 	return transfer.NewSink(durableOSFS{}, transfer.DefaultChunk)
 }
 
-// osFS presents this machine's filesystem as the write surface
-// internal/transfer declares. It is the local counterpart of the
-// composition root's fsTransferLease, and it is far shorter for one reason:
-// the two contracts RemoteFS documents and cannot check are properties `os`
-// already has.
+// durableOSFS syncs each completed temporary file before the shared Sink
+// promotes it. Uploads and native downloads therefore have one local write
+// path and the same crash-durability boundary.
+
+// osFS holds the local path operations shared by durableOSFS. durableOSFS
+// implements transfer.RemoteFS; its Create method uses createExclusive below
+// so a concurrent transfer's temp file cannot be truncated (D5).
 //
-//   - Create's O_WRONLY|O_CREATE|O_EXCL is spelled here, so a concurrent
-//     transfer's temp file cannot be truncated (D5).
-//   - A refusal arrives as *fs.PathError wrapping the errno, so
-//     errors.Is against fs.ErrNotExist, fs.ErrPermission and fs.ErrInvalid
-//     already holds. That is what keeps the sink's KeepBoth search from
-//     spending its 32 attempts on a read-only directory and then reporting
-//     "no free name", which would be false rather than merely vague. EEXIST
-//     is deliberately NOT in that set: a taken name is the one refusal that
-//     trying the next suffix does answer.
+// A refusal arrives as *fs.PathError wrapping the errno, so errors.Is
+// against fs.ErrNotExist, fs.ErrPermission and fs.ErrInvalid already holds.
+// That is what keeps the sink's KeepBoth search from spending its 32 attempts
+// on a read-only directory and then reporting "no free name", which would be
+// false rather than merely vague. EEXIST is deliberately NOT in that set: a
+// taken name is the one refusal that trying the next suffix does answer.
 //
 // Paths are joined by internal/transfer with `path`, not `path/filepath`.
 // On the platforms nocx targets those are the same function; the provider
 // still owns syntax, and checkPath is what the read half applies.
 type osFS struct{}
 
-// durableOSFS is the native-download variation of the local RemoteFS. It
-// inherits the path operations verbatim and overrides only Create so the
-// existing Sink syncs the temporary file before its atomic promote.
+// durableOSFS shares every filesystem operation with osFS and overrides
+// Create so the Sink syncs the temporary file before its atomic promote.
 type durableOSFS struct{ osFS }
 
 type durableFile struct {
@@ -106,10 +97,6 @@ func (f *durableFile) Close() error {
 		return err
 	}
 	return f.File.Close()
-}
-
-func (osFS) Create(path string) (transfer.RemoteFile, error) {
-	return createExclusive(path)
 }
 
 func (durableOSFS) Create(path string) (transfer.RemoteFile, error) {
@@ -177,5 +164,5 @@ func (osFS) Remove(path string) error { return os.Remove(path) }
 var (
 	_ filesystem.Provider = (*Provider)(nil)
 	_ filesystem.Uploader = (*Provider)(nil)
-	_ transfer.RemoteFS   = osFS{}
+	_ transfer.RemoteFS   = durableOSFS{}
 )

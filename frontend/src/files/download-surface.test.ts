@@ -99,30 +99,21 @@ describe('one surface per dispatcher', () => {
 
 describe('platform saver composition', () => {
   it('uses files.downloadSave in Wails and sends only the transfer id', async () => {
-    const host = window as unknown as {
-      webkit?: { messageHandlers?: { external?: { postMessage?: () => void } } }
-    }
-    const previous = host.webkit
-    host.webkit = { messageHandlers: { external: { postMessage: () => {} } } }
-    try {
-      const d = fakeDispatcher()
-      await downloadSurfaceFor(d.dispatcher).flow.fetch({
-        bindingId: 'binding-1',
-        path: '/srv/report.bin',
-        machine: 'alice@srv',
-      })
-      expect(d.calls).toEqual([
-        {
-          method: 'files.download',
-          params: { bindingId: 'binding-1', path: '/srv/report.bin' },
-        },
-        {
-          method: 'files.downloadSave',
-          params: { transferId: '0'.repeat(32) },
-        },
-      ])
-    } finally {
-      host.webkit = previous
-    }
+    const d = fakeDispatcher()
+    await downloadSurfaceFor(d.dispatcher, () => true).flow.fetch({
+      bindingId: 'binding-1',
+      path: '/srv/report.bin',
+      machine: 'alice@srv',
+    })
+    expect(d.calls).toEqual([
+      {
+        method: 'files.download',
+        params: { bindingId: 'binding-1', path: '/srv/report.bin' },
+      },
+      {
+        method: 'files.downloadSave',
+        params: { transferId: '0'.repeat(32) },
+      },
+    ])
   })
 })

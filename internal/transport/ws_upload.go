@@ -457,14 +457,10 @@ func (rt *runningTransfer) size() int64 {
 	return rt.upload.Size
 }
 
-// stop cancels the transfer AND unblocks its reader.
-//
-// The second half is not optional and it is this caller's to honour.
-// transfer.Sink.Put documents it: an io.Reader has no context, so Put
-// checks cancellation between chunks and can never abandon a Read already
-// in flight. Cancelling the context alone therefore leaves a stalled body
-// holding a temp file and a lease open indefinitely. Closing the body is
-// what makes the cancellation arrive.
+// stop cancels the transfer and unblocks an upload's claimed HTTP body.
+// A download's remote Read is bounded by the source lease's watchdog; closing
+// its handle here would queue behind that Read and make cancel/teardown wait
+// outside the registry's unwind bound.
 func (rt *runningTransfer) stop() {
 	rt.cancel()
 	rt.mu.Lock()
@@ -472,12 +468,6 @@ func (rt *runningTransfer) stop() {
 	rt.mu.Unlock()
 	if c != nil {
 		_ = c.Close()
-	}
-	if rt.dir == dirDownload && rt.download != nil {
-		// RemoteReader has no context. Closing the pinned handle is the only
-		// operation that can interrupt a Read already in flight; Download.Close
-		// is synchronized with Get and the deferred owner close.
-		_ = rt.download.Close()
 	}
 }
 

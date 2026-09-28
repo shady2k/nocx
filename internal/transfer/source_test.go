@@ -29,9 +29,7 @@ import (
 	"io"
 	"io/fs"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/transfer"
 )
@@ -279,61 +277,6 @@ func TestSourceGet_CancelledByThePerson(t *testing.T) {
 	}
 }
 
-var errBlockingReaderClosed = errors.New("blocking reader closed")
-
-type blockingReadFS struct {
-	started chan struct{}
-	closed  chan struct{}
-	start   sync.Once
-	close   sync.Once
-}
-
-func (f *blockingReadFS) Open(string) (transfer.RemoteReader, int64, error) {
-	return &blockingReadFile{fs: f}, 1, nil
-}
-
-type blockingReadFile struct{ fs *blockingReadFS }
-
-func (f *blockingReadFile) Read([]byte) (int, error) {
-	f.fs.start.Do(func() { close(f.fs.started) })
-	<-f.fs.closed
-	return 0, errBlockingReaderClosed
-}
-
-func (f *blockingReadFile) Close() error {
-	f.fs.close.Do(func() { close(f.fs.closed) })
-	return nil
-}
-
-func TestDownloadClose_InterruptsAReadAlreadyInFlight(t *testing.T) {
-	fsys := &blockingReadFS{started: make(chan struct{}), closed: make(chan struct{})}
-	source := transfer.NewSource(fsys, transfer.DefaultChunk)
-	download, err := source.Open("/srv/blocked")
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, getErr := source.Get(context.Background(), download, io.Discard, nil)
-		done <- getErr
-	}()
-	<-fsys.started
-	if err := download.Close(); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case getErr := <-done:
-		if !errors.Is(getErr, errBlockingReaderClosed) {
-			t.Fatalf("Get error = %v, want reader-close interruption", getErr)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Get stayed blocked after Download.Close")
-	}
-	if err := download.Close(); err != nil {
-		t.Fatalf("second Close = %v, want idempotent", err)
-	}
-}
-
 // A cancel that lands before the first chunk sends nothing at all. This is
 // the row that has no upload counterpart worth stating and every download
 // counterpart worth stating: the transfer is refused with the client
@@ -448,5 +391,63 @@ func TestSourceGet_PreservesTheBytesExactly(t *testing.T) {
 	}
 	if !bytes.Equal(w.got, body) {
 		t.Fatal("the delivered bytes are not the file's bytes")
+	}
+}
+
+type saveDownloadSource struct {
+	get func(context.Context, *transfer.Download, io.Writer, func(int64)) (int64, error)
+}
+
+func (s saveDownloadSource) Open(string) (*transfer.Download, error) {
+	return nil, errors.New("unused")
+}
+
+func (s saveDownloadSource) Get(ctx context.Context, d *transfer.Download, w io.Writer, progress func(int64)) (int64, error) {
+	return s.get(ctx, d, w, progress)
+}
+
+type drainDownloadSink struct{}
+
+func (drainDownloadSink) Put(_ context.Context, _ transfer.Upload, r io.Reader, _ func(int64)) (transfer.Outcome, error) {
+	_, err := io.Copy(io.Discard, r)
+	return transfer.Outcome{}, err
+}
+
+type failDownloadSink struct{ err error }
+
+func (s failDownloadSink) Put(context.Context, transfer.Upload, io.Reader, func(int64)) (transfer.Outcome, error) {
+	return transfer.Outcome{Stranded: []string{"/private/destination.tmp"}}, s.err
+}
+
+func TestSaveDownload_PreservesSourceFailureClassification(t *testing.T) {
+	remoteErr := errors.New("remote read permission denied")
+	source := saveDownloadSource{get: func(context.Context, *transfer.Download, io.Writer, func(int64)) (int64, error) {
+		return 0, remoteErr
+	}}
+
+	_, _, err := transfer.SaveDownload(context.Background(), source, &transfer.Download{}, drainDownloadSink{},
+		transfer.Upload{DestDir: t.TempDir(), Name: "file", OnExists: transfer.Overwrite}, nil)
+	var destinationErr *transfer.DestinationError
+	if errors.As(err, &destinationErr) || !errors.Is(err, remoteErr) {
+		t.Fatalf("SaveDownload error = %v; want original source error and no destination classification", err)
+	}
+}
+
+func TestSaveDownload_MarksDestinationFailureForRedaction(t *testing.T) {
+	destinationErr := errors.New("create /private/destination.tmp: permission denied")
+	source := saveDownloadSource{get: func(_ context.Context, _ *transfer.Download, w io.Writer, _ func(int64)) (int64, error) {
+		n, err := io.WriteString(w, "bytes")
+		return int64(n), err
+	}}
+
+	_, outcome, err := transfer.SaveDownload(context.Background(), source, &transfer.Download{},
+		failDownloadSink{err: destinationErr},
+		transfer.Upload{DestDir: "/private", Name: "chosen.bin", Size: 5, OnExists: transfer.Overwrite}, nil)
+	var classified *transfer.DestinationError
+	if !errors.As(err, &classified) || !errors.Is(err, destinationErr) {
+		t.Fatalf("SaveDownload error = %v; want classified destination error", err)
+	}
+	if len(outcome.Stranded) != 1 || outcome.Stranded[0] != "/private/destination.tmp" {
+		t.Fatalf("outcome = %+v; want backend-only stranded path", outcome)
 	}
 }

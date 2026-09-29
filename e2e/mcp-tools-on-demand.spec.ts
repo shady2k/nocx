@@ -125,7 +125,10 @@ function callDiscoveredMCPTool(body: string): ScriptedToolCall[] {
   )
   const name = declaration?.function?.name
   if (!name?.startsWith('mcp_')) {
-    throw new Error('tools.search did not load the configured MCP tool')
+    const offered = (parsed.tools ?? []).map((tool) => tool.function?.name ?? '(unnamed)')
+    throw new Error(
+      `tools.search did not load the configured MCP tool; offered: ${offered.join(', ')}`,
+    )
   }
   modelMCPTool = name
   return [{ name, arguments: { topic: TOPIC } }]
@@ -243,6 +246,25 @@ test.describe('MCP tools activate only after approval (nocx-ga29v.7)', () => {
       const got = await wire.call('mcpServers.get', { id: saved!.id })
       expect(JSON.stringify({ listed, got })).not.toContain(secretValue)
       expect(JSON.stringify({ listed, got })).not.toContain('secretRef')
+      const currentPolicy = (await wire.call('policy.get', {})) as {
+        policy: Record<string, unknown> & {
+          delegate: {
+            decision: 'permit' | 'ask' | 'refuse'
+            scopes: { kind: string; id: string; includeSubdomains?: boolean }[]
+          }
+        }
+      }
+      const policy = { ...currentPolicy.policy }
+      delete policy.rules
+      policy.delegate = {
+        ...currentPolicy.policy.delegate,
+        decision: 'ask',
+        // The universal network scope deliberately does not include stdio.
+        // Give this run only the configured server's exact destination, so
+        // the fixture exercises the approval boundary rather than a fence refusal.
+        scopes: [{ kind: 'destination', id: `mcp+stdio:${saved!.id}` }],
+      }
+      await wire.call('policy.set', { policy })
     } finally {
       wire.close()
     }

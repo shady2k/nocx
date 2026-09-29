@@ -5143,10 +5143,10 @@ export class TerminalContent extends BasePaneContent {
    * area in DEVICE pixels, cols × the renderer's device cell
    * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
    * unit, the helper's cellGeometry decodes it, and nothing else converts).
-   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
-   * cell — it is the unit where the metric is exact, and the one a
-   * rounding step cannot drift (review round 1). One shape at every door —
-   * open, attach, resize (SessionSize).
+   * DEVICE pixels because xterm builds its CSS cell FROM a device cell; the
+   * browser can still report fractional dimensions after layout, so the
+   * aggregate is rounded to the integer pixels required by the wire.
+   * One shape at every door — open, attach, resize (SessionSize).
    *
    * The renderer is a parameter because the OPEN reports before this
    * window's renderer field exists: _bindSession runs while `renderer` is
@@ -5171,8 +5171,8 @@ export class TerminalContent extends BasePaneContent {
     const report = {
       cols: this.cols,
       rows: this.rows,
-      xpixel: dims !== null ? this.cols * dims.width : 0,
-      ypixel: dims !== null ? this.rows * dims.height : 0,
+      xpixel: dims !== null ? Math.round(this.cols * dims.width) : 0,
+      ypixel: dims !== null ? Math.round(this.rows * dims.height) : 0,
     }
     this._lastReport = report
     return report

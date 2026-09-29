@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -471,7 +472,13 @@ func sanitizeSchema(raw json.RawMessage, required bool) (json.RawMessage, error)
 		return nil, fmt.Errorf("schema exceeds %d bytes", profile.MaxMCPSchemaBytes)
 	}
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&value); err != nil {
+		return nil, errors.New("schema is invalid JSON")
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		return nil, errors.New("schema is invalid JSON")
 	}
 	root, ok := value.(map[string]any)
@@ -504,28 +511,46 @@ func sanitizeSchemaNode(value any, depth int) error {
 	if depth > 32 {
 		return errors.New("schema nesting exceeds 32 levels")
 	}
-	switch node := value.(type) {
-	case map[string]any:
-		for key, child := range node {
-			if _, annotation := schemaAnnotations[key]; annotation {
-				delete(node, key)
-				continue
+	node, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for key, child := range node {
+		if _, annotation := schemaAnnotations[key]; annotation {
+			delete(node, key)
+			continue
+		}
+		if _, supported := schemaKeywords[key]; !supported {
+			return fmt.Errorf("unsupported schema keyword %q", key)
+		}
+		if key == "$ref" {
+			ref, ok := child.(string)
+			if !ok || !strings.HasPrefix(ref, "#/") {
+				return errors.New("external schema references are not allowed")
 			}
-			if _, supported := schemaKeywords[key]; !supported {
-				return fmt.Errorf("unsupported schema keyword %q", key)
+		}
+		switch key {
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+			schemas, ok := child.(map[string]any)
+			if !ok {
+				return fmt.Errorf("schema keyword %q must be an object", key)
 			}
-			if key == "$ref" {
-				ref, ok := child.(string)
-				if !ok || !strings.HasPrefix(ref, "#/") {
-					return errors.New("external schema references are not allowed")
+			for _, schema := range schemas {
+				if err := sanitizeSchemaNode(schema, depth+1); err != nil {
+					return err
 				}
 			}
-			switch key {
-			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
-				schemas, ok := child.(map[string]any)
-				if !ok {
-					return fmt.Errorf("schema keyword %q must be an object", key)
+		case "oneOf", "anyOf", "allOf", "prefixItems":
+			if schemas, ok := child.([]any); ok {
+				for _, schema := range schemas {
+					if err := sanitizeSchemaNode(schema, depth+1); err != nil {
+						return err
+					}
 				}
+			}
+		case "items":
+			switch schemas := child.(type) {
+			case []any:
 				for _, schema := range schemas {
 					if err := sanitizeSchemaNode(schema, depth+1); err != nil {
 						return err
@@ -536,9 +561,19 @@ func sanitizeSchemaNode(value any, depth int) error {
 					return err
 				}
 			}
-		}
-	case []any:
-		for _, child := range node {
+		case "dependencies":
+			if schemas, ok := child.(map[string]any); ok {
+				for _, schema := range schemas {
+					if _, propertyNames := schema.([]any); propertyNames {
+						continue
+					}
+					if err := sanitizeSchemaNode(schema, depth+1); err != nil {
+						return err
+					}
+				}
+			}
+		case "additionalProperties", "additionalItems", "unevaluatedProperties", "propertyNames",
+			"contains", "unevaluatedItems", "not", "if", "then", "else":
 			if err := sanitizeSchemaNode(child, depth+1); err != nil {
 				return err
 			}

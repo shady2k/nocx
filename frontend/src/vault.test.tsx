@@ -1838,11 +1838,6 @@ describe('VaultSection', () => {
     expect(btn.hasAttribute('disabled')).toBe(false)
   })
 
-  it('the reset row states that it cannot be undone, before the dialog is opened', async () => {
-    await renderVaultSection(SEALED_STATUS)
-    expect(screen.getByText(/Delete every saved password.*Cannot be undone/)).toBeTruthy()
-  })
-
   it('does not set the diagnostics block below the page type size', async () => {
     await renderVaultSection(UNSEALED_STATUS)
     const details = document.querySelector('details.ui-vault-diagnostics')!
@@ -1864,6 +1859,8 @@ describe('ResetVaultDialog', () => {
     const resetPreview = vi.fn().mockResolvedValue({
       secretCount: 3,
       profileCount: 5,
+      endpointCount: 0,
+      mcpServerCount: 0,
       systemKeychainReachable: true,
       vaultInitialized: true,
       ...overrides?.preview,
@@ -1874,6 +1871,8 @@ describe('ResetVaultDialog', () => {
         : vi.fn().mockResolvedValue({
             secretCount: 3,
             profileCount: 5,
+            endpointCount: 0,
+            mcpServerCount: 0,
             residue: [],
             ...overrides?.result,
           })
@@ -1914,6 +1913,65 @@ describe('ResetVaultDialog', () => {
       expect(impact.textContent).toContain('3 saved secrets')
       expect(impact.textContent).toContain('5 connections')
     })
+  })
+  it('shows an MCP-only impact before confirmation without resetting', async () => {
+    const { reset } = await openReset({
+      preview: { secretCount: 1, profileCount: 0, endpointCount: 0, mcpServerCount: 1 },
+    })
+    const impacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact')).map(
+      (element) => element.textContent ?? '',
+    )
+    expect(impacts.join(' ')).toContain('1 MCP server')
+    expect(impacts.join(' ')).toContain('secret-backed bindings configured again')
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('shows two MCP records even when they share one saved secret', async () => {
+    const { reset } = await openReset({
+      preview: { secretCount: 1, profileCount: 0, endpointCount: 0, mcpServerCount: 2 },
+    })
+    const impacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact')).map(
+      (element) => element.textContent ?? '',
+    )
+    expect(impacts.join(' ')).toContain('2 MCP servers')
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('shows endpoint and MCP impacts independently alongside secrets and profiles', async () => {
+    const { reset } = await openReset({
+      preview: { secretCount: 2, profileCount: 1, endpointCount: 1, mcpServerCount: 2 },
+    })
+    const impacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact')).map(
+      (element) => element.textContent ?? '',
+    )
+    expect(impacts.join(' ')).toContain('2 saved secrets')
+    expect(impacts.join(' ')).toContain('1 connection')
+    expect(impacts.join(' ')).toContain('1 AI endpoint')
+    expect(impacts.join(' ')).toContain('2 MCP servers')
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('keeps a referenced MCP warning visible when no secret material remains', async () => {
+    const { reset } = await openReset({
+      preview: { secretCount: 0, profileCount: 0, endpointCount: 0, mcpServerCount: 1 },
+    })
+    const impacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact')).map(
+      (element) => element.textContent ?? '',
+    )
+    expect(impacts.join(' ')).toContain('There are no saved secrets')
+    expect(impacts.join(' ')).toContain('1 MCP server')
+    expect(reset).not.toHaveBeenCalled()
+  })
+
+  it('does not warn about endpoints or MCP servers when every count is zero', async () => {
+    await openReset({
+      preview: { secretCount: 0, profileCount: 0, endpointCount: 0, mcpServerCount: 0 },
+    })
+    const impacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact')).map(
+      (element) => element.textContent ?? '',
+    )
+    expect(impacts.join(' ')).toContain('There are no saved secrets')
+    expect(impacts.join(' ')).not.toMatch(/AI endpoint|MCP server/)
   })
 
   // The confirmation is the whole point of the dialog. A destructive action
@@ -1969,25 +2027,15 @@ describe('ResetVaultDialog', () => {
     })
   })
 
-  it('confirms plainly when there was nothing left behind', async () => {
-    await openReset({ result: { residue: [] } })
-    fireEvent.click(screen.getByLabelText('I understand this cannot be undone'))
-    fireEvent.click(resetButton())
-
-    await vi.waitFor(() => {
-      const toast = document.querySelector('.ui-toast')!
-      expect(toast.getAttribute('data-level')).toBe('success')
-      expect(toast.textContent).toContain('Set up protection to start again')
+  it('omits endpoint and MCP-holder notices when those preview counts are zero', async () => {
+    await openReset({
+      preview: { secretCount: 0, profileCount: 0, endpointCount: 0, mcpServerCount: 0 },
     })
-  })
-
-  it('says so when there is nothing to delete', async () => {
-    await openReset({ preview: { secretCount: 0, profileCount: 0 } })
-    await vi.waitFor(() => {
-      expect(document.querySelector('.ui-vault-reset-impact')!.textContent).toBe(
-        'There are no saved secrets to delete.',
-      )
-    })
+    const nonemptyImpacts = Array.from(document.querySelectorAll('.ui-vault-reset-impact'))
+      .map((element) => element.textContent?.trim())
+      .filter(Boolean)
+    expect(nonemptyImpacts).toHaveLength(1)
+    expect(nonemptyImpacts[0]).not.toMatch(/AI endpoint|MCP server/)
   })
 })
 

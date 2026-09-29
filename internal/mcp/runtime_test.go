@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
 )
@@ -101,6 +103,116 @@ func TestSanitizeSchemaAllowsLocalDefinitionsAndPropertySchemas(t *testing.T) {
 	}
 	if strings.Contains(string(got), "description") {
 		t.Fatalf("schema annotation survived sanitization: %s", got)
+	}
+}
+
+func TestSanitizeSchemaPreservesLiteralValuesAndLargeNumbers(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"mode":{
+				"description":"annotation removed from the schema node",
+				"const":{"description":"literal","mode":"safe","$ref":"literal"},
+				"enum":[{"description":"literal","mode":"safe","$ref":"literal"}]
+			},
+			"count":{"const":9007199254740993}
+		},
+		"required":["mode","count"],
+		"dependentRequired":{"$ref":["description"]}
+	}`)
+	got, err := sanitizeSchema(raw, true)
+	if err != nil {
+		t.Fatalf("sanitizeSchema: %v", err)
+	}
+	if strings.Contains(string(got), "annotation removed from the schema node") {
+		t.Fatalf("schema annotation survived sanitization: %s", got)
+	}
+	if !strings.Contains(string(got), "9007199254740993") {
+		t.Fatalf("large integer was changed by decoding: %s", got)
+	}
+	compiler := jsonschema.NewCompiler()
+	const resource = "https://nocx.local/mcp/literal-test.json"
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(got))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = compiler.AddResource(resource, doc); err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := compiler.Compile(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := map[string]any{"description": "literal", "mode": "safe", "$ref": "literal"}
+	if err := compiled.Validate(map[string]any{"mode": literal, "count": json.Number("9007199254740993")}); err != nil {
+		t.Fatalf("schema rejected its exact literal value: %v", err)
+	}
+	if err := compiled.Validate(map[string]any{"mode": "unsafe", "count": json.Number("9007199254740993")}); err == nil {
+		t.Fatal("schema accepted a value different from its object const")
+	}
+}
+
+func TestInvokeValidatesArgumentsAgainstLiveToolSchema(t *testing.T) {
+	var calls atomic.Int32
+	server := sdk.NewServer(&sdk.Implementation{Name: "fixture", Version: "1"}, nil)
+	server.AddTool(&sdk.Tool{
+		Name: "literal",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{"mode": map[string]any{
+				"const": map[string]any{"description": "literal", "mode": "safe", "$ref": "literal"},
+			}},
+			"required": []string{"mode"},
+		},
+	}, func(context.Context, *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
+		calls.Add(1)
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "ok"}}}, nil
+	})
+	handler := sdk.NewStreamableHTTPHandler(
+		func(*http.Request) *sdk.Server { return server },
+		&sdk.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	)
+	endpoint := httptest.NewServer(handler)
+	defer endpoint.Close()
+
+	record := httpServerRecord(endpoint.URL)
+	activation, err := ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := NewManager(nil)
+	defer func() { _ = runtime.Close() }()
+	catalog, err := runtime.Refresh(t.Context(), activation)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	record.Catalog, err = catalog.ProfileCatalog()
+	if err != nil {
+		t.Fatalf("ProfileCatalog: %v", err)
+	}
+	activation, err = ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(arguments string) error {
+		_, invokeErr := runtime.Invoke(t.Context(), Invocation{
+			RunID: "schema", Activation: activation, RemoteTool: "literal",
+			DescriptorDigest: catalog.Tools[0].DescriptorDigest,
+			Arguments:        json.RawMessage(arguments),
+		})
+		return invokeErr
+	}
+	if err := invoke(`{"mode":{"description":"literal","mode":"safe","$ref":"literal"}}`); err != nil {
+		t.Fatalf("Invoke with the schema's object-valued const: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("remote calls after valid arguments = %d, want 1", calls.Load())
+	}
+	if err := invoke(`{"mode":"unsafe"}`); err == nil {
+		t.Fatal("Invoke accepted arguments that violate the live tool schema")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("remote calls after invalid arguments = %d, want 1", calls.Load())
 	}
 }
 
@@ -201,6 +313,47 @@ func TestHTTPRefreshAndInvokeUseSDKWithoutRetainingDiscoverySession(t *testing.T
 		t.Fatalf("result = %+v, calls = %d", result, calls.Load())
 	}
 	runtime.CloseRun("run-1")
+}
+
+func TestPrivateHTTPMCPDestinationRemainsAllowed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	record := httpServerRecord("http://10.0.0.7/mcp")
+	activation, err := ActivationFromServer(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionConfig, err := buildHTTPTransport(t.Context(), activation, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessionConfig.cleanup()
+	guard, ok := sessionConfig.transport.HTTPClient.Transport.(*guardedHTTPTransport)
+	if !ok {
+		t.Fatalf("HTTP transport has type %T, want guarded transport", sessionConfig.transport.HTTPClient.Transport)
+	}
+	guard.inner.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, record.HTTP.Endpoint, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := sessionConfig.transport.HTTPClient.Do(request)
+	if err != nil {
+		t.Fatalf("configured private HTTP MCP destination: %v", err)
+	}
+	defer func() {
+		if err := response.Body.Close(); err != nil {
+			t.Errorf("close HTTP response body: %v", err)
+		}
+	}()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("HTTP status = %d, want 204 from loopback fixture", response.StatusCode)
+	}
 }
 
 func TestInvokeRejectsChangedLiveDescriptorWithoutCallingTool(t *testing.T) {

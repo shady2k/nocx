@@ -587,24 +587,42 @@ func validateSchemaNode(value any, depth int) error {
 	if depth > 32 {
 		return errors.New("MCP schema nesting exceeds 32 levels")
 	}
-	switch v := value.(type) {
-	case map[string]any:
-		for key, child := range v {
-			if _, annotation := schemaAnnotations[key]; annotation {
-				return fmt.Errorf("MCP schema annotation %q is not allowed", key)
+	node, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	for key, child := range node {
+		if _, annotation := schemaAnnotations[key]; annotation {
+			return fmt.Errorf("MCP schema annotation %q is not allowed", key)
+		}
+		if key == "$ref" {
+			ref, ok := child.(string)
+			if !ok || !strings.HasPrefix(ref, "#/") {
+				return errors.New("MCP schema references must be local JSON pointers")
 			}
-			if key == "$ref" {
-				ref, ok := child.(string)
-				if !ok || !strings.HasPrefix(ref, "#/") {
-					return errors.New("MCP schema references must be local JSON pointers")
+		}
+		switch key {
+		case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
+			schemas, ok := child.(map[string]any)
+			if !ok {
+				return fmt.Errorf("MCP schema keyword %q must be an object", key)
+			}
+			for _, schema := range schemas {
+				if err := validateSchemaNode(schema, depth+1); err != nil {
+					return err
 				}
 			}
-			switch key {
-			case "properties", "patternProperties", "$defs", "definitions", "dependentSchemas":
-				schemas, ok := child.(map[string]any)
-				if !ok {
-					return fmt.Errorf("MCP schema keyword %q must be an object", key)
+		case "oneOf", "anyOf", "allOf", "prefixItems":
+			if schemas, ok := child.([]any); ok {
+				for _, schema := range schemas {
+					if err := validateSchemaNode(schema, depth+1); err != nil {
+						return err
+					}
 				}
+			}
+		case "items":
+			switch schemas := child.(type) {
+			case []any:
 				for _, schema := range schemas {
 					if err := validateSchemaNode(schema, depth+1); err != nil {
 						return err
@@ -615,9 +633,19 @@ func validateSchemaNode(value any, depth int) error {
 					return err
 				}
 			}
-		}
-	case []any:
-		for _, child := range v {
+		case "dependencies":
+			if schemas, ok := child.(map[string]any); ok {
+				for _, schema := range schemas {
+					if _, propertyNames := schema.([]any); propertyNames {
+						continue
+					}
+					if err := validateSchemaNode(schema, depth+1); err != nil {
+						return err
+					}
+				}
+			}
+		case "additionalProperties", "additionalItems", "unevaluatedProperties", "propertyNames",
+			"contains", "unevaluatedItems", "not", "if", "then", "else":
 			if err := validateSchemaNode(child, depth+1); err != nil {
 				return err
 			}

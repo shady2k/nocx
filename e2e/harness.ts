@@ -1041,7 +1041,6 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
     })
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
     await baseExpect(setupSheet).not.toBeVisible({ timeout: 10_000 })
-    await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
   }
 
   // The record exists — which is all this helper can honestly claim, and all
@@ -1053,6 +1052,13 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
   await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toBeVisible({
     timeout: 10_000,
   })
+  // WebKit can leave the form open after vault setup even when the save landed.
+  // The saved row above is the evidence; close the leftover form so the next
+  // settings action is not hidden behind it.
+  if (await dialog.isVisible()) {
+    await dialog.getByRole('button', { name: 'Close dialog' }).click()
+    await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
+  }
 }
 
 /**

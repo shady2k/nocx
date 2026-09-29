@@ -61,6 +61,26 @@ func NewMCPCatalogSnapshot(server profile.MCPServer) (MCPCatalogSnapshot, error)
 	return MCPCatalogSnapshot{activation: activation, state: server.Catalog.State, tools: tools}, nil
 }
 
+// GrantScopes returns the exact destinations of fresh catalogs with at least
+// one enabled tool. These scopes extend the run fence; policy rows still
+// decide whether the corresponding MCP effect is permitted.
+func (s MCPCatalogSnapshot) GrantScopes() ([]content.GrantScope, error) {
+	if s.state != profile.MCPCatalogFresh || !s.activation.Enabled {
+		return nil, nil
+	}
+	for _, tool := range s.tools {
+		if !tool.enabled {
+			continue
+		}
+		destination, err := mcpDestination(s.activation)
+		if err != nil {
+			return nil, err
+		}
+		return []content.GrantScope{{Kind: content.ResourceDestination, ID: destination}}, nil
+	}
+	return nil, nil
+}
+
 // MCPModelName is the stable provider-safe name for a remote tool identity.
 func MCPModelName(serverID, remoteTool string) string {
 	digest := sha256.Sum256([]byte(serverID + "\x00" + remoteTool))

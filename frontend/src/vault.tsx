@@ -951,8 +951,8 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
     >
       <Stack>
         <p class="ui-vault-desc-text">
-          This deletes every password and key passphrase nocx has saved, and cannot be undone. There
-          is no way to recover them afterwards.
+          This deletes every saved secret, including passwords, key passphrases, and tokens, and
+          cannot be undone. There is no way to recover them afterwards.
         </p>
 
         <Show when={preview()}>
@@ -967,6 +967,18 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
               </Show>
               <Show when={p().secretCount === 0}>
                 <p class="ui-vault-reset-impact">There are no saved secrets to delete.</p>
+              </Show>
+              <Show when={p().endpointCount > 0}>
+                <p class="ui-vault-reset-impact">
+                  {countPhrase(p().endpointCount, 'AI endpoint', 'AI endpoints')} will need
+                  credentials configured again.
+                </p>
+              </Show>
+              <Show when={p().mcpServerCount > 0}>
+                <p class="ui-vault-reset-impact">
+                  {countPhrase(p().mcpServerCount, 'MCP server', 'MCP servers')} will need
+                  secret-backed bindings configured again.
+                </p>
               </Show>
               {/* Stated before the choice, not after it. Whether the keychain
                   answers decides whether anything stored there can be removed
@@ -1821,7 +1833,7 @@ export function VaultSection(props: VaultSectionProps) {
           for="vault-reset"
           label="Reset the vault"
           orientation="horizontal"
-          description="Delete every saved password and key passphrase and start again. Cannot be undone."
+          description="Delete every saved secret and start again. Cannot be undone."
         >
           <Button variant="danger" onClick={() => setDialog('reset')}>
             Reset the vault

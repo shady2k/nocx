@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/profile"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -367,6 +369,85 @@ func TestOAuthCaptureRejectsAuthorizationMetadataWithoutS256(t *testing.T) {
 			_, err = capture.RoundTrip(request)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("RoundTrip error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestOAuthSilentRefreshUsesOAuthDestinationPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		tokenURL string
+	}{
+		{name: "private plaintext HTTP", tokenURL: "http://10.0.0.7/token"},
+		{name: "private cross-origin HTTPS", tokenURL: "https://10.0.0.7/token"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newOAuthTestSecretStore()
+			raw, err := json.Marshal(storedOAuthToken{
+				AccessToken:  "expired-access",
+				TokenType:    "Bearer",
+				RefreshToken: "refresh-material",
+				Expiry:       time.Now().Add(-time.Minute),
+				ClientID:     "test-client",
+				TokenURL:     test.tokenURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref, err := store.Create(t.Context(), credential.NewSecretBytes(raw))
+			clear(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := httpServerRecord("https://10.0.0.5/mcp")
+			record.HTTP.Auth = profile.MCPHTTPAuthOAuth
+			record.HTTP.OAuth = &profile.MCPOAuthConfig{
+				Registration:  profile.MCPOAuthPreregistered,
+				ClientID:      "test-client",
+				Scopes:        []string{},
+				SessionRef:    &profile.MCPSecretBinding{SecretRef: string(ref), Owned: true},
+				Status:        profile.MCPOAuthConnected,
+				GrantedScopes: []string{},
+			}
+			activation, err := ActivationFromServer(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			session, err := buildHTTPTransport(t.Context(), activation, store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.cleanup()
+			transport := session.transport
+			source, err := transport.OAuthHandler.TokenSource(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			persistent, ok := source.(*persistentOAuthTokenSource)
+			if !ok {
+				t.Fatalf("token source has type %T, want persistent OAuth source", source)
+			}
+			guard, ok := persistent.client.Transport.(*guardedHTTPTransport)
+			if !ok {
+				t.Fatalf("OAuth transport has type %T, want guarded transport", persistent.client.Transport)
+			}
+			var dials atomic.Int32
+			dialErr := errors.New("unexpected dial")
+			guard.inner.DialContext = func(context.Context, string, string) (net.Conn, error) {
+				dials.Add(1)
+				return nil, dialErr
+			}
+
+			_, err = source.Token()
+			if !errors.Is(err, ErrDestinationRefused) {
+				t.Fatalf("Token error = %v, want ErrDestinationRefused", err)
+			}
+			if got := dials.Load(); got != 0 {
+				t.Fatalf("token destination dial attempts = %d, want 0", got)
+			}
+			if got := store.replacements.Load(); got != 0 {
+				t.Fatalf("secret replacements = %d, want 0", got)
 			}
 		})
 	}

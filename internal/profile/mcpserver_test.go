@@ -1,11 +1,58 @@
 package profile
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestMCPCatalogSchemaTreatsKeywordValuesAsData(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type":"object",
+		"properties":{"mode":{"const":{"description":"literal","mode":"safe","$ref":"literal"}}},
+		"required":["mode"],
+		"enum":[{"description":"literal","mode":"safe","$ref":"literal"}],
+		"dependentRequired":{"$ref":["description"]},
+		"dependencies":{"description":["$ref"]}
+	}`)
+	if err := validateMCPSchema(raw, true); err != nil {
+		t.Fatalf("validateMCPSchema rejected literal keyword data: %v", err)
+	}
+	if err := validateMCPSchema(json.RawMessage(`{"type":"object","properties":{"mode":{"type":"string","description":"forbidden"}}}`), true); err == nil {
+		t.Fatal("persisted property schema accepted an annotation")
+	}
+
+	store := newTestStore(t)
+	server, err := store.CreateMCPServer(validTestMCPServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed, err := store.RefreshMCPServerCatalog(server.ID, server.Revision, MCPCatalog{
+		Tools: []MCPTool{{Name: "literal", InputSchema: raw}},
+	})
+	if err != nil {
+		t.Fatalf("RefreshMCPServerCatalog: %v", err)
+	}
+	loaded, err := store.GetMCPServer(refreshed.ID)
+	if err != nil {
+		t.Fatalf("GetMCPServer: %v", err)
+	}
+	decode := func(value json.RawMessage) any {
+		var decoded any
+		decoder := json.NewDecoder(bytes.NewReader(value))
+		decoder.UseNumber()
+		if err := decoder.Decode(&decoded); err != nil {
+			t.Fatal(err)
+		}
+		return decoded
+	}
+	if !reflect.DeepEqual(decode(loaded.Catalog.Tools[0].InputSchema), decode(raw)) {
+		t.Fatalf("catalog schema changed on refresh/load: %s", loaded.Catalog.Tools[0].InputSchema)
+	}
+}
 
 func literalBinding(value string) MCPValueBinding {
 	return MCPValueBinding{Kind: MCPBindingLiteral, Literal: &value}

@@ -164,27 +164,38 @@ func validateStructuredContent(raw json.RawMessage, schemaRaw json.RawMessage) e
 	if len(raw) == 0 || len(schemaRaw) == 0 || string(schemaRaw) == "null" {
 		return nil
 	}
+	return validateAgainstSchema(raw, schemaRaw, "MCP output schema", "structured content", "does not match")
+}
+
+func validateToolArguments(raw json.RawMessage, schemaRaw json.RawMessage) error {
+	if len(schemaRaw) == 0 || string(schemaRaw) == "null" {
+		return errors.New("MCP tool input schema is missing")
+	}
+	return validateAgainstSchema(raw, schemaRaw, "MCP tool input schema", "tool arguments", "do not match")
+}
+
+func validateAgainstSchema(raw json.RawMessage, schemaRaw json.RawMessage, schemaName, valueName, mismatchVerb string) error {
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return errors.New("structured content is invalid JSON")
+		return fmt.Errorf("%s is invalid JSON", valueName)
 	}
-	const resource = "https://nocx.local/mcp/output-schema.json"
+	const resource = "https://nocx.local/mcp/value-schema.json"
 	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaRaw))
 	if err != nil {
-		return errors.New("MCP output schema is invalid")
+		return fmt.Errorf("%s is invalid", schemaName)
 	}
 	compiler := jsonschema.NewCompiler()
 	if addErr := compiler.AddResource(resource, doc); addErr != nil {
-		return errors.New("MCP output schema cannot be compiled")
+		return fmt.Errorf("%s cannot be compiled", schemaName)
 	}
 	compiled, err := compiler.Compile(resource)
 	if err != nil {
-		return errors.New("MCP output schema cannot be compiled")
+		return fmt.Errorf("%s cannot be compiled", schemaName)
 	}
 	if err := compiled.Validate(value); err != nil {
-		return fmt.Errorf("structured content does not match MCP output schema: %w", err)
+		return fmt.Errorf("%s %s %s", valueName, mismatchVerb, schemaName)
 	}
 	return nil
 }

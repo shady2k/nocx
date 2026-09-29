@@ -286,6 +286,10 @@ func (m *Manager) Invoke(ctx context.Context, invocation Invocation) (Result, er
 		return Result{}, ErrCatalogStale
 	}
 
+	err = validateToolArguments(invocation.Arguments, liveTool.InputSchema)
+	if err != nil {
+		return Result{}, err
+	}
 	if verifyErr := m.verify(callCtx, invocation.Activation); verifyErr != nil {
 		m.dropSession(key, pooled)
 		return Result{}, verifyErr

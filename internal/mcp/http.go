@@ -115,9 +115,12 @@ func buildHTTPTransport(ctx context.Context, activation Activation, resolver Sec
 		guard := newGuardedHTTPTransport(cfg.Endpoint, headers, activation.Limits.MaxResultBytes, max(activation.Limits.StartupTimeout, activation.Limits.CallTimeout))
 		client := &http.Client{Transport: guard}
 		client.CheckRedirect = guard.CheckRedirect
+		oauthGuard := newGuardedHTTPTransport(cfg.Endpoint, nil, activation.Limits.MaxResultBytes, max(activation.Limits.StartupTimeout, activation.Limits.CallTimeout))
+		oauthGuard.oauthEndpoints = true
+		oauthClient := &http.Client{Transport: oauthGuard, CheckRedirect: oauthGuard.CheckRedirect}
 		source := oauth2.StaticTokenSource(token)
 		if tokenConfig != nil && token.RefreshToken != "" {
-			refreshCtx := context.WithValue(ctx, oauth2.HTTPClient, client)
+			refreshCtx := context.WithValue(ctx, oauth2.HTTPClient, oauthClient)
 			source = tokenConfig.TokenSource(refreshCtx, token)
 		}
 		coordinator := newOAuthRefreshCoordinator()
@@ -134,7 +137,7 @@ func buildHTTPTransport(ctx context.Context, activation Activation, resolver Sec
 				template:     stored,
 				last:         cloneOAuthToken(token),
 				config:       tokenConfig,
-				client:       client,
+				client:       oauthClient,
 				clientSecret: clientSecret,
 				coordinator:  coordinator,
 				sensitive:    &sensitive,
@@ -147,7 +150,10 @@ func buildHTTPTransport(ctx context.Context, activation Activation, resolver Sec
 				MaxRetries:   -1,
 				OAuthHandler: &nonInteractiveOAuth{source: source},
 			},
-			cleanup:      guard.inner.CloseIdleConnections,
+			cleanup: func() {
+				guard.inner.CloseIdleConnections()
+				oauthGuard.inner.CloseIdleConnections()
+			},
 			sensitive:    sensitive,
 			sensitiveRef: &sensitive,
 		}, nil

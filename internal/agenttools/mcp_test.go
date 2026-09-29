@@ -46,6 +46,41 @@ func TestMCPModelNameIsStableAndNamespaced(t *testing.T) {
 	}
 }
 
+func TestMCPCatalogGrantScopesNameOnlyFreshEnabledDestinations(t *testing.T) {
+	fresh, err := NewMCPCatalogSnapshot(mcpServerFixture(profile.MCPCatalogFresh))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopes, err := fresh.GrantScopes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []content.GrantScope{{Kind: content.ResourceDestination, ID: "mcp+stdio:server-a"}}
+	if len(scopes) != 1 || scopes[0] != want[0] {
+		t.Fatalf("fresh enabled scopes = %+v, want %+v", scopes, want)
+	}
+
+	disabledServer := mcpServerFixture(profile.MCPCatalogFresh)
+	disabledServer.Catalog.Tools[0].Enabled = false
+	disabled, err := NewMCPCatalogSnapshot(disabledServer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := NewMCPCatalogSnapshot(mcpServerFixture(profile.MCPCatalogStale))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, snapshot := range map[string]MCPCatalogSnapshot{"disabled": disabled, "stale": stale} {
+		scopes, err := snapshot.GrantScopes()
+		if err != nil {
+			t.Fatalf("%s scopes: %v", name, err)
+		}
+		if len(scopes) != 0 {
+			t.Errorf("%s catalog scopes = %+v, want none", name, scopes)
+		}
+	}
+}
+
 func TestRegistryWithMCPFiltersCatalogAndBindsExactScope(t *testing.T) {
 	server := mcpServerFixture(profile.MCPCatalogFresh)
 	snapshot, err := NewMCPCatalogSnapshot(server)

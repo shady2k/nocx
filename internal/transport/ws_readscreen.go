@@ -274,11 +274,11 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 // until a policy is named: naming one is the one-line flip this seam makes,
 // and the readScreen over-the-wire tests prove the machinery with the
 // policy named at the harness.
-func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
+func (s *WSServer) runGrantFor(sessionID string, mcpScopes ...content.GrantScope) *content.Grant {
 	if s.agentPolicy == nil {
 		return nil
 	}
-	return s.runGrantFrom(s.agentPolicy.Policy(), sessionID)
+	return s.runGrantFrom(s.agentPolicy.Policy(), sessionID, mcpScopes...)
 }
 
 // runGrantFrom is the mint itself, over ONE stated global document.
@@ -291,7 +291,7 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 // the same session-selector rule and the same fence as the real mint, or it
 // would answer about an authority nobody would ever hold — so it crosses THIS
 // function, and there is no second mint to keep in step with.
-func (s *WSServer) runGrantFrom(global content.EffectPolicy, sessionID string) *content.Grant {
+func (s *WSServer) runGrantFrom(global content.EffectPolicy, sessionID string, mcpScopes ...content.GrantScope) *content.Grant {
 	// The session's own answers overlay the global policy — an "allow in
 	// this session" is in force from the answer until the session ends, and
 	// the store (ws_sessionpolicy.go) is what ends it. The run grant's base
@@ -321,6 +321,7 @@ func (s *WSServer) runGrantFrom(global content.EffectPolicy, sessionID string) *
 		// minted here rather than assumed by the tool.
 		{Kind: content.ResourceEnvironment, ID: content.EnvironmentIDFor(content.EnvLocal, "")},
 	}
+	scopes = append(scopes, mcpScopes...)
 	if s.skillsEnabled() {
 		scopes = append(scopes, content.GrantScope{Kind: content.ResourceContent, ID: "skill"})
 	}

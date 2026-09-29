@@ -18,6 +18,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -161,6 +162,50 @@ func TestRunGrantForOffersContentTools(t *testing.T) {
 		if !names[want] {
 			t.Fatalf("run grant offered tools %v, missing %q", names, want)
 		}
+	}
+}
+
+func TestRunGrantForIncludesExactConfiguredMCPScope(t *testing.T) {
+	const destination = "mcp+stdio:server-a"
+	scope := content.GrantScope{Kind: content.ResourceDestination, ID: destination}
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a", scope)
+	if grant == nil {
+		t.Fatal("runGrantFor returned no grant")
+	}
+	if !hasGrantScope(grant.Policy.RunFence(), scope.Kind, scope.ID) {
+		t.Fatalf("run fence = %+v, missing exact MCP destination", grant.Policy.RunFence())
+	}
+	if !hasGrantScope(grant.Policy.Delegate.Scopes, scope.Kind, scope.ID) {
+		t.Fatalf("delegate scopes = %+v, missing exact MCP destination", grant.Policy.Delegate.Scopes)
+	}
+	if (content.GrantScope{Kind: content.ResourceDestination, ID: "*"}).Contains(scope) {
+		t.Fatal("ordinary wildcard scope unexpectedly covered an MCP destination")
+	}
+}
+
+func TestRunsUnreachedByRowWriteRetainsConfiguredMCPScope(t *testing.T) {
+	const destination = "mcp+stdio:server-a"
+	scope := content.GrantScope{Kind: content.ResourceDestination, ID: destination}
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a", scope)
+	server.pendingRunsMu.Lock()
+	server.pendingRuns[7] = askRunContext{
+		runID: 7, sessionID: session.ID("session-a"), grant: grant,
+		mcpScopes: []content.GrantScope{scope},
+	}
+	server.pendingRunsMu.Unlock()
+
+	after := autonomousMatrixForTests()
+	after.Delegate.Decision = content.DecisionRefuse
+	affected, moved := server.RunsUnreachedByRowWrite(after)
+	if len(affected) != 1 || affected[0] != 7 {
+		t.Fatalf("affected runs = %v, want [7]", affected)
+	}
+	if len(moved) != 1 || moved[0] != content.EffectDelegate {
+		t.Fatalf("moved effects = %v, want [delegate]", moved)
 	}
 }
 

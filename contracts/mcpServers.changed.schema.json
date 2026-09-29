@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.changed.schema.json",
+  "title": "MCPServersChangedParams",
+  "description": "Lightweight invalidation notification. It deliberately carries no configuration, catalog schemas, or secret metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "revision", "change"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "change": {
+      "type": "string",
+      "enum": ["created", "updated", "deleted", "catalog", "tools", "oauth"]
+    }
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.create.params.schema.json",
+  "title": "MCPServersCreateParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "enabled", "transport", "stdio", "http", "limits"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "enabled": { "type": "boolean" },
+    "transport": { "type": "string", "enum": ["stdio", "streamable-http"] },
+    "stdio": { "oneOf": [{ "$ref": "#/$defs/stdio" }, { "type": "null" }] },
+    "http": { "oneOf": [{ "$ref": "#/$defs/http" }, { "type": "null" }] },
+    "limits": { "$ref": "#/$defs/limits" }
+  },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startupTimeoutMs", "callTimeoutMs", "idleTimeoutMs", "maxResultBytes"],
+      "properties": {
+        "startupTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 120000 },
+        "callTimeoutMs": { "type": "integer", "minimum": 100, "maximum": 300000 },
+        "idleTimeoutMs": { "type": "integer", "minimum": 0, "maximum": 120000 },
+        "maxResultBytes": { "type": "integer", "minimum": 1024, "maximum": 262144 }
+      }
+    },
+    "valueBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "literal", "secret", "secretValue", "keep"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["literal", "secret"] },
+        "literal": { "type": ["string", "null"], "maxLength": 8192 },
+        "secret": { "type": ["string", "null"], "maxLength": 512 },
+        "secretValue": { "type": ["string", "null"], "maxLength": 8192 },
+        "keep": { "type": "boolean" }
+      }
+    },
+    "secretBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secret", "secretValue", "keep"],
+      "properties": {
+        "secret": { "type": ["string", "null"], "maxLength": 512 },
+        "secretValue": { "type": ["string", "null"], "maxLength": 8192 },
+        "keep": { "type": "boolean" }
+      }
+    },
+    "stdio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "argv", "cwd", "env"],
+      "properties": {
+        "command": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "argv": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "type": "string", "maxLength": 4096 }
+        },
+        "cwd": { "type": "string", "maxLength": 4096 },
+        "env": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "value": { "$ref": "#/$defs/valueBinding" }
+            }
+          }
+        }
+      }
+    },
+    "oauth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registration", "clientId", "clientSecret", "scopes"],
+      "properties": {
+        "registration": { "type": "string", "enum": ["dynamic", "preregistered"] },
+        "clientId": { "type": "string", "maxLength": 512 },
+        "clientSecret": { "oneOf": [{ "$ref": "#/$defs/secretBinding" }, { "type": "null" }] },
+        "scopes": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      }
+    },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "auth", "headers", "bearer", "oauth"],
+      "properties": {
+        "endpoint": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "auth": { "type": "string", "enum": ["none", "bearer", "oauth"] },
+        "headers": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "value": { "$ref": "#/$defs/valueBinding" }
+            }
+          }
+        },
+        "bearer": { "oneOf": [{ "$ref": "#/$defs/secretBinding" }, { "type": "null" }] },
+        "oauth": { "oneOf": [{ "$ref": "#/$defs/oauth" }, { "type": "null" }] }
+      }
+    }
+  }
+}

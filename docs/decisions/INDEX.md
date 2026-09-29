@@ -133,6 +133,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0073 | [The screen frame is keyed by its session and its reader, and continues on its own carrier](0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md) | Accepted (2026-09-23; records the screen carrier decided in nocx-zg3k3.2.2 on nocx-zg3k3.2.6's measurement)                                                 |
 | 0074 | [A command boundary is settled by an event, never by a timer](0074-a-command-boundary-is-settled-by-an-event-never-by-a-timer.md)                                                             | Accepted (2026-09-24; supersedes ADR-0066's bounded missing-fence policy; decision 3's settling list extended by ADR-0075)                                  |
 | 0075 | [An overflowing row stream ends the block in flight incomplete, and the buffers are the person's](0075-an-overflowing-row-stream-ends-the-block-in-flight-incomplete.md)                      | Accepted (2026-09-26; the owner's rule of 2026-09-25; supersedes AD-10's "records the hole" for the row stream and extends ADR-0074 decision 3)             |
+| 0076 | [MCP tools are persisted declarations activated on demand](0076-mcp-tools-on-demand.md)                                                                                                       | Accepted (2026-09-29)                                                                                                                                       |
 
 ## Adding one
 

@@ -37,6 +37,7 @@ import { HistoryStatusStore } from './history-status'
 import { CheckoutsStatusStore } from './checkouts-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
+import { MCPServerClient } from './mcp-servers-client'
 import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { EmittingClient } from './emitting-client'
@@ -245,6 +246,7 @@ function main(): void {
   const dialogClient = new DialogClient(dispatcher)
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
+  const mcpServersClient = new MCPServerClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
   // The UI-state document (ADR-0048): what the app remembers without being
   // asked — the sidebar's collapse, its active view, its width. Not the
@@ -716,6 +718,7 @@ function main(): void {
         // the Settings page would be a second owner of what a pane is called.
         (sessionId: string) => tm.sessionDisplayName(sessionId),
         checkoutsStatusStore,
+        mcpServersClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

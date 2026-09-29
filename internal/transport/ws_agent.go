@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -665,6 +666,8 @@ type agentHandlers struct {
 	snippetOp  capability.SnippetOperation
 	skills     assistant.SkillLibrary
 	agentTools agenttools.Registry
+	mcpServers profile.MCPServerRepository
+	mcpRuntime mcp.Runtime
 	log        log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
@@ -684,7 +687,7 @@ type agentHandlers struct {
 	// grantFor mints the run's default grant from the workspace policy the
 	// composition root named (ADR-0020 §7; runGrantFor). Nil when no policy
 	// is named — the run carries no grant and the model is offered no tools.
-	grantFor func(sessionID string) *content.Grant
+	grantFor func(sessionID string, mcpScopes ...content.GrantScope) *content.Grant
 	// requester is the broker-backed seam a renderer-executed tool asks
 	// through (assistant.RendererRequester); nil when the broker is not
 	// wired, which disables InRenderer tools.
@@ -984,13 +987,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// comment. Nil when the session is attached to no recorded pane, which
 	// costs the restore hint and nothing else (nocx-4em1z).
 	in.PaneID = panePtr(sess.PaneID())
-	// The run's authority is minted here, with the question: the workspace
-	// policy preset the composition root named, scoped to the run's own
-	// session and the observe effect class (ADR-0020 decision 5 — the grant
-	// is immutable once execution starts, so it is decided before the
-	// stream begins). Nil when no policy is named: the run executes no
-	// tools, which is the state before readScreen.
-	runGrant := h.grantFor(p.SessionID)
 
 	// The endpoint the run will use comes from the ANSWERING ROLE (bead
 	// nocx-e6kn2): the one resolver maps the role to its assigned
@@ -1004,6 +1000,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// to record: the ask never started).
 	var endpoint profile.Endpoint
 	var facts content.RunFacts
+	var mcpCatalogs []agenttools.MCPCatalogSnapshot
 	if !h.endpointWired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})
 		return
@@ -1019,6 +1016,21 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 			EndpointID: ep.ID,
 			BaseURL:    ep.BaseURL,
 			Model:      model,
+		}
+		if h.mcpServers == nil {
+			return nil
+		}
+		servers, err := h.mcpServers.ListMCPServers()
+		if err != nil {
+			return fmt.Errorf("load MCP catalogs: %w", err)
+		}
+		mcpCatalogs = make([]agenttools.MCPCatalogSnapshot, 0, len(servers))
+		for _, server := range servers {
+			snapshot, snapshotErr := agenttools.NewMCPCatalogSnapshot(server)
+			if snapshotErr != nil {
+				return fmt.Errorf("snapshot MCP server %q: %w", server.ID, snapshotErr)
+			}
+			mcpCatalogs = append(mcpCatalogs, snapshot)
 		}
 		return nil
 	})
@@ -1036,6 +1048,19 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		}
 		return
 	}
+	// Grant scopes are based on the same immutable server snapshot sent to the
+	// assistant, including only fresh catalogs with enabled tools.
+	var mcpScopes []content.GrantScope
+	for _, snapshot := range mcpCatalogs {
+		scopes, scopeErr := snapshot.GrantScopes()
+		if scopeErr != nil {
+			h.answerError(req, scopeErr)
+			return
+		}
+		mcpScopes = append(mcpScopes, scopes...)
+	}
+	runGrant := h.grantFor(p.SessionID, mcpScopes...)
+
 	in.Facts = facts
 
 	// Endpoint material (the credential and secret-valued headers) is NOT
@@ -1083,15 +1108,17 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	leaseDegradation := assistant.NewRunLeaseDegradation()
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
-		runID:      askRes.RunID,
-		control:    runControl,
-		entryID:    askRes.EntryID,
-		paneID:     in.PaneID,
-		question:   in.Question,
-		endpoint:   endpoint,
-		model:      facts.Model,
-		grant:      runGrant,
-		offerState: assistant.NewWireToolOfferState(),
+		runID:       askRes.RunID,
+		control:     runControl,
+		entryID:     askRes.EntryID,
+		paneID:      in.PaneID,
+		question:    in.Question,
+		endpoint:    endpoint,
+		model:       facts.Model,
+		grant:       runGrant,
+		offerState:  assistant.NewWireToolOfferState(),
+		mcpCatalogs: mcpCatalogs,
+		mcpScopes:   mcpScopes,
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -1296,6 +1323,11 @@ type askRunContext struct {
 	// offerState survives retries and approval resumes so the structural
 	// offer remains once-per-run without process-lifetime run-id storage.
 	offerState *assistant.WireToolOfferState
+	// mcpCatalogs and mcpScopes are the immutable catalog/config snapshot and
+	// its exact destination fence. Approval resumes reuse both, never reading
+	// mutable configuration or activating a server while rebuilding them.
+	mcpCatalogs []agenttools.MCPCatalogSnapshot
+	mcpScopes   []content.GrantScope
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -1441,6 +1473,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}); err != nil {
 		streamErr = err
 		emitStreamEnded()
+		h.closeMCPRun(rc.runID)
 		// The transition was refused: the run is already terminal (closed
 		// by another path). Nothing to drive; stop.
 		return
@@ -1565,6 +1598,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
+		MCPCatalogs:      rc.mcpCatalogs,
+		MCPRuntime:       h.mcpRuntime,
 		RunID:            strconv.FormatInt(rc.runID, 10),
 		SessionID:        string(rc.sessionID),
 		Attempt:          rc.attempt,
@@ -1826,10 +1861,15 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
+		h.closeMCPRun(rc.runID)
 		// The transition was refused: the run is already terminal (closed
 		// by another path). The question is moot; nothing to render.
 		return
 	}
+	// A suspended run owns no live MCP session. Approval can arrive much later,
+	// so keeping a subprocess or HTTP connection across this boundary would
+	// turn waiting for a person into unbounded runtime ownership.
+	h.closeMCPRun(rc.runID)
 	n := agentApprovalRequested{Reason: "policy"}
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
@@ -2424,7 +2464,7 @@ const receiptWithoutTurnWarning = "the answer was saved, but this turn could not
 // interrupted proposal, which is what the person answered about.
 func (h agentHandlers) resumeRun(ctx context.Context, rc askRunContext, r Responder) {
 	if h.grantFor != nil {
-		rc.grant = h.grantFor(string(rc.sessionID))
+		rc.grant = h.grantFor(string(rc.sessionID), rc.mcpScopes...)
 	}
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
@@ -2523,6 +2563,12 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 	}
 }
 
+func (h agentHandlers) closeMCPRun(runID int64) {
+	if h.mcpRuntime != nil {
+		h.mcpRuntime.CloseRun(strconv.FormatInt(runID, 10))
+	}
+}
+
 // terminalize persists the run's terminal state AND its entries in one
 // transaction (FinishAgentRun), then notifies the wire. The notification may
 // go nowhere — the connection may be gone — but the ledger is the record,
@@ -2556,6 +2602,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		}
 		state, reason, sentence, wireError = rc.control.cancelOutcome()
 	}
+	h.closeMCPRun(rc.runID)
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
 	// engine's continuation with it (nocx-igu4y). Ask drops its own
@@ -3013,6 +3060,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
 	}
+	mcpRuntime := s.mcpRuntime
 	// buildFor is every dependency an agent handler has EXCEPT the two that
 	// only a connection can supply. It is split out because the run-stopping
 	// path has a caller that is not on the agent lane: policy.setRule and
@@ -3025,6 +3073,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
+			mcpServers: s.mcpServers, mcpRuntime: mcpRuntime,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
@@ -3143,9 +3192,10 @@ func (s *WSServer) RunsUnreachedByRuleWrite(w content.RuleWrite) []int64 {
 // the set of runs one that coexisted.
 func (s *WSServer) RunsUnreachedByRowWrite(after content.EffectPolicy) ([]int64, []content.Effect) {
 	type held struct {
-		id      int64
-		session string
-		policy  content.EffectPolicy
+		id        int64
+		session   string
+		policy    content.EffectPolicy
+		mcpScopes []content.GrantScope
 	}
 	var runs []held
 	s.pendingRunsMu.Lock()
@@ -3156,14 +3206,17 @@ func (s *WSServer) RunsUnreachedByRowWrite(after content.EffectPolicy) ([]int64,
 			// reason the rule twin gives.
 			continue
 		}
-		runs = append(runs, held{id: id, session: string(rc.sessionID), policy: rc.grant.Policy})
+		runs = append(runs, held{
+			id: id, session: string(rc.sessionID), policy: rc.grant.Policy,
+			mcpScopes: append([]content.GrantScope(nil), rc.mcpScopes...),
+		})
 	}
 	s.pendingRunsMu.Unlock()
 
 	var out []int64
 	movedSet := map[content.Effect]bool{}
 	for _, run := range runs {
-		next := s.runGrantFrom(after, run.session)
+		next := s.runGrantFrom(after, run.session, run.mcpScopes...)
 		if next == nil {
 			// The server has no policy store, so nothing here was minted
 			// from one and no write can move it.
@@ -3251,6 +3304,19 @@ func (s *WSServer) StopRunsForRevokedAnswer(
 		stopped = append(stopped, id)
 	}
 	return stopped, alreadyFinished
+}
+
+// WithMCPRuntime attaches the process-lifetime execution and lifecycle seam to
+// agent.ask. When a separately named management refresher is already wired,
+// refresh remains routed through it; otherwise Runtime.Refresh is the explicit
+// refresher.
+func WithMCPRuntime(runtime mcp.Runtime) WSServerOption {
+	return func(s *WSServer) {
+		s.mcpRuntime = runtime
+		if s.mcpRefresher == nil {
+			s.mcpRefresher = runtime
+		}
+	}
 }
 
 // runTrace is the id of one agent exchange — the run — as every log line

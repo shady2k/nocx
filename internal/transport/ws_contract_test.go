@@ -36,6 +36,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
@@ -217,7 +218,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	preview := loadSchema(t, "vault.resetPreview.schema.json")
 	result := loadSchema(t, "vault.reset.schema.json")
 	rawPreview, err := json.Marshal(vaultResetPreviewResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		SystemKeychainReachable: false, VaultInitialized: true,
 	})
 	if err != nil {
@@ -226,7 +227,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	validateJSON(t, preview, rawPreview, "vault.resetPreview DTO")
 
 	rawWithResidue, err := json.Marshal(vaultResetResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		Residue: []vaultResetResidueEntry{{Store: "system", Reason: "no-service"}},
 	})
 	if err != nil {
@@ -270,7 +271,106 @@ func TestVaultReset_OverTheWireConformsToContract(t *testing.T) {
 	if resetResp.Error != nil {
 		t.Fatalf("vault.reset: %+v", resetResp.Error)
 	}
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				t.Fatalf("read reset notifications: %v", err)
+			}
+			break
+		}
+		var frame struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(payload, &frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame.Method == "mcpServers.changed" {
+			t.Fatal("vault.reset emitted mcpServers.changed with no changed MCP servers")
+		}
+	}
+
 	validateJSON(t, resultSchema, resetResp.Result, "vault.reset result")
+}
+
+func TestVaultResetClosesReferencedMCPSessionsBeforeSuccessAndNotifiesChangedServer(t *testing.T) {
+	repo := profile.NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+	server, err := repo.CreateMCPServer(profile.MCPServer{
+		Name:      "secret-backed",
+		Transport: profile.MCPTransportStdio,
+		Enabled:   true,
+		Stdio: &profile.MCPStdioConfig{
+			Command: "/bin/echo",
+			Env: []profile.MCPEnvBinding{{
+				Name:  "TOKEN",
+				Value: profile.MCPValueBinding{Kind: profile.MCPBindingSecret, SecretRef: "secrow:reset-secret"},
+			}},
+		},
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unaffected, err := repo.CreateMCPServer(profile.MCPServer{
+		Name:      "unaffected",
+		Enabled:   true,
+		Transport: profile.MCPTransportStdio,
+		Stdio:     &profile.MCPStdioConfig{Command: "/bin/echo", Env: []profile.MCPEnvBinding{}},
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &resetMCPRuntime{}
+	reset := &fakeVaultReset{clearReferences: func() error {
+		_, err := repo.ClearAllSecretReferences()
+		return err
+	}}
+	ws, stop := newVaultResetWSServer(t, reset, WithMCPServerRepository(repo), WithMCPRuntime(runtime))
+	defer stop()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.reset", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("vault.reset: %+v", resp.Error)
+	}
+	if !runtime.serversClosed {
+		t.Fatal("vault.reset succeeded before its referenced MCP server session closed")
+	}
+	if len(runtime.serverIDs) != 1 || runtime.serverIDs[0] != server.ID {
+		t.Fatalf("reset closed server IDs = %v, want only %s", runtime.serverIDs, server.ID)
+	}
+	if unaffected.ID == server.ID {
+		t.Fatal("fixture MCP server IDs collided")
+	}
+	var notification struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := conn.ReadJSON(&notification); err != nil {
+		t.Fatalf("read mcpServers.changed: %v", err)
+	}
+	if notification.Method != "mcpServers.changed" {
+		t.Fatalf("notification method = %q, want mcpServers.changed", notification.Method)
+	}
+	validateJSON(t, loadSchema(t, "mcpServers.changed.schema.json"), notification.Params, "vault.reset mcpServers.changed")
+	var changed mcpServersChangedParams
+	if err := json.Unmarshal(notification.Params, &changed); err != nil {
+		t.Fatal(err)
+	}
+	if changed.ID != server.ID || changed.Revision != server.Revision+1 || changed.Change != "updated" {
+		t.Fatalf("reset notification = %+v, want updated %s at revision %d", changed, server.ID, server.Revision+1)
+	}
 }
 
 // A reset must be reachable on a vault that is broken or half-built, so the
@@ -287,10 +387,10 @@ func TestVaultReset_IsReachableWithNoVaultLifecycleWired(t *testing.T) {
 	}
 }
 
-func newVaultResetWSServer(t *testing.T, rs VaultResetService) (*WSServer, func()) {
+func newVaultResetWSServer(t *testing.T, rs VaultResetService, extra ...WSServerOption) (*WSServer, func()) {
 	t.Helper()
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithVaultReset(rs))
+	options := append([]WSServerOption{WithVaultReset(rs)}, extra...)
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), options...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -298,7 +398,9 @@ func newVaultResetWSServer(t *testing.T, rs VaultResetService) (*WSServer, func(
 	return ws, func() { _ = ws.Stop(ctx) }
 }
 
-type fakeVaultReset struct{}
+type fakeVaultReset struct {
+	clearReferences func() error
+}
 
 func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) {
 	return vaultreset.Preview{
@@ -309,10 +411,42 @@ func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) 
 }
 
 func (f *fakeVaultReset) Execute(_ context.Context) (vaultreset.Result, error) {
+	if f.clearReferences != nil {
+		if err := f.clearReferences(); err != nil {
+			return vaultreset.Result{}, err
+		}
+	}
 	return vaultreset.Result{
 		Impact:  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
 		Residue: []vaultreset.Residue{{Store: "system", Reason: "no-service"}},
 	}, nil
+}
+
+type resetMCPRuntime struct {
+	serversClosed bool
+	serverIDs     []string
+}
+
+func (*resetMCPRuntime) Refresh(context.Context, mcp.Activation) (mcp.Catalog, error) {
+	return mcp.Catalog{}, nil
+}
+
+func (*resetMCPRuntime) Invoke(context.Context, mcp.Invocation) (mcp.Result, error) {
+	return mcp.Result{}, nil
+}
+
+func (*resetMCPRuntime) CloseRun(string) {}
+
+func (r *resetMCPRuntime) CloseServer(id string) {
+	r.serversClosed = true
+	r.serverIDs = append(r.serverIDs, id)
+}
+
+func (*resetMCPRuntime) Close() error { return nil }
+
+func (r *resetMCPRuntime) RunServerMutation(id string, mutation func() error) error {
+	r.CloseServer(id)
+	return mutation()
 }
 
 // ── vault.inventory ───────────────────────────────────────────────────

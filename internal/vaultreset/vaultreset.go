@@ -69,16 +69,18 @@ type SecretReferenceStore interface {
 // and "2 endpoints" are different sentences because they are different
 // questions.
 type Impact struct {
-	SecretCount   int
-	ProfileCount  int
-	EndpointCount int
+	SecretCount    int
+	ProfileCount   int
+	EndpointCount  int
+	MCPServerCount int
 }
 
 func impactFrom(i profile.SecretReferenceImpact) Impact {
 	return Impact{
-		SecretCount:   i.SecretCount,
-		ProfileCount:  i.ProfileCount,
-		EndpointCount: i.EndpointCount,
+		SecretCount:    i.SecretCount,
+		ProfileCount:   i.ProfileCount,
+		EndpointCount:  i.EndpointCount,
+		MCPServerCount: i.MCPServerCount,
 	}
 }
 

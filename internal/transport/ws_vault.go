@@ -12,6 +12,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/mcp"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -160,9 +162,12 @@ type vaultLifecycleHandlers struct {
 // vault.changed fan-out; the profile/group/credential stores are reachable
 // only through the operation's service.
 type vaultSecretHandlers struct {
-	op      capability.SecretOperation // nil → not fully wired
-	r       Responder
-	machine vaultMachine
+	op         capability.SecretOperation // nil → not fully wired
+	r          Responder
+	machine    vaultMachine
+	mcpRepo    profile.MCPServerRepository
+	mcpNotify  func(mcpServersChangedParams)
+	mcpRuntime mcp.Runtime
 	// secrets is the stanced material seam, held by the HANDLER and never
 	// reached from inside the operation: an operation-stance read blocks
 	// on the unlock, and no admission may be held across that wait
@@ -725,11 +730,12 @@ type vaultReplaceSecretParams struct {
 // handleReplaceSecret overwrites a secret's material. The row is
 // addressed by its renderer-addressable handle, which the backend resolves —
 // a SecretID is never accepted from the renderer as an identifier
-// (nocx-jb20.1). The reference does NOT change: the new value lands under
-// the same SecretID, so every connection using the secret keeps working and
-// the name and kind are untouched (renaming and replacing are independent
-// operations). The old value is never shown back — the vault does not hand
-// it out (ADR-0011 §2) — so the renderer only ever supplies the replacement.
+// (nocx-jb20.1). The reference does NOT change: the new value lands under the
+// same SecretID, so server configuration keeps its binding while active MCP
+// sessions are drained and closed before replacement. The name and kind are
+// untouched (rename and replacement are independent operations). The old
+// value is never shown back — the vault does not hand it out (ADR-0011 §2) —
+// so the renderer only ever supplies the replacement.
 // Like create, a private key may be supplied by PATH, which the backend
 // dereferences to the file's contents.
 func (h vaultSecretHandlers) handleReplaceSecret(ctx context.Context, req jsonrpcRequest) {
@@ -761,18 +767,67 @@ func (h vaultSecretHandlers) handleReplaceSecret(ctx context.Context, req jsonrp
 		value = contents
 	}
 
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
-		if err := svc.ReplaceSecret(ctx, params.ID, credential.NewSecret(value)); err != nil {
-			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.replaceSecret: ", err))
-			return nil
-		}
-		h.machine.broadcastVaultChanged()
-		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
+	if h.mcpRuntime != nil && h.mcpRepo == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "MCP server repository unavailable; cannot safely replace a referenced secret"})
+		return
 	}
+	var targets []profile.MCPServer
+	var secretID string
+	if h.mcpRepo != nil {
+		err := h.op.Run(ctx, func(_ context.Context, svc capability.SecretService) error {
+			id, ok := svc.ResolveRow(params.ID)
+			if !ok {
+				return nil
+			}
+			secretID = string(id)
+			var err error
+			targets, err = mcpServersReferencing(h.mcpRepo, secretID)
+			return err
+		})
+		if err != nil {
+			answerOperationRefusal(h.r, req, err)
+			return
+		}
+	}
+
+	var replaceErr error
+	mutation := func() error {
+		return h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
+			if h.mcpRepo != nil {
+				id, ok := svc.ResolveRow(params.ID)
+				if ok {
+					if string(id) != secretID {
+						return profile.ErrMCPServerConflict
+					}
+					current, err := mcpServersReferencing(h.mcpRepo, secretID)
+					if err != nil {
+						return err
+					}
+					if !sameMCPServerSnapshots(current, targets) {
+						return profile.ErrMCPServerConflict
+					}
+				} else if len(targets) != 0 {
+					return profile.ErrMCPServerConflict
+				}
+			}
+			replaceErr = svc.ReplaceSecret(ctx, params.ID, credential.NewSecret(value))
+			return replaceErr
+		})
+	}
+	if err := runMCPServerMutations(h.mcpRuntime, mcpServerIDs(targets), mutation); err != nil {
+		if replaceErr != nil {
+			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.replaceSecret: ", replaceErr))
+		} else {
+			answerOperationRefusal(h.r, req, err)
+		}
+		return
+	}
+	if replaceErr != nil {
+		_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.replaceSecret: ", replaceErr))
+		return
+	}
+	h.machine.broadcastVaultChanged()
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 type vaultDeleteSecretParams struct {
@@ -797,6 +852,10 @@ func (h vaultSecretHandlers) handleDeleteSecret(ctx context.Context, req jsonrpc
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: h.notWired})
 		return
 	}
+	if h.mcpRuntime != nil && h.mcpRepo == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "MCP server repository unavailable; cannot safely delete a referenced secret"})
+		return
+	}
 	var params vaultDeleteSecretParams
 	if !isJSONObject(req.Params) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -810,17 +869,79 @@ func (h vaultSecretHandlers) handleDeleteSecret(ctx context.Context, req jsonrpc
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id is required"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
-		if err := svc.DeleteSecret(ctx, params.ID); err != nil {
-			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.deleteSecret: ", err))
-			return nil
+	var targets []profile.MCPServer
+	var secretID string
+	if h.mcpRepo != nil {
+		err := h.op.Run(ctx, func(_ context.Context, svc capability.SecretService) error {
+			id, ok := svc.ResolveRow(params.ID)
+			if !ok {
+				return nil
+			}
+			secretID = string(id)
+			var err error
+			targets, err = mcpServersReferencing(h.mcpRepo, secretID)
+			return err
+		})
+		if err != nil {
+			answerOperationRefusal(h.r, req, err)
+			return
 		}
-		h.machine.broadcastVaultChanged()
-		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
+	}
+
+	var changed []profile.MCPServer
+	var deleteErr error
+	mutation := func() error {
+		err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
+			if h.mcpRepo != nil {
+				id, ok := svc.ResolveRow(params.ID)
+				if ok {
+					if string(id) != secretID {
+						return profile.ErrMCPServerConflict
+					}
+					current, err := mcpServersReferencing(h.mcpRepo, secretID)
+					if err != nil {
+						return err
+					}
+					if !sameMCPServerSnapshots(current, targets) {
+						return profile.ErrMCPServerConflict
+					}
+					changed = current
+				} else if len(targets) != 0 {
+					return profile.ErrMCPServerConflict
+				}
+			}
+			deleteErr = svc.DeleteSecret(ctx, params.ID)
+			if deleteErr != nil || h.mcpRepo == nil {
+				return deleteErr
+			}
+			for i := range changed {
+				updated, err := h.mcpRepo.GetMCPServer(changed[i].ID)
+				if err != nil {
+					return err
+				}
+				changed[i] = updated
+			}
+			return nil
+		})
+		return err
+	}
+	if err := runMCPServerMutations(h.mcpRuntime, mcpServerIDs(targets), mutation); err != nil {
+		if deleteErr != nil {
+			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.deleteSecret: ", deleteErr))
+		} else {
+			answerOperationRefusal(h.r, req, err)
+		}
+		return
+	}
+	if deleteErr != nil {
+		_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.deleteSecret: ", deleteErr))
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+	if h.mcpNotify != nil {
+		for _, server := range changed {
+			h.mcpNotify(mcpServersChangedParams{ID: server.ID, Revision: server.Revision, Change: "updated"})
+		}
 	}
 }
 
@@ -1336,11 +1457,11 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRenameSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.replaceSecret", params(validateVaultReplaceSecretRaw), func(r Responder) handlerFunc {
-			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.replaceSecret")}
+			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpRuntime: s.mcpRuntime, notWired: s.vaultSecretUnavailable("vault.replaceSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReplaceSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.deleteSecret", params(validateVaultDeleteSecretRaw), func(r Responder) handlerFunc {
-			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
+			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.resolveLine", params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
@@ -1348,11 +1469,11 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(resetSub, "vault.resetPreview", noParams(), func(r Responder) handlerFunc {
-			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
+			h := vaultResetHandlers{op: resetOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResetPreview(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),
 		whenAvailable(regResponder(resetSub, "vault.reset", noParams(), func(r Responder) handlerFunc {
-			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
+			h := vaultResetHandlers{op: resetOp, r: r, machine: s, mcpRepo: s.mcpServers, mcpNotify: s.broadcastMCPServersChanged, mcpRuntime: s.mcpRuntime}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReset(ctx, req) }
 		}), func() bool { return resetOp != nil }, "vault not available"),
 	}

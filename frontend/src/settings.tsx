@@ -26,6 +26,7 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { MCPServersSection } from './mcp-servers-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { SkillsSection } from './skills-section'
 import type { SkillsStore } from './skills-store'
@@ -46,6 +47,7 @@ import type { TypingClient } from './typing-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
+import type { MCPServerClient } from './mcp-servers-client'
 import type { ProfileClient, SSHProfile } from './profiles'
 import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
@@ -221,6 +223,7 @@ export interface SettingsComponentProps {
    *  the dev-web harness; the section then renders nothing. */
   footprintClient?: FootprintClient
   endpointsClient?: EndpointClient
+  mcpServersClient?: MCPServerClient
   /** The assistant's control-plane client (nocx-edio). Absent in the
    *  dev-web harness; the endpoints section then shows no status line. */
   agentClient?: AgentClient
@@ -614,6 +617,29 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    const mcpServersPage: SettingsPage = {
+      kind: 'component',
+      id: 'mcpServers',
+      title: 'MCP Servers',
+      groupId: 'assistant',
+      scrollMode: 'contained',
+      renderContent: () => (
+        <Show
+          when={props.mcpServersClient}
+          fallback={
+            <PageSection title="MCP Servers">
+              MCP servers are not available in this window.
+            </PageSection>
+          }
+        >
+          <MCPServersSection
+            client={props.mcpServersClient!}
+            vaultController={props.vaultController}
+            secretSource={props.secretSource}
+          />
+        </Show>
+      ),
+    }
     const snippetsPage: SettingsPage = {
       kind: 'component',
       id: 'snippets',
@@ -847,6 +873,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       vaultPage,
       secretsPage,
       endpointsPage,
+      mcpServersPage,
       snippetsPage,
       rolesPage,
       policyPage,

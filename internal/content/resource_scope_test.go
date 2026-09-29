@@ -283,6 +283,45 @@ func TestDestinationStarStaysDistinguishableFromAnEndpoint(t *testing.T) {
 	}
 }
 
+func TestMCPStdioDestinationGrantIsExactAndNotAnAddress(t *testing.T) {
+	const local = "mcp+stdio:mcp:weather:server-id"
+	scope := endpoint(local, false)
+	if err := content.ValidateGrantScope(scope); err != nil {
+		t.Fatalf("ValidateGrantScope(%q): %v", local, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		scope content.GrantScope
+		child content.GrantScope
+		want  bool
+	}{
+		{"same MCP server", scope, destination(local), true},
+		{"another MCP server", scope, destination("mcp+stdio:mcp:alerts:server-id"), false},
+		{"MCP server is not a URL host", endpoint("https://example.com", true), destination(local), false},
+		{"network wildcard does not grant a local MCP process", endpoint("*", false), destination(local), false},
+		{"local MCP scope does not grant an HTTP endpoint", scope, destination("https://example.com/path"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.scope.Contains(tc.child); got != tc.want {
+				t.Errorf("Contains(%q) = %v, want %v", tc.child.ID, got, tc.want)
+			}
+		})
+	}
+	if err := content.ValidateGrantScope(endpoint(local, true)); err == nil {
+		t.Error("local MCP destination accepted a subdomain marker")
+	}
+	for _, invalid := range []string{
+		"mcp+stdio:",
+		"mcp+stdio:mcp:weather/other",
+		"mcp+stdio:mcp:weather?query",
+		"mcp+stdio:mcp:weather server",
+	} {
+		if err := content.ValidateGrantScope(endpoint(invalid, false)); err == nil {
+			t.Errorf("ValidateGrantScope(%q) accepted malformed MCP destination", invalid)
+		}
+	}
+}
+
 // A child that itself claims subdomains is only inside a parent that claims
 // them too — otherwise a narrowing comparison would read a wider scope as
 // contained in a narrower one.

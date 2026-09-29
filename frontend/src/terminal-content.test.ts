@@ -412,6 +412,30 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       vi.useRealTimers()
     }
   })
+  it('rounds fractional device-pixel measurements to the integer wire size', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let teardown: (() => void) | undefined
+    try {
+      const mounted = await mountTerminal(makeClipboard(), {}, makeClient())
+      teardown = mounted.teardown
+      const renderer = rendererOf(mounted.content)
+      const session = sessionOf(mounted.content)
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({ width: 7.1234, height: 13.2 })
+
+      renderer._fireResize(90, 28)
+      vi.advanceTimersByTime(80)
+
+      expect(session.sendResize).toHaveBeenCalledWith({
+        cols: 90,
+        rows: 28,
+        xpixel: 641,
+        ypixel: 370,
+      })
+    } finally {
+      teardown?.()
+      vi.useRealTimers()
+    }
+  })
 
   it('disposal cancels a pending PTY resize', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })

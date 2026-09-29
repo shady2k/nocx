@@ -50,6 +50,12 @@ func ValidateGrantScope(scope GrantScope) error {
 			}
 			return nil
 		}
+		if isMCPStdioDestinationID(scope.ID) {
+			if scope.IncludeSubdomains {
+				return errors.New("resource scope: local MCP destination cannot include subdomains")
+			}
+			return nil
+		}
 		endpoint, err := parseDestinationEndpoint(scope.ID)
 		if err != nil {
 			return fmt.Errorf("resource scope: destination %q: %w", scope.ID, err)
@@ -313,25 +319,47 @@ func defaultPortFor(scheme string) string {
 	return "443"
 }
 
-// destinationContains is THE containment predicate for network grants, and
-// the only one: content.GrantScope.Contains and agenttools.URLScope.Allows
-// both reach it, so what the settings page shows and what the dialler
-// enforces cannot drift apart (AGENTS.md, one owner per behaviour).
+// destinationContains is THE containment predicate for URL destination
+// grants, and the only one: content.GrantScope.Contains and
+// agenttools.URLScope.Allows both reach it, so what the settings page shows
+// and what the dialler enforces cannot drift apart (AGENTS.md, one owner per
+// behaviour). The opaque stdio MCP identity uses exact equality below; it is
+// not a network endpoint, so a network wildcard never covers it.
 //
-// Matching is LABEL-WISE and never a string suffix. "notgithub.com" ends in
-// "github.com" and "github.com.evil.example" contains it; neither is inside
-// a grant over github.com, and the leading dot on the suffix is the whole of
-// why.
+// URL matching is LABEL-WISE and never a string suffix. "notgithub.com" ends
+// in "github.com" and "github.com.evil.example" contains it; neither is
+// inside a grant over github.com, and the leading dot on the suffix is the
+// whole of why.
+const mcpStdioDestinationPrefix = "mcp+stdio:"
+
+func isMCPStdioDestinationID(id string) bool {
+	serverID, ok := strings.CutPrefix(id, mcpStdioDestinationPrefix)
+	if !ok || serverID == "" {
+		return false
+	}
+	for i := range len(serverID) {
+		c := serverID[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' ||
+			c >= '0' && c <= '9' || c == ':' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func destinationContains(scope, child GrantScope) bool {
 	if ValidateGrantScope(scope) != nil {
 		return false
 	}
 	if scope.ID == star {
-		return true
+		return !strings.HasPrefix(child.ID, mcpStdioDestinationPrefix)
 	}
 	if child.ID == star {
 		// The child claims every address; one endpoint does not hold it.
 		return false
+	}
+	if isMCPStdioDestinationID(scope.ID) || isMCPStdioDestinationID(child.ID) {
+		return scope.ID == child.ID && !child.IncludeSubdomains
 	}
 	// A child that itself claims subdomains is wider than its bare host, so
 	// only a parent that also claims them can hold it.

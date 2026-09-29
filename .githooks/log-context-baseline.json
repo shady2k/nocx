@@ -603,6 +603,11 @@
       "text": "text: \"I could not read a skill at that address, so nothing was proposed and nothing was installed: \" + resolveErr.Error(),"
     },
     {
+      "file": "internal/assistant/mcp.go",
+      "line": 65,
+      "text": "message := \"MCP tool call failed: \" + cause.Error()"
+    },
+    {
       "file": "internal/assistant/presentation.go",
       "line": 161,
       "text": "info, err := candidate.Info(context.Background())"
@@ -1941,6 +1946,31 @@
       "file": "internal/transport/ws_probe.go",
       "line": 363,
       "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: \"Trust host key failed: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_mcp_servers.go",
+      "line": 759,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: \"Invalid params: \" + err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_mcp_servers.go",
+      "line": 767,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error(), Data: mcpErrorData{Reason: \"not-found\"}})"
+    },
+    {
+      "file": "internal/transport/ws_mcp_servers.go",
+      "line": 769,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: err.Error(), Data: mcpErrorData{Reason: \"tool-not-found\"}})"
+    },
+    {
+      "file": "internal/transport/ws_mcp_servers.go",
+      "line": 771,
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
+      "file": "internal/transport/ws_mcp_servers.go",
+      "line": 943,
+      "text": "return err.Error()"
     },
     {
       "file": "internal/transport/ws_roles.go",

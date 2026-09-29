@@ -28,7 +28,10 @@ func mcpServerFixture(state profile.MCPCatalogState) profile.MCPServer {
 		ID: "server-a", Revision: 4, Name: "fixture server", Enabled: true,
 		Transport: profile.MCPTransportStdio,
 		Stdio:     &profile.MCPStdioConfig{Command: "/bin/echo", Argv: []string{}, Env: []profile.MCPEnvBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 		Catalog: profile.MCPCatalog{
 			State: state, RefreshedAt: &now, Digest: hex.EncodeToString(catalogDigest.Sum(nil)),
 			Tools: []profile.MCPTool{{Name: "echo", Description: "REMOTE INSTRUCTIONS MUST NOT BECOME THE DECLARATION", InputSchema: input, DescriptorDigest: descriptorDigest, Enabled: true, Status: profile.MCPToolUnchanged}},

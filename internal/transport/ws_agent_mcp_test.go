@@ -57,7 +57,10 @@ func createAskMCPServer(t *testing.T, repo profile.MCPServerRepository) {
 		Enabled:   true,
 		Transport: profile.MCPTransportStdio,
 		Stdio:     &profile.MCPStdioConfig{Command: "/bin/false", Argv: []string{}, Env: []profile.MCPEnvBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 	})
 	if err != nil {
 		t.Fatalf("create MCP server: %v", err)

@@ -144,15 +144,6 @@ type MCPLimits struct {
 	MaxResultBytes   int `json:"maxResultBytes"`
 }
 
-func DefaultMCPLimits() MCPLimits {
-	return MCPLimits{
-		StartupTimeoutMS: 15_000,
-		CallTimeoutMS:    60_000,
-		IdleTimeoutMS:    30_000,
-		MaxResultBytes:   MaxMCPResultBytes,
-	}
-}
-
 func (l MCPLimits) StartupTimeout() time.Duration {
 	return time.Duration(l.StartupTimeoutMS) * time.Millisecond
 }

@@ -82,7 +82,10 @@ func TestVaultDeleteSecret_DrainsMCPCallBeforeSuccessAndInvalidatesActivation(t 
 		Enabled:   true,
 		Transport: profile.MCPTransportStdio,
 		Stdio:     &profile.MCPStdioConfig{Command: "/bin/echo", Env: []profile.MCPEnvBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 	})
 	if unaffectedErr != nil {
 		t.Fatalf("create unrelated MCP server: %v", unaffectedErr)

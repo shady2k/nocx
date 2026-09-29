@@ -186,8 +186,6 @@ func NewManager(resolver SecretResolver, options ...ManagerOption) *Manager {
 	return manager
 }
 
-func NewRuntime(resolver SecretResolver) Runtime { return NewManager(resolver) }
-
 func (m *Manager) Refresh(ctx context.Context, activation Activation) (Catalog, error) {
 	activation = activation.clone()
 	if err := activation.validate(false); err != nil {

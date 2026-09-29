@@ -250,8 +250,11 @@ func httpServerRecord(endpoint string) profile.MCPServer {
 		ID: "mcp:http", Revision: 7, Name: "HTTP", Enabled: true,
 		Transport: profile.MCPTransportStreamableHTTP,
 		HTTP:      &profile.MCPHTTPConfig{Endpoint: endpoint, Auth: profile.MCPHTTPAuthNone, Headers: []profile.MCPHeaderBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
-		Catalog:   profile.MCPCatalog{State: profile.MCPCatalogMissing, Tools: []profile.MCPTool{}},
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
+		Catalog: profile.MCPCatalog{State: profile.MCPCatalogMissing, Tools: []profile.MCPTool{}},
 	}
 }
 
@@ -1162,7 +1165,10 @@ func TestStdioRefreshAndCancellationCloseTheProcess(t *testing.T) {
 				{Name: "NOCX_MCP_STOPPED", Value: literal(stopped)},
 			},
 		},
-		Limits:  profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 		Catalog: profile.MCPCatalog{State: profile.MCPCatalogMissing, Tools: []profile.MCPTool{}},
 	}
 	activation, err := ActivationFromServer(record)
@@ -1226,7 +1232,10 @@ func TestStdioRefreshAndCancellationCloseTheProcess(t *testing.T) {
 
 	_ = os.Remove(stopped)
 	_ = os.Remove(started)
-	record.Limits = profile.DefaultMCPLimits()
+	record.Limits = profile.MCPLimits{
+		StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+		IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+	}
 	activation, err = ActivationFromServer(record)
 	if err != nil {
 		t.Fatal(err)

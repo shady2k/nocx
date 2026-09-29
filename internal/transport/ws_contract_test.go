@@ -310,7 +310,10 @@ func TestVaultResetClosesReferencedMCPSessionsBeforeSuccessAndNotifiesChangedSer
 				Value: profile.MCPValueBinding{Kind: profile.MCPBindingSecret, SecretRef: "secrow:reset-secret"},
 			}},
 		},
-		Limits: profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +323,10 @@ func TestVaultResetClosesReferencedMCPSessionsBeforeSuccessAndNotifiesChangedSer
 		Enabled:   true,
 		Transport: profile.MCPTransportStdio,
 		Stdio:     &profile.MCPStdioConfig{Command: "/bin/echo", Env: []profile.MCPEnvBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

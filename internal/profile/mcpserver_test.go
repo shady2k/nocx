@@ -75,7 +75,10 @@ func validTestMCPServer() MCPServer {
 				{Name: "TOKEN", Value: secretBinding("secrow:shared", false)},
 			},
 		},
-		Limits: DefaultMCPLimits(),
+		Limits: MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
 	}
 }
 

@@ -56,8 +56,11 @@ func assistantMCPServer() profile.MCPServer {
 		ID: "server-kernel", Revision: 9, Name: "Kernel fixture", Enabled: true,
 		Transport: profile.MCPTransportStdio,
 		Stdio:     &profile.MCPStdioConfig{Command: "/bin/echo", Argv: []string{}, Env: []profile.MCPEnvBinding{}},
-		Limits:    profile.DefaultMCPLimits(),
-		Catalog:   profile.MCPCatalog{State: profile.MCPCatalogFresh, RefreshedAt: &now, Digest: hex.EncodeToString(catalog.Sum(nil)), Tools: []profile.MCPTool{{Name: "echo", InputSchema: input, DescriptorDigest: descriptorDigest, Enabled: true, Status: profile.MCPToolUnchanged}}},
+		Limits: profile.MCPLimits{
+			StartupTimeoutMS: 15_000, CallTimeoutMS: 60_000,
+			IdleTimeoutMS: 30_000, MaxResultBytes: 262_144,
+		},
+		Catalog: profile.MCPCatalog{State: profile.MCPCatalogFresh, RefreshedAt: &now, Digest: hex.EncodeToString(catalog.Sum(nil)), Tools: []profile.MCPTool{{Name: "echo", InputSchema: input, DescriptorDigest: descriptorDigest, Enabled: true, Status: profile.MCPToolUnchanged}}},
 	}
 }
 

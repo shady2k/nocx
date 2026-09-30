@@ -93,31 +93,29 @@ package transport
 //     other by golden vectors, and keeping them about PTY only is worth as
 //     much here as there.
 //
-//  4. And the one that decides it without the other three: A DOWNLOAD HAS
-//     TO BECOME A FILE. A browser saves a response to disk itself, streaming
-//     it, and a page cannot. Bytes arriving as WebSocket messages have to be
-//     accumulated in the renderer's heap and handed to the platform as one
-//     Blob, so a 2 GB download would need 2 GB of renderer memory before
-//     anything reached the disk. There is no version of that which is not
-//     worse.
+// 4. And the one that decides it without the other three: A DOWNLOAD HAS
+// TO BECOME A FILE. Browser builds hand the response to the browser's
+// streaming download manager; a page cannot save a large response by
+// accumulating it in its heap and wrapping it in one Blob. Native desktop
+// builds stream the same ticketed HTTP body directly into the local atomic
+// sink instead. Neither destination uses the WebSocket for file bytes.
 //
 // The route therefore reuses the upload's machinery rather than
 // duplicating it: the same OriginPolicy through the same allowTransferOrigin,
 // the same guarded listener bounding its header block, the same one-shot
 // ticket store with the same four states and the same TTL, and the same
 // registry. What is genuinely new is a per-WRITE stall deadline instead of
-// a per-read one, and the response framing.
+// a per-read one, and destination-specific response framing.
 //
 // # The asymmetry that governs every failure below
 //
-// An upload can be undone: its bytes land in a temp file and a failure
-// before the promote leaves the destination exactly as it was. A download
-// cannot. Bytes handed to the client are gone, the status line is written
-// before the first of them, and neither can be revised. So there is no
-// stranded list here and no rollback — what replaces them is that the
-// response is FRAMED at the size measured on the pinned handle, so a
-// transfer that fails part-way arrives as a body short of its own declared
-// length, which every HTTP client treats as the failure it is.
+// A browser response cannot undo bytes handed to the client, so its
+// Content-Length makes a short source read an HTTP failure. A native save
+// writes into a same-directory temp file and keeps the prior destination
+// until atomic promotion. Its HTTP source stage therefore has no
+// Content-Length: a terminal status trailer proves source completion before
+// the local sink syncs and promotes, and a later completion RPC reports that
+// local commit to the transfer worker.
 
 import (
 	"context"
@@ -158,9 +156,20 @@ const (
 // even though R2 is not what is being enforced: a tolerant decoder accepts
 // a field, drops it silently, and reads as "that parameter is ignored",
 // which is one refactor away from being read.
+type downloadDestination struct {
+	value string
+	set   bool
+}
+
+func (d *downloadDestination) UnmarshalJSON(raw []byte) error {
+	d.set = true
+	return json.Unmarshal(raw, &d.value)
+}
+
 type filesDownloadParams struct {
-	BindingID string `json:"bindingId"`
-	Path      string `json:"path"`
+	BindingID   string              `json:"bindingId"`
+	Path        string              `json:"path"`
+	Destination downloadDestination `json:"destination,omitempty"`
 }
 
 // filesDownloadResult is what files.download answers. There is exactly one
@@ -175,16 +184,35 @@ type filesDownloadResult struct {
 	// when it lands. Never a path: the person asked for one file and the
 	// directory it came from is already on their screen.
 	Name string `json:"name"`
-	// Size is the length measured on the OPEN handle, and it is the number
-	// the fetch declares as its Content-Length. It is authoritative rather
-	// than advisory because the handle is pinned: nothing that happens to
-	// the NAME between this answer and the fetch can make it describe
-	// different bytes.
+	// Size is measured on the pinned OPEN handle. Browser responses frame it
+	// with Content-Length; native receivers use it to check streamed bytes
+	// before their atomic sink promotes the destination.
 	Size int64 `json:"size"`
 }
 
 type filesDownloadCancelParams struct {
 	TransferID string `json:"transferId"`
+}
+
+type filesDownloadCompleteParams struct {
+	TransferID string `json:"transferId"`
+	Outcome    string `json:"outcome"`
+}
+
+func decodeFilesDownloadCompleteRaw(raw json.RawMessage) (filesDownloadCompleteParams, string) {
+	var p filesDownloadCompleteParams
+	if msg := decodeParamsStrict(raw, &p); msg != "" {
+		return p, msg
+	}
+	if !isLowerHex(p.TransferID, 32) {
+		return p, "transferId is required and must be the 32-hex id the backend minted"
+	}
+	switch p.Outcome {
+	case "saved", "cancelled", "source-failed", "destination-failed":
+		return p, ""
+	default:
+		return p, `outcome must be "saved", "cancelled", "source-failed" or "destination-failed"`
+	}
 }
 
 // filesDownloadDoneParams is the files.downloadDone notification — the
@@ -210,21 +238,23 @@ type filesDownloadDoneParams struct {
 
 // ── validators ───────────────────────────────────────────────────────────
 
-// validateFilesDownloadRaw applies files.upload's path rules to the
-// download's source: absolute, clean and bounded, checked before any
-// handler runs, so every rejection is -32602 before anything is opened. The
-// provider then applies its own syntax, which is the half this cannot do
-// because the destination host may spell paths differently from the one we
-// are running on.
-func validateFilesDownloadRaw(raw json.RawMessage) string {
+// decodeFilesDownloadRaw is the single strict parser used by middleware's
+// validator and prepared typed handler for files.download.
+func decodeFilesDownloadRaw(raw json.RawMessage) (filesDownloadParams, string) {
 	var p filesDownloadParams
 	if msg := decodeParamsStrict(raw, &p); msg != "" {
-		return msg
+		return p, msg
 	}
 	if !isLowerHex(p.BindingID, 32) {
-		return "bindingId is required and must be the 32-hex id the backend minted"
+		return p, "bindingId is required and must be the 32-hex id the backend minted"
 	}
-	return validateFSPath(p.Path, "path")
+	if msg := validateFSPath(p.Path, "path"); msg != "" {
+		return p, msg
+	}
+	if p.Destination.set && p.Destination.value != "native" {
+		return p, `destination must be "native" when provided`
+	}
+	return p, ""
 }
 
 func validateFilesDownloadCancelRaw(raw json.RawMessage) string {
@@ -318,42 +348,81 @@ func (s *WSServer) startDownload(rt *runningTransfer, source transfer.Source) er
 // It holds the source and the pinned handle and nothing else. The handle
 // files.download came from, and the use-guard that handle carried, were
 // both let go when files.download answered (D8).
+const nativeDownloadCompletionTimeout = 30 * time.Second
+
 func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
 	defer close(rt.done)
-	// The pinned handle is closed on EVERY path out of this goroutine,
-	// including the one where nobody ever fetched. It is the closing end
-	// of the interval that opened when files.download called Open: from
-	// that call until this line, one descriptor on the source host is held
-	// against this transfer, and nothing else in the process may close it.
-	defer func() { _ = rt.download.Close() }()
-
 	var dst io.Writer
+	var sent int64
+	var sourceErr error
 	select {
 	case dst = <-rt.dest:
+		sent, sourceErr = source.Get(rt.ctx, rt.download, dst, rt.progress)
 	case <-rt.ctx.Done():
-		// Cancelled, or the ticket's TTL elapsed with nobody fetching. No
-		// byte has left the host and none ever will.
-		rt.finish(downloadStateCancelled, transfer.Outcome{}, rt.ctx.Err(), s.transfers.clock())
+		sourceErr = rt.ctx.Err()
+	}
+
+	rt.mu.Lock()
+	rt.sourceBytes, rt.sourceErr, rt.streamSet = sent, sourceErr, true
+	rt.mu.Unlock()
+	if rt.streamDone != nil {
+		close(rt.streamDone)
+	}
+	// This goroutine alone owns the pinned remote handle.
+	_ = rt.download.Close()
+
+	if !rt.nativeDownload {
+		rt.finish(downloadStateOf(sourceErr, rt.ctx.Err()), transfer.Outcome{}, sourceErr, s.transfers.clock())
 		s.transfers.retireTicket(rt.ticket)
 		s.settleDownload(rt)
 		return
 	}
 
-	sent, err := source.Get(rt.ctx, rt.download, dst, rt.progress)
-	rt.finish(downloadStateOf(err, rt.ctx.Err()), transfer.Outcome{}, err, s.transfers.clock())
+	outcome := ""
+	select {
+	case outcome = <-rt.completion:
+	case <-s.transfers.afterTimeout(s.transfers.nativeCompletionTimeout()):
+	}
+	state, finalErr := nativeDownloadFinal(rt, outcome, sourceErr)
+	rt.finish(state, transfer.Outcome{}, finalErr, s.transfers.clock())
 	s.transfers.retireTicket(rt.ticket)
-	// Before the deferred close(rt.done), on every path: anything that
-	// observes a transfer as over — the fetch handler, the teardown wait, a
-	// test — must find the terminal outcome already delivered or already
-	// retained, never in flight behind it.
 	s.settleDownload(rt)
-	if err != nil {
-		// The reason reaches the person through files.downloadDone; the
-		// log is for the operator and carries neither the ticket nor the
-		// path.
-		s.log.Warn("download did not complete",
-			"transfer_id", rt.id, "binding_id", rt.bindingID,
-			"sent", sent, "total", rt.size(), "error", err)
+}
+
+func nativeDownloadFinal(rt *runningTransfer, outcome string, sourceErr error) (string, error) {
+	var writeErr *transfer.WriteError
+	if errors.As(sourceErr, &writeErr) {
+		switch outcome {
+		case "destination-failed":
+			return downloadStateFailed, errors.New("native download save failed")
+		case "cancelled":
+			return downloadStateCancelled, context.Canceled
+		case "source-failed":
+			return downloadStateFailed, errors.New("native download source failed")
+		default:
+			return downloadStateFailed, errors.New("native download source failed")
+		}
+	}
+	if sourceErr != nil && !errors.Is(sourceErr, context.Canceled) {
+		return downloadStateFailed, sourceErr
+	}
+	switch outcome {
+	case "saved":
+		if sourceErr == nil {
+			return downloadStateSent, nil
+		}
+		return downloadStateFailed, errors.New("native download source failed")
+	case "cancelled":
+		return downloadStateCancelled, context.Canceled
+	case "destination-failed":
+		return downloadStateFailed, errors.New("native download save failed")
+	case "source-failed":
+		return downloadStateFailed, errors.New("native download source failed")
+	default:
+		if sourceErr != nil {
+			return downloadStateCancelled, context.Canceled
+		}
+		return downloadStateFailed, errors.New("native download completion not confirmed")
 	}
 }
 
@@ -438,14 +507,9 @@ type downloadHandlers struct {
 // and measures it, and only then is a transfer registered and a ticket
 // minted. Everything that can refuse this request without holding a
 // descriptor has refused it before one is held.
-func (h downloadHandlers) handleDownload(ctx context.Context, state *connState, req jsonrpcRequest) {
+func (h downloadHandlers) handleDownload(ctx context.Context, state *connState, req jsonrpcRequest, params filesDownloadParams) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
-		return
-	}
-	var params filesDownloadParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
@@ -506,19 +570,14 @@ func (h downloadHandlers) handleDownload(ctx context.Context, state *connState, 
 		// mint-side expiry timer and from server shutdown.
 		tctx, cancel := context.WithCancel(context.Background())
 		rt := &runningTransfer{
-			id:        id,
-			dir:       dirDownload,
-			sessionID: sid,
-			bindingID: params.BindingID,
-			download:  d,
-			ctx:       tctx,
-			cancel:    cancel,
-			dest:      make(chan io.Writer, 1),
-			done:      make(chan struct{}),
-			// One slot: the emitter reads the latest byte count off the
-			// transfer, so a second pending wake would only ask it to send
-			// the same number twice.
-			progressWake: make(chan struct{}, 1),
+			id: id, dir: dirDownload, sessionID: sid, bindingID: params.BindingID,
+			download: d, nativeDownload: params.Destination.set && params.Destination.value == "native",
+			ctx: tctx, cancel: cancel, dest: make(chan io.Writer, 1),
+			done: make(chan struct{}), progressWake: make(chan struct{}, 1),
+		}
+		if rt.nativeDownload {
+			rt.streamDone = make(chan struct{})
+			rt.completion = make(chan string, 1)
 		}
 		if err := h.machine.startDownload(rt, source); err != nil {
 			cancel()
@@ -562,6 +621,44 @@ func (h downloadHandlers) handleDownloadCancel(ctx context.Context, state *connS
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
+func (h downloadHandlers) handleDownloadComplete(state *connState, req jsonrpcRequest, params filesDownloadCompleteParams) {
+	rt := h.machine.transferFor(params.TransferID)
+	if rt == nil || rt.dir != dirDownload || !rt.nativeDownload || !state.has(rt.sessionID) {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		return
+	}
+	rt.mu.Lock()
+	if rt.completionSet {
+		same := rt.completionOutcome == params.Outcome
+		rt.mu.Unlock()
+		if !same {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+		return
+	}
+	if rt.finalized {
+		rt.mu.Unlock()
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		return
+	}
+	if params.Outcome == "saved" && (!rt.streamSet || rt.sourceErr != nil) {
+		rt.mu.Unlock()
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		return
+	}
+	rt.completionSet = true
+	rt.completionOutcome = params.Outcome
+	rt.completion <- params.Outcome
+	shouldStop := params.Outcome != "saved" && !rt.streamSet
+	rt.mu.Unlock()
+	if shouldStop {
+		rt.stop()
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+}
+
 // ── GET /download/{ticket} — the data half ───────────────────────────────
 
 // downloadResponse is the claimed response, wrapped so that it can be
@@ -585,13 +682,12 @@ type downloadResponse struct {
 	setWrite func(time.Time) error
 	flush    func() error
 	stall    time.Duration
-	// commit writes the response head. Called at most once, at the first
-	// byte, or by the handler for the zero-byte case.
-	commit func()
-
+	// commit writes the response head on its first byte or the zero-byte path.
+	commit    func()
 	mu        sync.Mutex
 	closed    bool
 	committed bool
+	finished  bool
 }
 
 // errDownloadClosed is what a Write after Close reports. It carries no
@@ -638,14 +734,19 @@ func (b *downloadResponse) Close() error {
 	b.mu.Lock()
 	already := b.closed
 	b.closed = true
+	finished := b.finished
 	b.mu.Unlock()
-	if already {
+	if already || finished {
 		return nil
 	}
-	// A deadline in the past: an in-flight Write returns at once with a
-	// timeout, and there is none to race with if it has not started.
 	_ = b.setWrite(time.Now().Add(-time.Second))
 	return nil
+}
+
+func (b *downloadResponse) finishResponse() {
+	b.mu.Lock()
+	b.finished = true
+	b.mu.Unlock()
 }
 
 // wroteAnything reports whether the response head has been committed, which
@@ -738,11 +839,18 @@ func (s *WSServer) handleDownloadFetch(w http.ResponseWriter, r *http.Request) {
 
 	name, size := rt.downloadName(), rt.size()
 	body := &downloadResponse{
-		w:        w,
-		setWrite: rc.SetWriteDeadline,
-		flush:    rc.Flush,
-		stall:    s.transfers.stallTimeout(),
-		commit:   func() { writeDownloadHead(w, name, size) },
+		w: w, setWrite: rc.SetWriteDeadline, flush: rc.Flush,
+		stall: s.transfers.stallTimeout(),
+		commit: func() {
+			if rt.nativeDownload {
+				writeNativeDownloadHead(w, name)
+			} else {
+				writeDownloadHead(w, name, size)
+			}
+		},
+	}
+	if rt.nativeDownload {
+		w.Header().Set("Trailer", "X-Nocx-Download-Status")
 	}
 	if !rt.attachWriter(body) {
 		// The transfer ended between the claim and the hand-off. Nothing
@@ -750,50 +858,39 @@ func (s *WSServer) handleDownloadFetch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone", http.StatusGone)
 		return
 	}
+	defer body.finishResponse()
 
-	// The handler waits for the transfer, because net/http invalidates the
-	// response writer the moment it returns and the source is writing to
-	// it.
-	//
-	// A client that goes away CLOSES the response and does not cancel the
-	// transfer, and the difference is upload's: closing is what unwinds a
-	// Write the source has already blocked in, while cancelling would
-	// additionally relabel the outcome — a dropped connection is a client
-	// that stopped taking the file, which is a FAILURE the person should
-	// see reported as one, and "cancelled" is reserved for somebody
-	// actually asking.
+	if rt.nativeDownload {
+		select {
+		case <-rt.streamDone:
+		case <-r.Context().Done():
+			_ = body.Close()
+			<-rt.streamDone
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		rt.mu.Lock()
+		sourceErr := rt.sourceErr
+		rt.mu.Unlock()
+		w.Header().Set("X-Nocx-Download-Status", downloadTrailerStatus(sourceErr, rt.ctx.Err()))
+		if !body.wroteAnything() {
+			writeNativeDownloadHead(w, name)
+			_ = rc.Flush()
+		}
+		return
+	}
 	select {
 	case <-rt.done:
 	case <-r.Context().Done():
 		_ = body.Close()
 		<-rt.done
 	}
-
-	// The deadline is cleared before anything else is written. Cancelling
-	// the transfer trips it deliberately — that is what unblocks a Write
-	// already in flight — and a deadline left in the past would then make
-	// the refusal below unwritable, so a person who cancelled would get a
-	// dropped connection instead of a status. The one case where this
-	// changes nothing is the client that went away, which is not reading
-	// either way.
 	_ = rc.SetWriteDeadline(time.Time{})
-
 	state, _, _, _ := rt.snapshot()
 	if body.wroteAnything() {
-		// The head is written and the bytes are gone; the status cannot be
-		// revised and must not be. A transfer that failed part-way is
-		// visible as a body short of the Content-Length it declared, which
-		// is what every HTTP client already treats as a broken transfer —
-		// and the authoritative account reaches the person as
-		// files.downloadDone regardless.
 		return
 	}
 	switch state {
 	case downloadStateSent:
-		// An empty file is a file: zero bytes means Write was never
-		// called, so the head has not been committed and this is where it
-		// is. A 200 with Content-Length: 0 is the correct download of an
-		// empty file, not a failure.
 		writeDownloadHead(w, name, size)
 	case downloadStateCancelled:
 		http.Error(w, "the transfer was cancelled", http.StatusInternalServerError)
@@ -842,6 +939,28 @@ func writeDownloadHead(w http.ResponseWriter, name string, size int64) {
 	// headers, so it would receive the bytes and not the name — and under
 	// `dev-web` every request here is cross-origin by construction.
 	h.Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length")
+	w.WriteHeader(http.StatusOK)
+}
+
+func downloadTrailerStatus(err, ctxErr error) string {
+	switch {
+	case err == nil:
+		return "sent"
+	case errors.Is(err, context.Canceled), ctxErr != nil:
+		return "cancelled"
+	default:
+		return "failed"
+	}
+}
+
+func writeNativeDownloadHead(w http.ResponseWriter, name string) {
+	h := w.Header()
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Disposition", contentDisposition(name))
+	h.Set("Cache-Control", "no-store")
+	h.Set("Access-Control-Expose-Headers", "Content-Disposition, X-Nocx-Download-Status")
+	h.Set("Trailer", "X-Nocx-Download-Status")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -917,13 +1036,21 @@ func rfc5987(s string) string {
 // the filesystem domain's bound.
 func (s *WSServer) filesDownloadSpecs(bindingOp capability.FilesystemBindingOperation, bindingSub control.Submission) []methodSpec {
 	return []methodSpec{
-		reg(bindingSub, "files.download", params(validateFilesDownloadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		regDecoded(bindingSub, "files.download", decodeFilesDownloadRaw, func(_ *wsConn, state *connState, r Responder) func(context.Context, jsonrpcRequest, filesDownloadParams) {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownload(ctx, state, req) }
+			return func(ctx context.Context, req jsonrpcRequest, p filesDownloadParams) {
+				h.handleDownload(ctx, state, req, p)
+			}
 		}),
-		reg(bindingSub, "files.downloadCancel", params(validateFilesDownloadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(bindingSub, "files.downloadCancel", params(validateFilesDownloadCancelRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
 			h := downloadHandlers{op: bindingOp, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownloadCancel(ctx, state, req) }
+		}),
+		regDecoded(bindingSub, "files.downloadComplete", decodeFilesDownloadCompleteRaw, func(_ *wsConn, state *connState, r Responder) func(context.Context, jsonrpcRequest, filesDownloadCompleteParams) {
+			h := downloadHandlers{op: bindingOp, machine: s, r: r}
+			return func(_ context.Context, req jsonrpcRequest, p filesDownloadCompleteParams) {
+				h.handleDownloadComplete(state, req, p)
+			}
 		}),
 	}
 }

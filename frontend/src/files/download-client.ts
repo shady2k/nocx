@@ -8,34 +8,33 @@
 // where an upload's is a three-way union, its outcome enum is
 // sent/cancelled/failed where an upload's is written/skipped/cancelled/
 // failed, and its terminal frame carries `bytes` where an upload's carries
-// `finalName` and `stranded`. A `TransferServices` covering both would be a
-// union of two vocabularies with a discriminator at every read.
+// `finalName` and `stranded`. A `TransferServices` covering both would be
+// a union of two vocabularies with a discriminator at every read.
 //
-// ## The bytes do not come back through here
+// ## Bulk bytes stay off the WebSocket
 //
-// There is no `fetchBody` on this seam, and its absence is the design
-// rather than a gap. `files.download` answers with a URL on the backend's
-// own HTTP surface and `Content-Disposition: attachment`, so handing that
-// URL to the browser is what saves the file — see `download-save.ts` for
-// why fetching it into a Blob first is the one thing this must not do.
-// What the renderer needs from the wire is what the transfer is DOING, and
-// that arrives as files.downloadProgress and files.downloadDone.
+// The result carries a one-shot HTTP ticket. Browser builds hand its URL to
+// the browser for a streamed attachment; native builds pass the same URL to
+// the local atomic receiver. Neither path buffers the body into a renderer
+// Blob, and neither sends file bytes over JSON-RPC. The renderer's own
+// lifecycle comes from `files.downloadProgress` and `files.downloadDone`.
 
 import type { Dispatcher } from '../dispatcher'
 import type { FilesDownloadResult } from '../generated/files.download'
 import type { FilesDownloadCancelResult } from '../generated/files.downloadCancel'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
+import type { FilesDownloadCompleteResult } from '../generated/files.downloadComplete'
 
-/** The whole of what a renderer may say about a download: which binding,
- *  and which path on the host that binding views. There is no source
- *  ticket and there is no destination — naming the path is the same
- *  authority the caller already used to list the directory, and where the
- *  file lands is the browser's business and never the renderer's. */
+/** The renderer names the remote source, and native only when selected by
+ *  the prepared receiver. It never supplies a local destination. */
 export interface DownloadRequest {
   bindingId: string
   path: string
+  destination?: 'native'
 }
+
+type NativeDownloadOutcome = 'saved' | 'cancelled' | 'source-failed' | 'destination-failed'
 
 /** The download feature's entire backend surface, so a test can substitute
  *  a fake — the ports pattern the Files panel already uses. */
@@ -43,9 +42,8 @@ export interface DownloadServices {
   /** Mint one transfer: an id, a one-shot ticket, the URL that redeems it,
    *  the name it lands under and the size measured on the open handle. */
   download(req: DownloadRequest): Promise<FilesDownloadResult>
-  /** Idempotent: cancelling a finished transfer is not an error, because
-   *  the person's cancel races the transfer's own completion every time. */
   cancel(transferId: string): Promise<FilesDownloadCancelResult>
+  complete(transferId: string, outcome: NativeDownloadOutcome): Promise<FilesDownloadCompleteResult>
   /** Resolve the result's `url` — a PATH on the backend's HTTP surface —
    *  against the socket's own origin. It is here rather than in the saver
    *  because only the client holds the dispatcher, and it is the same
@@ -68,11 +66,22 @@ class DownloadClient {
     return this.dispatcher.call<FilesDownloadResult>('files.download', {
       bindingId: req.bindingId,
       path: req.path,
+      ...(req.destination === undefined ? {} : { destination: req.destination }),
     })
   }
 
   cancel(transferId: string): Promise<FilesDownloadCancelResult> {
     return this.dispatcher.call<FilesDownloadCancelResult>('files.downloadCancel', { transferId })
+  }
+
+  complete(
+    transferId: string,
+    outcome: NativeDownloadOutcome,
+  ): Promise<FilesDownloadCompleteResult> {
+    return this.dispatcher.call<FilesDownloadCompleteResult>('files.downloadComplete', {
+      transferId,
+      outcome,
+    })
   }
 
   resolveUrl(url: string): string | null {
@@ -122,6 +131,7 @@ export function createDownloadServices(dispatcher: Dispatcher): DownloadServices
   return {
     download: (req) => client.download(req),
     cancel: (transferId) => client.cancel(transferId),
+    complete: (transferId, outcome) => client.complete(transferId, outcome),
     resolveUrl: (url) => client.resolveUrl(url),
     subscribeProgress: (handler) => client.subscribeProgress(handler),
     subscribeDone: (handler) => client.subscribeDone(handler),

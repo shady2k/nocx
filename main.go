@@ -18,10 +18,12 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/downloadsave"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/update/serverbin"
@@ -202,6 +204,13 @@ type WailsApp struct {
 	// would not start it is still built — every raise then fails loudly per
 	// call, which is the contract that predates the split.
 	attention *wailsadapter.Host
+
+	promptMu        sync.Mutex
+	promptAdmission control.Admission
+	downloadOnce    sync.Once
+	downloadMu      sync.RWMutex
+	downloadAddress string
+	downloadSave    *downloadsave.Service
 }
 
 // Log logs a message from the frontend.
@@ -282,6 +291,12 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	// From here a health report can certify: the updater can name the
 	// backend that answered this window, and refuse anything else.
 	w.probe.Attach(launch)
+	if isLoopbackWSAddress(launch.Hello.WSAddress) {
+		w.downloadMu.Lock()
+		w.downloadAddress = launch.Hello.WSAddress
+		w.downloadMu.Unlock()
+		w.initializeDownloadSave()
+	}
 	w.logger.Info("nocx window has a backend",
 		"version", launch.Hello.Build.Version,
 		"commit", launch.Hello.Build.Commit,
@@ -415,6 +430,9 @@ func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
 //
 //wails:ignore
 func (w *WailsApp) ServiceShutdown() error {
+	if svc := w.downloadService(); svc != nil {
+		svc.Close()
+	}
 	if w.notifications != nil {
 		return w.notifications.ServiceShutdown()
 	}
@@ -459,6 +477,12 @@ func (w *WailsApp) ResolveBackend() BackendResolution {
 			w.logger.Error("nocx backend discovery failed", "error", err)
 		}
 		return backendFailureResolution(launchFailure(err))
+	}
+	if isLoopbackWSAddress(launch.Hello.WSAddress) {
+		w.downloadMu.Lock()
+		w.downloadAddress = launch.Hello.WSAddress
+		w.downloadMu.Unlock()
+		w.initializeDownloadSave()
 	}
 	if w.probe != nil {
 		w.probe.Attach(launch)
@@ -692,19 +716,48 @@ func (w *WailsApp) shutdown() {
 // reportAttentionActivated for why the shell does not act on it itself.
 const attentionActivatedEvent = "nocx:attentionActivated"
 
-// HostOpenFile opens the platform file picker and returns the chosen ABSOLUTE
-// path, or "" when the person cancelled.
-//
-// It cannot be dismissed from here — the v3 open dialog has no cancel handle
-// once shown — so the call returns only when the person acts. That is the
-// contract transport.DialogService has always documented for a
-// non-cooperative adapter, and the coordinator's capacity-one waiting gate is
-// what keeps a second picker from stacking meanwhile.
+// isLoopbackWSAddress accepts only a checked loopback TCP endpoint from the
+// backend handshake before it is retained for native downloads.
+func isLoopbackWSAddress(address string) bool {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (w *WailsApp) acquirePrompt(ctx context.Context) (control.Permit, error) {
+	w.promptMu.Lock()
+	if w.promptAdmission == nil {
+		w.promptAdmission = control.NewWaitingSemaphore("client.os-dialog", 1, 8, time.Second)
+	}
+	admission := w.promptAdmission
+	w.promptMu.Unlock()
+	permit, rejection := admission.TryAcquire(ctx)
+	if rejection != nil {
+		return nil, errors.New("another system dialog is already open")
+	}
+	return permit, nil
+}
+
+// HostOpenFile opens the platform file picker and returns the chosen path or
+// an empty string when the person cancels. It shares bounded admission with
+// directory and download save prompts.
 func (w *WailsApp) HostOpenFile() (string, error) {
 	app := application.Get()
 	if app == nil {
 		return "", errors.New("no Wails application in this process")
 	}
+	permit, err := w.acquirePrompt(context.Background())
+	if err != nil {
+		return "", err
+	}
+	defer permit.Release()
 	return app.Dialog.OpenFile().
 		CanChooseFiles(true).
 		SetTitle("Choose a file").
@@ -721,6 +774,11 @@ func (w *WailsApp) HostOpenDirectory() (string, error) {
 	if app == nil {
 		return "", errors.New("no Wails application in this process")
 	}
+	permit, err := w.acquirePrompt(context.Background())
+	if err != nil {
+		return "", err
+	}
+	defer permit.Release()
 	return app.Dialog.OpenFile().
 		CanChooseFiles(false).
 		CanChooseDirectories(true).

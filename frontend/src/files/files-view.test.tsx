@@ -1613,16 +1613,15 @@ describe('downloading a file from the tree', () => {
     expect(menuLabels().some((l) => l.includes('Download'))).toBe(false)
   })
 
-  it('picking it names the file on the wire and hands the browser the URL', async () => {
+  it('passes the row name as a save suggestion and hands the browser the URL', async () => {
     const app = await openMenuOn('ssh', false)
     app.services!.nextResult.push(downloadResultFixture({ name: 'notes.md', size: 12 }))
     menuRow('Download').click()
 
     await vi.waitFor(() => expect(app.services!.downloads).toHaveLength(1))
     expect(app.services!.downloads[0]).toEqual({ bindingId: 'b1', path: '/notes.md' })
-    // The renderer named no destination — it could not, and the saver was
-    // handed the URL the backend minted.
     await vi.waitFor(() => expect(app.saver!.saved).toHaveLength(1))
+    expect(app.saver!.suggestedNames).toEqual(['notes.md'])
     expect(app.saver!.saved[0]).toContain('/download/')
   })
 

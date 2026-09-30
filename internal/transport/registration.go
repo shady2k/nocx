@@ -99,6 +99,9 @@ type methodSpec struct {
 	// method that nobody validated cannot exist in a built server. See
 	// paramsValidator.
 	validate paramsValidator
+	// prepare decodes validated params once and attaches the typed value to
+	// the request passed to the handler.
+	prepare func(json.RawMessage) (any, string)
 }
 
 // paramsValidator checks one method's raw params BEFORE its handler runs.
@@ -290,7 +293,18 @@ func validated(spec methodSpec, next handlerFunc, r Responder) handlerFunc {
 			_ = r.TryError(req.ID, RPCError{Code: -32601, Message: msg})
 			return
 		}
-		if msg := validateParams(spec.validate, req.Params); msg != "" {
+		if len(req.Params) > maxParamsBytes {
+			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("Invalid params: params exceed %d bytes", maxParamsBytes)})
+			return
+		}
+		if spec.prepare != nil {
+			prepared, msg := spec.prepare(req.Params)
+			if msg != "" {
+				_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+				return
+			}
+			req.preparedParams = prepared
+		} else if msg := validateParams(spec.validate, req.Params); msg != "" {
 			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 			return
 		}
@@ -308,6 +322,41 @@ type handlerFunc func(ctx context.Context, req jsonrpcRequest)
 // sealed-vault normalizer for every method (connMethods decides).
 func reg(sub control.Submission, method string, v paramsValidator, build func(w *wsConn, state *connState, r Responder) handlerFunc) methodSpec {
 	return methodSpec{method: method, submission: sub, build: build, validate: v}
+}
+
+// regDecoded combines strict validation with request-local typed decoding.
+// The validator and prepare hook share one decoder implementation; each
+// request is decoded exactly once by validated.
+func regDecoded[T any](sub control.Submission, method string,
+	decode func(json.RawMessage) (T, string),
+	build func(*wsConn, *connState, Responder) func(context.Context, jsonrpcRequest, T),
+) methodSpec {
+	prepare := func(raw json.RawMessage) (any, string) {
+		value, msg := decode(raw)
+		if msg != "" {
+			return nil, msg
+		}
+		return value, ""
+	}
+	return methodSpec{
+		method: method, submission: sub,
+		validate: params(func(raw json.RawMessage) string {
+			_, msg := decode(raw)
+			return msg
+		}),
+		prepare: prepare,
+		build: func(w *wsConn, state *connState, r Responder) handlerFunc {
+			handle := build(w, state, r)
+			return func(ctx context.Context, req jsonrpcRequest) {
+				value, ok := req.preparedParams.(T)
+				if !ok {
+					_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+					return
+				}
+				handle(ctx, req, value)
+			}
+		},
+	}
 }
 
 // whenAvailable declares that a method answers only while its domain is

@@ -22,6 +22,8 @@ package transport
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +38,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/transfer"
 )
 
 func downloadURLFor(ws *WSServer, ticket string) string {
@@ -687,5 +692,281 @@ func TestDownloadRoute_ARefusedDownloadMintsNoTicket(t *testing.T) {
 	e.ws.transfers.mu.Unlock()
 	if tickets != 0 {
 		t.Fatalf("%d tickets outstanding after a refused download", tickets)
+	}
+}
+
+func TestNativeDownloadStreamsBeforeFinalCompletion(t *testing.T) {
+	for _, body := range []string{"native bytes", ""} {
+		name := "regular"
+		if body == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			e := newDownloadTestEnv(t)
+			sid := e.openSession(t, 1)
+			dir := t.TempDir()
+			path := fixture(t, dir, "native.bin", body)
+			bid := e.openBinding(t, sid, dir, 2)
+			params := downloadParams(bid, path)
+			params["destination"] = "native"
+			started := callDownload(t, e.conn, params, 3).mustResult(t)
+
+			early := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+				"transferId": started.TransferID, "outcome": "saved",
+			}, 4)
+			var earlyReply struct {
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(early, &earlyReply); err != nil || earlyReply.Error == nil || earlyReply.Error.Code != -32602 {
+				t.Fatalf("saved before source completion was not rejected: %s (decode %v)", early, err)
+			}
+			other := connectWS(t, e.ws)
+			foreign := jsonrpcCallWithID(t, other, "files.downloadComplete", map[string]any{
+				"transferId": started.TransferID, "outcome": "cancelled",
+			}, 8)
+			_ = other.Close()
+			var foreignReply struct {
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(foreign, &foreignReply); err != nil || foreignReply.Error == nil || foreignReply.Error.Code != -32602 {
+				t.Fatalf("foreign session completion was not rejected: %s (decode %v)", foreign, err)
+			}
+
+			resp, err := uploadHTTPClient.Get(downloadURLFor(e.ws, started.Ticket))
+			if err != nil {
+				t.Fatalf("native GET: %v", err)
+			}
+			got, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read native response: %v", readErr)
+			}
+			if string(got) != body {
+				t.Fatalf("body %q, want %q", got, body)
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d, want 200", resp.StatusCode)
+			}
+			if resp.Header.Get("Content-Length") != "" {
+				t.Fatalf("native response has Content-Length %q", resp.Header.Get("Content-Length"))
+			}
+			if status := resp.Trailer.Get("X-Nocx-Download-Status"); status != "sent" {
+				t.Fatalf("terminal trailer %q, want sent", status)
+			}
+			rt := e.ws.transferFor(started.TransferID)
+			select {
+			case <-rt.done:
+				t.Fatal("native transfer finalized before local completion")
+			default:
+			}
+
+			completionSchema := loadSchema(t, "files.downloadComplete.schema.json")
+			completionParamsSchema := loadSchema(t, "files.downloadComplete.params.schema.json")
+			complete := func(id int, outcome string) *jsonrpcErrorObj {
+				params := map[string]any{"transferId": started.TransferID, "outcome": outcome}
+				encodedParams, err := json.Marshal(params)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := validateJSONErr(completionParamsSchema, encodedParams); err != nil {
+					t.Fatalf("completion params violate schema: %v", err)
+				}
+				raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", params, id)
+				var reply struct {
+					Result json.RawMessage  `json:"result"`
+					Error  *jsonrpcErrorObj `json:"error"`
+				}
+				if err := json.Unmarshal(raw, &reply); err != nil {
+					t.Fatalf("decode completion reply: %v", err)
+				}
+				if reply.Error == nil {
+					if err := validateJSONErr(completionSchema, reply.Result); err != nil {
+						t.Fatalf("completion result violates schema: %v", err)
+					}
+					if string(reply.Result) != "{}" {
+						t.Fatalf("completion result %s, want {}", reply.Result)
+					}
+				}
+				return reply.Error
+			}
+			if err := complete(5, "saved"); err != nil {
+				t.Fatalf("saved completion: %+v", err)
+			}
+			if err := complete(6, "saved"); err != nil {
+				t.Fatalf("identical completion retry: %+v", err)
+			}
+			if err := complete(7, "cancelled"); err == nil || err.Code != -32602 {
+				t.Fatalf("contradictory completion was not rejected: %+v", err)
+			}
+			if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateSent {
+				t.Fatalf("final state %q, want sent", state)
+			}
+		})
+	}
+}
+
+func TestNativeDownloadCompletionTimeoutIsTruthful(t *testing.T) {
+	expired := make(chan time.Time, 1)
+	expired <- time.Now()
+	e := newDownloadTestEnv(t, func(s *WSServer) {
+		s.transfers.after = func(time.Duration) <-chan time.Time { return expired }
+	})
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "native.bin", "body")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	resp, err := uploadHTTPClient.Get(downloadURLFor(e.ws, started.Ticket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
+		t.Fatalf("final state %q, want failed without completion", state)
+	}
+	_, _, _, finalErr := e.ws.transferFor(started.TransferID).snapshot()
+	if finalErr == nil || finalErr.Error() != "native download completion not confirmed" {
+		t.Fatalf("timeout reason %v", finalErr)
+	}
+}
+
+func TestNativeDownloadNegativeCompletionBeforeClaimReleasesTicket(t *testing.T) {
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "native.bin", "body")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "cancelled",
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("pre-claim cancellation reply %s (decode %v)", raw, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("state %q, want cancelled", state)
+	}
+	if code, _ := getDownload(t, e.ws, started.Ticket); code != http.StatusGone {
+		t.Fatalf("ticket after pre-claim cancellation = %d, want 410", code)
+	}
+}
+
+func TestDownloadCompleteRejectsBrowserAndForeignSession(t *testing.T) {
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "browser.bin", "browser")
+	bid := e.openBinding(t, sid, dir, 2)
+	started := callDownload(t, e.conn, downloadParams(bid, path), 3).mustResult(t)
+	other := connectWS(t, e.ws)
+	defer func() { _ = other.Close() }()
+	for _, tc := range []struct {
+		name string
+		conn *websocket.Conn
+		id   int
+	}{
+		{name: "browser receiver", conn: e.conn, id: 4},
+		{name: "foreign connection", conn: other, id: 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := jsonrpcCallWithID(t, tc.conn, "files.downloadComplete", map[string]any{
+				"transferId": started.TransferID, "outcome": "cancelled",
+			}, tc.id)
+			var reply struct {
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(raw, &reply); err != nil || reply.Error == nil || reply.Error.Code != -32602 {
+				t.Fatalf("completion was not rejected: %s (decode %v)", raw, err)
+			}
+		})
+	}
+	if code, body, hdr, err := getDownloadFull(e.ws, started.Ticket, nil); err != nil || code != http.StatusOK || body != "browser" || hdr.Get("Content-Length") != "7" {
+		t.Fatalf("browser framing changed: status=%d body=%q length=%q err=%v", code, body, hdr.Get("Content-Length"), err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateSent {
+		t.Fatalf("browser state %q, want sent", state)
+	}
+}
+
+type exactBytesThenSourceError struct{ err error }
+
+func (s exactBytesThenSourceError) Open(path string) (*transfer.Download, error) {
+	return transfer.NewSource(pinnedFS{body: "bytes"}, transfer.DefaultChunk).Open(path)
+}
+
+func (s exactBytesThenSourceError) Get(_ context.Context, _ *transfer.Download, w io.Writer, progress func(int64)) (int64, error) {
+	n, err := w.Write([]byte("bytes"))
+	progress(int64(n))
+	if err != nil {
+		return int64(n), err
+	}
+	return int64(n), s.err
+}
+
+func TestNativeDownloadSourceErrorAfterExactAdvertisedBytesUsesFailedTrailer(t *testing.T) {
+	sourceErr := errors.New("remote SFTP read failed after final data packet")
+	e := newDownloadTestEnvWith(t, downloadFactoryWithSource(exactBytesThenSourceError{err: sourceErr}))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "remote.bin", "bytes")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	resp, err := uploadHTTPClient.Get(downloadURLFor(e.ws, started.Ticket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read exact-size native body: %v", err)
+	}
+	if string(body) != "bytes" || int64(len(body)) != started.Size {
+		t.Fatalf("received %q (%d bytes), advertised %d", body, len(body), started.Size)
+	}
+	if got := resp.Trailer.Get("X-Nocx-Download-Status"); got != "failed" {
+		t.Fatalf("source error trailer %q, want failed", got)
+	}
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "source-failed",
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("source-failed completion response %s (decode %v)", raw, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
+		t.Fatalf("state %q, want failed", state)
+	}
+	_, _, _, gotErr := e.ws.transferFor(started.TransferID).snapshot()
+	if gotErr == nil || gotErr.Error() != sourceErr.Error() {
+		t.Fatalf("source failure %v, want original %v", gotErr, sourceErr)
+	}
+}
+
+func TestNativeDownloadSeparatesWriterAndRemoteReadErrors(t *testing.T) {
+	pathFailure := errors.New("private destination path detail")
+	writeErr := &transfer.WriteError{Err: pathFailure}
+	state, err := nativeDownloadFinal(&runningTransfer{}, "destination-failed", writeErr)
+	if state != downloadStateFailed || err == nil || err.Error() != "native download save failed" || strings.Contains(err.Error(), pathFailure.Error()) {
+		t.Fatalf("destination classification state=%q err=%v", state, err)
+	}
+	remoteErr := &transfer.SizeMismatchError{Declared: 5, Got: 4}
+	state, err = nativeDownloadFinal(&runningTransfer{}, "destination-failed", remoteErr)
+	if state != downloadStateFailed || err != remoteErr {
+		t.Fatalf("remote source classification state=%q err=%v, want original %v", state, err, remoteErr)
 	}
 }

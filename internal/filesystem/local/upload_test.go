@@ -54,6 +54,33 @@ func TestProviderImplementsUploader(t *testing.T) {
 	}
 }
 
+func TestDownloadTargetValidatesLocalPathAndBuildsOverwriteUpload(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.bin")
+	got, err := local.DownloadTarget(path, 42)
+	if err != nil {
+		t.Fatalf("DownloadTarget(%q): %v", path, err)
+	}
+	want := transfer.Upload{DestDir: dir, Name: "report.bin", Size: 42, OnExists: transfer.Overwrite}
+	if got != want {
+		t.Fatalf("DownloadTarget = %+v, want %+v", got, want)
+	}
+
+	for _, invalid := range []struct {
+		path string
+		size int64
+	}{
+		{path: "relative/file"},
+		{path: dir + string(filepath.Separator) + "sub" + string(filepath.Separator) + ".." + string(filepath.Separator) + "file"},
+		{path: string(filepath.Separator)},
+		{path: path, size: -1},
+	} {
+		if _, err := local.DownloadTarget(invalid.path, invalid.size); err == nil {
+			t.Errorf("DownloadTarget(%q, %d) succeeded; want local destination validation failure", invalid.path, invalid.size)
+		}
+	}
+}
+
 // TestSink_WritesTheFileIntoTheDestination is the happy path rule 2 asks
 // for on this side: the bytes a browser drop carries land in the tab's
 // directory, under the name they were dropped with, with the content they

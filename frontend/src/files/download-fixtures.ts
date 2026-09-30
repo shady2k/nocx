@@ -10,7 +10,7 @@ import type { DownloadRequest, DownloadServices } from './download-client'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
 import type { FilesDownloadResult } from '../generated/files.download'
-import type { DownloadSaver } from './download-save'
+import type { DownloadSaveOutcome, DownloadSaver } from './download-save'
 
 export { fakeClock } from './upload-fixtures'
 
@@ -39,6 +39,10 @@ export function fakeDownloadServices(): DownloadServices & {
   downloads: DownloadRequest[]
   cancels: string[]
   nextResult: FilesDownloadResult[]
+  completions: {
+    transferId: string
+    outcome: 'saved' | 'cancelled' | 'source-failed' | 'destination-failed'
+  }[]
   /** What `resolveUrl` answers. Null is the real "there is no socket" —
    *  the case the flow has to report rather than guess an origin for. */
   origin: string | null
@@ -49,6 +53,10 @@ export function fakeDownloadServices(): DownloadServices & {
   const api = {
     downloads: [] as DownloadRequest[],
     cancels: [] as string[],
+    completions: [] as {
+      transferId: string
+      outcome: 'saved' | 'cancelled' | 'source-failed' | 'destination-failed'
+    }[],
     nextResult: [] as FilesDownloadResult[],
     origin: 'http://127.0.0.1:7331' as string | null,
     download(req: DownloadRequest): Promise<FilesDownloadResult> {
@@ -59,6 +67,13 @@ export function fakeDownloadServices(): DownloadServices & {
     },
     cancel(transferId: string) {
       api.cancels.push(transferId)
+      return Promise.resolve({})
+    },
+    complete(
+      transferId: string,
+      outcome: 'saved' | 'cancelled' | 'source-failed' | 'destination-failed',
+    ) {
+      api.completions.push({ transferId, outcome })
       return Promise.resolve({})
     },
     resolveUrl(url: string): string | null {
@@ -88,12 +103,25 @@ export function fakeDownloadServices(): DownloadServices & {
  *  real one clicks an anchor, which jsdom cannot follow and a test must not
  *  want it to: what the flow owes is "the platform was asked, exactly once,
  *  with the resolved URL". */
-export function fakeSaver(): DownloadSaver & { saved: string[] } {
+/** Browser preparation records detached anchor handoffs for flow tests. */
+export function fakeSaver(): DownloadSaver & { saved: string[]; suggestedNames: string[] } {
   const saved: string[] = []
+  const suggestedNames: string[] = []
   return {
     saved,
-    save(url: string) {
-      saved.push(url)
+    suggestedNames,
+    prepare(suggestedName) {
+      suggestedNames.push(suggestedName)
+      return Promise.resolve({
+        destination: 'browser' as const,
+        save(_result, url): Promise<DownloadSaveOutcome> {
+          if (url === null) return Promise.resolve('destination-failed')
+          saved.push(url)
+          return Promise.resolve('handed-off')
+        },
+        cancel() {},
+        dispose() {},
+      })
     },
   }
 }

@@ -101,6 +101,23 @@ describe('what reaches the wire', () => {
     const frame = frames(s).find((f) => f.method === 'files.downloadCancel')
     expect(frame?.params).toEqual({ transferId: '0'.repeat(32) })
   })
+  it('files.downloadComplete sends only the transfer id and enum outcome', async () => {
+    const { d, s } = await connected()
+    void createDownloadServices(d).complete('0'.repeat(32), 'source-failed')
+    const frame = frames(s).find((f) => f.method === 'files.downloadComplete')
+    expect(frame?.params).toEqual({ transferId: '0'.repeat(32), outcome: 'source-failed' })
+  })
+
+  it('native destination is the only optional download parameter', async () => {
+    const { d, s } = await connected()
+    void createDownloadServices(d).download({
+      bindingId: 'b1',
+      path: '/srv/a',
+      destination: 'native',
+    })
+    const frame = frames(s).find((f) => f.method === 'files.download')
+    expect(frame?.params).toEqual({ bindingId: 'b1', path: '/srv/a', destination: 'native' })
+  })
 })
 
 describe('resolving the fetch URL', () => {

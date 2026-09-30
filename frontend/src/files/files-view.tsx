@@ -338,18 +338,13 @@ function FilesPanel(props: FilesPanelProps) {
   /**
    * Download the file the menu was opened on (nocx-9le.8.3).
    *
-   * THE RENDERER NAMES NO DESTINATION. It says which file, and the browser
-   * saves it wherever that person's browser saves files, under the name the
-   * backend put on Content-Disposition. There is no path for the panel to
-   * choose and it must not invent one; the desktop build's native save
-   * dialog is a backend method (nocx-9le.8.4) and will arrive as another
-   * implementation of the saver, not as a path threaded through here.
+   * THE RENDERER NAMES NO DESTINATION. The desktop's native save dialog
+   * chooses the local target; browser downloads remain browser-owned.
    *
    * It appears in the operations list because the flow records it in the
    * download store, which the activity bar reads as a source — the same row
    * an upload draws, with the same progress and the same cancel. There is
-   * no second list and no second row: that is the thing the operations
-   * surface exists to prevent.
+   * no second list and no second row.
    */
   const downloadFile = async (node: FilesNode): Promise<void> => {
     const d = props.download
@@ -361,6 +356,7 @@ function FilesPanel(props: FilesPanelProps) {
     await d.flow.fetch({
       bindingId: b.bindingId,
       path: node.path,
+      name: node.name,
       machine: props.store.origin()?.machine ?? '',
     })
   }

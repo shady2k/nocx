@@ -5,8 +5,58 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/transfer"
 )
+
+type orderedSyncFile struct {
+	events   *[]string
+	syncErr  error
+	closeErr error
+}
+
+func (f *orderedSyncFile) Write([]byte) (int, error) { return 0, nil }
+func (f *orderedSyncFile) Sync() error {
+	*f.events = append(*f.events, "sync")
+	return f.syncErr
+}
+
+func (f *orderedSyncFile) Close() error {
+	*f.events = append(*f.events, "close")
+	return f.closeErr
+}
+
+func TestSyncingFileSyncsBeforeCloseAndClosesAfterSyncFailure(t *testing.T) {
+	wantSyncErr := errors.New("sync failed")
+	events := []string{}
+	f := &syncingFile{file: &orderedSyncFile{events: &events, syncErr: wantSyncErr}}
+
+	err := f.Close()
+	var closed *transfer.ClosedFileError
+	if !errors.As(err, &closed) || !errors.Is(err, wantSyncErr) {
+		t.Fatalf("Close error = %v; want ClosedFileError wrapping sync failure", err)
+	}
+	if got := strings.Join(events, ","); got != "sync,close" {
+		t.Fatalf("operations = %q, want sync before close", got)
+	}
+}
+
+func TestSyncingFileMarksCloseFailureAfterClosing(t *testing.T) {
+	wantCloseErr := errors.New("close failed")
+	events := []string{}
+	f := &syncingFile{file: &orderedSyncFile{events: &events, closeErr: wantCloseErr}}
+
+	err := f.Close()
+	var closed *transfer.ClosedFileError
+	if !errors.As(err, &closed) || !errors.Is(err, wantCloseErr) {
+		t.Fatalf("Close error = %v; want ClosedFileError wrapping close failure", err)
+	}
+	if got := strings.Join(events, ","); got != "sync,close" {
+		t.Fatalf("operations = %q, want sync before close", got)
+	}
+}
 
 // The three RemoteFS contracts the sink cannot derive for itself, asserted
 // on the adapter directly. Two of them are reachable through Put and are

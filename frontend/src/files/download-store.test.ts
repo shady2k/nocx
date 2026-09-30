@@ -11,7 +11,7 @@
 // accounts differently: a byte count that is meaningful on a FAILURE, and
 // `sent` as its own terminal phase rather than a synonym folded into
 // `written`.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createRoot } from 'solid-js'
 
 import { fakeClock, fakeDownloadServices } from './download-fixtures'
@@ -265,6 +265,59 @@ describe('cancelling', () => {
     f.services.cancel = () => Promise.reject(new Error('gone'))
     expect(() => f.store.cancel('t1')).not.toThrow()
     await Promise.resolve()
+  })
+  it('cancels native local work as well as the backend on user cancel', () => {
+    const f = fixture()
+    const localCancel = vi.fn()
+    f.store.begin({
+      transferId: 'native',
+      name: 'a',
+      sourcePath: '/a',
+      machine: 'srv',
+      size: 1,
+      localCancel,
+    })
+    f.store.cancel('native')
+    expect(localCancel).toHaveBeenCalledTimes(1)
+    expect(f.services.cancels).toEqual(['native'])
+  })
+
+  it('stops local work on backend failure or cancellation, but not success', () => {
+    for (const outcome of ['failed', 'cancelled', 'sent'] as const) {
+      const f = fixture()
+      const localCancel = vi.fn()
+      f.store.begin({
+        transferId: 'native',
+        name: 'a',
+        sourcePath: '/a',
+        machine: 'srv',
+        size: 1,
+        localCancel,
+      })
+      f.services.emitDone({
+        transferId: 'native',
+        outcome,
+        name: 'a',
+        bytes: 1,
+        total: 1,
+      })
+      expect(localCancel).toHaveBeenCalledTimes(outcome === 'sent' ? 0 : 1)
+    }
+  })
+
+  it('cancels remaining native local work on disposal', () => {
+    const f = fixture()
+    const localCancel = vi.fn()
+    f.store.begin({
+      transferId: 'native',
+      name: 'a',
+      sourcePath: '/a',
+      machine: 'srv',
+      size: 1,
+      localCancel,
+    })
+    f.store.dispose()
+    expect(localCancel).toHaveBeenCalledTimes(1)
   })
 })
 

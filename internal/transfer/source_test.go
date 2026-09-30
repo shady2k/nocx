@@ -26,12 +26,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/transfer"
 )
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) - 1, nil }
 
 func openFor(t *testing.T, f *fakeReadFS, p string, chunk int) *transfer.Download {
 	t.Helper()
@@ -74,6 +79,25 @@ func TestSourceGet_DeliversAnOrdinaryFile(t *testing.T) {
 	}
 	if lastProgress != int64(len(body)) {
 		t.Errorf("last progress = %d, want %d", lastProgress, len(body))
+	}
+}
+
+func TestSourceGet_ShortWriterHasTypedClassificationAndOriginalMessage(t *testing.T) {
+	f := newFakeReadFS()
+	f.files["/srv/f"] = "abc"
+	d := openFor(t, f, "/srv/f", transfer.DefaultChunk)
+
+	_, err := transfer.NewSource(f, transfer.DefaultChunk).Get(context.Background(), d, shortWriter{}, nil)
+	var writeErr *transfer.WriteError
+	if !errors.As(err, &writeErr) || !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("Get error = %v; want WriteError wrapping io.ErrShortWrite", err)
+	}
+	if got := err.Error(); got != "transfer: send: short write" {
+		t.Fatalf("Get error text = %q; want the existing send diagnosis", got)
+	}
+	var mismatch *transfer.SizeMismatchError
+	if errors.As(err, &mismatch) {
+		t.Fatalf("writer failure was misclassified as source size mismatch: %v", err)
 	}
 }
 
@@ -179,8 +203,9 @@ func TestSourceGet_ReadFailsMidStream(t *testing.T) {
 	var w countingWriter
 	sent, err := transfer.NewSource(f, 256).
 		Get(context.Background(), d, &w, nil)
-	if !errors.Is(err, errReadFailed) {
-		t.Fatalf("Get error = %v; want the read's own reason", err)
+	var writeErr *transfer.WriteError
+	if !errors.Is(err, errReadFailed) || errors.As(err, &writeErr) {
+		t.Fatalf("Get error = %v; want a source read failure, not WriteError", err)
 	}
 	if sent != 1024 || len(w.got) != 1024 {
 		t.Fatalf("sent = %d and the client holds %d; want 1024 of each", sent, len(w.got))
@@ -202,6 +227,10 @@ func TestSourceGet_TheFileShrankAfterTheOpen(t *testing.T) {
 	var mismatch *transfer.SizeMismatchError
 	if !errors.As(err, &mismatch) {
 		t.Fatalf("Get error = %v; want a SizeMismatchError", err)
+	}
+	var writeErr *transfer.WriteError
+	if errors.As(err, &writeErr) {
+		t.Fatalf("size mismatch was classified as a destination write failure: %v", err)
 	}
 	if mismatch.Declared != 4096 || mismatch.Got != int64(len("only eight")) || mismatch.AtLeast {
 		t.Fatalf("mismatch = %+v; want the declared 4096 against the 10 delivered", mismatch)

@@ -131,15 +131,12 @@ func (s *sink) Put(ctx context.Context, u Upload, r io.Reader, progress func(tot
 		copyErr = ctx.Err()
 	}
 	if copyErr != nil || closeErr != nil {
-		// §6 splits these two. A copy that failed leaves a temp whose state
-		// is known — partial, ours, removable. A Close that failed after
-		// every byte was written is precisely the case where the server did
-		// NOT confirm the file's final state, and removing a file whose
-		// state you do not know is not cleanup, it is a second uncertain
-		// write. So that temp stays and is named; the reservation, an empty
-		// file the sink alone created, goes either way.
+		// A confirmed-closed local file can be removed even when Sync failed:
+		// unlike a remote Close error, the descriptor no longer owns an
+		// uncertain remote state. Unmarked Close failures remain stranded.
 		remove, stranded := []string{temp, reserved}, []string(nil)
-		if copyErr == nil {
+		var closed *ClosedFileError
+		if copyErr == nil && closeErr != nil && !errors.As(closeErr, &closed) {
 			remove, stranded = []string{reserved}, []string{temp}
 		}
 		left, cleanupErr := s.tryRemove(remove...)
@@ -218,7 +215,7 @@ func copyChunks(ctx context.Context, dst io.Writer, src io.Reader, size int64, c
 				err = io.ErrShortWrite
 			}
 			if err != nil {
-				return fmt.Errorf("transfer: %s: %w", label.write, err)
+				return fmt.Errorf("transfer: %s: %w", label.write, &WriteError{Err: err})
 			}
 			total += int64(n)
 			progress(total)

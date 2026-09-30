@@ -1,46 +1,21 @@
-// DownloadFlow — take one file off the machine the active tab is on.
-//
-// It is shorter than the upload flow and every missing part is the
-// direction rather than an economy. There is no collision question because
-// nothing on the far host is replaced. There is no source routing because
-// there is one source: a path the caller already enumerated. There is no
-// body to send because the bytes come the other way, and they do not come
-// through the renderer at all (`download-save.ts`).
-//
-// So the whole gesture is: mint a transfer, record it from the RESULT, and
-// hand the URL to the platform. Two things can go wrong here and both are
-// the renderer's own half:
-//
-// - `files.download` was refused. No transfer exists, so there is no row to
-//   fail — the refusal is reported and nothing else happens. (A row minted
-//   for a transfer the backend never created is a row nothing can ever end.)
-// - The URL cannot be resolved, which means there is no connection to
-//   resolve it against. The transfer DOES exist, the ticket will expire
-//   unredeemed, and the row says so rather than sitting at 0% forever.
-//
-// Everything after the save is the backend's account: files.downloadProgress
-// moves the row and files.downloadDone ends it.
+// DownloadFlow owns the client-side lifecycle from destination preparation
+// through transfer completion. It asks for a destination before minting so
+// cancelling a native dialog creates no backend transfer. Once minted, the
+// one-shot ticket is never retried: the prepared receiver reports a native
+// outcome for completion, while browser downloads remain handed off to the
+// browser and terminal accounting remains owned by files.downloadDone.
 
 import type { ToastLevel } from '../ui/toast'
+import type { FilesDownloadResult } from '../generated/files.download'
 import type { DownloadServices } from './download-client'
-import type { DownloadSaver } from './download-save'
+import type { DownloadSaveOutcome, DownloadSaver, PreparedDownloadSave } from './download-save'
 import type { DownloadStore } from './download-store'
 
-/** Which file, on which binding. The name is not here: the backend measures
- *  and names the file on the handle it opens, and a name carried from the
- *  tree would be the renderer's second opinion about it.
- *
- *  Not exported: a caller passes the object literal, never names the type —
- *  the rule `upload-flow.ts`'s collision ask follows. */
+/** Which file and binding the Files panel selected. */
 interface DownloadTarget {
   bindingId: string
   path: string
-  /** WHICH MACHINE `path` is on, as a person names it. It rides the target
-   *  rather than being derived here for the reason `UploadDestination`
-   *  carries it: `machine-name.ts` is the one owner of the string and its
-   *  answer is already on the origin the panel follows, so a flow that
-   *  built its own would be a second spelling of one machine — and the two
-   *  agree everywhere anybody looks until the day one of them has no user. */
+  name: string
   machine: string
 }
 
@@ -65,37 +40,74 @@ export function createDownloadFlow(deps: DownloadFlowDeps): DownloadFlow {
   const { services, store, saver, report } = deps
 
   async function fetchOne(target: DownloadTarget): Promise<void> {
-    let result
+    let prepared: PreparedDownloadSave | null
     try {
-      result = await services.download({ bindingId: target.bindingId, path: target.path })
+      prepared = await saver.prepare(target.name)
     } catch (e) {
-      // No transfer was created, so there is nothing to put in the
-      // operations list — a row here would never receive a done frame and
-      // would sit unfinished for the life of the session.
+      report(`Could not prepare download: ${e instanceof Error ? e.message : String(e)}`, 'danger')
+      return
+    }
+    if (prepared === null) return
+
+    let result: FilesDownloadResult
+    try {
+      result = await services.download({
+        bindingId: target.bindingId,
+        path: target.path,
+        ...(prepared.destination === 'native' ? { destination: 'native' as const } : {}),
+      })
+    } catch (e) {
+      prepared.dispose()
       report(
         `Could not download ${target.path}: ${e instanceof Error ? e.message : String(e)}`,
         'danger',
       )
       return
     }
-    // The RESULT is what says the transfer exists — never a progress frame.
+
+    const localCancel = prepared.destination === 'native' ? () => prepared.cancel() : undefined
     store.begin({
       transferId: result.transferId,
       name: result.name,
       sourcePath: target.path,
       machine: target.machine,
       size: result.size,
+      localCancel,
     })
+
     const url = services.resolveUrl(result.url)
-    if (url === null) {
+    if (url === null && prepared.destination === 'browser') {
       const why = `${result.name}: there is no connection to the backend to fetch the bytes over`
       store.failLocally(result.transferId, why)
+      store.cancel(result.transferId)
+      prepared.dispose()
       report(why, 'danger')
       return
     }
-    // Exactly once. The ticket is one-shot: a retry would be a 410, which
-    // would report a failure for a file that may already be on the disk.
-    saver.save(url)
+
+    let outcome: DownloadSaveOutcome
+    try {
+      outcome = await prepared.save(result, url)
+    } catch {
+      outcome = 'destination-failed'
+    }
+    if (prepared.destination !== 'native') {
+      if (outcome !== 'handed-off') {
+        store.failLocally(result.transferId, `${result.name}: browser could not start the download`)
+        store.cancel(result.transferId)
+      }
+      prepared.dispose()
+      return
+    }
+
+    const completion = outcome === 'handed-off' ? 'destination-failed' : outcome
+    try {
+      await services.complete(result.transferId, completion)
+    } catch {
+      store.unsettle(result.transferId, 'The native download outcome was not confirmed')
+    } finally {
+      prepared.dispose()
+    }
   }
 
   return { fetch: fetchOne }

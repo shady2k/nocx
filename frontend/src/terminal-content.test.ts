@@ -394,6 +394,12 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       teardown = mounted.teardown
       const renderer = rendererOf(mounted.content)
       const session = sessionOf(mounted.content)
+      // A WebView can expose the same fractional device-cell extent seen on
+      // the wire (80 × 10.499954… = 839.996…); the wire requires whole pixels.
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({
+        width: 839.996337890625 / 80,
+        height: 28,
+      })
       renderer._fireResize(120, 40)
       renderer._fireResize(100, 30)
       renderer._fireResize(90, 28)
@@ -404,8 +410,8 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       expect(session.sendResize).toHaveBeenCalledWith({
         cols: 90,
         rows: 28,
-        xpixel: 720,
-        ypixel: 448,
+        xpixel: 945,
+        ypixel: 784,
       })
     } finally {
       teardown?.()

@@ -3,13 +3,13 @@
 - **Date:** 2026-10-02
 - **Task:** `nocx-zg3k3.5.13` — rework the interval record's plan (`nocx-zg3k3.5`, reopened) for the
   departure journal.
-- **Status of the design:** settled. The owner decided `nocx-ccr8e` option 2 on 2026-10-02
-  (decouple durable capture from live retention; the live tier's bounds stay), and three
-  consultations — the first (codex, 2026-10-01) on the direction, the second (sol, 2026-10-02) on
-  the mechanism and the three design questions, the third (codex CLI, 2026-10-02) on whether a
-  better alternative exists — agree on the picks recorded below. All three texts are quoted in
-  full on `nocx-ccr8e`; this spec is the implementable statement of them, and **a deviation from
-  any settled pick in this document is a stop-and-ask, not a rewrite**.
+- **Status of the design:** superseded by the owner's upstream-first direction on 2026-10-03
+  (`nocx-zg3k3.5.17`). **Do not implement this journal, its ABI, or its dependent leaves as
+  written below.** First pin fresh upstream Ghostty while keeping only what is needed to build
+  libghostty-vt binaries; then design the smallest change that actually proves complete durable
+  capture. The 2026-10-02 product choice still stands: durable output is independent of bounded
+  live scrollback, including a session with no window. The three consultations below are dated
+  evidence for the former mechanism, not instructions for new work.
 - **What this document is not:** product code. No code, contract or fork change accompanies it;
   the task breakdown it generates (`br`, leaves under `nocx-zg3k3.5`) is the other half of the
   deliverable.

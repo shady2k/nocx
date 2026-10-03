@@ -47,14 +47,14 @@ the checkout is simply never there.
 
 ## The fork, the patch, and what a release carries
 
-**The source is a FORK of ghostty, `shady2k/ghostty`, at a commit that carries
-nocx's patches.** `MANIFEST.json` records all four facts a reader needs to see
-that: the fork's `repository`, the `commit` the archives were built from, the
-`baseCommit` that commit sits on, and a one-line `patch` describing the
-difference — `Validate` refuses a commit that differs from its base without
-saying what the patch is, and refuses a `patch` on an unpatched pin. The tag the
-fork carries at the base is `nocx-pin-e2e53f861482`; the archives are built from
-the branch on top of it.
+**The release host is our FORK, `shady2k/ghostty`; this pin's SOURCE is an
+unmodified upstream commit.** The fork's `main` fast-forwards upstream. A
+separate build-only branch holds the GitHub Actions workflow, which checks out
+the exact upstream source commit rather than building the workflow commit.
+`MANIFEST.json` records the fork `repository`, that source `commit`, its
+`baseCommit` (the same commit here), and an empty `patch`. `Validate` refuses
+an unexplained source difference or a patch on an unpatched pin. Older fork
+branches and PRs still exist as history but are not inputs to this release.
 
 **There is no source tarball asset any more** (`nocx-ygxjv.14`). ADR-0065 point 1
 asks for a controlled copy of the source rather than a SHA on somebody else's
@@ -160,9 +160,15 @@ make vt-recipe-audit                 # rebuild from the pin and report the diff
 make vt-recipe-pin                   # rebuild and RECORD the result as the pin
 ```
 
-`make helpers` needs the pinned Zig — 0.16.0, the version ghostty's
-`build.zig.zon` declares — on `PATH` or in `$ZIG`. `vtfetch zig` checks the
-version and refuses a different one rather than building bytes nobody pinned.
+`make helpers` needs Zig 0.16.0 on `PATH` or in `$ZIG`. `vtfetch zig`
+checks the reported version but **not the compiler's build provenance**. When
+PRODUCING the archives, use Ghostty's flake-locked `zig-overlay` binary, as
+the fork's build-only GitHub Actions workflow does, not a different
+`nixpkgs#zig` reporting the same version. Measured on 2026-10-03: the latter
+built arm64 `compiler_rt.o` with undefined section symbols; every file passed
+hash verification but both arm64 link probes failed. The workflow runs
+`vt-verify-link` on all six targets before uploading any artifact. Consumers
+still verify the committed bytes and link against their target's archive.
 
 `make helpers` also needs the archives, which come from the FORK's GitHub
 release — the one `release.assetURLTemplate` names. **That release must exist
@@ -175,14 +181,14 @@ run, or to test a fetch without network, point it at a local directory:
 make vt-archives VT_ASSETS=build/libghostty-vt/dist
 ```
 
-For a pin whose commit is not pushed yet — the coordinator builds a fork
-branch's archives before publishing that branch — point the recipe at the
-checkout. It checks the checkout is AT the manifest's commit, so it can be a
-different tree on disk but never a different revision of one:
-
-```bash
-make vt-recipe-pin VT_SOURCE=build/ghostty-fork
-```
+For a new pin, the fork's `nocx/build-libghostty-vt-*` branch builds from
+the exact upstream commit in its workflow, packages all six targets using this
+repository's recipe, and uploads the archives **and generated manifest** as
+one GitHub Actions artifact. The coordinator checks that run and its complete
+link gate before publishing the assets to the fork's GitHub Release, then
+commits the manifest from that artifact in nocx. A local recipe run is only
+an audit unless it also uses the upstream flake-locked Zig and passes all six
+link probes; its hashes are never a substitute for the published files.
 
 ## The script surface
 
@@ -280,16 +286,19 @@ the release carries.
 
 ## Publishing
 
-Not done by this repository's automation, and not by a task brief: uploading a
-release is an outward-facing act. Once `scripts/recipe.sh` has produced
-`build/libghostty-vt/dist/`, it is one command, and nothing in the code needs
-editing afterwards because the fetch's URL and hashes both come from the
-committed manifest. It goes to the FORK, whose tag that manifest names:
+Not done by this repository's automation: uploading a release is an
+outward-facing act. Download the fork's successful six-target workflow artifact
+**after** its link gate, and verify it against the manifest included in that
+same artifact. Publish exactly those 13 files to the FORK, targeting the
+upstream commit named in the manifest; never rebuild or substitute an archive
+between verification and upload. The release tag and URL in the committed
+manifest then select these bytes for nocx's fetch.
 
 ```bash
-gh release create --repo shady2k/ghostty libghostty-vt-6ea3d0e55a00 \
-  --title "libghostty-vt @ 6ea3d0e55a00" \
-  --notes "Pinned archives built from ghostty e2e53f861482 + nocx's DECRQM patch, plus the licences of what they link (ADR-0065). Fetched and verified by cmd/vtfetch; see third_party/libghostty-vt/MANIFEST.json." \
+gh release create --repo shady2k/ghostty libghostty-vt-befcdfd2c3a1 \
+  --target befcdfd2c3a1cb24d9ec886e93c95b2b5daa7028 \
+  --title "libghostty-vt @ befcdfd2c3a1" \
+  --notes "Unmodified upstream Ghostty; six link-verified static archives for nocx." \
   build/libghostty-vt/dist/*
 ```
 

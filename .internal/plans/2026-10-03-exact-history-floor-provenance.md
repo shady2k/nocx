@@ -3,7 +3,7 @@
 - **Date:** 2026-10-03
 - **Task:** [`nocx-2mm9u`](../../.beads/issues.jsonl) — exact retained departure floor and layout generation in the fork snapshot.
 - **Fork PR:** [#2](https://github.com/shady2k/ghostty/pull/2), currently blocked at `538b5f36bcd84157782fc8a0eddee5677c29d284`.
-- **Status:** review-ready design draft. The provenance semantics below are settled. Implementation is blocked on `nocx-zg3k3.5.14`, a separate PageList resize-OOM fix assigned to an independent worker. Base the provenance implementation on that merged fix and rerun its fault-injection check. Keep the two local red tests and caller-serialization note in the PR worktree; do not push them yet.
+- **Status:** review-ready design draft. The provenance semantics below are settled. Implementation is blocked until both `nocx-zg3k3.5.14` (width-only shadow resize-OOM fix) and `nocx-zg3k3.5.15` (combined width+height journal-aware resize-OOM fix) merge; `.15` depends on `.14`, and both block this task. They exercise distinct resize failure paths in the same PageList code. After both merge, rerun both fault-injection checks before provenance implementation. Keep the two local red tests and caller-serialization note in the PR worktree; do not push them yet.
 
 ## Goal and binding decisions
 
@@ -143,11 +143,16 @@ allocator calls.
   there is no whole-feed rollback. The existing C write seam reports failure through the
   sticky status, not a per-write result.
 
-The resize defect is now tracked as `nocx-zg3k3.5.14`, assigned to an independent worker on a
-separate fork branch from the pin base; it blocks `nocx-2mm9u`. The eventual provenance branch
-must include the merged fix and rerun this filtered fault test. No provenance-specific
-rollback or C ABI change is proposed here. The current C resize contract is not safe to build
-on until that separate fix is accepted.
+The width-only shadow resize-OOM defect is tracked as `nocx-zg3k3.5.14`, assigned to an
+independent worker on a separate fork branch from the pin base; it blocks `nocx-2mm9u`. A
+second, distinct failure is tracked as `nocx-zg3k3.5.15`: injected OOM during combined
+width+height resize through the journal-aware path can abort the Screen integrity check at
+`cursor.y < pages.rows`. `.15` depends on `.14`, touches the same PageList files, and also
+blocks `nocx-2mm9u`; it is not covered by the width-only shadow transaction test. Both fixes
+must merge before provenance implementation. Then rerun both filtered failure paths and assert
+unchanged-on-error Screen state plus journal consistency (no lost, duplicate, or phantom
+pending departure/odometer effect). No provenance-specific rollback or C ABI change is
+proposed here; do not redesign product behavior in this plan.
 
 ## Candidate representation
 
@@ -272,14 +277,16 @@ failure: if the row crosses, odometer and provenance still advance while the jou
 its refusal.
 
 For resize, reserve sidecar capacity before the PageList commit point and preserve the
-existing `Screen.resize` unchanged-on-error contract. The measured PageList violation is
-blocked separately by `nocx-zg3k3.5.14`; do not add another rollback policy here. The C history
-getter has no provenance-error status, so a sidecar OOM must not leave it serving a stale
-floor. Add no C result field unless later source testing proves it necessary.
+existing `Screen.resize` unchanged-on-error contract. The width-only PageList violation is
+tracked by `nocx-zg3k3.5.14`; the distinct combined width+height journal-aware failure is
+`nocx-zg3k3.5.15`. Both are prerequisites; do not add another rollback policy here. The C
+history getter has no provenance-error status, so a sidecar OOM must not leave it serving a
+stale floor. Add no C result field unless later source testing proves it necessary.
 
-Transient resize allocation peak is not yet measured. The existing resize-OOM inconsistency is
-tracked separately. After `nocx-zg3k3.5.14` merges, rerun the filtered failure test and measure
-old-plus-new page and sidecar peak separately from the steady-state retention cap.
+Transient resize allocation peak is not yet measured. The existing resize-OOM inconsistencies
+are tracked separately. After both `nocx-zg3k3.5.14` and `.15` merge, rerun the width-only and
+combined width+height failure tests, then measure old-plus-new page and sidecar peak separately
+from the steady-state retention cap.
 
 ## Mutation and lifecycle table
 
@@ -352,9 +359,12 @@ Add red/green tests for:
   printable input and assert sticky `vt_processing_error` plus cursor progress; this proves
   action-local failure, not whole-feed rollback
   (`src/terminal/stream_terminal.zig::Handler.vt`);
-- after `nocx-zg3k3.5.14` merges, force OOM through the C resize seam at each allocator failure
-  point. Assert C `.out_of_memory` and the documented `Screen.resize` unchanged-on-error state;
-  retain a direct regression for the existing `PageList.resizeCols` post-mutation failure path;
+- after both `nocx-zg3k3.5.14` and `.15` merge, force OOM through the C resize seam at each
+  allocator failure point in both width-only and combined width+height paths. Assert C
+  `.out_of_memory`, the `Screen.resize` unchanged-on-error state, and journal consistency with
+  the pre-call screen (no lost, duplicate, or phantom pending departure/odometer effect). Keep
+  direct regressions for the `.14` `PageList.resizeCols` post-mutation failure and the distinct
+  `.15` journal-aware `cursor.y < pages.rows` failure;
 - `history_snapshot` returns rows, total, floor, generation, and odometer from one serialized
   call; C API caller-serialization is documented in the header;
 - record transient old+new resize peak separately from the steady retention cap. Run the same
@@ -372,14 +382,15 @@ the later `nocx-gomch` wire/page leaf.
 ## Execution slices and worktree boundaries
 
 This is a high-risk PageList/storage change. Plan **four sequential fork implementation
-sessions after `nocx-zg3k3.5.14` merges and this plan is accepted**, plus later Go-port work.
-Keep fork implementation in one worktree through acceptance: the slices collide in
-`PageList.zig`, `page.zig`, and `departures.zig`; do not have two workers edit those files
+sessions after both `nocx-zg3k3.5.14` and `.15` merge and this plan is accepted**, plus later
+Go-port work. Keep fork implementation in one worktree through acceptance: the slices collide
+in `PageList.zig`, `page.zig`, and `departures.zig`; do not have two workers edit those files
 concurrently.
 
-1. **OOM/accounting preflight (one design session).** Wait for `nocx-zg3k3.5.14` to merge,
-   then rerun the filtered C resize fault test against `Screen.resize`'s unchanged-on-error
-   contract. Confirm sidecar-capacity accounting and the steady/transient budget contract.
+1. **OOM/accounting preflight (one design session).** Wait for both `nocx-zg3k3.5.14` and
+   `.15` to merge, then rerun the filtered C resize fault tests for width-only and combined
+   width+height paths against `Screen.resize`'s unchanged-on-error contract and verify journal
+   consistency. Confirm sidecar-capacity accounting and the steady/transient budget contract.
    The provenance and pagination semantics above are already specified; no new whole-feed
    rollback is assumed.
 2. **Sidecar storage/accounting (one implementation session).** Add Node-owned storage,
@@ -416,6 +427,6 @@ stop at a compiling boundary and hand off rather than splitting conflicting work
 - No C mutex and no same-handle concurrent C test; caller serialization is the contract.
 - No PR merge or close. PR #2 stays open and blocked until the provenance behavior and checks
   are accepted.
-- No implementation, commit, or push until `nocx-zg3k3.5.14` merges and the owner reviews
-  this plan. No additional product-semantic choice is currently open; the tracker dependency
-  is the blocker.
+- No provenance implementation until both `nocx-zg3k3.5.14` and `.15` merge and the owner
+  reviews this plan. No additional product-semantic choice is currently open; the two tracked
+  resize-OOM fixes are the blockers.

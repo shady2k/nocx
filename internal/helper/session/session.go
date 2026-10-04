@@ -437,11 +437,14 @@ type hostSession struct {
 	// every emission the shutdown drain gave up on (nocx-2v80t.3.54).
 	// owedMarker is an incomplete marker no subscriber took, stated before
 	// the next delivery (rows.go, nocx-2v80t.3.38). The pump's alone.
-	owedMarker     *rowEmission
-	rowBufferBytes int64
-	rowQueuedBytes int64
-	rowsIncomplete atomic.Uint64
-	rowsDone       chan struct{}
+	owedMarker            *rowEmission
+	rowBufferBytes        int64
+	rowQueuedBytes        int64 // FIFO owner's charge in rowPool
+	rowPool               rowBytePool
+	rowsIncomplete        atomic.Uint64
+	rowBufferOverflows    atomic.Uint64 // ADR-0075 helper-pool exhaustion, distinct from live-tier shortfall
+	rowsLiveRetentionLost atomic.Uint64
+	rowsDone              chan struct{}
 	// rowsDrainDone, once armed by requestRowsDrain, is closed by the pump
 	// the moment its queue is next empty with nothing owed (rows.go,
 	// nocx-2v80t.3.52) — the event stop() waits on, under rowMu since it is

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -254,7 +255,7 @@ func endNonce(b byte) sessionruntime.FenceNonce {
 // and no more, measured by the bridge's own accounting.
 func bufferOf(hs *hostSession, n int) {
 	one := rowEmission{from: 0, rows: []emulator.Row{textRow("x")}}
-	hs.rowBufferBytes = int64(n) * emissionBytes(one)
+	hs.rowBufferBytes = int64(n+1)*emissionBytes(one) + emissionBytes(rowEmission{incomplete: true}) + int64(maxResendEnds)*int64(unsafe.Sizeof(droppedEnd{}))
 }
 
 // queuedBytes is the bridge's own count of what its queue holds.

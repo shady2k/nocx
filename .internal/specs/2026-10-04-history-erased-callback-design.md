@@ -188,12 +188,15 @@ fire as the floor prunes them. Live scrollback stays empty because the live tier
 surface clamps to the person's 0 (nocx-side, §7). Check: feed under a 0 setting, then assert
 the durable stream holds every row and the live history page serves none.
 
-### 5.4 Multiple departures inside one write (the 11-byte counterexample)
+### 5.4 Multiple departures inside one write (the REP counterexample)
 
 During one `vt_write`, `grow` appends and P1/P2 fire per page as the budget binds; each fired
 span is copied before its rows die. The post-write read then captures only the survivors, so
 the union of callback spans + newest growth is exactly the departures. This is the check the
-no-fork reader fails (12,476 vs 796 at width 80).
+no-fork reader fails. On the pinned upstream the REP parameter saturates in u16, so the probe
+uses the actual maximum: `x ESC[65535b` at width 80 (>=~796 departures) and at width 1
+(>=~65k departures), plus a 4096-LF feed (~4073 departures), all inside one write — the
+callback must hand every pruned span and the reader the survivors, with no dup and no gap.
 
 ### 5.5 History erasure inside one write (ED3/RIS same-write)
 

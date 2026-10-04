@@ -408,19 +408,8 @@ test.describe('long transcript scroll budget', () => {
     }
   }
 
-  // SKIPPED, NOT RETIRED (nocx-ccr8e): the live tier's retention is bounded
-  // now (terminal.scrollbackLines, default 10,000, and the 32 MiB per-session
-  // ceiling the port always applies), and this spec's premise — fifty
-  // thousand rows, every one capturable — is unreachable through any setting
-  // value: a feed that crosses the boundary freezes its block with rows lost
-  // before capture (measured: block 105 at the default, 290 at the maximum).
-  // The fix is decided — the departure odometer + journal that decouples
-  // durable capture from live retention (stage zg3k3.5) — and this spec IS
-  // that work's acceptance: unskip it there, at default AND at zero.
-  test.skip(
-    true,
-    'nocx-ccr8e: durable capture is retention-bounded until the zg3k3.5 departure journal lands',
-  )
+  // Active stage acceptance for nocx-zg3k3.5: durable capture must retain
+  // every row independently of the default live scrollback budget.
 
   test('measures 500 blocks and preserves native selection/search', async ({ page }) => {
     const endpoint = await backend.start()
@@ -508,5 +497,88 @@ test.describe('long transcript scroll budget', () => {
       type: 'frame budget (reported, not asserted)',
       description: `median ${frames.medianMs} ms, p95 ${frames.p95Ms} ms against an idle ${frames.baselineMs} ms; ${frames.failures.join('; ') || 'within budget'}`,
     })
+  })
+
+  test('zero live retention leaves durable output after restart and no live history', async ({
+    page,
+  }) => {
+    const endpoint = await backend.start()
+    const setupWire = await openControlPlane(endpoint.port, endpoint.token)
+    try {
+      // Set through the same settings RPC the Settings screen uses, before
+      // the initial pane is created so its spawn carries the zero budget.
+      await setupWire.call('settings.set', { key: 'terminal.scrollbackLines', value: 0 })
+    } finally {
+      setupWire.close()
+    }
+    await bindEndpoint(page, endpoint)
+    await page.goto('/')
+    await appReadyForInput(page)
+
+    const marker = 'transcript-zero-retention'
+    const command = `printf '${marker}-%03d\\n' {1..${ROWS_PER_BLOCK}}`
+    await page.locator(INPUT).fill(command)
+    await page.keyboard.press('Enter')
+    await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
+
+    const findStoredRows = async (ep: typeof endpoint): Promise<string[]> => {
+      const wire = await openControlPlane(ep.port, ep.token)
+      try {
+        const query = (await wire.call('ledger.query', {
+          scope: 'everywhere',
+          limit: 100,
+        })) as { entries: Array<{ id: string; intent: string }> }
+        const entry = query.entries.find((candidate) => candidate.intent === command)
+        if (!entry) return []
+        const detail = (await wire.call('ledger.get', { id: entry.id })) as {
+          artifacts: Array<{ mediaType: string; id: string }>
+        }
+        const rowsArtifact = detail.artifacts.find(
+          (artifact) => artifact.mediaType === 'application/x-nocx-rows',
+        )
+        if (!rowsArtifact) return []
+        const body = (await wire.call('ledger.artifact', { id: rowsArtifact.id })) as {
+          body: string
+        }
+        return body.body
+          .split('\n')
+          .filter(Boolean)
+          .map((line) =>
+            (JSON.parse(line) as { row: { text: string } }).row.text.replace(/\s+$/, ''),
+          )
+      } finally {
+        wire.close()
+      }
+    }
+
+    const own = Array.from(
+      { length: ROWS_PER_BLOCK },
+      (_, index) => `${marker}-${String(index + 1).padStart(3, '0')}`,
+    )
+    await expect.poll(async () => findStoredRows(endpoint), { timeout: 30_000 }).toEqual(own)
+
+    const restarted = await backend.restart()
+    await bindEndpoint(page, restarted)
+    await page.reload()
+    await appReadyForInput(page)
+    await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
+    const storedAfterRestart = await findStoredRows(restarted)
+    expect(storedAfterRestart).toEqual(own)
+
+    const pane = page.locator('.pane.active')
+    const sessionId = await pane.getAttribute('data-session-id')
+    expect(sessionId).toBeTruthy()
+    const historyWire = await openControlPlane(restarted.port, restarted.token)
+    try {
+      const pageResult = (await historyWire.call('session.historyPage', {
+        sessionId,
+        before: null,
+        limit: 64,
+      })) as { start: number; end: number; floor: number }
+      expect(pageResult.end - pageResult.start, 'zero-budget live history page is empty').toBe(0)
+    } finally {
+      historyWire.close()
+    }
+    await expect(page.locator('.pane.active .live-history-page')).toHaveCount(0)
   })
 })

@@ -16,7 +16,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"reflect"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -165,10 +167,15 @@ func (r *recordingConn) lastResult(t *testing.T) json.RawMessage {
 // itself decoded, rather than a second call's.
 func hostedSessionsRecording(t *testing.T) (*client.Client, *recordingConn) {
 	t.Helper()
+	return hostedSessionsRecordingWithShell(t, session.Shell{Path: "/bin/sh"})
+}
+
+func hostedSessionsRecordingWithShell(t *testing.T, shell session.Shell) (*client.Client, *recordingConn) {
+	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := session.New(session.Options{
 		Generation: "testhash",
-		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}, ""),
+		Spawner:    session.NewLocalSpawner(log, shell, ""),
 		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
@@ -199,47 +206,53 @@ func hostedSessionsRecording(t *testing.T) (*client.Client, *recordingConn) {
 // oneShotWriteSession spawns a real shell through the real session service —
 // the same seam spawnOverTheWire (screen_contract_test.go) uses — and hands
 // back the client, its recorder and the spawned entry.
+const startupSentinel = "NOCX_LOGIN_SHELL_READY_7F3A"
+
 func oneShotWriteSession(t *testing.T) (*client.Client, *recordingConn, client.SessionEntry) {
 	t.Helper()
-	c, rec := hostedSessionsRecording(t)
+	shellPath := filepath.Join(t.TempDir(), "fixture-shell")
+	script := "#!/bin/sh\nprintf 'shell startup\\n'\nsleep 0.1\nPS1='" + startupSentinel + "$ ' \nexport PS1\nexec /bin/sh -i\n"
+	if err := os.WriteFile(shellPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("write fixture shell: %v", err)
+	}
+	c, rec := hostedSessionsRecordingWithShell(t, session.Shell{Path: "/bin/sh", Args: []string{shellPath}})
 	entry := spawnOverTheWire(t, c)
 	return c, rec, entry
 }
 
-// waitStableSnapshot reads snapshots until two consecutive reads agree on
-// the whole frame (content AND cursor — the same two facts checkToken's
-// digest covers), and returns the second of that agreeing pair.
-//
-// It is a WAIT ON OBSERVABLE STATE, not a duration (AGENTS.md: "a test may
-// not depend on timing... wait on an observable state change"): the shell
-// this test spawns is real and keeps producing output on its own schedule
-// for a while after the pty exists, and "nothing is still arriving" is
-// exactly what two identical reads in a row means. The deadline below is a
-// FAILSAFE against a shell that never settles, not the success condition —
-// the same shape every bounded wait elsewhere in this package already uses
-// (a select on an event with a t.Fatal on the side that only fires when
-// something is actually wrong).
-func waitStableSnapshot(t *testing.T, c *client.Client, id client.HostSessionID) proto.SnapshotResult {
+// snapshotContainsText searches the rendered rows of a wire snapshot.
+func snapshotContainsText(snapshot proto.SnapshotResult, text string) bool {
+	for _, row := range snapshot.Frame.Lines {
+		var line strings.Builder
+		for _, cell := range row {
+			line.WriteString(cell.Text)
+		}
+		if strings.Contains(line.String(), text) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForStartupSentinel waits for the fixture shell's final startup line.
+// The deadline only fails a shell that never signals readiness; elapsed time
+// and repeated equal frames are not treated as proof that startup is complete.
+func waitForStartupSentinel(t *testing.T, c *client.Client, id client.HostSessionID) proto.SnapshotResult {
 	t.Helper()
 	ctx := context.Background()
-	prev, err := c.Snapshot(ctx, id)
-	if err != nil {
-		t.Fatalf("client.Snapshot: %v", err)
-	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		time.Sleep(5 * time.Millisecond)
-		cur, err := c.Snapshot(ctx, id)
+		snapshot, err := c.Snapshot(ctx, id)
 		if err != nil {
 			t.Fatalf("client.Snapshot: %v", err)
 		}
-		if reflect.DeepEqual(cur.Frame, prev.Frame) {
-			return cur
+		if snapshotContainsText(snapshot, startupSentinel) {
+			return snapshot
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the shell's screen never settled within %s; last two frames still disagreed", 5*time.Second)
+			t.Fatalf("login shell did not print startup sentinel %q within %s", startupSentinel, 5*time.Second)
 		}
-		prev = cur
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -262,25 +275,18 @@ func TestTheOneShotWritePathConformsToItsContractOverTheWire(t *testing.T) {
 	if err = validateHelperJSON(loadHelperSchema(t, "session.snapshot.params.schema.json"), mustMarshal(t, snapParams)); err != nil {
 		t.Fatalf("snapshot params do not satisfy the contract: %v", err)
 	}
-	// A real login shell keeps printing after the pty exists — a prompt
-	// redraw, a startup file's own output — asynchronously with everything
-	// this test does. Minting a target against a screen that is still
-	// settling races that output: the token's digest is taken from THIS
-	// read, checkToken (tokens.go) recomputes it from whatever the screen
-	// holds at commit, and content that arrived in between is an honest
-	// stale_target — the mechanism working as designed against an unquiet
-	// terminal, not a defect in it (measured: a handful of failures in
-	// several dozen runs, gone once the read waits for the shell to go
-	// quiet first). waitStableSnapshot is that wait: it reads until two
-	// consecutive reads agree, which is what "nothing is still arriving"
-	// actually means, rather than a duration nobody could size correctly
-	// for a shell's own startup files.
-	//
+	// The fixture shell deliberately pauses after its first startup output.
+	// Equal snapshots during that pause are not proof that startup is done.
+	// Wait for the shell's final startup sentinel before minting a target, so
+	// the token digest and commit see the same screen.
 	// Each call is still through the typed client method itself — snapshot
 	// ids are minted fresh per call (hs.snapNext++, session.go), so a raw
 	// capture of one and a decode of a different one would always disagree;
-	// rec captures the SAME response the STABLE call itself decoded.
-	clientSnap := waitStableSnapshot(t, c, entry.HostSessionID)
+	// rec captures the SAME response the sentinel wait itself decoded.
+	clientSnap := waitForStartupSentinel(t, c, entry.HostSessionID)
+	if !snapshotContainsText(clientSnap, startupSentinel) {
+		t.Fatal("snapshot returned before the shell printed its startup sentinel")
+	}
 	snapRaw := rec.lastResult(t)
 	if err = validateHelperJSON(loadHelperSchema(t, "session.snapshot.schema.json"), snapRaw); err != nil {
 		t.Fatalf("the snapshot result off the socket does not satisfy its contract:\n%v\n\npayload was:\n%s", err, snapRaw)

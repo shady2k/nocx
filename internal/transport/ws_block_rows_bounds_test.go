@@ -187,6 +187,11 @@ type boundsRecorder struct {
 
 	sid session.ID
 	ws  *WSServer
+
+	confirmations chan uint64
+	confirmDone   chan struct{}
+	confirmErrors chan error
+	stopConfirm   sync.Once
 }
 
 func (r *boundsRecorder) onRows(o client.OutputRows) {
@@ -214,9 +219,44 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 	}
 	r.batches = append(r.batches, o)
 	r.mu.Unlock()
-	// Forward to the real sink: one store write per frame, exactly the
-	// app's binding.
-	r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, "")
+	// Forward to the real sink just as the app binding does. Incomplete
+	// markers terminate the block without acknowledging rows; ordinary
+	// batches are confirmed only after the store accepts them.
+	if o.Incomplete {
+		r.ws.BlockOutputIncomplete(r.sid, o.FromRow)
+		return
+	}
+	// Mirror the app's asynchronous confirmation path too: the ack releases
+	// the helper's retained resend copy only after the store accepts these
+	// rows, and cannot run synchronously on the client's read loop.
+	if upTo, confirm := r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, ""); confirm {
+		r.confirmations <- upTo
+	}
+}
+
+func (r *boundsRecorder) startConfirmations(attached *client.AttachedSession) {
+	// The test emits fewer than 6,000 rows across all three intervals, so
+	// even one confirmation per row fits without blocking the client's read
+	// loop on a response that the same loop must receive.
+	r.confirmations = make(chan uint64, 8192)
+	r.confirmDone = make(chan struct{})
+	r.confirmErrors = make(chan error, 1)
+	go func() {
+		defer close(r.confirmDone)
+		for upTo := range r.confirmations {
+			if err := attached.ConfirmWritten(context.Background(), upTo); err != nil {
+				select {
+				case r.confirmErrors <- err:
+				default:
+				}
+			}
+		}
+	}()
+}
+
+func (r *boundsRecorder) stopConfirmations() {
+	r.stopConfirm.Do(func() { close(r.confirmations) })
+	<-r.confirmDone
 }
 
 func (r *boundsRecorder) onEnd(e client.IntervalEnd) {
@@ -411,14 +451,22 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			if dialErr != nil {
 				t.Fatalf("dial the helper: %v", dialErr)
 			}
-			t.Cleanup(func() { _ = c.Close() })
+			var rec *boundsRecorder
+			t.Cleanup(func() {
+				_ = c.Close()
+				if rec != nil && rec.confirmDone != nil {
+					rec.stopConfirmations()
+				}
+			})
 
 			// The real pane: a real shell on a real PTY at this geometry,
-			// with a row window generous enough that the helper's own row
-			// buffer is not the bound under test — the store's cap is.
+			// with the helper's default retained window and row budget. The
+			// recorder confirms each stored batch asynchronously, like the app,
+			// so the resend copy does not accumulate while the flood runs.
 			spawnIn := proto.SpawnParams{
 				Cwd: "/", Cols: uint16(g.cols), Rows: uint16(g.rows), //nolint:gosec // the shipped geometries
-				WindowBytes: 8 << 20, IdempotencyKey: fmt.Sprintf("bounds-%dx%d", g.cols, g.rows),
+				WindowBytes:    8 << 20,
+				IdempotencyKey: fmt.Sprintf("bounds-%dx%d", g.cols, g.rows),
 			}
 			var spawnRaw json.RawMessage
 			if err := c.Call(context.Background(), proto.ServiceSession, proto.OpSpawn, spawnIn, &spawnRaw); err != nil {
@@ -429,13 +477,14 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 				t.Fatalf("decode spawn: %v", err)
 			}
 
-			rec := &boundsRecorder{sid: session.ID(sid), ws: e.ws}
+			rec = &boundsRecorder{sid: session.ID(sid), ws: e.ws}
 			attached, err := c.Attach(context.Background(), proto.AttachParams{
 				Session: spawned.Entry.Session, Subscriber: "0123456789abcdef0123456789abcdef",
 			})
 			if err != nil {
 				t.Fatalf("attach: %v", err)
 			}
+			rec.startConfirmations(attached)
 			attached.OnOutputRows(rec.onRows)
 			attached.OnIntervalEnd(rec.onEnd)
 			// The block stream is attached for the session, exactly as the
@@ -532,6 +581,9 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			burstStreamed, _ := rec.intervalAt(1)
 			burstArt := waitForSealed(t, db, burst)
 			burstLost, burstDropped := blockRowsSummaryOf(t, db, burst)
+			if rec.sawIncomplete {
+				t.Fatal("the helper's row buffer overflowed during the burst: the frame bound measured an incomplete stream")
+			}
 
 			// THE FRAME BOUND'S PRECONDITION (nocx-zg3k3.5.9): a batch
 			// larger than the split bound reached the pump at this size.
@@ -584,6 +636,15 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			}
 			if got := storedLines(smallArt); got != smallRows+uint64(smallClosing) { //nolint:gosec // a row count
 				t.Fatalf("under-cap output stored %d rows, produced %d streamed + %d closing: a row went missing", got, smallRows, smallClosing)
+			}
+
+			// All frames through the last end have reached the recorder. Drain
+			// their asynchronous acks before cleanup, just like the app's binding.
+			rec.stopConfirmations()
+			select {
+			case err := <-rec.confirmErrors:
+				t.Fatalf("confirm rows written to the block store: %v", err)
+			default:
 			}
 
 			// THE MEASUREMENTS THE BEAD ASKS THE REPORT TO CARRY.

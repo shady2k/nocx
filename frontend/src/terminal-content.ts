@@ -193,6 +193,7 @@ import {
 import { createCellModel, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
 import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
+import { installLiveSelectionGesture, type LiveSelectionGesture } from './painter/selection-gesture'
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
@@ -1395,6 +1396,7 @@ export class TerminalContent extends BasePaneContent {
    *  a live region before it has a session — and fed by the one frame
    *  handler below. */
   private _painter: CellPainter | null = null
+  private _selectionGesture: LiveSelectionGesture | null = null
   /** The surface element the painter paints into, held for disposal. */
   private _painterSurface: HTMLElement | null = null
   /** THE measuring authority the frozen blocks publish for (cell-fit.ts):
@@ -4782,6 +4784,25 @@ export class TerminalContent extends BasePaneContent {
     // keeps the byte path exactly as it was.
     const cellModel = createCellModel()
     this._cellModel = cellModel
+    const painter = this._painter
+    const painterSurface = this._painterSurface
+    const gestureRoot = this.scrollback?.scrollbackArea
+    if (painter && painterSurface && gestureRoot) {
+      this._selectionGesture = installLiveSelectionGesture({
+        model: cellModel,
+        painter,
+        surface: painterSurface,
+        gestureRoot,
+        surfaceId: this.pane.paneId,
+        copy: (text) => {
+          if (shouldCopy(text)) {
+            this.clipboard.writeText(text).catch((e) => {
+              console.warn('nocx: clipboard write failed (live cell selection)', e)
+            })
+          }
+        },
+      })
+    }
     installPaneScreenSeam()
     paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
@@ -8098,6 +8119,8 @@ export class TerminalContent extends BasePaneContent {
     // reader has no model worth reading and no session to be found under.
     if (this.session) paneScreenReaders.delete(this.session.sessionId)
     this._cellModel = null
+    this._selectionGesture?.dispose()
+    this._selectionGesture = null
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()

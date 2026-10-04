@@ -975,6 +975,12 @@
   white-space: pre;
 }
 
+.term-grid-selection {
+  position: absolute;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--color-accent), transparent 68%);
+}
+
 .term-grid-cursor {
   position: absolute;
   pointer-events: none;

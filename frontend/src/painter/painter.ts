@@ -92,6 +92,13 @@ export interface CellPainter {
   /** Apply one installed revision. Rows whose content is unchanged keep
    *  their DOM; changed rows are repainted through run-geometry. */
   apply(snapshot: ScreenSnapshot): void
+  /** Paint a selection from model coordinates, or clear it. End offsets are exclusive. */
+  setSelection(
+    range: {
+      readonly anchor: { readonly row: number; readonly offset: number }
+      readonly focus: { readonly row: number; readonly offset: number }
+    } | null,
+  ): void
   /** THE mapping, bound to the installed revision's committed geometry.
    *  Null before the first apply — there is nothing to map yet. */
   mapping(): PixelMapping | null
@@ -101,6 +108,7 @@ export interface CellPainter {
 
 const GRID_CLASS = 'term-grid'
 const CURSOR_CLASS = 'term-grid-cursor'
+const SELECTION_CLASS = 'term-grid-selection'
 
 export function createCellPainter(opts: CellPainterOptions): CellPainter {
   const surface = opts.surface
@@ -114,6 +122,11 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   let rows: HTMLDivElement[] = []
   let installed: ScreenSnapshot | null = null
   let lastMetric: RunMetric | null = null
+  let selection: {
+    anchor: { row: number; offset: number }
+    focus: { row: number; offset: number }
+  } | null = null
+  let selectionNodes: HTMLDivElement[] = []
 
   /** A changed metric re-verdicts every run's spacing — rule 1's output is
    *  painted output — so it repaints like a content change. The numbers
@@ -163,6 +176,43 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
     lastMetric = metric
     installed = snapshot
     placeCursor(snapshot)
+    paintSelection(snapshot)
+  }
+
+  function paintSelection(snapshot: ScreenSnapshot): void {
+    for (const node of selectionNodes) node.remove()
+    selectionNodes = []
+    if (selection === null) return
+    const ordered =
+      selection.anchor.row < selection.focus.row ||
+      (selection.anchor.row === selection.focus.row &&
+        selection.anchor.offset <= selection.focus.offset)
+        ? ([selection.anchor, selection.focus] as const)
+        : ([selection.focus, selection.anchor] as const)
+    const [start, end] = ordered
+    const mapping = createMapping(snapshot)
+    const dpr = displayDpr()
+    const cellWidth = devicePxToCssPx(snapshot.geometry.cellWidthPx, dpr)
+    const cellHeight = devicePxToCssPx(snapshot.geometry.cellHeightPx, dpr)
+    for (let row = start.row; row <= end.row; row++) {
+      if (row < 0 || row >= snapshot.rows.length) continue
+      const from = row === start.row ? start.offset : 0
+      const to = row === end.row ? end.offset : snapshot.rows[row].cells.length
+      if (to <= from) continue
+      const point = mapping.cellToPixel(from, row)
+      if (point === null) continue
+      const node = document.createElement('div')
+      node.className = SELECTION_CLASS
+      node.dataset.row = String(row)
+      node.dataset.start = String(from)
+      node.dataset.end = String(to)
+      node.style.left = `${point.x}px`
+      node.style.top = `${point.y}px`
+      node.style.width = `${(to - from) * cellWidth}px`
+      node.style.height = `${cellHeight}px`
+      surface.insertBefore(node, cursor)
+      selectionNodes.push(node)
+    }
   }
 
   function placeCursor(snapshot: ScreenSnapshot): void {
@@ -181,6 +231,11 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   return {
     apply,
 
+    setSelection(range) {
+      selection = range === null ? null : { anchor: { ...range.anchor }, focus: { ...range.focus } }
+      if (installed !== null) paintSelection(installed)
+    },
+
     mapping() {
       return installed === null ? null : createMapping(installed)
     },
@@ -190,6 +245,8 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
       rows = []
       installed = null
       lastMetric = null
+      selection = null
+      selectionNodes = []
       cursor.remove()
       surface.classList.remove(GRID_CLASS)
     },

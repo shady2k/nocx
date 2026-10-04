@@ -395,3 +395,51 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
     expect(liveRow(surface)).not.toBe(before)
   })
 })
+
+describe('live selection paint (nocx-zg3k3.4.4)', () => {
+  it('highlights the model endpoints and retains them when a new frame paints', () => {
+    const { painter, surface } = mount(() => null)
+    const first = frameOf(
+      1,
+      [
+        [
+          ['a', 1, true],
+          ['漢', 2, true],
+          ['', 3, false],
+          ['b', 1, true],
+        ],
+      ],
+      { x: 0, y: 0, visible: false },
+      { cols: 4, rows: 1, cellWidthPx: 8, cellHeightPx: 20 },
+    )
+    const snapshot = snapshotOf(first)
+    painter.apply(snapshot)
+    painter.setSelection({ anchor: { row: 0, offset: 1 }, focus: { row: 0, offset: 3 } })
+    const highlight = surface.querySelector<HTMLElement>('.term-grid-selection')
+    expect(highlight).not.toBeNull()
+    expect(highlight?.style.left).toBe('8px')
+    expect(highlight?.style.width).toBe('16px')
+    expect(highlight?.style.top).toBe('0px')
+    expect(highlight?.style.height).toBe('20px')
+    painter.apply(
+      snapshotOf(
+        frameOf(
+          2,
+          [
+            [
+              ['z', 1, true],
+              ['z', 1, true],
+              ['z', 1, true],
+              ['z', 1, true],
+            ],
+          ],
+          { x: 0, y: 0, visible: false },
+          { cols: 4, rows: 1, cellWidthPx: 8, cellHeightPx: 20 },
+        ),
+      ),
+    )
+    expect(surface.querySelector('.term-grid-selection')).not.toBeNull()
+    painter.setSelection(null)
+    expect(surface.querySelector('.term-grid-selection')).toBeNull()
+  })
+})

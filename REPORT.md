@@ -30,4 +30,4 @@ The design places generation lifetime locks and `probe-prunable` in D3/D7. They 
 
 ## Commit
 
-383b963d (amended to include this report’s commit reference).
+e2417c3d (implementation commit; this report is committed immediately after it).

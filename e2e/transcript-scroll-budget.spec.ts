@@ -35,6 +35,15 @@ const serverBin = () => readStand().server
 
 const BLOCKS = 500
 const ROWS_PER_BLOCK = 100
+// The zero-retention subtest's single command must output far more rows than
+// the library's bounded capture floor at 0 lines (~399 rows at 80 cols, design
+// section 7): with a small batch the pages are never pruned and the test would
+// pass without the history-erased effect. 5000 rows force pruning inside the
+// write, which is the mechanism under test.
+const ZERO_COMMAND_ROWS = 5000
+// The ledger search limit the zero subtest queries with; must hold the whole
+// command's rows after restart.
+const ZERO_QUERY_LIMIT = 6000
 // The transcript's own last row: the off-screen half of the native find probe.
 // Derived from BLOCKS, never spelled out — a reduced run is the same spec.
 const LAST_MARKER = `transcript-${String(BLOCKS).padStart(4, '0')}-${String(ROWS_PER_BLOCK).padStart(3, '0')}`
@@ -508,6 +517,10 @@ test.describe('long transcript scroll budget', () => {
       // Set through the same settings RPC the Settings screen uses, before
       // the initial pane is created so its spawn carries the zero budget.
       await setupWire.call('settings.set', { key: 'terminal.scrollbackLines', value: 0 })
+      // A single 5000-row command is past the default per-command cap (256 KiB,
+      // ~80 bytes per encoded row), so raise it to its maximum: this test is
+      // about the zero-budget capture floor, not the output cap.
+      await setupWire.call('settings.set', { key: 'history.outputCapKB', value: 4096 })
     } finally {
       setupWire.close()
     }
@@ -516,7 +529,9 @@ test.describe('long transcript scroll budget', () => {
     await appReadyForInput(page)
 
     const marker = 'transcript-zero-retention'
-    const command = `printf '${marker}-%03d\\n' {1..${ROWS_PER_BLOCK}}`
+    // One command far larger than the zero-budget capture floor, so pruning
+    // inside the write is exercised (see ZERO_COMMAND_ROWS).
+    const command = `printf '${marker}-%03d\\n' {1..${ZERO_COMMAND_ROWS}}`
     await page.locator(INPUT).fill(command)
     await page.keyboard.press('Enter')
     await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
@@ -526,7 +541,7 @@ test.describe('long transcript scroll budget', () => {
       try {
         const query = (await wire.call('ledger.query', {
           scope: 'everywhere',
-          limit: 100,
+          limit: ZERO_QUERY_LIMIT,
         })) as { entries: Array<{ id: string; intent: string }> }
         const entry = query.entries.find((candidate) => candidate.intent === command)
         if (!entry) return []
@@ -540,19 +555,24 @@ test.describe('long transcript scroll budget', () => {
         const body = (await wire.call('ledger.artifact', { id: rowsArtifact.id })) as {
           body: string
         }
-        return body.body
-          .split('\n')
-          .filter(Boolean)
-          .map((line) =>
-            (JSON.parse(line) as { row: { text: string } }).row.text.replace(/\s+$/, ''),
-          )
+        return (
+          body.body
+            .split('\n')
+            .filter(Boolean)
+            .map((line) =>
+              (JSON.parse(line) as { row: { text: string } }).row.text.replace(/\s+$/, ''),
+            )
+            // Drop the echoed command line (the terminal's own echo of the
+            // input) and keep only the marker rows this command generated.
+            .filter((text) => text.startsWith(`${marker}-`))
+        )
       } finally {
         wire.close()
       }
     }
 
     const own = Array.from(
-      { length: ROWS_PER_BLOCK },
+      { length: ZERO_COMMAND_ROWS },
       (_, index) => `${marker}-${String(index + 1).padStart(3, '0')}`,
     )
     await expect.poll(async () => findStoredRows(endpoint), { timeout: 30_000 }).toEqual(own)

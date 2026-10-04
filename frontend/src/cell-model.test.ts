@@ -29,6 +29,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { SessionFrame } from './generated/session.frame'
 import {
+  captureLiveSelection,
   columnSpan,
   createCellModel,
   type ApplyResult,
@@ -55,8 +56,16 @@ function frame(
   rows: CellSpec[][],
   cols: number,
   rowsCount = rows.length,
+  wraps: readonly boolean[] = [],
 ): SessionFrame {
-  return fixtureFrameOf(revision, rows, undefined, { cols, rows: rowsCount })
+  const built = fixtureFrameOf(revision, rows, undefined, { cols, rows: rowsCount })
+  if (wraps.length > 0) {
+    built.rows = built.rows.map((wireRow, index) => ({
+      ...wireRow,
+      ...(wraps[index] ? { wrap: true } : {}),
+    }))
+  }
+  return built
 }
 
 /** A frame of blank plain cells — the ordinary frame every refusal test
@@ -734,5 +743,96 @@ describe('atomic per-revision replacement', () => {
     expect(snapshot.cellAt(0, 3)?.width).toBe(1)
     expect(snapshot.cellAt(0, 4)?.grapheme).toBe('b')
     expect(snapshot.cellAt(0, 4)?.column).toBe(4)
+  })
+})
+
+describe('live selection snapshots', () => {
+  it('copies from the captured revision after a newer frame is installed', () => {
+    const model = createCellModel()
+    const snapshot = applied(
+      model,
+      frame(
+        1,
+        [
+          [
+            ['A', 1, true],
+            ['界', 2, true],
+            ['B', 1, true],
+          ],
+        ],
+        4,
+      ),
+    )
+    const selection = captureLiveSelection(
+      'pane-1',
+      snapshot,
+      { row: 0, offset: 0 },
+      { row: 0, offset: 4 },
+    )
+    applied(
+      model,
+      frame(
+        2,
+        [
+          [
+            ['X', 1, true],
+            ['Y', 1, true],
+            ['Z', 1, true],
+            ['!', 1, true],
+          ],
+        ],
+        4,
+      ),
+    )
+    expect(selection.copy()).toBe('A界B')
+    expect(selection.anchor).toMatchObject({ surfaceId: 'pane-1', revision: 1, row: 0, offset: 0 })
+  })
+
+  it('joins soft wraps, keeps hard newlines, and normalizes wide grapheme boundaries', () => {
+    const snapshot = applied(
+      createCellModel(),
+      frame(
+        1,
+        [
+          [
+            ['A', 1, true],
+            ['界', 2, true],
+          ],
+          [
+            ['B', 1, true],
+            ['C', 1, true],
+            ['D', 1, true],
+          ],
+        ],
+        3,
+        2,
+        [true, false],
+      ),
+    )
+    expect(
+      captureLiveSelection('pane', snapshot, { row: 0, offset: 1 }, { row: 1, offset: 3 }).copy(),
+    ).toBe('界BCD')
+    const hard = applied(
+      createCellModel(),
+      frame(
+        1,
+        [
+          [
+            ['A', 1, true],
+            ['B', 1, true],
+            ['C', 1, true],
+          ],
+          [
+            ['D', 1, true],
+            ['E', 1, true],
+            ['F', 1, true],
+          ],
+        ],
+        3,
+      ),
+    )
+    expect(
+      captureLiveSelection('pane', hard, { row: 0, offset: 1 }, { row: 1, offset: 2 }).copy(),
+    ).toBe('BC\nDE')
   })
 })

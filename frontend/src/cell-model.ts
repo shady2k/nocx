@@ -407,3 +407,63 @@ export function createCellModel(): CellModel {
     },
   }
 }
+
+/** Stable identity of a live-screen selection endpoint. Offsets are grid
+ * columns, never DOM positions or measured pixels. */
+interface LiveSelectionEndpoint {
+  readonly surfaceId: string
+  readonly revision: number
+  readonly row: number
+  readonly offset: number
+}
+
+/** A selection owns the immutable screen snapshot it began on. New frames may
+ * replace the model's current revision without changing copy()'s result. */
+export interface LiveSelection {
+  readonly anchor: LiveSelectionEndpoint
+  readonly focus: LiveSelectionEndpoint
+  copy(): string
+}
+
+/** Capture a range against one immutable revision. End offsets are exclusive; copied text follows the model's declared wide-cell
+ * footprint and never splits a grapheme. */
+export function captureLiveSelection(
+  surfaceId: string,
+  snapshot: ScreenSnapshot,
+  anchor: { readonly row: number; readonly offset: number },
+  focus: { readonly row: number; readonly offset: number },
+): LiveSelection {
+  const endpoint = (position: {
+    readonly row: number
+    readonly offset: number
+  }): LiveSelectionEndpoint => {
+    const row = Math.max(0, Math.min(snapshot.rows.length - 1, Math.trunc(position.row)))
+    const cells = snapshot.rows[row]?.cells ?? []
+    const offset = Math.max(0, Math.min(cells.length, Math.trunc(position.offset)))
+    return Object.freeze({ surfaceId, revision: snapshot.revision, row, offset })
+  }
+  const capturedAnchor = endpoint(anchor)
+  const capturedFocus = endpoint(focus)
+  const ordered =
+    capturedAnchor.row < capturedFocus.row ||
+    (capturedAnchor.row === capturedFocus.row && capturedAnchor.offset <= capturedFocus.offset)
+      ? ([capturedAnchor, capturedFocus] as const)
+      : ([capturedFocus, capturedAnchor] as const)
+  const copy = (): string => {
+    const [start, end] = ordered
+    const parts: string[] = []
+    for (let rowIndex = start.row; rowIndex <= end.row; rowIndex++) {
+      const row = snapshot.rowAt(rowIndex)
+      if (!row) continue
+      const from = rowIndex === start.row ? start.offset : 0
+      const to = rowIndex === end.row ? end.offset : row.cells.length
+      for (let column = from; column < to; column++) {
+        const cell = row.cellAt(column)
+        if (cell?.hasText) parts.push(cell.grapheme)
+      }
+      if (rowIndex < end.row && !row.wrap) parts.push('\n')
+    }
+    return parts.join('')
+  }
+  return Object.freeze({ anchor: capturedAnchor, focus: capturedFocus, copy })
+}

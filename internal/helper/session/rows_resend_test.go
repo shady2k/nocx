@@ -130,6 +130,50 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 // pump handed out), and the next attach must read the scrollback back from
 // the mark, or the taken rows are silently gone: never re-sent, never
 // counted. Ordered events, no load.
+func TestReplacingAnAttachedReaderResendsItsUnconfirmedRows(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	subscriberID := proto.SubscriberID("11111111111111111111111111111111")
+	hs.mu.Lock()
+	old := hs.subs["coord-1"]
+	delete(hs.subs, "coord-1")
+	old.id = subscriberID
+	old.attachment = "att-old"
+	old.stop = func() {}
+	old.wake = newGate()
+	old.lifecycleWake = newGate()
+	old.done = make(chan struct{})
+	close(old.done)
+	old.lifecycleDone = make(chan struct{})
+	close(old.lifecycleDone)
+	hs.subs[subscriberID] = old
+	hs.attachments = map[proto.AttachmentID]*attachment{"att-old": {id: "att-old", subscriber: subscriberID, sink: first}}
+	hs.mu.Unlock()
+
+	rowsFeed(t, rt, 0, 40)
+	first.waitFor(1, 0, 0)
+
+	// The old connection is replaced before its asynchronous detach reaches
+	// the helper. Its last rows were delivered but never confirmed, so the
+	// replacement must replay them from the retained window.
+	second := newRowsSink()
+	_, err := hs.attach(proto.AttachParams{Subscriber: subscriberID, Session: hs.id, Fresh: true},
+		second, func() proto.AttachmentID { return "att-new" }, hs.log)
+	if err != nil {
+		t.Fatalf("replace attached reader: %v", err)
+	}
+	t.Cleanup(func() { hs.detach(second, "att-new") })
+	hs.rowMu.Lock()
+	resendDue := hs.resendDue
+	hs.rowMu.Unlock()
+	if !resendDue {
+		t.Fatal("replacing an attached reader did not arm a resend of its unconfirmed rows")
+	}
+	second.waitFor(1, 0, 0)
+	if got := decodeResentRows(t, second.rowFrames()); len(got) == 0 || len(got[0].texts) == 0 {
+		t.Fatalf("replacement reader received no unconfirmed rows: %+v", got)
+	}
+}
+
 func TestThePumpResendsRowsAnUnconfirmingReaderTook(t *testing.T) {
 	hs, rt, sink := rowsBridgeSession(t, 80, 24)
 

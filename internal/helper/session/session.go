@@ -464,10 +464,10 @@ type hostSession struct {
 	rowSendSeq        int
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
-	// resendDue is the row pump's own flag (rows.go): an emission reached
-	// zero subscribers and was dropped, so the coordinator's return owes a
-	// read-back from the scrollback (nocx-zg3k3.5.3). The pump alone writes
-	// and reads it — no lock, one goroutine.
+	// resendDue is the row pump's flag (rows.go): an emission reached zero
+	// subscribers, or a reader was replaced before its detach arrived, so
+	// the next reader owes a read-back from the retained window
+	// (nocx-zg3k3.5.3). Guarded by rowMu because attach/detach arm it too.
 	resendDue bool
 	// resendEnds is the row pump's list of the interval ends its drops
 	// took (rows.go, nocx-zg3k3.5.3): the boundaries the coordinator's
@@ -698,6 +698,14 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	if previous, ok := s.subs[p.Subscriber]; ok {
 		old = previous
 		oldWriter = s.writer != nil && *s.writer == p.Subscriber && s.writerAtt == previous.attachment
+		// A replacement can win the race with the old connection's
+		// asynchronous detach. In that ordering detach will later find no
+		// attachment to remove, so it cannot arm the resend. Replacing a
+		// reader is itself proof that its last unconfirmed rows may need
+		// replay; rowsConfirmed keeps already-stored output idempotent.
+		s.rowMu.Lock()
+		s.resendDue = true
+		s.rowMu.Unlock()
 		delete(s.subs, p.Subscriber)
 		delete(s.attachments, previous.attachment)
 		if oldWriter {

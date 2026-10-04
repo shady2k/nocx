@@ -121,7 +121,8 @@ func (f *ctxSpyTabs) CreateTabAfter(_ context.Context, tab content.Tab, _ conten
 
 // TabForPane is the seam's fourth method and nothing here is about it: the
 // sessions these tests name carry no pane id, so the spawner never asks.
-func (f *ctxSpyTabs) TabForPane(context.Context, string) (string, error) { return "", nil }
+func (f *ctxSpyTabs) TabForPane(context.Context, string) (string, error)       { return "", nil }
+func (f *ctxSpyTabs) WorkspaceForPane(context.Context, string) (string, error) { return "", nil }
 
 func (f *ctxSpyTabs) DeleteTab(ctx context.Context, id string, _ content.Replacement) error {
 	f.mu.Lock()

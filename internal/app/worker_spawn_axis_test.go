@@ -97,6 +97,8 @@ func (f *fakeAxisTabs) TabForPane(_ context.Context, paneID string) (string, err
 	return f.tabOf[paneID], nil
 }
 
+func (f *fakeAxisTabs) WorkspaceForPane(context.Context, string) (string, error) { return "", nil }
+
 func (f *fakeAxisTabs) anchorsAsked() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

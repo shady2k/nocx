@@ -258,6 +258,8 @@ func (f *worktreeTabs) TabForPane(_ context.Context, paneID string) (string, err
 	return f.tabOf[paneID], nil
 }
 
+func (f *worktreeTabs) WorkspaceForPane(context.Context, string) (string, error) { return "", nil }
+
 func (f *worktreeTabs) Panes(_ context.Context, tabID string) ([]content.Pane, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

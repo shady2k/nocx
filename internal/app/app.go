@@ -2389,10 +2389,9 @@ func New(opts ...Option) (*App, error) {
 			// session.message already spend targets through — never a second
 			// door onto a pane's input queue.
 			readiness: paneWatch,
-			// Participants are minted in the default workspace until a
-			// coordinator names its own. It is the workspace the ledger
-			// already records every session nobody named one for, so this
-			// adds no new answer to "where does an unplaced thing go".
+			// The default is the fallback when a coordinator has no resolvable
+			// pane workspace. A resolved coordinator workspace is read from the
+			// layout by workerSpawner, keeping the placement on its own strip.
 			workspace: string(workspace.Default),
 			// tp again (nocx-ui8q6.3): the same server instance that mints
 			// the tab's session is what tells a connected renderer the tab

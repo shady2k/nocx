@@ -202,7 +202,8 @@ func (hangingTabs) Panes(context.Context, string) ([]content.Pane, error) {
 
 // TabForPane answers nothing, which is the anchorless case: no tab is named,
 // so the participant's tab goes last and no second method can hang.
-func (hangingTabs) TabForPane(context.Context, string) (string, error) { return "", nil }
+func (hangingTabs) TabForPane(context.Context, string) (string, error)       { return "", nil }
+func (hangingTabs) WorkspaceForPane(context.Context, string) (string, error) { return "", nil }
 
 func (hangingTabs) DeleteTab(ctx context.Context, _ string, _ content.Replacement) error {
 	<-ctx.Done()

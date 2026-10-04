@@ -119,6 +119,7 @@ type paneMinter interface {
 	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 	PaneCwd(ctx context.Context, paneID string) (string, error)
 	TabForPane(ctx context.Context, paneID string) (string, error)
+	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
 	// Panes reads one tab's panes, the layout's own listing. A spawn needs
 	// it for one fact only — the coordinator pane's KIND, which decides
 	// whether a worktree ask may be served on this machine at all — and
@@ -279,8 +280,8 @@ type workerSpawner struct {
 	// come. Production always wires the real watcher; only a test double built
 	// to exercise the axis gate or the tab bookkeeping alone leaves it nil.
 	readiness paneReadiness
-	// workspace is where a participant's tab is minted. The worker's own
-	// workspace, resolved by the caller, never guessed here.
+	// workspace is the fallback when the coordinator's pane workspace is
+	// unknown. Spawn uses the layout's resolved workspace otherwise.
 	workspace string
 	// announce tells a connected renderer the tab exists, once Spawn has
 	// committed to succeeding (nocx-ui8q6.3). Nil is the absence case
@@ -791,6 +792,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// the coordinator's ONE layout row, so it is looked up once and asked
 	// its questions — a second walk could answer about a different row.
 	cwd := s.coordinatorCwd(ctx, coordPane, lg)
+	workspace := s.coordinatorWorkspace(ctx, coordPane, lg)
 	// THE CHECKOUT, before anything is minted (nocx-xn63t.1.2). A worktree
 	// ask is served or refused HERE, while the window is still untouched:
 	// no pane row, no tab, nothing for a refusal to compensate. Every
@@ -821,7 +823,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		}
 	}
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
-		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
+		content.Tab{ID: tabID.String(), WorkspaceID: workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
 		s.coordinatorTab(ctx, coordPane, lg),
 	)
@@ -1080,12 +1082,10 @@ func coordinatorCwdFor(ctx context.Context, layout paneMinter, paneID string, lg
 // participant at the end of the strip is one a person can see and move, and
 // one that never spawned cannot be.
 //
-// IT DOES NOT DERIVE A WORKSPACE. A coordinator's tab in ANOTHER workspace
-// names no seat on the strip this participant's tab is going into, and the
-// store's answer for that case is "last", which is what comes back. Where a
-// participant's tab is minted is the composition root's answer, stated there
-// and deliberately not re-decided in a spawn (app.go: the default workspace,
-// "until a coordinator names its own").
+// The coordinator's tab and workspace are both read from the layout. The
+// workspace is resolved separately by coordinatorWorkspace so the anchor and
+// the new tab belong to the same strip; a missing workspace falls back to
+// the configured default rather than inventing a second layout answer.
 func (s *workerSpawner) coordinatorTab(ctx context.Context, paneID string, lg log.Logger) string {
 	if paneID == "" || s.layout == nil {
 		return ""
@@ -1099,6 +1099,23 @@ func (s *workerSpawner) coordinatorTab(ctx context.Context, paneID string, lg lo
 	lg.Debug("worker spawn: the participant's tab belongs after its coordinator's",
 		"pane_id", paneID, "after_tab", after)
 	return after
+}
+
+// coordinatorWorkspace answers which workspace holds the coordinator's pane.
+// A missing coordinator or a layout lookup failure keeps the established
+// default-workspace fallback; a resolved workspace is used for both the new
+// tab and its placement anchor.
+func (s *workerSpawner) coordinatorWorkspace(ctx context.Context, paneID string, lg log.Logger) string {
+	if paneID == "" || s.layout == nil {
+		return s.workspace
+	}
+	workspace, err := s.layout.WorkspaceForPane(ctx, paneID)
+	if err != nil || workspace == "" {
+		lg.Debug("worker spawn: the coordinator's workspace is unknown; using the default",
+			"pane_id", paneID, "error", err)
+		return s.workspace
+	}
+	return workspace
 }
 
 // deliverTask waits for paneID to become typable and reports what it found —

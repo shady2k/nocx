@@ -218,29 +218,32 @@ func TestAWorkersTabLeavesEveryOtherWorkspaceAlone(t *testing.T) {
 	}
 }
 
-// A coordinator whose tab is in ANOTHER workspace names no seat on the strip
-// the participant's tab is going into, and the spawn still succeeds: the tab
-// goes last rather than taking a seat that belongs to somebody else — and
-// never the head, which is where the defect this file was written from left
-// it.
-func TestAWorkersTabGoesLastWhenItsCoordinatorIsElsewhere(t *testing.T) {
+// A coordinator's workspace is part of the participant's placement: a tab
+// spawned from a named workspace belongs in that same strip, immediately
+// after its coordinator, not in the default strip.
+func TestAWorkersTabOpensInItsCoordinatorsWorkspace(t *testing.T) {
 	stand := newWorkerStand(t)
 	layout := stand.db.Layout()
-	placeTabs(t, layout, content.DefaultWorkspaceID, "tab-1", "tab-2")
-	placeTabs(t, layout, "ws-elsewhere", "tab-x")
+	placeTabs(t, layout, content.DefaultWorkspaceID, "tab-default")
+	placeTabs(t, layout, "ws-team", "tab-team-1", "tab-team-2", "tab-team-3")
+	defaultBefore := idsOf(t, stripOf(t, layout, content.DefaultWorkspaceID))
 
-	coordinator := stand.openCoordinator(t, paneOf("tab-x"))
-	stand.registerFrom(t, "worker-placement", coordinator)
+	coordinator := stand.openCoordinator(t, paneOf("tab-team-2"))
+	participant := stand.registerFrom(t, "worker-placement", coordinator)
 
-	stored := stripOf(t, layout, content.DefaultWorkspaceID)
-	if len(stored) != 3 {
-		t.Fatalf("the strip is %v, want three tabs", idsOf(t, stored))
+	team := stripOf(t, layout, "ws-team")
+	if got := idsOf(t, team); len(got) != 4 || got[0] != "tab-team-1" || got[1] != "tab-team-2" || got[3] != "tab-team-3" {
+		t.Fatalf("coordinator workspace strip is %v, want participant after tab-team-2", got)
 	}
-	if stored[0].ID != "tab-1" || stored[1].ID != "tab-2" {
-		t.Fatalf("the strip is %v, want the existing order kept", idsOf(t, stored))
+	held, err := layout.TabForPane(context.Background(), stand.paneOfSession(t, participant.Liveness.SessionID))
+	if err != nil {
+		t.Fatalf("which tab holds the participant's pane: %v", err)
 	}
-	if stored[2].ID == "tab-1" || stored[2].ID == "tab-2" {
-		t.Fatalf("no participant's tab is in the strip at all: %v", idsOf(t, stored))
+	if team[2].ID != held {
+		t.Fatalf("tab at seat 2 is %s, but participant's pane is in %s", team[2].ID, held)
+	}
+	if got := idsOf(t, stripOf(t, layout, content.DefaultWorkspaceID)); len(got) != len(defaultBefore) || got[0] != defaultBefore[0] {
+		t.Fatalf("default strip changed from %v to %v", defaultBefore, got)
 	}
 }
 

@@ -17,7 +17,7 @@ Added a cell-model-coordinate selection overlay to the live painter. Added point
 - `cd frontend && npx vitest run src/painter/painter.test.ts src/painter/selection-gesture.test.ts` — passed (18 tests).
 - `cd frontend && npx tsc --noEmit -p tsconfig.json` — passed.
 - `cd frontend && npx prettier --check` on all touched frontend files — passed.
-- No wire changed, so contracts checks were not run. Did not run `make ci-full`, containerized tests, or e2e.
+- No wire changed. The pre-commit hook ran `npm run contracts:check` and it passed. Did not run `make ci-full`, containerized tests, or e2e.
 
 ## Not completed
 
@@ -25,4 +25,4 @@ The requested live-to-card drag and stable card endpoint identity `(block id, ar
 
 ## Commit
 
-Pending at report creation.
+Commit: `54b513b2`.

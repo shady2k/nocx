@@ -26,6 +26,10 @@ The core drag-release-into-card behavior is not implemented. The live selection 
 
 ## Session 2 — live-to-card selection
 
+### Commit
+
+- `3cbfcfa1` — `feat(frontend): copy selections from live output into cards (nocx-zg3k3.4.5)`
+
 ### Wired
 
 The selection gesture now resolves card endpoints by `(block id, artifact version, logical line)` from the parsed `StoredBlockRows` retained by `paintStoredRows`. It hit-tests the endpoint against the live painter's committed cell width and uses the shared mapping's grapheme-cluster column resolver, so a wide grapheme remains atomic. Card content is reconstructed from the stored rows through `captureLiveSelection`, the same copy primitive used by the pinned live snapshot; rendered text and node order are not copy inputs. Cross-boundary ranges are joined in display order (card rows before live rows), independent of drag direction. The live portion remains highlighted while a cross-boundary drag is active.
@@ -39,7 +43,7 @@ Added `live selection gesture > copies a drag from live output into a card in di
 - `cd frontend && npx vitest run src/painter/selection-gesture.test.ts src/painter/mapping.test.ts src/scrollback/block-rows.test.ts` — passed, 36 tests.
 - `cd frontend && npx tsc --noEmit -p tsconfig.json` — passed.
 - `cd frontend && npm run format:check` — passed.
-- `npm run contracts:check` — not run; no wire contract changed.
+- `npm run contracts:check` — passed in the pre-commit static gate; no wire contract changed.
 - Containerized jobs, `make ci-full` and e2e — not run, as instructed.
 
 ### Not done

@@ -10,6 +10,8 @@ import { BlockNotice } from '../ui/block-notice'
 
 export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
+  /** Immutable artifact identity pinned by the ledger read. */
+  readonly artifactVersion?: string
   readonly droppedRows: number
   readonly lostRows: number
   /** Rows lost while nocx's server was unavailable: the terminal kept them
@@ -64,6 +66,7 @@ function rowLine(value: unknown): LedgerBlockRowsLine {
 export function parseStoredBlockRows(
   body: string,
   metadata: RowsArtifactMetadata,
+  artifactVersion?: string,
 ): StoredBlockRows {
   const lines = body
     .split('\n')
@@ -83,6 +86,7 @@ export function parseStoredBlockRows(
       : {}
   return {
     lines,
+    ...(artifactVersion === undefined ? {} : { artifactVersion }),
     droppedRows: nonNegativeInteger(payload.droppedRows),
     lostRows: nonNegativeInteger(payload.lostRows),
     unavailableRows: nonNegativeInteger(payload.unavailableRows),
@@ -250,8 +254,17 @@ export function paintStoredRows(
     opts.warm?.(fitCandidatesOf(snapshot.rows))
     const output = document.createElement('div')
     output.className = 'cmd-output'
-    for (const row of snapshot.rows) {
-      output.appendChild(paintRow(row, opts))
+    for (let index = 0; index < snapshot.rows.length; index++) {
+      const painted = paintRow(snapshot.rows[index], opts)
+      const storedLine = stored.lines[index]
+      if (storedLine) {
+        painted.dataset.blockId = block.dataset.entryId ?? ''
+        if (stored.artifactVersion !== undefined) {
+          painted.dataset.artifactVersion = stored.artifactVersion
+        }
+        painted.dataset.logicalLine = String(storedLine.from)
+      }
+      output.appendChild(painted)
     }
     // Paths and urls become clickable HERE, once per paint, the same "one
     // pass beats a pass per click" rule the retired outputHtml path used

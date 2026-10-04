@@ -264,7 +264,10 @@ async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
   try {
-    return { kind: 'rows', rows: parseStoredBlockRows(artifact.body, artifact.metadata) }
+    return {
+      kind: 'rows',
+      rows: parseStoredBlockRows(artifact.body, artifact.metadata, artifact.metadata.id),
+    }
   } catch (err) {
     return { kind: 'unreadable', reason: reasonOf(err) }
   }
@@ -444,7 +447,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
       return {
         kind: 'command',
         body: null,
-        rows: parseStoredBlockRows(artifact.body, rows),
+        rows: parseStoredBlockRows(artifact.body, rows, artifact.id),
         caused,
         proseEvicted: !!entry.proseEvicted,
       }

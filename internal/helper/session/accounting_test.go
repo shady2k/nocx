@@ -24,15 +24,19 @@ func TestSharedRowPoolChargesTransientResendAndFIFOCopies(t *testing.T) {
 	if got, max := poolBytes(t, hs), hs.rowBufferBytes; got > max {
 		t.Fatalf("simultaneous resend + FIFO owners charged %d > budget %d", got, max)
 	}
-	if got := hs.rowPool.ownerBytes(rowOwnerResend); got != retainedBytes {
-		t.Fatalf("resend owner charged %d, want %d", got, retainedBytes)
+	if got := hs.rowPool.ownerBytes(rowOwnerResend); got != 2*retainedBytes {
+		t.Fatalf("resend owner charged %d, want %d: the independent owner charge includes the explicit owner and retained emission", got, 2*retainedBytes)
 	}
 	if got := hs.rowQueuedBytes; got != emissionBytes(rowEmission{from: 0, rows: row}) {
 		t.Fatalf("FIFO charge = %d", got)
 	}
 	hs.releaseRetainedRows(charged)
+	if got, want := poolBytes(t, hs), hs.rowQueuedBytes+retainedBytes; got != want {
+		t.Fatalf("after transient resend release total=%d, FIFO+retained=%d", got, want)
+	}
+	hs.releaseRetainedRows(retainedBytes)
 	if got := poolBytes(t, hs); got != hs.rowQueuedBytes {
-		t.Fatalf("after resend release total=%d, FIFO=%d", got, hs.rowQueuedBytes)
+		t.Fatalf("after prefix reclaim total=%d, FIFO=%d", got, hs.rowQueuedBytes)
 	}
 }
 

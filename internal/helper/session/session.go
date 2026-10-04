@@ -371,11 +371,7 @@ type hostSession struct {
 	// It is separate from the emulator's bounded capture floor: at zero the
 	// runtime still captures departures, while historyPage serves no rows.
 	scrollback atomic.Uint64
-	// resendRT is the seam the resend's scrollback walk reads the runtime
-	// through (rows.go's resendRuntime). Spawn wires the session's own
-	// runtime; only a test that arms a departure at the seam sets
-	// anything else, and resender() answers the runtime when this is nil.
-	resendRT resendRuntime
+
 	// screen is the emulator the runtime directs. It is held here for its
 	// LIFETIME and not for its behaviour: every read and every write goes
 	// through runtime, and Close is this object's to call because a runtime
@@ -441,6 +437,8 @@ type hostSession struct {
 	rowBufferBytes        int64
 	rowQueuedBytes        int64 // FIFO owner's charge in rowPool
 	rowPool               rowBytePool
+	resendWindow          []retainedRowSpan // original indexed cells kept until a proven prefix ack
+	resendReclaimed       uint64
 	rowsIncomplete        atomic.Uint64
 	rowBufferOverflows    atomic.Uint64 // ADR-0075 helper-pool exhaustion, distinct from live-tier shortfall
 	rowsLiveRetentionLost atomic.Uint64

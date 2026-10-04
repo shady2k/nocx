@@ -160,9 +160,10 @@ func buildBudgetPumpSession(logger *slog.Logger) (*hostSession, *sessionruntime.
 		now:     time.Now,
 		subs:    make(map[proto.SubscriberID]*subscriber),
 		rowWake: make(chan struct{}, 1),
-		// Larger than the whole feed's row content: the queue the pump
-		// drains must never be the bound under measurement.
-		rowBufferBytes: 64 << 20,
+		// Larger than both simultaneous owners of the whole feed (FIFO and
+		// retained resend window): pool capacity must not truncate the
+		// pump work under measurement.
+		rowBufferBytes: 128 << 20,
 		rowsDone:       make(chan struct{}),
 	}
 	sink := newBudgetSink()

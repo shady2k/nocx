@@ -62,5 +62,3 @@ func (p *rowBytePool) release(owner string, n int64) {
 	p.owners[owner] -= n
 	p.total -= n
 }
-
-func (p *rowBytePool) ownerBytes(owner string) int64 { return p.owners[owner] }

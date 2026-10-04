@@ -653,35 +653,6 @@ func (s *hostSession) serveRows() {
 	}
 }
 
-// chargeRetainedRows is the charge point for nocx-ho1ri's delivered-but-unacked
-// resend window. The window calls this before retaining a copy and releases the
-// returned amount only after a prefix-proven ack. A shared underlying slice is
-// still charged to both owners while both can keep it alive.
-func (s *hostSession) chargeRetainedRows(rows []emulator.Row) (int64, bool) {
-	n := emissionBytes(rowEmission{rows: rows})
-	s.rowMu.Lock()
-	defer s.rowMu.Unlock()
-	if s.rowPool.limit == 0 {
-		limit := s.rowBufferBytes
-		if limit <= 0 {
-			limit = DefaultRowBufferBytes
-		}
-		s.rowPool.configure(limit)
-	}
-	if !s.rowPool.charge(rowOwnerResend, n) {
-		return 0, false
-	}
-	return n, true
-}
-
-// releaseRetainedRows pairs with chargeRetainedRows when the resend window
-// drops rows after a prefix-proven ack.
-func (s *hostSession) releaseRetainedRows(n int64) {
-	s.rowMu.Lock()
-	s.rowPool.release(rowOwnerResend, n)
-	s.rowMu.Unlock()
-}
-
 // droppedEnd is one interval end the pump dropped for want of a subscriber:
 // the boundary's own identity, kept so the coordinator's return can be
 // handed the marker again (nocx-zg3k3.5.3). The pump alone holds these.

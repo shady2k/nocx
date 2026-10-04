@@ -385,22 +385,27 @@ func TestAckLeapingOverMissingRetainedHeadReclaimsNothing(t *testing.T) {
 	rowsFeed(t, rt, 0, 40)
 	sink.waitFor(1, 0, 0)
 	rows := []emulator.Row{textRow("after-hole")}
-	bytes, ok := hs.chargeRetainedRows(rows)
-	if !ok {
+	bytes := emissionBytes(rowEmission{rows: rows})
+	hs.rowMu.Lock()
+	// This is an intentionally sparse retained-window fixture. Charge it
+	// through the pool primitive, as the production enqueue path does, then
+	// verify the user-visible ack watermark and retained record stay put.
+	if !hs.rowPool.charge(rowOwnerResend, bytes) {
+		hs.rowMu.Unlock()
 		t.Fatal("could not charge test retained row")
 	}
-	hs.rowMu.Lock()
 	hs.resendWindow = []retainedRowSpan{{from: 5, rows: rows, bytes: bytes}}
 	hs.rowMu.Unlock()
-	before := hs.rowPool.ownerBytes(rowOwnerResend)
 	if err := hs.confirmRows(sink, "coord-1", 10); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	if got := hs.rowPool.ownerBytes(rowOwnerResend); got != before {
-		t.Fatalf("ack across missing head reclaimed resend bytes: %d -> %d", before, got)
-	}
 	if hs.rowsConfirmed != 0 {
 		t.Fatalf("confirmed watermark advanced across unproven head to %d", hs.rowsConfirmed)
+	}
+	hs.rowMu.Lock()
+	defer hs.rowMu.Unlock()
+	if len(hs.resendWindow) != 1 || hs.resendWindow[0].from != 5 || len(hs.resendWindow[0].rows) != 1 {
+		t.Fatalf("ack across missing head changed retained window: %+v", hs.resendWindow)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 func TestSharedRowPoolChargesTransientResendAndFIFOCopies(t *testing.T) {
@@ -67,9 +68,10 @@ func TestSharedRowPoolOverflowMarksRowAndResumesAfterEnd(t *testing.T) {
 	if len(hs.rowQueue) != 0 {
 		t.Fatal("rows inside the damaged command were recorded")
 	}
-	hs.enqueueRowEmission(rowEmission{end: true, from: 19})
-	if _, ok := hs.dequeueRowEmission(); !ok {
-		t.Fatal("next end marker was not queued")
+	nonce := sessionruntime.FenceNonce{1}
+	hs.enqueueRowEmission(rowEmission{end: true, from: 19, nonce: nonce})
+	if end, ok := hs.dequeueRowEmission(); !ok || !end.end || end.nonce != nonce {
+		t.Fatalf("next end marker=(%+v,%v), want its own fence", end, ok)
 	}
 	hs.enqueueRowEmission(rowEmission{from: 19, rows: row})
 	if len(hs.rowQueue) != 1 || hs.rowQueue[0].from != 19 {

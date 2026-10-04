@@ -102,6 +102,30 @@ describe('restore-client — one helper, two media types', () => {
 describe("restore-client — a block's stored rows say whether they were read", () => {
   const ROW_LINE = JSON.stringify({ from: 3, row: { text: 'hi' } })
 
+  it('shares an in-flight stored-row read for the same entry', async () => {
+    let resolveGet!: (value: unknown) => void
+    const calls: string[] = []
+    const client = {
+      call: vi.fn((method: string) => {
+        calls.push(method)
+        if (method === 'ledger.get') {
+          return new Promise((resolve) => {
+            resolveGet = resolve
+          })
+        }
+        return Promise.resolve({ body: `${ROW_LINE}\n` })
+      }),
+    } as unknown as WSClient
+
+    const first = blockRowsForEntry(client, 'entry-shared')
+    const second = blockRowsForEntry(client, 'entry-shared')
+    expect(calls).toEqual(['ledger.get'])
+    resolveGet({ artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }] })
+    const [one, two] = await Promise.all([first, second])
+    expect(one).toEqual(two)
+    expect(calls).toEqual(['ledger.get', 'ledger.artifact'])
+  })
+
   it('answers the rows when the artifact is there and well formed', async () => {
     const { client } = fakeLedger([
       { id: 'art-rows', mediaType: 'application/x-nocx-rows', body: `${ROW_LINE}\n` },

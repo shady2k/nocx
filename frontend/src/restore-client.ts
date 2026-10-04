@@ -222,7 +222,31 @@ function storeKeepsNothing(err: unknown): boolean {
   return err instanceof RpcError && (err.code === -32602 || err.code === -32601)
 }
 
-export async function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+// A block's rows can be requested by several simultaneous restoration and
+// notification paths. They are the same read of the same stored artifact, so
+// share the in-flight operation per client and entry instead of putting
+// duplicate large artifact responses on the WebSocket at once.
+const blockRowsInFlight = new WeakMap<WSClient, Map<string, Promise<BlockRowsRead>>>()
+
+export function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+  let entries = blockRowsInFlight.get(client)
+  if (!entries) {
+    entries = new Map()
+    blockRowsInFlight.set(client, entries)
+  }
+  const existing = entries.get(entryId)
+  if (existing) return existing
+
+  const read = readBlockRowsForEntry(client, entryId)
+  entries.set(entryId, read)
+  const clear = () => {
+    if (entries?.get(entryId) === read) entries.delete(entryId)
+  }
+  void read.then(clear, clear)
+  return read
+}
+
+async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
   let artifact: FetchedArtifact
   try {
     let entry: LedgerGet

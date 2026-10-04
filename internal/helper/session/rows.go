@@ -679,7 +679,21 @@ func (s *hostSession) resendFromScrollback() bool {
 	s.rowMu.Lock()
 	ends := append([]droppedEnd(nil), s.resendEnds...)
 	spans := append([]retainedRowSpan(nil), s.resendWindow...)
+	// Emissions still queued have not reached any reader yet. If a new
+	// attachment caused this replay, stop just before the first such row;
+	// the queue will carry that suffix after the retained prefix and neither
+	// duplicate it nor let it overtake the replay.
+	queuedFrom := d
+	for _, em := range s.rowQueue {
+		if !em.end && !em.clear && em.from < queuedFrom {
+			queuedFrom = em.from
+			break
+		}
+	}
 	s.rowMu.Unlock()
+	if queuedFrom < d {
+		d = queuedFrom
+	}
 	// Read the watermark last. An ack racing the snapshot may leave harmless
 	// extra copied rows, but can never make the snapshot claim a reclaimed
 	// prefix is missing.
@@ -927,6 +941,17 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 	// loaded residual (nocx-zg3k3.5.11): the walk owns the newcomer's past,
 	// the emission belongs to whoever was bound when it started.
 	s.mu.Lock()
+	s.rowMu.Lock()
+	resendDue := s.resendDue
+	s.rowMu.Unlock()
+	if resendDue && !em.incomplete {
+		// A reader attached after the pump's resend check but before this
+		// snapshot must not receive a newer queued row before its retained
+		// prefix. Returning undelivered leaves the queue's retained copy in
+		// place; the next pump turn performs the replay first.
+		s.mu.Unlock()
+		return false
+	}
 	subs := s.subscribersLocked()
 	s.mu.Unlock()
 	delivered := true

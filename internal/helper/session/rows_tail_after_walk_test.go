@@ -52,10 +52,7 @@ func TestTheTailAfterAReturnedWalkStreamsAndEndsOnTheSameSubscriber(t *testing.T
 	// The return: coord-2 binds, the pump wakes, and the walk runs against
 	// the departed snapshot D=200.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(1, 0, 0)
 
 	// THE COMMAND RUNS ON: 77 more lines depart 200..277, live to the same

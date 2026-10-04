@@ -72,12 +72,10 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back.
+	// It comes back through the real attach path, which arms the resend
+	// before making the new reader visible to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	// The resend begins at the prefix-confirmed watermark. Those rows have
 	// been reclaimed from the helper's bounded window and need not be sent
@@ -120,6 +118,114 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the resent rows are not the command's whole output:\n got %d rows %q\nwant %d rows %q",
 			len(got), strings.Join(got, ","), len(want), strings.Join(want, ","))
+	}
+}
+
+// A new subscriber can attach after an output emission was queued but before
+// the pump observed that it had no recipient. In that ordering the queued
+// emission itself does not arm resendDue, so attaching must compare the
+// confirmed mark with the runtime's departure count and request replay before
+// the pump delivers queued rows to the new reader.
+func TestNewReaderReplaysUnconfirmedRowsBeforeQueuedOutput(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	rowsFeed(t, rt, 0, 45)
+	first.waitFor(1, 0, 0)
+	if err := hs.confirmRows(first, "coord-1", 16); err != nil {
+		t.Fatalf("confirm the stored prefix: %v", err)
+	}
+	<-hs.requestRowsDrain()
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+
+	second := newRowsSink()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", second)
+
+	// Drain gives the pump's queue-empty observation without timing. During
+	// a shutdown drain replay is intentionally paused, so if the pump has not
+	// already sent the new reader's replay, the test checks that attach armed
+	// it and invokes the same retained walk synchronously.
+	<-hs.requestRowsDrain()
+	frames := decodeResentRows(t, second.rowFrames())
+	if len(frames) == 0 {
+		hs.rowMu.Lock()
+		due := hs.resendDue
+		hs.rowMu.Unlock()
+		if !due {
+			t.Fatal("attaching a new reader did not arm a resend of its unconfirmed rows")
+		}
+		if !hs.resendFromScrollback() {
+			t.Fatal("the retained unconfirmed rows could not be replayed to the new reader")
+		}
+		frames = decodeResentRows(t, second.rowFrames())
+	}
+	if len(frames) == 0 || frames[0].from != 16 {
+		var got uint64
+		if len(frames) != 0 {
+			got = frames[0].from
+		}
+		t.Fatalf("new reader's first rows start at %d, want unconfirmed watermark 16", got)
+	}
+}
+
+// Pending output must remain after the replay prefix. The retained walk ends
+// at the first still-queued row, then the FIFO resumes at that row exactly
+// once. This forces the attach/pump ordering that is scheduler-dependent in
+// the package's ordinary full run.
+func TestReaderReplayStopsAtThePendingQueueHead(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	rowsFeed(t, rt, 0, 45)
+	first.waitFor(1, 0, 0)
+	if err := hs.confirmRows(first, "coord-1", 16); err != nil {
+		t.Fatalf("confirm the stored prefix: %v", err)
+	}
+	<-hs.requestRowsDrain()
+
+	const queuedFrom = uint64(20)
+	queued := make([]emulator.Row, 0, 2)
+	hs.rowMu.Lock()
+	for _, span := range hs.resendWindow {
+		for i, row := range span.rows {
+			index := span.from + uint64(i) //nolint:gosec // slice index is non-negative
+			if index >= queuedFrom && index < queuedFrom+2 {
+				queued = append(queued, row)
+			}
+		}
+	}
+	em := rowEmission{from: queuedFrom, rows: queued}
+	em.bytes = emissionBytes(em)
+	if len(queued) != 2 || !hs.rowPool.charge(rowOwnerFIFO, em.bytes) {
+		hs.rowMu.Unlock()
+		t.Fatalf("could not queue two retained rows from %d", queuedFrom)
+	}
+	hs.rowQueue = append(hs.rowQueue, em)
+	hs.rowQueuedBytes += em.bytes
+	hs.rowMu.Unlock()
+
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+	second := newRowsSink()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", second)
+
+	second.waitFor(1, 0, 0)
+	firstBatch := decodeResentRows(t, second.rowFrames())
+	if firstBatch[0].from != 16 {
+		t.Fatalf("the pending output overtook resend: first FromRow is %d, want 16", firstBatch[0].from)
+	}
+	second.waitFor(2, 0, 0)
+	batches := decodeResentRows(t, second.rowFrames())
+	if len(batches) != 2 || batches[1].from != queuedFrom {
+		t.Fatalf("the pending queue did not resume at %d after the replay: %+v", queuedFrom, batches)
+	}
+	if texts := append(batches[0].texts, batches[1].texts...); len(texts) != 6 {
+		t.Fatalf("replay plus queued output delivered %d rows, want 6", len(texts))
+	} else {
+		for i, text := range texts {
+			if want := fmt.Sprintf("L%06d", 16+i); text != want {
+				t.Fatalf("row %d = %q, want %q", i, text, want)
+			}
+		}
 	}
 }
 
@@ -205,10 +311,7 @@ func TestThePumpResendsRowsAnUnconfirmingReaderTook(t *testing.T) {
 
 	// The coordinator comes back.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	// The sixteen taken rows are read back from the scrollback: the mark
 	// never moved, and it is the only dedup line there is.
@@ -294,10 +397,7 @@ func TestThePumpResendsAnEndItDroppedForNoSubscriber(t *testing.T) {
 
 	// It comes back.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	sink2.waitFor(1, 1, 0)
 
@@ -374,10 +474,7 @@ func TestThePumpCountsWhatItCannotProveBelowADroppedBoundary(t *testing.T) {
 	}
 
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	sink2.waitFor(2, 1, 0)
 
@@ -495,10 +592,7 @@ func TestResendSurvivesLiveHistoryPrune(t *testing.T) {
 		t.Fatal("the setup did not prune the initial emitted row from live history")
 	}
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(1, 0, 0)
 	resent := decodeResentRows(t, sink2.rowFrames())
 	if len(resent) == 0 || resent[0].from != initial[0].from || len(resent[0].texts) == 0 || resent[0].texts[0] != first {

@@ -30,12 +30,10 @@ func TestTheResendWalksFromTheRunningIntervalsStart(t *testing.T) {
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back, and the resend runs.
+	// It comes back through the real attachment path, which arms the
+	// resend before exposing the reader to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(4, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
@@ -79,12 +77,10 @@ func TestTheResendWalksFromTheEarliestIntervalEvenAfterItEnds(t *testing.T) {
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back, and the resend runs.
+	// It comes back through the real attachment path, which arms the
+	// resend before exposing the reader to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(1, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())

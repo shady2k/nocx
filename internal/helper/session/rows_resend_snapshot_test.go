@@ -30,10 +30,7 @@ func TestResendUsesOriginalCellsAfterDisconnectedWidthChange(t *testing.T) {
 	rowsFeed(t, rt, 100, 100)
 
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(1, 0, 0)
 	resent := decodeResentRows(t, sink2.rowFrames())
 	if len(resent) == 0 || resent[0].from != from {

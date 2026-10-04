@@ -465,8 +465,9 @@ type hostSession struct {
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
 	// resendDue is the row pump's flag (rows.go): an emission reached zero
-	// subscribers, or a reader was replaced before its detach arrived, so
-	// the next reader owes a read-back from the retained window
+	// subscribers, a reader was replaced before its detach arrived, or a
+	// reader attached while rows remained unconfirmed; in each case the next
+	// reader owes a read-back from the retained window
 	// (nocx-zg3k3.5.3). Guarded by rowMu because attach/detach arm it too.
 	resendDue bool
 	// resendEnds is the row pump's list of the interval ends its drops
@@ -686,6 +687,17 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		s.mu.Unlock()
 		stop()
 		return proto.AttachResult{}, ErrNoSuchSession
+	}
+
+	// A newly bound reader also needs the retained suffix when rows
+	// departed before it attached. Set the obligation before publishing the
+	// subscriber under this mutex: deliverRowEmission takes the same lock
+	// while checking resendDue, so a queued live emission cannot overtake
+	// the replay in the gap between the pump's due check and its fan-out.
+	if s.runtime != nil && s.rowsConfirmed < s.runtime.DepartedRowCount() {
+		s.rowMu.Lock()
+		s.resendDue = true
+		s.rowMu.Unlock()
 	}
 
 	// One pump per subscriber: a second attach by the same subscriber

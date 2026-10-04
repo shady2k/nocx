@@ -145,6 +145,24 @@ func rowsBridgeSession(t *testing.T, cols, rows int) (*hostSession, *sessionrunt
 	return hs, rt, sink
 }
 
+// rowsAttachReader uses the session's real attachment path for a reader
+// returning to the rows pump. Tests that mutate subs directly bypass the
+// resend obligation production attach establishes for unconfirmed output.
+func rowsAttachReader(t *testing.T, hs *hostSession, id proto.SubscriberID, sink *rowsSink) {
+	t.Helper()
+	hs.mu.Lock()
+	if hs.attachments == nil {
+		hs.attachments = make(map[proto.AttachmentID]*attachment)
+	}
+	hs.mu.Unlock()
+	attachmentID := proto.AttachmentID("att-" + string(id))
+	if _, err := hs.attach(proto.AttachParams{Subscriber: id, Session: hs.id, Fresh: true}, sink,
+		func() proto.AttachmentID { return attachmentID }, hs.log); err != nil {
+		t.Fatalf("attach rows reader %s: %v", id, err)
+	}
+	t.Cleanup(func() { hs.detach(sink, attachmentID) })
+}
+
 func mintRaw(t *testing.T) [16]byte {
 	t.Helper()
 	var raw [16]byte

@@ -210,14 +210,55 @@ write boundary; the boundary-page partial erases of P3 are handed as spans; the 
 on resize exactly as it does today. Check: shrink/grow mid-transcript, both axes, with pruning
 active; complete and duplicate-free.
 
-### 5.7 Reconnect, restart, no open window
+### 5.7 Reconnect (resend), restart, no open window — and why the resend must not read the live tier
 
-Transport reconnect does not touch the emulator or the durable stream; the stream is the
-bounded helper queue (ADR-0075 on overflow), which is already how resend works. Restart reads
-the coordinator's store; no open window is the ordinary headless path. The callback changes
-none of these; the checks exist to prove the new fork effect did not regress them (a session
-runs a command with no window, restarts, and the restored card has the complete output; a
-frame disrupts and rejoins mid-transcript with no hole).
+The reviewer's correction of 2026-10-04 stands here: this design does NOT inherit the
+shipped resend as-is. Today `internal/helper/session/rows.go` `resendFromScrollback` (L639)
+rebuilds the unacknowledged span by re-reading the EMULATOR'S LIVE history
+(`t.HistoryRows` via `ReadDepartedScreen`), bounded below by `EarliestIntervalStart`, and the
+helper keeps no delivered-row copy (the wire FIFO frees rows once delivered; the owner's
+decision gives the helper no second buffer). Two failures follow under the bounded live tier
+this stage keeps:
+
+- rows that were DELIVERED but not yet acknowledged are no longer in the helper's queue, so
+  the resend re-reads them from scrollback; if the live tier pruned them during the
+  disconnect, the resend cannot rebuild them — a loss the "short" path then states;
+- a width change during the disconnect reflows the scrollback, so the resend serves reflowed
+  rows at the wrong absolute indices — the rows served are not the rows
+  that were emitted.
+
+The history-erased callback does not fix this by itself: the callback feeds the durable row
+STREAM, and a delivered-but-unacked row is no longer in that stream's helper queue. So the
+reconnect check is passed by the design only together with a helper-side resend change:
+
+**The helper keeps delivered rows in its bounded buffer until an ack proves the whole
+logical prefix durable, and resend serves from that buffer, never from the emulator's live
+history.** The retention is the existing bounded helper buffer (`history.helperBufferMB`,
+ADR-0075): it holds rows from their emission until a prefix-proving ack (a real reclaim
+watermark or explicit missing ranges — not `EarliestIntervalStart`'s retain-forever repair),
+and overflow takes ADR-0075's existing path (the block in flight ends incomplete). Resend
+then serves original cells at their original absolute indices: pruned-during-disconnect rows
+are still in the helper's retained window, and a width change while disconnected cannot
+reflow them because they no longer read from the emulator.
+
+This is exactly the scope of the retired leaves `nocx-ho1ri` (resend from an indexed replay
+of original cells, prefix-proven reclaim) and `nocx-4nkw1` (one byte pool for the helper's
+buffers). The upstream-first reset retired the JOURNAL, not this helper defect; the two
+leaves are reopened with corrected bodies under this design.
+
+Reconnect checks (lower-tier, deterministic):
+
+- **width change during a disconnect**: rows emitted at indices [m, d) survive a reflow
+  while the coordinator is away; the resend serves the ORIGINAL cells at their original
+  indices, and a generation mismatch is stated as loss, never relabelled;
+- **prune during a disconnect**: rows the live tier pruned while the coordinator was away
+  are still served from the helper's retained window (they were emitted before the prune);
+- **an ack that leaps a missing head**: an ack claiming rows the helper cannot prove durable
+  reclaims nothing; the unproven prefix is re-offered, and the loss path names the cause.
+
+Restart reads the coordinator's store; no open window is the ordinary headless path; the
+callback changes neither. The checks exist to prove the whole path — new fork effect,
+helper retention, coordinator store — holds across a disconnect/rejoin with no hole.
 
 ## 5.8 Port-side note: reading rows inside the callback
 
@@ -264,16 +305,16 @@ floor, the durable stream stays complete, the live surface serves none.)
 
 ## 8. Comparison against the DONE WHEN's alternatives; the smallest passing mechanism
 
-| check                                      | corrected post-write reader + bounded feeding | **narrow complete-row callback (chosen)** | fork journal                                                   |
-| ------------------------------------------ | --------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------- |
-| normal                                     | passes                                        | passes                                    | passes                                                         |
-| nearly-full                                | passes (re-baseline)                          | passes (spans explicit)                   | passes                                                         |
-| zero live history                          | fails (no history to read)                    | **passes** (floor + P1-P4)                | passes (primary-boundary crossing)                             |
-| many departures in one write (11-byte REP) | **fails (measured: 12,476 vs 796)**           | **passes** (P1/P2 per page)               | passes                                                         |
-| ED3/RIS in one write                       | fails without a byte-scan split               | **passes** (P3/P4)                        | passes                                                         |
-| resize/reflow                              | passes (re-baseline, no reflow loss)          | passes (effect does not fire in reflow)   | passes                                                         |
-| reconnect / restart / no window            | passes (stream unchanged)                     | passes                                    | passes                                                         |
-| fork delta                                 | none                                          | **one effect + 3 sites + header type**    | odometer + journal stage + drain + floor + generation + ledger |
+| check                                      | corrected post-write reader + bounded feeding                                  | **narrow complete-row callback (chosen)**                                               | fork journal                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| normal                                     | passes                                                                         | passes                                                                                  | passes                                                         |
+| nearly-full                                | passes (re-baseline)                                                           | passes (spans explicit)                                                                 | passes                                                         |
+| zero live history                          | fails (no history to read)                                                     | **passes** (floor + P1-P4)                                                              | passes (primary-boundary crossing)                             |
+| many departures in one write (11-byte REP) | **fails (measured: 12,476 vs 796)**                                            | **passes** (P1/P2 per page)                                                             | passes                                                         |
+| ED3/RIS in one write                       | fails without a byte-scan split                                                | **passes** (P3/P4)                                                                      | passes                                                         |
+| resize/reflow                              | passes (re-baseline, no reflow loss)                                           | passes (effect does not fire in reflow)                                                 | passes                                                         |
+| reconnect / restart / no window            | fails on reconnect: resend reads the live tier (prune and reflow eat the span) | **passes** — with the helper's retained-window resend (§5.7, nocx-ho1ri/4nkw1 reopened) | passes (journal-era replay ledger)                             |
+| fork delta                                 | none                                                                           | **one effect + 3 sites + header type**                                                  | odometer + journal stage + drain + floor + generation + ledger |
 
 The next-smallest passing candidate after the reader's REP failure is the callback; the journal
 passes too but carries the most fork ABI. The callback is therefore the smallest passing
@@ -296,8 +337,12 @@ mechanism.
 
 ## 10. What this design deliberately does not build
 
-- No departure odometer, no retained floor, no layout generation, no replay ledger, no
-  fork-side staging, no dynamic limit raising, no byte-scan of destructive sequences.
+- **Fork side:** no departure odometer, no retained floor, no layout generation, no
+  fork-side staging, no dynamic limit raising, no byte-scan of destructive sequences — the
+  fork change is exactly the one observational history-erased effect.
+- **Helper side:** the resend keeps delivered rows in the EXISTING bounded helper buffer
+  until a prefix-proving ack (nocx-ho1ri/4nkw1's scope, reopened); no second buffer beyond
+  ADR-0075's accounting, no journal, no ledger outside the helper's own budget.
 - The 500-block transcript acceptance (`nocx-i9qw0`) remains the separate final check; the
   lower-tier deterministic tests replace the journal-plan's lower-tier list one-for-one with
   the checks in §5.

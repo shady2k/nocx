@@ -283,10 +283,8 @@ func TestDepartedRowsRefuseAClosedTerminal(t *testing.T) {
 }
 
 // The retention boundary: deep enough into scrollback, the library prunes
-// whole pages and the depth count can shrink inside one feed — the rows that
-// left in that feed become unreadable. What the port owes the caller then is
-// the truth, an interval flagged incomplete, never an empty success: a
-// consumer can carry "output was lost" honestly, but it cannot carry a lie.
+// whole pages inside a feed. The history-erased effect makes those spans
+// explicit, so the port can still report the complete departed stream.
 // This test feeds past the boundary and demands that accounting.
 //
 // The boundary is the test's OWN (departedRetention): the adapter clears both
@@ -294,7 +292,7 @@ func TestDepartedRowsRefuseAClosedTerminal(t *testing.T) {
 // is what cost the e2e a whole command's rows (terminal.go's install,
 // nocx-2v80t.3.9). This is the port's answer for a terminal that DOES carry a
 // budget — the honest fallback, kept rather than removed.
-func TestDepartedRowsFlagRetentionLossPastTheBoundary(t *testing.T) {
+func TestDepartedRowsCaptureEveryChunkAcrossRetentionPrune(t *testing.T) {
 	term := departedTerm(t, 10, 5)
 	departedRetention(t, term, 50_000)
 
@@ -312,13 +310,17 @@ func TestDepartedRowsFlagRetentionLossPastTheBoundary(t *testing.T) {
 		rows, err := term.DepartedRows()
 		if err != nil {
 			flagged++
-			continue
 		}
-		// Every chunk of this stream scrolls chunkLines rows off the screen,
-		// so an unflagged empty interval claims nothing left — the lie this
-		// test exists to kill.
+		// Every chunk of this stream scrolls chunkLines rows off the screen;
+		// the effect makes retention pruning explicit rather than ambiguous.
 		if len(rows) == 0 {
-			t.Fatalf("chunk %d: 0 rows, nil error — the interval is silent while the feed scrolled %d rows", c, chunkLines)
+			t.Fatalf("chunk %d: 0 rows, err %v — the interval is silent while the feed scrolled %d rows", c, err, chunkLines)
+		}
+		for i, row := range rows {
+			want := fmt.Sprintf("X%06d", reported+i)
+			if got := departedText(row); got != want {
+				t.Fatalf("row %d of chunk %d: got %q, want %q", i, c, got, want)
+			}
 		}
 		reported += len(rows)
 	}
@@ -326,33 +328,92 @@ func TestDepartedRowsFlagRetentionLossPastTheBoundary(t *testing.T) {
 	t.Logf("fed %d lines: %d rows reported, %d intervals flagged incomplete",
 		chunks*chunkLines, reported, flagged)
 
-	// The boundary was reached and honestly reported at least once — and the
-	// fix is not "flag everything": capture still works below the boundary,
-	// and a floor here kills an implementation that reports nothing but
-	// errors.
-	if flagged == 0 {
-		t.Fatalf("no interval was flagged: the feed never learned about the retention boundary")
+	if flagged != 0 {
+		t.Fatalf("%d intervals were flagged despite history-erased spans", flagged)
 	}
-	if reported < 30_000 {
-		t.Fatalf("only %d rows reported across the run: capture stopped working well before the boundary", reported)
+	if reported != chunks*chunkLines-4 {
+		t.Fatalf("reported %d rows, want %d", reported, chunks*chunkLines-4)
 	}
 }
 
-// A reset and an erase-saved-lines DESTROY history: the rows they take
-// ceased rather than left, so they are not departures and the interval is
-// not flagged — silence, and capture continues from the empty buffer.
-func TestDepartedRowsTreatADestroyedHistoryAsSilence(t *testing.T) {
+// A reset destroys old history silently, but departures created earlier in
+// the same write are copied by the history-erased effect before RIS releases
+// their pages.
+func TestDepartedRowsCaptureDeparturesBeforeSameWriteReset(t *testing.T) {
 	term := departedTerm(t, 10, 5)
 	departedFeed(t, term, numbered(8))
 	departedAssertEqual(t, departedDrain(t, term), numberedWant(8))
-	// RIS — full reset. The scrollback goes to zero.
+	departedFeed(t, term, numbered(8)+"\x1bc")
+	want := append([]departedRowWant{{text: "L04"}, {text: "L05"}, {text: "L06"}, {text: "L07"}}, numberedWant(8)...)
+	departedAssertEqual(t, departedDrain(t, term), want)
+
+	// A later reset has only history already reported at the earlier write
+	// boundary, so it does not report those rows twice.
 	departedFeed(t, term, "\x1bc")
 	if rows, err := term.DepartedRows(); err != nil || len(rows) != 0 {
-		t.Fatalf("after reset: %d rows, err %v; want silence", len(rows), err)
+		t.Fatalf("reset of previously reported history: %d rows, err %v; want silence", len(rows), err)
 	}
+}
 
-	// And the report continues from the empty buffer exactly as at New:
-	// the next departures are the first rows of the next output.
-	departedFeed(t, term, numbered(8))
+func TestDepartedRowsCaptureDeparturesBeforeSameWriteED3(t *testing.T) {
+	term := departedTerm(t, 10, 5)
+	departedFeed(t, term, numbered(8)+"\x1b[3J")
 	departedAssertEqual(t, departedDrain(t, term), numberedWant(8))
+}
+
+func TestDepartedRowsCaptureClampedREPAtBothWidths(t *testing.T) {
+	for _, cols := range []int{80, 1} {
+		t.Run(fmt.Sprintf("width-%d", cols), func(t *testing.T) {
+			term := departedTerm(t, cols, 24)
+			departedFeed(t, term, "x\x1b[1000000b")
+			rows, err := term.DepartedRows()
+			if err != nil {
+				t.Fatalf("departed rows: %v", err)
+			}
+			// CSI parameters are u16 in the pinned parser, so 1,000,000
+			// saturates to 65,535. The initial x makes 65,536 cells total.
+			want := (65_536+cols-1)/cols - 24
+			if len(rows) != want {
+				t.Fatalf("REP departures: got %d rows, want %d", len(rows), want)
+			}
+			for i, row := range rows {
+				if len(row.Cells) != cols || !row.Cells[0].HasText || row.Cells[0].Grapheme != "x" {
+					t.Fatalf("row %d begins with %#v and has %d cells; want x at width %d", i, row.Cells[0], len(row.Cells), cols)
+				}
+			}
+		})
+	}
+}
+
+func TestDepartedRowsCaptureREPPrunedDuringOneWrite(t *testing.T) {
+	term := departedTerm(t, 80, 5)
+	// A single REP parameter saturates to u16 on the pinned CSI parser. Repeat
+	// it in one vt_write to cross the library's retained-history budget while
+	// keeping the output bounded enough for this deterministic port test.
+	departedFeed(t, term, strings.Repeat("x\x1b[65535b", 20))
+	rows, err := term.DepartedRows()
+	if err != nil {
+		t.Fatalf("departed rows: %v", err)
+	}
+	want := (20*65_536+79)/80 - 5
+	if len(rows) != want {
+		t.Fatalf("REP departures: got %d rows, want %d", len(rows), want)
+	}
+	for i, row := range rows {
+		if len(row.Cells) != 80 || !row.Cells[0].HasText || row.Cells[0].Grapheme != "x" {
+			t.Fatalf("row %d begins with %#v and has %d cells, want x at width 80", i, row.Cells[0], len(row.Cells))
+		}
+	}
+}
+
+func TestDepartedRowsCaptureLargeLFWriteAcrossPrune(t *testing.T) {
+	term := departedTerm(t, 80, 5)
+	departedFeed(t, term, strings.Repeat("\n", 4096))
+	rows, err := term.DepartedRows()
+	if err != nil {
+		t.Fatalf("departed rows: %v", err)
+	}
+	if len(rows) != 4092 {
+		t.Fatalf("LF departures: got %d rows, want 4092", len(rows))
+	}
 }

@@ -196,31 +196,26 @@ func TestApplyScrollbackLoweringDoesNotMakeTheNextFeedReportALoss(t *testing.T) 
 	}
 }
 
-// And the honest counterpart: retention pruning INSIDE a feed still reports
-// a loss. A budget in force that a feed outruns from a depth already near
-// the limit is output the report cannot carry, and silence would be the lie
-// this port exists to prevent.
-func TestApplyScrollbackRetentionPruneInsideAFeedStillReportsALoss(t *testing.T) {
+// Retention pruning inside a feed is copied through the history-erased effect
+// instead of being guessed from the net scrollback depth.
+func TestApplyScrollbackRetentionPruneKeepsDepartedRowsComplete(t *testing.T) {
 	term := departedTerm(t, 80, 24)
 	budgetApply(t, term, 3_000)
 
-	// Bring the depth just under the applied limit (3000 widened by a page
-	// at this geometry = 3512), and read the report so the baseline stands
-	// there.
 	departedFeed(t, term, numbered(3_400))
 	if _, err := term.DepartedRows(); err != nil {
-		t.Fatalf("precondition: the first feed reported a loss: %v", err)
+		t.Fatalf("precondition: %v", err)
 	}
 	if got := budgetTotal(t, term); got >= 3_512 {
 		t.Fatalf("precondition: depth %d is at or past the applied limit already", got)
 	}
 
-	// One feed that crosses it: the pages pruned while it runs and the
-	// feed's own departures land in one depth reading, and no scalar
-	// separates them.
 	departedFeed(t, term, numbered(200))
-
-	if _, err := term.DepartedRows(); err == nil {
-		t.Fatal("a feed that outran the budget reported a clean interval")
+	rows, err := term.DepartedRows()
+	if err != nil {
+		t.Fatalf("feed crossing the budget: %v", err)
+	}
+	if len(rows) != 200 {
+		t.Fatalf("feed crossing the budget reported %d rows, want 200", len(rows))
 	}
 }

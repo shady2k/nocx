@@ -192,6 +192,24 @@ type terminal struct {
 	// follows the replies/effects rule: the goroutine holding mu is the only
 	// writer, and everything in it was already copied out of the library.
 	departed []emulator.Row
+	// departedFrontier is the port's monotonic count of rows copied into the
+	// departed stream. Draining the stream does not move this frontier; a
+	// history-erased callback uses it as the captured prefix, not the length of
+	// the currently pending slice.
+	departedFrontier uint64
+	// historyCapture is the coordinate translation for one mutating library
+	// call: history pages pruned earlier in that call shift later callback
+	// spans left, while rows at or beyond baseRows first entered history in
+	// this call. The callback must not confuse those fresh rows with history
+	// already copied at an earlier boundary.
+	historyCapture struct {
+		active     bool
+		baseRows   int
+		owedRows   int
+		prunedRows int
+		frontier   uint64
+		erased     bool
+	}
 	// departedErr is the first read failure a capture hit, handed to the
 	// caller with the rows that were read: a report with a hole in it is the
 	// caller's to judge, not this adapter's to pass off as whole.
@@ -469,14 +487,29 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	before, beforeErr := t.scrollbackLocked()
 	beforeScreen, beforeScreenErr := t.screenLocked()
 	beforeRows := t.geom.Rows
+	oldGeometry := t.geom
+	t.beginHistoryCaptureLocked()
+	// A resize visits both page lists, but the effect does not identify the
+	// list that owns its span. The HISTORY reader names the active list, so a
+	// callback on an alternate-screen resize could otherwise copy primary
+	// rows out of the alternate buffer. Resize's existing per-buffer ledger
+	// handles the hidden primary; only install the copier when primary is
+	// active and therefore matches the HISTORY read path.
+	if beforeScreenErr != nil || beforeScreen != emulator.ScreenPrimary {
+		t.historyCapture.active = false
+	}
+	t.geom = g // callbacks during resize read rows at the geometry being applied
 	if r := C.ghostty_terminal_resize(t.t, C.uint16_t(g.Cols), C.uint16_t(g.Rows),
 		C.uint32_t(g.CellWidthPx), C.uint32_t(g.CellHeightPx)); r != C.GHOSTTY_SUCCESS {
 		// The geometry in force is the one the library refused to leave, so
 		// nothing here changes: a refused resize leaves the previous size
 		// standing on both sides of the port.
+		t.historyCapture.active = false
+		t.historyCapture.erased = false
+		t.geom = oldGeometry
 		return nil, resultError("terminal_resize", r)
 	}
-	t.geom = g
+	t.historyCapture.active = false
 	// A resize reflows, and reflow rewrites history's line breaks: the rows
 	// it reshapes did not leave the screen, so the departure baseline is
 	// taken again rather than let a reflowed count read as departures.
@@ -530,7 +563,7 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 				// reflowed it off (below) — so each owes the departure it
 				// will not report again.
 				base.owed += refill
-			case grew < 0 && after > before:
+			case grew < 0 && after+t.historyCapture.prunedRows > before:
 				// The screen shrank and reflowed its top rows INTO history:
 				// they have left the screen as surely as a scrolled row has,
 				// and they are on no later screen either, so a consumer that
@@ -545,10 +578,18 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 				// and depart. Bounding the push by what the depth grew keeps
 				// a rewrap of history's own line breaks out of it
 				// (nocx-2v80t.3.9).
-				pushed := min(-grew, after-before)
+				pushed := min(-grew, after+t.historyCapture.prunedRows-before)
 				again := min(pushed, base.owed)
 				base.owed -= again
-				if fresh := pushed - again; fresh > 0 {
+				fresh := pushed - again
+				callbackRows := int(t.departedFrontier - t.historyCapture.frontier)
+				if callbackRows > fresh {
+					t.failDeparted(fmt.Errorf("ghostty: history-erased callback captured %d rows beyond %d resize departures", callbackRows, fresh))
+					fresh = 0
+				} else {
+					fresh -= callbackRows
+				}
+				if fresh > 0 {
 					t.captureDepartedLocked(after-fresh, after)
 				}
 			}
@@ -560,6 +601,7 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 			}
 		}
 	}
+	t.historyCapture.erased = false
 	return t.takeReplies(), nil
 }
 
@@ -586,8 +628,11 @@ func (t *terminal) ingestLocked(b []byte) {
 	for start := 0; start < len(b); {
 		n, kind := t.scanMarkers(b[start:])
 		if n > 0 {
+			t.beginHistoryCaptureLocked()
 			C.ghostty_terminal_vt_write(t.t, (*C.uint8_t)(unsafe.Pointer(&b[start])), C.size_t(n))
+			t.historyCapture.active = false
 			t.noteDepartedLocked()
+			t.historyCapture.erased = false
 		}
 		switch kind {
 		case markKindFence:
@@ -759,8 +804,14 @@ func (t *terminal) noteDepartedLocked() {
 			"ghostty: departed rows unmeasured across a torn measurement (depth %d -> %d): what left the screen while the depth was unreadable cannot be read",
 			base.rows, h))
 	}
+	d := h - base.rows
+	callbackRows := uint64(0)
+	if t.historyCapture.erased && t.departedFrontier >= t.historyCapture.frontier {
+		callbackRows = t.departedFrontier - t.historyCapture.frontier
+		d += t.historyCapture.prunedRows
+	}
 	if base.valid {
-		if d := h - base.rows; d > 0 {
+		if d > 0 {
 			// The growth a reflow's rows make when they leave a second time
 			// is not a departure: they are already reported, and their debt
 			// is paid first. Only what is left after it is new output
@@ -769,28 +820,31 @@ func (t *terminal) noteDepartedLocked() {
 			if fresh > base.owed {
 				fresh -= base.owed
 				base.owed = 0
-				t.captureDepartedLocked(h-fresh, h)
 			} else {
 				base.owed -= fresh
+				fresh = 0
+			}
+			if callbackRows > uint64(fresh) {
+				t.failDeparted(fmt.Errorf("ghostty: history-erased callback captured %d rows beyond %d new departures", callbackRows, fresh))
+				fresh = 0
+			} else {
+				fresh -= int(callbackRows)
+			}
+			if fresh > 0 {
+				t.captureDepartedLocked(h-fresh, h)
 			}
 		} else if d < 0 && h > 0 {
-			// The depth shrank while rows were still retained: the
-			// library's retention budget pruned whole pages inside this
-			// feed (a 10,000-byte budget applies by default, pruned at
-			// page granularity). The feed's own departures are mixed with
-			// pages the count lost, and no scalar says which rows left —
-			// so the interval is reported incomplete, never as an empty
-			// success. A consumer can carry "output was lost"; it cannot
-			// carry a lie.
+			// The history shrank without a history-erased span. The depth
+			// alone cannot separate a retention prune from departures, so
+			// report a hole rather than claim an empty success.
 			t.failDeparted(fmt.Errorf(
 				"ghostty: scrollback retention pruned during one feed (depth %d -> %d): the rows that left in that feed cannot be read",
 				base.rows, h))
 		}
-		// d < 0 at zero depth is a reset or an erase-saved-lines: the
-		// history was DESTROYED, and destroyed rows did not leave the
-		// screen — they ceased. The baseline follows the buffer down
-		// without a report, exactly as it does for d == 0, the feed that
-		// scrolls nothing.
+		// A zero depth after reset or ED3 is not itself a departure
+		// signal. If this same write scrolled rows before destroying them,
+		// the callback has already copied that fresh span; old history is
+		// skipped by its captured frontier.
 		//
 		// ED3 ITSELF IS SIGHTED SEPARATELY, BY SCANNING (erase.go), NOT
 		// FROM THIS DELTA. A depth transition can only report an erase
@@ -838,7 +892,76 @@ func (t *terminal) captureDepartedLocked(from, to int) {
 			return
 		}
 		t.departed = append(t.departed, row)
+		t.departedFrontier++
 	}
+}
+
+// beginHistoryCaptureLocked snapshots the active buffer's established history
+// depth before a library mutation. The history-erased callback converts its
+// current coordinates back to this pre-mutation space by adding prunedRows.
+func (t *terminal) beginHistoryCaptureLocked() {
+	screen, err := t.readScreen()
+	if err != nil {
+		t.historyCapture.active = false
+		t.historyCapture.baseRows = 0
+		t.historyCapture.owedRows = 0
+		t.historyCapture.prunedRows = 0
+		t.historyCapture.frontier = t.departedFrontier
+		t.historyCapture.erased = false
+		t.failDeparted(fmt.Errorf("ghostty: history-erased baseline screen: %w", err))
+		return
+	}
+	base := t.sb[sbIndex(screen)]
+	if !base.valid {
+		base.rows = 0 // the alternate screen starts with empty history
+	}
+	t.historyCapture.active = true
+	t.historyCapture.baseRows = base.rows
+	t.historyCapture.owedRows = base.owed
+	t.historyCapture.prunedRows = 0
+	t.historyCapture.frontier = t.departedFrontier
+	t.historyCapture.erased = false
+}
+
+// captureHistoryErasedLocked copies the still-live rows in an erased span.
+// The original coordinate is first_row + prunedRows; rows before baseRows were
+// already present at the mutation boundary. The departed frontier then skips
+// any fresh prefix already copied by an earlier callback in this mutation.
+func (t *terminal) captureHistoryErasedLocked(firstRow, count int) {
+	prunedBefore := t.historyCapture.prunedRows
+	t.historyCapture.erased = true
+	if count <= 0 {
+		return
+	}
+	if firstRow < 0 || count > int(^uint32(0))-firstRow {
+		t.failDeparted(fmt.Errorf("ghostty: invalid history-erased span %d+%d", firstRow, count))
+		t.historyCapture.prunedRows += count
+		return
+	}
+	endOriginal := firstRow + prunedBefore + count
+	startOriginal := max(firstRow+prunedBefore, t.historyCapture.baseRows+t.historyCapture.owedRows)
+	// Each appended row advances the stream frontier. Translate it back into
+	// the original coordinates to deduplicate callback spans in this write.
+	if t.departedFrontier >= t.historyCapture.frontier {
+		streamRows := t.departedFrontier - t.historyCapture.frontier
+		if streamRows <= uint64(^uint(0)>>1) {
+			startOriginal = max(startOriginal, t.historyCapture.baseRows+t.historyCapture.owedRows+int(streamRows))
+		}
+	}
+	from := startOriginal - prunedBefore
+	to := endOriginal - prunedBefore
+	if t.departedErr == nil {
+		for y := from; y < to; y++ {
+			row, err := t.rowAt(pointHistory, y)
+			if err != nil {
+				t.failDeparted(fmt.Errorf("ghostty: history-erased row %d of %d..%d: %w", y, firstRow, firstRow+count, err))
+				break
+			}
+			t.departed = append(t.departed, row)
+			t.departedFrontier++
+		}
+	}
+	t.historyCapture.prunedRows += count
 }
 
 // failDeparted records the interval's first hole; the report is handed out

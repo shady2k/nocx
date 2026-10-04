@@ -41,6 +41,15 @@ func nocxGoBell(handle C.uintptr_t) {
 	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectBell})
 }
 
+//export nocxGoHistoryErased
+func nocxGoHistoryErased(handle C.uintptr_t, firstRow C.uint32_t, count C.uint32_t) {
+	t := lookup(uintptr(handle))
+	if t == nil || !t.historyCapture.active {
+		return
+	}
+	t.captureHistoryErasedLocked(int(firstRow), int(count))
+}
+
 //export nocxGoTitle
 func nocxGoTitle(handle C.uintptr_t, data *C.uint8_t, n C.size_t) {
 	t := lookup(uintptr(handle))

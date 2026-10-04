@@ -107,6 +107,16 @@ static void cb_bell(GhosttyTerminal terminal, void *userdata) {
   nocxGoBell((uintptr_t)userdata);
 }
 
+/* History rows are copied synchronously while the borrowed span still names
+ * the linked page-list rows, immediately before the library destroys them. */
+static void cb_history_erased(
+    GhosttyTerminal terminal, void *userdata,
+    const GhosttyTerminalHistoryErased *erased) {
+  (void)terminal;
+  if (erased == NULL) return;
+  nocxGoHistoryErased((uintptr_t)userdata, erased->first_row, erased->count);
+}
+
 /*
  * The title is read from the terminal rather than passed to the callback, so
  * it is read HERE, while the borrowed string is alive: GHOSTTY_TERMINAL_DATA_TITLE
@@ -191,6 +201,9 @@ GhosttyResult nocxInstall(GhosttyTerminal terminal, uintptr_t handle) {
   if (r != GHOSTTY_SUCCESS) return r;
   r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_BELL,
                            (const void *)cb_bell);
+  if (r != GHOSTTY_SUCCESS) return r;
+  r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_HISTORY_ERASED,
+                           (const void *)cb_history_erased);
   if (r != GHOSTTY_SUCCESS) return r;
   r = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED,
                            (const void *)cb_title_changed);

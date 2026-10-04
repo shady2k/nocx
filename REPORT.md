@@ -1,5 +1,9 @@
 # Report — nocx-zg3k3.4.5
 
+## Commits
+
+- `898626cd` — `feat(frontend): carry card selection endpoint identity (nocx-zg3k3.4.5)`
+
 ## Wired
 
 The restored card-row path now carries the immutable ledger artifact ID as `artifactVersion` through `StoredBlockRows`. Painted card rows expose `blockId`, `artifactVersion`, and the stored absolute `logicalLine` as data attributes. Restore reads pass the artifact ID into the parser. The artifact ID is used as the version identity because ledger artifact bodies are addressed by immutable ID; no wire schema change was needed.

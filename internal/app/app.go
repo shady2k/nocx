@@ -882,6 +882,13 @@ func New(opts ...Option) (*App, error) {
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	agentApprovals := agentapproval.NewStore(logger, docStore, "agent-approvals.json")
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	// THE DURABLE RESTART RECORD (ADR-0079, nocx-xn63t.5.1): one atomic JSON
+	// document beside the rest of this profile's state, holding the minimal
+	// link from a worker pane to the agent, launch directory and resume
+	// identity a restart needs. It is a separate store from the live worker
+	// record on purpose — that one is MemoryStore and D5 said so — and it is
+	// read at exactly one moment, the startup restore below.
+	workerRestarts := workers.NewFileRestartStore(docStore, "worker-restarts.json")
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -2409,7 +2416,13 @@ func New(opts ...Option) (*App, error) {
 			repos:        gitFactory,
 			worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
 			checkouts:    checkouts,
-			log:          logger,
+			// The watcher's own enrolment cache is the one owner of "which
+			// agent runs in this pane" (panetyping.go's own doc), and it is
+			// asked lazily so a spawn that reads it before the enrolment
+			// arrived records nothing rather than the wrong agent
+			// (ADR-0079).
+			agents: paneAgents{watch: paneWatch},
+			log:    logger,
 		},
 		workerEnrol,
 		workerSup,
@@ -2441,6 +2454,12 @@ func New(opts ...Option) (*App, error) {
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
+		// THE RESTART RECORD'S WRITER (ADR-0079). Without it nothing survives
+		// a restart, which is exactly what D5 said and exactly what this bead
+		// amends; with it, every participant that goes live leaves the tuple a
+		// startup restore reads and every closed or compensated one takes its
+		// record with it.
+		workers.WithRestartRecords(workerRestarts),
 		// How long a worker's pane must hold a state before it is a fact its
 		// coordinator is told about (nocx-luqz9.2, design §4.4). Stated rather
 		// than left to the zero value for the reason the sweep interval below
@@ -2455,6 +2474,19 @@ func New(opts ...Option) (*App, error) {
 	// answer the registrar cannot give.
 	checkouts.held = workerRecord
 	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
+
+	// THE RESTART RECORD'S ONE READ (ADR-0079). It runs here, after the layout
+	// chain and the worker record both exist and before the transport can
+	// serve a question, for the reason clearWindowOnCleanStart gives for its
+	// own position: a backend start IS an application start, so what the last
+	// one left behind is judged now or not at all.
+	//
+	// It classifies and forgets; it does not relaunch (nocx-xn63t.5.2 owns
+	// that, and the launch record it needs does not exist yet). What it does
+	// buy is the half that is true today: a worker whose pane was closed while
+	// nocx was down stops being a record nobody will ever resolve, and one that
+	// cannot be resumed is said so at startup instead of in a document.
+	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout())
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The

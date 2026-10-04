@@ -93,9 +93,9 @@ func budgetTotalOf(t *testing.T, term emulator.Terminal) int {
 }
 
 // The whole story in one session: the budget the spawn carried holds from
-// birth, the op lowers it on the RUNNING session, zero erases what was
-// retained, and nothing accumulates afterwards — every step observed on the
-// real emulator through the service's own pump.
+// birth, the op lowers it on the RUNNING session, and zero leaves a bounded
+// capture floor while the live page remains empty — every step observed on
+// the real emulator through the service's own pump.
 func TestSetScrollbackAppliesToARunningSession(t *testing.T) {
 	proc := newRawReaderFakeProcess()
 	svc := New(Options{
@@ -140,10 +140,8 @@ func TestSetScrollbackAppliesToARunningSession(t *testing.T) {
 	}
 	awaitTotal(t, "the lowered budget to prune", hs.screen, func(n int) bool { return n <= 100+512+1 })
 
-	// Zero erases what was retained, and nothing accumulates afterwards:
-	// the feed that follows is INGESTED (its cursor is on the screen) and
-	// the emulator still holds nothing — the data loss the value 0 asks
-	// for, taken from the session itself.
+	// Zero keeps the emulator's bounded page floor for durable capture, but
+	// the helper's live surface must not expose it.
 	raw, err = json.Marshal(proto.SetScrollbackParams{Session: hs.id, MaxLines: 0})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -151,12 +149,17 @@ func TestSetScrollbackAppliesToARunningSession(t *testing.T) {
 	if _, err = svc.Call(context.Background(), proto.OpSetScrollback, raw); err != nil {
 		t.Fatalf("set-scrollback 0: %v", err)
 	}
-	awaitTotal(t, "zero to erase", hs.screen, func(n int) bool { return n == 0 })
-
-	proc.produce(numberedFeed(300))
-	awaitCursorAtBottom(t, hs.screen)
-	if got := budgetTotalOf(t, hs.screen); got != 0 {
-		t.Fatalf("after a feed at zero the session retains %d rows, want none", got)
+	proc.produce(numberedFeed(2000))
+	awaitTotal(t, "zero's bounded capture floor after output", hs.screen, func(n int) bool { return n >= 243 })
+	if got := budgetTotalOf(t, hs.screen); got < 243 || got > 512 {
+		t.Fatalf("after a feed at zero the session retains %d rows, want the bounded capture floor", got)
+	}
+	page, err := hs.historyPage(nil, 64)
+	if err != nil {
+		t.Fatalf("history page at zero: %v", err)
+	}
+	if got := len(decodePageRows(t, page.Rows)); got != 0 || page.More {
+		t.Fatalf("history page at zero exposes %d rows with more=%v, want an empty page", got, page.More)
 	}
 }
 

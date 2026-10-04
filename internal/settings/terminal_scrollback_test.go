@@ -5,9 +5,8 @@ package settings_test
 // what survives a restart, this is how far a person can scroll right now,
 // and the two were separated on purpose. This file asserts the declaration
 // arrives on the screen like every other number — bounds, unit, zero label —
-// and that its description carries the three qualifications the library's
-// behaviour forces the screen to state, because the setting destroys data
-// the moment it is saved.
+// and that its description carries the live-surface meaning separately from
+// durable capture, so zero remains a clear no-live-history choice.
 
 import (
 	"strings"
@@ -66,8 +65,8 @@ func TestTerminalScrollback_DescriptionNamesTheThreeQualifications(t *testing.T)
 		{"styled output retains fewer", "styled"},
 		{"the byte ceiling", "ceiling"},
 		{"lowering prunes at once", "immediately"},
-		{"zero erases what is kept", "erases"},
-		{"the warning comes before the save, not after", "before it is saved, not after"},
+		{"zero means no live scrollback", "no live scrollback"},
+		{"durable capture remains available", "durable capture"},
 	} {
 		if !strings.Contains(desc, fragment.contains) {
 			t.Errorf("description does not name %s (missing %q): %q", fragment.what, fragment.contains, desc)

@@ -71,9 +71,9 @@ func scrollbackPageRowsAt(cols int) uint64 {
 // lines than asked (measured, at limit 10000: 9665 retained at 80 columns).
 // Applied one page wide, what is retained lands above the ask and within
 // one page of it at this geometry — the behaviour the setting's description
-// states ("usually keeps somewhat more than this"). Zero is never widened:
-// zero means no history at all, and a page of it would be a lie the screen
-// cannot carry.
+// states ("usually keeps somewhat more than this"). Zero is not widened: it
+// selects the library's bounded capture floor; the helper clamps the live
+// history page to the person's zero setting.
 //
 // The re-baseline is the load-bearing half. Rows the prune takes were
 // already reported when they left the screen; they ceased in the library's
@@ -93,7 +93,7 @@ func scrollbackPageRowsAt(cols int) uint64 {
 // (zero pushed, zero refill), exactly the truth for a mutation that
 // touched history and never the screen.
 //
-// A budget applied at zero erases what is retained at once; one applied
+// A zero budget applies the library's bounded capture floor; a positive one
 // lower than the current depth prunes it at once — the library answers the
 // set eagerly (measured: depth 4977 fell to 931 at the set, before any
 // feed). An error leaves the previous budget in force.
@@ -105,14 +105,13 @@ func (t *terminal) ApplyScrollback(maxLines uint64) error {
 	}
 	lines := maxLines
 	bytes := scrollbackMaxBytes
+	// At zero, keep that nonzero byte ceiling and leave lines at zero so rows
+	// continue through scrollback pages and the history-erased callback. The
+	// library interprets lines=0 as its bounded capture floor (243 rows at
+	// 80 columns in the Linux-linked archive), not as no history. The helper
+	// enforces the person's zero setting at the live history surface.
 	if lines > 0 {
 		lines += scrollbackPageRowsAt(t.geom.Cols)
-	} else {
-		// The library ignores a line limit of zero (measured: a 977-row
-		// history retained 399 rows under a set limit of 0 — the value
-		// reads as "small default", not "none"). The zero-byte budget is
-		// what erases: applied alone, retained falls to 0 and stays there.
-		bytes = 0
 	}
 	if err := t.setScrollbackBudget(&bytes, &lines); err != nil {
 		return err

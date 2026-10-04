@@ -67,38 +67,47 @@ func TestApplyScrollbackDefaultRetainsThePromisedLines(t *testing.T) {
 	}
 }
 
-// Criterion 2: zero leaves no history. What was retained is gone at once,
-// and nothing accumulates afterwards — 0 means only the current screen.
+// Criterion 2: zero hides live history but leaves the bounded emulator floor
+// needed for the history-erased callback to preserve durable departures.
 func TestApplyScrollbackZeroLeavesNoHistory(t *testing.T) {
 	term := departedTerm(t, 80, 24)
 	budgetApply(t, term, 10_000)
-	departedFeed(t, term, numbered(500))
+	departedFeed(t, term, numbered(2000))
 	if got := budgetTotal(t, term); got == 0 {
 		t.Fatalf("precondition: nothing was retained before the zero")
 	}
-	// The first feed's departures are queued until they are read; read them
-	// here, so the report the zero leaves behind is this test's own and not
-	// the queue of rows erased before it.
+	// Drain the first feed's report so the assertions below cover only the
+	// feed made under the zero setting.
 	if _, err := term.DepartedRows(); err != nil {
 		t.Fatalf("precondition: the first feed reported a loss: %v", err)
 	}
 
 	budgetApply(t, term, 0)
-	if got := budgetTotal(t, term); got != 0 {
-		t.Fatalf("after 0 the terminal retains %d rows, want none — zero erases what was kept", got)
+	if got := budgetTotal(t, term); got != 243 {
+		t.Fatalf("at 80 columns, lines=0 retains %d rows, want the measured 243-row page floor", got)
 	}
 
-	// And it stays gone: the budget is in force, not a one-off erase. The
-	// rows the next output pushes off the screen are destroyed as they
-	// leave — there is no history for a report to read them out of, so the
-	// report is silence. That is the data loss the value 0 asks for, and
-	// the setting's screen says so before it is saved.
 	departedFeed(t, term, numbered(200))
-	if got := budgetTotal(t, term); got != 0 {
-		t.Fatalf("after more output at 0 the terminal retains %d rows, want none", got)
+	if got := budgetTotal(t, term); got < 243 || got > 512 {
+		t.Fatalf("after more output at 0 the terminal retains %d rows, want the bounded floor through one page (243..512)", got)
 	}
-	if rows, err := term.DepartedRows(); err != nil || len(rows) != 0 {
-		t.Fatalf("a feed at zero reported %d rows, err %v; want silence — nothing is retained to read from", len(rows), err)
+	rows, err := term.DepartedRows()
+	if err != nil {
+		t.Fatalf("a feed at zero reported a loss: %v", err)
+	}
+	if len(rows) != 200 {
+		t.Fatalf("a feed at zero reported %d departed rows, want all 200", len(rows))
+	}
+	for i, row := range rows {
+		var want string
+		if i < 23 {
+			want = fmt.Sprintf("L%02d", 1977+i)
+		} else {
+			want = fmt.Sprintf("L%02d", i-23)
+		}
+		if got := departedText(row); got != want {
+			t.Fatalf("durable departure %d reads %q, want %q", i, got, want)
+		}
 	}
 }
 

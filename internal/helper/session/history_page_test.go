@@ -32,6 +32,7 @@ func decodePageRows(t *testing.T, raw json.RawMessage) []string {
 // One page, from the head, of a history the runtime really holds.
 func TestHistoryPageOpAnswersWhatTheRuntimeHolds(t *testing.T) {
 	hs, rt, _ := rowsBridgeSession(t, 80, 24)
+	hs.scrollback.Store(DefaultScrollbackLines)
 	rowsFeed(t, rt, 0, 60) // history L000000..L000036, head 37
 
 	res, err := hs.historyPage(nil, 10)
@@ -64,6 +65,7 @@ func TestHistoryPageOpAnswersWhatTheRuntimeHolds(t *testing.T) {
 // below where the live tier begins.
 func TestHistoryPageOpAnswersBelowTheFloorAfterClear(t *testing.T) {
 	hs, rt, _ := rowsBridgeSession(t, 80, 24)
+	hs.scrollback.Store(DefaultScrollbackLines)
 	rowsFeed(t, rt, 0, 60)
 	if err := rt.Ingest([]byte("\x1b[H\x1b[2J\x1b[3J")); err != nil {
 		t.Fatalf("clear: %v", err)

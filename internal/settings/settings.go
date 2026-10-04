@@ -1133,7 +1133,7 @@ var TerminalScrollbackLines = MustRegisterNumber(NumberSpec{
 	Key:         "terminal.scrollbackLines",
 	Section:     "Terminal",
 	Label:       "Scroll back, at most",
-	Description: "How many lines of output the live terminal keeps above the current screen. Pruning happens in whole pages (about 400 KB each), so the terminal usually keeps somewhat more than this — by dozens of lines, sometimes a hundred. Heavily styled output keeps fewer, because the emulator's internal memory ceiling is reached first. Lowering the value prunes what is retained immediately, and 0 erases it entirely. This setting destroys scrollback at the moment it is saved; the screen warns before it is saved, not after.",
+	Description: "How many lines of output the live terminal keeps above the current screen. Pruning happens in whole pages (about 400 KB each), so the terminal usually keeps somewhat more than this — by dozens of lines, sometimes a hundred. Heavily styled output keeps fewer, because the emulator's internal memory ceiling is reached first. Lowering the value prunes live scrollback immediately. Set to 0 for no live scrollback; output remains available to durable capture.",
 	DataClass:   PublicConfig,
 	Default:     10000,
 	Min:         fp(0),

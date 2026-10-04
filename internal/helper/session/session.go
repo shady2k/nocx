@@ -367,6 +367,10 @@ type hostSession struct {
 	// going are all inside that interval and none of them creates it or ends
 	// it (requirement 5 of nocx-ygxjv.12).
 	runtime *sessionruntime.Session
+	// scrollback is the live-history setting this helper session was given.
+	// It is separate from the emulator's bounded capture floor: at zero the
+	// runtime still captures departures, while historyPage serves no rows.
+	scrollback atomic.Uint64
 	// resendRT is the seam the resend's scrollback walk reads the runtime
 	// through (rows.go's resendRuntime). Spawn wires the session's own
 	// runtime; only a test that arms a departure at the seam sets

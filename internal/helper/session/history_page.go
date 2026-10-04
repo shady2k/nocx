@@ -35,6 +35,15 @@ func (hs *hostSession) historyPage(before *uint64, limit int) (proto.HistoryPage
 	if err != nil {
 		return proto.HistoryPageResult{}, err
 	}
+	if hs.scrollback.Load() == 0 {
+		// The setting belongs to the helper's live surface, not the runtime:
+		// the runtime keeps a bounded capture floor so departures remain
+		// durable. Preserve the runtime's cursor/floor snapshot, but expose an
+		// empty interval so no captured rows become live scrollback.
+		view.Start = view.End
+		view.More = false
+		view.Rows = nil
+	}
 	rows, err := sessionruntime.EncodeRows(view.Rows)
 	if err != nil {
 		return proto.HistoryPageResult{}, err

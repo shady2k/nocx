@@ -73,4 +73,4 @@ The manual screen-reader pass is not complete. This worktree has no interactive 
 
 ### Commit
 
-Pending.
+- `88963b7c` — `feat(frontend): expose terminal rows and blocks accessibly (nocx-zg3k3.4.2)`

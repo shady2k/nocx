@@ -284,6 +284,105 @@ func TestRemovingTheLastPaneOfTheLastTabTakesTheWorkspaceToo(t *testing.T) {
 	}
 }
 
+// ── the strip stays dense when a tab leaves it ───────────────────────────
+//
+// A workspace's open tabs are 0..n-1 in the order they are drawn. ReorderTabs
+// writes that, and CreateTabAfter's seatTabAfter renumbers the strip around an
+// INSERT; a close has to close the gap for the same reason, because every
+// reader of the strip — Tabs' own ORDER BY position, id — sorts rather than
+// indexes, and a hole would still read back in order while no longer being
+// dense. The order is what a person sees; the density is the state the store
+// promised (nocx-xn63t.4.14).
+//
+// Two doors reach a tab leaving the strip, and both are asserted: DeleteTab,
+// and the dissolution DeletePane and MovePane trigger when the last pane of a
+// tab goes.
+
+// Criterion: closing a tab in the middle of a strip leaves the rest dense —
+// the neighbours move up by one and the order is what it was.
+func TestClosingATabRenumbersTheStripBehindIt(t *testing.T) {
+	_, layout := newLayout(t)
+	aStripOfThree(t, layout)
+
+	if err := layout.DeleteTab(context.Background(), "tab-2", aReplacement()); err != nil {
+		t.Fatalf("DeleteTab: %v", err)
+	}
+
+	strip := aStrip(t, layout, "ws-1")
+	if got := tabIDsOf(strip); len(got) != 2 || got[0] != "tab-1" || got[1] != "tab-3" {
+		t.Fatalf("the strip is %v, want [tab-1 tab-3] — the order is what it was", got)
+	}
+	for seat, tab := range strip {
+		if tab.Position != seat {
+			t.Fatalf("tab %s sits at position %d, want %d — the strip is not dense after the close",
+				tab.ID, tab.Position, seat)
+		}
+	}
+}
+
+// The same property through the OTHER door: closing a tab's last pane
+// dissolves the tab, and the strip it was in closes the gap just the same. One
+// invariant, one implementation, and both ways in are asserted because they are
+// two different call sites.
+func TestDissolvingATabByClosingItsLastPaneRenumbersTheStrip(t *testing.T) {
+	_, layout := newLayout(t)
+	aStripOfThree(t, layout)
+
+	if err := layout.DeletePane(context.Background(), "pane-2", aReplacement()); err != nil {
+		t.Fatalf("DeletePane: %v", err)
+	}
+
+	strip := aStrip(t, layout, "ws-1")
+	if got := tabIDsOf(strip); len(got) != 2 || got[0] != "tab-1" || got[1] != "tab-3" {
+		t.Fatalf("the strip is %v, want [tab-1 tab-3]", got)
+	}
+	for seat, tab := range strip {
+		if tab.Position != seat {
+			t.Fatalf("tab %s sits at position %d, want %d — the strip is not dense after the close",
+				tab.ID, tab.Position, seat)
+		}
+	}
+}
+
+// A close renumbers the strip it happened in and nothing else: another
+// workspace's tabs keep the seats they had.
+func TestClosingATabLeavesEveryOtherStripsSeatsAlone(t *testing.T) {
+	_, layout := newLayout(t)
+	ctx := context.Background()
+	aStripOfThree(t, layout)
+	seedWorkspace(t, layout, "ws-2", "tab-other", "pane-other")
+
+	if err := layout.DeleteTab(ctx, "tab-2", aReplacement()); err != nil {
+		t.Fatalf("DeleteTab: %v", err)
+	}
+
+	if got := seatOf(t, layout, "ws-2", "tab-other"); got != 0 {
+		t.Fatalf("a tab in another workspace moved to position %d, want 0", got)
+	}
+}
+
+// The last tab in a workspace leaves nothing to renumber — and the workspace
+// itself is dissolved, so the row carrying its positions is gone. Asserted
+// because "close the gap" must not reach past the strip it is closing.
+func TestClosingTheLastTabOfAStripHasNoGapLeftToClose(t *testing.T) {
+	_, layout := newLayout(t)
+	ctx := context.Background()
+	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
+	seedWorkspace(t, layout, "ws-2", "tab-2", "pane-2")
+
+	if err := layout.DeleteTab(ctx, "tab-1", aReplacement()); err != nil {
+		t.Fatalf("DeleteTab: %v", err)
+	}
+
+	if got := tabIDs(t, layout, "ws-1"); len(got) != 0 {
+		t.Fatalf("tabs in the dissolved workspace = %v, want none", got)
+	}
+	strip := aStrip(t, layout, "ws-2")
+	if len(strip) != 1 || strip[0].Position != 0 {
+		t.Fatalf("ws-2's strip = %+v, want tab-2 alone at position 0", strip)
+	}
+}
+
 // ── the replacement tab, and the workspace it belongs to ─────────────────
 
 // Closing the last tab in the APPLICATION yields a fresh one, and it is in

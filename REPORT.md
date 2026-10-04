@@ -24,4 +24,4 @@ The first test attempt was blocked because the pinned libghostty-vt archive was 
 
 ## Commit
 
-Pending.
+Helper carrier commit: `5932cbf8`. The app/WebSocket/renderer work is not included.

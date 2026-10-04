@@ -18,7 +18,7 @@ The spec now arms its delayed-output producer while following the live end, wait
 
 ## Commit and push
 
-Commit: `9989e5e4` (`fix(e2e): anchor scrollback checks to visible history rows`). Push pending.
+Code and report commit: `27778cde` (`fix(e2e): anchor scrollback checks to visible history rows`), pushed to `origin/w/6-18-webkit-seam`.
 
 ## Not done
 

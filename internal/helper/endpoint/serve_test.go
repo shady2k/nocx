@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"os/exec"
 	"sync"
 	"testing"
@@ -28,10 +29,11 @@ import (
 // process-scoped session service, one listener, and the accept loop from
 // production putting a fresh protocol engine on every connection.
 type helperDaemon struct {
-	dir  string
-	svc  *session.Service
-	ln   net.Listener
-	done chan struct{}
+	dir     string
+	svc     *session.Service
+	ln      net.Listener
+	done    chan struct{}
+	drained chan struct{}
 }
 
 func startDaemon(t *testing.T, shell session.Shell) *helperDaemon {
@@ -41,16 +43,19 @@ func startDaemon(t *testing.T, shell session.Shell) *helperDaemon {
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	svc := session.New(session.Options{
-		Generation: gen,
-		Spawner:    session.NewLocalSpawner(discardLog(), shell, ""),
-		Inspector:  session.NewInspector(),
-		Log:        discardLog(),
-		Limits:     session.DefaultLimits(),
-	})
-	d := &helperDaemon{dir: dir, svc: svc, ln: ln, done: make(chan struct{})}
-
 	ctx, stop := context.WithCancel(context.Background())
+	drained := make(chan struct{})
+	svc := session.New(session.Options{
+		Generation:   gen,
+		StartupGrace: time.Hour,
+		OnDrained:    func() { close(drained); stop() },
+		Spawner:      session.NewLocalSpawner(discardLog(), shell, ""),
+		Inspector:    session.NewInspector(),
+		Log:          discardLog(),
+		Limits:       session.DefaultLimits(),
+	})
+	d := &helperDaemon{dir: dir, svc: svc, ln: ln, done: make(chan struct{}), drained: drained}
+
 	go func() {
 		defer close(d.done)
 		_ = endpoint.Serve(ctx, ln, func(conn net.Conn) {
@@ -287,6 +292,11 @@ func TestTheSessionOutlivesTheConnectionWhenTheConnectionIsASocket(t *testing.T)
 	// The connection dies. Nothing else does: this is one attachment ending
 	// (D2), and the interval the session lives across opens here.
 	first.close()
+	select {
+	case <-d.drained:
+		t.Fatal("bridge/socket EOF drained the daemon")
+	default:
+	}
 
 	second := connect(t, d)
 	var inv proto.SessionsResult
@@ -325,6 +335,84 @@ func TestTheSessionOutlivesTheConnectionWhenTheConnectionIsASocket(t *testing.T)
 		if t.Context().Err() != nil {
 			t.Fatalf("the stream never grew past %d after the connection died", was)
 		}
+	}
+}
+
+func TestLastSessionExitDrainsAndUnlinksTheEndpoint(t *testing.T) {
+	d := startDaemon(t, session.Shell{Path: "/bin/sh", Args: []string{"-c", "exit 0"}})
+	c := connect(t, d)
+	var spawned proto.SpawnResult
+	c.request(proto.OpSpawn, proto.SpawnParams{Cols: 80, Rows: 24}, &spawned)
+	select {
+	case <-d.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon did not stop after its last session process exited")
+	}
+	if _, err := os.Stat(mustEndpointPath(t, d.dir)); !os.IsNotExist(err) {
+		t.Fatalf("endpoint still exists after daemon shutdown: err=%v", err)
+	}
+	if _, err := endpoint.Dial(context.Background(), d.dir, gen); err == nil {
+		t.Fatal("endpoint probe reached a daemon after its last session exited")
+	}
+	select {
+	case <-d.drained:
+	default:
+		t.Fatal("daemon shutdown did not enter draining state")
+	}
+}
+
+func mustEndpointPath(t *testing.T, dir string) string {
+	t.Helper()
+	path, err := endpoint.Path(dir, gen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLastDetachDoesNotDrainTheDaemonOrStopItsSession(t *testing.T) {
+	d := startDaemon(t, session.Shell{Path: "/bin/sh", Args: []string{"-i"}})
+	conn := connect(t, d)
+	sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+	var spawned proto.SpawnResult
+	conn.request(proto.OpSpawn, proto.SpawnParams{Cols: 80, Rows: 24}, &spawned)
+	var attached proto.AttachResult
+	conn.request(proto.OpAttach, proto.AttachParams{Subscriber: sub, Session: spawned.Entry.Session, Fresh: true, RequestWrite: true}, &attached)
+	if !attached.Write.Granted {
+		t.Fatalf("no writer: %+v", attached.Write)
+	}
+	conn.write(proto.TypeSessionData, proto.EncodeSessionFrame(proto.SessionFrame{
+		Session: mustSession(t, spawned.Entry.Session.Session), Subscriber: subscriberBytes(t, sub),
+		Epoch:   attached.Write.Epoch,
+		Payload: []byte("i=0; while :; do i=$((i+1)); echo DETACH$i; sleep 1; done\n"),
+	}))
+	conn.await("the process output before detach", func() bool { return len(conn.received(subscriberBytes(t, sub))) > 0 })
+	conn.request(proto.OpDetach, proto.DetachParams{Attachment: attached.Attachment}, &proto.DetachResult{})
+	select {
+	case <-d.drained:
+		t.Fatal("last detach drained the daemon")
+	default:
+	}
+	var inventory proto.SessionsResult
+	var before proto.StreamOffset
+	conn.request(proto.OpSessions, proto.SessionsParams{}, &inventory)
+	if len(inventory.Sessions) != 1 || inventory.Sessions[0].Exit != nil {
+		t.Fatalf("session did not survive detach: %+v", inventory.Sessions)
+	}
+	before = inventory.Sessions[0].Window.Written
+	for {
+		conn.request(proto.OpSessions, proto.SessionsParams{}, &inventory)
+		if inventory.Sessions[0].Window.Written > before {
+			break
+		}
+		if t.Context().Err() != nil {
+			t.Fatal("session output stopped after the last detach")
+		}
+	}
+	select {
+	case <-d.drained:
+		t.Fatal("daemon drained while its session process remained active")
+	default:
 	}
 }
 

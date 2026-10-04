@@ -245,17 +245,21 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 	}
 	defer sshCap.release()
 
+	daemonCtx, stopDaemon := context.WithCancel(ctx)
+	defer stopDaemon()
 	sessions := session.New(session.Options{
-		Generation: generation,
-		Spawner:    session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
-		SSHSpawner: sshCap.sessionSpawner,
-		Inspector:  session.NewInspector(),
-		Log:        log,
-		Limits:     session.DefaultLimits(),
+		Generation:   generation,
+		StartupGrace: session.MeasuredStartupGrace,
+		OnDrained:    stopDaemon,
+		Spawner:      session.NewLocalSpawner(log, session.Shell{}, agentHelperPath),
+		SSHSpawner:   sshCap.sessionSpawner,
+		Inspector:    session.NewInspector(),
+		Log:          log,
+		Limits:       session.DefaultLimits(),
 	})
 	defer sessions.Close()
 
-	if err := endpoint.Serve(ctx, ln, func(conn net.Conn) {
+	if err := endpoint.Serve(daemonCtx, ln, func(conn net.Conn) {
 		h := host.New(conn, conn, contentHash, instanceID, log)
 		// Which services this build answers is decided by
 		// registerHelperServices, in one place (services.go) — including
@@ -270,7 +274,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		release := sessions.Bind(h)
 		defer release()
 
-		if err := h.Serve(ctx); err != nil {
+		if err := h.Serve(daemonCtx); err != nil {
 			// A version mismatch ends this CONNECTION and nothing else. It
 			// was the process's exit code while the helper served exactly one
 			// connection over stdin/stdout; a daemon holding somebody's

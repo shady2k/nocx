@@ -354,11 +354,12 @@ type hostSession struct {
 	// session from before the fork until the row leaves the inventory". It is
 	// never reported: the key is the CALLER's record and the helper is only
 	// asked to honour it, not to publish it.
-	key       string
-	startedAt time.Time
-	launch    proto.LaunchRecord
-	proc      Process
-	win       *window
+	key             string
+	startedAt       time.Time
+	launch          proto.LaunchRecord
+	proc            Process
+	lifetimeCounted bool // guarded by Service.mu; true while its process is running
+	win             *window
 	// runtime is this session's ONE terminal-state owner (ADR-0066): the
 	// emulator, the modes the program set, the committed geometry and the
 	// answers to the program's own questions. It is created in spawn before

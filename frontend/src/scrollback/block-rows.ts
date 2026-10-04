@@ -116,7 +116,7 @@ export function blockColumnsOf(lines: readonly LedgerBlockRowsLine[]): number {
  *  geometry.cols. There is no cell-level padding here any more: that was
  *  the [grapheme, width, hasText]-per-column shape's own bookkeeping, and
  *  the compact wire does not carry cells to pad. */
-function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
+export function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   if (lines.length === 0) return null
   const cols = blockColumnsOf(lines)
   if (cols === 0) return null
@@ -134,6 +134,20 @@ function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   }
   const result = createCellModel().apply(frame)
   return result.ok ? result.snapshot : null
+}
+
+/** Selection reads the same parsed rows that paint the card, never its DOM text.
+ * The immutable artifact id is part of the key so a replaced artifact cannot
+ * silently resolve an old endpoint. */
+const selectionRows = new Map<string, StoredBlockRows>()
+function selectionKey(blockId: string, artifactVersion: string): string {
+  return `${blockId}\u0000${artifactVersion}`
+}
+export function storedBlockRowsForSelection(
+  blockId: string,
+  artifactVersion: string,
+): StoredBlockRows | null {
+  return selectionRows.get(selectionKey(blockId, artifactVersion)) ?? null
 }
 
 export interface StoredBlockPaintOptions {
@@ -244,6 +258,10 @@ export function paintStoredRows(
   stored: StoredBlockRows,
   opts: StoredBlockPaintOptions,
 ): void {
+  const blockId = block.dataset.entryId
+  if (blockId && stored.artifactVersion) {
+    selectionRows.set(selectionKey(blockId, stored.artifactVersion), stored)
+  }
   block
     .querySelectorAll(
       ':scope > .cmd-output, :scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',

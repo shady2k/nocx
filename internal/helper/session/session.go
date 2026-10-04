@@ -261,6 +261,9 @@ type Sink interface {
 	// (nocx-2v80t.3.17), on the same ordered carrier as the rows and the
 	// end markers, in the position it occurred.
 	SendClearBoundary(proto.ClearBoundaryFrame) error
+	// SendEffectFrame carries one identity-bearing non-visual runtime effect.
+	// It is separate from screen snapshots so re-sending cells cannot repeat it.
+	SendEffectFrame(proto.EffectFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -903,6 +906,7 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 	// one the connection bound, with module and trace already on it.
 	log := nocxlog.From(ctx)
 	defer close(sub.screenDone)
+	seenEffects := make(map[[2]uint64]struct{})
 	for {
 		select {
 		case <-cons.Ready():
@@ -929,6 +933,47 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 				}
 			}
 		}
+		for _, effect := range cons.Effects() {
+			identity := [2]uint64{uint64(effect.At.Generation), uint64(effect.ID)}
+			if _, seen := seenEffects[identity]; seen {
+				continue
+			}
+			seenEffects[identity] = struct{}{}
+			kind, ok := protoEffectKind(effect.Kind)
+			if !ok {
+				log.Warn("session effect refused: unknown runtime effect kind", "session", s.id.Session, "kind", effect.Kind)
+				continue
+			}
+			frame := proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
+				Kind: kind, Body: effect.Body,
+			}
+			if err := sub.sink.SendEffectFrame(frame); err != nil {
+				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)
+				return
+			}
+		}
+	}
+}
+
+// protoEffectKind is the single explicit translation from the runtime's
+// closed vocabulary to the helper carrier's wire values. Unknown runtime
+// values are refused rather than narrowed into an unrelated wire kind.
+func protoEffectKind(kind sessionruntime.EffectKind) (proto.EffectKind, bool) {
+	switch kind {
+	case sessionruntime.EffectBell:
+		return proto.EffectBell, true
+	case sessionruntime.EffectNotification:
+		return proto.EffectNotification, true
+	case sessionruntime.EffectClipboard:
+		return proto.EffectClipboard, true
+	case sessionruntime.EffectTitle:
+		return proto.EffectTitle, true
+	case sessionruntime.EffectCwdReport:
+		return proto.EffectCwdReport, true
+	default:
+		return 0, false
 	}
 }
 

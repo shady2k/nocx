@@ -84,6 +84,7 @@ func (s *rowsSink) SendNotification(proto.Notification) error  { return nil }
 func (s *rowsSink) SendScreenFrame(proto.ScreenDataFrame) error {
 	return nil
 }
+func (s *rowsSink) SendEffectFrame(proto.EffectFrame) error { return nil }
 
 func (s *rowsSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	s.mu.Lock()

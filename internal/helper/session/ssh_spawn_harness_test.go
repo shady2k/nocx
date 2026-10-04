@@ -1145,6 +1145,7 @@ func (w *exitWatcher) SendScreenFrame(proto.ScreenDataFrame) error      { return
 func (w *exitWatcher) SendOutputRows(proto.OutputRowsFrame) error       { return nil }
 func (w *exitWatcher) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (w *exitWatcher) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+func (w *exitWatcher) SendEffectFrame(proto.EffectFrame) error          { return nil }
 func (w *exitWatcher) SendNotification(n proto.Notification) error {
 	if n.Service != proto.ServiceSession {
 		return nil

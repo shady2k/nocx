@@ -45,3 +45,32 @@ Added `live selection gesture > copies a drag from live output into a card in di
 ### Not done
 
 Cross-card selection between two different card artifacts is not supported; this leaf implements the specified cross-boundary card/live gesture and same-card selection. Selection across multiple historical cards would need a display-order model for the intervening artifacts, which is not represented by the endpoint identity currently carried on each row.
+
+## Session — accessible rows and block structure (nocx-zg3k3.4.2)
+
+### Built
+
+The live cell painter now exposes a labeled grid with readable row text, row positions, roving keyboard focus (Arrow Up/Down, Home, End), current/focused state, and selection state. It paints a visible focus outline and marks the cursor and selection overlays as decorative. It does not use a live region: routine frame and dirty-cell updates therefore do not create repeated announcements.
+
+Scrollback blocks now expose labeled, keyboard-focusable groups in DOM order. Their focus outline is visible. Keyboard navigation changes focus without activating a block.
+
+### Tests and TDD evidence
+
+- `src/painter/painter.test.ts` — `accessible live rows > moves keyboard focus through readable rows without activating them`; `accessible live rows > exposes updates without a live announcement channel and ignores identical frames`.
+- `src/scrollback/blocks.test.ts` — `accessible block structure > exposes each block as a named, keyboard-focusable group`.
+- Red first: with the product implementation removed, the acceptance tests failed (4 failures, 227 passed). Failures included absent grid role, missing row state, and missing block group role. The targeted tests then passed with the implementation.
+
+### Checks
+
+- `cd frontend && npx vitest run src/painter/painter.test.ts src/scrollback/blocks.test.ts` — passed, 2 files / 231 tests.
+- `cd frontend && npx tsc --noEmit -p tsconfig.json` — passed.
+- `cd frontend && npm run format:check -- -- <touched files>` — passed.
+- No wire changes; `contracts:check` was not applicable. The prohibited full/container/e2e suites were not run.
+
+### Not done
+
+The manual screen-reader pass is not complete. This worktree has no interactive screen-reader session for a named platform. Stage acceptance still needs a recorded pass with the platform and screen reader named, confirming row and block reading and that routine dirty-cell updates are not noisy.
+
+### Commit
+
+Pending.

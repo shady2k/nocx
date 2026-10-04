@@ -114,9 +114,77 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   const surface = opts.surface
   const palette = opts.palette ?? DEFAULT_SNAPSHOT
   surface.classList.add(GRID_CLASS)
+  surface.setAttribute('role', 'grid')
+  surface.setAttribute('aria-label', 'Terminal output')
+
+  let activeRow: number | null = null
+  let keyboardFocus = false
+
+  function updateRowAccessibility(): void {
+    rows.forEach((row, index) => {
+      row.setAttribute('role', 'row')
+      row.setAttribute('aria-rowindex', String(index + 1))
+      const selected =
+        selection !== null &&
+        index >= Math.min(selection.anchor.row, selection.focus.row) &&
+        index <= Math.max(selection.anchor.row, selection.focus.row)
+      row.setAttribute('aria-selected', String(selected))
+      if (activeRow === index) row.setAttribute('aria-current', 'true')
+      else row.removeAttribute('aria-current')
+      row.tabIndex = activeRow === null ? (index === 0 ? 0 : -1) : activeRow === index ? 0 : -1
+      if (activeRow === index && keyboardFocus) row.dataset.focusVisible = 'true'
+      else delete row.dataset.focusVisible
+    })
+  }
+
+  function onFocus(event: FocusEvent): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.term-grid-row')
+    const index = row === null ? -1 : rows.indexOf(row as HTMLDivElement)
+    if (index < 0) return
+    activeRow = index
+    updateRowAccessibility()
+  }
+
+  function onFocusOut(event: FocusEvent): void {
+    if (event.relatedTarget instanceof Node && surface.contains(event.relatedTarget)) return
+    activeRow = null
+    keyboardFocus = false
+    updateRowAccessibility()
+  }
+
+  function onKeyDown(event: KeyboardEvent): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.term-grid-row')
+    if (row === null) return
+    const index = rows.indexOf(row as HTMLDivElement)
+    const destination =
+      event.key === 'ArrowDown'
+        ? index + 1
+        : event.key === 'ArrowUp'
+          ? index - 1
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? rows.length - 1
+              : index
+    if (destination === index || destination < 0 || destination >= rows.length) return
+    event.preventDefault()
+    keyboardFocus = true
+    rows[destination].focus()
+  }
+
+  function onPointerDown(): void {
+    keyboardFocus = false
+    updateRowAccessibility()
+  }
+
+  surface.addEventListener('focusin', onFocus)
+  surface.addEventListener('focusout', onFocusOut)
+  surface.addEventListener('keydown', onKeyDown)
+  surface.addEventListener('pointerdown', onPointerDown)
 
   const cursor = document.createElement('div')
   cursor.className = CURSOR_CLASS
+  cursor.setAttribute('aria-hidden', 'true')
   surface.appendChild(cursor)
 
   let rows: HTMLDivElement[] = []
@@ -173,6 +241,9 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
         rows[r] = next
       }
     }
+    if (activeRow !== null && activeRow >= rows.length)
+      activeRow = rows.length === 0 ? null : rows.length - 1
+    updateRowAccessibility()
     lastMetric = metric
     installed = snapshot
     placeCursor(snapshot)
@@ -203,6 +274,7 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
       if (point === null) continue
       const node = document.createElement('div')
       node.className = SELECTION_CLASS
+      node.setAttribute('aria-hidden', 'true')
       node.dataset.row = String(row)
       node.dataset.start = String(from)
       node.dataset.end = String(to)
@@ -233,6 +305,7 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
 
     setSelection(range) {
       selection = range === null ? null : { anchor: { ...range.anchor }, focus: { ...range.focus } }
+      updateRowAccessibility()
       if (installed !== null) paintSelection(installed)
     },
 
@@ -248,6 +321,12 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
       selection = null
       selectionNodes = []
       cursor.remove()
+      surface.removeEventListener('focusin', onFocus)
+      surface.removeEventListener('focusout', onFocusOut)
+      surface.removeEventListener('keydown', onKeyDown)
+      surface.removeEventListener('pointerdown', onPointerDown)
+      surface.removeAttribute('role')
+      surface.removeAttribute('aria-label')
       surface.classList.remove(GRID_CLASS)
     },
 

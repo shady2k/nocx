@@ -439,7 +439,40 @@ describe('live selection paint (nocx-zg3k3.4.4)', () => {
       ),
     )
     expect(surface.querySelector('.term-grid-selection')).not.toBeNull()
+    expect(surface.querySelector('.term-grid-row')?.getAttribute('aria-selected')).toBe('true')
     painter.setSelection(null)
     expect(surface.querySelector('.term-grid-selection')).toBeNull()
+  })
+})
+
+describe('accessible live rows (nocx-zg3k3.4.2)', () => {
+  it('moves keyboard focus through readable rows without activating them', () => {
+    const { painter, surface } = mount(() => null)
+    painter.apply(snapshotOf(frameOf(1, [[['a', 1, true]], [['b', 1, true]], [['c', 1, true]]])))
+    const rows = [...surface.querySelectorAll<HTMLElement>('.term-grid-row')]
+    expect(surface.getAttribute('role')).toBe('grid')
+    expect(rows.map((row) => [row.getAttribute('role'), row.textContent, row.tabIndex])).toEqual([
+      ['row', 'a', 0],
+      ['row', 'b', -1],
+      ['row', 'c', -1],
+    ])
+    rows[0].focus()
+    rows[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    expect(document.activeElement).toBe(rows[1])
+    expect(rows[1].getAttribute('aria-current')).toBe('true')
+    expect(rows[1].getAttribute('aria-selected')).toBe('false')
+    expect(rows[1].getAttribute('data-focus-visible')).toBe('true')
+  })
+
+  it('exposes updates without a live announcement channel and ignores identical frames', () => {
+    const { painter, surface } = mount(() => null)
+    const snapshot = snapshotOf(frameOf(1, [[['readable row', 1, true]]]))
+    painter.apply(snapshot)
+    const row = surface.querySelector('.term-grid-row')
+    expect(row?.textContent).toBe('readable row')
+    expect(row?.getAttribute('aria-selected')).toBe('false')
+    expect(surface.querySelector('[aria-live]')).toBeNull()
+    painter.apply(snapshot)
+    expect(surface.querySelector('.term-grid-row')).toBe(row)
   })
 })

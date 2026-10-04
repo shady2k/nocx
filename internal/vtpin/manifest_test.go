@@ -304,17 +304,24 @@ func TestCommittedManifestIsComplete(t *testing.T) {
 	if got, want := m.Release.Tag, "libghostty-vt-"+m.ShortCommit(); got != want {
 		t.Fatalf("release tag %q, want %q: the tag is derived from the commit the archives came from", got, want)
 	}
-	// The pin carried one patch (the DECRQM ANSI-form fix, nocx-ygxjv.8) until
-	// upstream merged the same one-line fix itself — ghostty-org/ghostty#14236,
-	// merge commit 1f225ebb5894, verified byte-for-byte against the fork's
-	// patch during nocx-q3ya5. So the pin is unpatched again: commit and
-	// baseCommit name the same upstream commit, and Patch is empty — Validate
-	// refuses any other combination (a patched commit with no Patch text, or an
-	// unpatched one that still claims a Patch).
-	if m.Upstream.Commit != m.Upstream.BaseCommit || m.Upstream.Patch != "" {
-		t.Fatalf("the pin is patched (commit %s, base %s, patch %q); if that patch is no longer needed "+
-			"(upstream merged it), the pin should be unpatched: commit == baseCommit and no patch text",
-			m.Upstream.Commit, m.Upstream.BaseCommit, m.Upstream.Patch)
+	// A patched pin must say what the patch is, and an unpatched pin must not
+	// claim one. This keeps the fork's delta readable from the manifest alone
+	// (the design enforced by Validate). The current patch is the synchronous
+	// history-erased effect, tracked by nocx-zg3k3.5.19; if upstream absorbs it,
+	// the clean upstream pin remains valid with equal commits and empty Patch.
+	if m.Upstream.Commit != m.Upstream.BaseCommit {
+		if strings.TrimSpace(m.Upstream.Patch) == "" {
+			t.Fatalf("patched pin (commit %s, base %s) must describe its patch", m.Upstream.Commit, m.Upstream.BaseCommit)
+		}
+		patch := strings.ToLower(m.Upstream.Patch)
+		if !strings.Contains(patch, "history-erased") || !strings.Contains(patch, "nocx-zg3k3.5.19") {
+			t.Fatalf("patched pin description %q must name the history-erased effect (nocx-zg3k3.5.19)", m.Upstream.Patch)
+		}
+	} else if strings.TrimSpace(m.Upstream.Patch) != "" {
+		t.Fatalf("unpatched pin (commit == baseCommit == %s) must not claim a patch: %q", m.Upstream.Commit, m.Upstream.Patch)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("the committed manifest does not satisfy Validate: %v", err)
 	}
 	if !strings.Contains(m.Release.AssetURLTemplate, m.Release.Tag) {
 		t.Fatalf("asset URL template %q does not name the release tag %q", m.Release.AssetURLTemplate, m.Release.Tag)

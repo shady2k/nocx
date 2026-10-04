@@ -64,6 +64,7 @@ func (s *wedgeFirstSink) SendOutputRows(f proto.OutputRowsFrame) error {
 
 func (s *wedgeFirstSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (s *wedgeFirstSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+func (s *wedgeFirstSink) SendEffectFrame(proto.EffectFrame) error          { return nil }
 
 func (s *wedgeFirstSink) attemptCount() int {
 	s.mu.Lock()

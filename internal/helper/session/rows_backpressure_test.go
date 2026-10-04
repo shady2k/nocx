@@ -152,6 +152,7 @@ func (s *orderedStallingSink) SendClearBoundary(proto.ClearBoundaryFrame) error 
 	s.record(recordedDelivery{clear: true})
 	return nil
 }
+func (s *orderedStallingSink) SendEffectFrame(proto.EffectFrame) error { return nil }
 
 func (s *orderedStallingSink) snapshot() []recordedDelivery {
 	s.mu.Lock()

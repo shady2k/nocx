@@ -360,6 +360,7 @@ type AttachedSession struct {
 	// told, by name, when the carrier dropped an assembly — the invariant's
 	// "or has been told it lost it". Both guarded by mu; fired outside it.
 	screenObs     func(revision uint64, payload []byte)
+	effectObs     func(proto.EffectFrame)
 	screenLostObs func(reason string)
 	// outputRowsObs and intervalEndObs are the coordinator's consumers for
 	// this session's streamed rows and end markers (nocx-2v80t.3.6) — see
@@ -705,6 +706,14 @@ func (a *AttachedSession) OnScreenFrame(f func(revision uint64, payload []byte))
 	a.mu.Unlock()
 }
 
+// OnEffect registers the consumer for non-visual runtime effects. Effects
+// retain their producer-minted identity across the helper carrier.
+func (a *AttachedSession) OnEffect(f func(proto.EffectFrame)) {
+	a.mu.Lock()
+	a.effectObs = f
+	a.mu.Unlock()
+}
+
 // OnScreenLost registers the coordinator's observer for a screen the carrier
 // dropped — a superseded assembly, a bound refused. The reason is the
 // assembler's own named error, carried through untranslated.
@@ -727,6 +736,15 @@ func (a *AttachedSession) deliverScreen(assembled *proto.AssembledScreenFrame) {
 }
 
 // reportScreenLost tells the observer what the carrier dropped and why.
+func (a *AttachedSession) deliverEffect(effect proto.EffectFrame) {
+	a.mu.Lock()
+	obs := a.effectObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(effect)
+	}
+}
+
 func (a *AttachedSession) reportScreenLost(reason string) {
 	a.mu.Lock()
 	obs := a.screenLostObs

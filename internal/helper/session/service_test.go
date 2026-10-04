@@ -258,6 +258,7 @@ func (s *recordingSink) SendNotification(n proto.Notification) error {
 func (s *recordingSink) SendOutputRows(proto.OutputRowsFrame) error       { return nil }
 func (s *recordingSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (s *recordingSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+func (s *recordingSink) SendEffectFrame(proto.EffectFrame) error          { return nil }
 
 func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 	s.mu.Lock()

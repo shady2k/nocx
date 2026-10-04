@@ -17,6 +17,7 @@ import (
 type drainSink struct {
 	mu      sync.Mutex
 	frames  []proto.ScreenDataFrame
+	effects []proto.EffectFrame
 	arrived chan struct{}
 }
 
@@ -41,6 +42,20 @@ func (s *drainSink) SendOutputRows(proto.OutputRowsFrame) error       { return n
 func (s *drainSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (s *drainSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
 func (s *drainSink) SendNotification(proto.Notification) error        { return nil }
+
+func (s *drainSink) SendEffectFrame(f proto.EffectFrame) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.effects = append(s.effects, f)
+	s.wake()
+	return nil
+}
+
+func (s *drainSink) effectFrames() []proto.EffectFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]proto.EffectFrame(nil), s.effects...)
+}
 
 func (s *drainSink) SendScreenFrame(f proto.ScreenDataFrame) error {
 	s.mu.Lock()
@@ -120,4 +135,58 @@ func TestASubscriberThatReadsReceivesEveryRevisionTheScreenPublishes(t *testing.
 			t.Fatalf("only %d of %d whole screen frames arrived for the subscriber", len(sink.wholeScreenFrames(hs.raw)), revisions)
 		}
 	}
+}
+
+// TestASubscriberReceivesAnIdentityBearingEffect proves that the runtime's
+// non-visual queue leaves the helper on its own carrier, not inside a screen
+// snapshot. The producer identity survives the helper drain unchanged.
+func TestASubscriberReceivesAnIdentityBearingEffect(t *testing.T) {
+	sink := newDrainSink()
+	proc := newScriptedProcess("")
+	svc, hs := spawnScripted(t, proc, 0)
+	release := svc.Bind(sink)
+	t.Cleanup(release)
+	sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+	params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
+	if err != nil {
+		t.Fatalf("attach params: %v", err)
+	}
+	if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if err := hs.runtime.Ingest([]byte("\x07")); err != nil {
+		t.Fatalf("ingest bell: %v", err)
+	}
+	deadline := time.Now().Add(hangLimit)
+	for {
+		next := sink.waiter()
+		effects := sink.effectFrames()
+		if len(effects) > 0 {
+			f := effects[0]
+			if f.Session != hs.raw || f.Generation != 1 || f.EffectID != 1 || f.Kind != proto.EffectBell {
+				t.Fatalf("effect frame identity/kind = %+v", f)
+			}
+			if f.Subscriber != mustSubscriberBytes(t, sub) {
+				t.Fatalf("effect delivered to subscriber %x, want %s", f.Subscriber, sub)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("runtime effect never reached helper carrier")
+		}
+		select {
+		case <-next:
+		case <-time.After(hangLimit):
+			t.Fatal("runtime effect never reached helper carrier")
+		}
+	}
+}
+
+func mustSubscriberBytes(t *testing.T, id proto.SubscriberID) [16]byte {
+	t.Helper()
+	b, err := proto.SessionBytes(string(id))
+	if err != nil {
+		t.Fatalf("subscriber bytes: %v", err)
+	}
+	return b
 }

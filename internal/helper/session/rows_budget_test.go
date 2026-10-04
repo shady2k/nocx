@@ -127,6 +127,7 @@ func (s *budgetSink) SendOutputRows(f proto.OutputRowsFrame) error {
 
 func (s *budgetSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (s *budgetSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+func (s *budgetSink) SendEffectFrame(proto.EffectFrame) error          { return nil }
 
 // budgetRawID is the fixed wire identity the stand's subscriber carries —
 // mintRaw's bytes, without the testing.T a benchmark has none of.

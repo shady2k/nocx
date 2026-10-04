@@ -269,6 +269,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.channelData(ctx, payload)
 	case proto.TypeScreenFrame:
 		h.screenData(ctx, payload)
+	case proto.TypeSessionEffect:
+		h.effectData(payload)
 	case proto.TypeOutputRows:
 		h.rowsData(ctx, payload)
 	case proto.TypeIntervalEnd:
@@ -367,6 +369,25 @@ func (h *Host) screenData(ctx context.Context, payload []byte) {
 // mid-frame.
 func (h *Host) SendScreenFrame(f proto.ScreenDataFrame) error {
 	return h.write(proto.TypeScreenFrame, proto.EncodeScreenDataFrame(f))
+}
+
+// SendEffectFrame writes one runtime effect to the coordinator on its own
+// identity-bearing plane, never on the full-screen snapshot carrier.
+func (h *Host) SendEffectFrame(f proto.EffectFrame) error {
+	return h.write(proto.TypeSessionEffect, proto.EncodeEffectFrame(f))
+}
+
+// effectData refuses the reverse direction: only the helper's runtime may
+// produce session effects.
+func (h *Host) effectData(payload []byte) {
+	f, err := proto.DecodeEffectFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed session effect frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("session effect dropped: coordinator-originated effects are refused",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"effect_id", f.EffectID, "kind", f.Kind)
 }
 
 // SendOutputRows writes one rows-plane frame: one batch of the rows the

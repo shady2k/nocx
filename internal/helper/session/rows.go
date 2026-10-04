@@ -181,7 +181,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowBufferOverflows.Add(1)
 		s.log.Warn("session row buffer overflowed: the block in flight ends incomplete",
 			"session", s.id.Session, "fromRow", from, "bufferBytes", budget,
-			"overflowsTotal", s.rowsIncomplete.Load())
+			"overflowsTotal", s.rowBufferOverflows.Load())
 		s.wakeRows()
 		return
 	}

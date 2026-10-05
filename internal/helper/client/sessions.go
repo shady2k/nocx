@@ -1001,10 +1001,37 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// attachedLifecycle is one attachment's lifecycle carrier: the reader the
+// coordinator's lifecycle bridge pumps, and the writer that carries its own
+// frames back to the shell.
+//
+// THE ACK IS OFF THE READ PATH (nocx-uo8pf). Read used to copy the bytes and
+// then, inside the same call, make the subscriber's `ack` request and wait
+// for its answer — an answer that is the only thing which let Read return.
+// The ack is CREDIT for bytes this reader has already taken, not permission
+// to take them, and the bridge that hands those bytes to the lifecycle
+// channel writes them to the adapter only once Read returns. So an ack the
+// helper was slow to answer held every frame behind it, and the frame that
+// matters is a command's completion: the person's block stays open, and
+// nothing in the product says why. The cursor is recorded in Read and sent by
+// ackLoop (the only sender), one ack at a time and always the LATEST cursor.
+// Latest is enough because an ack NAMES a cursor rather than counting bytes,
+// so a superseded offset is not a lost ack — and it is required, because a
+// helper refuses an ack behind its own cursor.
 type attachedLifecycle struct {
 	session *AttachedSession
 	closed  chan struct{}
 	once    sync.Once
+
+	// ackOnce starts ackLoop on the first cursor that needs acknowledging;
+	// ackMu guards the cursor waiting to be sent (ackWait says there is one);
+	// ackWake carries one token to ackLoop, so Read never blocks on it.
+	ackOnce   sync.Once
+	ackWake   chan struct{}
+	ackMu     sync.Mutex
+	ackWait   bool
+	ackOffset proto.StreamOffset
+	ackPTY    proto.StreamOffset
 }
 
 func (l *attachedLifecycle) Read(p []byte) (int, error) {
@@ -1045,23 +1072,77 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if frozen {
 			return n, nil
 		}
+		l.ackLater(offset, ptyOffset)
+	}
+	return n, nil
+}
+
+// ackLater records the lifecycle cursor the reader has just handed over and
+// wakes ackLoop. It never blocks and never fails: the bytes are already the
+// caller's, and the ack is credit for them rather than permission to have
+// them, so nothing the ack's answer says may decide when they are delivered
+// (nocx-uo8pf).
+func (l *attachedLifecycle) ackLater(offset, ptyOffset proto.StreamOffset) {
+	l.ackMu.Lock()
+	l.ackOffset, l.ackPTY, l.ackWait = offset, ptyOffset, true
+	l.ackMu.Unlock()
+	l.ackOnce.Do(func() { go l.ackLoop() })
+	select {
+	case l.ackWake <- struct{}{}:
+	default:
+	}
+}
+
+// ackLoop is this reader's only sender of acks: one at a time, always the
+// latest cursor ackLater recorded, until the reader or its attachment ends.
+// A cursor recorded while an ack is in flight is not lost — the next turn
+// sends it — so a reader that takes many chunks inside one round trip sends
+// one ack for all of them rather than one per chunk.
+//
+// The request's context is the reader's own lifetime. An ack still in flight
+// when the reader is closed, or when the attachment ends underneath it, is
+// abandoned through that cancellation rather than left holding a goroutine
+// for the life of the connection, and a return caused by that cancellation is
+// not reported as a refusal — it is this loop's own exit.
+func (l *attachedLifecycle) ackLoop() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-l.closed:
+		case <-l.session.done:
+		}
+		cancel()
+	}()
+	for {
+		select {
+		case <-l.ackWake:
+		case <-ctx.Done():
+			return
+		}
+		l.ackMu.Lock()
+		waiting, offset, ptyOffset := l.ackWait, l.ackOffset, l.ackPTY
+		l.ackWait = false
+		l.ackMu.Unlock()
+		if !waiting {
+			continue
+		}
 		// This ack is for the LIFECYCLE cursor. The PTY offset rides along
 		// only because the wire requires it; a helper that knows
 		// lifecycleOffset neither judges nor applies it, since the PTY reader
 		// acks that cursor itself and may already have passed this value
 		// (nocx-2v80t.3.44).
-		if err := l.session.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
+		if err := l.session.client.Call(ctx, proto.ServiceSession, proto.OpAck,
 			proto.AckParams{
 				Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
 				Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
 				Offset:     ptyOffset, LifecycleOffset: &offset,
-			}, nil); err != nil {
+			}, nil); err != nil && ctx.Err() == nil {
 			// Not fatal, for the reason the PTY reader's ack is not.
 			l.session.client.log.Warn("lifecycle ack refused", "err", err,
 				"session", proto.SessionHex(l.session.session), "offset", uint64(offset))
 		}
 	}
-	return n, nil
 }
 
 func (l *attachedLifecycle) Write(p []byte) (int, error) {
@@ -1095,7 +1176,7 @@ func (l *attachedLifecycle) Close() error {
 }
 
 func (a *AttachedSession) Lifecycle() io.ReadWriteCloser {
-	return &attachedLifecycle{session: a, closed: make(chan struct{})}
+	return &attachedLifecycle{session: a, closed: make(chan struct{}), ackWake: make(chan struct{}, 1)}
 }
 
 // WriteGranted reports whether this attachment holds the session's one write

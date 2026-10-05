@@ -9,7 +9,7 @@
  * backend's preserved log landing under its own test) is in harness.ts's
  * VaultBackend.preserveLog.
  *
- * Four sources, each bounded so a chatty test cannot bury the one line that
+ * Five sources, each bounded so a chatty test cannot bury the one line that
  * mattered:
  *
  *   - The shared stand's backend log, filtered to this test's own trace_id
@@ -23,6 +23,12 @@
  *     fixture's page, and of every page a spec built itself and put on the
  *     report with watchPageForTest.
  *   - The control-plane's own JSON-RPC frames — method, id and error ONLY.
+ *   - The block DOM (nocx-itmo2) — every `.cmd-block` on the page, its parent
+ *     chain, and the counts a `.pane.active .scrollback-inner > .cmd-block`
+ *     selector walks through. Read ONLY on failure, and it is the one thing the
+ *     accessibility snapshot cannot settle: a run failed on exactly that
+ *     selector while the snapshot showed the block settled on screen, so what
+ *     is missing is the DOM ownership the flattened snapshot hides.
  *
  * WHO PRINTS IT. The report is written by an AUTO fixture (harness.ts), once
  * per test, whichever fixtures the test asked for. It used to be written by
@@ -90,7 +96,7 @@ function bounded<T>(max: number): { push(item: T): void; items: T[]; dropped: nu
 }
 
 /** What one watched page collected, and the one moment its accessibility
- *  snapshot can still be taken. */
+ *  snapshot and its block DOM can still be taken. */
 export interface PageDiagnostics {
   /** Read the page's accessibility tree NOW, while it is still open, and keep
    *  it for the report. A fixture page is closed by the time the auto fixture
@@ -99,6 +105,14 @@ export interface PageDiagnostics {
   captureSnapshot(): Promise<void>
   /** Whether a snapshot has been taken already. */
   hasSnapshot(): boolean
+  /** Read the page's `.cmd-block` DOM NOW, for the same reason and at the same
+   *  moment as `captureSnapshot` — and, like it, only on a way out that is
+   *  already known to be a failure. A page a SPEC owns is usually still open
+   *  when the report is written, and is read then instead. Never throws: a
+   *  page that has gone away is answered with a line saying so. */
+  captureBlockDom(): Promise<void>
+  /** Whether the block DOM has been read already. */
+  hasBlockDom(): boolean
   /** This page's sections of the printed block. */
   sections(label: string): string[]
 }
@@ -127,6 +141,7 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
   const consoleLines = bounded<string>(MAX_CONSOLE_LINES)
   const frames = bounded<RedactedFrame>(MAX_FRAMES)
   let snapshot: string | null = null
+  let blockDom: string | null = null
 
   page.on('console', (msg) => {
     consoleLines.push(`[console:${msg.type()}] ${msg.text()}`)
@@ -163,6 +178,12 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
     hasSnapshot() {
       return snapshot !== null
     },
+    async captureBlockDom() {
+      blockDom = await readBlockDomFrom(page)
+    },
+    hasBlockDom() {
+      return blockDom !== null
+    },
     sections(label) {
       return [
         linesSection(
@@ -176,6 +197,7 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
           frames.dropped,
         ),
         `-- ${label}: accessibility snapshot --\n${snapshot ?? '(the page closed before a snapshot was taken)'}`,
+        `-- ${label}: block DOM --\n${blockDom ?? '(the DOM was not read before the page went away)'}`,
       ]
     },
   }
@@ -256,6 +278,13 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
       // A page still open with no snapshot yet is read now; one already
       // snapshotted keeps it (captureSnapshotsForTest, the page fixture).
       if (!watched.diagnostics.hasSnapshot()) await watched.diagnostics.captureSnapshot()
+      // The block DOM, on the same rule as the snapshot above: a page the
+      // fixture owns was read on its way out, one a spec owns is usually still
+      // open and is read here. Either way this runs for a test that did NOT
+      // end as expected, and a passing test never reaches it (nocx-itmo2).
+      if (!watched.diagnostics.hasBlockDom()) await watched.diagnostics.captureBlockDom()
+      // Both are read BEFORE this page's sections are built, or a page read
+      // here would print the "not read" line and then be read for nothing.
       sections.push(...watched.diagnostics.sections(watched.label))
     }
     if (pages.length === 0) sections.push('-- no browser page was on this report --')
@@ -283,4 +312,108 @@ function linesSection(label: string, lines: string[], extraDropped = 0): string 
   const header = `-- ${label} (${shown.length} shown${totalDropped > 0 ? `, ${totalDropped} dropped` : ''}) --`
   if (shown.length === 0) return `${header}\n(none)`
   return `${header}\n${shown.join('\n')}`
+}
+
+/** How long the block-DOM probe may take before the report moves on without
+ *  it. A page whose main thread is wedged answers no `evaluate` at all, and a
+ *  report that waits for one loses every section beside it. */
+const BLOCK_DOM_DEADLINE_MS = 5_000
+
+/**
+ * Read the block DOM off `page` (nocx-itmo2), and never let it cost anything
+ * but itself: a page that has gone away, a probe that rejects and a page that
+ * simply stops answering are all answered with a line saying so. The report is
+ * already describing one failure, and a diagnostic that is missing must not
+ * replace it with a second one.
+ */
+async function readBlockDomFrom(page: Page): Promise<string> {
+  if (page.isClosed()) return '(the page had closed before the DOM could be read)'
+  try {
+    const read = page.evaluate(readBlockDom)
+    const timedOut = new Promise<string>((resolve) => {
+      const timer = setTimeout(
+        () => resolve('(the DOM read timed out — the page stopped answering)'),
+        BLOCK_DOM_DEADLINE_MS,
+      )
+      timer.unref()
+    })
+    return await Promise.race([read, timedOut])
+  } catch (err) {
+    return `(could not read the DOM: ${String(err)})`
+  }
+}
+
+/**
+ * The block-DOM probe, run INSIDE the failing page.
+ *
+ * Why it exists, in one sentence: a CI run failed on
+ * `.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-running)` six
+ * times over thirty seconds — zero elements every poll — while the
+ * accessibility snapshot taken at the same moment showed the block settled on
+ * screen. A snapshot flattens the DOM, so it cannot say whether
+ * `.scrollback-inner` exists at all, whether the block hangs from it, or from
+ * what else it hangs instead. This says exactly that.
+ *
+ * It runs in the browser, so it may not close over anything from this module:
+ * Playwright serializes the function and nothing else travels with it.
+ */
+function readBlockDom(): string {
+  /** A page can hold hundreds of restored blocks. Enough to see the shape,
+   *  few enough to stay a short block in a CI log. */
+  const MAX_BLOCKS = 20
+  /** "up to four levels" of parent, the depth this diagnostic was asked for. */
+  const CHAIN_LIMIT = 4
+
+  const nodes = (selector: string): Element[] => Array.from(document.querySelectorAll(selector))
+  const count = (selector: string): number => document.querySelectorAll(selector).length
+
+  /** `tag.class1.class2`, the spelling a person reads in devtools. */
+  const describe = (node: Element): string => {
+    const classes = typeof node.className === 'string' ? node.className.trim().split(/\s+/) : []
+    const tag = node.tagName.toLowerCase()
+    return classes.length > 0 && classes[0] !== '' ? `${tag}.${classes.join('.')}` : tag
+  }
+
+  const parentChain = (node: Element): string => {
+    const levels: string[] = []
+    let parent = node.parentElement
+    while (parent !== null && levels.length < CHAIN_LIMIT) {
+      levels.push(describe(parent))
+      parent = parent.parentElement
+    }
+    return levels.length > 0 ? levels.join(' < ') : '(no parent element)'
+  }
+
+  const blocks = nodes('.cmd-block')
+  const lines: string[] = [`every .cmd-block on the page: ${blocks.length}`]
+  for (const block of blocks.slice(0, MAX_BLOCKS)) {
+    lines.push(
+      `  ${describe(block)} entry-id=${JSON.stringify(block.getAttribute('data-entry-id'))}` +
+        ` block-kind=${JSON.stringify(block.getAttribute('data-block-kind'))}` +
+        ` running=${block.classList.contains('cmd-block-running')}`,
+    )
+    lines.push(`    parents (nearest first, at most ${CHAIN_LIMIT}): ${parentChain(block)}`)
+  }
+  if (blocks.length > MAX_BLOCKS) {
+    lines.push(`  … ${blocks.length - MAX_BLOCKS} more .cmd-block not shown`)
+  }
+
+  // The selector that failed, taken apart step by step. A 0 on any line above
+  // the last explains the failure on its own — the container is missing, or
+  // the block is not its child. A 0 on the LAST line alone means the block is
+  // a direct child of the container and still carries `cmd-block-running`.
+  lines.push('selector counts:')
+  for (const selector of [
+    '.pane',
+    '.pane.active',
+    '.scrollback-area',
+    '.scrollback-inner',
+    '.pane.active .scrollback-inner',
+    '.pane.active .scrollback-inner > .cmd-block',
+    '.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-running)',
+  ]) {
+    const matches = count(selector)
+    lines.push(`  ${selector} = ${matches} ${matches > 0 ? '(matches)' : '(no match)'}`)
+  }
+  return lines.join('\n')
 }

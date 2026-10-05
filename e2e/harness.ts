@@ -312,8 +312,14 @@ export const test = base.extend<{ failureContext: void }, { appReady: void }>({
     // modal-report.ts for why that is a report and not an assertion.
     await reportStandingModals(page, info)
     // The report itself is the auto fixture's, and it runs after this page
-    // is gone — so the snapshot is taken now, while there is one to take.
-    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
+    // is gone — so the snapshot is taken now, while there is one to take. The
+    // block DOM is read at the same moment and under the same condition,
+    // because what a failing `.cmd-block` selector matched is read off the
+    // page or not at all (nocx-itmo2).
+    if (info.status !== info.expectedStatus) {
+      await diagnostics.captureSnapshot()
+      await diagnostics.captureBlockDom()
+    }
   },
 })
 
@@ -343,7 +349,12 @@ export const standalone = base.extend<{ failureContext: void }>({
     const diagnostics = watchPageForTest(info.testId, page, 'page', { closeAfterReport: false })
     await use(page)
     await reportStandingModals(page, info)
-    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
+    // Same as the `test` object's page fixture: read on the way out of a
+    // failure, while there is a page to read (nocx-itmo2).
+    if (info.status !== info.expectedStatus) {
+      await diagnostics.captureSnapshot()
+      await diagnostics.captureBlockDom()
+    }
   },
 })
 

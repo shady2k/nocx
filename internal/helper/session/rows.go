@@ -721,9 +721,16 @@ func (s *hostSession) resendFromScrollback() bool {
 	// those rows to an authenticated Start without a lifecycle-envelope field.
 	s.rowMu.Lock()
 	outputStartRow, outputStartKnown := s.outputStartRow, s.outputStartKnown
+	outputStartSequence := s.outputStartSequence
 	s.rowMu.Unlock()
 	if outputStartKnown {
 		for _, sub := range subs {
+			// The replay mark stands in for every queued mark at or below this
+			// snapshot. Advancing the subscriber's sequence here prevents a
+			// delayed live emission from duplicating it after retained rows.
+			if sub.outputStartSequence < outputStartSequence {
+				sub.outputStartSequence = outputStartSequence
+			}
 			if sink, ok := sub.sink.(interface {
 				SendOutputStartRow(proto.OutputStartRowFrame) error
 			}); ok {

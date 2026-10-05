@@ -169,9 +169,8 @@ func rowsN(n int) []emulator.Row { return make([]emulator.Row, n) }
 // is still in flight does not stop the next delivery from being handed to
 // the transport, and the marks that pile up meanwhile collapse to the
 // newest one — the mark is a watermark, so the highest is all of them.
-func (f *fakeSink) SetBlockOutputReplay(session.ID, func() error) {}
-func (f *fakeSink) BlockOutputStartPlaneAttached(session.ID)      {}
-func (f *fakeSink) BlockOutputStartRow(session.ID, uint64)        {}
+func (f *fakeSink) BlockOutputStartPlaneAttached(session.ID) {}
+func (f *fakeSink) BlockOutputStartRow(session.ID, uint64)   {}
 
 func TestTheRowsReadLoopNeverWaitsOnAConfirmation(t *testing.T) {
 	// The exclusive mark: the helper's UpToRow is one past the last row it

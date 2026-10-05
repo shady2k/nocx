@@ -1087,6 +1087,10 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		}),
+		reg(ordered, "session.intent", params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }

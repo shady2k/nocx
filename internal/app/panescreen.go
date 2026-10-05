@@ -215,6 +215,19 @@ func (h helperPaneClient) IntentStatus(ctx context.Context, _ string, tokenID st
 	return h.client.IntentStatus(ctx, h.id, tokenID)
 }
 
+// Intent sends structured input to the helper that owns the pane. The helper's
+// session.intent owner applies the access epoch and encodes against the
+// program's current terminal modes; this coordinator never produces PTY bytes.
+func (p *paneScreen) Intent(ctx context.Context, sessionID string, params proto.IntentParams) (proto.IntentResult, error) {
+	c, id, err := p.owner(ctx, sessionID)
+	if err != nil {
+		return proto.IntentResult{}, err
+	}
+	params.Session = proto.HostSessionID{Generation: proto.GenerationID(id.Generation), Session: id.Session}
+	params.Interactive = true
+	return c.Intent(ctx, params)
+}
+
 // paneReplay is the calibration replay, over the LOCAL helper.
 //
 // It is the local daemon and not the pane's own helper — a stored set belongs

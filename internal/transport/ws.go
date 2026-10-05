@@ -309,6 +309,9 @@ type WSServer struct {
 	// session nobody watches runs exactly as it did before, and the byte path
 	// never depends on it.
 	paneScreens paneScreens
+	// paneIntentSource routes structured renderer input to the helper that
+	// owns the session's emulator. Nil leaves session.intent unwired.
+	paneIntentSource paneIntentSource
 	// screenResender asks for the frame a subscriber is owed the moment it is
 	// installed (screen.go). Nil sends nothing until the next revision.
 	screenResender ScreenResender

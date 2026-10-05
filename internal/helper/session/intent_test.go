@@ -593,3 +593,118 @@ func TestASessionIntentRefusalShowsTheRegionOnceThenOmitsIt(t *testing.T) {
 		t.Fatalf("intent-status carried regionNow %q, want none", status.Result.Refusal.RegionNow)
 	}
 }
+
+// Interactive pane input uses the same runtime encoder and owner queue as
+// target-bearing agent intents, but it carries no screen token: a person may
+// press Enter at a shell prompt. The access epoch is still checked at receipt
+// and at commit, so a revoked renderer cannot write any bytes.
+func TestInteractiveIntentEncodesThroughRuntime(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Enter"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "executed" || got.BytesWritten != 1 {
+		t.Fatalf("interactive Enter = state=%s bytes=%d refusal=%+v, want one executed byte", got.State, got.BytesWritten, got.Refusal)
+	}
+	if written := proc.writtenPayloads(); len(written) != 1 || string(written[0]) != "\r" {
+		t.Fatalf("interactive Enter wrote %q, want CR", written)
+	}
+}
+
+func TestInteractiveIntentRefusesRevokedAccessEpochWithoutWriting(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+	bump := awaitResult(t, submitBump(t, hs, 1))
+	if bump.State != sessionruntime.IntentStateExecuted {
+		t.Fatalf("access bump = %+v, want executed", bump)
+	}
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "refused" || got.Refusal == nil || got.Refusal.Cause != "access_revoked" {
+		t.Fatalf("stale interactive intent = %+v, want refused/access_revoked", got)
+	}
+	if got.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("revoked intent wrote bytes: result=%+v writes=%q", got, proc.writtenPayloads())
+	}
+}
+
+func TestInteractiveArrowIntentFollowsProgramCursorMode(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	proc.produce([]byte("\x1b[?1h"))
+	application, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Left"),
+	})
+	if err != nil || application.State != "executed" {
+		t.Fatalf("application-cursor intent = %+v, err=%v", application, err)
+	}
+	proc.produce([]byte("\x1b[?1l"))
+	legacy, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Left"),
+	})
+	if err != nil || legacy.State != "executed" {
+		t.Fatalf("normal-cursor intent = %+v, err=%v", legacy, err)
+	}
+	written := proc.writtenPayloads()
+	if len(written) != 2 || string(written[0]) != "\x1bOD" || string(written[1]) != "\x1b[D" {
+		t.Fatalf("program-mode arrow encodings = %q, want application then normal cursor sequences", written)
+	}
+}
+
+func TestInteractiveIntentRevocationWinsWhileQueued(t *testing.T) {
+	proc := newBlockingProcess()
+	hs, control := newIntentTestSession(t, proc)
+	blocker, err := hs.owner.submit(ownerItem{kind: itemClientFrame, payload: []byte("block")})
+	if err != nil {
+		t.Fatalf("submit blocker: %v", err)
+	}
+	proc.awaitEntered(t)
+
+	intent, err := hs.owner.submit(ownerItem{kind: itemIntent, intent: &pendingIntent{
+		Intent: sessionruntime.Intent{
+			At: hs.runtime.Incarnation(), Under: control.Epoch, By: control.Holder,
+			Kind: sessionruntime.IntentKindText, Payload: []byte("stale"),
+		},
+		Interactive: true,
+		Canonical:   canonicalIntent{Kind: sessionruntime.IntentKindText, Payload: []byte("stale"), AccessEpoch: 1},
+	}})
+	if err != nil {
+		t.Fatalf("submit intent: %v", err)
+	}
+	bump := awaitResult(t, submitBump(t, hs, 1))
+	if bump.State != sessionruntime.IntentStateExecuted || bump.Epoch != 2 {
+		t.Fatalf("access bump = %+v, want epoch 2", bump)
+	}
+	proc.release()
+	if result := awaitResult(t, blocker); result.State != sessionruntime.IntentStateExecuted {
+		t.Fatalf("blocker = %+v", result)
+	}
+	result := awaitResult(t, intent)
+	if result.State != sessionruntime.IntentStateRefused || !errors.Is(result.Err, errAccessRevoked) || result.BytesWritten != 0 {
+		t.Fatalf("queued intent = %+v, want zero-byte access_revoked", result)
+	}
+	select {
+	case written := <-proc.scriptedProcess.written:
+		if string(written) != "block" {
+			t.Fatalf("first write = %q, want blocker", written)
+		}
+	default:
+		t.Fatal("blocker write was not recorded")
+	}
+	select {
+	case written := <-proc.scriptedProcess.written:
+		t.Fatalf("revoked intent wrote unexpected bytes %q", written)
+	default:
+	}
+}

@@ -20,6 +20,7 @@ export type { SessionSize }
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
+import type { SessionEffect } from './generated/session.effect'
 import type { SessionHistoryPage } from './generated/session.historyPage'
 import type { SessionHistoryPageRows } from './generated/session.historyPageRows'
 import type { SessionIntentResult } from './generated/session.intent'
@@ -398,6 +399,9 @@ interface SessionState {
   // equivalent on purpose: buffering would only move the same superseded
   // snapshot one hop.
   screenFrameCallback: ((frame: SessionFrame) => void) | null
+  effectCallback: ((effect: SessionEffect) => void) | null
+  seenEffects: Set<string>
+  pendingEffects: SessionEffect[]
   // historyPageCallback receives one parsed session.historyPageRows
   // document (nocx-zg3k3.10.3) — the rows of one live-history page, riding
   // the same metadata frame the screen plane shares, keyed by the pageId
@@ -593,6 +597,10 @@ export class SessionHandle {
    *  side refuses what it cannot install, and nothing here counts or acks. */
   onScreenFrame(cb: (frame: SessionFrame) => void): void {
     this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
+
+  onEffect(cb: (effect: SessionEffect) => void): void {
+    this.client.onSessionEffect(this.sessionId, cb)
   }
 
   /** Asks for one page of this session's live history, as the emulator
@@ -896,6 +904,38 @@ export class WSClient {
         progress,
         ...(children === null ? {} : { children }),
       })
+    })
+
+    this.dispatcher.subscribe('session.effect', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      const generation = raw.generation
+      const effectId = raw.effectId
+      const kind = raw.kind
+      const body = raw.body
+      if (typeof generation !== 'string' || !/^[1-9][0-9]*$/.test(generation)) return
+      if (typeof effectId !== 'string' || !/^[1-9][0-9]*$/.test(effectId)) return
+      if (
+        kind !== 'bell' &&
+        kind !== 'notification' &&
+        kind !== 'clipboard' &&
+        kind !== 'title' &&
+        kind !== 'cwd'
+      ) {
+        log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
+        return
+      }
+      if (typeof body !== 'string') return
+      const identity = `${generation}:${effectId}`
+      if (state.seenEffects.has(identity)) return
+      state.seenEffects.add(identity)
+      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, body }
+      if (state.effectCallback) state.effectCallback(effect)
+      else state.pendingEffects.push(effect)
     })
 
     this.dispatcher.subscribe('session.liveness', (params: unknown) => {
@@ -1251,6 +1291,9 @@ export class WSClient {
       reported,
       dataCallback: null,
       screenFrameCallback: null,
+      effectCallback: null,
+      seenEffects: new Set(),
+      pendingEffects: [],
       historyPageCallback: null,
       pendingData: '',
       exitCallback: null,
@@ -1712,6 +1755,14 @@ export class WSClient {
     if (state) {
       state.screenFrameCallback = cb
     }
+  }
+
+  onSessionEffect(sessionId: string, cb: (effect: SessionEffect) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.effectCallback = cb
+    const pending = state.pendingEffects.splice(0)
+    for (const effect of pending) cb(effect)
   }
 
   onSessionObservation(

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { parseOsc7, parseOsc133, parseRecoveryFence, XtermRenderer } from './xterm'
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
+import type { SessionEffect } from '../generated/session.effect'
 import { CommandSnapshotStore } from '../command-snapshot'
 
 /**
@@ -2220,5 +2221,39 @@ describe("xterm's own stylesheets are rewritten only when their text changes (no
     expect(styles.some((el) => el.textContent?.includes('#123456'))).toBe(true)
     r.dispose()
     container.remove()
+  })
+})
+
+describe('runtime effect dispatch', () => {
+  it('routes bell, notification, clipboard, title, and cwd to the existing callbacks', () => {
+    const renderer = new XtermRenderer()
+    const bell = vi.fn()
+    const notification = vi.fn()
+    const clipboard = vi.fn()
+    const title = vi.fn()
+    const cwd = vi.fn()
+    renderer.onBell(bell)
+    renderer.onNotification?.(notification)
+    renderer.onClipboardWrite(clipboard)
+    renderer.onTitle(title)
+    renderer.onCwd(cwd)
+    const send = (kind: SessionEffect['kind'], body = '') =>
+      renderer.applySessionEffect({
+        sessionId: 'session',
+        generation: '1',
+        effectId: '1',
+        kind,
+        body,
+      })
+    send('bell')
+    send('notification', 'build finished')
+    send('clipboard', 'clipboard text')
+    send('title', 'shell title')
+    send('cwd', '/worktree')
+    expect(bell).toHaveBeenCalledTimes(1)
+    expect(notification).toHaveBeenCalledWith({ title: '', body: 'build finished' })
+    expect(clipboard).toHaveBeenCalledWith('clipboard text')
+    expect(title).toHaveBeenCalledWith('shell title')
+    expect(cwd).toHaveBeenCalledWith({ host: '', path: '/worktree' })
   })
 })

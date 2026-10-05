@@ -4832,6 +4832,12 @@ export class TerminalContent extends BasePaneContent {
     // prompt marker — see SETTLE_BACKSTOP_MS.
     this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
+    session.onEffect((effect) => {
+      // Effects are delivered independently of full frames. The client IPC
+      // layer validates the closed kind set and deduplicates identity before
+      // this existing renderer policy path sees the event.
+      renderer.applySessionEffect?.(effect)
+    })
     session.onData((data: string) => {
       log.debug('nocx: session data received', { length: data.length })
       renderer.write(data)

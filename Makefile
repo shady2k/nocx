@@ -754,7 +754,7 @@ ci-backend:
 	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_PORTABLE_PKGS)' \
 	NOCX_ALLOC_BUDGET_PKGS='$(ALLOC_BUDGET_PKGS)' \
 	NOCX_CI_TEST_P='$(GO_TEST_P)' \
-	  ./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
+	  ./scripts/ci-linux.sh -- $$($(PORTABLE_PKGS_CMD))
 
 # THE ALLOCATION BUDGETS RUN WITHOUT -race (nocx-zg3k3.5.8). Every other Go pass
 # here and in ci.yml runs -race, and the race detector instruments and adds
@@ -826,8 +826,22 @@ OS_EXEMPT := internal/pty internal/storage
 print-os-pkgs:
 	@echo '$(OS_PKGS)'
 
+# THE PORTABLE HALF OF ./..., DERIVED ONCE (nocx-eo47x). It is held as a
+# COMMAND rather than an expanded list so that both callers can share the one
+# derivation: CI asks over `make -s print-portable-pkgs`, and `ci-backend`
+# hands the same thing to the runner.
+#
+# IT IS COMMAND TEXT AND NOT `$$($(MAKE) -s ...)` ON PURPOSE, and that is the
+# defect this replaced. make treats a recipe line that mentions $(MAKE) as
+# RECURSIVE and runs it even under -n, so `make -n ci-backend` — a dry run —
+# really built the ubuntu-24.04 image, took the shared container gate lock and
+# ran a containerized leg, with the package list set to the PRINTED TEXT of the
+# derivation instead of its output (it died on `package go is not in std`).
+# Held as text, this expands into something make only PRINTS under -n.
+PORTABLE_PKGS_CMD = $(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
+
 print-portable-pkgs:
-	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
+	@$(PORTABLE_PKGS_CMD)
 
 # The tagged set (nocx-xk1di), by the same rule: ci.yml's jobs ask for the half
 # they own rather than carrying a copy. print-local-ssh-pkgs is the whole set,

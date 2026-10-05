@@ -29,6 +29,15 @@
  *     accessibility snapshot cannot settle: a run failed on exactly that
  *     selector while the snapshot showed the block settled on screen, so what
  *     is missing is the DOM ownership the flattened snapshot hides.
+ *   - The ledger's own record of the rows a spec compared (nocx-rb4ca) —
+ *     recorded, not read here: a spec asks the store its question the moment
+ *     its OWN comparison fails (recordRowsCensusForTest) and the report prints
+ *     what it got. It has to be that way round because a spec's backend is
+ *     stopped by `afterEach` before this report runs, so a census asked for
+ *     here would be a read of a socket that is already gone. It exists to
+ *     answer the one question the backend log cannot: whether a short stored
+ *     transcript is rows that never arrived, rows parked in a second artifact,
+ *     or rows the artifact's own record says were never in it.
  *
  * WHO PRINTS IT. The report is written by an AUTO fixture (harness.ts), once
  * per test, whichever fixtures the test asked for. It used to be written by
@@ -59,6 +68,41 @@ export interface RegisterableBackend {
 }
 
 const backendsByTestId = new Map<string, RegisterableBackend[]>()
+
+/** One checkpoint's census, as its spec recorded it: what the ledger held for
+ *  the rows the spec was comparing, at the moment its own comparison failed. */
+export interface RecordedRowsCensus {
+  /** What the spec was checking when it took this — the checkpoint's own
+   *  words, so a test with two comparisons does not read as one. */
+  label: string
+  /** The census, already rendered: a spec owns the reading (it knows the
+   *  command and the endpoint) and this module owns only the printing. */
+  text: string
+}
+
+const rowsCensusByTestId = new Map<string, RecordedRowsCensus[]>()
+
+/**
+ * Record what the ledger held for one spec's own comparison, for the failure
+ * report to print (nocx-rb4ca).
+ *
+ * WHY IT IS RECORDED AND NOT READ BY THE REPORT. A spec's backend is stopped
+ * by its `afterEach`, which runs before the report's auto fixture, so anything
+ * this module tried to ask the store at report time would be a read of a
+ * socket that no longer exists — and the interesting moment is the failure
+ * itself, not a minute later. The spec therefore takes the census while the
+ * store is still up, on the only path that needs it (its own failing
+ * comparison), and the report prints it verbatim.
+ *
+ * Appended, never replaced: one test can compare the same entry at more than
+ * one checkpoint (before and after a restart), and the difference between the
+ * two is often the whole answer.
+ */
+export function recordRowsCensusForTest(testId: string, label: string, text: string): void {
+  const list = rowsCensusByTestId.get(testId) ?? []
+  list.push({ label, text })
+  rowsCensusByTestId.set(testId, list)
+}
 
 /** Attribute a backend a spec started for itself to the test running right
  *  now, so a failure's printed block finds it without the spec having to say
@@ -255,8 +299,10 @@ export async function captureSnapshotsForTest(testId: string): Promise<void> {
 export async function reportFailureContext(info: TestInfo, traceId: string): Promise<void> {
   const pages = pagesByTestId.get(info.testId) ?? []
   const backends = backendsByTestId.get(info.testId) ?? []
+  const censuses = rowsCensusByTestId.get(info.testId) ?? []
   pagesByTestId.delete(info.testId)
   backendsByTestId.delete(info.testId)
+  rowsCensusByTestId.delete(info.testId)
   try {
     if (info.status === info.expectedStatus) return
 
@@ -288,6 +334,21 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
       sections.push(...watched.diagnostics.sections(watched.label))
     }
     if (pages.length === 0) sections.push('-- no browser page was on this report --')
+
+    // The store's own answer about the rows the spec was comparing (nocx-rb4ca),
+    // printed after the pages because it is read off the ledger rather than the
+    // browser. A test that never compared stored rows records none, and says so
+    // in one line instead of leaving the reader to wonder whether it was lost.
+    if (censuses.length === 0) {
+      sections.push(
+        '-- ledger: stored rows of this test (nocx-rb4ca) --\n' +
+          '(the spec recorded no census: it takes one only when its own comparison of stored rows fails)',
+      )
+    } else {
+      for (const census of censuses) {
+        sections.push(`-- ledger: stored rows at ${census.label} (nocx-rb4ca) --\n${census.text}`)
+      }
+    }
 
     process.stderr.write(sections.join('\n') + '\n')
   } finally {

@@ -11251,6 +11251,9 @@
       "$ref": "https://nocx.local/contracts/session.displaced.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/session.effect.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/session.focus.schema.json"
     },
     {

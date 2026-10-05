@@ -334,6 +334,7 @@ type localHelperOpener struct {
 	// composition root once the transport exists (the opener itself is built
 	// before it). Nil is a legitimate wiring and registers no observer.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half, bound late for
 	// the same reason publishScreen is (helper_block_rows.go). Nil wires
 	// nothing.
@@ -697,6 +698,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
 		publishScreen:      o.publishScreen,
+		publishEffect:      o.publishEffect,
 		blockRows:          o.blockRows,
 		environmentEntries: o.environmentEntries,
 		cursors:            o.lifecycleCursors,

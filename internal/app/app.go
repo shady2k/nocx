@@ -2154,6 +2154,7 @@ func New(opts ...Option) (*App, error) {
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
 	localOpener.publishScreen = tp.PublishScreenFrame
+	localOpener.publishEffect = tp.PublishSessionEffect
 	localOpener.blockRows = tp
 	// The two row buffers are the person's settings (nocx-2v80t.3.36): the
 	// helper's rides each spawn, the coordinator's is the transport's for
@@ -3114,7 +3115,7 @@ func (a *App) Start(ctx context.Context) error {
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
-			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
+			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, publishEffect: a.Transport.PublishSessionEffect, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
@@ -3213,6 +3214,7 @@ func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struc
 				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
 				local: a.localHelper, timeout: vaultSealedRetryAttempt,
 				publishScreen: a.Transport.PublishScreenFrame,
+				publishEffect: a.Transport.PublishSessionEffect,
 				blockRows:     a.Transport,
 			},
 			content.DefaultUnreconciledRetention, a.slogger)

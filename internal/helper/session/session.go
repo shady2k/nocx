@@ -414,10 +414,12 @@ type hostSession struct {
 	// bridge records (nocx-2v80t.3.36), and rowStreamNext is the index one
 	// past the last batch the runtime handed over, recorded or not — where
 	// the incomplete marker says recording stopped when a marker overflows.
-	rowMu         sync.Mutex
-	rowQueue      []rowEmission
-	rowState      rowRecording
-	rowStreamNext uint64
+	rowMu            sync.Mutex
+	rowQueue         []rowEmission
+	rowState         rowRecording
+	rowStreamNext    uint64
+	outputStartRow   uint64
+	outputStartKnown bool
 	// rowWake wakes the pump when the queue was empty and a new emission
 	// arrived; capacity 1, because a pending wake means "the queue is
 	// non-empty" and coalesces the same way a watermark does — the pump
@@ -689,14 +691,18 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		return proto.AttachResult{}, ErrNoSuchSession
 	}
 
-	// A newly bound reader also needs the retained suffix when rows
-	// departed before it attached. Set the obligation before publishing the
-	// subscriber under this mutex: deliverRowEmission takes the same lock
-	// while checking resendDue, so a queued live emission cannot overtake
-	// the replay in the gap between the pump's due check and its fan-out.
-	if s.runtime != nil && s.rowsConfirmed < s.runtime.DepartedRowCount() {
+	// A newly bound reader needs the retained suffix when rows departed before
+	// it attached, and the position mark even when that suffix is empty. Set
+	// the obligation before publishing the subscriber under this mutex:
+	// deliverRowEmission takes the same lock while checking resendDue, so a
+	// queued live emission cannot overtake the replay in the gap between the
+	// pump's due check and its fan-out.
+	if s.runtime != nil {
+		needsReplay := s.rowsConfirmed < s.runtime.DepartedRowCount()
 		s.rowMu.Lock()
-		s.resendDue = true
+		if needsReplay || s.outputStartKnown {
+			s.resendDue = true
+		}
 		s.rowMu.Unlock()
 	}
 

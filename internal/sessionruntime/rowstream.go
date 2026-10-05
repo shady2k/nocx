@@ -32,6 +32,13 @@ import "github.com/shady2k/nocx/internal/emulator"
 // ended, so a consumer holds the hole to the position it happened at, and a
 // batch with no rows and a loss is how a hole at an interval's very end is
 // stated — at the position the interval's end marker then names.
+// OutputStartMarker is an optional ordered RowStream emission for the absolute
+// session row position at OSC 133 C. The receiver learns position on the same
+// carrier as rows, while lifecycle authentication remains independent.
+type OutputStartMarker interface {
+	OutputStartRow(from uint64)
+}
+
 type RowStream interface {
 	// OutputRows carries one feed's departed rows, oldest first, with the
 	// absolute index of the first and the struck-feed count immediately
@@ -88,4 +95,12 @@ func (s *Session) SetRowStream(r RowStream) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.rowStream = r
+	// A replacement reader needs the current output boundary before its
+	// resend rows. Re-emitting the mark on the newly bound ordered stream
+	// keeps position recoverable without making the lifecycle frame carry it.
+	if r != nil {
+		if marker, ok := r.(OutputStartMarker); ok && s.observation != nil && s.observation.OutputMarked {
+			marker.OutputStartRow(s.observation.OutputMarkDeparted)
+		}
+	}
 }

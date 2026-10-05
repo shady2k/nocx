@@ -372,7 +372,8 @@ type AttachedSession struct {
 	// clearBoundaryObs is the coordinator's consumer for this session's
 	// sighted clear boundaries (nocx-2v80t.3.17) — see OnClearBoundary. On
 	// the same ordered stream and guarded the same way as the two above.
-	clearBoundaryObs func()
+	clearBoundaryObs  func()
+	outputStartRowObs func(OutputStartRow)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -1185,6 +1186,38 @@ func (a *AttachedSession) Close() error {
 	a.finish()
 	return a.client.Call(context.Background(), proto.ServiceSession, proto.OpDetach,
 		proto.DetachParams{Attachment: attachment}, nil)
+}
+
+// ReplayOutputRows replaces this attachment's helper-side reader at the
+// same acknowledged offsets. The helper's existing attach/replacement path
+// replays its retained rows before queued output; no new wire operation or
+// subscriber is introduced. Its response is read by the independent client
+// loop, so callers must not invoke it synchronously from a frame observer.
+func (a *AttachedSession) ReplayOutputRows(ctx context.Context) error {
+	a.mu.Lock()
+	p := proto.AttachParams{
+		Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
+		Session:    proto.HostSessionID{Generation: a.generation, Session: hex.EncodeToString(a.session[:])},
+		Offset:     a.offset, LifecycleOffset: a.lifecycleOffset,
+	}
+	a.mu.Unlock()
+	var result proto.AttachResult
+	if err := a.client.Call(ctx, proto.ServiceSession, proto.OpAttach, p, &result); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.attachment = result.Attachment
+	// A same-subscriber reader replacement preserves the existing writer
+	// lease without granting it again. In that case AttachResult.Write.Epoch
+	// is zero; overwriting the local epoch would make this live attachment
+	// unable to write even though the helper still recognizes its lease.
+	if result.Write.Granted {
+		a.epoch = result.Write.Epoch
+	}
+	a.offset = result.Resume.From
+	a.lifecycleOffset = result.LifecycleResume.From
+	a.mu.Unlock()
+	return nil
 }
 
 // EndSession releases this attachment AND asks the helper to close the

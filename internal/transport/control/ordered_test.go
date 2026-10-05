@@ -162,3 +162,36 @@ func TestOrderedSubmission_PropagatesTaskContext(t *testing.T) {
 		t.Fatal("task never ran")
 	}
 }
+
+func TestOrderedSubmission_ShutdownRejectsNewWorkAndWaitsForAdmitted(t *testing.T) {
+	sub, ok := NewOrderedSubmission("session", 2).(*orderedSubmission)
+	if !ok {
+		t.Fatal("NewOrderedSubmission returned an unexpected implementation")
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	if rejection := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) {
+		close(started)
+		<-release
+	}}); rejection != nil {
+		t.Fatalf("TrySubmit: %v", rejection)
+	}
+	<-started
+
+	sub.Shutdown()
+	if rejection := sub.TrySubmit(context.Background(), Task{Run: func(context.Context) {}}); rejection == nil {
+		t.Fatal("TrySubmit succeeded after Shutdown")
+	}
+	waited := make(chan struct{})
+	go func() {
+		<-sub.done
+		close(waited)
+	}()
+	select {
+	case <-waited:
+		t.Fatal("Wait returned while admitted work was running")
+	default:
+	}
+	close(release)
+	<-waited
+}

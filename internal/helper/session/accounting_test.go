@@ -16,16 +16,16 @@ func TestSharedRowPoolProductionEnqueueAndPrefixReclaim(t *testing.T) {
 	row := []emulator.Row{textRow("retained")}
 	rowBytes := emissionBytes(rowEmission{rows: row})
 	endReserve := int64(maxResendEnds) * int64(unsafe.Sizeof(droppedEnd{}))
-	// One emission costs the shared pool twice while it is both queued and
-	// retained for resend. The marker and dropped-end reserves stay carved
-	// out of that same budget.
-	hs := &hostSession{rowBufferBytes: markerBytes + endReserve + 2*rowBytes, log: slog.Default()}
+	// The queue and resend window refer to the same backing rows. Count cell
+	// data once, plus the FIFO's emission record. The marker and dropped-end
+	// reserves stay carved out of that same budget.
+	hs := &hostSession{rowBufferBytes: markerBytes + endReserve + rowBytes + int64(unsafe.Sizeof(rowEmission{})), log: slog.Default()}
 	hs.enqueueRowEmission(rowEmission{from: 0, rows: row})
 	if len(hs.rowQueue) != 1 || hs.rowQueue[0].from != 0 {
 		t.Fatalf("production enqueue did not queue rows: %+v", hs.rowQueue)
 	}
-	if got, want := poolBytes(t, hs), 2*rowBytes; got != want {
-		t.Fatalf("enqueue pool charge=%d, want FIFO+retained=%d", got, want)
+	if got, want := poolBytes(t, hs), rowBytes+int64(unsafe.Sizeof(rowEmission{})); got != want {
+		t.Fatalf("enqueue pool charge=%d, want shared rows plus FIFO record=%d", got, want)
 	}
 	em, ok := hs.dequeueRowEmission()
 	if !ok {
@@ -53,9 +53,9 @@ func TestSharedRowPoolOverflowMarksRowAndResumesAfterEnd(t *testing.T) {
 	row := []emulator.Row{textRow("row")}
 	rowBytes := emissionBytes(rowEmission{rows: row})
 	endReserve := int64(maxResendEnds) * int64(unsafe.Sizeof(droppedEnd{}))
-	hs := &hostSession{rowBufferBytes: markerBytes + endReserve + rowBytes + rowBytes/2, log: slog.Default()}
-	// The FIFO charge fits, but the production resend charge cannot fit
-	// beside it. The bridge must undo the FIFO charge and emit its marker.
+	// The shared row data cannot fit in the budget. The bridge emits its
+	// marker without retaining either a FIFO or resend copy.
+	hs := &hostSession{rowBufferBytes: markerBytes + endReserve + rowBytes/2, log: slog.Default()}
 	hs.enqueueRowEmission(rowEmission{from: 17, rows: row})
 	if len(hs.rowQueue) != 1 || !hs.rowQueue[0].incomplete || hs.rowQueue[0].from != 17 {
 		t.Fatalf("queue does not contain the named incomplete marker: %+v", hs.rowQueue)
@@ -66,9 +66,11 @@ func TestSharedRowPoolOverflowMarksRowAndResumesAfterEnd(t *testing.T) {
 	if got := hs.rowBufferOverflows.Load(); got != 1 {
 		t.Fatalf("overflow counter=%d, want 1", got)
 	}
-	if em, ok := hs.dequeueRowEmission(); !ok || !em.incomplete || em.from != 17 {
+	em, ok := hs.dequeueRowEmission()
+	if !ok || !em.incomplete || em.from != 17 {
 		t.Fatalf("marker dequeue=(%+v,%v)", em, ok)
 	}
+	hs.releaseRowEmission(em)
 	// Overflow drops through the next end fence; afterward the following
 	// command is accepted by the same FIFO and the same pool.
 	hs.enqueueRowEmission(rowEmission{from: 18, rows: row})

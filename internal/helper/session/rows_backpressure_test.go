@@ -255,7 +255,10 @@ func endNonce(b byte) sessionruntime.FenceNonce {
 // and no more, measured by the bridge's own accounting.
 func bufferOf(hs *hostSession, n int) {
 	one := rowEmission{from: 0, rows: []emulator.Row{textRow("x")}}
-	hs.rowBufferBytes = 2*int64(n+1)*emissionBytes(one) + emissionBytes(rowEmission{incomplete: true}) + int64(maxResendEnds)*int64(unsafe.Sizeof(droppedEnd{}))
+	markerBytes := emissionBytes(rowEmission{incomplete: true})
+	endReserve := int64(maxResendEnds) * int64(unsafe.Sizeof(droppedEnd{}))
+	fifoRecord := int64(unsafe.Sizeof(rowEmission{}))
+	hs.rowBufferBytes = markerBytes + endReserve + int64(n+1)*(emissionBytes(one)+fifoRecord)
 }
 
 // queuedBytes is the bridge's own count of what its queue holds.

@@ -231,10 +231,9 @@ func TestReaderReplayStopsAtThePendingQueueHead(t *testing.T) {
 
 // The detach shape the acceptance's first half rides (nocx-zg3k3.5.3):
 // the coordinator TOOK the rows — the pump delivered them, delivered=true,
-// no drop, no resendDue — and went away without confirming. The pump's own
-// bookkeeping is the only witness (the confirmed mark is behind what the
-// pump handed out), and the next attach must read the scrollback back from
-// the mark, or the taken rows are silently gone: never re-sent, never
+// no drop — and went away without confirming. The confirmed mark is behind
+// what the pump handed out, and the next attach must read the scrollback back
+// from the mark, or the taken rows are silently gone: never re-sent, never
 // counted. Ordered events, no load.
 func TestReplacingAnAttachedReaderResendsItsUnconfirmedRows(t *testing.T) {
 	hs, rt, first := rowsBridgeSession(t, 80, 24)
@@ -268,12 +267,9 @@ func TestReplacingAnAttachedReaderResendsItsUnconfirmedRows(t *testing.T) {
 		t.Fatalf("replace attached reader: %v", err)
 	}
 	t.Cleanup(func() { hs.detach(second, "att-new") })
-	hs.rowMu.Lock()
-	resendDue := hs.resendDue
-	hs.rowMu.Unlock()
-	if !resendDue {
-		t.Fatal("replacing an attached reader did not arm a resend of its unconfirmed rows")
-	}
+	// The pump may complete this resend before attach returns to this test,
+	// so assert the reader-visible replay rather than sampling its transient
+	// internal obligation flag.
 	second.waitFor(1, 0, 0)
 	if got := decodeResentRows(t, second.rowFrames()); len(got) == 0 || len(got[0].texts) == 0 {
 		t.Fatalf("replacement reader received no unconfirmed rows: %+v", got)

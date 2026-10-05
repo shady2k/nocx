@@ -23,7 +23,7 @@ import (
 // publisher, and the committed manifest verifies — the contract the sh
 // writer must mirror.
 func TestLaunchBundle_ConformsToPublisherContract(t *testing.T) {
-	b := launchBundle()
+	b := shippedBundle()
 	if err := validateBundle(b); err != nil {
 		t.Fatalf("launchBundle fails validateBundle: %v", err)
 	}

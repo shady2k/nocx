@@ -190,7 +190,7 @@ func TestTheStartupRestoreDropsClosedPanesAndReportsWhatItCannotResume(t *testin
 	if err != nil {
 		t.Fatalf("agentrecord.New: %v", err)
 	}
-	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentRecords.Probe())
+	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentProbe{store: agentRecords})
 	if len(got) != 2 {
 		t.Fatalf("restorations = %+v, want the two records whose panes are still open", got)
 	}
@@ -337,7 +337,7 @@ func TestTheAgentRecordDecidesWhetherAPersistedWorkerCanBeLaunched(t *testing.T)
 	if err != nil {
 		t.Fatalf("agentrecord.New: %v", err)
 	}
-	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentRecords.Probe())
+	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentProbe{store: agentRecords})
 	if len(got) != 2 {
 		t.Fatalf("restorations = %+v, want both records whose panes are still open", got)
 	}

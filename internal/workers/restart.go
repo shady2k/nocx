@@ -45,6 +45,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -53,24 +54,24 @@ import (
 // record stores what it was told and never decides a flag itself, because a
 // mode derived here would be a second answer to a question the agent's own
 // record owns.
-type ResumeMode string
+// ResumeMode and its values are the LAUNCH RECORD's vocabulary (nocx-t5e7d):
+// what an agent can resume under is a fact about the agent, so the record owns
+// the words and this package RENAMES them rather than restating them. A second
+// definition here would be two answers to one question, and the record is the
+// one that answers it — a mode no record declares is a mode nocx cannot build
+// an invocation for.
+type ResumeMode = agentrecord.ResumeMode
 
 const (
-	// ResumeNone means the agent does not resume at all, and a restart opens
-	// the pane in its checkout with a fresh conversation. It is a real
-	// recorded state and not the absence of one: an agent that cannot resume
-	// is a fact worth persisting, because it is what lets the restore say "this
-	// one starts over" rather than "this one cannot be restored".
-	ResumeNone ResumeMode = "none"
-	// ResumeByID resumes by an explicit conversation id — `claude --resume
-	// <id>`, `codex resume <id>` — which is what a shared checkout needs,
-	// because a most-recent-session flag there would lasso another task's
-	// conversation (nocx-2txuc).
-	ResumeByID ResumeMode = "by-id"
-	// ResumeByCwd resumes the agent's own most-recent session for the launch
-	// directory, which is correct in a worktree because each tree has its own
-	// directory (nocx-2txuc).
-	ResumeByCwd ResumeMode = "by-cwd"
+	// ResumeNone: the agent does not resume at all. See agentrecord.ResumeNone
+	// for why the negative is a recorded state rather than an absence.
+	ResumeNone = agentrecord.ResumeNone
+	// ResumeByID: continue an explicitly named conversation
+	// (agentrecord.ResumeByID).
+	ResumeByID = agentrecord.ResumeByID
+	// ResumeByCwd: continue the launch directory's most recent conversation
+	// (agentrecord.ResumeByCwd).
+	ResumeByCwd = agentrecord.ResumeByCwd
 )
 
 // ResumeIdentity is the identity one agent's conversation is continued under.

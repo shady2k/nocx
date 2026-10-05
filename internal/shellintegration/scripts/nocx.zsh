@@ -735,6 +735,15 @@ __nocx_agent_run() {
     # If a future Claude subcommand rejects trailing flags, update this
     # argv proof and feed the prompt through stdin instead of moving the flag
     # ahead of user arguments.
+    #
+    # THIS IS THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it is deliberately
+    # not part of the generated wrapper block above (nocx-t5e7d): the block
+    # carries NAMES, because this script is published to hosts nobody here
+    # controls and a person's own arguments are not theirs to receive. Where a
+    # tool-surface argument belongs instead is the launch record's `args`,
+    # applied where nocx runs — nocx-xn63t.5.2's argv builder. Until that
+    # exists, this append is unconditional, so it applies to every agent the
+    # block wraps and not only to the one whose flag it spells.
     # Cleared before the agent is exec'd: the staging above has taken its copy,
     # nothing after this point needs the bearer, and a shell that ran a child
     # with it still in its own variable space is one `printenv`-style accident
@@ -760,9 +769,14 @@ __nocx_agent_run() {
     return $__rc
 }
 
-# One agent today (D15: one worker first, not three). A function, not an alias,
-# and not exported: what it wraps is what the user TYPES in a nocx pane.
-claude() { __nocx_agent_run claude "$@"; }
+# The agents nocx wraps, GENERATED from the agent record (nocx-t5e7d): the line
+# below is replaced, before this script is stripped and delivered, by one
+# wrapper per ENABLED agent — by NAME and nothing else, because this script is
+# published to hosts nobody here controls (agents.go says why in full).
+#
+# A function, not an alias, and not exported: what it wraps is what the user
+# TYPES in a nocx pane.
+# @NOCX_AGENT_WRAPPERS@
 
 __nocx_lc_read_grant() {
     local __rid="$1" __t=0 __env __bootstrap

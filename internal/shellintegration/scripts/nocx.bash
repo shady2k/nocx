@@ -957,6 +957,15 @@ __nocx_agent_run() {
     # If a future Claude subcommand rejects trailing flags, update this
     # argv proof and feed the prompt through stdin instead of moving the flag
     # ahead of user arguments.
+    #
+    # THIS IS THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it is deliberately
+    # not part of the generated wrapper block above (nocx-t5e7d): the block
+    # carries NAMES, because this script is published to hosts nobody here
+    # controls and a person's own arguments are not theirs to receive. Where a
+    # tool-surface argument belongs instead is the launch record's `args`,
+    # applied where nocx runs — nocx-xn63t.5.2's argv builder. Until that
+    # exists, this append is unconditional, so it applies to every agent the
+    # block wraps and not only to the one whose flag it spells.
     # Cleared before the agent is exec'd: the staging above has taken its copy,
     # nothing after this point needs the bearer, and a shell that ran a child
     # with it still in its own variable space is one `printenv`-style accident
@@ -983,16 +992,18 @@ __nocx_agent_run() {
     return $__rc
 }
 
-# The agents nocx wraps. One today, deliberately: D15 of the orchestration
-# design says one worker first, not three — the mechanism is what is being
-# built and fan-out is cheap once it works. A second name is a second line.
+# The agents nocx wraps, GENERATED from the agent record (nocx-t5e7d): the line
+# below is replaced, before this script is stripped and delivered, by one
+# wrapper per ENABLED agent — by NAME and nothing else, because this script is
+# published to hosts nobody here controls and a person's record is not theirs to
+# receive (agents.go says why in full).
 #
 # A FUNCTION, not an alias, and not exported. What it wraps is what the user
 # TYPES in a nocx pane; a script that runs `claude` in a subshell gets the real
 # binary, because bash does not pass functions to children unless told to. That
 # is the right scope: orchestration is a property of the pane the person is
 # sitting in front of, not of everything that pane ever spawns.
-claude() { __nocx_agent_run claude "$@"; }
+# @NOCX_AGENT_WRAPPERS@
 
 # Classify a typed line as a nested environment. Conservative by design:
 # anything ambiguous is NOT nested and runs conventionally — the honest

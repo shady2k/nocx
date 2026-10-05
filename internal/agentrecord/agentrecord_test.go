@@ -14,14 +14,12 @@ package agentrecord
 // what nocx does.
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/workers"
 )
 
 // newStore opens the store over a fresh app directory and answers the
@@ -95,11 +93,11 @@ func TestAnUntouchedAgentReadsTheBuildsRecord(t *testing.T) {
 	e := entry(t, s, "claude")
 
 	modes := e.Record.Resume.Modes()
-	if len(modes) != 2 || modes[0] != workers.ResumeByID || modes[1] != workers.ResumeByCwd {
+	if len(modes) != 2 || modes[0] != ResumeByID || modes[1] != ResumeByCwd {
 		t.Fatalf("claude's resume modes = %v, want by-id and by-cwd", modes)
 	}
-	if e.Record.Resume.Supports(workers.ResumeNone) {
-		t.Fatalf("a record reports that it resumes with mode %q, and that mode is the fact that it does not resume", workers.ResumeNone)
+	if e.Record.Resume.Supports(ResumeNone) {
+		t.Fatalf("a record reports that it resumes with mode %q, and that mode is the fact that it does not resume", ResumeNone)
 	}
 	if len(e.Record.Resume.SessionIDArgs) == 0 {
 		t.Fatalf("claude's record cannot mint the session id a by-id resume continues: %+v", e.Record.Resume)
@@ -137,7 +135,7 @@ func TestAPersonsDocumentReplacesTheShippedRecordAndIsNotRewritten(t *testing.T)
 	// The build ships a by-id resume for claude and this document declares
 	// none: what is read is their document ENTIRELY, because a field-by-field
 	// merge would be two owners of one decision.
-	if e.Record.Resume.Supports(workers.ResumeByID) {
+	if e.Record.Resume.Supports(ResumeByID) {
 		t.Fatalf("the build's by-id resume survived a document that declares none: %+v", e.Record.Resume)
 	}
 	if !e.Record.Builtin {
@@ -274,28 +272,31 @@ func TestANameThatCouldLeaveTheAppDirectoryIsNotAnAgent(t *testing.T) {
 	}
 }
 
-// The record answers the restart restore's resume question, and the answers
-// are the agent record's own rather than the record's completeness alone.
+// The record answers the restart restore's resume question, and the answers are
+// the AGENT RECORD's own rather than the identity's completeness: whether nocx
+// knows an agent by this name, whether its record is usable, and whether it
+// declares the arguments a resume in this mode would be built from. The half
+// this package does NOT answer — whether the identity names a conversation at
+// all — is workers.DiskProbe's, asked before this in internal/app's probe, and
+// deliberately not restated here.
 func TestTheRecordAnswersWhetherAnAgentCanBeResumed(t *testing.T) {
-	s, _ := newStore(t)
-	p := s.Probe()
-	ctx := context.Background()
+	s, dir := newStore(t)
 
 	t.Run("an agent this build ships, by id", func(t *testing.T) {
-		if err := p.Resume(ctx, "claude", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"}); err != nil {
-			t.Fatalf("Resume: %v, want claude's own by-id resume accepted", err)
+		if err := s.ResumeAnswer("claude", ResumeByID); err != nil {
+			t.Fatalf("ResumeAnswer: %v, want claude's own by-id resume accepted", err)
 		}
 	})
 	t.Run("an agent this build ships, by cwd", func(t *testing.T) {
-		if err := p.Resume(ctx, "claude", workers.ResumeIdentity{Mode: workers.ResumeByCwd}); err != nil {
-			t.Fatalf("Resume: %v, want claude's own by-cwd resume accepted", err)
+		if err := s.ResumeAnswer("claude", ResumeByCwd); err != nil {
+			t.Fatalf("ResumeAnswer: %v, want claude's own by-cwd resume accepted", err)
 		}
 	})
 	t.Run("a name nocx has never seen", func(t *testing.T) {
-		// THIS is the answer the shipped DiskProbe could not give: it said
-		// "an agent nocx never saw" in its own comment and could not tell one
-		// from a name somebody invented.
-		err := p.Resume(ctx, "definitely-not-an-agent", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"})
+		// THIS is the answer the shipped DiskProbe could not give: it said "an
+		// agent nocx never saw" in its own comment and could not tell one from
+		// a name somebody invented.
+		err := s.ResumeAnswer("definitely-not-an-agent", ResumeByID)
 		if err == nil {
 			t.Fatalf("a name nocx has no record of was accepted as a launchable agent")
 		}
@@ -303,15 +304,10 @@ func TestTheRecordAnswersWhetherAnAgentCanBeResumed(t *testing.T) {
 			t.Fatalf("refusal = %q, want the agent named", err)
 		}
 	})
-	t.Run("no agent at all", func(t *testing.T) {
-		if err := p.Resume(ctx, "", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"}); err == nil {
-			t.Fatalf("an empty agent name was accepted")
-		}
-	})
 	t.Run("a mode the agent's record declares no args for", func(t *testing.T) {
 		s2, dir2 := newStore(t)
 		writeDocument(t, dir2, "claude", `{"version": 1, "command": "claude", "resume": {"resumeCwdArgs": ["--continue"]}}`)
-		err := s2.Probe().Resume(ctx, "claude", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"})
+		err := s2.ResumeAnswer("claude", ResumeByID)
 		if err == nil {
 			t.Fatalf("a by-id resume was accepted for a record that declares only a by-cwd one")
 		}
@@ -319,10 +315,16 @@ func TestTheRecordAnswersWhetherAnAgentCanBeResumed(t *testing.T) {
 			t.Fatalf("refusal = %q, want what the record DOES resume named", err)
 		}
 	})
+	t.Run("a mode that is not a way of resuming at all", func(t *testing.T) {
+		err := s.ResumeAnswer("claude", ResumeNone)
+		if err == nil {
+			t.Fatalf("a resume was accepted under %q, which is the fact that there is no conversation", ResumeNone)
+		}
+	})
 	t.Run("a record that declares no resume at all", func(t *testing.T) {
 		s3, dir3 := newStore(t)
 		writeDocument(t, dir3, "myagent", `{"version": 1, "command": "my-agent"}`)
-		err := s3.Probe().Resume(ctx, "myagent", workers.ResumeIdentity{Mode: workers.ResumeByCwd})
+		err := s3.ResumeAnswer("myagent", ResumeByCwd)
 		if err == nil {
 			t.Fatalf("a resume was accepted for an agent whose record declares none")
 		}
@@ -333,7 +335,7 @@ func TestTheRecordAnswersWhetherAnAgentCanBeResumed(t *testing.T) {
 	t.Run("a document that cannot be used", func(t *testing.T) {
 		s4, dir4 := newStore(t)
 		writeDocument(t, dir4, "claude", `{`)
-		err := s4.Probe().Resume(ctx, "claude", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"})
+		err := s4.ResumeAnswer("claude", ResumeByID)
 		if err == nil {
 			t.Fatalf("a resume was accepted over a record that cannot be read")
 		}
@@ -342,35 +344,64 @@ func TestTheRecordAnswersWhetherAnAgentCanBeResumed(t *testing.T) {
 		}
 	})
 	t.Run("a store nobody built", func(t *testing.T) {
-		// Fail closed, the same direction a nil probe is refused in
-		// workers.Restore: a restore that could not look must not claim the
-		// pane is fine.
-		if err := (Probe{}).Resume(ctx, "claude", workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "c"}); err == nil {
-			t.Fatalf("a probe with no store accepted a resume")
+		err := (*Store)(nil).ResumeAnswer("claude", ResumeByID)
+		if err == nil {
+			t.Fatalf("a store that was never built accepted a resume")
 		}
-		if err := (Probe{}).Checkout(ctx, workers.Worktree{}, ""); err == nil {
-			t.Fatalf("a probe with no store accepted a launch directory of nothing")
+		if !strings.Contains(err.Error(), "claude") {
+			t.Fatalf("refusal = %q, want the agent named", err)
 		}
 	})
+	_ = dir
 }
 
-// The checkout question is not the record's, and it is delegated rather than
-// restated: what a probe says about a directory is what the probe that owns
-// that question says.
-func TestTheCheckoutQuestionIsTheShippedProbesOwn(t *testing.T) {
-	s, _ := newStore(t)
-	p := s.Probe()
-	ctx := context.Background()
+// The enabled set is what a shell is offered: the build's own agents plus the
+// person's, minus the ones they switched off.
+func TestEnabledNamesIsTheBuildsAgentsPlusThePersonsMinusTheDisabled(t *testing.T) {
+	s, dir := newStore(t)
+	writeDocument(t, dir, "myagent", `{"version": 1, "command": "my-agent"}`)
+	writeDocument(t, dir, "switched-off", `{"version": 1, "command": "other", "disabled": true}`)
 
-	dir := t.TempDir()
-	if err := p.Checkout(ctx, workers.Worktree{}, dir); err != nil {
-		t.Fatalf("Checkout(%q) = %v, want a directory that is there accepted", dir, err)
+	got := s.EnabledNames()
+	if !sameStrings(got, []string{"claude", "myagent"}) {
+		t.Fatalf("EnabledNames = %v, want this build's agent and the person's, with the switched-off one left out", got)
 	}
-	if want := (workers.DiskProbe{}).Checkout(ctx, workers.Worktree{}, dir); want != nil {
-		t.Fatalf("the shipped probe disagrees about %q: %v", dir, want)
+	// A document a person disabled takes a SHIPPED agent out of the offering
+	// too — that is the whole of what `disabled` means, and the reason it is
+	// recorded rather than derived.
+	writeDocument(t, dir, "claude", `{"version": 1, "command": "claude", "disabled": true}`)
+	if got := s.EnabledNames(); !sameStrings(got, []string{"myagent"}) {
+		t.Fatalf("EnabledNames = %v, want a switched-off build agent gone from the offering", got)
 	}
-	gone := filepath.Join(dir, "gone")
-	if err := p.Checkout(ctx, workers.Worktree{}, gone); err == nil {
-		t.Fatalf("Checkout(%q) accepted a directory that is not there", gone)
+	// And a record that cannot be read takes its agent out rather than offering
+	// one nocx cannot describe: whether it is switched off is one of the things
+	// an unreadable document does not say.
+	writeDocument(t, dir, "myagent", `{`)
+	if got := s.EnabledNames(); len(got) != 0 {
+		t.Fatalf("EnabledNames = %v, want nothing offered when both records are unusable", got)
 	}
+}
+
+// The shipped set is the build's own and is never empty: a build that ships no
+// agent cannot wrap one.
+func TestShippedNamesIsNeverEmpty(t *testing.T) {
+	got := ShippedNames()
+	if len(got) == 0 {
+		t.Fatalf("this build ships no agent at all")
+	}
+	if !sameStrings(got, []string{"claude"}) {
+		t.Fatalf("ShippedNames = %v, want the one agent this build ships a driver for", got)
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

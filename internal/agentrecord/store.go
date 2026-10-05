@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -94,6 +96,12 @@ func New(configDir string) (*Store, error) {
 // neither this build nor the person describes one — which is the honest answer
 // for an agent nocx has never seen, and is what keeps a restore from launching
 // a name somebody typed.
+// Entry answers which record is in force for one agent, and false when neither
+// this build nor the person describes one — which is the honest answer for an
+// agent nocx has never seen, and is what keeps a restore from launching a name
+// somebody typed.
+func (s *Store) Entry(id string) (Entry, bool) { return s.entry(id) }
+
 func (s *Store) entry(id string) (Entry, bool) {
 	if s == nil || !storage.ValidDocumentName(id) {
 		return Entry{}, false
@@ -183,3 +191,88 @@ func (s *Store) emptied(id string) (bool, error) {
 // name is the document's file name, built from a name validated at
 // construction, which is the only reason this is a one-liner.
 func name(id string) string { return id + ".json" }
+
+// EnabledNames lists the agents this MACHINE offers, which is a different
+// question from ShippedNames and the one a shell asks before it decides what
+// to wrap: everything this build ships plus everything the person has written
+// a document for, minus the agents they switched off, in a stable order.
+//
+// THREE FAIL-CLOSED CHOICES, all in the same direction:
+//
+//   - a document that cannot be used takes its agent OUT of the set. Whether
+//     the person switched that agent off is one of the things an unreadable
+//     document does not say, so offering it would be offering one nocx cannot
+//     describe.
+//   - a directory that cannot be read answers with the SHIPPED set rather than
+//     with nothing: this build's own agents are still real, and a shell with
+//     no wrappers at all is a terminal that quietly stopped being orchestrated.
+//   - a name that could not be a document's file name is not an agent and is
+//     skipped, exactly as entry refuses it.
+//
+// Reading the directory is the only way to see an agent nobody ships — the
+// whole point of a record a person writes — and it happens HERE rather than
+// once at construction so that adding an agent is seen by the next shell
+// rather than by the next start of the backend.
+func (s *Store) EnabledNames() []string {
+	if s == nil {
+		return ShippedNames()
+	}
+	seen := make(map[string]bool, len(s.shipped))
+	for id := range s.shipped {
+		seen[id] = true
+	}
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return ShippedNames()
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if id := strings.TrimSuffix(name, ".json"); storage.ValidDocumentName(id) {
+			seen[id] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		entry, known := s.entry(id)
+		if !known || entry.State == StateUnreadable || entry.Record.Disabled {
+			continue
+		}
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ResumeAnswer is the record's half of the restart restore's resume question:
+// whether this agent, under this mode, names a conversation that can be
+// continued — and whether nocx knows the agent at all.
+//
+// IT IS THE ANSWER NOTHING ELSE COULD GIVE, which is why it is here rather than
+// at the caller. workers.DiskProbe answers an identity's own completeness, and
+// its doc comment names "an agent nocx never saw" as a thing it cannot tell
+// from a name somebody invented; that question is this record's, and this is
+// where it is answered.
+//
+// Every branch fails CLOSED, and the sentence each one returns is the one a
+// person reads when their worker does not come back, so it names what stood in
+// the way rather than only that something did.
+func (s *Store) ResumeAnswer(agent string, mode ResumeMode) error {
+	entry, known := s.entry(agent)
+	switch {
+	case !known:
+		return fmt.Errorf("nocx has no record of an agent called %q, so there is nothing to launch", agent)
+	case entry.State == StateUnreadable:
+		return fmt.Errorf("nocx cannot read its record for the agent %q (%s), so it will not launch it", agent, entry.Problem)
+	}
+	if !entry.Record.Resume.Supports(mode) {
+		modes := entry.Record.Resume.Modes()
+		if len(modes) == 0 {
+			return fmt.Errorf("the record for %q declares no way to resume a conversation", agent)
+		}
+		return fmt.Errorf("the record for %q resumes %v, and this identity asks for %q", agent, modes, mode)
+	}
+	return nil
+}

@@ -67,10 +67,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/workers"
 )
 
 // DirName is the directory under the app's config directory that holds these
@@ -87,6 +87,30 @@ const documentVersion = 1
 
 //go:embed agents/*.json
 var shippedFS embed.FS
+
+// ResumeMode is HOW a worker's conversation is continued, and it is the
+// LAUNCH RECORD's vocabulary rather than the worker record's: what an agent can
+// resume under is a fact about the AGENT, which is why it lives here and why
+// internal/workers renames these values rather than restating them.
+type ResumeMode string
+
+const (
+	// ResumeNone means the agent does not resume at all, and a restart opens
+	// the pane in its checkout with a fresh conversation. It is a real
+	// recorded state and not the absence of one: an agent that cannot resume
+	// is a fact worth recording, because it is what lets a restore say "this
+	// one starts over" rather than "this one cannot be restored".
+	ResumeNone ResumeMode = "none"
+	// ResumeByID resumes by an explicit conversation id — `claude --resume
+	// <id>`, `codex resume <id>` — which is what a shared checkout needs,
+	// because a most-recent-session flag there would lasso another task's
+	// conversation (nocx-2txuc).
+	ResumeByID ResumeMode = "by-id"
+	// ResumeByCwd resumes the agent's own most-recent session for the launch
+	// directory, which is correct in a worktree because each tree has its own
+	// directory (nocx-2txuc).
+	ResumeByCwd ResumeMode = "by-cwd"
+)
 
 // Resume is HOW this agent's conversation is continued: the three argv shapes
 // the 2026-08-15 spec's §5 named, in the record rather than in the code that
@@ -118,11 +142,11 @@ type Resume struct {
 // this mode would be built from. An unknown mode is not supported, and neither
 // is ResumeNone — see Modes for why the second of those is the honest answer
 // rather than an omission.
-func (r Resume) Supports(mode workers.ResumeMode) bool {
+func (r Resume) Supports(mode ResumeMode) bool {
 	switch mode {
-	case workers.ResumeByID:
+	case ResumeByID:
 		return len(r.ResumeIDArgs) > 0
-	case workers.ResumeByCwd:
+	case ResumeByCwd:
 		return len(r.ResumeCwdArgs) > 0
 	default:
 		// ResumeNone, and every mode a newer build might name: an identity
@@ -139,13 +163,13 @@ func (r Resume) Supports(mode workers.ResumeMode) bool {
 // ResumeNone is deliberately absent: it is a fact a person may record about an
 // agent ("this one cannot resume") and not a way this record resumes one, so
 // listing it here would advertise an invocation that does not exist.
-func (r Resume) Modes() []workers.ResumeMode {
-	out := make([]workers.ResumeMode, 0, 2)
-	if r.Supports(workers.ResumeByID) {
-		out = append(out, workers.ResumeByID)
+func (r Resume) Modes() []ResumeMode {
+	out := make([]ResumeMode, 0, 2)
+	if r.Supports(ResumeByID) {
+		out = append(out, ResumeByID)
 	}
-	if r.Supports(workers.ResumeByCwd) {
-		out = append(out, workers.ResumeByCwd)
+	if r.Supports(ResumeByCwd) {
+		out = append(out, ResumeByCwd)
 	}
 	return out
 }
@@ -329,5 +353,21 @@ func loadShipped() map[string]Record {
 	if len(out) == 0 {
 		panic("agentrecord: no shipped agent records, and a build that describes no agent can launch none")
 	}
+	return out
+}
+
+// ShippedNames lists the agents THIS BUILD ships, in a stable order. It is the
+// set the EMBEDDED shell scripts wrap, and it is the honest answer for a shell
+// that has no profile to read: this build's own agents, which is what a build
+// can know about itself.
+func ShippedNames() []string { return idsOf(shippedRecords) }
+
+// idsOf lists a record set's ids in a stable order.
+func idsOf(records map[string]Record) []string {
+	out := make([]string, 0, len(records))
+	for id := range records {
+		out = append(out, id)
+	}
+	sort.Strings(out)
 	return out
 }

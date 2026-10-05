@@ -230,8 +230,8 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 	if !vr.Installed {
 		t.Fatal("Verify over SFTP: bundle not installed")
 	}
-	if vr.Generation != genDir(version) {
-		t.Errorf("active generation = %q, want %q", vr.Generation, genDir(version))
+	if vr.Generation != shippedBundle().generation() {
+		t.Errorf("active generation = %q, want %q", vr.Generation, shippedBundle().generation())
 	}
 
 	// The launch carrier on the host is the one this build ships (0700).
@@ -247,7 +247,7 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 		"nocx.posix": posixScript,
 	}
 	for name, script := range want {
-		got := readFileT(t, filepath.Join(root, integrationDir, genDir(version), name))
+		got := readFileT(t, filepath.Join(root, integrationDir, shippedBundle().generation(), name))
 		if string(got) != script {
 			t.Errorf("%s content differs from the embedded script (%d vs %d bytes)", name, len(got), len(script))
 		}
@@ -390,14 +390,14 @@ func TestEnsureInstalledRemote_ModesOverSFTP(t *testing.T) {
 		root,
 		filepath.Join(root, tmpName),
 		filepath.Join(root, integrationDir),
-		filepath.Join(root, integrationDir, genDir(version)),
+		filepath.Join(root, integrationDir, shippedBundle().generation()),
 	} {
 		if got := statModeT(t, dir).Perm(); got != 0o700 {
 			t.Errorf("directory mode %s = %04o, want 0700", dir, got)
 		}
 	}
 	for _, name := range []string{"nocx.bash", "nocx.zsh", "nocx.posix"} {
-		p := filepath.Join(root, integrationDir, genDir(version), name)
+		p := filepath.Join(root, integrationDir, shippedBundle().generation(), name)
 		if got := statModeT(t, p).Perm(); got != 0o600 {
 			t.Errorf("data file mode %s = %04o, want 0600", p, got)
 		}
@@ -538,8 +538,8 @@ func TestEnsureInstalledRemote_ReadonlyHomeFailsOpenThenConverges(t *testing.T) 
 		t.Fatalf("EnsureInstalledRemote after restore: %v", err)
 	}
 	m := readManifestT(t, root)
-	if m.Generation != genDir(version) {
-		t.Errorf("active generation after convergence = %q, want %q", m.Generation, genDir(version))
+	if m.Generation != shippedBundle().generation() {
+		t.Errorf("active generation after convergence = %q, want %q", m.Generation, shippedBundle().generation())
 	}
 }
 
@@ -774,7 +774,7 @@ func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
 	root := filepath.Join(remoteHome, dirName)
 
 	// The user modified one generation file after the publish.
-	gen := filepath.Join(root, integrationDir, genDir(version))
+	gen := filepath.Join(root, integrationDir, shippedBundle().generation())
 	if err := os.WriteFile(filepath.Join(gen, "nocx.bash"), []byte("user edit"), 0o600); err != nil {
 		t.Fatalf("user edit: %v", err)
 	}
@@ -787,10 +787,10 @@ func TestUninstallRemote_RemovesManifestOwnedFilesOverSFTP(t *testing.T) {
 	if !slices.Contains(removed, "manifest.json") {
 		t.Errorf("removed = %v, want manifest.json among them", removed)
 	}
-	if !slices.Contains(removed, filepath.ToSlash(filepath.Join(integrationDir, genDir(version), "nocx.zsh"))) {
+	if !slices.Contains(removed, filepath.ToSlash(filepath.Join(integrationDir, shippedBundle().generation(), "nocx.zsh"))) {
 		t.Errorf("removed = %v, want the unmodified generation files among them", removed)
 	}
-	if !slices.Contains(conflicts, filepath.ToSlash(filepath.Join(integrationDir, genDir(version), "nocx.bash"))) {
+	if !slices.Contains(conflicts, filepath.ToSlash(filepath.Join(integrationDir, shippedBundle().generation(), "nocx.bash"))) {
 		t.Errorf("conflicts = %v, want the user-modified nocx.bash reported", conflicts)
 	}
 

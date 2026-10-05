@@ -769,7 +769,27 @@ func New(opts ...Option) (*App, error) {
 	// logrus_containment.go, and the receipt test that pins it.
 	installLogrusContainment(logger)
 
-	shint := shellintegration.New(logger)
+	// THE AGENT RECORD (nocx-t5e7d): the one description of an agent nocx runs
+	// — its command, its arguments, its environment and the three resume
+	// shapes — embedded in this binary and NEVER written out, beside whatever
+	// documents a person has written under this profile's own `agents`
+	// directory.
+	//
+	// It is built HERE, ahead of the shell integration, because the integration
+	// is its first reader: the wrappers a host is published are generated from
+	// this store's enabled names, so the set a shell offers and the set the
+	// record describes have one owner. The startup restore below is its second
+	// reader, and it asks a different question of the same store.
+	agentRecords, agentRecordsErr := agentrecord.New(paths.ConfigDir())
+	if agentRecordsErr != nil {
+		return nil, fmt.Errorf("agent records: %w", agentRecordsErr)
+	}
+
+	// The agent wrappers a published bundle carries are the ENABLED agents of
+	// the record as it stands at the moment of the publish, read through this
+	// closure rather than captured once: a record a person edits reaches the
+	// next host this process connects to, not the next start of the app.
+	shint := shellintegration.New(logger, shellintegration.WithAgentNames(agentRecords.EnabledNames))
 	remoteInstaller := &remoteInstallerAdapter{inner: shint}
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
@@ -890,19 +910,6 @@ func New(opts ...Option) (*App, error) {
 	// record on purpose — that one is MemoryStore and D5 said so — and it is
 	// read at exactly one moment, the startup restore below.
 	workerRestarts := workers.NewFileRestartStore(docStore, "worker-restarts.json")
-	// THE AGENT RECORD (nocx-t5e7d): the one description of an agent nocx
-	// runs — its command, its arguments, its environment and the three resume
-	// shapes — embedded in this binary and NEVER written out, beside whatever
-	// documents a person has written under this profile's own `agents`
-	// directory. It is built here because the startup restore below is its
-	// first reader: the question "is this agent one nocx knows, and can its
-	// record resume the conversation this pane names" was nobody's fact until
-	// this store existed, and it is the half the restart record cannot answer
-	// about itself (workers.DiskProbe's own doc says so).
-	agentRecords, agentRecordsErr := agentrecord.New(paths.ConfigDir())
-	if agentRecordsErr != nil {
-		return nil, fmt.Errorf("agent records: %w", agentRecordsErr)
-	}
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -2500,7 +2507,7 @@ func New(opts ...Option) (*App, error) {
 	// buy is the half that is true today: a worker whose pane was closed while
 	// nocx was down stops being a record nobody will ever resolve, and one that
 	// cannot be resumed is said so at startup instead of in a document.
-	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentRecords.Probe())
+	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The

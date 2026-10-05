@@ -11,6 +11,7 @@ import {
 } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionEffect } from './generated/session.effect'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -2050,5 +2051,75 @@ describe('session.displaced notification', () => {
     const sent = ws.sent.length
     client.sendToSession(SID, 'x')
     expect(ws.sent.length).toBe(sent + 1)
+  })
+})
+
+describe('session.effect notification', () => {
+  const effect = (over: Record<string, unknown> = {}) => ({
+    jsonrpc: '2.0',
+    method: 'session.effect',
+    params: {
+      sessionId: SID,
+      generation: '4',
+      effectId: '7',
+      kind: 'clipboard',
+      body: 'permitted text',
+      ...over,
+    },
+  })
+
+  it('dispatches the first effect and suppresses duplicate delivery by identity', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect())
+    ws.deliverText(effect())
+    expect(received).toEqual([
+      {
+        sessionId: SID,
+        generation: '4',
+        effectId: '7',
+        kind: 'clipboard',
+        body: 'permitted text',
+      },
+    ])
+  })
+
+  it('does not turn a full frame into a non-visual side effect', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":9}'), MSG_TYPE_METADATA),
+    )
+    expect(received).toEqual([])
+  })
+
+  it('delivers a notification once when its event is replayed', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'notification', body: 'finished' }))
+    ws.deliverText(effect({ kind: 'notification', body: 'finished' }))
+    expect(received).toHaveLength(1)
+    expect(received[0]?.kind).toBe('notification')
+  })
+
+  it('refuses unknown kinds and malformed identities', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'input' }))
+    ws.deliverText(effect({ effectId: '0' }))
+    expect(received).toEqual([])
+  })
+
+  it('buffers an event delivered before the pane registers its handler', async () => {
+    const { session, ws } = await connectedSession()
+    ws.deliverText(effect({ kind: 'notification', body: 'done' }))
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    expect(received).toHaveLength(1)
+    expect(received[0]?.kind).toBe('notification')
   })
 })

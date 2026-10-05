@@ -257,6 +257,7 @@ async function mountTerminal(
   view: EditorView
   ed: CommandEditor
   clipboard: ClipboardFake
+  gate: ClipboardGate
   content: TerminalContent
   tab: Pane
   teardown: () => void
@@ -264,11 +265,12 @@ async function mountTerminal(
   const clientFake = client ?? makeClient()
   // ClientFake is structurally a WSClient; the tab layer expects the real type.
   const wsClient = clientFake as unknown as WSClient
+  const gate = new ClipboardGate()
   const content = new TerminalContent(
     wsClient,
     opts.pane ?? anchoredPane(),
     clipboard,
-    new ClipboardGate(),
+    gate,
     makeBanner(),
     profileClient ?? null,
     () => {},
@@ -299,6 +301,7 @@ async function mountTerminal(
     view: viewOf(ed),
     ed,
     clipboard,
+    gate,
     content,
     tab,
     teardown: () => {
@@ -16871,6 +16874,34 @@ describe('the prompt prediction measures at the real block width, once per frame
     } finally {
       frames.restore()
       h.restore()
+    }
+  })
+})
+
+describe('runtime clipboard effects keep the existing permission gate', () => {
+  it('denies a clipboard write until permission is granted, then writes once', async () => {
+    const clipboard = makeClipboard()
+    const client = makeClient()
+    const mounted = await mountTerminal(clipboard, {}, client)
+    try {
+      const session = client._sessions[0]
+      if (!session) throw new Error('session not opened')
+      const effect = {
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'clipboard' as const,
+        body: 'runtime text',
+      }
+      session.fireEffect(effect)
+      await Promise.resolve()
+      expect(clipboard.writeText).not.toHaveBeenCalled()
+      mounted.gate.allow()
+      session.fireEffect({ ...effect, effectId: '2' })
+      expect(clipboard.writeText).toHaveBeenCalledTimes(1)
+      expect(clipboard.writeText).toHaveBeenCalledWith('runtime text')
+    } finally {
+      mounted.teardown()
     }
   })
 })

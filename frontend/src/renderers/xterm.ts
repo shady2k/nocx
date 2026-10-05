@@ -37,6 +37,7 @@ import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
 import { parseOscNotification } from '../osc-notification'
+import type { SessionEffect } from '../generated/session.effect'
 import { logDecision, isDecisionTracing } from '../log'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
@@ -321,6 +322,10 @@ export class XtermRenderer implements TerminalRenderer {
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
   private notificationSubs: NotificationRequestCallback[] = []
+  private titleSubs: TitleCallback[] = []
+  private cwdSubs: CwdCallback[] = []
+  private bellSubs: BellCallback[] = []
+  private clipboardSubs: ClipboardWriteCallback[] = []
   private notifyOscDisposables: Array<{ dispose(): void }> = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
@@ -957,6 +962,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onTitle(cb: TitleCallback): void {
+    this.titleSubs.push(cb)
     this.term?.onTitleChange(cb)
   }
 
@@ -976,11 +982,10 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onCwd(cb: CwdCallback): void {
+    this.cwdSubs.push(cb)
     this.term?.parser.registerOscHandler(7, (data: string) => {
       const parsed = parseOsc7(data)
-      if (parsed) {
-        cb({ host: parsed.host, path: parsed.path })
-      }
+      if (parsed) cb({ host: parsed.host, path: parsed.path })
       return false // let xterm.js also handle it (default render is no-op)
     })
   }
@@ -1046,7 +1051,28 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onBell(cb: BellCallback): void {
+    this.bellSubs.push(cb)
     this.term?.onBell(cb)
+  }
+
+  applySessionEffect(effect: SessionEffect): void {
+    switch (effect.kind) {
+      case 'bell':
+        for (const sub of this.bellSubs) sub()
+        break
+      case 'notification':
+        for (const sub of this.notificationSubs) sub({ title: '', body: effect.body })
+        break
+      case 'clipboard':
+        for (const sub of this.clipboardSubs) sub(effect.body)
+        break
+      case 'title':
+        for (const sub of this.titleSubs) sub(effect.body)
+        break
+      case 'cwd':
+        for (const sub of this.cwdSubs) sub({ host: '', path: effect.body })
+        break
+    }
   }
 
   onSelectionChange(cb: SelectionCallback): void {
@@ -1056,6 +1082,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onClipboardWrite(cb: ClipboardWriteCallback): void {
+    this.clipboardSubs.push(cb)
     this.term?.parser.registerOscHandler(52, (data: string) => {
       // decodeOsc52 is a pure parser imported from the clipboard module
       // and does not touch the clipboard — the callback fires the decoded

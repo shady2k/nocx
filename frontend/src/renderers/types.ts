@@ -4,6 +4,7 @@
 import type { ITheme } from '@xterm/xterm'
 import type { CapturedFrame } from '../frame/types'
 import type { OscNotification } from '../osc-notification'
+import type { SessionEffect } from '../generated/session.effect'
 
 export type DataCallback = (data: string) => void
 export type ResizeCallback = (cols: number, rows: number) => void
@@ -181,6 +182,9 @@ export interface TerminalRenderer {
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.
   onBell(cb: () => void): void
+
+  /** Deliver a non-visual event produced by the authoritative session runtime. */
+  applySessionEffect?(effect: SessionEffect): void
 
   // onSelectionChange fires when the user completes a selection gesture in
   // the terminal, not per cell or per boundary movement. The callback

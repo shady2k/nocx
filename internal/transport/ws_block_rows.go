@@ -476,11 +476,13 @@ type openBlock struct {
 	// rather than where the interval's index says it should be
 	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
 	rows uint64
-	// Recovered artifacts may use OSC 133 C to locate retained rows. Fresh
-	// authenticated starts always use row zero; they never wait on this mark.
+	// outputStartRow is the helper's ordered command-output mark. A fresh
+	// block trusts it only after the authenticated start reserved this open;
+	// a pre-start mark alone cannot authorize a block or move its boundary.
 	outputStartKnown        bool
 	outputStartMarked       bool
 	outputStartRow          uint64
+	expectedFirstRow        uint64
 	awaitingOutputReplay    bool
 	recoveredOutputInterval bool
 	preOutputStart          []pendingRows
@@ -802,6 +804,12 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 	}
 	if b.rows < found.NextRow {
 		b.rows = found.NextRow
+	}
+	// A re-bound block continues at the durable cursor it carried. The
+	// artifact's first stored row may be later than the block's original
+	// start, but this reader's expected continuation is the cursor.
+	if found.NextRow > b.expectedFirstRow {
+		b.expectedFirstRow = found.NextRow
 	}
 	if found.NextRow > 0 {
 		b.floor = found.FirstRow
@@ -1307,8 +1315,17 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 		return
 	}
 	if !block.recoveredOutputInterval {
-		// An ordinary block is owned by its authenticated Start and begins at
-		// row zero. OSC marks only locate rows replayed into a recovered block.
+		// The authenticated start already owns this fresh block. Its first
+		// ordered output mark refines the open's row-zero boundary, but never
+		// moves it backwards or replaces a cursor already carried forward.
+		if !block.outputStartMarked {
+			block.outputStartKnown = true
+			block.outputStartMarked = true
+			if fromRow > block.expectedFirstRow {
+				block.expectedFirstRow = fromRow
+			}
+			block.outputStartRow = block.expectedFirstRow
+		}
 		bs.mu.Unlock()
 		return
 	}
@@ -1458,6 +1475,25 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		bs.mu.Unlock()
 		return 0, false
 	}
+	if sourced {
+		if closed := bs.closedThrough[sid]; fromRow < closed {
+			skip := closed - fromRow
+			if skip >= uint64(len(rows)) {
+				bs.mu.Unlock()
+				return closed, true
+			}
+			rows = rows[skip:]
+			fromRow = closed
+			lost = 0
+		}
+	}
+	if block != nil && !block.recoveredOutputInterval {
+		// A previous interval may have closed after this next open was
+		// reserved. Its boundary is the next block's own row-zero cursor.
+		if closed := bs.closedThrough[sid]; closed > block.expectedFirstRow {
+			block.expectedFirstRow = closed
+		}
+	}
 	if block != nil && block.outputStartKnown {
 		start := block.outputStartRow
 		if block.recoveredOutputInterval && start > block.rows {
@@ -1480,16 +1516,6 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	var headFrom uint64
 	fullyStored := false
 	if sourced {
-		if closed := bs.closedThrough[sid]; fromRow < closed {
-			skip := closed - fromRow
-			if skip >= uint64(len(rows)) {
-				bs.mu.Unlock()
-				return closed, true
-			}
-			rows = rows[skip:]
-			fromRow = closed
-			lost = 0
-		}
 		// Dedup by absolute row index (nocx-zg3k3.5.3): a resent delivery
 		// may start behind what this block already committed. block.rows is
 		// the artifact's cursor, moved by each append that landed -- the
@@ -1786,9 +1812,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	}
 	s.finishDirectDelivery(ctx, sid, block, rows)
 	bs.mu.Lock()
-	floor, storedUpTo := block.floor, block.rows
+	floor, storedUpTo, expectedFirstRow := block.floor, block.rows, block.expectedFirstRow
 	bs.mu.Unlock()
-	if floor > 0 {
+	if floor > expectedFirstRow {
 		// A watermark is a contiguous prefix, not the end of an artifact
 		// whose first stored row is later. Keep the helper's head until it
 		// reaches the floor and prependBlockHead joins it to the artifact.
@@ -2940,6 +2966,27 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 		if bs.current[sid] == nil {
 			bs.current[sid] = existing
 			delete(bs.queued, sid)
+			if closed := bs.closedThrough[sid]; closed > existing.expectedFirstRow {
+				existing.expectedFirstRow = closed
+			}
+			if bs.outputStartKnown[sid] {
+				mark := bs.outputStartMarks[sid]
+				existing.outputStartKnown = true
+				existing.outputStartMarked = true
+				existing.outputStartRow = mark
+				if existing.recoveredOutputInterval {
+					// A recovered mark is a replay fence; the continuation's
+					// expected start remains the durable cursor it carried.
+					if existing.outputStartRow > existing.rows {
+						existing.outputStartRow = existing.rows
+					}
+				} else if mark > existing.expectedFirstRow {
+					existing.expectedFirstRow = mark
+					existing.outputStartRow = mark
+				}
+				delete(bs.outputStartKnown, sid)
+				delete(bs.outputStartMarks, sid)
+			}
 		}
 		if bs.flushing[sid] {
 			bs.mu.Unlock()
@@ -2974,6 +3021,11 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 	// An existing current block owns those rows; only a no-current open uses
 	// waiting to hold them for the block being created.
 	if !hasCurrent {
+		// A mark observed before this authenticated reservation may belong to
+		// the prompt or a prior command. Only a mark arriving during this
+		// open, or after it installs, refines this block's expected first row.
+		delete(bs.outputStartKnown, sid)
+		delete(bs.outputStartMarks, sid)
 		bs.waiting[sid] = attempt
 	}
 	bs.opening[sid] = attempt
@@ -3119,9 +3171,19 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		bs.open[sid] = make(map[string]*openBlock)
 	}
 	b := &openBlock{attempt: attempt, entry: attempt, artifactID: openArtifact, kept: openArtifact != ""}
-	// This is a fresh authenticated start, not a recovered interval. Its
-	// output boundary is row zero; an OSC mark must never gate or replay it.
+	// This fresh authenticated start owns its output boundary. A mark seen
+	// after the reservation arrived while OPEN was in flight; otherwise the
+	// authenticated row-zero boundary is the expected first row.
 	b.outputStartKnown = true
+	b.expectedFirstRow = bs.closedThrough[sid]
+	b.outputStartRow = b.expectedFirstRow
+	if bs.outputStartKnown[sid] {
+		b.outputStartMarked = true
+		if mark := bs.outputStartMarks[sid]; mark > b.expectedFirstRow {
+			b.expectedFirstRow = mark
+			b.outputStartRow = mark
+		}
+	}
 	delete(bs.outputStartKnown, sid)
 	delete(bs.outputStartMarks, sid)
 	bs.open[sid][attempt] = b
@@ -3250,7 +3312,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 			block.floor = delivery.from
 		}
 		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
-		floor := block.floor
+		floor, expectedFirstRow := block.floor, block.expectedFirstRow
 		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
@@ -3258,7 +3320,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
-		if floor == 0 {
+		if floor <= expectedFirstRow {
 			confirmPendingRows(ctx, confirm, delivery)
 		}
 	}

@@ -21,6 +21,9 @@ import (
 // only when the helper reports its end.
 func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	if err := db.Ledger().CreateSession(context.Background(), content.Session{ID: sid, WorkspaceID: "ws-lifecycle"}); err != nil {
+		t.Fatalf("create persisted session for rebind: %v", err)
+	}
 	e.ws.AttachBlockRows(session.ID(sid))
 
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make restart")

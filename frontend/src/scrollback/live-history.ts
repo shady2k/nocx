@@ -147,6 +147,10 @@ export class LiveHistorySurface {
    *  began (leftTail): paid back by the first page the rebuild installs, so
    *  the gesture that left the tail is not eaten by the replacement. */
   private _rebuildTailGap: number | null = null
+  /** The reader's place, held across the caret reveal one keystroke makes
+   *  (nocx-zg3k3.15.2) — see _holdThroughTyping. Null when nothing is held. */
+  private _holdTop: number | null = null
+  private _holdFrame = 0
   /** True only while the unstructured mode owns the pane. */
   private _active = false
   /** One page's two planes, held apart until they meet: the rows document
@@ -168,8 +172,19 @@ export class LiveHistorySurface {
     this.el.className = 'live-history'
     this.el.hidden = true
     opts.stack.insertBefore(this.el, opts.stack.firstChild)
-    const onScroll = (): void => this._pump()
+    const onScroll = (): void => {
+      // THE ENGINE'S OWN CARET REVEAL IS NOT A SCROLL (nocx-zg3k3.15.2,
+      // _holdThroughTyping): the reader did not move, so there is nothing to
+      // pump for and nothing to page.
+      if (this._restoreHeld()) return
+      this._pump()
+    }
     opts.scroller.addEventListener('scroll', onScroll, { passive: true })
+    // Capture phase: the keystroke belongs to the grid's hidden input, and
+    // the hold has to be taken before the engine's default action — the
+    // reveal it makes — rather than after the input layer has seen the key.
+    const onKeyDown = (ev: KeyboardEvent): void => this._holdThroughTyping(ev)
+    opts.scroller.addEventListener('keydown', onKeyDown, true)
     // THE WHEEL, TRANSLATED BY THE SCROLLER'S OWN OWNER (nocx-zg3k3.10.4).
     // The input surface is still xterm's (until nocx-zg3k3.3), and xterm
     // consumes a wheel over the live screen into its OWN viewport — which
@@ -185,6 +200,7 @@ export class LiveHistorySurface {
     this._offScroll = () => {
       opts.scroller.removeEventListener('scroll', onScroll)
       opts.scroller.removeEventListener('wheel', onWheel)
+      opts.scroller.removeEventListener('keydown', onKeyDown, true)
     }
   }
 
@@ -200,6 +216,7 @@ export class LiveHistorySurface {
     } else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
       delta *= this._scroller.clientHeight
     }
+    this._releaseHold()
     const before = this._scroller.scrollTop
     // The browser clamps; when the clamp holds the reader exactly where
     // they were, there is nothing to claim — but the GESTURE still counts:
@@ -317,6 +334,10 @@ export class LiveHistorySurface {
    *  existed when the reader left — and the head page is asked for once so
    *  the gesture has something to scroll into view. */
   tailReengaged(): void {
+    // A live end delivered inside a hold is the engine's caret reveal being
+    // reported, not the reader coming back: put them where they were and
+    // keep their past. See _holdThroughTyping.
+    if (this._restoreHeld()) return
     this._away = false
     if (this._dirty) {
       this._forget()
@@ -361,6 +382,11 @@ export class LiveHistorySurface {
   }
 
   private _clearTimers(): void {
+    if (this._holdFrame !== 0) {
+      window.cancelAnimationFrame(this._holdFrame)
+      this._holdFrame = 0
+    }
+    this._holdTop = null
     if (this._refreshTimer !== 0) {
       window.clearTimeout(this._refreshTimer)
       this._refreshTimer = 0
@@ -408,6 +434,78 @@ export class LiveHistorySurface {
     }
     if (this._exhausted || this._pages.length > 0) return
     this._request()
+  }
+
+  /** A KEYSTROKE IS NOT A SCROLL (nocx-zg3k3.15.2).
+   *
+   * MEASURED, in the container's WebKit, with the scroller's own `scroll`
+   * events logged beside every decision this class makes: the first
+   * character typed into the grid throws a reader who is wheeled into the
+   * past to the bottom, and between the key and that scroll the trace
+   * carries NO scroll call at all — neither this surface's nor the
+   * controller's. What moved the scroller is the ENGINE revealing the caret
+   * of the focused control by scrolling its ancestors, and the grid's hidden
+   * input (xterm's helper textarea) sits at the cursor: inside this scroller,
+   * at the live end. The reader is at the live end afterwards, so this
+   * class's own rule — a stale past is rebuilt under a reader who is there
+   * (`_fireHeadRefresh`, `tailReengaged`) — takes the rows they were reading
+   * away, which is the whole of the reported defect.
+   *
+   * The position is this scroller's — the stylesheet's own
+   * `overflow-anchor: none` says why, against the engine's other controller
+   * (scroll anchoring) — so a key that TYPES holds the reader's place across
+   * the reveal its own default action makes. A key that NAVIGATES (Page Up,
+   * the arrows, Home/End) holds nothing, because it is the reader's own way
+   * of moving; neither does a wheel (`_translateWheel`), for the same
+   * reason. The hold lasts ONE FRAME: long enough for the reveal and for the
+   * follow sentinel's delivery of it, and short enough that it can never
+   * undo a scroll the reader makes afterwards.
+   *
+   * The reveal itself is not preventable from here: where that input sits is
+   * xterm's (`position: fixed`, or any containing block outside this
+   * scroller, would take the IME's candidate window out with it), so the
+   * reader's place is kept on this side instead of the engine's scroll being
+   * argued out of happening.
+   */
+  private _holdThroughTyping(ev: KeyboardEvent): void {
+    if (this._holdTop !== null) return
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return
+    // A key that types one character. `Enter`, `Backspace` and the editing
+    // keys are not this: they move no caret the engine has to reveal.
+    if (ev.key.length !== 1) return
+    if (!this._active) return
+    const el = this._scroller
+    // Nothing to hold: a scroller with no layout box, or with nothing to
+    // scroll, has no place the reader could lose — and one already at its
+    // live end has no place the reveal could take them from. The GEOMETRY
+    // answers that, rather than this class's own `_away`: a departure the
+    // scroll event's own guards swallowed still leaves a reader to keep.
+    if (el.clientHeight === 0 || el.scrollHeight <= el.clientHeight) return
+    if (isAtTail(el)) return
+    this._holdTop = el.scrollTop
+    this._holdFrame = window.requestAnimationFrame(() => {
+      this._holdFrame = 0
+      this._holdTop = null
+    })
+  }
+
+  /** A hold this surface takes back, released here rather than waited out:
+   *  every one of these is a position THIS class or the reader moved, so the
+   *  reveal has nothing left to undo. */
+  private _releaseHold(): void {
+    this._holdTop = null
+  }
+
+  /** Put the reader back at the place a hold remembers, and answer whether
+   *  there was one to restore. Called from the two places the reveal can
+   *  reach this surface: the scroller's own `scroll` event, and the follow
+   *  sentinel's delivery of the live end — which is a frame behind the
+   *  scroll it reports. */
+  private _restoreHeld(): boolean {
+    const top = this._holdTop
+    if (top === null) return false
+    if (this._scroller.scrollTop !== top) this._scroller.scrollTop = top
+    return true
   }
 
   /** Grow while the reader is near the top and the emulator holds more. */
@@ -606,6 +704,8 @@ export class LiveHistorySurface {
     const before = this._scroller.scrollHeight
     oldest.el.replaceWith(el)
     const removed = before - this._scroller.scrollHeight
+    // Ours, not the engine's: a reveal has nothing left to undo here.
+    this._releaseHold()
     if (removed > 0) this._scroller.scrollTop = Math.max(0, this._scroller.scrollTop - removed)
     this._pages[0] = { el, start: floor, end: oldest.end, rows: keep }
   }
@@ -648,6 +748,8 @@ export class LiveHistorySurface {
     const before = this._scroller.scrollHeight
     this.el.insertBefore(pageEl, this.el.firstChild)
     const added = this._scroller.scrollHeight - before
+    // Ours, not the engine's: a reveal has nothing left to undo here.
+    this._releaseHold()
     if (added > 0) this._scroller.scrollTop += added
     if (this._rebuildTailGap !== null) {
       // A stale rebuild's first page: the reader's own distance from the

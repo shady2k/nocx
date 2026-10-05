@@ -648,6 +648,69 @@ describe('live-history', () => {
     }
   })
 
+  it('a keystroke holds the reader in place: the caret reveal is not a scroll', async () => {
+    // nocx-zg3k3.15.2. Measured in WebKit: the first character typed into the
+    // grid throws a reader who is wheeled into the past to the bottom, with no
+    // scroll call in the trace at all. What moves the scroller is the engine
+    // revealing the focused control's caret by scrolling its ancestors, and
+    // the grid's hidden input sits at the cursor — inside this scroller, at
+    // the live end — so the surface's own rule then rebuilds the past under a
+    // reader who is "at" the live end.
+    vi.useFakeTimers()
+    const frames: FrameRequestCallback[] = []
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb)
+      return frames.length
+    }
+    try {
+      const { surface, scroller } = mount()
+      atBottom(scroller)
+      surface.setMode('unstructured')
+      const source = scriptedSource([pageOf('H'.repeat(32), 0, 30, 0, false)])
+      surface.bind(source)
+      await settle()
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+
+      // The reader walks up into the past, and output departs while they are
+      // away: the painted past is stale, and this surface has decided to leave
+      // it alone under a reader who is reading it.
+      scrollNearTop(scroller, 100)
+      await settle()
+      surface.noteOutput()
+
+      // ONE CHARACTER IS TYPED. The engine answers by revealing the caret of
+      // the control it went to — a scroll of this scroller that carries no
+      // call this surface can see.
+      scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', bubbles: true }))
+      scroller.scrollTop = scroller.scrollHeight - scroller.clientHeight
+      scroller.dispatchEvent(new Event('scroll'))
+
+      // The reader is where they were, and on the rows they were reading: the
+      // reveal moved nothing of theirs and rebuilt nothing under them.
+      expect(scroller.scrollTop).toBe(100)
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+
+      // The follow sentinel's own delivery of the live end is a frame behind
+      // the scroll it reports. It is the reveal being reported, not the reader
+      // coming back, so it does not re-engage and rebuild either.
+      surface.tailReengaged()
+      expect(scroller.scrollTop).toBe(100)
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+      expect(source.requested).toEqual([null])
+
+      // THE HOLD LASTS ONE FRAME. Released, the next scroll of the scroller is
+      // the reader's own move and is never undone.
+      for (const cb of frames.splice(0)) cb(0)
+      scroller.scrollTop = 0
+      scroller.dispatchEvent(new Event('scroll'))
+      expect(scroller.scrollTop).toBe(0)
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      vi.useRealTimers()
+    }
+  })
+
   it('the wheel over the live screen reaches the scroller in the unstructured mode, and only there', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)

@@ -118,7 +118,7 @@ afterEach(() => {
 describe('session.intent', () => {
   it('presents the epoch the open ack seated and returns its typed outcome', async () => {
     const { session, ws } = await connectedSession()
-    const pending = session.intent('key', btoa('Enter'))
+    const pending = session.intent('key', 'Enter')
     const request = ws.requests().find((candidate) => candidate.method === 'session.intent')
 
     expect(request).toBeDefined()
@@ -148,7 +148,7 @@ describe('session.intent', () => {
   // than a keystroke lost (nocx-zg3k3.3.1).
   it('re-presents a refusal that wrote nothing, with the epoch the refusal named', async () => {
     const { session, ws } = await connectedSession()
-    const pending = session.intent('key', btoa('Enter'))
+    const pending = session.intent('key', 'Enter')
 
     const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
     expect(first.params).toEqual({
@@ -197,7 +197,7 @@ describe('session.intent', () => {
   // would be a livelock around a control-plane call on every keystroke.
   it('does not re-present a refusal that named the epoch it was given', async () => {
     const { session, ws } = await connectedSession()
-    const pending = session.intent('key', btoa('Enter'))
+    const pending = session.intent('key', 'Enter')
     const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
     ws.deliverText({
       jsonrpc: '2.0',
@@ -220,7 +220,7 @@ describe('session.intent', () => {
   // received bytes, and sending them again would type the person's input twice.
   it('never re-presents an intent that wrote something', async () => {
     const { session, ws } = await connectedSession()
-    const pending = session.intent('text', btoa('hi'))
+    const pending = session.intent('text', 'hi')
     const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
     ws.deliverText({
       jsonrpc: '2.0',
@@ -257,7 +257,7 @@ describe('session.intent', () => {
     })
     const session = await opening
 
-    const pending = session.intent('text', btoa('hi'))
+    const pending = session.intent('text', 'hi')
     const request = socket()
       .requests()
       .filter((candidate) => candidate.method === 'session.intent')[0]
@@ -300,13 +300,10 @@ describe('session.intent', () => {
   it('carries every kind of input, not only the printable ones', async () => {
     const { session, ws } = await connectedSession()
     const kinds: SessionIntentKind[] = ['key', 'text', 'paste', 'mouse', 'focus']
-    const payloads = [
-      btoa('Ctrl+Left'),
-      btoa('hi'),
-      btoa('hi\nthere'),
-      btoa('press left 2 3'),
-      btoa('in'),
-    ]
+    // The payloads as the CALLER spells them — what the person did. The wire's
+    // base64 is the handle's business, asserted below.
+    const payloads = ['Ctrl+Left', 'hi', 'hi\nthere', 'press left 2 3', 'in']
+    const onTheWire = payloads.map((payload) => btoa(payload))
 
     for (let i = 0; i < kinds.length; i++) {
       const pending = session.intent(kinds[i], payloads[i])
@@ -316,7 +313,7 @@ describe('session.intent', () => {
         sessionId: SID,
         accessEpoch: 3,
         kind: kinds[i],
-        payload: payloads[i],
+        payload: onTheWire[i],
       })
       ws.deliverText({
         jsonrpc: '2.0',

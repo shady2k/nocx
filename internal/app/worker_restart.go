@@ -53,7 +53,7 @@ type openWindow interface {
 // available: the workers really were there, and a person who is told nothing
 // concludes nocx lost them rather than that it declined to look.
 func restoreWorkerRecords(ctx context.Context, lg log.Logger,
-	store workers.RestartStore, window openWindow,
+	store workers.RestartStore, window openWindow, probe workers.RestartProbe,
 ) []workers.Restoration {
 	records, err := store.Records(ctx)
 	if err != nil {
@@ -66,7 +66,7 @@ func restoreWorkerRecords(ctx context.Context, lg log.Logger,
 	}
 
 	kept := forgetRecordsOfClosedPanes(ctx, lg, store, window, records)
-	restored := workers.Restore(ctx, kept, workers.DiskProbe{})
+	restored := workers.Restore(ctx, kept, probe)
 	for _, x := range restored {
 		if !x.Restorable() {
 			lg.Warn("worker restart: a persisted worker cannot be resumed after this restart",

@@ -49,7 +49,6 @@ package agentrule
 
 import (
 	"encoding/json"
-	"regexp"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
@@ -85,14 +84,6 @@ type document struct {
 
 // enabled reports whether detection is on. Absent is on.
 func (d document) enabled() bool { return d.Enabled == nil || *d.Enabled }
-
-// agentName bounds what may become a FILE name. The names come from the
-// drivers this build carries, and one that walks out of the app directory is a
-// wiring mistake with a filesystem behind it — so it is refused where it
-// enters, at construction, and never again. Leading dots are out for the same
-// reason the directory is named rather than hidden: a rule nobody can see is a
-// rule nobody can repair by hand, which is most of why it is a file.
-var agentName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // State is where the rule reading an agent's pane comes from, and whether
 // there is one at all. The set is closed for the reason agentdriver.State's

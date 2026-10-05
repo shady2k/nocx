@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
@@ -889,6 +890,19 @@ func New(opts ...Option) (*App, error) {
 	// record on purpose — that one is MemoryStore and D5 said so — and it is
 	// read at exactly one moment, the startup restore below.
 	workerRestarts := workers.NewFileRestartStore(docStore, "worker-restarts.json")
+	// THE AGENT RECORD (nocx-t5e7d): the one description of an agent nocx
+	// runs — its command, its arguments, its environment and the three resume
+	// shapes — embedded in this binary and NEVER written out, beside whatever
+	// documents a person has written under this profile's own `agents`
+	// directory. It is built here because the startup restore below is its
+	// first reader: the question "is this agent one nocx knows, and can its
+	// record resume the conversation this pane names" was nobody's fact until
+	// this store existed, and it is the half the restart record cannot answer
+	// about itself (workers.DiskProbe's own doc says so).
+	agentRecords, agentRecordsErr := agentrecord.New(paths.ConfigDir())
+	if agentRecordsErr != nil {
+		return nil, fmt.Errorf("agent records: %w", agentRecordsErr)
+	}
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -2486,7 +2500,7 @@ func New(opts ...Option) (*App, error) {
 	// buy is the half that is true today: a worker whose pane was closed while
 	// nocx was down stops being a record nobody will ever resolve, and one that
 	// cannot be resumed is said so at startup instead of in a document.
-	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout())
+	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentRecords.Probe())
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The

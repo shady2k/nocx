@@ -15,10 +15,12 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -181,7 +183,14 @@ func TestTheStartupRestoreDropsClosedPanesAndReportsWhatItCannotResume(t *testin
 		}
 	}
 
-	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo)
+	// The RECORD's probe, not the shipped disk one (nocx-t5e7d): the restore
+	// asks the agent record which agents nocx knows and what each of them can
+	// resume, and this pass is its first reader.
+	agentRecords, err := agentrecord.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("agentrecord.New: %v", err)
+	}
+	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentRecords.Probe())
 	if len(got) != 2 {
 		t.Fatalf("restorations = %+v, want the two records whose panes are still open", got)
 	}
@@ -273,5 +282,93 @@ func TestARestartReopensEachStoredTabOnceInItsPriorWorkspaceAndOrder(t *testing.
 	if len(got) != 2 || got[0] != firstTab || got[1] != secondTab {
 		t.Fatalf("tabs after the restart = %v, want each stored tab once in its prior order [%s %s]",
 			got, firstTab, secondTab)
+	}
+}
+
+// The AGENT RECORD is what decides whether a persisted worker's agent can be
+// launched (nocx-t5e7d). This is the seam nocx-xn63t.5.1 left and said so in
+// its own words — "an agent nocx never saw" was a question that could not be
+// answered until a record of which agents exist was anybody's fact — so the
+// proof is that the pass asks it and acts on the answer: an agent nocx has no
+// record of is a named restore failure, and an agent whose record declares the
+// resume shape its pane recorded comes back as a launch request.
+func TestTheAgentRecordDecidesWhetherAPersistedWorkerCanBeLaunched(t *testing.T) {
+	ctx := context.Background()
+	lg := log.NewSlogAdapter(nil)
+
+	db := openLayoutStore(t)
+	layoutRepo := db.Layout()
+	open := map[string]string{}
+	for _, id := range []string{"pane-shipped", "pane-unknown"} {
+		dir := t.TempDir()
+		open[id] = dir
+		if _, err := layoutRepo.CreateWorkspace(ctx,
+			content.Workspace{ID: "ws-" + id, Name: id, Position: 1},
+			content.Tab{ID: "tab-" + id, Layout: content.LayoutRow},
+			content.Pane{ID: id, TabID: "tab-" + id, Cwd: dir, Kind: content.PaneLocal, SizeShare: 1},
+		); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+
+	docs := storage.NewDocumentStore(t.TempDir())
+	restarts := workers.NewFileRestartStore(docs, "worker-restarts.json")
+	for _, rec := range []workers.RestartRecord{
+		{
+			Participant: "p-shipped", Group: "worker-1", PaneID: "pane-shipped", TabID: "tab-shipped",
+			Agent: "claude", Cwd: open["pane-shipped"],
+			Resume: workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-1"},
+		},
+		{
+			Participant: "p-unknown", Group: "worker-1", PaneID: "pane-unknown", TabID: "tab-unknown",
+			// A name nocx has no record of — an agent somebody typed, or one
+			// whose record this install has never had. Both are the same
+			// answer, and neither may become a launch.
+			Agent: "not-an-agent", Cwd: open["pane-unknown"],
+			Resume: workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "conv-2"},
+		},
+	} {
+		if err := restarts.Record(ctx, rec); err != nil {
+			t.Fatalf("record %s: %v", rec.Participant, err)
+		}
+	}
+
+	agentRecords, err := agentrecord.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("agentrecord.New: %v", err)
+	}
+	got := restoreWorkerRecords(ctx, lg, restarts, layoutRepo, agentRecords.Probe())
+	if len(got) != 2 {
+		t.Fatalf("restorations = %+v, want both records whose panes are still open", got)
+	}
+	byParticipant := map[workers.ParticipantID]workers.Restoration{}
+	for _, x := range got {
+		byParticipant[x.Record.Participant] = x
+	}
+
+	// The agent this build ships, resumed under the shape its record
+	// declares: a launch request, which is the half that must still work.
+	shipped, ok := byParticipant["p-shipped"]
+	if !ok || !shipped.Restorable() {
+		t.Fatalf("the shipped agent's record = %+v, want a launch request", shipped)
+	}
+	if shipped.Request.Agent != "claude" || shipped.Request.Resume.ID != "conv-1" {
+		t.Fatalf("the reconstructed launch = %+v, want the recorded agent and identity", shipped.Request)
+	}
+
+	// An agent nocx has no record of: an explicit failure naming it, never an
+	// empty shell that claims the pane came back.
+	unknown, ok := byParticipant["p-unknown"]
+	if !ok {
+		t.Fatalf("the unknown agent's record vanished instead of being reported")
+	}
+	if unknown.Restorable() {
+		t.Fatalf("an agent nocx has no record of produced a launch: %+v", unknown.Request)
+	}
+	if unknown.Failure.Reason != workers.RestoreResumeUnavailable {
+		t.Fatalf("failure = %+v, want the resume question named", unknown.Failure)
+	}
+	if !strings.Contains(unknown.Failure.Detail, "not-an-agent") {
+		t.Fatalf("detail = %q, want the agent named so a person can act on it", unknown.Failure.Detail)
 	}
 }

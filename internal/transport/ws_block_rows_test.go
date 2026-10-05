@@ -412,6 +412,9 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	// The second block starts at absolute row 4 after the first block's
+	// closing screen; deliver its output-start mark while it is queued.
+	e.ws.BlockOutputStartRow(session.ID(sid), 4)
 	secondFence := lifecycleFence(0x92)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
 

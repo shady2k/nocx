@@ -33,6 +33,7 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
 			e.ws.AttachBlockRows(sid)
+			e.ws.BlockOutputStartPlaneAttached(sid)
 
 			// A: running when the helper's buffer overflows.
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
@@ -92,6 +93,9 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 
 			// D: the next command, recorded whole.
 			d := startsACommand(t, e, pub, lane, h, 11, "make d")
+			// D's output begins after the session's pre-command rows; this is
+			// the authenticated block's absolute first row, not a missing head.
+			e.ws.BlockOutputStartRow(sid, 5)
 			if _, confirm := e.ws.BlockRowsArrived(sid, 5, 0, []emulator.Row{aStreamRow("d0")}, ""); !confirm {
 				t.Fatal("D's row was not confirmed")
 			}

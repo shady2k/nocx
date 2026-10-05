@@ -12,12 +12,40 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
+
+func TestFreshArtifactAtItsAuthenticatedNonzeroOutputStartConfirmsImmediately(t *testing.T) {
+	e, _, _, _, sid, attempt, store, db := lateOpenSetup(t)
+	e.ws.BlockOutputStartPlaneAttached(sid)
+
+	// The authenticated start reserved this open before the store bind. A
+	// mark that arrives during the authorized open names this block's own
+	// first row; its nonzero absolute index is not a missing head.
+	release, done := heldReopen(t, e, sid, attempt, store)
+	e.ws.BlockOutputStartRow(sid, 6)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(wantWithin):
+		t.Fatal("the marked open did not finish")
+	}
+
+	rows := []emulator.Row{aStreamRow("R7"), aStreamRow("R8"), aStreamRow("R9"), aStreamRow("R10")}
+	if up, confirm := e.ws.BlockRowsArrived(sid, 6, 0, rows, ""); !confirm || up != 10 {
+		t.Fatalf("first append at the authenticated start answered up=%d confirm=%v, want durable cursor 10", up, confirm)
+	}
+
+	stored := streamRows(t, db, attempt)
+	if len(stored) != 4 || stored[0].From != 6 {
+		t.Fatalf("artifact rows = %+v, want the block beginning at its absolute first row 6", stored)
+	}
+}
 
 func TestFreshFirstAppendAboveZeroDoesNotConfirmTheMissingHead(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)

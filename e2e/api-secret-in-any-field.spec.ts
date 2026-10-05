@@ -238,7 +238,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     const importAsk = page.getByRole('dialog').filter({ hasText: 'Import collection' })
     await expect(importAsk).toBeVisible()
     await page.locator('#api-import-paste').fill(collectionExport(server.baseUrl))
-    await (await openImportDestination(importAsk, page)).fill(collectionRoot)
+    await openImportDestination(importAsk, page, { fill: collectionRoot })
     await importAsk.getByRole('button', { name: 'Import', exact: true }).click()
 
     const requestRow = workbench.locator('.api-tree__row').filter({ hasText: REQUEST_NAME })

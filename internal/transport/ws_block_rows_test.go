@@ -236,6 +236,96 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
+func TestOutputStartMarkFiltersPreMarkRowsAfterAuthenticatedStart(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	// When a mark exists, it arrives before the output on the same ordered
+	// rows plane even if lifecycle Start is still travelling separately.
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
+		t.Fatalf("admitted rows = %+v, want only output at absolute row 2", rows)
+	}
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
+		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
+	}
+	rows = streamRows(t, db, attempt)
+	if len(rows) != 2 || rows[1].Text != "tail" || rows[1].From != 3 {
+		t.Fatalf("final rows = %+v", rows)
+	}
+}
+
+func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T) {
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	startsACommand(t, e, pub, lane, h, 2, "printf first")
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	current := bs.current[session.ID(sid)]
+	current.awaitingOutputReplay = true
+	bs.queued[session.ID(sid)] = "next-attempt"
+	bs.mu.Unlock()
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("held")}, ""); confirm || up != 0 {
+		t.Fatalf("row before the replay mark = (%d, %v), want held", up, confirm)
+	}
+
+	// The current block's repeated mark must clear its replay gate even
+	// though a later authenticated start is already queued.
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	bs.mu.Lock()
+	awaitingReplay := current.awaitingOutputReplay
+	pending := len(current.preOutputStart)
+	queuedMark := bs.outputStartKnown[session.ID(sid)]
+	bs.mu.Unlock()
+	if awaitingReplay || pending != 0 || queuedMark {
+		t.Fatalf("current replay state = awaiting %v, pending %d, queued mark %v", awaitingReplay, pending, queuedMark)
+	}
+}
+
+func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf without shell integration")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
+		t.Fatalf("ordinary no-mark row = (%d, %v), want row 1 confirmed", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 1 || rows[0].From != 0 || rows[0].Text != "ordinary output" {
+		t.Fatalf("ordinary no-mark rows = %+v, want output at authenticated row-zero boundary", rows)
+	}
+}
+
+func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("early")}, ""); confirm || up != 0 {
+		t.Fatalf("rows before authenticated Start = (%d, %v), want rejected", up, confirm)
+	}
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
+		t.Fatalf("admitted rows = %+v, want only output at absolute row 2", rows)
+	}
+}
+
 // A shell can submit the next command before the helper has delivered the
 // previous interval's queued rows. Those rows must remain with the interval
 // that emitted them until its end marker opens the next block.

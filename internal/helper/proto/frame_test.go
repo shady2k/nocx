@@ -183,3 +183,21 @@ func TestGarbageRegionAccountingSpansFeedCalls(t *testing.T) {
 		t.Fatalf("want %d gapped bytes across both feeds, got %d", len(garbage), gapped)
 	}
 }
+
+func TestOutputStartRowBelongsToClosedFrameSet(t *testing.T) {
+	if !TypeOutputStartRow.valid() {
+		t.Fatal("output-start-row type rejected by closed frame registry")
+	}
+	var got FrameType
+	d := NewDecoder(func(ty FrameType, _, _ uint32, _ []byte) { got = ty }, func(int) { t.Fatal("known frame skipped") })
+	payload, err := EncodeOutputStartRowFrame(OutputStartRowFrame{FromRow: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Feed(EncodeFrame(TypeOutputStartRow, 0, 0, payload)); err != nil {
+		t.Fatalf("feed output-start-row frame: %v", err)
+	}
+	if got != TypeOutputStartRow {
+		t.Fatalf("decoded frame type = %d", got)
+	}
+}

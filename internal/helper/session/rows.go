@@ -89,15 +89,12 @@ type rowEmission struct {
 	// incomplete makes this emission the buffer's one overflow marker
 	// (nocx-2v80t.3.36).
 	incomplete bool
-	// bytes is what the emission costs the buffer, fixed at enqueue.
+	// bytes is the unique row data plus emission overhead, fixed at enqueue.
 	bytes int64
 }
 
-// emissionBytes is what one emission costs the row buffer: the rows it
-// carries, cell by cell as the emulator hands them over, plus a fixed
-// overhead for the emission itself. An estimate of the heap it holds — the
-// same order as the truth, never a count that could be gamed by a row of
-// empty cells.
+// emissionBytes estimates the unique heap retained by one emission: its rows,
+// cell by cell as the emulator hands them over, plus fixed overhead.
 func emissionBytes(em rowEmission) int64 {
 	const emissionOverhead = int64(unsafe.Sizeof(rowEmission{}))
 	n := emissionOverhead
@@ -112,8 +109,19 @@ func emissionBytes(em rowEmission) int64 {
 	return n
 }
 
+// fifoEmissionBytes counts only storage unique to the FIFO. A row batch is
+// also retained for resend, and both structures reference the same row slices;
+// charge the cell data once to the resend window, not again to the FIFO.
+func fifoEmissionBytes(em rowEmission) int64 {
+	if !em.end && !em.clear && !em.incomplete && len(em.rows) > 0 {
+		return int64(unsafe.Sizeof(rowEmission{}))
+	}
+	return em.bytes
+}
+
 // retainedRowSpan owns the original cells at their absolute departure indices.
-// The shared row pool accounts this ownership independently of the wire FIFO.
+// The wire FIFO references the same backing rows until delivery, so its pool
+// charge covers only the separate emission record.
 type retainedRowSpan struct {
 	from  uint64
 	rows  []emulator.Row
@@ -179,7 +187,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowPool.configure(budget)
 	}
 	retainedBytes := int64(0)
-	if !s.rowPool.charge(rowOwnerFIFO, em.bytes) {
+	if !s.rowPool.charge(rowOwnerFIFO, fifoEmissionBytes(em)) {
 		// The first row this buffer does not record: the dropped batch's own
 		// first, or where the stream stood when a marker would not fit.
 		from := s.rowStreamNext
@@ -209,7 +217,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	if batch && len(em.rows) != 0 {
 		retainedBytes = emissionBytes(rowEmission{rows: em.rows})
 		if !s.rowPool.charge(rowOwnerResend, retainedBytes) {
-			s.rowPool.release(rowOwnerFIFO, em.bytes)
+			s.rowPool.release(rowOwnerFIFO, fifoEmissionBytes(em))
 			from := em.from
 			marker := rowEmission{incomplete: true, from: from}
 			marker.bytes = emissionBytes(marker)
@@ -236,7 +244,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowState = rowsRecording
 	}
 	s.rowQueue = append(s.rowQueue, em)
-	s.rowQueuedBytes += em.bytes
+	s.rowQueuedBytes += fifoEmissionBytes(em)
 	s.rowMu.Unlock()
 	s.wakeRows()
 }
@@ -362,7 +370,11 @@ func (s *hostSession) abandonRowsDrain() {
 		if em.incomplete {
 			owner = rowOwnerOverflowMarker
 		}
-		s.rowPool.release(owner, em.bytes)
+		bytes := fifoEmissionBytes(em)
+		if em.incomplete {
+			bytes = em.bytes
+		}
+		s.rowPool.release(owner, bytes)
 		if em.incomplete {
 			s.log.Warn("session row pump: a queued incomplete marker was never delivered at shutdown; its loss was already counted",
 				"session", s.id.Session, "fromRow", em.from)
@@ -475,7 +487,11 @@ func (s *hostSession) releaseRowEmission(em rowEmission) {
 	if em.incomplete {
 		owner = rowOwnerOverflowMarker
 	}
-	s.rowPool.release(owner, em.bytes)
+	bytes := fifoEmissionBytes(em)
+	if em.incomplete {
+		bytes = em.bytes
+	}
+	s.rowPool.release(owner, bytes)
 	s.rowMu.Unlock()
 }
 
@@ -499,7 +515,7 @@ func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 	em := s.rowQueue[0]
 	s.rowQueue[0] = rowEmission{}
 	s.rowQueue = s.rowQueue[1:]
-	s.rowQueuedBytes -= em.bytes
+	s.rowQueuedBytes -= fifoEmissionBytes(em)
 	// The charge follows the emission while it is in flight; releasing here
 	// would open capacity while deliverRowEmission still holds its rows.
 	if em.incomplete {

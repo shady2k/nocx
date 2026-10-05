@@ -72,6 +72,22 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":null,"limit":30}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":17,"limit":1}`),
 		},
+		// Structured input from the pane's own renderer. One probe per kind
+		// THIS contract carries: the check below refuses a registered method
+		// with no probes at all, and session.intent was registered without
+		// them, so this method's own package failed its own gate.
+		//
+		// Three and not five, deliberately: the runtime's vocabulary is key,
+		// text, paste, mouse and focus, and a click and a focus change are
+		// input a person produced — but widening that enum is the frontend
+		// half's change (nocx-zg3k3.3.1), and a probe whose kind this schema
+		// does not carry would be rejected as a valid probe. When the two
+		// kinds arrive, they bring their probes.
+		"session.intent": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"key","payload":"RW50ZXI="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"text","payload":"aGk="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":2,"kind":"paste","payload":"aGkKdGhlcmU="}`),
+		},
 		"notes.create": {
 			[]byte(`{}`),
 			[]byte(`{"body":"body"}`),

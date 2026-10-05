@@ -72,6 +72,7 @@ type hostedSpawn struct {
 	// built without a transport — and registers no observer rather than
 	// dropping frames nobody asked for.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half
 	// (helper_block_rows.go): the rows that leave the screen and each
 	// command's end become the command's block in history. Nil wires nothing.
@@ -321,6 +322,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			log.From(ctx).Warn("screen assembly lost on the carrier",
 				"session", string(screenSid), "reason", reason)
 		})
+	}
+	if h.publishEffect != nil {
+		effectSid := session.ID(entry.HostSessionID.Session)
+		attached.OnEffect(func(effect proto.EffectFrame) { h.publishEffect(effectSid, effect) })
 	}
 
 	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the

@@ -143,24 +143,12 @@ func TestNewReaderReplaysUnconfirmedRowsBeforeQueuedOutput(t *testing.T) {
 	second := newRowsSink()
 	rowsAttachReader(t, hs, "22222222222222222222222222222222", second)
 
-	// Drain gives the pump's queue-empty observation without timing. During
-	// a shutdown drain replay is intentionally paused, so if the pump has not
-	// already sent the new reader's replay, the test checks that attach armed
-	// it and invokes the same retained walk synchronously.
-	<-hs.requestRowsDrain()
+	// Observe the actual attach-driven pump, not a manual replay while the
+	// pump is in a shutdown drain. The replay mark and retained rows are
+	// delivered through the same production path and ordered FIFO.
+	second.waitForOutputStarts(1)
+	second.waitFor(1, 0, 0)
 	frames := decodeResentRows(t, second.rowFrames())
-	if len(frames) == 0 {
-		hs.rowMu.Lock()
-		due := hs.resendDue
-		hs.rowMu.Unlock()
-		if !due {
-			t.Fatal("attaching a new reader did not arm a resend of its unconfirmed rows")
-		}
-		if !hs.resendFromScrollback() {
-			t.Fatal("the retained unconfirmed rows could not be replayed to the new reader")
-		}
-		frames = decodeResentRows(t, second.rowFrames())
-	}
 	second.mu.Lock()
 	starts := append([]proto.OutputStartRowFrame(nil), second.outputStarts...)
 	events := append([]string(nil), second.events...)
@@ -304,9 +292,8 @@ func TestReplacingAnAttachedReaderResendsItsUnconfirmedRows(t *testing.T) {
 		t.Fatalf("replace attached reader: %v", err)
 	}
 	t.Cleanup(func() { hs.detach(second, "att-new") })
-	// The pump may complete this resend before attach returns to this test,
-	// so assert the reader-visible replay rather than sampling its transient
-	// internal obligation flag.
+	// Observe the resulting rows, not the transient resendDue flag: the
+	// pump may already have consumed the obligation by the time attach returns.
 	second.waitFor(1, 0, 0)
 	if got := decodeResentRows(t, second.rowFrames()); len(got) == 0 || len(got[0].texts) == 0 {
 		t.Fatalf("replacement reader received no unconfirmed rows: %+v", got)

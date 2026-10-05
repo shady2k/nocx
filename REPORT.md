@@ -23,4 +23,4 @@ A helper resend test also stopped sampling the transient internal `resendDue` fl
 
 ## Commit
 
-Pending.
+Implementation commit: `a1715242a1bad43e728b0a50b2039edd206a8a16`.

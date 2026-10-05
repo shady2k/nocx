@@ -493,6 +493,14 @@
       "capture": "prime-agent-0.9.8-prompt",
       "atMs": 59000,
       "note": "Same real prime-agent prompt run. Replay shows the complete story, empty prompt and no active spinner by this mark; candidate finished moment."
+    },
+    {
+      "agent": "prime-agent",
+      "candidateMoment": "tool-error",
+      "ownerPending": true,
+      "capture": "prime-agent-0.9.8-tool-error",
+      "atMs": 12000,
+      "note": "Real prime-agent v0.9.8, 120x40, ephemeral no-session PTY in a disposable `/tmp` directory. Prompt asked it to run exactly `cat __prime_agent_missing_file_7a31f6.txt` once. At 12000ms replay shows the bash tool error (`TypeError`) and its result, `No such file or directory`; this is a tool failure, not a model rejection."
     }
   ]
 }

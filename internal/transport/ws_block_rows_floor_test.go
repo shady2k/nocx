@@ -19,6 +19,39 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 )
 
+func TestFreshFirstAppendAboveZeroDoesNotConfirmTheMissingHead(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf first append")
+
+	// The store accepts this first batch at row 6 and records [6,10), but it
+	// does not hold the prefix [0,6). A helper watermark at 10 would reclaim
+	// that still-owed prefix, so this append must not confirm yet.
+	suffix := []emulator.Row{aStreamRow("R7"), aStreamRow("R8"), aStreamRow("R9"), aStreamRow("R10")}
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 6, 0, suffix, ""); confirm || up != 0 {
+		t.Fatalf("first append at row 6 answered up=%d confirm=%v, want no confirmation before the head is stored", up, confirm)
+	}
+
+	// The resend's head reaches below the artifact's actual first row. It
+	// prepends [0,6), then may confirm the now-contiguous [0,10) span.
+	head := []emulator.Row{aStreamRow("R1"), aStreamRow("R2"), aStreamRow("R3"), aStreamRow("R4"), aStreamRow("R5"), aStreamRow("R6"), aStreamRow("R7"), aStreamRow("R8")}
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, head, ""); !confirm || up != 10 {
+		t.Fatalf("completed head answered up=%d confirm=%v, want the full durable cursor 10", up, confirm)
+	}
+
+	stored := streamRows(t, db, attempt)
+	if len(stored) != 10 {
+		t.Fatalf("artifact holds %d rows, want contiguous [0,10): %+v", len(stored), stored)
+	}
+	wantFrom := uint64(0)
+	for _, row := range stored {
+		if row.From != wantFrom {
+			t.Fatalf("stored row starts at %d, want %d", row.From, wantFrom)
+		}
+		wantFrom++
+	}
+}
+
 func TestAResentHeadBelowTheBlockFloorPrependsBeforeItConfirms(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

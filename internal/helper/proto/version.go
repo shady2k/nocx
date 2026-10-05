@@ -284,10 +284,18 @@ package proto
 // older than this app" — a pane whose history cannot be paged, which is a
 // fact about the generation and not about the session. Nothing shipped at 15
 // carries a shape the op changes, so nothing moved with it.
+// This is still 15, widened in place: `TypeOutputStartRow` adds the VT output
+// mark's absolute row position as another event on the ordered row plane. The
+// mark carries position only; authenticated lifecycle Start remains its own
+// authority-bearing channel, and the frame byte is recognized before any
+// helper generation can scan through it as garbage.
+//
 // This is 16 rather than 15 because session.intent now carries structured
 // interactive pane input as well as token-bearing automation intents. The new
 // `interactive` discriminator allows the same owner/encoder path to accept a
 // controller's key, text or paste without a screen target, while always
 // checking the observed access epoch; a 15-helper rejects the new field under
 // additionalProperties:false, and cannot provide the controller input path.
+// The row mark above was added at 15 without a bump and the intent field
+// cannot be, so the number moves here and only here.
 const Version = "16"

@@ -445,7 +445,31 @@ func dissolveTabIfEmpty(ctx context.Context, tx *sql.Tx, tabID string) error {
 	if err := markTabClosed(ctx, tx, tabID, closedNow()); err != nil {
 		return err
 	}
+	if err := renumberStrip(ctx, tx, workspaceID); err != nil {
+		return err
+	}
 	return dissolveWorkspaceIfEmpty(ctx, tx, workspaceID)
+}
+
+// renumberStrip closes the gap a tab left in its workspace's strip, through the
+// SAME writer CreateTabAfter's placement and ReorderTabs use — because "a
+// workspace's open tabs are 0..n-1 in drawing order" is one invariant and a
+// close is not the place to grow a second form of it (nocx-xn63t.4.14).
+//
+// The order the remaining tabs keep is read INSIDE the caller's transaction,
+// so the strip it renumbers is the one the close just changed.
+//
+// It runs on the tabs that SURVIVE, in the caller's transaction and therefore
+// rolled back with it: a failed close leaves the strip exactly as it was, the
+// same property CreateTabAfter's own failure test asserts for an insert.
+func renumberStrip(ctx context.Context, tx *sql.Tx, workspaceID string) error {
+	held, err := idsOf(ctx, tx,
+		`SELECT id FROM tabs WHERE workspace_id = ? AND closed_at IS NULL ORDER BY position, id`,
+		workspaceID)
+	if err != nil {
+		return err
+	}
+	return writeTabPositions(ctx, tx, held)
 }
 
 // dissolveWorkspaceIfEmpty DELETES the workspace when its last open tab has
@@ -842,6 +866,9 @@ func (s *sqliteContent) DeleteTab(ctx context.Context, id string, next Replaceme
 				return err
 			}
 			if err := markTabClosed(ctx, tx, id, closedNow()); err != nil {
+				return err
+			}
+			if err := renumberStrip(ctx, tx, workspaceID); err != nil {
 				return err
 			}
 			if err := dissolveWorkspaceIfEmpty(ctx, tx, workspaceID); err != nil {

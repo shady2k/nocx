@@ -63,10 +63,13 @@ func (s *rowsFirstSessions) Call(_ context.Context, op string, params json.RawMe
 	}
 	var subscriber [16]byte
 	copy(subscriber[:], raw)
-	doc, _ := json.Marshal(proto.OutputRowsDoc{FromRow: 177, Rows: json.RawMessage(`[{"text":"R178"}]`)})
 	s.mu.Lock()
 	h := s.host
 	s.mu.Unlock()
+	if err := h.SendOutputStartRow(proto.OutputStartRowFrame{Session: session, Subscriber: subscriber, FromRow: 177}); err != nil {
+		return nil, err
+	}
+	doc, _ := json.Marshal(proto.OutputRowsDoc{FromRow: 177, Rows: json.RawMessage(`[{"text":"R178"}]`)})
 	if err := h.SendOutputRows(proto.OutputRowsFrame{
 		Session: session, Subscriber: subscriber, FromRow: 177, Payload: doc,
 	}); err != nil {
@@ -106,14 +109,23 @@ func TestRowsTheHelperSendsWhileAnsweringTheAttachReachTheConsumer(t *testing.T)
 
 	var mu sync.Mutex
 	var got []client.OutputRows
+	var marks []client.OutputStartRow
+	var order []string
 	attached, err := c.Attach(context.Background(), proto.AttachParams{
 		Subscriber: "0123456789abcdef0123456789abcdef",
 		Session:    proto.HostSessionID{Generation: "g", Session: "00112233445566778899aabbccddeeff"},
 		Offset:     0,
 	}, client.ObserveBeforeAttach(func(a *client.AttachedSession) {
+		a.OnOutputStartRow(func(mark client.OutputStartRow) {
+			mu.Lock()
+			marks = append(marks, mark)
+			order = append(order, "mark")
+			mu.Unlock()
+		})
 		a.OnOutputRows(func(o client.OutputRows) {
 			mu.Lock()
 			got = append(got, o)
+			order = append(order, "rows")
 			mu.Unlock()
 		})
 	}))
@@ -124,6 +136,9 @@ func TestRowsTheHelperSendsWhileAnsweringTheAttachReachTheConsumer(t *testing.T)
 
 	mu.Lock()
 	defer mu.Unlock()
+	if len(marks) != 1 || marks[0].FromRow != 177 || len(order) != 2 || order[0] != "mark" || order[1] != "rows" {
+		t.Fatalf("ordered mark/rows = %+v / %+v, want mark 177 before rows", marks, order)
+	}
 	if len(got) != 1 || got[0].FromRow != 177 || len(got[0].Rows) != 1 {
 		t.Fatalf("the consumer received %+v, want the one batch (row 177) the helper sent while answering the attach: "+
 			"a frame that reaches the attachment before anyone watches it is dropped", got)

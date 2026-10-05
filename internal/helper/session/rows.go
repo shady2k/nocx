@@ -75,27 +75,26 @@ const (
 // runtime's gift — freshly copied by the emulator's report, owned by whoever
 // takes them next — so the pump marshals them OFF the runtime's lock.
 type rowEmission struct {
-	end     bool
-	clear   bool
-	nonce   sessionruntime.FenceNonce
-	from    uint64
-	lost    uint64
-	rows    []emulator.Row
-	closing []emulator.Row
+	end          bool
+	clear        bool
+	outputStart  bool
+	markSequence uint64
+	nonce        sessionruntime.FenceNonce
+	from         uint64
+	lost         uint64
+	rows         []emulator.Row
+	closing      []emulator.Row
 	// noFence is an end marker's settledWithoutFence (nocx-2v80t.3.29).
 	noFence bool
 	// incomplete makes this emission the buffer's one overflow marker
 	// (nocx-2v80t.3.36).
 	incomplete bool
-	// bytes is what the emission costs the buffer, fixed at enqueue.
+	// bytes is the unique row data plus emission overhead, fixed at enqueue.
 	bytes int64
 }
 
-// emissionBytes is what one emission costs the row buffer: the rows it
-// carries, cell by cell as the emulator hands them over, plus a fixed
-// overhead for the emission itself. An estimate of the heap it holds — the
-// same order as the truth, never a count that could be gamed by a row of
-// empty cells.
+// emissionBytes estimates the unique heap retained by one emission: its rows,
+// cell by cell as the emulator hands them over, plus fixed overhead.
 func emissionBytes(em rowEmission) int64 {
 	const emissionOverhead = int64(unsafe.Sizeof(rowEmission{}))
 	n := emissionOverhead
@@ -110,8 +109,19 @@ func emissionBytes(em rowEmission) int64 {
 	return n
 }
 
+// fifoEmissionBytes counts only storage unique to the FIFO. A row batch is
+// also retained for resend, and both structures reference the same row slices;
+// charge the cell data once to the resend window, not again to the FIFO.
+func fifoEmissionBytes(em rowEmission) int64 {
+	if !em.end && !em.clear && !em.incomplete && len(em.rows) > 0 {
+		return int64(unsafe.Sizeof(rowEmission{}))
+	}
+	return em.bytes
+}
+
 // retainedRowSpan owns the original cells at their absolute departure indices.
-// The shared row pool accounts this ownership independently of the wire FIFO.
+// The wire FIFO references the same backing rows until delivery, so its pool
+// charge covers only the separate emission record.
 type retainedRowSpan struct {
 	from  uint64
 	rows  []emulator.Row
@@ -139,12 +149,22 @@ func (b *rowBridge) ClearBoundary() {
 	b.hs.enqueueRowEmission(rowEmission{clear: true})
 }
 
+func (b *rowBridge) OutputStartRow(from uint64) {
+	b.hs.rowMu.Lock()
+	b.hs.outputStartRow = from
+	b.hs.outputStartKnown = true
+	b.hs.outputStartSequence++
+	sequence := b.hs.outputStartSequence
+	b.hs.rowMu.Unlock()
+	b.hs.enqueueRowEmission(rowEmission{outputStart: true, from: from, markSequence: sequence})
+}
+
 // enqueueRowEmission appends one emission to the FIFO if the buffer can hold
 // it, and otherwise ends the block in flight incomplete (the header's rule).
 // Nothing here blocks: an append and a byte count, under rowMu.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	s.rowMu.Lock()
-	batch := !em.end && !em.clear
+	batch := !em.end && !em.clear && !em.outputStart
 	if batch {
 		s.rowStreamNext = em.from + uint64(len(em.rows)) // #nosec G115 -- len is never negative
 	}
@@ -167,7 +187,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowPool.configure(budget)
 	}
 	retainedBytes := int64(0)
-	if !s.rowPool.charge(rowOwnerFIFO, em.bytes) {
+	if !s.rowPool.charge(rowOwnerFIFO, fifoEmissionBytes(em)) {
 		// The first row this buffer does not record: the dropped batch's own
 		// first, or where the stream stood when a marker would not fit.
 		from := s.rowStreamNext
@@ -197,7 +217,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	if batch && len(em.rows) != 0 {
 		retainedBytes = emissionBytes(rowEmission{rows: em.rows})
 		if !s.rowPool.charge(rowOwnerResend, retainedBytes) {
-			s.rowPool.release(rowOwnerFIFO, em.bytes)
+			s.rowPool.release(rowOwnerFIFO, fifoEmissionBytes(em))
 			from := em.from
 			marker := rowEmission{incomplete: true, from: from}
 			marker.bytes = emissionBytes(marker)
@@ -224,7 +244,7 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		s.rowState = rowsRecording
 	}
 	s.rowQueue = append(s.rowQueue, em)
-	s.rowQueuedBytes += em.bytes
+	s.rowQueuedBytes += fifoEmissionBytes(em)
 	s.rowMu.Unlock()
 	s.wakeRows()
 }
@@ -350,7 +370,11 @@ func (s *hostSession) abandonRowsDrain() {
 		if em.incomplete {
 			owner = rowOwnerOverflowMarker
 		}
-		s.rowPool.release(owner, em.bytes)
+		bytes := fifoEmissionBytes(em)
+		if em.incomplete {
+			bytes = em.bytes
+		}
+		s.rowPool.release(owner, bytes)
 		if em.incomplete {
 			s.log.Warn("session row pump: a queued incomplete marker was never delivered at shutdown; its loss was already counted",
 				"session", s.id.Session, "fromRow", em.from)
@@ -463,7 +487,11 @@ func (s *hostSession) releaseRowEmission(em rowEmission) {
 	if em.incomplete {
 		owner = rowOwnerOverflowMarker
 	}
-	s.rowPool.release(owner, em.bytes)
+	bytes := fifoEmissionBytes(em)
+	if em.incomplete {
+		bytes = em.bytes
+	}
+	s.rowPool.release(owner, bytes)
 	s.rowMu.Unlock()
 }
 
@@ -487,7 +515,7 @@ func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 	em := s.rowQueue[0]
 	s.rowQueue[0] = rowEmission{}
 	s.rowQueue = s.rowQueue[1:]
-	s.rowQueuedBytes -= em.bytes
+	s.rowQueuedBytes -= fifoEmissionBytes(em)
 	// The charge follows the emission while it is in flight; releasing here
 	// would open capacity while deliverRowEmission still holds its rows.
 	if em.incomplete {
@@ -685,7 +713,7 @@ func (s *hostSession) resendFromScrollback() bool {
 	// duplicate it nor let it overtake the replay.
 	queuedFrom := d
 	for _, em := range s.rowQueue {
-		if !em.end && !em.clear && em.from < queuedFrom {
+		if !em.end && !em.clear && !em.outputStart && em.from < queuedFrom {
 			queuedFrom = em.from
 			break
 		}
@@ -703,6 +731,30 @@ func (s *hostSession) resendFromScrollback() bool {
 	s.mu.Unlock()
 	if len(subs) == 0 {
 		return false
+	}
+	// The output mark is position, not authority, but a replacement reader
+	// needs it before the retained-window rows so the coordinator can join
+	// those rows to an authenticated Start without a lifecycle-envelope field.
+	s.rowMu.Lock()
+	outputStartRow, outputStartKnown := s.outputStartRow, s.outputStartKnown
+	outputStartSequence := s.outputStartSequence
+	s.rowMu.Unlock()
+	if outputStartKnown {
+		for _, sub := range subs {
+			// The replay mark stands in for every queued mark at or below this
+			// snapshot. Advancing the subscriber's sequence here prevents a
+			// delayed live emission from duplicating it after retained rows.
+			if sub.outputStartSequence < outputStartSequence {
+				sub.outputStartSequence = outputStartSequence
+			}
+			if sink, ok := sub.sink.(interface {
+				SendOutputStartRow(proto.OutputStartRowFrame) error
+			}); ok {
+				if err := sink.SendOutputStartRow(proto.OutputStartRowFrame{Session: s.raw, Subscriber: sub.raw, FromRow: outputStartRow}); err != nil {
+					s.log.Warn("session output-start replay mark not delivered", "session", s.id.Session, "subscriber", sub.id, "fromRow", outputStartRow, "err", err)
+				}
+			}
+		}
 	}
 	if mark > d {
 		mark = d
@@ -880,6 +932,27 @@ func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, caus
 // dying, and releaseConnection does the teardown — one dead reader must not
 // take the others' frames with it.
 func (s *hostSession) deliverRowEmission(em rowEmission) bool {
+	if em.outputStart {
+		s.mu.Lock()
+		subs := s.subscribersLocked()
+		s.mu.Unlock()
+		for _, sub := range subs {
+			if sub.outputStartSequence >= em.markSequence {
+				continue
+			}
+			sink, ok := sub.sink.(interface {
+				SendOutputStartRow(proto.OutputStartRowFrame) error
+			})
+			if !ok {
+				s.log.Warn("session output-start mark not delivered: sink lacks row-mark support", "session", s.id.Session, "subscriber", sub.id, "fromRow", em.from)
+				continue
+			}
+			if err := sink.SendOutputStartRow(proto.OutputStartRowFrame{Session: s.raw, Subscriber: sub.raw, FromRow: em.from}); err != nil {
+				s.log.Warn("session output-start mark not delivered", "session", s.id.Session, "subscriber", sub.id, "fromRow", em.from, "err", err)
+			}
+		}
+		return len(subs) > 0
+	}
 	if em.clear {
 		payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
 		if err != nil {

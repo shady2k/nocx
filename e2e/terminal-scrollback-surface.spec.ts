@@ -182,13 +182,62 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     }
 
     // ── Clause 2: arriving output does not move the reader's anchor ─────
-    // The reader is scrolled up into the oldest rows, reading. A delayed
-    // producer was armed BEFORE the anchor was captured, so its output is
-    // guaranteed to land while the reader holds the position.
-    await type_(`( sleep 8; echo ANCHOR-LATE-${nonce} ) &`)
-    const anchorTop = await scrollTop()
+    // Arm the producer while following the live end. Typing and submitting
+    // a command can itself move a scroller; that is not output arriving while
+    // the reader is holding a position. Re-enter history only after the
+    // producer has confirmed it started, then track a row identity and its
+    // viewport position rather than a WebKit-dependent scrollTop value.
+    await expect
+      .poll(
+        async () => {
+          if (await atLiveEnd()) return true
+          await page.mouse.wheel(0, 1400)
+          return false
+        },
+        { timeout: 30_000, intervals: [250] },
+      )
+      .toBe(true)
+    await pane.locator('.xterm-live-container').click()
+    await type_(`( sleep 15; echo ANCHOR-LATE-${nonce} ) & echo ANCHOR-ARMED-${nonce}`)
+    await expect
+      .poll(async () => liveRows(), { timeout: 20_000 })
+      .toContain(`ANCHOR-ARMED-${nonce}`)
+
+    await pane.locator('.scrollback-area').hover()
+    await expect
+      .poll(
+        async () => {
+          const start = await oldest.getAttribute('data-start').catch(() => null)
+          if (start === String(floor)) return true
+          await page.mouse.wheel(0, -900)
+          return false
+        },
+        { timeout: 60_000, intervals: [400] },
+      )
+      .toBe(true)
+    const anchor = await page.evaluate(() => {
+      const area = document.querySelector('.pane.active .scrollback-area')
+      if (area === null) return null
+      const bounds = area.getBoundingClientRect()
+      const row = Array.from(
+        document.querySelectorAll('.pane.active .live-history-page .term-grid-row'),
+      ).find((candidate) => {
+        const rect = candidate.getBoundingClientRect()
+        return rect.bottom > bounds.top && rect.top < bounds.bottom
+      })
+      if (row === undefined) return null
+      return { text: row.textContent ?? '', top: row.getBoundingClientRect().top }
+    })
+    expect(anchor).not.toBeNull()
     await expect.poll(async () => liveRows(), { timeout: 25_000 }).toContain(`ANCHOR-LATE-${nonce}`)
-    expect(await scrollTop()).toBe(anchorTop)
+    const anchorAfter = await page.evaluate((text) => {
+      const row = Array.from(
+        document.querySelectorAll('.pane.active .live-history-page .term-grid-row'),
+      ).find((candidate) => candidate.textContent === text)
+      return row?.getBoundingClientRect().top ?? null
+    }, anchor!.text)
+    expect(anchorAfter).not.toBeNull()
+    expect(anchorAfter).toBeCloseTo(anchor!.top, 0)
 
     // ── Clause 3: returning to the bottom resumes tail follow ───────────
     // Each poll is a real wheel-down gesture until the live end is reached.

@@ -50,3 +50,28 @@ test('deliberately fails, to print the failure-context block', async ({ page }) 
   // purpose, without depending on any other property of the app.
   await expect(page.locator('.nocx-tab')).toHaveCount(999)
 })
+
+/**
+ * The same report for a page the spec closed ITSELF (nocx-itmo2).
+ *
+ * The block-DOM section must not be conditional on there being anything left
+ * to read. A failing test whose report omitted it reads as "the DOM was fine",
+ * which is the opposite of what an absent read means — and that is the reader
+ * this section exists for. failure-context.ts's `watchPageForTest` says a spec
+ * may close its own page mid-test and the report then carries what the page
+ * said up to that moment, so this is that promise held to: the section appears
+ * and says the page had gone.
+ */
+test('deliberately fails with its own page already closed, so the DOM section still appears', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await promptReady(page)
+  await page.close()
+
+  // Stated rather than asserted, because there is no locator left to assert
+  // against: what this test is FOR is the block printed underneath it.
+  throw new Error(
+    'nocx-itmo2 proof: the spec closed its own page, and the report still has to say it',
+  )
+})

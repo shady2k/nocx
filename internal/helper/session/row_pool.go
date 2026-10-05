@@ -2,10 +2,10 @@ package session
 
 import "unsafe"
 
-// rowBytePool is the single per-session history.helperBufferMB budget. Owners
-// count simultaneous copies independently: a row held by both the FIFO and
-// the resend window spends its bytes twice until one owner releases it.
-// Callers serialize access with rowMu.
+// rowBytePool is the single per-session history.helperBufferMB budget. It
+// charges unique retained row data once; the FIFO and resend window can refer
+// to the same backing rows, while each separately allocated record is charged
+// to its owner. Callers serialize access with rowMu.
 type rowBytePool struct {
 	limit              int64
 	markerReserve      int64

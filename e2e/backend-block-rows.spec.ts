@@ -32,8 +32,18 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
     `.pane.active .cmd-block[data-entry-id="${entryId}"] .cmd-output .term-grid-row`,
   )
   await expect(running).toContainText(firstMarker, { timeout: 15_000 })
+  // MORE THAN THE MARKER ROW, WAITED FOR AND NOT SAMPLED. The assertion's
+  // subject is "the block is showing rows it was not found by" — the block
+  // grew from backend-stored rows while the command is still running — and a
+  // bare count() behind `toContainText` measured only how quickly the second
+  // row was painted after the first landed. On a loaded runner that read 1 and
+  // failed the test with the product working (CI 37308159660, `ci-e2e (webkit,
+  // 1)`, `Received: 1`). Polling is the wait on the observable; the timeout is
+  // the same 15 s the assertions around it use, not a wider one.
+  await expect.poll(async () => rows.count(), { timeout: 15_000 }).toBeGreaterThan(1)
+  // Sampled AFTER the poll, so the growth assertion below still compares what
+  // is on screen when the pause is released against what was there before it.
   const earlyCount = await rows.count()
-  expect(earlyCount).toBeGreaterThan(1)
   await page.keyboard.press('Enter')
   await expect.poll(async () => rows.count(), { timeout: 10_000 }).toBeGreaterThan(earlyCount)
   await expect(page.locator('.pane.active .xterm-live-container')).toContainText(finalMarker, {

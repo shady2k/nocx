@@ -1,5 +1,9 @@
 # Report — nocx-xn63t.6.15
 
+## Commits
+
+- `5375c486` — implementation and acceptance tests.
+
 ## Changes
 
 The renderer now sends the active tab ID as `afterTabId` and does not compute a tab position. The `tabs.create` handler routes anchored creates through `CreateTabAfter`, which seats and renumbers the workspace in the content store. The params contract and renderer request type carry the anchor.
@@ -20,8 +24,7 @@ The renderer now sends the active tab ID as `afterTabId` and does not compute a 
 - `cd frontend && npx prettier --check src/layout/layout-store.ts src/layout/layout-store.test.ts src/layout/layout-client.ts src/panes.ts src/test-support/panes-fixtures.ts src/panes-layout.test.ts src/panes.test.ts`: PASS.
 - `cd frontend && npm run contracts:check`: PASS.
 - `go test ./internal/content ./internal/capability`: PASS.
-- `go test -tags gtk3 ./internal/transport -run TestTabsCreateAfterActiveTabSeatsAndReadsBackOrder`: PASS. `make vt-archives` supplied the pinned Ghostty headers required to build transport.
-- `go test -tags gtk3 ./internal/capability ./internal/transport`: capability passed; transport could not build because `ghostty/vt.h` is unavailable.
+- `go test -tags gtk3 ./internal/transport`: PASS (the focused new test and package suite). `make vt-archives` supplied the pinned Ghostty headers required to build transport.
 - `git diff --check`: PASS.
 
-`npm ci` was needed to install the frontend dependencies in the worktree.
+`npm ci` was needed to install the root and frontend dependencies in the worktree.

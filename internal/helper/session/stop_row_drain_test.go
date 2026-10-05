@@ -151,44 +151,70 @@ func TestStopWithNoCaptureOwedEndsCleanly(t *testing.T) {
 	}
 }
 
+// stallUntilOverflow parks the pump inside its first send and only then feeds
+// the rows behind it, so the buffer provably overflows and the incomplete
+// marker exists before anything waits on one.
+//
+// It is the precondition the drain tests could not previously STATE. With the
+// pump free it is not a race that happens to go one way but an outcome: the
+// FIFO charge of a delivered row is released as the pump delivers it, so a
+// pump that keeps up spends one row's bytes at a time and five rows against
+// bufferOf(2) never overflow AT ALL — no marker, nothing owed, and both waits
+// below unbounded rather than merely slow. A burst feed hides that on an idle
+// machine and a loaded runner pays it (nocx-xn63t.6.17: 2 runs in 2 on the
+// ci-mac runner, green 4/4 on Linux). Wedging the pump makes the overflow the
+// only thing that can happen — with the stalled row's own charges never
+// released, the third row behind it cannot fit and everything after that is
+// dropped without a charge — so the loss is counted before a single delivery
+// is attempted and the assertion below reads it directly instead of inferring
+// it.
+func stallUntilOverflow(t *testing.T, sink *orderedStallingSink, hs *hostSession, bridge *rowBridge) {
+	t.Helper()
+	const rows = 5
+	bridge.OutputRows(0, []emulator.Row{textRow("x")}, 0)
+	select {
+	case <-sink.stalled:
+	case <-time.After(hangLimit):
+		t.Fatal("the pump never reached the sink, so nothing queued behind it could overflow")
+	}
+	for i := uint64(1); i <= rows; i++ {
+		bridge.OutputRows(i, []emulator.Row{textRow("x")}, 0)
+	}
+	if got := hs.rowsIncomplete.Load(); got != 1 {
+		t.Fatalf("rowsIncomplete = %d behind a wedged pump, want 1 — the overflow these tests need never happened", got)
+	}
+}
+
 // A failed send of the row buffer's own incomplete marker (nocx-2v80t.3.38)
 // leaves it owed; stopping must still deliver it — or, failing that, record
 // the loss — rather than let releaseConnection and the pump's own end
 // silently swallow the one statement that output was discarded (finding 6).
 //
-// The sink refuses the marker for as long as the test says so, so it is owed
-// and every retry the pump makes on its own fails, however many stale wakes
-// rowWake happens to have banked — an earlier version counted on exactly one
-// and hung 1 run in ~2000 under -race when there was none (nocx-2v80t.9).
-// The sink starts taking it only as stop() is called, and stop() may not
-// end with it undelivered: that is the drain's own attempt, which a failed
-// attempt that merely began before the drain was armed must not stand in
-// for (the pump's side of nocx-2v80t.9).
+// The sink refuses every marker send while the session is not draining, so it
+// is owed and every retry the pump makes on its own fails, however many stale
+// wakes rowWake happens to have banked — an earlier version counted on exactly
+// one and hung 1 run in ~2000 under -race when there was none (nocx-2v80t.9).
+// It starts taking it only while stop() is draining, which is the property
+// under test and not a flag flipped from this goroutine: a shared counter set
+// after the first failure races the pump's own immediate retry, and when that
+// retry wins, the marker lands without stop() having drained anything and the
+// test passes having proved nothing (the pump's side of nocx-2v80t.9). stop()
+// may not end with it undelivered.
 func TestStopDeliversAnOwedIncompleteMarkerBeforeEnding(t *testing.T) {
 	sink := newOrderedStallingSink()
-	sink.failIncompleteTimes = -1
 	hs, _ := stopTestSession(t, sink)
+	sink.takeIncompleteOnlyWhileDraining(hs.drainRequested)
 	bufferOf(hs, 2)
 	bridge := &rowBridge{hs: hs}
-	row := []emulator.Row{textRow("x")}
 
-	// The sink holds its first send until released, so the five rows are
-	// all queued against a two-row buffer and it overflows every time: a
-	// pump that happened to keep up with the feed made no marker at all, 2
-	// runs in 1500 under -race (nocx-2v80t.9).
-	for i := uint64(1); i <= 5; i++ {
-		bridge.OutputRows(i, row, 0)
-	}
-	close(sink.release)
+	stallUntilOverflow(t, sink, hs, bridge)
+	close(sink.release) // the rows queued behind the stall, and then the marker, may go
 	select {
 	case <-sink.failed: // the marker's first send failed: it is owed
 	case <-time.After(hangLimit):
 		t.Fatal("the marker's send never happened")
 	}
 
-	sink.mu.Lock()
-	sink.failIncompleteTimes = 0
-	sink.mu.Unlock()
 	stopBounded(t, hs)
 
 	log := sink.snapshot()
@@ -234,15 +260,12 @@ func TestStopWithNoMarkerOwedEndsCleanly(t *testing.T) {
 func TestStopReturnsWhenTheSinkRefusesEveryMarkerSend(t *testing.T) {
 	sink := newOrderedStallingSink()
 	sink.failIncompleteTimes = -1 // never succeeds
-	close(sink.release)           // every non-marker send may still proceed at once
 	hs, _ := stopTestSession(t, sink)
 	bufferOf(hs, 2)
 	bridge := &rowBridge{hs: hs}
-	row := []emulator.Row{textRow("x")}
 
-	for i := uint64(1); i <= 5; i++ {
-		bridge.OutputRows(i, row, 0)
-	}
+	stallUntilOverflow(t, sink, hs, bridge)
+	close(sink.release) // every non-marker send may still proceed at once
 	select {
 	case <-sink.failed:
 	case <-time.After(hangLimit):
@@ -269,31 +292,51 @@ func TestStopReturnsWhenTheSinkRefusesEveryMarkerSend(t *testing.T) {
 // call, so there is no cancellation this package can reach into for an
 // in-flight send. deliverForPump bounds a drain-time attempt to stopGrace —
 // the same grace the process's own tail already gets from owner.stop — and
-// abandons it past that. Three scheduled failures first, exactly as
+// abandons it past that.
+//
+// Three scheduled failures first, exactly as
 // TestStopDeliversAnOwedIncompleteMarkerBeforeEnding needs them, so the
 // marker is genuinely parked (not resolved by 3.49's immediate retry or the
 // one stale wake rowWake's single slot can bank) before stop() is ever
-// called and its own drain-time retry is the one that blocks.
+// called and its own drain-time retry is the one that blocks. Both halves of
+// that are construction rather than luck here, which is what
+// nocx-xn63t.6.17 is about. The overflow is stallUntilOverflow's, read off
+// rowsIncomplete before anything is released; the third failure needs one
+// wake, and the feed behind the wedged pump leaves exactly one — coalesced
+// into rowWake's single slot, and the pump performs no select between the
+// stall and the park after the second refusal, so that park is what consumes
+// it. Nothing else calls wakeRows between here and stop(), so the pump is
+// parked with an empty slot when stop() arms the drain, and the attempt that
+// blocks past stopGrace is provably the drain's own rather than a straggler
+// the drain had to sweep up.
 func TestStopReturnsWhenTheOwedMarkersSendNeverReturns(t *testing.T) {
 	sink := newOrderedStallingSink()
 	sink.failIncompleteTimes = 3
 	sink.blockAfterExhausted = true
-	close(sink.release)
 	hs, _ := stopTestSession(t, sink)
 	bufferOf(hs, 2)
 	bridge := &rowBridge{hs: hs}
-	row := []emulator.Row{textRow("x")}
 
-	for i := uint64(1); i <= 5; i++ {
-		bridge.OutputRows(i, row, 0)
-	}
+	stallUntilOverflow(t, sink, hs, bridge)
+	close(sink.release)
 	select {
 	case <-sink.exhausted: // all three scheduled failures have happened; the marker is genuinely parked
 	case <-time.After(hangLimit):
 		t.Fatal("the marker's three scheduled sends never all happened")
 	}
+	for _, d := range sink.snapshot() {
+		if d.incomplete {
+			t.Fatalf("the marker reached the sink while it was still refusing: %+v", d)
+		}
+	}
 
 	stopBounded(t, hs) // must return even though the drain's own retry never does
+
+	for _, d := range sink.snapshot() {
+		if d.incomplete {
+			t.Fatalf("a sink whose send never returns recorded a DELIVERED incomplete marker: %+v", d)
+		}
+	}
 }
 
 // countEncodedRows decodes one rows-plane payload and answers how many rows

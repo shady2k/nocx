@@ -963,22 +963,21 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	if ids := idsOf(t, tabs); containsID(ids, tabID) {
 		t.Fatalf("the closed worker's tab is still in the window: %v", ids)
 	}
-	// THE REST OF THE STRIP KEEPS ITS ORDER. The window reads a workspace's
-	// tabs in position order, and the seats of the tabs that stayed are the
-	// ones they already had — the store renumbers around an INSERT
-	// (content/layout_sqlite.go's createTab: "the strip is renumbered around
-	// the new tab") and does not renumber on a close, so asserting density
-	// here would be asserting an invariant the store never claimed. This
-	// check's worker is the OLDEST of three, so its seat is not the last one:
-	// worker_close_tab_test.go's own density assertion is made where it
-	// holds, on a strip whose closed tab is last.
+	// THE REST OF THE STRIP IS STILL DENSE AND STILL IN ITS ORDER. The window
+	// reads a workspace's tabs in position order, and a close renumbers the
+	// strip behind the tab that left, through the same writer CreateTabAfter
+	// seats a new tab with and ReorderTabs writes the user's order with
+	// (nocx-xn63t.4.14). This check's worker is the OLDEST of three, so its
+	// seat is not the last one — the case a close leaves a hole in, and the
+	// reason this asserts density rather than the neighbouring order alone.
 	positions := make([]int, 0, len(tabs))
 	for _, tab := range tabs {
 		positions = append(positions, tab.Position)
 	}
-	for i := 1; i < len(positions); i++ {
-		if positions[i] <= positions[i-1] {
-			t.Fatalf("the strip's remaining tabs are out of order after the close: %v", positions)
+	for seat, tab := range tabs {
+		if tab.Position != seat {
+			t.Fatalf("tab %s sits at position %d, want %d — the strip is not dense after the close: %v",
+				tab.ID, tab.Position, seat, positions)
 		}
 	}
 	var closed struct {

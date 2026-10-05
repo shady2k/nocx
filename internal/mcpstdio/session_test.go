@@ -183,8 +183,11 @@ func initialization(d *stdioDriver) {
 type scriptedEndpoint struct {
 	listener *net.UnixListener
 
-	mu    sync.Mutex
-	dials int
+	mu         sync.Mutex
+	dials      int
+	conns      map[net.Conn]struct{}
+	serveWG    sync.WaitGroup
+	acceptDone chan struct{}
 
 	answer func(net.Conn, rpcEnvelope)
 	// onEnd is called when a connection's read loop stops, which is how a test
@@ -210,12 +213,31 @@ func startScriptedEndpoint(t *testing.T, answer func(net.Conn, rpcEnvelope), opt
 	if err != nil {
 		t.Fatalf("listen on endpoint socket: %v", err)
 	}
-	endpoint := &scriptedEndpoint{listener: listener, answer: answer}
+	endpoint := &scriptedEndpoint{
+		listener:   listener,
+		answer:     answer,
+		conns:      make(map[net.Conn]struct{}),
+		acceptDone: make(chan struct{}),
+	}
 	for _, option := range options {
 		option(endpoint)
 	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() {
+		_ = listener.Close()
+		<-endpoint.acceptDone
+		endpoint.mu.Lock()
+		conns := make([]net.Conn, 0, len(endpoint.conns))
+		for conn := range endpoint.conns {
+			conns = append(conns, conn)
+		}
+		endpoint.mu.Unlock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		endpoint.serveWG.Wait()
+	})
 	go func() {
+		defer close(endpoint.acceptDone)
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -223,6 +245,8 @@ func startScriptedEndpoint(t *testing.T, answer func(net.Conn, rpcEnvelope), opt
 			}
 			endpoint.mu.Lock()
 			endpoint.dials++
+			endpoint.conns[conn] = struct{}{}
+			endpoint.serveWG.Add(1)
 			endpoint.mu.Unlock()
 			go endpoint.serve(conn)
 		}
@@ -242,8 +266,17 @@ func (e *scriptedEndpoint) dialCount() int {
 }
 
 func (e *scriptedEndpoint) serve(conn net.Conn) {
+	defer e.serveWG.Done()
+	var answers sync.WaitGroup
 	defer func() {
+		// The callbacks may still report write failures through their test's
+		// *testing.T. Keep the connection and serving goroutine alive until
+		// every callback has returned, then let endpoint cleanup finish.
+		answers.Wait()
 		_ = conn.Close()
+		e.mu.Lock()
+		delete(e.conns, conn)
+		e.mu.Unlock()
 		if e.onEnd != nil {
 			e.onEnd(conn)
 		}
@@ -254,7 +287,11 @@ func (e *scriptedEndpoint) serve(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		go e.answer(conn, request)
+		answers.Add(1)
+		go func() {
+			defer answers.Done()
+			e.answer(conn, request)
+		}()
 	}
 }
 
@@ -390,6 +427,7 @@ func TestACallWaitsForTheListInFlightAndUsesItsCatalogue(t *testing.T) {
 // would take every sibling down with the cancelled call.
 func TestCancellingOneCallLeavesItsSiblingAlone(t *testing.T) {
 	held := make(chan struct{}, 2)
+	answered := make(chan struct{}, 2)
 	release := make(chan struct{})
 	endpoint := startScriptedEndpoint(t, func(conn net.Conn, request rpcEnvelope) {
 		switch request.Method {
@@ -399,10 +437,12 @@ func TestCancellingOneCallLeavesItsSiblingAlone(t *testing.T) {
 			held <- struct{}{}
 			<-release
 			writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"first":true}`)})
+			answered <- struct{}{}
 		case "alpha.second":
 			held <- struct{}{}
 			<-release
 			writeJSONLine(t, conn, rpcEnvelope{JSONRPC: "2.0", ID: request.ID, Result: json.RawMessage(`{"second":true}`)})
+			answered <- struct{}{}
 		}
 	})
 	driver := startStdio(t, endpoint.socket())
@@ -426,6 +466,12 @@ func TestCancellingOneCallLeavesItsSiblingAlone(t *testing.T) {
 	// answer — and the id check is what proves it: a response for the cancelled
 	// call would have to arrive here to be seen at all.
 	close(release)
+	// Cancellation does not stop the endpoint's already-running handler. Join
+	// both callbacks while this test is still active: writeJSONLine reports
+	// failures through t, and an unjoined endpoint callback can otherwise call
+	// t.Errorf after the test has completed.
+	<-answered
+	<-answered
 	if text := toolText(t, driver.nextID(3)); text != `{"second":true}` {
 		t.Fatalf("the sibling answered %s after its own call was cancelled", text)
 	}

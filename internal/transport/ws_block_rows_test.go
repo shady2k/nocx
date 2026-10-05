@@ -236,6 +236,124 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
+func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	// A position mark can arrive before the authenticated start on the rows
+	// plane. It must not change a fresh block's ordinary row-zero boundary.
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
+		t.Fatalf("fresh block rows = %+v, want the full row-zero stream", rows)
+	}
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
+		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
+	}
+	rows = streamRows(t, db, attempt)
+	if len(rows) != 4 || rows[3].Text != "tail" || rows[3].From != 3 {
+		t.Fatalf("final rows = %+v", rows)
+	}
+}
+
+func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T) {
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	startsACommand(t, e, pub, lane, h, 2, "printf first")
+
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	current := bs.current[session.ID(sid)]
+	current.recoveredOutputInterval = true // model a block adopted from durable storage
+	current.outputStartKnown = true
+	current.outputStartMarked = true
+	current.outputStartRow = 2
+	current.awaitingOutputReplay = true
+	bs.mu.Unlock()
+
+	bs.mu.Lock()
+	bs.queued[session.ID(sid)] = "next-attempt"
+	bs.mu.Unlock()
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("held")}, ""); confirm || up != 0 {
+		t.Fatalf("row before the replay mark = (%d, %v), want held", up, confirm)
+	}
+
+	// The current block's repeated mark must clear its replay gate even
+	// though a later authenticated start is already queued.
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	bs.mu.Lock()
+	awaitingReplay := current.awaitingOutputReplay
+	pending := len(current.preOutputStart)
+	queuedMark := bs.outputStartKnown[session.ID(sid)]
+	bs.mu.Unlock()
+	if awaitingReplay || pending != 0 || queuedMark {
+		t.Fatalf("current replay state = awaiting %v, pending %d, queued mark %v", awaitingReplay, pending, queuedMark)
+	}
+}
+
+func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf recovery")
+
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	bs.current[session.ID(sid)].recoveredOutputInterval = true
+	bs.mu.Unlock()
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("first owed row"), aStreamRow("second owed row"), aStreamRow("third owed row"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("recovered rows ack = (%d, %v), want the whole undurable prefix", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 3 || rows[0].Text != "first owed row" || rows[0].From != 0 {
+		t.Fatalf("recovered rows = %+v, want all rows from the empty durable cursor", rows)
+	}
+}
+
+func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf without shell integration")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
+		t.Fatalf("ordinary no-mark row = (%d, %v), want row 1 confirmed", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 1 || rows[0].From != 0 || rows[0].Text != "ordinary output" {
+		t.Fatalf("ordinary no-mark rows = %+v, want output at authenticated row-zero boundary", rows)
+	}
+}
+
+func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("early")}, ""); confirm || up != 0 {
+		t.Fatalf("rows before authenticated Start = (%d, %v), want rejected", up, confirm)
+	}
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
+		t.Fatalf("fresh authenticated rows = %+v, want full row-zero stream", rows)
+	}
+}
+
 // A shell can submit the next command before the helper has delivered the
 // previous interval's queued rows. Those rows must remain with the interval
 // that emitted them until its end marker opens the next block.
@@ -294,6 +412,9 @@ func TestBlockRowsArrived_RowsBehindTheBoundaryEnterNoBlock(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, firstFence)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
+	// The second block starts at absolute row 4 after the first block's
+	// closing screen; deliver its output-start mark while it is queued.
+	e.ws.BlockOutputStartRow(session.ID(sid), 4)
 	secondFence := lifecycleFence(0x92)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, secondFence)))
 

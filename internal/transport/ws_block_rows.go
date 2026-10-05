@@ -95,6 +95,12 @@ type blockStream struct {
 	// open are the session's open blocks by attempt id — kept ones carry a
 	// real block, refused ones only remember the refusal.
 	open map[session.ID]map[string]*openBlock
+	// outputStartMarks holds a mark that arrived before the authenticated
+	// lifecycle start opened its block. It contains position only, never
+	// authority to open a block.
+	outputStartMarks   map[session.ID]uint64
+	outputStartKnown   map[session.ID]bool
+	outputStartEnabled map[session.ID]bool
 	// current is the interval whose rows are currently being delivered. A
 	// later authenticated start has an open block too, but stays queued until
 	// the current interval's end promotes it.
@@ -347,6 +353,11 @@ func (bs *blockStream) heldBytesLocked(sid session.ID) int64 {
 			n += heldRowsBytes(d.rows)
 		}
 	}
+	if current := bs.current[sid]; current != nil {
+		for _, d := range current.preOutputStart {
+			n += heldRowsBytes(d.rows)
+		}
+	}
 	for _, set := range [][]pendingEnd{bs.pendingCloses[sid], bs.ends[sid], bs.queuedEnds[sid]} {
 		for _, e := range set {
 			n += heldRowsBytes(e.closing)
@@ -465,6 +476,16 @@ type openBlock struct {
 	// rather than where the interval's index says it should be
 	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
 	rows uint64
+	// outputStartRow is the helper's ordered command-output mark. A fresh
+	// block trusts it only after the authenticated start reserved this open;
+	// a pre-start mark alone cannot authorize a block or move its boundary.
+	outputStartKnown        bool
+	outputStartMarked       bool
+	outputStartRow          uint64
+	expectedFirstRow        uint64
+	awaitingOutputReplay    bool
+	recoveredOutputInterval bool
+	preOutputStart          []pendingRows
 	// floor is the absolute index the artifact's stored span begins at —
 	// the store's FirstRow, read at the re-bind. The stored span is
 	// [floor, rows): a delivery reaching below the floor is the block's
@@ -763,13 +784,43 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 			attempt: found.EntryID, entry: found.EntryID,
 			artifactID: found.ArtifactID, kept: true,
 		}
+		if bs.outputStartKnown[sid] {
+			b.outputStartKnown = true
+			b.outputStartMarked = true
+			b.outputStartRow = bs.outputStartMarks[sid]
+			delete(bs.outputStartKnown, sid)
+			delete(bs.outputStartMarks, sid)
+		} else {
+			// No mark has been observed for this recovered interval. Keep
+			// the authenticated row-zero boundary; a later mark may locate
+			// the retained rows that need replay.
+			b.outputStartKnown = true
+		}
+		// Only an artifact adopted from durable storage is a replay boundary.
+		// Fresh authenticated starts use the ordinary row-zero path, even if
+		// the shell later emits OSC 133 C.
+		b.recoveredOutputInterval = bs.outputStartEnabled[sid]
 		bs.open[sid][found.EntryID] = b
 	}
 	if b.rows < found.NextRow {
 		b.rows = found.NextRow
 	}
+	// A re-bound block continues at the durable cursor it carried. The
+	// artifact's first stored row may be later than the block's original
+	// start, but this reader's expected continuation is the cursor.
+	if found.NextRow > b.expectedFirstRow {
+		b.expectedFirstRow = found.NextRow
+	}
 	if found.NextRow > 0 {
 		b.floor = found.FirstRow
+	}
+	// A durable artifact adopted into this reader is the only block whose
+	// output mark can request a retained-window replay.
+	b.recoveredOutputInterval = bs.outputStartEnabled[sid]
+	if b.recoveredOutputInterval && b.outputStartMarked {
+		// The helper's replacement-attachment replay will carry the same mark
+		// before its retained rows. Hold until that fence arrives.
+		b.awaitingOutputReplay = true
 	}
 	if bs.current[sid] == nil {
 		bs.current[sid] = b
@@ -1085,6 +1136,9 @@ func (bs *blockStream) detachCoordinator(sid session.ID) {
 	delete(bs.pending, sid)
 	delete(bs.flushing, sid)
 	delete(bs.opening, sid)
+	delete(bs.outputStartMarks, sid)
+	delete(bs.outputStartKnown, sid)
+	delete(bs.outputStartEnabled, sid)
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
 	delete(bs.closeTries, sid)
@@ -1213,6 +1267,176 @@ func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b
 // an end marker. It takes the same path as any other delivery, so the loss
 // reaches the block's summary and the block's cursor moves to the end of the
 // gap, where the closing screen then lands.
+// BlockOutputStartPlaneAttached enables the position gate for this source.
+// Authentication still comes only from the lifecycle start path.
+func (s *WSServer) BlockOutputStartPlaneAttached(sid session.ID) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	if bs.outputStartEnabled == nil {
+		bs.outputStartEnabled = make(map[session.ID]bool)
+	}
+	bs.outputStartEnabled[sid] = true
+	if block := bs.current[sid]; block != nil {
+		// A current block at reader attachment is a recovered interval.
+		// Fresh blocks opened after this point must not enter this path.
+		block.recoveredOutputInterval = true
+		if block.outputStartMarked {
+			// The new reader's retained-window replay follows this ordered
+			// stream marker; do not admit later rows ahead of it.
+			block.awaitingOutputReplay = true
+		} else {
+			block.outputStartKnown = true
+			block.outputStartRow = 0
+		}
+	}
+	bs.mu.Unlock()
+}
+
+// BlockOutputStartRow carries a position mark on the ordered rows stream. It
+// cannot establish a block. Fresh authenticated starts ignore it and begin at
+// row zero; only an artifact adopted after reader replacement uses it to
+// delimit rows in the helper's already-ordered retained-window replay.
+func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	block := bs.current[sid]
+	currentReplayMark := block != nil && block.recoveredOutputInterval && block.awaitingOutputReplay && (!block.outputStartMarked || fromRow == block.outputStartRow)
+	saveForNext := !currentReplayMark && (block == nil || bs.queued[sid] != "" || bs.opening[sid] != "")
+	if saveForNext {
+		if bs.outputStartMarks == nil {
+			bs.outputStartMarks = make(map[session.ID]uint64)
+		}
+		if bs.outputStartKnown == nil {
+			bs.outputStartKnown = make(map[session.ID]bool)
+		}
+		bs.outputStartMarks[sid] = fromRow
+		bs.outputStartKnown[sid] = true
+		bs.mu.Unlock()
+		return
+	}
+	if !block.recoveredOutputInterval {
+		// The authenticated start already owns this fresh block. Its first
+		// ordered output mark refines the open's row-zero boundary, but never
+		// moves it backwards or replaces a cursor already carried forward.
+		if !block.outputStartMarked {
+			block.outputStartKnown = true
+			block.outputStartMarked = true
+			if fromRow > block.expectedFirstRow {
+				block.expectedFirstRow = fromRow
+			}
+			block.outputStartRow = block.expectedFirstRow
+		}
+		bs.mu.Unlock()
+		return
+	}
+	if currentReplayMark {
+		block.outputStartKnown = true
+		block.outputStartMarked = true
+		block.outputStartRow = fromRow
+		if block.awaitingOutputReplay {
+			// This mark is the replacement reader's replay fence. Rows already
+			// held before it remain unconfirmed; store them before admitting the
+			// replayed suffix instead of assuming the helper retained them all.
+			block.awaitingOutputReplay = false
+			pending := block.preOutputStart
+			block.preOutputStart = nil
+			confirm := bs.confirmers[sid]
+			startRow := fromRow
+			if startRow > block.rows {
+				startRow = block.rows
+			}
+			bs.mu.Unlock()
+			for _, p := range pending {
+				rows, start, lost := outputRowsAfterStart(p, startRow)
+				if len(rows) == 0 && lost == 0 {
+					continue
+				}
+				up, ok := s.BlockRowsArrived(sid, start, lost, rows, p.cause)
+				if ok && confirm != nil {
+					confirm(up)
+				}
+			}
+			return
+		}
+		bs.mu.Unlock()
+		return
+	}
+	if block.outputStartKnown && block.outputStartMarked {
+		if fromRow > block.outputStartRow {
+			if bs.outputStartMarks == nil {
+				bs.outputStartMarks = make(map[session.ID]uint64)
+			}
+			if bs.outputStartKnown == nil {
+				bs.outputStartKnown = make(map[session.ID]bool)
+			}
+			bs.outputStartMarks[sid] = fromRow
+			bs.outputStartKnown[sid] = true
+		}
+		bs.mu.Unlock()
+		return
+	}
+	block.outputStartKnown = true
+	block.outputStartMarked = true
+	block.outputStartRow = fromRow
+	pending := block.preOutputStart
+	block.preOutputStart = nil
+	confirm := bs.confirmers[sid]
+	startRow := fromRow
+	if block.recoveredOutputInterval && startRow > block.rows {
+		// A delayed OSC mark can trail rows already durable in the artifact.
+		// Replaying from the cursor avoids dropping the still-owed gap.
+		startRow = block.rows
+	}
+	bs.mu.Unlock()
+	for _, p := range pending {
+		rows, start, lost := outputRowsAfterStart(p, startRow)
+		if len(rows) == 0 && lost == 0 {
+			if confirm != nil {
+				// The output mark is only a position. Confirm no farther than
+				// the effective start proved by the durable cursor.
+				confirm(startRow)
+			}
+			continue
+		}
+		up, ok := s.BlockRowsArrived(sid, start, lost, rows, p.cause)
+		if ok && confirm != nil {
+			confirm(up)
+		}
+	}
+	bs.mu.Lock()
+	block.preOutputStart = nil
+	bs.mu.Unlock()
+}
+
+func pendingAfterOutputStart(in []pendingRows, start uint64) []pendingRows {
+	out := make([]pendingRows, 0, len(in))
+	for _, p := range in {
+		rows, from, lost := outputRowsAfterStart(p, start)
+		if len(rows) == 0 && lost == 0 {
+			continue
+		}
+		out = append(out, pendingRows{from: from, lost: lost, cause: p.cause, rows: rows})
+	}
+	return out
+}
+
+func outputRowsAfterStart(p pendingRows, start uint64) ([]emulator.Row, uint64, uint64) {
+	if len(p.rows) == 0 {
+		if p.from >= start {
+			return nil, p.from, p.lost
+		}
+		return nil, start, 0
+	}
+	if p.from >= start {
+		return p.rows, p.from, p.lost
+	}
+	skip := start - p.from
+	if skip >= uint64(len(p.rows)) {
+		return nil, start, 0
+	}
+	return p.rows[skip:], start, 0
+}
+
 func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool) {
 	if len(rows) == 0 && lost == 0 {
 		return 0, false
@@ -1233,9 +1457,24 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		return 0, false
 	}
 	block := bs.current[sid]
-	var head []emulator.Row
-	var headFrom uint64
-	fullyStored := false
+	if block == nil && bs.opening[sid] != "" {
+		if !s.holdLocked(sid, fromRow, rows) {
+			bs.mu.Unlock()
+			return 0, false
+		}
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...)})
+		bs.mu.Unlock()
+		return 0, false
+	}
+	if block != nil && block.awaitingOutputReplay {
+		if !s.holdLocked(sid, fromRow, rows) {
+			bs.mu.Unlock()
+			return 0, false
+		}
+		block.preOutputStart = append(block.preOutputStart, pendingRows{from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...)})
+		bs.mu.Unlock()
+		return 0, false
+	}
 	if sourced {
 		if closed := bs.closedThrough[sid]; fromRow < closed {
 			skip := closed - fromRow
@@ -1247,6 +1486,36 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			fromRow = closed
 			lost = 0
 		}
+	}
+	if block != nil && !block.recoveredOutputInterval {
+		// A previous interval may have closed after this next open was
+		// reserved. Its boundary is the next block's own row-zero cursor.
+		if closed := bs.closedThrough[sid]; closed > block.expectedFirstRow {
+			block.expectedFirstRow = closed
+		}
+	}
+	if block != nil && block.outputStartKnown {
+		start := block.outputStartRow
+		if block.recoveredOutputInterval && start > block.rows {
+			// The persisted cursor wins over a late output mark: rows between
+			// the cursor and mark are still owed by the replacement reader.
+			start = block.rows
+		}
+		if fromRow < start {
+			skip := start - fromRow
+			if skip >= uint64(len(rows)) {
+				bs.mu.Unlock()
+				return start, true
+			}
+			rows = rows[skip:]
+			fromRow = start
+			lost = 0
+		}
+	}
+	var head []emulator.Row
+	var headFrom uint64
+	fullyStored := false
+	if sourced {
 		// Dedup by absolute row index (nocx-zg3k3.5.3): a resent delivery
 		// may start behind what this block already committed. block.rows is
 		// the artifact's cursor, moved by each append that landed -- the
@@ -1527,6 +1796,12 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	// The append committed, so the artifact's cursor is now the exclusive end
 	// of this delivery. The close reads it to place its closing screen.
 	bs.mu.Lock()
+	if block.rows == 0 && block.floor == 0 {
+		// The first accepted append may start above row zero. Record the
+		// store's actual floor so a resend of the missing head is prepended,
+		// not mistaken for an already-stored overlap.
+		block.floor = fromRow
+	}
 	block.rows = writtenUpTo
 	bs.mu.Unlock()
 	if len(rows) > 0 {
@@ -1536,7 +1811,16 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		})
 	}
 	s.finishDirectDelivery(ctx, sid, block, rows)
-	return writtenUpTo, true
+	bs.mu.Lock()
+	floor, storedUpTo, expectedFirstRow := block.floor, block.rows, block.expectedFirstRow
+	bs.mu.Unlock()
+	if floor > expectedFirstRow {
+		// A watermark is a contiguous prefix, not the end of an artifact
+		// whose first stored row is later. Keep the helper's head until it
+		// reaches the floor and prependBlockHead joins it to the artifact.
+		return 0, false
+	}
+	return storedUpTo, true
 }
 
 // finishDirectDelivery is the direct path's completion tail, run on every
@@ -2682,6 +2966,27 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 		if bs.current[sid] == nil {
 			bs.current[sid] = existing
 			delete(bs.queued, sid)
+			if closed := bs.closedThrough[sid]; closed > existing.expectedFirstRow {
+				existing.expectedFirstRow = closed
+			}
+			if bs.outputStartKnown[sid] {
+				mark := bs.outputStartMarks[sid]
+				existing.outputStartKnown = true
+				existing.outputStartMarked = true
+				existing.outputStartRow = mark
+				if existing.recoveredOutputInterval {
+					// A recovered mark is a replay fence; the continuation's
+					// expected start remains the durable cursor it carried.
+					if existing.outputStartRow > existing.rows {
+						existing.outputStartRow = existing.rows
+					}
+				} else if mark > existing.expectedFirstRow {
+					existing.expectedFirstRow = mark
+					existing.outputStartRow = mark
+				}
+				delete(bs.outputStartKnown, sid)
+				delete(bs.outputStartMarks, sid)
+			}
 		}
 		if bs.flushing[sid] {
 			bs.mu.Unlock()
@@ -2716,6 +3021,11 @@ func (bs *blockStream) openAttemptFor(ctx context.Context, s *WSServer, sid sess
 	// An existing current block owns those rows; only a no-current open uses
 	// waiting to hold them for the block being created.
 	if !hasCurrent {
+		// A mark observed before this authenticated reservation may belong to
+		// the prompt or a prior command. Only a mark arriving during this
+		// open, or after it installs, refines this block's expected first row.
+		delete(bs.outputStartKnown, sid)
+		delete(bs.outputStartMarks, sid)
 		bs.waiting[sid] = attempt
 	}
 	bs.opening[sid] = attempt
@@ -2861,6 +3171,21 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		bs.open[sid] = make(map[string]*openBlock)
 	}
 	b := &openBlock{attempt: attempt, entry: attempt, artifactID: openArtifact, kept: openArtifact != ""}
+	// This fresh authenticated start owns its output boundary. A mark seen
+	// after the reservation arrived while OPEN was in flight; otherwise the
+	// authenticated row-zero boundary is the expected first row.
+	b.outputStartKnown = true
+	b.expectedFirstRow = bs.closedThrough[sid]
+	b.outputStartRow = b.expectedFirstRow
+	if bs.outputStartKnown[sid] {
+		b.outputStartMarked = true
+		if mark := bs.outputStartMarks[sid]; mark > b.expectedFirstRow {
+			b.expectedFirstRow = mark
+			b.outputStartRow = mark
+		}
+	}
+	delete(bs.outputStartKnown, sid)
+	delete(bs.outputStartMarks, sid)
 	bs.open[sid][attempt] = b
 	hadCurrent := bs.current[sid] != nil
 	if !hadCurrent {
@@ -2871,6 +3196,12 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 	var pending []pendingRows
 	if !hadCurrent {
 		pending = bs.takeForFlushLocked(sid, takeAllPendingRows)
+		if b.awaitingOutputReplay {
+			b.preOutputStart = append(b.preOutputStart, pending...)
+			pending = nil
+		} else if b.outputStartKnown {
+			pending = pendingAfterOutputStart(pending, b.outputStartRow)
+		}
 	}
 	if len(pending) > 0 {
 		bs.flushing[sid] = true
@@ -2977,7 +3308,11 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 		// delivery, the instant it stops being "in flight to the store" and
 		// becomes rows the store already holds.
 		bs.mu.Lock()
+		if block.rows == 0 && block.floor == 0 {
+			block.floor = delivery.from
+		}
 		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
+		floor, expectedFirstRow := block.floor, block.expectedFirstRow
 		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
@@ -2985,7 +3320,9 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
-		confirmPendingRows(ctx, confirm, delivery)
+		if floor <= expectedFirstRow {
+			confirmPendingRows(ctx, confirm, delivery)
+		}
 	}
 	next := bs.takePendingRows(sid, block.attempt)
 	if len(next) == 0 {

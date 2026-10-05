@@ -44,7 +44,7 @@ func (s *WSServer) PublishHistoryPage(sid session.ID, doc []byte) bool {
 		SessionID: sidBytes,
 		Payload:   doc,
 	}
-	if enqueueErr := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode()); enqueueErr != nil {
+	if enqueueErr := wconn.out.TryEnqueueResponseFrame(websocket.BinaryMessage, f.Encode()); enqueueErr != nil {
 		// The subscriber is behind and its stall policy is what it sees; the
 		// page is not superseded by the next revision, so the refusal is the
 		// handler's to answer with, not a line to log and move past.

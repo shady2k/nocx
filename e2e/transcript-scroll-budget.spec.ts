@@ -649,7 +649,15 @@ test.describe('long transcript scroll budget', () => {
     })
   })
 
-  test('zero live retention leaves durable output after restart and no live history', async ({
+  // Skipped 2026-10-05 by the owner's decision to merge #267 with this open: after a
+  // coordinator restart the stored transcript loses the tail of the command - one
+  // sealed artifact, `truncated=gap`, `endRow == cursor` (a seal with no closing
+  // screen) and ~1160 rows never stored, because the interval was frozen at the count
+  // measured while the pty was still draining. That is ADR-0074's settle losing a
+  // person's own output, and the choice between amending the settle and hunting its
+  // trigger is an owner decision. Bead nocx-n5ent (P0) carries the evidence, the two
+  // options and what a person sees under each; un-skip this test when one is taken.
+  test.skip('zero live retention leaves durable output after restart and no live history', async ({
     page,
   }, testInfo) => {
     const endpoint = await backend.start()

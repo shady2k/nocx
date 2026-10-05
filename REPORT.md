@@ -94,9 +94,10 @@ The new browser spec was added before changing any product code. Red-first runs 
 - `cd frontend && npx tsc --noEmit -p tsconfig.json` — passed.
 - `npm run typecheck` — passed for the e2e TypeScript project after removing a duplicate global declaration.
 - `npm run format:check` — passed after formatting the new files and report.
+- Pre-commit checks — passed, including root ESLint and the e2e TypeScript check. An initial commit attempt caught an unused fixture variable; it was removed before the successful commit.
 - `npm run contracts:check` — not run; no wire changes.
 - No full e2e suite or `make ci-full` was run.
 
 ### Commit
 
-Pending.
+- `c5abe521` — `feat(frontend): prove joined live-to-card selection (nocx-zg3k3.4.3)`.

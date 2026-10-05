@@ -18,12 +18,13 @@
     },
     "kind": {
       "type": "string",
-      "enum": ["key", "text", "paste"]
+      "description": "Which kind of input the person produced. It is the whole of sessionruntime's intent vocabulary (internal/sessionruntime/contract.go's IntentKind) and not a printable subset: a click and a focus change are input too, and the pane's own renderer is the only source of them (nocx-zg3k3.3.1, design §6.1).",
+      "enum": ["key", "text", "paste", "mouse", "focus"]
     },
     "payload": {
       "type": "string",
       "contentEncoding": "base64",
-      "description": "Key name with modifiers, committed UTF-8 text, or verbatim paste body."
+      "description": "The intent's own argument, and its shape is the kind's: a key name with modifier prefixes (\"Ctrl+Up\"), committed UTF-8 text, a verbatim paste body, a mouse event as \"<action> <button> <x> <y>\" in cell coordinates (\"press left 12 5\"), or \"in\"/\"out\" for focus."
     }
   }
 }

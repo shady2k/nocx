@@ -78,6 +78,15 @@ type OpenResult = {
  * every misalignment type-check — which is exactly the defect that put
  * onSetupVault into the onAdoptabilityChange slot.
  */
+/** The kinds of input a person produces, as the wire spells them
+ *  (contracts/session.intent.params.schema.json's `kind`). It is the whole of
+ *  sessionruntime's intent vocabulary and not the printable subset of it: a
+ *  click and a focus change are input too, and this renderer is the only
+ *  source of them (nocx-zg3k3.3.1, design §6.1). What the payload looks like
+ *  follows from the kind — a key name with modifiers, committed text, a paste
+ *  body, a mouse event in cells, or "in"/"out". */
+export type SessionIntentKind = 'key' | 'text' | 'paste' | 'mouse' | 'focus'
+
 export interface OpenAnchor {
   /**
    * The pane this session is the pipe of: the renderer-minted UUIDv7 the
@@ -568,7 +577,7 @@ export class SessionHandle {
    *  mode interpretation and refuses an obsolete access epoch before writing. */
   intent(
     accessEpoch: number,
-    kind: 'key' | 'text' | 'paste',
+    kind: SessionIntentKind,
     payload: string,
   ): Promise<SessionIntentResult> {
     return this.client.sessionIntent(this.sessionId, accessEpoch, kind, payload)
@@ -1512,16 +1521,12 @@ export class WSClient {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
   }
 
-  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
-   *  answer's facts ride the result; the rows ride the screen plane keyed
-   *  by the result's pageId — one socket, one FIFO, so a caller reading in
-   *  order finds the rows already queued when the promise resolves. */
   /** Sends a control-plane session intent for the pane's renderer. Payload is
    *  the schema's base64 string; PTY bytes stay on the separate data plane. */
   sessionIntent(
     sessionId: string,
     accessEpoch: number,
-    kind: 'key' | 'text' | 'paste',
+    kind: SessionIntentKind,
     payload: string,
   ): Promise<SessionIntentResult> {
     return this.dispatcher.call<SessionIntentResult>('session.intent', {
@@ -1532,6 +1537,10 @@ export class WSClient {
     })
   }
 
+  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
+   *  answer's facts ride the result; the rows ride the screen plane keyed
+   *  by the result's pageId — one socket, one FIFO, so a caller reading in
+   *  order finds the rows already queued when the promise resolves. */
   historyPage(
     sessionId: string,
     before: number | null,

@@ -141,3 +141,84 @@ func sessionIntentResultRaw(t *testing.T, raw []byte) []byte {
 	}
 	return response.Result
 }
+
+// The wire's kind set is the runtime's whole intent vocabulary: a person keys,
+// types, pastes, clicks and moves focus, and each reaches the helper as its own
+// kind so the encoder can decide what the program asked for (nocx-zg3k3.3.1,
+// design §6.1). A kind missing here is not a smaller set of features — it is a
+// click the runtime is never asked to encode, refused cannot_encode.
+func TestSessionIntentCarriesEveryKindTheRuntimeEncodes(t *testing.T) {
+	kinds := []struct {
+		kind    string
+		payload string
+	}{
+		{"key", "Ctrl+Left"},
+		{"text", "hello"},
+		{"paste", "hello\nworld"},
+		{"mouse", "press left 2 3"},
+		{"focus", "in"},
+	}
+	source := &fakePaneIntentSource{result: proto.IntentResult{State: "executed", BytesWritten: 1, FenceAfter: 7}}
+	ws, _, _ := newPanesWS(t, WithPaneIntentSource(source))
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	for i, k := range kinds {
+		raw := jsonrpcCallWithID(t, conn, "session.intent", map[string]any{
+			"sessionId": sid, "accessEpoch": 1, "kind": k.kind, "payload": []byte(k.payload),
+		}, i+2)
+		var response struct {
+			Result sessionIntentResult `json:"result"`
+			Error  *RPCError           `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatalf("decode %s response: %v", k.kind, err)
+		}
+		if response.Error != nil {
+			t.Fatalf("%s intent refused at the wire: %+v", k.kind, response.Error)
+		}
+	}
+
+	calls := source.snapshot()
+	if len(calls) != len(kinds) {
+		t.Fatalf("helper calls = %d, want %d", len(calls), len(kinds))
+	}
+	for i, k := range kinds {
+		if calls[i].params.Kind != k.kind || string(calls[i].params.Payload) != k.payload {
+			t.Fatalf("call %d = kind %q payload %q, want %q/%q",
+				i, calls[i].params.Kind, calls[i].params.Payload, k.kind, k.payload)
+		}
+	}
+}
+
+// A kind outside that set is refused as a bad request rather than forwarded:
+// sessionruntime maps an unrecognised spelling to IntentKindNone and refuses it
+// cannot_encode, but a payload this protocol has no shape for is the caller's
+// error and never reaches the session at all (An unrecognised claim must never
+// look stronger than it is).
+func TestSessionIntentRefusesAKindTheRuntimeDoesNotEncode(t *testing.T) {
+	source := &fakePaneIntentSource{result: proto.IntentResult{State: "executed"}}
+	ws, _, _ := newPanesWS(t, WithPaneIntentSource(source))
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	for _, kind := range []string{"volume", "MOUSE", ""} {
+		raw := jsonrpcCallWithID(t, conn, "session.intent", map[string]any{
+			"sessionId": sid, "accessEpoch": 1, "kind": kind, "payload": []byte("x"),
+		}, 2)
+		var response struct {
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatalf("decode %q response: %v", kind, err)
+		}
+		if response.Error == nil || response.Error.Code != -32602 {
+			t.Fatalf("kind %q response = %s, want -32602", kind, raw)
+		}
+	}
+	if len(source.snapshot()) != 0 {
+		t.Fatal("a kind the runtime cannot encode reached the helper")
+	}
+}

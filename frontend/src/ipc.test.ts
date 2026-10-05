@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import { SessionHandle, WSClient } from './ipc'
+import { SessionHandle, WSClient, type SessionIntentKind } from './ipc'
 import {
   FRAME_HEADER_SIZE,
   FRAME_VERSION,
@@ -121,6 +121,41 @@ describe('session.intent', () => {
       bytesWritten: 1,
       fenceAfter: 7,
     })
+  })
+
+  // The kinds are the whole of the runtime's intent vocabulary, and a renderer
+  // sends all five: a click and a focus change are input a person produced and
+  // nobody else can report them (nocx-zg3k3.3.1). A client that could only
+  // spell the printable three would make a click unrepresentable here, and the
+  // helper would never be asked what the program's mouse mode says.
+  it('carries every kind of input, not only the printable ones', async () => {
+    const { session, ws } = await connectedSession()
+    const kinds: SessionIntentKind[] = ['key', 'text', 'paste', 'mouse', 'focus']
+    const payloads = [
+      btoa('Ctrl+Left'),
+      btoa('hi'),
+      btoa('hi\nthere'),
+      btoa('press left 2 3'),
+      btoa('in'),
+    ]
+
+    for (let i = 0; i < kinds.length; i++) {
+      const pending = session.intent(1, kinds[i], payloads[i])
+      const sent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
+      const request = sent[sent.length - 1]
+      expect(request?.params).toEqual({
+        sessionId: SID,
+        accessEpoch: 1,
+        kind: kinds[i],
+        payload: payloads[i],
+      })
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { state: 'executed', bytesWritten: 1, fenceAfter: i },
+      })
+      await expect(pending).resolves.toEqual({ state: 'executed', bytesWritten: 1, fenceAfter: i })
+    }
   })
 })
 

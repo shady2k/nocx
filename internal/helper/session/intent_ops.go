@@ -229,7 +229,17 @@ func (hs *hostSession) ensureControl() (sessionruntime.Control, error) {
 }
 
 // intentKindFromWire maps the wire's closed kind set onto sessionruntime's
-// own vocabulary. An unrecognised spelling maps to IntentKindNone, which
+// own vocabulary.
+//
+// IT IS THE WHOLE VOCABULARY AND NOT A SUBSET OF IT (nocx-zg3k3.3.1): key,
+// text, paste, mouse and focus are sessionruntime's five intent kinds, and a
+// renderer sends all five — a click and a focus change are input a person
+// produced, and the pane's own renderer is the only source of them. A mapping
+// that stopped at the printable three did not refuse those intents, it refused
+// them cannot_encode, which is the shape of "this kind names no encoding"
+// rather than "this wire does not carry it".
+//
+// An unrecognised spelling still maps to IntentKindNone, which
 // sessionruntime's own encode refuses cannot_encode (ErrIntentUnsupported) at
 // the commit point — the same "an unrecognised claim must never look
 // stronger than it is" rule client.completenessFromWire already states one
@@ -242,6 +252,10 @@ func intentKindFromWire(s string) sessionruntime.IntentKind {
 		return sessionruntime.IntentKindText
 	case "paste":
 		return sessionruntime.IntentKindPaste
+	case "mouse":
+		return sessionruntime.IntentKindMouse
+	case "focus":
+		return sessionruntime.IntentKindFocus
 	default:
 		return sessionruntime.IntentKindNone
 	}

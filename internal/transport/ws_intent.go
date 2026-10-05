@@ -15,6 +15,16 @@ const (
 	sessionIntentBudgetNanos = int64(5_000_000_000)
 )
 
+// sessionIntentKinds is the wire's closed kind set: the whole of
+// sessionruntime's intent vocabulary and nothing else (nocx-zg3k3.3.1). It is a
+// set rather than a chain of comparisons because the kinds are what the RUNTIME
+// encodes, and a kind this protocol does not carry is the CALLER's error — a
+// spelling missing here must be refused as a bad request rather than forwarded
+// as an intent the runtime would then answer cannot_encode.
+var sessionIntentKinds = map[string]struct{}{
+	"key": {}, "text": {}, "paste": {}, "mouse": {}, "focus": {},
+}
+
 type sessionIntentParams struct {
 	SessionID   string `json:"sessionId"`
 	AccessEpoch uint64 `json:"accessEpoch"`
@@ -46,7 +56,8 @@ func validateSessionIntentRaw(raw json.RawMessage) string {
 			return "invalid session.intent params: unknown field " + name
 		}
 	}
-	if p.SessionID == "" || p.AccessEpoch == 0 || (p.Kind != "key" && p.Kind != "text" && p.Kind != "paste") || len(p.Payload) > maxSessionIntentBytes {
+	_, knownKind := sessionIntentKinds[p.Kind]
+	if p.SessionID == "" || p.AccessEpoch == 0 || !knownKind || len(p.Payload) > maxSessionIntentBytes {
 		return "invalid session.intent params"
 	}
 	if _, err := session.IDToBytes(session.ID(p.SessionID)); err != nil {

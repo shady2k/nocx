@@ -87,6 +87,11 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"key","payload":"RW50ZXI="}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"text","payload":"aGk="}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":2,"kind":"paste","payload":"aGkKdGhlcmU="}`),
+			// The two kinds that arrived with the widening (nocx-zg3k3.3.1):
+			// a click and a focus change are input a person produced, and
+			// sessionruntime has encoded both all along.
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"mouse","payload":"cHJlc3MgbGVmdCAyIDM="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"focus","payload":"aW4="}`),
 		},
 		"notes.create": {
 			[]byte(`{}`),

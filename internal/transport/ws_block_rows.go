@@ -95,6 +95,13 @@ type blockStream struct {
 	// open are the session's open blocks by attempt id — kept ones carry a
 	// real block, refused ones only remember the refusal.
 	open map[session.ID]map[string]*openBlock
+	// outputStartMarks holds a mark that arrived before the authenticated
+	// lifecycle start opened its block. It contains position only, never
+	// authority to open a block.
+	outputStartMarks   map[session.ID]uint64
+	outputStartKnown   map[session.ID]bool
+	outputStartEnabled map[session.ID]bool
+	outputReplayers    map[session.ID]func() error
 	// current is the interval whose rows are currently being delivered. A
 	// later authenticated start has an open block too, but stays queued until
 	// the current interval's end promotes it.
@@ -347,6 +354,11 @@ func (bs *blockStream) heldBytesLocked(sid session.ID) int64 {
 			n += heldRowsBytes(d.rows)
 		}
 	}
+	if current := bs.current[sid]; current != nil {
+		for _, d := range current.preOutputStart {
+			n += heldRowsBytes(d.rows)
+		}
+	}
 	for _, set := range [][]pendingEnd{bs.pendingCloses[sid], bs.ends[sid], bs.queuedEnds[sid]} {
 		for _, e := range set {
 			n += heldRowsBytes(e.closing)
@@ -465,6 +477,16 @@ type openBlock struct {
 	// rather than where the interval's index says it should be
 	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
 	rows uint64
+	// The OSC 133 C row position gates admission. A fresh authenticated
+	// start waits for this ordered mark; rows received while waiting are
+	// retained only for this already-authenticated block.
+	outputStartKnown     bool
+	outputStartMarked    bool
+	outputStartRow       uint64
+	awaitingOutputStart  bool
+	awaitingOutputReplay bool
+	shouldReplayOnStart  bool
+	preOutputStart       []pendingRows
 	// floor is the absolute index the artifact's stored span begins at —
 	// the store's FirstRow, read at the re-bind. The stored span is
 	// [floor, rows): a delivery reaching below the floor is the block's
@@ -762,6 +784,19 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 		b = &openBlock{
 			attempt: found.EntryID, entry: found.EntryID,
 			artifactID: found.ArtifactID, kept: true,
+		}
+		if bs.outputStartKnown[sid] {
+			b.outputStartKnown = true
+			b.outputStartMarked = true
+			b.outputStartRow = bs.outputStartMarks[sid]
+			delete(bs.outputStartKnown, sid)
+			delete(bs.outputStartMarks, sid)
+		} else {
+			// No mark has been observed for this interval. Preserve the
+			// authenticated start's ordinary row-zero boundary; a mark that
+			// arrives later on the ordered rows plane replaces it before the
+			// output it governs.
+			b.outputStartKnown = true
 		}
 		bs.open[sid][found.EntryID] = b
 	}
@@ -1085,6 +1120,10 @@ func (bs *blockStream) detachCoordinator(sid session.ID) {
 	delete(bs.pending, sid)
 	delete(bs.flushing, sid)
 	delete(bs.opening, sid)
+	delete(bs.outputStartMarks, sid)
+	delete(bs.outputStartKnown, sid)
+	delete(bs.outputStartEnabled, sid)
+	delete(bs.outputReplayers, sid)
 	delete(bs.pendingCloses, sid)
 	delete(bs.closing, sid)
 	delete(bs.closeTries, sid)
@@ -1213,6 +1252,168 @@ func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b
 // an end marker. It takes the same path as any other delivery, so the loss
 // reaches the block's summary and the block's cursor moves to the end of the
 // gap, where the closing screen then lands.
+// BlockOutputStartPlaneAttached enables the position gate for this source.
+// Authentication still comes only from the lifecycle start path.
+func (s *WSServer) BlockOutputStartPlaneAttached(sid session.ID) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	if bs.outputStartEnabled == nil {
+		bs.outputStartEnabled = make(map[session.ID]bool)
+	}
+	bs.outputStartEnabled[sid] = true
+	if block := bs.current[sid]; block != nil {
+		if block.outputStartMarked {
+			// The new reader's retained-window replay follows this ordered
+			// stream marker; do not admit later rows ahead of it.
+			block.awaitingOutputReplay = true
+		} else {
+			block.outputStartKnown = true
+			block.outputStartRow = 0
+			block.awaitingOutputStart = false
+		}
+	}
+	bs.mu.Unlock()
+}
+
+// SetBlockOutputReplay installs the same-subscriber attach that causes the
+// helper's existing retained-window resend. The callback is invoked only
+// after an authenticated lifecycle Start and the row mark have joined.
+func (s *WSServer) SetBlockOutputReplay(sid session.ID, replay func() error) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	if replay == nil {
+		delete(bs.outputReplayers, sid)
+		bs.mu.Unlock()
+		return
+	}
+	if bs.outputReplayers == nil {
+		bs.outputReplayers = make(map[session.ID]func() error)
+	}
+	bs.outputReplayers[sid] = replay
+	block := bs.current[sid]
+	request := block != nil && block.shouldReplayOnStart && block.outputStartMarked && !block.awaitingOutputReplay
+	if request {
+		block.awaitingOutputReplay = true
+	}
+	bs.mu.Unlock()
+	if request {
+		if err := replay(); err != nil {
+			s.log.Warn("block rows retained-window replay request failed", "session", sid, "error", err)
+		}
+	}
+}
+
+// BlockOutputStartRow carries an output-position marker on the ordered rows
+// stream. It is position only: only openAttemptFor (authenticated lifecycle
+// start) can establish a block. When a mark and authenticated start join, the
+// helper's retained-window replay repairs any rows that arrived before the
+// start; otherwise the position is consumed by the next authenticated start.
+func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	block := bs.current[sid]
+	currentReplayMark := block != nil && block.awaitingOutputReplay && block.outputStartMarked && fromRow == block.outputStartRow
+	saveForNext := !currentReplayMark && (block == nil || bs.queued[sid] != "" || bs.opening[sid] != "")
+	if saveForNext {
+		if bs.outputStartMarks == nil {
+			bs.outputStartMarks = make(map[session.ID]uint64)
+		}
+		if bs.outputStartKnown == nil {
+			bs.outputStartKnown = make(map[session.ID]bool)
+		}
+		bs.outputStartMarks[sid] = fromRow
+		bs.outputStartKnown[sid] = true
+		bs.mu.Unlock()
+		return
+	}
+	if block.outputStartMarked && fromRow == block.outputStartRow {
+		if block.awaitingOutputReplay {
+			// This mark is the replacement reader's replay fence. Anything held
+			// before it was not confirmed and will be resent ahead of queued output.
+			block.awaitingOutputReplay = false
+			block.preOutputStart = nil
+		}
+		bs.mu.Unlock()
+		return
+	}
+	if block.outputStartKnown && block.outputStartMarked {
+		if fromRow > block.outputStartRow {
+			if bs.outputStartMarks == nil {
+				bs.outputStartMarks = make(map[session.ID]uint64)
+			}
+			if bs.outputStartKnown == nil {
+				bs.outputStartKnown = make(map[session.ID]bool)
+			}
+			bs.outputStartMarks[sid] = fromRow
+			bs.outputStartKnown[sid] = true
+		}
+		bs.mu.Unlock()
+		return
+	}
+	block.awaitingOutputStart = false
+	block.outputStartKnown = true
+	block.outputStartMarked = true
+	block.outputStartRow = fromRow
+	replay := bs.outputReplayers[sid]
+	if block.shouldReplayOnStart && replay != nil {
+		block.awaitingOutputReplay = true
+		bs.mu.Unlock()
+		if err := replay(); err != nil {
+			s.log.Warn("block rows retained-window replay request failed", "session", sid, "fromRow", fromRow, "error", err)
+		}
+		return
+	}
+	pending := block.preOutputStart
+	block.preOutputStart = nil
+	confirm := bs.confirmers[sid]
+	bs.mu.Unlock()
+	for _, p := range pending {
+		rows, start, lost := outputRowsAfterStart(p, fromRow)
+		if len(rows) == 0 && lost == 0 {
+			if confirm != nil {
+				confirm(fromRow)
+			}
+			continue
+		}
+		up, ok := s.BlockRowsArrived(sid, start, lost, rows, p.cause)
+		if ok && confirm != nil {
+			confirm(up)
+		}
+	}
+	bs.mu.Lock()
+	block.preOutputStart = nil
+	bs.mu.Unlock()
+}
+
+func pendingAfterOutputStart(in []pendingRows, start uint64) []pendingRows {
+	out := make([]pendingRows, 0, len(in))
+	for _, p := range in {
+		rows, from, lost := outputRowsAfterStart(p, start)
+		if len(rows) == 0 && lost == 0 {
+			continue
+		}
+		out = append(out, pendingRows{from: from, lost: lost, cause: p.cause, rows: rows})
+	}
+	return out
+}
+
+func outputRowsAfterStart(p pendingRows, start uint64) ([]emulator.Row, uint64, uint64) {
+	if len(p.rows) == 0 {
+		if p.from >= start {
+			return nil, p.from, p.lost
+		}
+		return nil, start, 0
+	}
+	if p.from >= start {
+		return p.rows, p.from, p.lost
+	}
+	skip := start - p.from
+	if skip >= uint64(len(p.rows)) {
+		return nil, start, 0
+	}
+	return p.rows[skip:], start, 0
+}
+
 func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool) {
 	if len(rows) == 0 && lost == 0 {
 		return 0, false
@@ -1233,6 +1434,35 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		return 0, false
 	}
 	block := bs.current[sid]
+	if block == nil && bs.opening[sid] != "" {
+		if !s.holdLocked(sid, fromRow, rows) {
+			bs.mu.Unlock()
+			return 0, false
+		}
+		bs.pending[sid] = append(bs.pending[sid], pendingRows{from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...)})
+		bs.mu.Unlock()
+		return 0, false
+	}
+	if block != nil && (block.awaitingOutputStart || block.awaitingOutputReplay) {
+		if !s.holdLocked(sid, fromRow, rows) {
+			bs.mu.Unlock()
+			return 0, false
+		}
+		block.preOutputStart = append(block.preOutputStart, pendingRows{from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...)})
+		bs.mu.Unlock()
+		return 0, false
+	}
+	if block != nil && block.outputStartKnown && fromRow < block.outputStartRow {
+		start := block.outputStartRow
+		skip := start - fromRow
+		if skip >= uint64(len(rows)) {
+			bs.mu.Unlock()
+			return start, true
+		}
+		rows = rows[skip:]
+		fromRow = start
+		lost = 0
+	}
 	var head []emulator.Row
 	var headFrom uint64
 	fullyStored := false
@@ -2861,6 +3091,22 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		bs.open[sid] = make(map[string]*openBlock)
 	}
 	b := &openBlock{attempt: attempt, entry: attempt, artifactID: openArtifact, kept: openArtifact != ""}
+	if bs.outputStartKnown[sid] {
+		b.outputStartKnown = true
+		b.outputStartMarked = true
+		b.outputStartRow = bs.outputStartMarks[sid]
+		delete(bs.outputStartKnown, sid)
+		delete(bs.outputStartMarks, sid)
+	} else {
+		// Authenticated Start remains sufficient for shells that do not emit
+		// OSC 133 C. If the position mark is present, the ordered rows plane
+		// will replace this fallback before the command's output rows arrive.
+		b.outputStartKnown = true
+	}
+	b.shouldReplayOnStart = bs.outputStartEnabled[sid]
+	if b.outputStartMarked && b.shouldReplayOnStart && bs.outputReplayers[sid] != nil {
+		b.awaitingOutputReplay = true
+	}
 	bs.open[sid][attempt] = b
 	hadCurrent := bs.current[sid] != nil
 	if !hadCurrent {
@@ -2871,13 +3117,28 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 	var pending []pendingRows
 	if !hadCurrent {
 		pending = bs.takeForFlushLocked(sid, takeAllPendingRows)
+		if b.awaitingOutputStart || b.awaitingOutputReplay {
+			b.preOutputStart = append(b.preOutputStart, pending...)
+			pending = nil
+		} else if b.outputStartKnown {
+			pending = pendingAfterOutputStart(pending, b.outputStartRow)
+		}
 	}
 	if len(pending) > 0 {
 		bs.flushing[sid] = true
 	}
 	confirm := bs.confirmers[sid]
+	var replay func() error
+	if !hadCurrent && b.awaitingOutputReplay {
+		replay = bs.outputReplayers[sid]
+	}
 	next, kind, nextGen := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
+	if replay != nil {
+		if err := replay(); err != nil {
+			s.log.Warn("block rows retained-window replay request failed", "session", sid, "attempt", attempt, "error", err)
+		}
+	}
 	if len(pending) > 0 {
 		bs.flushPendingRows(ctx, s, sid, b, pending, confirm)
 	}

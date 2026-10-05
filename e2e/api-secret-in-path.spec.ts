@@ -169,7 +169,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // it is still the truth and is still what a person types into once they
     // disagree with the offer. This spec disagrees: the collection must land
     // where the walk below can read it, not under the collections root.
-    await (await openImportDestination(ask, page)).fill(collectionRoot)
+    await openImportDestination(ask, page, { fill: collectionRoot })
 
     // ── AND THE OFFER, TAKEN ──────────────────────────────────────────────
     //

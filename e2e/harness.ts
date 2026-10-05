@@ -1352,8 +1352,38 @@ export class VaultBackend {
  * pencil visible, or field already open — and then guarantees the field. That
  * is a state change, never a duration, which is the rule a spec may not
  * break.
+ *
+ * AND IT HAS A THIRD SHAPE, WHICH IS A WINDOW AND NOT A SETTLEMENT
+ * (nocx-8ecbq). `nameable()` is false while the destination
+ * still names nothing, and `proposalFor` needs `store.defaultRoot()`, which
+ * rides `api.collections.list` — a round trip. api-pane.tsx says so itself
+ * under "WHEN THE ROOT LANDS AFTER THE SOURCE DOES" (nocx-s47is): the ask can
+ * be opened, and an export PASTED into it, while that trip is still in
+ * flight. For as long as it is, `sourceLabel !== '' && !nameable()` holds, so
+ * the FIELD IS OPEN AND THE PENCIL IS CORRECTLY ABSENT — and then the
+ * proposal lands and the ask collapses to the sentence and the pencil.
+ *
+ * Read once inside that window, this helper decides "the field is open,
+ * nothing to click" and the field it just promised is taken away before the
+ * caller reaches it (CI 37312755629, `ci-e2e (webkit, 2)`: the union count
+ * satisfied by the open field, no pencil to click, then
+ * `#api-import-postman-dest` hidden for the whole 5 s — while the
+ * accessibility snapshot taken at that moment shows `Imports into: …` and
+ * the pencil, i.e. the proposal had landed).
+ *
+ * So the pair is RETRIED until the field is really there, which is the wait a
+ * person performs: open it through the pencil whenever the ask offers the
+ * sentence, and take the field otherwise. A value brought by the caller is
+ * typed INSIDE that retry and not after it, because the window can close in
+ * the instant between the field appearing and the caller's next statement —
+ * and typing is what settles the ask for good (api-pane.tsx drops the late
+ * proposal once the destination has been typed into).
  */
-export async function openImportDestination(ask: Locator, page: Page): Promise<Locator> {
+export async function openImportDestination(
+  ask: Locator,
+  page: Page,
+  opts: { fill?: string } = {},
+): Promise<Locator> {
   const pencil = ask.getByRole('button', { name: 'Change where this goes' })
   const field = page.locator('#api-import-postman-dest')
   // `.or()` unions DOM MATCHES, and the field is always rendered — the dialog
@@ -1362,8 +1392,16 @@ export async function openImportDestination(ask: Locator, page: Page): Promise<L
   // what makes "exactly one of these is on screen" the settled state to wait
   // for, and a strict-mode violation is what asking without it costs.
   await baseExpect(pencil.or(field).filter({ visible: true })).toHaveCount(1)
-  if (await pencil.isVisible()) await pencil.click()
-  await baseExpect(field).toBeVisible()
+  await baseExpect(async () => {
+    // The pencil is the ask's own door to the field, taken whenever it is
+    // offered — and taking it is what makes the field STAY open, since
+    // `editingDest` is not subject to the proposal.
+    if (await pencil.isVisible()) await pencil.click()
+    baseExpect(await field.isVisible()).toBe(true)
+    // Bounded per attempt, so an attempt that loses the field to a landing
+    // proposal comes back to the retry instead of waiting out the test.
+    if (opts.fill !== undefined) await field.fill(opts.fill, { timeout: 2_000 })
+  }).toPass({ timeout: 15_000 })
   return field
 }
 

@@ -565,6 +565,18 @@ func (s *Session) parkObservationLocked(nonce FenceNonce) {
 	if o == nil {
 		return
 	}
+	// THE INTERVAL IN FLIGHT IS THE DEFERRED ONE AND KEEPS ITS OWN ROWS
+	// (nocx-n5ent). A second command's completion arriving while the first
+	// command's output is still unread asks to park THIS interval on the
+	// second nonce — which would take the first command's remaining rows away
+	// from it and hand them to an interval that never comes. The deferral is
+	// the statement that the interval's own fence has not been read yet, so
+	// nothing may re-park on it: the second command's half stays in the
+	// rendezvous set, where its own fence's sighting closes it against the
+	// interval that follows the flush.
+	if s.holdsDeferredSettle() {
+		return
+	}
 	if o.Nonce != (FenceNonce{}) && o.Nonce == nonce {
 		// A duplicate completion must not refresh the parked boundary: the
 		// interval's own end row is the count it had departed to when its
@@ -733,6 +745,87 @@ func (s *Session) settlePendingLocked(arriving FenceNonce) bool {
 	return s.settleParkedLocked(parked.Nonce)
 }
 
+// deferPendingLocked is [Session.settlePendingLocked] for an event that
+// arrived over the AUTHENTICATED channel, and it does NOT take the settle
+// (nocx-n5ent; ADR-0074 case 3, amended).
+//
+// The two carriers are ordered independently — the completion travels the
+// authenticated channel, the fence and the command's rows travel the pty —
+// and the shell sends its completion BEFORE it writes its fence
+// (internal/shellintegration/scripts/nocx.bash). So a completion for another
+// nonce, or an environment entry, is no proof that the parked interval's own
+// bytes have been read: on the runner the pty still held about a drain's worth
+// of the command's output when the settle fired, the interval was frozen at
+// the count the fast channel had reached, and every row that departed
+// afterwards belonged to a next interval that never came — 5000 rows printed,
+// 3843 stored, `truncated=gap`, `endRow == cursor`, and no way for the person
+// to see what the command had written.
+//
+// So the interval stays IN FLIGHT and keeps its own rows. It is sealed by its
+// own fence's sighting — the byte stream's own proof that its output is over,
+// with the screen the fence sat on — or, when that fence truly never comes, by
+// the byte stream's next boundary or the session's end
+// (flushDeferredSettleLocked). The bound is the helper's own stream and never
+// a duration, which is ADR-0074's rule and stays it.
+func (s *Session) deferPendingLocked(arriving FenceNonce) bool {
+	parked := s.observation
+	if parked == nil || parked.Nonce == (FenceNonce{}) || parked.Nonce == arriving {
+		return false
+	}
+	return s.deferParkedLocked(parked.Nonce)
+}
+
+// deferParkedLocked is the deferral itself: record that the interval parked
+// with the nonce is one whose settle the authenticated channel has asked for
+// and the stream has not yet proved. It answers false when no interval is
+// parked on that nonce — the rendezvous bound evicts meetings that are not the
+// parked one, and an eviction of somebody else's meeting settles nothing.
+func (s *Session) deferParkedLocked(nonce FenceNonce) bool {
+	parked := s.observation
+	if parked == nil || parked.Nonce != nonce {
+		return false
+	}
+	// The interval in flight is already the deferred one: a second
+	// authenticated event asks for the same settle and changes nothing. Later
+	// completions do not stack, exactly as a second completion for the parked
+	// nonce is the parked interval's own join.
+	if s.deferredSettleSet {
+		return true
+	}
+	s.deferredSettle, s.deferredSettleSet = parked.Nonce, true
+	// Completeness is NOT degraded here: the interval's fence may still be
+	// read off the pty, and an interval its own sighting seals is a boundary
+	// that was met. The settle that does take the interval — the flush below —
+	// is what says the boundary went unmet.
+	return true
+}
+
+// flushDeferredSettleLocked takes the settle an authenticated-channel event
+// asked for and could not take, at the event that proves the wait is over:
+// the byte stream has reached another boundary (a later fence's sighting), or
+// the session has ended. It is [Session.settleParkedLocked]'s own work — the
+// meeting reads expired, the claim about the stream goes no-fence, and the
+// interval seals with no closing screen at the count the stream has reached —
+// so the residue ADR-0074 case 3 records is unchanged; what changed is only
+// WHEN it is taken.
+func (s *Session) flushDeferredSettleLocked() bool {
+	if !s.deferredSettleSet {
+		return false
+	}
+	nonce := s.deferredSettle
+	s.deferredSettle, s.deferredSettleSet = FenceNonce{}, false
+	return s.settleParkedLocked(nonce)
+}
+
+// holdsDeferredSettle answers whether the interval in flight is one whose
+// settle the authenticated channel has already asked for (nocx-n5ent). It is
+// the guard the parking path reads: a second command's completion must not
+// take the interval in flight away from the first command's still-unread rows
+// (parkObservationLocked).
+func (s *Session) holdsDeferredSettle() bool {
+	return s.deferredSettleSet && s.observation != nil && s.observation.Nonce == s.deferredSettle
+}
+
 // settleParkedLocked settles the interval parked with the nonce: its
 // authenticated completion arrived and its fence's sighting never will. The
 // meeting is marked [RendezvousExpired] — settled, still record — the
@@ -744,6 +837,13 @@ func (s *Session) settleParkedLocked(nonce FenceNonce) bool {
 	parked := s.observation
 	if parked == nil || parked.Nonce != nonce {
 		return false
+	}
+	// A settle taken here is the one the deferral was holding (nocx-n5ent):
+	// the interval it names is being sealed, so nothing is left deferred for
+	// it. A deferral naming a DIFFERENT nonce belongs to another interval and
+	// is left alone.
+	if s.deferredSettleSet && s.deferredSettle == nonce {
+		s.deferredSettle, s.deferredSettleSet = FenceNonce{}, false
 	}
 	if e := s.rendezvous[nonce]; e != nil && e.pending() {
 		e.State = RendezvousExpired

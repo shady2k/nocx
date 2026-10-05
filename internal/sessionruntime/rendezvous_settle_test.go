@@ -138,10 +138,22 @@ func TestAParkedIntervalIsSettledByTheNextIntervalsStart(t *testing.T) {
 	}
 }
 
-// TestAParkedIntervalIsSettledByASecondCompletion: the same settle, driven by
-// the other event that names a later interval — an authenticated completion
-// for a nonce that is not the parked one.
-func TestAParkedIntervalIsSettledByASecondCompletion(t *testing.T) {
+// TestAParkedIntervalIsSettledAtTheStreamsNextBoundaryAfterASecondCompletion:
+// the settle a completion for ANOTHER nonce asks for, taken where it can be
+// taken without losing the command's own rows (nocx-n5ent, the ADR-0074 case 3
+// amendment).
+//
+// The completion arrives over the authenticated channel, and this carrier
+// cannot tell "the parked interval's fence has not been READ yet" from "it was
+// never written" — the shell sends its completion BEFORE it writes its fence,
+// so the completion that says a later command finished can arrive while the
+// pty still holds the earlier command's whole drain. Taking the settle there
+// froze the interval at a count the byte stream had not reached and left
+// everything after it outside every interval: measured on the runner, 5000
+// rows printed and 3843 stored. So the completion DEFERS, and the settle is
+// taken at the byte stream's next boundary — the same marker, later, with the
+// rows it covers.
+func TestAParkedIntervalIsSettledAtTheStreamsNextBoundaryAfterASecondCompletion(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))
 	parked, later := obsNonce(3), obsNonce(4)
 
@@ -151,19 +163,40 @@ func TestAParkedIntervalIsSettledByASecondCompletion(t *testing.T) {
 
 	s.Completed(s.Incarnation(), later, 0)
 
+	// THE DEFERRAL: nothing is sealed, and the interval in flight is still the
+	// parked one, so the rows the pty has not yet handed over remain its own.
+	if _, early := settledEnds(rs)[parked]; early {
+		t.Fatalf("a completion for another nonce sealed the parked interval at row %d before the stream reached its next boundary", atCompletion)
+	}
+	if s.observation == nil || s.observation.Nonce != parked {
+		t.Fatal("the second completion took the interval in flight away from the parked nonce, and with it the rows still to come")
+	}
+	// The later completion is its own interval's half, not A's: it is in the
+	// set waiting for its own fence.
+	if got := s.RendezvousFor(later).State; got != RendezvousAwaitingSighting {
+		t.Fatalf("the later completion's meeting reads %s, want awaiting-sighting", rendezvousStateName(got))
+	}
+
+	// The stream catches up, then reaches the later command's own boundary.
+	obsFeed(t, s, 30, 40)
+	if err := s.SightFence(later, []byte("$ ")); err != nil {
+		t.Fatalf("sight the next interval's own fence: %v", err)
+	}
+
 	end, ok := settledEnds(rs)[parked]
 	if !ok || end.endRow < atCompletion || len(end.closing) != 0 || !end.noFence {
 		t.Fatalf("the settled end marker is %+v, want no less than row %d, no closing screen, and no-fence", end, atCompletion)
 	}
+	// The marker names the rows the stream had reached: the interval kept
+	// them, and they are inside its block rather than outside every block.
 	if want := streamedRowsBefore(rs); end.endRow != want {
-		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
+		t.Fatalf("the settled end marker stops at row %d, want the %d rows the stream had carried", end.endRow, want)
+	}
+	if end.endRow <= atCompletion {
+		t.Fatalf("the settled end marker stops at row %d, no further than the %d the completion measured: the rows the pty still owed are outside the block", end.endRow, atCompletion)
 	}
 	if got := s.RendezvousFor(parked).State; got != RendezvousExpired {
 		t.Fatalf("the settled meeting reads %s, want expired", rendezvousStateName(got))
-	}
-	// The later completion is its own interval's half, not A's.
-	if got := s.RendezvousFor(later).State; got != RendezvousAwaitingSighting {
-		t.Fatalf("the later completion's meeting reads %s, want awaiting-sighting: it parked its own interval", rendezvousStateName(got))
 	}
 }
 
@@ -274,9 +307,10 @@ func TestASightingNobodyAuthenticatedSettlesWithoutASeal(t *testing.T) {
 // TestTheBoundNeverLeavesAParkedRecordUnsealed: the rendezvous set's bound
 // recycles a slot when it is full (design §6.4), and the interval parked on
 // the meeting that goes must not be left with a record nothing can seal. The
-// events settle it on the way — the completion that parks the NEWEST meeting
-// settles the one parked before it — so by the time the bound drops a meeting
-// its record is already sealed, at the count its own completion measured.
+// eviction DEFERS the settle rather than taking it (nocx-n5ent): spending a
+// slot is not evidence about the byte stream, so the record is sealed at the
+// stream's next boundary, at the count the stream had then reached — and never
+// left unsealed.
 func TestTheBoundNeverLeavesAParkedRecordUnsealed(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))
 
@@ -294,13 +328,30 @@ func TestTheBoundNeverLeavesAParkedRecordUnsealed(t *testing.T) {
 	}
 
 	// The ninth completion finds every incumbent authenticated: the slot it
-	// takes is the oldest meeting the events had ALREADY settled — and by then
-	// its interval's record is sealed, which is the point.
+	// takes is the oldest meeting. The record that meeting parked is DEFERRED
+	// there — the interval in flight is still the oldest one's, holding the
+	// rows the stream has not handed over yet — and the newest completion's
+	// own half waits in the set for its own fence.
 	s.Completed(s.Incarnation(), obsNonce(0xFF), 0)
 
 	if got := s.RendezvousFor(oldest).State; got != RendezvousIdle {
 		t.Fatalf("the meeting the bound recycled is %s, want idle", rendezvousStateName(got))
 	}
+	if _, early := settledEnds(rs)[oldest]; early {
+		t.Fatalf("the bound sealed the recycled meeting's record at row %d before the stream reached its next boundary", atCompletion)
+	}
+	if s.observation == nil || s.observation.Nonce != oldest {
+		t.Fatal("the interval in flight is no longer the recycled meeting's: its rows went with it")
+	}
+
+	// The stream reaches its next boundary: the newest command's own fence is
+	// sighted. The deferred record is sealed there, and the newest interval
+	// joins its own fence.
+	obsFeed(t, s, 30, 25)
+	if err := s.SightFence(obsNonce(0xFF), []byte("$ ")); err != nil {
+		t.Fatalf("sight the newest interval's fence: %v", err)
+	}
+
 	end, ok := settledEnds(rs)[oldest]
 	if !ok || end.endRow < atCompletion || len(end.closing) != 0 || !end.noFence {
 		t.Fatalf("the settled end marker is %+v, want no less than row %d, no closing screen, and no-fence", end, atCompletion)
@@ -308,14 +359,8 @@ func TestTheBoundNeverLeavesAParkedRecordUnsealed(t *testing.T) {
 	if want := streamedRowsBefore(rs); end.endRow != want {
 		t.Fatalf("the settled end marker stops at row %d while the interval had already streamed %d rows", end.endRow, want)
 	}
-	// Every completion whose fence never arrived sealed its interval — the
-	// bound recycled a slot, not a boundary — and the interval in flight is
-	// parked on the newest of them.
-	if ends := endRowsInOrder(rs); len(ends) != MaxPendingRendezvous {
-		t.Fatalf("%d end markers were emitted, want one per settled completion (%d)", len(ends), MaxPendingRendezvous)
-	}
-	if s.observation == nil || s.observation.Nonce != obsNonce(0xFF) {
-		t.Fatal("the interval in flight is not parked on the newest completion")
+	if ends := endRowsInOrder(rs); len(ends) != 2 {
+		t.Fatalf("%d end markers were emitted, want the flushed record's and the newest interval's own (%d)", len(ends), 2)
 	}
 }
 

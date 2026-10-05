@@ -1998,6 +1998,13 @@ func (s *WSServer) BlockBoundaryLost(ctx context.Context, sid session.ID, nonce 
 		endRow = block.rows
 	}
 	bs.mu.Unlock()
+	// SAID OUT LOUD, because this settle's endRow IS the artifact's cursor by
+	// construction (nocx-n5ent): a seal that reads `cursor == endRow` with no
+	// closing screen can only be this one or the runtime's own no-fence
+	// settle, and the census the e2e prints carries neither. The other half of
+	// the pair is the helper's "interval end settled without its fence" line.
+	s.log.Debug("block boundary lost: the interval is settled at what reached the store",
+		"session", sid, "attempt", attempt, "endRow", endRow)
 	s.closeBlockRows(ctx, sid, attempt, endRow, nil, hexNonce, true)
 }
 

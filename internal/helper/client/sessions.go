@@ -293,6 +293,130 @@ func streamBytes(n int) proto.StreamOffset {
 	return proto.StreamOffset(n)
 }
 
+// ackPump sends one reader's ack requests OFF THE READ PATH (nocx-uo8pf for
+// the lifecycle reader, nocx-da7sd for the PTY one). A reader hands it the
+// cursor of the bytes it has just taken; the pump is the only sender, it
+// sends one request at a time, and it always sends the LATEST cursor it was
+// handed.
+//
+// WHY IT EXISTS. An ack is CREDIT for bytes a reader has already taken, not
+// permission to take them, and both readers hand their bytes on only after
+// they return: the lifecycle bridge writes them to the adapter, the session's
+// read pump writes them into the replay ring and the grid. A synchronous,
+// deadline-less ack inside the read therefore turned one slow or stalled
+// helper into a stalled delivery of bytes that were already the
+// coordinator's — a command's completion on the lifecycle stream, the pane's
+// output on the PTY one. The wait was never doing work the delivery needed:
+// each cursor is advanced by the COPY, and the ack only says how far the
+// helper may forget.
+//
+// LATEST IS ENOUGH, AND LATEST IS REQUIRED. An ack NAMES a cursor rather than
+// counting bytes — the helper sets its subscriber's cursor to it — so a
+// superseded offset is not a lost ack; and the helper refuses an ack behind
+// its own cursor (session/ack and ackLifecycle), which is why the pump keeps
+// only the newest and sends strictly in order. On the helper's side that
+// cursor is exactly AD-10's credit: `sent - acked` is its in-flight measure,
+// so a later ack opens that window later and never wider, and the window's
+// own reclaim does not consult the cursor at all (window.write reclaims by
+// capacity, D8). A reader that never reads again still gets its last cursor
+// sent, so a source the helper throttled is always reopened.
+//
+// THE REQUEST'S CONTEXT IS THE READER'S LIFETIME, so an ack still in flight
+// when the reader or its attachment ends is abandoned through that
+// cancellation rather than left holding a goroutine, and a return caused by
+// that cancellation is this pump's own exit rather than a refusal to report.
+type ackPump struct {
+	client  *Client
+	session [16]byte
+	// label is the warning's own word, kept per reader so the two cursors
+	// stay tellable apart in a log ("session ack refused" / "lifecycle ack
+	// refused") — the lines an e2e triage greps for.
+	label string
+	// ends are the channels whose close ends this reader: the attachment's
+	// own, and the reader's own where it has a Close. A nil end is no end —
+	// this package's fixtures build an attachment by hand, with no lifetime
+	// channel at all — rather than a park that never wakes.
+	ends []<-chan struct{}
+
+	once sync.Once
+	wake chan struct{}
+
+	mu      sync.Mutex
+	waiting bool
+	params  proto.AckParams
+	cursor  proto.StreamOffset
+}
+
+func newAckPump(a *AttachedSession, label string, reader ...<-chan struct{}) *ackPump {
+	ends := make([]<-chan struct{}, 0, 1+len(reader))
+	for _, end := range append([]<-chan struct{}{a.done}, reader...) {
+		if end != nil {
+			ends = append(ends, end)
+		}
+	}
+	return &ackPump{
+		client: a.client, session: a.session, label: label, ends: ends,
+		wake: make(chan struct{}, 1),
+	}
+}
+
+// record hands the pump the cursor of the bytes the reader has just taken.
+// cursor is the offset to NAME in a refusal (the lifecycle reader's is not
+// params.Offset, which carries the PTY position its own reader owns). It
+// never blocks and never fails: the bytes are already the caller's.
+func (p *ackPump) record(params proto.AckParams, cursor proto.StreamOffset) {
+	p.mu.Lock()
+	p.params, p.cursor, p.waiting = params, cursor, true
+	p.mu.Unlock()
+	p.once.Do(func() { go p.run() })
+	select {
+	case p.wake <- struct{}{}:
+	default:
+	}
+}
+
+// run is the only sender: one request at a time, always the latest cursor
+// recorded, until the reader or its attachment ends. A cursor recorded while
+// a request is in flight is not lost — the next turn sends it, so a reader
+// that takes many chunks inside one round trip sends one ack for all of them
+// rather than one per chunk.
+func (p *ackPump) run() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, end := range p.ends {
+		go func(end <-chan struct{}) {
+			<-end
+			cancel()
+		}(end)
+	}
+	for {
+		select {
+		case <-p.wake:
+		case <-ctx.Done():
+			return
+		}
+		p.mu.Lock()
+		waiting, params, cursor := p.waiting, p.params, p.cursor
+		p.waiting = false
+		p.mu.Unlock()
+		if !waiting {
+			continue
+		}
+		if err := p.client.Call(ctx, proto.ServiceSession, proto.OpAck, params, nil); err != nil && ctx.Err() == nil {
+			// A refused ack is not the end of a session, and treating it as
+			// one is how a live shell was reported as ENDED. It is expected
+			// after a reset: the helper moves its own cursor the moment it
+			// sends the notification, so every ack for bytes already in
+			// flight is behind by the time it lands — a race the coordinator
+			// cannot win and does not need to. The session ends when the
+			// process exits or the transport dies, and both have their own
+			// owner.
+			p.client.log.Warn(p.label+" ack refused", "err", err,
+				"session", proto.SessionHex(p.session), "offset", uint64(cursor))
+		}
+	}
+}
+
 // AttachedSession is the coordinator-side data-plane view of one helper
 // session. Its identity is the helper-minted session and subscriber pair.
 type AttachedSession struct {
@@ -306,7 +430,13 @@ type AttachedSession struct {
 	lifecycleData *stream
 	done          chan struct{}
 	once          sync.Once
-	mu            sync.Mutex
+	// ack is this attachment's ack sender, minted on first use (ackSender):
+	// an attachment built without a constructor — three fixtures in this
+	// package build one by hand — reads without a nil sender. ackOnce is
+	// separate from once above, which belongs to finish.
+	ackOnce sync.Once
+	ack     *ackPump
+	mu      sync.Mutex
 	// exitMu guards the immutable helper status. The notification records a
 	// snapshot before finish closes done, and WaitErr keeps returning it after
 	// close so the session layer can classify the complete interval.
@@ -937,6 +1067,14 @@ func (a *AttachedSession) finish() {
 	})
 }
 
+// ackSender mints this attachment's ack sender on first use. The PTY reader
+// is the attachment itself, so there is no constructor of its own to build it
+// in — and an attachment a test builds by hand must read like any other.
+func (a *AttachedSession) ackSender() *ackPump {
+	a.ackOnce.Do(func() { a.ack = newAckPump(a, "session") })
+	return a.ack
+}
+
 func (a *AttachedSession) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
@@ -974,23 +1112,11 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 		offset := a.offset
 		a.mu.Unlock()
 		if !frozen {
-			if err := a.client.Call(context.Background(), proto.ServiceSession, proto.OpAck,
-				proto.AckParams{
-					Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
-					Session:    proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
-					Offset:     offset,
-				}, nil); err != nil {
-				// A refused ack is not the end of a session, and treating
-				// it as one is how a live shell was reported as ENDED. It
-				// is expected after a reset: the helper moves its own
-				// cursor the moment it sends the notification, so every
-				// ack for bytes already in flight is behind by the time it
-				// lands — a race the coordinator cannot win and does not
-				// need to. The session ends when the process exits or the
-				// transport dies, and both have their own owner.
-				a.client.log.Warn("session ack refused", "err", err,
-					"session", proto.SessionHex(a.session), "offset", uint64(offset))
-			}
+			a.ackSender().record(proto.AckParams{
+				Subscriber: proto.SubscriberID(hex.EncodeToString(a.subscriber[:])),
+				Session:    proto.HostSessionID{Generation: a.generation, Session: proto.SessionHex(a.session)},
+				Offset:     offset,
+			}, offset)
 		}
 	}
 	// Checked on every Read, not only when it moves the cursor: a caller
@@ -1005,33 +1131,20 @@ func (a *AttachedSession) Read(p []byte) (int, error) {
 // coordinator's lifecycle bridge pumps, and the writer that carries its own
 // frames back to the shell.
 //
-// THE ACK IS OFF THE READ PATH (nocx-uo8pf). Read used to copy the bytes and
-// then, inside the same call, make the subscriber's `ack` request and wait
-// for its answer — an answer that is the only thing which let Read return.
-// The ack is CREDIT for bytes this reader has already taken, not permission
-// to take them, and the bridge that hands those bytes to the lifecycle
-// channel writes them to the adapter only once Read returns. So an ack the
-// helper was slow to answer held every frame behind it, and the frame that
-// matters is a command's completion: the person's block stays open, and
-// nothing in the product says why. The cursor is recorded in Read and sent by
-// ackLoop (the only sender), one ack at a time and always the LATEST cursor.
-// Latest is enough because an ack NAMES a cursor rather than counting bytes,
-// so a superseded offset is not a lost ack — and it is required, because a
-// helper refuses an ack behind its own cursor.
+// ITS ACK IS OFF THE READ PATH (nocx-uo8pf, like the PTY reader's before it):
+// Read records the cursor the bytes it has just handed over end at and
+// returns, and ack carries that cursor to the helper. It used to make the
+// request here and wait for its answer — which is what held a command's
+// completion in the bridge's buffer for as long as the helper took to
+// answer it.
 type attachedLifecycle struct {
 	session *AttachedSession
 	closed  chan struct{}
 	once    sync.Once
-
-	// ackOnce starts ackLoop on the first cursor that needs acknowledging;
-	// ackMu guards the cursor waiting to be sent (ackWait says there is one);
-	// ackWake carries one token to ackLoop, so Read never blocks on it.
-	ackOnce   sync.Once
-	ackWake   chan struct{}
-	ackMu     sync.Mutex
-	ackWait   bool
-	ackOffset proto.StreamOffset
-	ackPTY    proto.StreamOffset
+	// ack is this reader's own sender. Its lifetime is the reader's — this
+	// bridge's Close and the attachment's end together — where the PTY
+	// reader's is the attachment alone.
+	ack *ackPump
 }
 
 func (l *attachedLifecycle) Read(p []byte) (int, error) {
@@ -1072,77 +1185,18 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if frozen {
 			return n, nil
 		}
-		l.ackLater(offset, ptyOffset)
-	}
-	return n, nil
-}
-
-// ackLater records the lifecycle cursor the reader has just handed over and
-// wakes ackLoop. It never blocks and never fails: the bytes are already the
-// caller's, and the ack is credit for them rather than permission to have
-// them, so nothing the ack's answer says may decide when they are delivered
-// (nocx-uo8pf).
-func (l *attachedLifecycle) ackLater(offset, ptyOffset proto.StreamOffset) {
-	l.ackMu.Lock()
-	l.ackOffset, l.ackPTY, l.ackWait = offset, ptyOffset, true
-	l.ackMu.Unlock()
-	l.ackOnce.Do(func() { go l.ackLoop() })
-	select {
-	case l.ackWake <- struct{}{}:
-	default:
-	}
-}
-
-// ackLoop is this reader's only sender of acks: one at a time, always the
-// latest cursor ackLater recorded, until the reader or its attachment ends.
-// A cursor recorded while an ack is in flight is not lost — the next turn
-// sends it — so a reader that takes many chunks inside one round trip sends
-// one ack for all of them rather than one per chunk.
-//
-// The request's context is the reader's own lifetime. An ack still in flight
-// when the reader is closed, or when the attachment ends underneath it, is
-// abandoned through that cancellation rather than left holding a goroutine
-// for the life of the connection, and a return caused by that cancellation is
-// not reported as a refusal — it is this loop's own exit.
-func (l *attachedLifecycle) ackLoop() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() {
-		select {
-		case <-l.closed:
-		case <-l.session.done:
-		}
-		cancel()
-	}()
-	for {
-		select {
-		case <-l.ackWake:
-		case <-ctx.Done():
-			return
-		}
-		l.ackMu.Lock()
-		waiting, offset, ptyOffset := l.ackWait, l.ackOffset, l.ackPTY
-		l.ackWait = false
-		l.ackMu.Unlock()
-		if !waiting {
-			continue
-		}
 		// This ack is for the LIFECYCLE cursor. The PTY offset rides along
 		// only because the wire requires it; a helper that knows
 		// lifecycleOffset neither judges nor applies it, since the PTY reader
 		// acks that cursor itself and may already have passed this value
 		// (nocx-2v80t.3.44).
-		if err := l.session.client.Call(ctx, proto.ServiceSession, proto.OpAck,
-			proto.AckParams{
-				Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
-				Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
-				Offset:     ptyOffset, LifecycleOffset: &offset,
-			}, nil); err != nil && ctx.Err() == nil {
-			// Not fatal, for the reason the PTY reader's ack is not.
-			l.session.client.log.Warn("lifecycle ack refused", "err", err,
-				"session", proto.SessionHex(l.session.session), "offset", uint64(offset))
-		}
+		l.ack.record(proto.AckParams{
+			Subscriber: proto.SubscriberID(hex.EncodeToString(l.session.subscriber[:])),
+			Session:    proto.HostSessionID{Generation: l.session.generation, Session: proto.SessionHex(l.session.session)},
+			Offset:     ptyOffset, LifecycleOffset: &offset,
+		}, offset)
 	}
+	return n, nil
 }
 
 func (l *attachedLifecycle) Write(p []byte) (int, error) {
@@ -1176,7 +1230,9 @@ func (l *attachedLifecycle) Close() error {
 }
 
 func (a *AttachedSession) Lifecycle() io.ReadWriteCloser {
-	return &attachedLifecycle{session: a, closed: make(chan struct{}), ackWake: make(chan struct{}, 1)}
+	l := &attachedLifecycle{session: a, closed: make(chan struct{})}
+	l.ack = newAckPump(a, "lifecycle", l.closed)
+	return l
 }
 
 // WriteGranted reports whether this attachment holds the session's one write

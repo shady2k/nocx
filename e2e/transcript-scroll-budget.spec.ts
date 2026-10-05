@@ -30,6 +30,7 @@ import {
 } from './harness'
 import { readStand } from './stand'
 import { judgeFrames, type FrameVerdict } from './frame-budget.mts'
+import { recordRowsCensusForTest } from './failure-context'
 
 const serverBin = () => readStand().server
 
@@ -57,6 +58,146 @@ const BLOCK = '.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-runnin
 const RUNNING_BLOCK = '.pane.active .scrollback-inner > .cmd-block.cmd-block-running'
 const SCROLLER = '.pane.active .scrollback-area'
 const ROW = `${BLOCK} .cmd-output .term-grid-row`
+// The media type a command's streamed rows are stored under (contracts/ledger.blockRows.schema.json).
+const ROWS_MEDIA_TYPE = 'application/x-nocx-rows'
+// How much of the backend's log the census greps for the seal's own numbers.
+// It is read at the failure, while the file is live; the appends of a
+// 5000-row command are a small part of a few hundred kilobytes.
+const CENSUS_LOG_BYTES = 8 * 1024 * 1024
+
+/** One artifact's metadata, as ledger.get reports it (contracts/ledger.get.schema.json). */
+interface LedgerArtifactMeta {
+  id: string
+  executionId: number
+  mediaType: string
+  state: string
+  byteLen: number
+  chunkCount: number
+  truncated: string | null
+  payload: unknown
+}
+
+/**
+ * WHAT THE STORE ACTUALLY HOLDS FOR ONE COMMAND (nocx-rb4ca), taken at the
+ * moment this spec's own comparison of the stored rows fails.
+ *
+ * A short durable transcript has three shapes that look identical in the
+ * failure report, and the backend log alone cannot tell them apart: the rows
+ * arrived and were refused into a sealed artifact, they are parked in a SECOND
+ * rows artifact of the same entry (a reader takes the first one —
+ * internal/transport/ws_blocks.go's blockBody returns one artifact and never
+ * joins a second), or they never arrived at all. So this reads back everything
+ * the read path can see, in the read path's own terms:
+ *
+ *   - every artifact of the entry whose media type is application/x-nocx-rows,
+ *     with the state and payload the store reports for it;
+ *   - for each, the rows READ THROUGH ledger.artifact — how many, how many
+ *     carry this command's marker, and the absolute row RANGE (the `from` of
+ *     its first and last line, which is the index space the seal's own cursor
+ *     and endRow are stated in);
+ *   - and the store's and the transport's own lines about the seal, taken
+ *     verbatim from the backend log: `block rows close: sealing` (its cursor,
+ *     dropped, lost, unavailable) and `interval end sealed the block` (the
+ *     interval end's endRow). Those two numbers are what the report has never
+ *     carried, and they are the ones that say whether the artifact's own
+ *     record agrees with the read.
+ *
+ * Read-only: it asks the same questions findStoredRows asks, by the same
+ * methods, and changes nothing about the comparison it explains.
+ */
+async function rowsCensus(
+  ep: { port: number; token: string },
+  backendLog: string,
+  command: string,
+  marker: string,
+): Promise<string> {
+  const out: string[] = [`command ${JSON.stringify(command)}`]
+  const wire = await openControlPlane(ep.port, ep.token)
+  try {
+    const query = (await wire.call('ledger.query', {
+      scope: 'everywhere',
+      limit: ZERO_QUERY_LIMIT,
+    })) as { entries: Array<{ id: string; intent: string }> }
+    const entries = query.entries.filter((entry) => entry.intent === command)
+    out.push(
+      `ledger.query: ${query.entries.length} entries in the page, ${entries.length} of them this command`,
+    )
+    for (const entry of entries) {
+      const detail = (await wire.call('ledger.get', { id: entry.id })) as {
+        artifacts: LedgerArtifactMeta[]
+      }
+      const rowsArtifacts = detail.artifacts.filter(
+        (artifact) => artifact.mediaType === ROWS_MEDIA_TYPE,
+      )
+      // WHICH ONE THE READER TAKES is the question a list of artifacts cannot
+      // answer on its own: both this spec's own read and the product's
+      // blockBody take the FIRST artifact of this media type in execution
+      // order and never join a second (internal/transport/ws_blocks.go), so
+      // the first line below is the one the comparison actually saw.
+      out.push(
+        `entry ${entry.id}: ${detail.artifacts.length} artifact(s), ` +
+          `${rowsArtifacts.length} of media type ${ROWS_MEDIA_TYPE}`,
+      )
+      out.push(
+        rowsArtifacts.length === 0
+          ? '  the read path takes: nothing — no artifact of this media type exists for this entry'
+          : `  the read path takes the first of these: ${rowsArtifacts[0]!.id}`,
+      )
+      for (const [index, artifact] of rowsArtifacts.entries()) {
+        const body = (await wire.call('ledger.artifact', { id: artifact.id })) as { body: string }
+        const rows = body.body
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { from: number; row: { text: string } })
+        const mine = rows.filter((row) => row.row.text.replace(/\s+$/, '').startsWith(`${marker}-`))
+        const first = rows[0]
+        const last = rows[rows.length - 1]
+        const text = (row: { row: { text: string } } | undefined) =>
+          row ? JSON.stringify(row.row.text.replace(/\s+$/, '')) : '(none)'
+        out.push(
+          `  artifact ${index === 0 ? '(the read takes this one)' : '(not read)'} ` +
+            `${artifact.id} execution=${artifact.executionId} ` +
+            `state=${artifact.state} byteLen=${artifact.byteLen} ` +
+            `chunks=${artifact.chunkCount} truncated=${String(artifact.truncated)} ` +
+            `payload=${JSON.stringify(artifact.payload)}`,
+        )
+        out.push(
+          `    rows ${rows.length}, marker rows ${mine.length}, ` +
+            `range [${first ? first.from : '-'}..${last ? last.from : '-'}], ` +
+            `first ${text(first)}, last ${text(last)}`,
+        )
+      }
+      // The two shapes a short read can have, stated rather than left to be
+      // worked out: a tail parked in another artifact is invisible to a reader
+      // that joins none of them, and an artifact that is the only one rules
+      // that shape out entirely.
+      out.push(
+        rowsArtifacts.length === 1
+          ? '  one rows artifact exists: a missing tail cannot be parked in a second one — it is this artifact or it never arrived'
+          : `  ${rowsArtifacts.length} rows artifacts exist and the read joins none of them: only the first is read, so a tail in any of the others is invisible to this comparison`,
+      )
+    }
+    if (entries.length === 0) {
+      out.push('(no entry in this page has this command as its intent)')
+    }
+  } finally {
+    wire.close()
+  }
+  const seals = backendLog
+    .split('\n')
+    .filter(
+      (line) =>
+        line.includes('block rows close: sealing') ||
+        line.includes('interval end sealed the block'),
+    )
+  out.push(
+    seals.length === 0
+      ? 'backend log: neither "block rows close: sealing" nor "interval end sealed the block" is in it'
+      : `backend log, the store's and the transport's own lines:\n    ${seals.join('\n    ')}`,
+  )
+  return out.join('\n')
+}
+
 interface TranscriptMetrics {
   blocks: number
   rows: number
@@ -508,9 +649,17 @@ test.describe('long transcript scroll budget', () => {
     })
   })
 
-  test('zero live retention leaves durable output after restart and no live history', async ({
+  // Skipped 2026-10-05 by the owner's decision to merge #267 with this open: after a
+  // coordinator restart the stored transcript loses the tail of the command - one
+  // sealed artifact, `truncated=gap`, `endRow == cursor` (a seal with no closing
+  // screen) and ~1160 rows never stored, because the interval was frozen at the count
+  // measured while the pty was still draining. That is ADR-0074's settle losing a
+  // person's own output, and the choice between amending the settle and hunting its
+  // trigger is an owner decision. Bead nocx-n5ent (P0) carries the evidence, the two
+  // options and what a person sees under each; un-skip this test when one is taken.
+  test.skip('zero live retention leaves durable output after restart and no live history', async ({
     page,
-  }) => {
+  }, testInfo) => {
     const endpoint = await backend.start()
     const setupWire = await openControlPlane(endpoint.port, endpoint.token)
     try {
@@ -575,7 +724,35 @@ test.describe('long transcript scroll budget', () => {
       { length: ZERO_COMMAND_ROWS },
       (_, index) => `${marker}-${String(index + 1).padStart(3, '0')}`,
     )
-    await expect.poll(async () => findStoredRows(endpoint), { timeout: 30_000 }).toEqual(own)
+
+    // The census is taken ONLY on the path where this comparison fails, and it
+    // is taken HERE rather than in the failure report because the backend this
+    // read needs is stopped by `afterEach` before that report runs (nocx-rb4ca).
+    // It never throws: a diagnostic that is missing must not replace the
+    // failure it was taken for, so a read that fails is recorded as the line
+    // saying so.
+    const recordCensus = async (label: string, ep: { port: number; token: string }) => {
+      try {
+        recordRowsCensusForTest(
+          testInfo.testId,
+          label,
+          await rowsCensus(ep, backend.logTail(CENSUS_LOG_BYTES), command, marker),
+        )
+      } catch (censusError) {
+        recordRowsCensusForTest(
+          testInfo.testId,
+          label,
+          `(the store could not be read for this census: ${String(censusError)})`,
+        )
+      }
+    }
+
+    try {
+      await expect.poll(async () => findStoredRows(endpoint), { timeout: 30_000 }).toEqual(own)
+    } catch (error) {
+      await recordCensus('the comparison before the restart', endpoint)
+      throw error
+    }
 
     const restarted = await backend.restart()
     await bindEndpoint(page, restarted)
@@ -583,7 +760,12 @@ test.describe('long transcript scroll budget', () => {
     await appReadyForInput(page)
     await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
     const storedAfterRestart = await findStoredRows(restarted)
-    expect(storedAfterRestart).toEqual(own)
+    try {
+      expect(storedAfterRestart).toEqual(own)
+    } catch (error) {
+      await recordCensus('the comparison after the restart', restarted)
+      throw error
+    }
 
     const pane = page.locator('.pane.active')
     const sessionId = await pane.getAttribute('data-session-id')

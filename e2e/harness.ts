@@ -312,8 +312,14 @@ export const test = base.extend<{ failureContext: void }, { appReady: void }>({
     // modal-report.ts for why that is a report and not an assertion.
     await reportStandingModals(page, info)
     // The report itself is the auto fixture's, and it runs after this page
-    // is gone — so the snapshot is taken now, while there is one to take.
-    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
+    // is gone — so the snapshot is taken now, while there is one to take. The
+    // block DOM is read at the same moment and under the same condition,
+    // because what a failing `.cmd-block` selector matched is read off the
+    // page or not at all (nocx-itmo2).
+    if (info.status !== info.expectedStatus) {
+      await diagnostics.captureSnapshot()
+      await diagnostics.captureBlockDom()
+    }
   },
 })
 
@@ -343,7 +349,12 @@ export const standalone = base.extend<{ failureContext: void }>({
     const diagnostics = watchPageForTest(info.testId, page, 'page', { closeAfterReport: false })
     await use(page)
     await reportStandingModals(page, info)
-    if (info.status !== info.expectedStatus) await diagnostics.captureSnapshot()
+    // Same as the `test` object's page fixture: read on the way out of a
+    // failure, while there is a page to read (nocx-itmo2).
+    if (info.status !== info.expectedStatus) {
+      await diagnostics.captureSnapshot()
+      await diagnostics.captureBlockDom()
+    }
   },
 })
 
@@ -1029,17 +1040,7 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
     .not.toBe('pending')
 
   if (await setupSheet.isVisible()) {
-    await page.locator('#vault-setup-passphrase').fill(spec.vaultPassphrase)
-    await page.locator('#vault-setup-confirm').fill(spec.vaultPassphrase)
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-    // The recovery code, then Done — the sheet's own two steps.
-    await baseExpect(page.locator('.ui-vault-code-block-wrap .ui-code-block')).toBeVisible({
-      timeout: 10_000,
-    })
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    await setUpVaultThroughTheSheet(page, spec.vaultPassphrase)
     await baseExpect(setupSheet).not.toBeVisible({ timeout: 10_000 })
     await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
   }
@@ -1053,6 +1054,68 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
   await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toBeVisible({
     timeout: 10_000,
   })
+}
+
+/**
+ * Answer the vault setup sheet — passphrase, Set Up, the recovery code, Done.
+ *
+ * ONE OWNER for the journey, because it had two (this file and
+ * vault-sealed-probe.spec.ts) and the second copy is what failed in CI
+ * (nocx-xn63t.6.20).
+ *
+ * THE SUBMIT IS VERIFIED, NOT ASSUMED. The sheet's own two steps are its own
+ * state machine: `saving()` disables BOTH buttons and relabels the primary one
+ * the moment a submit starts, and a submit that is accepted advances the
+ * `<Show>` to the recovery code. A plain `click()` then `toBeVisible()` waits
+ * on the consequence without ever checking that the cause happened — and a
+ * click CAN be lost between its mousedown and its mouseup (the sheet is a
+ * top-sheet that is still settling, so the two land on different elements and
+ * the browser fires the click on their common ancestor, which has no handler).
+ * Nothing in the renderer then moves: no request leaves the wire, no error is
+ * painted, `saving()` stays false — the sheet simply sits on step 1 until the
+ * wait runs out. That is exactly what CI run 37340666515's `ci-e2e (webkit, 2)`
+ * reported: `.ui-vault-code-block-wrap .ui-code-block` "element(s) not found"
+ * for ten seconds, the sheet's own snapshot still showing step 1 with both
+ * fields filled, neither button disabled and no error text, while the backend
+ * log ended BEFORE the click and carried no `vault.setup` at all.
+ *
+ * So the gesture is RETRIED until the state it is supposed to produce, which is
+ * the wait a person performs: press Set Up again while the sheet is still
+ * offering step 1 with the button live. The button being ENABLED is what makes
+ * repeating it safe — a submit already in flight has disabled it (so this waits
+ * for the code block without clicking), and a second Setup that does arrive is
+ * refused by the vault itself ("vault is already initialized",
+ * internal/vault/vault.go:283) rather than re-keying anything.
+ */
+export async function setUpVaultThroughTheSheet(page: Page, passphrase: string): Promise<void> {
+  const sheet = page
+    .locator('.ui-prompt-overlay')
+    .filter({ has: page.locator('#vault-setup-passphrase') })
+  await baseExpect(sheet).toBeVisible({ timeout: 10_000 })
+
+  const passphraseField = page.locator('#vault-setup-passphrase')
+  const submit = page.getByRole('dialog').getByRole('button', { name: /Set Up/i })
+  const recoveryCode = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+
+  await passphraseField.fill(passphrase)
+  await page.locator('#vault-setup-confirm').fill(passphrase)
+
+  await baseExpect(async () => {
+    // Press, then look. Step 1 still on screen means no submit has been
+    // accepted, so the press is simply made again — which is what a person
+    // does with a button that appeared to do nothing. The press is bounded
+    // and its refusal is swallowed: while a submit IS in flight the sheet
+    // disables the button, and waiting for it there would spend the budget on
+    // a press that is not owed. Nothing here is a duration; every attempt
+    // ends on the sheet's own state and 15 s is the budget for the pair.
+    if (await passphraseField.isVisible()) {
+      await submit.click({ timeout: 2_000 }).catch(() => undefined)
+    }
+    baseExpect(await recoveryCode.isVisible()).toBe(true)
+  }).toPass({ timeout: 15_000 })
+
+  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+  await baseExpect(sheet).not.toBeVisible({ timeout: 10_000 })
 }
 
 /**
@@ -1341,8 +1404,38 @@ export class VaultBackend {
  * pencil visible, or field already open — and then guarantees the field. That
  * is a state change, never a duration, which is the rule a spec may not
  * break.
+ *
+ * AND IT HAS A THIRD SHAPE, WHICH IS A WINDOW AND NOT A SETTLEMENT
+ * (nocx-8ecbq). `nameable()` is false while the destination
+ * still names nothing, and `proposalFor` needs `store.defaultRoot()`, which
+ * rides `api.collections.list` — a round trip. api-pane.tsx says so itself
+ * under "WHEN THE ROOT LANDS AFTER THE SOURCE DOES" (nocx-s47is): the ask can
+ * be opened, and an export PASTED into it, while that trip is still in
+ * flight. For as long as it is, `sourceLabel !== '' && !nameable()` holds, so
+ * the FIELD IS OPEN AND THE PENCIL IS CORRECTLY ABSENT — and then the
+ * proposal lands and the ask collapses to the sentence and the pencil.
+ *
+ * Read once inside that window, this helper decides "the field is open,
+ * nothing to click" and the field it just promised is taken away before the
+ * caller reaches it (CI 37312755629, `ci-e2e (webkit, 2)`: the union count
+ * satisfied by the open field, no pencil to click, then
+ * `#api-import-postman-dest` hidden for the whole 5 s — while the
+ * accessibility snapshot taken at that moment shows `Imports into: …` and
+ * the pencil, i.e. the proposal had landed).
+ *
+ * So the pair is RETRIED until the field is really there, which is the wait a
+ * person performs: open it through the pencil whenever the ask offers the
+ * sentence, and take the field otherwise. A value brought by the caller is
+ * typed INSIDE that retry and not after it, because the window can close in
+ * the instant between the field appearing and the caller's next statement —
+ * and typing is what settles the ask for good (api-pane.tsx drops the late
+ * proposal once the destination has been typed into).
  */
-export async function openImportDestination(ask: Locator, page: Page): Promise<Locator> {
+export async function openImportDestination(
+  ask: Locator,
+  page: Page,
+  opts: { fill?: string } = {},
+): Promise<Locator> {
   const pencil = ask.getByRole('button', { name: 'Change where this goes' })
   const field = page.locator('#api-import-postman-dest')
   // `.or()` unions DOM MATCHES, and the field is always rendered — the dialog
@@ -1351,8 +1444,16 @@ export async function openImportDestination(ask: Locator, page: Page): Promise<L
   // what makes "exactly one of these is on screen" the settled state to wait
   // for, and a strict-mode violation is what asking without it costs.
   await baseExpect(pencil.or(field).filter({ visible: true })).toHaveCount(1)
-  if (await pencil.isVisible()) await pencil.click()
-  await baseExpect(field).toBeVisible()
+  await baseExpect(async () => {
+    // The pencil is the ask's own door to the field, taken whenever it is
+    // offered — and taking it is what makes the field STAY open, since
+    // `editingDest` is not subject to the proposal.
+    if (await pencil.isVisible()) await pencil.click()
+    baseExpect(await field.isVisible()).toBe(true)
+    // Bounded per attempt, so an attempt that loses the field to a landing
+    // proposal comes back to the retry instead of waiting out the test.
+    if (opts.fill !== undefined) await field.fill(opts.fill, { timeout: 2_000 })
+  }).toPass({ timeout: 15_000 })
   return field
 }
 

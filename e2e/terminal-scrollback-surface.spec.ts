@@ -195,8 +195,31 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     }
 
     // ── Clause 2: arriving output does not move the reader's anchor ─────
-    // Compare the rows the person sees, not the surface's mounted page window:
-    // virtualization may unmount offscreen rows without changing the view.
+    // Arm the producer while following the live end. Submitting a command can
+    // itself move the scroller; that is not arriving output. Wait for its
+    // armed marker before returning to the oldest history page to read.
+    await expect
+      .poll(
+        async () => {
+          if (await atLiveEnd()) return true
+          await page.mouse.wheel(0, 1400)
+          return false
+        },
+        { timeout: 30_000, intervals: [250] },
+      )
+      .toBe(true)
+    await pane.locator('.xterm-live-container').click()
+    const lateMarker = `ANCHOR-LATE-${nonce}`
+    await type_(`( sleep 15; echo ${lateMarker} ) & echo ANCHOR-ARMED-${nonce}`)
+    await expect
+      .poll(async () => liveRows(), { timeout: 20_000 })
+      .toContain(`ANCHOR-ARMED-${nonce}`)
+
+    // Re-enter the same history position only after the producer confirms it
+    // is armed. Compare visible rows (not the virtualized mounted-page window)
+    // and the anchor row's viewport position.
+    await pane.locator('.scrollback-area').hover()
+    await scrollToHistoryStart()
     const visibleRowsBefore = await readVisibleRows()
     const visibleAnchorIndex = visibleRowsBefore.findIndex((text) => /SCROLLBK-\d{3}/.test(text))
     if (visibleAnchorIndex < 0) throw new Error('no visible history row is available to anchor')
@@ -210,31 +233,43 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     }
     expect(anchor.rows[anchor.index]).toMatch(/SCROLLBK-\d{3}/)
     const visibleBefore = visibleRowsBefore
-    const lateMarker = `ANCHOR-LATE-${nonce}`
-    await type_(`( sleep 8; echo ${lateMarker} ) &`)
-    await expect
-      .poll(
-        async () =>
-          liveRows().then((rows) =>
-            // A background job can print on the same row as the shell prompt.
-            rows.split('\n').some((row) => row.includes(lateMarker)),
-          ),
-        { timeout: 25_000 },
+    const anchorTop = await page.evaluate((text) => {
+      const area = document.querySelector('.pane.active .scrollback-area')
+      if (area === null) return null
+      const clip = area.getBoundingClientRect()
+      const row = Array.from(area.querySelectorAll('.live-history-page .term-grid-row')).find(
+        (candidate) => (candidate.textContent ?? '').trim() === text,
       )
-      .toBe(true)
+      if (row === undefined) return null
+      const bounds = row.getBoundingClientRect()
+      return bounds.bottom > clip.top && bounds.top < clip.bottom ? bounds.top : null
+    }, anchor.rowText)
+    expect(anchorTop).not.toBeNull()
 
+    await expect.poll(async () => liveRows(), { timeout: 25_000 }).toContain(lateMarker)
+    const visibleAfter = await readVisibleRows()
+    expect(visibleAfter.filter((row) => row.includes(lateMarker)).length).toBeLessThanOrEqual(1)
     const withoutLateMarker = (rows: string[]): string[] =>
       rows.flatMap((row) => {
         if (!row.includes(lateMarker)) return [row]
         const remaining = row.replace(lateMarker, '').trim()
         return remaining === '' ? [] : [remaining]
       })
-    const visibleAfter = await readVisibleRows()
-    expect(visibleAfter.filter((row) => row.includes(lateMarker)).length).toBeLessThanOrEqual(1)
-    // This finding is asserted after the rest of the scenario below.
 
+    // The row identity and its position are the live anchor. Then restore the
+    // history start and check the visible content window survived virtualization.
+    const anchorTopAfter = await page.evaluate((text) => {
+      const area = document.querySelector('.pane.active .scrollback-area')
+      if (area === null) return null
+      const clip = area.getBoundingClientRect()
+      const row = Array.from(area.querySelectorAll('.live-history-page .term-grid-row')).find(
+        (candidate) => (candidate.textContent ?? '').trim() === text,
+      )
+      if (row === undefined) return null
+      const bounds = row.getBoundingClientRect()
+      return bounds.bottom > clip.top && bounds.top < clip.bottom ? bounds.top : null
+    }, anchor.rowText)
     await scrollToHistoryStart()
-
     const visibleAnchorAfter = await readVisibleRows()
     const anchorIndexAfter = visibleAnchorAfter.findIndex((text) => text === anchor.rowText)
     expect(anchorIndexAfter).toBeGreaterThanOrEqual(0)
@@ -333,6 +368,8 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       true,
       'nocx-zg3k3.15.2: origin/main shows the same delayed-output viewport jump; baseline defect.',
     )
+    expect(anchorTopAfter).not.toBeNull()
+    expect(anchorTopAfter).toBeCloseTo(anchorTop!, 0)
     expect(withoutLateMarker(visibleAfter)).toEqual(visibleBefore)
   } finally {
     try {

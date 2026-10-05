@@ -100,3 +100,30 @@ The new browser spec was added before changing any product code. Red-first runs 
 ### Commit
 
 Pending.
+
+## Session — repair stage regressions (nocx-zg3k3.15.1)
+
+### Fixes
+
+- Mouse-reporting mode now takes precedence over the selection gesture. The painter click reaches xterm, so programs receive SGR mouse input. Triple-click on a card explicitly selects its output rows, and joined card-to-live drags resolve live endpoints across row gaps and restore xterm focus.
+- Restored command rows now use `blockRowsForEntry`, the same coalescing reader as block notifications. This avoids a second full artifact response when restore overlaps a notification refresh.
+- A burst of `block.grew` notifications now shares one per-entry read and paint. If `block.closed` arrives during that read, the UI queues one final read after the growth read settles. A red-first test sent 100 growth notifications and observed 200 row paints before the guard; it now verifies one paint for the burst and one final paint after close.
+
+### Red-first and acceptance evidence
+
+- The initial targeted Chromium tests reproduced the clipboard-selection failure and a missed SGR mouse click.
+- The zero-retention WebKit test initially timed out waiting for the completed block. Three uninstrumented repeats before the fix failed in 40.6–42.4s. Backend logs showed authenticated completion and `block.closed` promptly; the UI's repeated stored-row paints delayed the visual freeze. After coalescing, the same uninstrumented test passed 3/3 in 18.5s, 12.7s and 13.0s, including its restart and durable-output assertions.
+- The restore-client concurrent-read regression test verifies that restoration and a notification share one in-flight artifact read.
+
+### Checks
+
+- `PW_PROJECTS=chromium e2e/run-in-container.sh --repeat-each=2 e2e/clipboard.spec.ts e2e/live-region-is-the-painters.spec.ts e2e/live-to-card-joined.spec.ts` — 12 passed.
+- `PW_PROJECTS=webkit e2e/run-in-container.sh --repeat-each=3 --grep 'zero live retention' e2e/transcript-scroll-budget.spec.ts` — 3 passed.
+- Targeted Vitest: `terminal-content.test.ts`, `restore-client.test.ts`, and `selection-gesture.test.ts` — 402 passed.
+- `frontend/node_modules/.bin/tsc --noEmit -p frontend/tsconfig.json` — passed.
+- `npm --prefix frontend run format:check` — passed.
+- No wire contracts changed. `make ci-full` and the full e2e suite were not run, as instructed.
+
+### Commit
+
+The fixes and this report are in the requested fix commit.

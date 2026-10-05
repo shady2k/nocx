@@ -17,6 +17,10 @@ export interface LiveSelectionGestureOptions {
   readonly surface: HTMLElement
   readonly gestureRoot?: HTMLElement
   readonly surfaceId: string
+  /** The input renderer owns mouse reporting; selection must not consume its clicks. */
+  readonly mouseReportingActive?: () => boolean
+  /** Return keyboard input to xterm when a joined gesture reaches live output. */
+  readonly focusInput?: () => void
   readonly copy: (text: string) => void
 }
 
@@ -99,10 +103,14 @@ export function installLiveSelectionGesture(
 
   const endpoint = (event: PointerEvent): Endpoint | null => {
     const node = asNode(event.target)
-    const cardRow = (node instanceof Element ? node : null)?.closest(
-      '.term-grid-row[data-block-id]',
-    )
-    return cardRow ? cardPosition(event) : livePosition(event)
+    const element = node instanceof Element ? node : null
+    const cardRow = element?.closest('.term-grid-row[data-block-id]')
+    if (cardRow) return cardPosition(event)
+    // A plain command block may contain selectable text but does not have
+    // stored-row identity. It belongs to native text selection, never a
+    // guessed live-grid cell based on coordinates outside the painter.
+    if (element?.closest('.cmd-block')) return null
+    return livePosition(event)
   }
 
   const drawLive = (point: Endpoint | null) => {
@@ -142,6 +150,10 @@ export function installLiveSelectionGesture(
 
   const down = (event: PointerEvent) => {
     if (!root.contains(event.target as Node) || event.button !== 0) return
+    // The input renderer is the authority on DEC mouse modes. A reporting
+    // program must receive the original pointer sequence, not a selection
+    // gesture that prevents its default handling.
+    if (opts.mouseReportingActive?.()) return
     pinned = opts.model.current()
     pinnedMapping = opts.painter.mapping()
     if (!pinned || !pinnedMapping) return
@@ -152,7 +164,10 @@ export function installLiveSelectionGesture(
     drawLive(point)
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up, { once: true })
-    event.preventDefault()
+    // Card-only selection uses the browser's native text selection and its
+    // existing copy-on-select listener. Keep that path intact. A drag from a
+    // card into the live grid is still joined by the handlers below.
+    if (point.kind === 'live') event.preventDefault()
   }
 
   const copyAcross = (a: Endpoint, b: Endpoint): string | null => {
@@ -204,22 +219,54 @@ export function installLiveSelectionGesture(
     return `${cardText}${lastCardRow && !lastCardRow.wrap ? '\n' : ''}${liveText}`
   }
 
+  const tripleClick = (event: MouseEvent) => {
+    if (event.detail !== 3) return
+    const node = asNode(event.target)
+    const element = node instanceof Element ? node : null
+    if (element?.closest('[data-block-control], .ui-context-menu')) return
+    const block = element?.closest<HTMLElement>('.cmd-block')
+    const target =
+      element?.closest<HTMLElement>('.cmd-block .term-grid-row, .cmd-block .term-line') ??
+      block?.querySelector<HTMLElement>('.cmd-output') ??
+      block
+    if (!target) return
+    // The browser's triple-click default does not select a whole preformatted
+    // cell row consistently. Select the row explicitly; terminal-content's
+    // existing mouseup copy-on-select writer then writes it exactly once.
+    const range = document.createRange()
+    range.selectNodeContents(target)
+    const selected = window.getSelection()
+    if (!selected) return
+    event.preventDefault()
+    selected.removeAllRanges()
+    selected.addRange(range)
+  }
+
   const move = (event: PointerEvent) => {
     if (!anchor) return
-    const point = endpoint(event)
+    // During a drag, the browser may keep targeting the source block or a
+    // gap between the card and live grid. Coordinates still use the painter's
+    // mapping, so resolve a live endpoint there instead of losing the gesture.
+    const point = endpoint(event) ?? (anchor.kind === 'card' ? livePosition(event) : null)
     if (!point) return
+    if (anchor.kind === 'card' && point.kind === 'live') opts.focusInput?.()
     drawLive(point)
   }
 
   const up = (event: PointerEvent) => {
     window.removeEventListener('pointermove', move)
     if (!anchor) return
-    const focus = endpoint(event)
-    if (focus) {
+    const focus = endpoint(event) ?? (anchor.kind === 'card' ? livePosition(event) : null)
+    if (focus && (anchor.kind === 'live' || focus.kind === 'live')) {
       drawLive(focus)
       const text = copyAcross(anchor, focus)
       if (text !== null) opts.copy(text)
-    } else {
+      // A card-to-live drag may also have produced a native DOM range while
+      // the browser delivered the drag. Clear it before mouseup so the
+      // scrollback's native copy-on-select listener cannot write a second
+      // (and different) value.
+      if (anchor.kind === 'card') window.getSelection()?.removeAllRanges()
+    } else if (!focus) {
       opts.painter.setSelection(null)
     }
     anchor = null
@@ -229,9 +276,11 @@ export function installLiveSelectionGesture(
   }
 
   root.addEventListener('pointerdown', down)
+  root.addEventListener('mousedown', tripleClick)
   return {
     dispose() {
       root.removeEventListener('pointerdown', down)
+      root.removeEventListener('mousedown', tripleClick)
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
       anchor = null

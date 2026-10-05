@@ -213,6 +213,9 @@ export interface TerminalRenderer {
    *  decide whether a multi-line body may be pasted (design §9.4). */
   bracketedPasteActive(): boolean
 
+  /** Whether xterm currently owns pointer input for a DEC mouse-report mode. */
+  mouseReportingActive(): boolean
+
   /** Register the snippet-palette chord (⌥⌘P) handler. The renderer's
    *  custom key handler sees the chord BEFORE xterm encodes it, calls this
    *  callback and returns false — the chord is consumed at the xterm

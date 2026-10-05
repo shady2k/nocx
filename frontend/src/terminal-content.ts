@@ -1351,15 +1351,16 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
-  /** The most recently started rows fetch per entry, keyed by attempt id —
-   *  what a block.grew/block.closed notification only STARTS
-   *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
-   *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
-   *  than starting a second fetch for the same entry when one is already
-   *  running — block.closed's closing read above all — and starts its own (also tracked here) when nothing was; either way the
-   *  run tool's completion waits on the SAME fetch this map would otherwise
-   *  let a second caller duplicate (nocx-2v80t.3.19). */
+  /** The stored-row read and paint in flight per entry, keyed by attempt id.
+   *  A burst of block.grew notifications shares this promise instead of
+   *  repainting the same artifact once per notification. If block.closed
+   *  arrives during a growth read, one final read is queued behind it so the
+   *  closing rows are not lost. `_ensureBlockRows` reuses the active or
+   *  closing promise rather than starting a duplicate fetch (nocx-2v80t.3.19). */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
+  /** One final fetch queued behind an older growth fetch, when block.closed
+   *  arrives before that fetch settles. */
+  private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -4444,6 +4445,7 @@ export class TerminalContent extends BasePaneContent {
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsFinalPending.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4551,7 +4553,7 @@ export class TerminalContent extends BasePaneContent {
         entryId: params.entryId,
         kept: 'kept' in params && params.kept === true,
       }
-      if (closed.kept) void this._refreshBlockRows(closed.entryId)
+      if (closed.kept) void this._refreshBlockRows(closed.entryId, true)
       this.scrollback?.blockManager.blockClosed(closed.entryId)
     }
     const onBlockCleared = (params: unknown): void => {
@@ -4794,6 +4796,8 @@ export class TerminalContent extends BasePaneContent {
         surface: painterSurface,
         gestureRoot,
         surfaceId: this.pane.paneId,
+        mouseReportingActive: () => renderer.mouseReportingActive(),
+        focusInput: () => renderer.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {
             this.clipboard.writeText(text).catch((e) => {
@@ -8050,6 +8054,7 @@ export class TerminalContent extends BasePaneContent {
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsFinalPending.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8664,14 +8669,38 @@ export class TerminalContent extends BasePaneContent {
 
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
-   *  Tracked in `_blockRowsInFlight` so a freeze landing while this is
-   *  still running can wait for it (`_ensureBlockRows`) instead of reading
-   *  `.cmd-output` before it has anything written into it. Cleared only if
-   *  nothing newer replaced the entry — block.grew and then block.closed
-   *  for the same entry each start their own fetch, and the closing one is
-   *  the one worth waiting for; never removing a newer entry's promise out
-   *  from under it. */
-  private _refreshBlockRows(entryId: string): Promise<void> {
+   *  Repeated growth notifications reuse one in-flight read and paint.
+   *  block.closed queues a final read behind that growth read when needed.
+   *  `_ensureBlockRows` reuses the active or closing promise instead of
+   *  reading `.cmd-output` before the stored rows are ready. */
+  private _refreshBlockRows(entryId: string, final = false): Promise<void> {
+    const active = this._blockRowsInFlight.get(entryId)
+    if (active) {
+      if (!final) return active
+      const closing = this._blockRowsFinalPending.get(entryId)
+      if (closing) return closing
+      // A block.closed notification names the final artifact while a growth
+      // read may still be painting an earlier version. Coalesce the whole
+      // burst, then do exactly one closing read after the growth read settles.
+      const finalRead = active.then(
+        () => {
+          this._blockRowsFinalPending.delete(entryId)
+          return this._refreshBlockRows(entryId)
+        },
+        () => {
+          this._blockRowsFinalPending.delete(entryId)
+          return this._refreshBlockRows(entryId)
+        },
+      )
+      this._blockRowsFinalPending.set(entryId, finalRead)
+      void finalRead.finally(() => {
+        if (this._blockRowsFinalPending.get(entryId) === finalRead) {
+          this._blockRowsFinalPending.delete(entryId)
+        }
+      })
+      return finalRead
+    }
+    this._blockRowsFinalPending.delete(entryId)
     const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
@@ -8722,10 +8751,12 @@ export class TerminalContent extends BasePaneContent {
    *  own only when neither is true (a block closed with no read behind it:
    *  one the store did not keep, or a completion that carried no fence). */
   private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
-    // A read in flight comes first, even when the record already holds rows:
-    // the block closes on block.closed, which starts the closing read before
-    // it closes the block (nocx-2v80t.3.27), and the rows an earlier
-    // block.grew left are not the final ones.
+    // A queued closing read outranks its older growth read, even when the
+    // record already holds rows: block.closed names the final artifact.
+    const closing = this._blockRowsFinalPending.get(entryId)
+    if (closing) return closing
+    // Otherwise a read in flight comes first, even when the record already
+    // holds rows; an earlier block.grew read may still be painting.
     const inFlight = this._blockRowsInFlight.get(entryId)
     if (inFlight) return inFlight
     if (rec.storedRows) return Promise.resolve()

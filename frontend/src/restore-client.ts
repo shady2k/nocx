@@ -443,11 +443,14 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const caused = entry.caused ?? []
     const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (entry.entry.kind !== 'ask' && rows) {
-      const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: rows.id })
+      // Restoration shares the in-flight row read used by notifications.
+      // Reading the large artifact through the coalescing reader avoids a
+      // second response when restoration races a block notification.
+      const stored = await blockRowsForEntry(client, entryId)
       return {
         kind: 'command',
         body: null,
-        rows: parseStoredBlockRows(artifact.body, rows, artifact.id),
+        ...(stored.kind === 'rows' ? { rows: stored.rows } : {}),
         caused,
         proseEvicted: !!entry.proseEvicted,
       }

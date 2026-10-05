@@ -56,16 +56,49 @@ package content
 //	          behind the ring's oldest byte.
 //	Stance  — WIRED. history.status reads it on every render of the History
 //	          settings section, which is where the degrade is stated.
-//	Read    — WIRED as of nocx-22k1c.2. main → App.Run → … → sessionSpecs →
+//	Read    — WIRED, to TWO callers, and only one of them is the client.
+//	          Re-audited 2026-10-05 for nocx-zg3k3.9, which was filed on the
+//	          premise that nothing can parse the recorded bytes once the
+//	          client paints cells; both `-whylive` and reading the tree say
+//	          the premise is wrong TODAY, and the two callers retire
+//	          differently.
+//
+//	          (1) main → App.Run → … → sessionSpecs →
 //	          sessionOutputHandlers.handleSessionOutput → Read: the
-//	          session.output JSON-RPC method is the read surface, and the
-//	          transport test that watches a fresh client recover an hour of
-//	          output the replay ring had long since discarded is its
-//	          end-to-end proof. It was TEST-REACHABLE ONLY for one bead —
-//	          `-whylive` answered "reachable only through reflection" — and
-//	          that was REPORTED rather than baselined, which is what made it
-//	          the next bead instead of a permanent warning. Keep this line
-//	          current: it is the only warning the next reader gets.
+//	          session.output JSON-RPC method. Its only production caller is
+//	          the renderer's reclaim — ipc.ts readSessionOutput ←
+//	          reclaimSession ← panes.ts adoptionFor, the restore of a pane
+//	          whose session outlived the window — and everything it feeds is
+//	          the client's VT: xterm's parser, which owns the program's modes
+//	          (bracketed paste, mouse reporting, application cursor keys) and
+//	          therefore what a keystroke, a paste and a click are encoded as
+//	          after a reclaim, plus the OSC 133 C/D markers that adjudicate a
+//	          restored block's exit code. Both are the PARSER's, so this
+//	          caller retires when the client stops parsing session bytes —
+//	          when input is intent (nocx-zg3k3.3.1) and at the latest with
+//	          xterm itself (nocx-zg3k3.8) — and not a day before: without it
+//	          a restarted window's xterm boots at default modes and vim
+//	          receives clicks and keys encoded for the wrong ones.
+//	          The transport test that watches a fresh client recover an hour
+//	          of output the replay ring had long since discarded is this
+//	          caller's end-to-end proof, and it was TEST-REACHABLE ONLY for
+//	          one bead — `-whylive` answered "reachable only through
+//	          reflection", and that was REPORTED rather than baselined, which
+//	          is what made it the next bead instead of a permanent warning.
+//
+//	          (2) main → App.Run → … → WSServer.ReadoptHostedSession →
+//	          recordedThrough → Read: the hole boundary a re-adopted
+//	          helper-hosted session resumes at (nocx-k6p18.30). It needs
+//	          `Produced` ALONE — where this machine's recording ends is where
+//	          the ring must resume, so the stretch nobody recorded is written
+//	          as a gap rather than spliced onto bytes that are not adjacent.
+//	          THIS ONE DOES NOT RETIRE WITH THE CLIENT: whoever deletes the
+//	          client-facing read must keep that one number, or a coordinator
+//	          replaced under a live remote session resumes from zero and
+//	          claims a recording it never had.
+//
+//	          Keep this line current: it is the only warning the next reader
+//	          gets.
 
 import (
 	"context"

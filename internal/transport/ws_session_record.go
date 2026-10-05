@@ -50,7 +50,7 @@ import (
 const recorderRetryInterval = 2 * time.Second
 
 // SessionOutputRecorder is the transport's view of the durable sink: the
-// three things this package asks of it and nothing else. content's own
+// four things this package asks of it and nothing else. content's own
 // repository satisfies it; a test's fake satisfies it without a database.
 //
 // The read is on the SAME interface as the write, deliberately (nocx-22k1c.2).
@@ -61,6 +61,15 @@ const recorderRetryInterval = 2 * time.Second
 // is present. A recording nothing can read is not durable in any sense worth
 // the word; writing it and reading it are two halves of one capability and
 // they arrive together or not at all.
+//
+// ONE READER IS NOT THE CLIENT (nocx-zg3k3.9). This package calls Read twice:
+// handleSessionOutput answers the session.output method, whose only
+// production caller is the renderer's reclaim, and recordedThrough
+// (ws_readopt.go) needs the recording's END OFFSET alone to resume a
+// re-adopted helper-hosted session where its recording stopped. The first
+// retires with the client's byte parser (input becomes intent, then xterm
+// leaves the build); the second does not, so the interface cannot be deleted
+// whole — see content/session_output.go's "What is wired" lines.
 type SessionOutputRecorder interface {
 	// Append records one run of bytes at its stream offset. A result with
 	// Kept false is a refusal — retention is off — and not a failure.

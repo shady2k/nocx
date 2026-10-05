@@ -128,6 +128,11 @@ type TargetResult struct {
 type IntentParams struct {
 	Session HostSessionID `json:"session"`
 	Token   string        `json:"token"`
+	// Interactive marks input from the pane's current controller. Unlike an
+	// agent intent it has no screen target: a person may press Enter at a
+	// shell prompt. It still passes through the same ordered owner and runtime
+	// encoder, and AccessEpoch is checked at receipt and commit.
+	Interactive bool `json:"interactive,omitempty"`
 	// AccessEpoch is the epoch the coordinator believes is current (design
 	// §7.2) — bound into the token's canonical intent at the commit point, so
 	// a replay of the same token under a DIFFERENT epoch is refused

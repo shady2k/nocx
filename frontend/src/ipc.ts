@@ -22,6 +22,7 @@ import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
 import type { SessionHistoryPage } from './generated/session.historyPage'
 import type { SessionHistoryPageRows } from './generated/session.historyPageRows'
+import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import { log } from './log'
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
@@ -561,6 +562,16 @@ export class SessionHandle {
    *  survive silently. */
   historyPage(before: number | null, limit: number): Promise<SessionHistoryPage> {
     return this.client.historyPage(this.sessionId, before, limit)
+  }
+
+  /** Sends structured input to this pane's helper. The helper owns terminal
+   *  mode interpretation and refuses an obsolete access epoch before writing. */
+  intent(
+    accessEpoch: number,
+    kind: 'key' | 'text' | 'paste',
+    payload: string,
+  ): Promise<SessionIntentResult> {
+    return this.client.sessionIntent(this.sessionId, accessEpoch, kind, payload)
   }
 
   /** Registers a callback for one live-history page's rows: the parsed
@@ -1505,6 +1516,22 @@ export class WSClient {
    *  answer's facts ride the result; the rows ride the screen plane keyed
    *  by the result's pageId — one socket, one FIFO, so a caller reading in
    *  order finds the rows already queued when the promise resolves. */
+  /** Sends a control-plane session intent for the pane's renderer. Payload is
+   *  the schema's base64 string; PTY bytes stay on the separate data plane. */
+  sessionIntent(
+    sessionId: string,
+    accessEpoch: number,
+    kind: 'key' | 'text' | 'paste',
+    payload: string,
+  ): Promise<SessionIntentResult> {
+    return this.dispatcher.call<SessionIntentResult>('session.intent', {
+      sessionId,
+      accessEpoch,
+      kind,
+      payload,
+    })
+  }
+
   historyPage(
     sessionId: string,
     before: number | null,

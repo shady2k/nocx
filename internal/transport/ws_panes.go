@@ -1,6 +1,9 @@
 package transport
 
 import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -75,4 +78,16 @@ func (s *WSServer) unwatchPane(sid session.ID) {
 	if s.paneAdmissions != nil {
 		s.paneAdmissions.SessionEnded(string(sid))
 	}
+}
+
+// paneIntentSource forwards ordinary renderer input to the helper that owns
+// the pane. It extends the same helper session.intent operation used by
+// target-bearing callers; it does not carry PTY bytes on the WebSocket.
+type paneIntentSource interface {
+	Intent(ctx context.Context, sessionID string, p proto.IntentParams) (proto.IntentResult, error)
+}
+
+// WithPaneIntentSource attaches the helper route used by session.intent.
+func WithPaneIntentSource(source paneIntentSource) WSServerOption {
+	return func(ws *WSServer) { ws.paneIntentSource = source }
 }

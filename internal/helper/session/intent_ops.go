@@ -143,6 +143,9 @@ func (s *Service) intent(ctx context.Context, p proto.IntentParams) (proto.Inten
 // for a caller that stayed to hear it, retrievable afterward through
 // session.intent-status.
 func (hs *hostSession) intent(ctx context.Context, p proto.IntentParams) (proto.IntentResult, error) {
+	if p.Interactive {
+		return hs.interactiveIntent(ctx, p)
+	}
 	tok, err := parseToken(p.Token)
 	if err != nil {
 		return refusedIntent("forged"), nil
@@ -177,6 +180,37 @@ func (hs *hostSession) intent(ctx context.Context, p proto.IntentParams) (proto.
 	}
 }
 
+// interactiveIntent is the pane owner's ordinary input path. It deliberately
+// skips the target digest only: the expected pane access epoch is carried into
+// the owner, checked at receipt and rechecked at the commit point. Key bytes
+// are still encoded by sessionruntime against modes the program set.
+func (hs *hostSession) interactiveIntent(ctx context.Context, p proto.IntentParams) (proto.IntentResult, error) {
+	ctrl, err := hs.ensureControl()
+	if err != nil {
+		return proto.IntentResult{}, err
+	}
+	kind := intentKindFromWire(p.Kind)
+	pi := &pendingIntent{
+		Intent: sessionruntime.Intent{
+			At: hs.runtime.Incarnation(), Under: ctrl.Epoch, By: ctrl.Holder,
+			Kind: kind, Payload: p.Payload,
+		},
+		Interactive: true,
+		Canonical:   canonicalIntent{Kind: kind, Payload: p.Payload, AccessEpoch: p.AccessEpoch},
+		CommitBy:    p.CommitBy,
+	}
+	done, err := hs.owner.submit(ownerItem{kind: itemIntent, intent: pi})
+	if err != nil {
+		return refusedIntent(causeOf(err)), nil
+	}
+	select {
+	case res := <-done:
+		return hs.renderIntentResult(res, Token{}), nil
+	case <-ctx.Done():
+		return proto.IntentResult{}, ctx.Err()
+	}
+}
+
 // ensureControl grants this session's one controller principal the first
 // time session.intent needs one (see this file's own package doc for why),
 // and answers the grant already in force otherwise. Serialised under hs.mu,
@@ -206,6 +240,8 @@ func intentKindFromWire(s string) sessionruntime.IntentKind {
 		return sessionruntime.IntentKindKey
 	case "text":
 		return sessionruntime.IntentKindText
+	case "paste":
+		return sessionruntime.IntentKindPaste
 	default:
 		return sessionruntime.IntentKindNone
 	}

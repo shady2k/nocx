@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.intent.params.schema.json",
+  "title": "SessionIntentParams",
+  "description": "Structured interactive intent from the pane controller. The helper runtime encodes it against modes the program set; this is never PTY bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "accessEpoch", "kind", "payload"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "accessEpoch": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pane access epoch last observed by the controller. Refused access_revoked with zero bytes if it is no longer current."
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["key", "text", "paste"]
+    },
+    "payload": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Key name with modifiers, committed UTF-8 text, or verbatim paste body."
+    }
+  }
+}

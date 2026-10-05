@@ -98,6 +98,32 @@ afterEach(() => {
   consoleWarn.mockRestore()
 })
 
+describe('session.intent', () => {
+  it('sends structured input over the control plane and returns its typed outcome', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent(4, 'key', btoa('Enter'))
+    const request = ws.requests().find((candidate) => candidate.method === 'session.intent')
+
+    expect(request).toBeDefined()
+    expect(request?.params).toEqual({
+      sessionId: SID,
+      accessEpoch: 4,
+      kind: 'key',
+      payload: btoa('Enter'),
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: request!.id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 7 },
+    })
+    await expect(pending).resolves.toEqual({
+      state: 'executed',
+      bytesWritten: 1,
+      fenceAfter: 7,
+    })
+  })
+})
+
 describe('connect', () => {
   it('resolves once the handshake completes', async () => {
     const client = new WSClient(mockDispatcher())

@@ -2080,6 +2080,7 @@ func New(opts ...Option) (*App, error) {
 	// write into this pane", decided against a second grid.
 	paneTyping := newPaneTypist(logger, paneViews, paneDrivers, paneCalibration, paneWatch, sess)
 	tpOpts = append(tpOpts, transport.WithPaneScreens(paneViews),
+		transport.WithPaneIntentSource(screenSource),
 		// The baseline a newly installed window is owed (nocx-zg3k3.2.15):
 		// asked of the helper that holds the pane through the same lookup
 		// every screen read takes, and delivered by that pane's own drain.

@@ -26,4 +26,4 @@ I did not run `make ci-full`, containerized tests, or e2e, as instructed. A comb
 
 ## Commit
 
-`452c7204` — `feat(transport): route pane input through session intent (nocx-zg3k3.14.2)`.
+`25d74249` — `feat(transport): route pane input through session intent (nocx-zg3k3.14.2)`.

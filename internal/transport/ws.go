@@ -2041,6 +2041,13 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	// Stop ordered submissions before tearing down server-owned resources.
+	// Existing tasks can finish, but no new task is admitted during shutdown.
+	for _, spec := range s.methods {
+		if stopper, ok := spec.submission.(control.Shutdownable); ok {
+			stopper.Shutdown()
+		}
+	}
 	// Cancel every running upload first. A transfer holds (over SFTP) a
 	// pooled connection reference for its lifetime and nothing else in this
 	// teardown would release it, and the POST that carries its body waits

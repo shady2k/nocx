@@ -73,6 +73,12 @@ type Submission interface {
 	TrySubmit(context.Context, Task) *Rejection
 }
 
+// Shutdownable is implemented by submissions that own a worker lifecycle.
+// Shutdown stops admission and lets already admitted work finish.
+type Shutdownable interface {
+	Shutdown()
+}
+
 // Task is a unit of control-plane work. Run is called with the context passed
 // to TrySubmit and must return when that context is cancelled.
 type Task struct {

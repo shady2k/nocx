@@ -1040,17 +1040,7 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
     .not.toBe('pending')
 
   if (await setupSheet.isVisible()) {
-    await page.locator('#vault-setup-passphrase').fill(spec.vaultPassphrase)
-    await page.locator('#vault-setup-confirm').fill(spec.vaultPassphrase)
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-    // The recovery code, then Done — the sheet's own two steps.
-    await baseExpect(page.locator('.ui-vault-code-block-wrap .ui-code-block')).toBeVisible({
-      timeout: 10_000,
-    })
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    await setUpVaultThroughTheSheet(page, spec.vaultPassphrase)
     await baseExpect(setupSheet).not.toBeVisible({ timeout: 10_000 })
     await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
   }
@@ -1064,6 +1054,68 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
   await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toBeVisible({
     timeout: 10_000,
   })
+}
+
+/**
+ * Answer the vault setup sheet — passphrase, Set Up, the recovery code, Done.
+ *
+ * ONE OWNER for the journey, because it had two (this file and
+ * vault-sealed-probe.spec.ts) and the second copy is what failed in CI
+ * (nocx-xn63t.6.20).
+ *
+ * THE SUBMIT IS VERIFIED, NOT ASSUMED. The sheet's own two steps are its own
+ * state machine: `saving()` disables BOTH buttons and relabels the primary one
+ * the moment a submit starts, and a submit that is accepted advances the
+ * `<Show>` to the recovery code. A plain `click()` then `toBeVisible()` waits
+ * on the consequence without ever checking that the cause happened — and a
+ * click CAN be lost between its mousedown and its mouseup (the sheet is a
+ * top-sheet that is still settling, so the two land on different elements and
+ * the browser fires the click on their common ancestor, which has no handler).
+ * Nothing in the renderer then moves: no request leaves the wire, no error is
+ * painted, `saving()` stays false — the sheet simply sits on step 1 until the
+ * wait runs out. That is exactly what CI run 37340666515's `ci-e2e (webkit, 2)`
+ * reported: `.ui-vault-code-block-wrap .ui-code-block` "element(s) not found"
+ * for ten seconds, the sheet's own snapshot still showing step 1 with both
+ * fields filled, neither button disabled and no error text, while the backend
+ * log ended BEFORE the click and carried no `vault.setup` at all.
+ *
+ * So the gesture is RETRIED until the state it is supposed to produce, which is
+ * the wait a person performs: press Set Up again while the sheet is still
+ * offering step 1 with the button live. The button being ENABLED is what makes
+ * repeating it safe — a submit already in flight has disabled it (so this waits
+ * for the code block without clicking), and a second Setup that does arrive is
+ * refused by the vault itself ("vault is already initialized",
+ * internal/vault/vault.go:283) rather than re-keying anything.
+ */
+export async function setUpVaultThroughTheSheet(page: Page, passphrase: string): Promise<void> {
+  const sheet = page
+    .locator('.ui-prompt-overlay')
+    .filter({ has: page.locator('#vault-setup-passphrase') })
+  await baseExpect(sheet).toBeVisible({ timeout: 10_000 })
+
+  const passphraseField = page.locator('#vault-setup-passphrase')
+  const submit = page.getByRole('dialog').getByRole('button', { name: /Set Up/i })
+  const recoveryCode = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+
+  await passphraseField.fill(passphrase)
+  await page.locator('#vault-setup-confirm').fill(passphrase)
+
+  await baseExpect(async () => {
+    // Press, then look. Step 1 still on screen means no submit has been
+    // accepted, so the press is simply made again — which is what a person
+    // does with a button that appeared to do nothing. The press is bounded
+    // and its refusal is swallowed: while a submit IS in flight the sheet
+    // disables the button, and waiting for it there would spend the budget on
+    // a press that is not owed. Nothing here is a duration; every attempt
+    // ends on the sheet's own state and 15 s is the budget for the pair.
+    if (await passphraseField.isVisible()) {
+      await submit.click({ timeout: 2_000 }).catch(() => undefined)
+    }
+    baseExpect(await recoveryCode.isVisible()).toBe(true)
+  }).toPass({ timeout: 15_000 })
+
+  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+  await baseExpect(sheet).not.toBeVisible({ timeout: 10_000 })
 }
 
 /**

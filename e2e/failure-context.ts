@@ -223,7 +223,14 @@ export function attachFailureDiagnostics(page: Page): PageDiagnostics {
       return snapshot !== null
     },
     async captureBlockDom() {
-      blockDom = await readBlockDomFrom(page)
+      try {
+        blockDom = await readBlockDomFrom(page)
+      } catch (err) {
+        // `readBlockDomFrom` already answers a refused read with a line of its
+        // own, so this catches what is left of it. A diagnostic may never take
+        // the report it is written into down with it (nocx-itmo2).
+        blockDom = `(could not read the DOM: ${String(err)})`
+      }
     },
     hasBlockDom() {
       return blockDom !== null
@@ -333,7 +340,20 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
       // here would print the "not read" line and then be read for nothing.
       sections.push(...watched.diagnostics.sections(watched.label))
     }
-    if (pages.length === 0) sections.push('-- no browser page was on this report --')
+    if (pages.length === 0) {
+      sections.push('-- no browser page was on this report --')
+      // AND THE BLOCK DOM SAYS SO RATHER THAN GOING MISSING. The section is
+      // not conditional on there being a page to read: a failed test whose
+      // report omitted it reads as "the DOM was fine", which is the opposite
+      // of what an absent read means — and the reader who concludes the DOM
+      // was fine is the reader this whole section was written for. Reachable
+      // whenever no page reached the report: a failure in beforeAll/afterAll,
+      // a page fixture whose setup threw, or a spec that builds its own client
+      // and never puts it on the report (nocx-itmo2).
+      sections.push(
+        '-- page: block DOM --\n(no browser page was on this report — the DOM was not read)',
+      )
+    }
 
     // The store's own answer about the rows the spec was comparing (nocx-rb4ca),
     // printed after the pages because it is read off the ledger rather than the

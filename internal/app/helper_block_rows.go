@@ -46,6 +46,8 @@ type blockRowsSink interface {
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
+	BlockOutputStartPlaneAttached(sid session.ID)
+	BlockOutputStartRow(sid session.ID, fromRow uint64)
 	// BlockOutputIncomplete is the helper's one marker that its row buffer
 	// overflowed (nocx-2v80t.3.36), on the same ordered sequence.
 	BlockOutputIncomplete(sid session.ID, fromRow uint64)
@@ -89,11 +91,13 @@ type rowsSource interface {
 	OnOutputRows(func(client.OutputRows))
 	OnIntervalEnd(func(client.IntervalEnd))
 	OnClearBoundary(func())
+	OnOutputStartRow(func(client.OutputStartRow))
 }
 
 func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	marks := newMarkSlot()
+	sink.BlockOutputStartPlaneAttached(sid)
 	if withConfirmation, ok := sink.(blockRowsConfirmationSink); ok {
 		withConfirmation.AttachBlockRowsWithConfirmation(sid, marks.offer)
 	} else {
@@ -130,6 +134,9 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	src.OnClearBoundary(func() {
 		sink.BlockClearBoundary(sid)
 	})
+	src.OnOutputStartRow(func(mark client.OutputStartRow) {
+		sink.BlockOutputStartRow(sid, mark.FromRow)
+	})
 
 	var once sync.Once
 	return func() {
@@ -137,6 +144,7 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 			src.OnOutputRows(nil)
 			src.OnIntervalEnd(nil)
 			src.OnClearBoundary(nil)
+			src.OnOutputStartRow(nil)
 			sink.DetachBlockRows(sid)
 			cancel()
 		})
@@ -160,19 +168,21 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 // It is a rowsSource, so the ordinary bridge (bindBlockRowsTo) registers its
 // consumers on it exactly as it would on the attachment.
 type heldRows struct {
-	mu    sync.Mutex
-	bound bool
-	held  []heldFrame
-	rows  func(client.OutputRows)
-	end   func(client.IntervalEnd)
-	clear func()
+	mu             sync.Mutex
+	bound          bool
+	held           []heldFrame
+	rows           func(client.OutputRows)
+	end            func(client.IntervalEnd)
+	clear          func()
+	outputStartRow func(client.OutputStartRow)
 }
 
 // heldFrame is one rows-plane frame, of whichever kind, in arrival order.
 type heldFrame struct {
-	rows  *client.OutputRows
-	end   *client.IntervalEnd
-	clear bool
+	rows           *client.OutputRows
+	end            *client.IntervalEnd
+	clear          bool
+	outputStartRow *client.OutputStartRow
 }
 
 // observe registers the hold on an attachment's rows plane.
@@ -180,6 +190,7 @@ func (h *heldRows) observe(src rowsSource) {
 	src.OnOutputRows(h.takeRows)
 	src.OnIntervalEnd(h.takeEnd)
 	src.OnClearBoundary(h.takeClear)
+	src.OnOutputStartRow(h.takeOutputStartRow)
 }
 
 // holdRowsBeforeAttach is the attach option that registers a hold, and the
@@ -232,6 +243,24 @@ func (h *heldRows) takeClear() {
 	}
 }
 
+func (h *heldRows) takeOutputStartRow(mark client.OutputStartRow) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.bound {
+		h.held = append(h.held, heldFrame{outputStartRow: &mark})
+		return
+	}
+	if h.outputStartRow != nil {
+		h.outputStartRow(mark)
+	}
+}
+
+func (h *heldRows) OnOutputStartRow(f func(client.OutputStartRow)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.outputStartRow = f
+}
+
 // OnOutputRows, OnIntervalEnd and OnClearBoundary make the hold the bridge's
 // rowsSource: the consumers the bridge registers are the stream's.
 func (h *heldRows) OnOutputRows(f func(client.OutputRows)) {
@@ -270,6 +299,10 @@ func (h *heldRows) release() {
 		case f.clear:
 			if h.clear != nil {
 				h.clear()
+			}
+		case f.outputStartRow != nil:
+			if h.outputStartRow != nil {
+				h.outputStartRow(*f.outputStartRow)
 			}
 		}
 	}
@@ -339,7 +372,7 @@ func (m *markSlot) offer(mark uint64) {
 	}
 }
 
-func (m *markSlot) next(ctx context.Context) (uint64, bool) {
+func (m *markSlot) next(ctx context.Context) (mark uint64, ok bool) {
 	for {
 		m.mu.Lock()
 		if m.has {

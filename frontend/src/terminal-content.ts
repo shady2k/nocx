@@ -1350,15 +1350,14 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
-  /** The most recently started rows fetch per entry, keyed by attempt id —
-   *  what a block.grew/block.closed notification only STARTS
-   *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
-   *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
-   *  than starting a second fetch for the same entry when one is already
-   *  running — block.closed's closing read above all — and starts its own (also tracked here) when nothing was; either way the
-   *  run tool's completion waits on the SAME fetch this map would otherwise
-   *  let a second caller duplicate (nocx-2v80t.3.19). */
+  /** One rows-read chain per entry, keyed by attempt id. `_ensureBlockRows`
+   *  reuses this chain so a freeze waits until the latest requested rows have
+   *  been painted, including a final read requested by block.closed. */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
+  /** At least one newer notification arrived during a read. This is state,
+   *  not a debounce timer: the next read starts when the current one settles,
+   *  so the final growth is not dropped. */
+  private readonly _blockRowsRefreshPending = new Set<string>()
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -4442,6 +4441,7 @@ export class TerminalContent extends BasePaneContent {
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsRefreshPending.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4538,10 +4538,9 @@ export class TerminalContent extends BasePaneContent {
       // the block's rows are whole. It is the ONE event a finished block
       // closes on — the renderer no longer watches the stream for a fence of
       // its own (ADR-0066 moved that rendezvous beside the emulator). A kept
-      // block's closing read starts FIRST, so the close that follows — and
-      // an agent run waiting on it — reads the rows the close made final,
-      // never the ones an earlier block.grew left. A block the store did not
-      // keep has nothing to read.
+      // block requests a final read here. If a growth read is still running,
+      // `_refreshBlockRows` queues one follow-up so a waiter receives the rows
+      // the close made final. A block the store did not keep has nothing to read.
       if (typeof params !== 'object' || params === null) return
       if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
         return
@@ -8029,6 +8028,7 @@ export class TerminalContent extends BasePaneContent {
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsRefreshPending.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8641,14 +8641,17 @@ export class TerminalContent extends BasePaneContent {
 
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
-   *  Tracked in `_blockRowsInFlight` so a freeze landing while this is
-   *  still running can wait for it (`_ensureBlockRows`) instead of reading
-   *  `.cmd-output` before it has anything written into it. Cleared only if
-   *  nothing newer replaced the entry — block.grew and then block.closed
-   *  for the same entry each start their own fetch, and the closing one is
-   *  the one worth waiting for; never removing a newer entry's promise out
-   *  from under it. */
+   *  A notification during an active read sets one pending refresh. The
+   *  chain then performs one follow-up read, so `_ensureBlockRows` can wait
+   *  for the latest rows without duplicating reads or dropping the last
+   *  growth. */
   private _refreshBlockRows(entryId: string): Promise<void> {
+    const inFlight = this._blockRowsInFlight.get(entryId)
+    if (inFlight) {
+      this._blockRowsRefreshPending.add(entryId)
+      return inFlight
+    }
+
     const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
@@ -8665,7 +8668,10 @@ export class TerminalContent extends BasePaneContent {
           entry: entryId,
           reason: read.reason,
         })
-        if (this._blockRowsInFlight.get(entryId) === fetch) {
+        if (
+          this._blockRowsInFlight.get(entryId) === tracked &&
+          !this._blockRowsRefreshPending.has(entryId)
+        ) {
           sb.blockManager.markRowsUnreadable(entryId, read.reason)
         }
         return
@@ -8683,26 +8689,32 @@ export class TerminalContent extends BasePaneContent {
         sb.scrollToBottomIfFollowing()
       })
     })
-    this._blockRowsInFlight.set(entryId, fetch)
-    void fetch.finally(() => {
-      if (this._blockRowsInFlight.get(entryId) === fetch) this._blockRowsInFlight.delete(entryId)
+    const tracked = fetch.finally(() => {
+      if (this._blockRowsInFlight.get(entryId) !== tracked) return
+      if (this._blockRowsRefreshPending.delete(entryId)) {
+        this._blockRowsInFlight.delete(entryId)
+        return this._refreshBlockRows(entryId)
+      }
+      this._blockRowsInFlight.delete(entryId)
     })
-    return fetch
+    this._blockRowsInFlight.set(entryId, tracked)
+    return tracked
   }
 
   /** Guarantee this record's stored rows are being asked for, and answer
    *  once the asking is done — successfully or not; `_refreshBlockRows`
    *  itself decides what a failed or empty answer paints, if anything.
-   *  Reuses a fetch a notification already started — block.closed starts
-   *  the closing one before it closes the block — resolves at once when
-   *  none is in flight and the record already carries rows, and starts its
-   *  own only when neither is true (a block closed with no read behind it:
-   *  one the store did not keep, or a completion that carried no fence). */
+   *  Reuses the chain a notification already started. `block.closed` asks
+   *  for a final read before closing the block; if a growth read is active,
+   *  the chain includes its queued follow-up. Resolves at once when none is
+   *  in flight and the record already carries rows, and starts its own only
+   *  when neither is true (a block closed with no read behind it: one the
+   *  store did not keep, or a completion that carried no fence). */
   private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
-    // A read in flight comes first, even when the record already holds rows:
-    // the block closes on block.closed, which starts the closing read before
-    // it closes the block (nocx-2v80t.3.27), and the rows an earlier
-    // block.grew left are not the final ones.
+    // A read chain comes first, even when the record already holds rows:
+    // block.closed requests the final read before it closes the block
+    // (nocx-2v80t.3.27), and the chain waits for that read after any earlier
+    // block.grew read, so the waiter receives the sealed rows.
     const inFlight = this._blockRowsInFlight.get(entryId)
     if (inFlight) return inFlight
     if (rec.storedRows) return Promise.resolve()

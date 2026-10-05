@@ -56,7 +56,7 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
     createTab: (t) => {
       calls.push(['tabs.create', t])
       return Promise.resolve({
-        tab: tab(t.id, { position: t.position, workspaceId: t.workspaceId }),
+        tab: tab(t.id, { position: 0, workspaceId: t.workspaceId }),
         firstPane: pane(t.firstPane.id, t.id, { cwd: t.firstPane.cwd, kind: t.firstPane.kind }),
         replayed: false,
       })
@@ -239,11 +239,23 @@ describe('LayoutStore', () => {
     expect(params).toMatchObject({
       id: opened.tabId,
       workspaceId: DEFAULT_WS,
-      position: 0,
       firstPane: { id: opened.paneId, kind: 'local', endpoint: null, sizeShare: 1 },
     })
     expect(store.tabs().map((t) => t.id)).toEqual([opened.tabId])
     expect(store.tabOf(opened.paneId)?.id).toBe(opened.tabId)
+  })
+
+  it('asks the store to seat a new tab after the active tab without computing a position', async () => {
+    const client = fakeClient()
+    const store = new LayoutStore(client)
+    await store.load()
+
+    const activeTabId = 'active-tab'
+    await store.openTab({ kind: 'local', endpoint: null, cwd: '' }, DEFAULT_WS, activeTabId).created
+
+    const [, params] = client.calls.find(([method]) => method === 'tabs.create')!
+    expect(params).toMatchObject({ workspaceId: DEFAULT_WS, afterTabId: activeTabId })
+    expect(params).not.toHaveProperty('position')
   })
 
   it('opens a tab in the workspace the caller names, and in the default when it names none', async () => {

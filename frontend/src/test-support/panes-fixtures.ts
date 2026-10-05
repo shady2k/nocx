@@ -1053,7 +1053,7 @@ export function makeLayoutBackend(): LayoutClientLike & {
     createTab: (t) => {
       const refused = refuse<never>('createTab')
       if (refused) return refused
-      const tab = tabRow(t.id, { position: t.position, workspaceId: t.workspaceId })
+      const tab = tabRow(t.id, { position: 0, workspaceId: t.workspaceId })
       const first = paneRow(t.firstPane.id, t.id, {
         cwd: t.firstPane.cwd,
         kind: t.firstPane.kind,

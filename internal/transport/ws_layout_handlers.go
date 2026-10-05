@@ -322,6 +322,7 @@ type tabCreateParams struct {
 	Name        *string         `json:"name"`
 	Colour      *string         `json:"colour"`
 	Position    int             `json:"position"`
+	AfterTabID  *string         `json:"afterTabId"`
 	Pinned      bool            `json:"pinned"`
 	Layout      string          `json:"layout"`
 	FirstPane   firstPaneParams `json:"firstPane"`
@@ -881,11 +882,18 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			if !h.decode(req, &p) {
 				return nil
 			}
-			made, err := svc.CreateTab(ctx, content.Tab{
+			tab := content.Tab{
 				ID: p.ID, WorkspaceID: p.WorkspaceID, ParentID: p.ParentID, Name: p.Name,
 				Colour: p.Colour, Position: p.Position, Pinned: p.Pinned,
 				Layout: content.TabLayout(p.Layout),
-			}, p.FirstPane.pane(p.ID))
+			}
+			var made content.Created[content.NewTab]
+			var err error
+			if p.AfterTabID != nil {
+				made, err = svc.CreateTabAfter(ctx, tab, p.FirstPane.pane(p.ID), *p.AfterTabID)
+			} else {
+				made, err = svc.CreateTab(ctx, tab, p.FirstPane.pane(p.ID))
+			}
 			h.answer(req, err, func() any {
 				return tabCreateResponse{
 					Tab:       wireTab(made.Object.Tab),

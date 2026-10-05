@@ -3413,7 +3413,6 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
     const made = await chain.backend.createTab({
       id: 'worker-tab-1',
       workspaceId: layout.defaultWorkspaceId(),
-      position: before,
       firstPane: { id: 'worker-pane-1', cwd: '', kind: 'local', endpoint: null, sizeShare: 1 },
     })
     client._fireWorkerTabCreated(workerFact(made.tab, made.firstPane))
@@ -3462,7 +3461,6 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
     const made = await chain.backend.createTab({
       id: 'worker-tab-1',
       workspaceId: workspace,
-      position: 1,
       firstPane: {
         id: 'worker-pane-1',
         cwd: '/repo/worker',
@@ -3515,7 +3513,6 @@ describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
     const made = await chain.backend.createTab({
       id: 'worker-tab-2',
       workspaceId: layout.defaultWorkspaceId(),
-      position: 1,
       firstPane: { id: 'worker-pane-2', cwd: '', kind: 'local', endpoint: null, sizeShare: 1 },
     })
     const fact = workerFact(made.tab, made.firstPane)
@@ -3677,7 +3674,6 @@ describe('a worker participant tab leaves when its worker is closed (nocx-xn63t.
     const made = await chain.backend.createTab({
       id: 'worker-tab-close',
       workspaceId: layout.defaultWorkspaceId(),
-      position: 1,
       firstPane: {
         id: 'worker-pane-close',
         cwd: '/repo/worker',

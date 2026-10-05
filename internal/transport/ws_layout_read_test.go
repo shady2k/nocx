@@ -63,6 +63,46 @@ func readLayout(t *testing.T, conn *websocket.Conn, id int) readWire {
 }
 
 // The whole chain, read back through one call.
+// A renderer can name its active tab as the placement anchor. The backend
+// seats the new tab immediately after it, and layout.read on a fresh
+// connection returns that order rather than the request's stale position.
+func TestTabsCreateAfterActiveTabSeatsAndReadsBackOrder(t *testing.T) {
+	ws, _ := newLayoutWSServer(t)
+	conn := connectWS(t, ws)
+	seedWire(t, conn)
+	mustLayoutCall(t, conn, "tabs.create", map[string]any{
+		"id": tabID2, "workspaceId": wsID1, "position": 9, "layout": "row",
+		"firstPane": firstPane(paneID2, "/srv"),
+	}, 1)
+	mustLayoutCall(t, conn, "workspaces.create", map[string]any{
+		"id": wsID2, "name": "other", "position": 1,
+		"firstTab": firstTab(tabID3), "firstPane": firstPane(paneID3, "/other"),
+	}, 2)
+	mustLayoutCall(t, conn, "tabs.create", map[string]any{
+		"id": "0198f2b0-0000-7000-8000-000000000014", "workspaceId": wsID1,
+		"afterTabId": tabID1, "layout": "row",
+		"firstPane": firstPane("0198f2b0-0000-7000-8000-000000000024", "/new"),
+	}, 3)
+
+	reloaded := connectWS(t, ws)
+	got := readLayout(t, reloaded, 4)
+	var order []string
+	positions := map[string]int{}
+	for _, row := range got.Tabs {
+		if row.WorkspaceID == wsID1 {
+			order = append(order, row.ID)
+		}
+		positions[row.ID] = row.Position
+	}
+	want := []string{tabID1, "0198f2b0-0000-7000-8000-000000000014", tabID2}
+	if len(order) != len(want) || order[0] != want[0] || order[1] != want[1] || order[2] != want[2] {
+		t.Fatalf("workspace order = %v, want %v", order, want)
+	}
+	if positions[tabID3] != 0 {
+		t.Fatalf("other workspace tab position = %d, want unchanged 0", positions[tabID3])
+	}
+}
+
 func TestLayoutReadAnswersTheWholeChain(t *testing.T) {
 	ws, _ := newLayoutWSServer(t)
 	conn := connectWS(t, ws)

@@ -46,6 +46,7 @@ type LayoutService interface {
 	DeleteWorkspace(ctx context.Context, id string, next content.Replacement) error
 
 	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
+	CreateTabAfter(ctx context.Context, tab content.Tab, firstPane content.Pane, after string) (content.Created[content.NewTab], error)
 	RenameTab(ctx context.Context, id string, name *string) (content.Tab, error)
 	RecolourTab(ctx context.Context, id string, colour *string) (content.Tab, error)
 	PinTab(ctx context.Context, id string, pinned bool) (content.Tab, error)
@@ -126,6 +127,13 @@ func (s *layoutService) CreateTab(ctx context.Context, tab content.Tab, firstPan
 		return content.Created[content.NewTab]{}, err
 	}
 	return s.layout.CreateTab(ctx, tab, firstPane)
+}
+
+func (s *layoutService) CreateTabAfter(ctx context.Context, tab content.Tab, firstPane content.Pane, after string) (content.Created[content.NewTab], error) {
+	if err := s.guard.check(); err != nil {
+		return content.Created[content.NewTab]{}, err
+	}
+	return s.layout.CreateTabAfter(ctx, tab, firstPane, after)
 }
 
 func (s *layoutService) RenameTab(ctx context.Context, id string, name *string) (content.Tab, error) {

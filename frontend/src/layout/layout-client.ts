@@ -77,7 +77,7 @@ export interface LayoutClientLike {
   createTab(tab: {
     id: string
     workspaceId: string
-    position: number
+    afterTabId?: string
     firstPane: PaneFacts
   }): Promise<TabsCreateResult>
   createPane(pane: PaneFacts & { tabId: string }): Promise<PanesCreateResult>
@@ -170,16 +170,16 @@ export class LayoutClient implements LayoutClientLike {
   createTab(tab: {
     id: string
     workspaceId: string
-    position: number
+    afterTabId?: string
     firstPane: PaneFacts
   }): Promise<TabsCreateResult> {
     return this.dispatcher.call<TabsCreateResult>('tabs.create', {
       id: tab.id,
       workspaceId: tab.workspaceId,
       parentId: null,
+      afterTabId: tab.afterTabId,
       name: null,
       colour: null,
-      position: tab.position,
       pinned: false,
       layout: 'row',
       firstPane: tab.firstPane,

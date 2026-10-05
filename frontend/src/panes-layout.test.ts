@@ -73,13 +73,11 @@ async function seededBackend({ decorate = true } = {}): Promise<
   await backend.createTab({
     id: 'tab-a',
     workspaceId: 'workspace:default',
-    position: 0,
     firstPane: { id: 'pane-a', cwd: '/repos/nocx', kind: 'local', endpoint: null, sizeShare: 1 },
   })
   await backend.createTab({
     id: 'tab-b',
     workspaceId: 'workspace:default',
-    position: 1,
     firstPane: { id: 'pane-b', cwd: '/srv', kind: 'local', endpoint: null, sizeShare: 1 },
   })
   if (decorate) {
@@ -681,7 +679,6 @@ async function backendWithAnSSHRow(
   await backend.createTab({
     id: `tab-${id}`,
     workspaceId: 'workspace:default',
-    position: 0,
     firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1 },
   })
   return backend
@@ -846,7 +843,6 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
     await backend.createTab({
       id: 'tab-ssh-2',
       workspaceId: 'workspace:default',
-      position: 1,
       firstPane: {
         id: 'pane-ssh-2',
         cwd: '/srv',

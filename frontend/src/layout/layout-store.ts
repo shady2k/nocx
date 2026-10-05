@@ -177,7 +177,7 @@ export class LayoutStore {
    * The answer, not the request, is what lands in the cache: a create reads
    * back what the store holds, including the containers it filled in.
    */
-  openTab(pane: NewPane, intoWorkspace?: string): OpenedTab {
+  openTab(pane: NewPane, intoWorkspace?: string, afterTabId?: string): OpenedTab {
     const tabId = uuidv7()
     const paneId = uuidv7()
     // WHERE A NEW TAB GOES IS THE CALLER'S ANSWER, not this module's. A window
@@ -193,7 +193,7 @@ export class LayoutStore {
       .createTab({
         id: tabId,
         workspaceId,
-        position: this.state.tabs.length,
+        afterTabId,
         firstPane: paneFacts(paneId, pane),
       })
       .then((made) => {

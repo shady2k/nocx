@@ -1489,7 +1489,11 @@ export class PaneManager {
     // would either vanish on arrival or drag the window away from where the
     // person was working. The default is where it goes when that is where
     // they are.
-    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
+    const opened = this.layout.openTab(
+      { kind, endpoint, cwd: '' },
+      this.currentWorkspaceId(),
+      this.activePane ? this.layout.tabOf(this.activePane.wireId)?.id : undefined,
+    )
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the

@@ -185,9 +185,40 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     // The reader is scrolled up into the oldest rows, reading. A delayed
     // producer was armed BEFORE the anchor was captured, so its output is
     // guaranteed to land while the reader holds the position.
-    await type_(`( sleep 8; echo ANCHOR-LATE-${nonce} ) &`)
+    const anchor = await page.evaluate(() => {
+      const scroller = document.querySelector('.pane.active .scrollback-area')
+      if (!(scroller instanceof HTMLElement)) throw new Error('scrollback scroller is missing')
+      const rows = Array.from(scroller.querySelectorAll('.live-history-page .term-grid-row'))
+      const visible = rows.find((row) => {
+        const rect = row.getBoundingClientRect()
+        const clip = scroller.getBoundingClientRect()
+        return rect.bottom > clip.top && rect.top < clip.bottom
+      })
+      if (!(visible instanceof HTMLElement)) throw new Error('no history row is visible to anchor')
+      return { text: visible.textContent ?? '', top: visible.getBoundingClientRect().top }
+    })
+    expect(anchor.text).toMatch(/SCROLLBK-\d{3}/)
     const anchorTop = await scrollTop()
-    await expect.poll(async () => liveRows(), { timeout: 25_000 }).toContain(`ANCHOR-LATE-${nonce}`)
+    await type_(`( sleep 8; echo ANCHOR-LATE-${nonce} ) &`)
+    await expect
+      .poll(
+        async () =>
+          liveRows().then((rows) =>
+            rows.split('\n').some((row) => row.trim() === `ANCHOR-LATE-${nonce}`),
+          ),
+        { timeout: 25_000 },
+      )
+      .toBe(true)
+    const anchorAfter = await page.evaluate((text) => {
+      const scroller = document.querySelector('.pane.active .scrollback-area')
+      if (!(scroller instanceof HTMLElement)) throw new Error('scrollback scroller is missing')
+      const row = Array.from(scroller.querySelectorAll('.live-history-page .term-grid-row')).find(
+        (candidate) => candidate.textContent === text,
+      )
+      if (!(row instanceof HTMLElement)) throw new Error('the anchored history row was replaced')
+      return row.getBoundingClientRect().top
+    }, anchor.text)
+    expect(anchorAfter).toBeCloseTo(anchor.top, 0)
     expect(await scrollTop()).toBe(anchorTop)
 
     // ── Clause 3: returning to the bottom resumes tail follow ───────────

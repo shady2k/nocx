@@ -10,6 +10,8 @@ import { BlockNotice } from '../ui/block-notice'
 
 export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
+  /** Immutable artifact identity pinned by the ledger read. */
+  readonly artifactVersion?: string
   readonly droppedRows: number
   readonly lostRows: number
   /** Rows lost while nocx's server was unavailable: the terminal kept them
@@ -64,6 +66,7 @@ function rowLine(value: unknown): LedgerBlockRowsLine {
 export function parseStoredBlockRows(
   body: string,
   metadata: RowsArtifactMetadata,
+  artifactVersion?: string,
 ): StoredBlockRows {
   const lines = body
     .split('\n')
@@ -83,6 +86,7 @@ export function parseStoredBlockRows(
       : {}
   return {
     lines,
+    ...(artifactVersion === undefined ? {} : { artifactVersion }),
     droppedRows: nonNegativeInteger(payload.droppedRows),
     lostRows: nonNegativeInteger(payload.lostRows),
     unavailableRows: nonNegativeInteger(payload.unavailableRows),
@@ -112,7 +116,7 @@ export function blockColumnsOf(lines: readonly LedgerBlockRowsLine[]): number {
  *  geometry.cols. There is no cell-level padding here any more: that was
  *  the [grapheme, width, hasText]-per-column shape's own bookkeeping, and
  *  the compact wire does not carry cells to pad. */
-function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
+export function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   if (lines.length === 0) return null
   const cols = blockColumnsOf(lines)
   if (cols === 0) return null
@@ -130,6 +134,20 @@ function snapshotForRows(lines: readonly LedgerBlockRowsLine[]) {
   }
   const result = createCellModel().apply(frame)
   return result.ok ? result.snapshot : null
+}
+
+/** Selection reads the same parsed rows that paint the card, never its DOM text.
+ * The immutable artifact id is part of the key so a replaced artifact cannot
+ * silently resolve an old endpoint. */
+const selectionRows = new Map<string, StoredBlockRows>()
+function selectionKey(blockId: string, artifactVersion: string): string {
+  return `${blockId}\u0000${artifactVersion}`
+}
+export function storedBlockRowsForSelection(
+  blockId: string,
+  artifactVersion: string,
+): StoredBlockRows | null {
+  return selectionRows.get(selectionKey(blockId, artifactVersion)) ?? null
 }
 
 export interface StoredBlockPaintOptions {
@@ -240,6 +258,10 @@ export function paintStoredRows(
   stored: StoredBlockRows,
   opts: StoredBlockPaintOptions,
 ): void {
+  const blockId = block.dataset.entryId
+  if (blockId && stored.artifactVersion) {
+    selectionRows.set(selectionKey(blockId, stored.artifactVersion), stored)
+  }
   block
     .querySelectorAll(
       ':scope > .cmd-output, :scope > [data-output-incomplete], :scope > [data-output-empty], :scope > [data-output-unreadable]',
@@ -250,8 +272,17 @@ export function paintStoredRows(
     opts.warm?.(fitCandidatesOf(snapshot.rows))
     const output = document.createElement('div')
     output.className = 'cmd-output'
-    for (const row of snapshot.rows) {
-      output.appendChild(paintRow(row, opts))
+    for (let index = 0; index < snapshot.rows.length; index++) {
+      const painted = paintRow(snapshot.rows[index], opts)
+      const storedLine = stored.lines[index]
+      if (storedLine) {
+        painted.dataset.blockId = block.dataset.entryId ?? ''
+        if (stored.artifactVersion !== undefined) {
+          painted.dataset.artifactVersion = stored.artifactVersion
+        }
+        painted.dataset.logicalLine = String(storedLine.from)
+      }
+      output.appendChild(painted)
     }
     // Paths and urls become clickable HERE, once per paint, the same "one
     // pass beats a pass per click" rule the retired outputHtml path used

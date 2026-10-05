@@ -1095,6 +1095,12 @@ export class XtermRenderer implements TerminalRenderer {
     return this.term?.modes.bracketedPasteMode ?? false
   }
 
+  /** The input engine owns pointer input while a DEC mouse mode is active. */
+  mouseReportingActive(): boolean {
+    const term = this.term
+    return term !== null && term.modes.mouseTrackingMode !== 'none'
+  }
+
   refreshAtlas(): void {
     // nocx-q18: clearing the texture atlas and then repainting races with
     // the atlas repopulation during _updateModel. After clearTextureAtlas(),

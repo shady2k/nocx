@@ -4549,3 +4549,21 @@ describe('backend-owned block rows', () => {
     expect(frozen.el.querySelector('.cmd-output')).toBeNull()
   })
 })
+
+describe('accessible block structure (nocx-zg3k3.4.2)', () => {
+  it('exposes each block as a named, keyboard-focusable group', () => {
+    const container = document.createElement('div')
+    const block = createRunningBlock(
+      1,
+      'echo hello',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    expect(block.getAttribute('role')).toBe('group')
+    expect(block.tabIndex).toBe(0)
+    expect(block.getAttribute('aria-label')).toContain('echo hello')
+  })
+})

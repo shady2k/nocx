@@ -210,6 +210,32 @@ describe('restore-client — a block says what it is by its kind, and a turn own
     })
   })
 
+  it('restoration shares stored-row artifacts with notification refreshes', async () => {
+    const calls: string[] = []
+    const rowBody = `${JSON.stringify({ from: 0, row: { text: 'hi' } })}\n`
+    const client = {
+      call: vi.fn((method: string) => {
+        calls.push(method)
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: { kind: 'shell' },
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+            caused: [],
+            proseEvicted: false,
+          })
+        }
+        return Promise.resolve({ body: rowBody, id: 'art-rows' })
+      }),
+    } as unknown as WSClient
+
+    const restored = restoredBody(client, 'entry-rows')
+    const refreshed = blockRowsForEntry(client, 'entry-rows')
+    const [body, rows] = await Promise.all([restored, refreshed])
+    expect(body.rows).toBeDefined()
+    expect(rows.kind).toBe('rows')
+    expect(calls.filter((method) => method === 'ledger.artifact')).toHaveLength(1)
+  })
+
   it('a turn draws no body of its own, whatever text/plain it carries', async () => {
     // This used to assert the opposite — that a turn is "drawn from its
     // text" — and it was written before ADR-0040 moved the stored unit into

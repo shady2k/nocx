@@ -4083,6 +4083,93 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('coalesces a growth burst and fetches final rows once after block.closed', async () => {
+    const releases: Array<() => void> = []
+    const body = `${JSON.stringify({
+      from: 0,
+      row: wireRowOf([['x', 1, true] as CellSpec]),
+    })}\n`
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return new Promise((resolve) => {
+          releases.push(() =>
+            resolve({
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              body,
+              truncated: null,
+              byteLen: body.length,
+            }),
+          )
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const paintStoredRows = vi.spyOn(withScrollback.scrollback.blockManager, 'applyStoredRows')
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const blockClosed = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.closed',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      expect(blockClosed).toBeDefined()
+      for (let index = 0; index < 100; index += 1) blockGrew?.({ entryId: 'att-1' })
+      expect(client.call.mock.calls.filter(([method]) => method === 'ledger.get')).toHaveLength(1)
+      await vi.waitFor(() => expect(releases).toHaveLength(1))
+
+      // The final notification arrives during the growth read. It must queue
+      // one fresh read after that read settles rather than repainting the same
+      // rows 100 times or closing on a partial artifact.
+      blockClosed?.({ entryId: 'att-1', kept: true })
+      releases[0]()
+      await vi.waitFor(() => expect(releases).toHaveLength(2))
+      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(1))
+      releases[1]()
+      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(2))
+      expect(
+        client.call.mock.calls.filter(([method]) => method === 'ledger.artifact'),
+      ).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('coalesces block.grew reads without losing the latest stored rows', async () => {
     type Artifact = {
       id: string
@@ -14865,11 +14952,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const area = scrollback.scrollbackArea
-      // The full-screen state the probe measured: the program fills the
-      // scroller exactly, so there is nothing to scroll YET.
-      let scrollHeight = 816
-      let scrollTop = 0
-      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 816 })
+      // A previous transcript already overflows, and the old scroller is
+      // genuinely at its tail. Its first ResizeObserver delivery is still a
+      // pre-growth baseline; that stale tail measurement must not release the
+      // hold before the seated answer's own box grows.
+      let scrollHeight = 900
+      let scrollTop = 500
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
       Object.defineProperty(area, 'scrollHeight', { configurable: true, get: () => scrollHeight })
       // A scroller clamps a write AT THE MOMENT OF THE WRITE and keeps the
       // clamped value — which is exactly why a scroll issued before the

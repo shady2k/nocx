@@ -395,6 +395,51 @@ describe('live-history', () => {
     }
   })
 
+  it('remembers a departure while the initial head read is in flight', async () => {
+    vi.useFakeTimers()
+    try {
+      const { surface, scroller } = mount()
+      surface.setMode('unstructured')
+      const first = pageOf('v'.repeat(32), 64, 30, 0, true)
+      const second = pageOf('w'.repeat(32), 94, 30, 0, true)
+      const source = scriptedSource([first, second], { holdResult: true })
+      surface.bind(source)
+      await settle()
+      expect(source.requested).toEqual([null])
+
+      // The live pane has a little more content than its viewport while the
+      // page result is outstanding. The first scroll crosses the live end.
+      // The read must not make that departure invisible just because its
+      // promise has not settled yet.
+      Object.defineProperty(scroller, 'scrollHeight', {
+        configurable: true,
+        get: () =>
+          scroller.clientHeight +
+          surface.el.querySelectorAll('.term-grid-row').length * ROW_PX +
+          ROW_PX,
+      })
+      scroller.scrollTop = 0
+      scroller.dispatchEvent(new Event('scroll'))
+      surface.noteOutput()
+      vi.advanceTimersByTime(HEAD_REFRESH_MS)
+      await settle()
+      expect(source.requested).toEqual([null])
+
+      // The old read lands after output advanced the head. Its page is
+      // painted, but neither that read nor its trailing refresh may tear it
+      // down under the reader who already left the live end.
+      source.resolveResult(first.pageId)
+      await settle()
+      vi.advanceTimersByTime(HEAD_REFRESH_MS)
+      await settle()
+
+      expect(source.requested).toEqual([null])
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('a result whose rows document never arrives stops blocking the next gesture', async () => {
     vi.useFakeTimers()
     try {

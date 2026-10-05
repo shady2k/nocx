@@ -193,6 +193,7 @@ import {
 import { createCellModel, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
 import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
+import { installLiveSelectionGesture, type LiveSelectionGesture } from './painter/selection-gesture'
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
@@ -1350,14 +1351,19 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
-  /** One rows-read chain per entry, keyed by attempt id. `_ensureBlockRows`
-   *  reuses this chain so a freeze waits until the latest requested rows have
-   *  been painted, including a final read requested by block.closed. */
+  /** One stored-row read chain per entry, keyed by attempt id. Growth
+   *  notifications during a read share it and queue one follow-up; block.closed
+   *  marks that same follow-up final. `_ensureBlockRows` waits for the chain so
+   *  a freeze sees the latest rows without duplicate fetches or paints. */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
   /** At least one newer notification arrived during a read. This is state,
    *  not a debounce timer: the next read starts when the current one settles,
    *  so the final growth is not dropped. */
   private readonly _blockRowsRefreshPending = new Set<string>()
+  /** The promise that includes a queued final read, for `_ensureBlockRows` to
+   *  await after block.closed. It points at the same chain as `_blockRowsInFlight`. */
+  private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
+
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -1394,6 +1400,7 @@ export class TerminalContent extends BasePaneContent {
    *  a live region before it has a session — and fed by the one frame
    *  handler below. */
   private _painter: CellPainter | null = null
+  private _selectionGesture: LiveSelectionGesture | null = null
   /** The surface element the painter paints into, held for disposal. */
   private _painterSurface: HTMLElement | null = null
   /** THE measuring authority the frozen blocks publish for (cell-fit.ts):
@@ -4442,6 +4449,7 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
+    this._blockRowsFinalPending.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4548,7 +4556,7 @@ export class TerminalContent extends BasePaneContent {
         entryId: params.entryId,
         kept: 'kept' in params && params.kept === true,
       }
-      if (closed.kept) void this._refreshBlockRows(closed.entryId)
+      if (closed.kept) void this._refreshBlockRows(closed.entryId, true)
       this.scrollback?.blockManager.blockClosed(closed.entryId)
     }
     const onBlockCleared = (params: unknown): void => {
@@ -4781,6 +4789,27 @@ export class TerminalContent extends BasePaneContent {
     // keeps the byte path exactly as it was.
     const cellModel = createCellModel()
     this._cellModel = cellModel
+    const painter = this._painter
+    const painterSurface = this._painterSurface
+    const gestureRoot = this.scrollback?.scrollbackArea
+    if (painter && painterSurface && gestureRoot) {
+      this._selectionGesture = installLiveSelectionGesture({
+        model: cellModel,
+        painter,
+        surface: painterSurface,
+        gestureRoot,
+        surfaceId: this.pane.paneId,
+        mouseReportingActive: () => renderer.mouseReportingActive(),
+        focusInput: () => renderer.focus(),
+        copy: (text) => {
+          if (shouldCopy(text)) {
+            this.clipboard.writeText(text).catch((e) => {
+              console.warn('nocx: clipboard write failed (live cell selection)', e)
+            })
+          }
+        },
+      })
+    }
     installPaneScreenSeam()
     paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
@@ -7345,13 +7374,18 @@ export class TerminalContent extends BasePaneContent {
       // on past the end would make this a second owner of the scroll position
       // for the whole of a long streamed answer.
       if (settle && typeof ResizeObserver !== 'undefined') {
-        let seatedHeight = -1
+        let seatedHeight: number | null = null
         const observer = new ResizeObserver((entries) => {
-          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight
-          const grew = height !== seatedHeight
+          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight ?? 0
+          // The first delivery is only a baseline. WebKit may report the
+          // overlay box before the reparented answer has grown in flow, while
+          // the old scroller is still at its tail; that measurement is not
+          // evidence the seated tail has landed.
+          const baseline = seatedHeight === null
+          const grew = !baseline && height !== seatedHeight
           seatedHeight = height
           followSeatedTail()
-          if (!grew || settle.tailReached()) observer.disconnect()
+          if (!baseline && (!grew || settle.tailReached())) observer.disconnect()
         })
         observer.observe(tail)
       }
@@ -8029,6 +8063,7 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
+    this._blockRowsFinalPending.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8098,6 +8133,8 @@ export class TerminalContent extends BasePaneContent {
     // reader has no model worth reading and no session to be found under.
     if (this.session) paneScreenReaders.delete(this.session.sessionId)
     this._cellModel = null
+    this._selectionGesture?.dispose()
+    this._selectionGesture = null
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()
@@ -8641,17 +8678,34 @@ export class TerminalContent extends BasePaneContent {
 
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
-   *  A notification during an active read sets one pending refresh. The
-   *  chain then performs one follow-up read, so `_ensureBlockRows` can wait
-   *  for the latest rows without duplicating reads or dropping the last
-   *  growth. */
-  private _refreshBlockRows(entryId: string): Promise<void> {
-    const inFlight = this._blockRowsInFlight.get(entryId)
-    if (inFlight) {
-      this._blockRowsRefreshPending.add(entryId)
-      return inFlight
+   *  Repeated growth notifications share one in-flight read and set one
+   *  pending refresh. block.closed marks that same follow-up final, and
+   *  `_ensureBlockRows` waits for the whole chain instead of reading
+   *  `.cmd-output` before the final stored rows are ready. The pending flag
+   *  is state, not a timer, so the last growth cannot be dropped. */
+  private _refreshBlockRows(entryId: string, final = false): Promise<void> {
+    if (final) {
+      const closing = this._blockRowsFinalPending.get(entryId)
+      if (closing) return closing
     }
 
+    const active = this._blockRowsInFlight.get(entryId)
+    if (active) {
+      this._blockRowsRefreshPending.add(entryId)
+      if (!final) return active
+      // The closing request shares the pending follow-up rather than
+      // creating another read after a growth burst.
+      this._blockRowsFinalPending.set(entryId, active)
+      const clearFinalPending = (): void => {
+        if (this._blockRowsFinalPending.get(entryId) === active) {
+          this._blockRowsFinalPending.delete(entryId)
+        }
+      }
+      void active.then(clearFinalPending, clearFinalPending)
+      return active
+    }
+
+    this._blockRowsRefreshPending.delete(entryId)
     const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
@@ -8698,6 +8752,15 @@ export class TerminalContent extends BasePaneContent {
       this._blockRowsInFlight.delete(entryId)
     })
     this._blockRowsInFlight.set(entryId, tracked)
+    if (final) {
+      this._blockRowsFinalPending.set(entryId, tracked)
+      const clearFinalPending = (): void => {
+        if (this._blockRowsFinalPending.get(entryId) === tracked) {
+          this._blockRowsFinalPending.delete(entryId)
+        }
+      }
+      void tracked.then(clearFinalPending, clearFinalPending)
+    }
     return tracked
   }
 
@@ -8711,10 +8774,12 @@ export class TerminalContent extends BasePaneContent {
    *  when neither is true (a block closed with no read behind it: one the
    *  store did not keep, or a completion that carried no fence). */
   private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
-    // A read chain comes first, even when the record already holds rows:
-    // block.closed requests the final read before it closes the block
-    // (nocx-2v80t.3.27), and the chain waits for that read after any earlier
-    // block.grew read, so the waiter receives the sealed rows.
+    // A queued close chain outranks its older growth read, even when the
+    // record already holds rows: block.closed names the final artifact.
+    const closing = this._blockRowsFinalPending.get(entryId)
+    if (closing) return closing
+    // Otherwise the active chain comes first. A close received during that
+    // read marks its one pending follow-up final before the block freezes.
     const inFlight = this._blockRowsInFlight.get(entryId)
     if (inFlight) return inFlight
     if (rec.storedRows) return Promise.resolve()

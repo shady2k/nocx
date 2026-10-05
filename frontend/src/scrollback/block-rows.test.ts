@@ -39,6 +39,22 @@ const stored: StoredBlockRows = {
 }
 
 describe('stored block rows', () => {
+  it('carries the immutable artifact version and logical line onto painted card rows', () => {
+    const block = document.createElement('article')
+    block.dataset.entryId = 'block-7'
+
+    paintStoredRows(
+      block,
+      { ...stored, artifactVersion: 'artifact-v4' },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const row = block.querySelector<HTMLElement>('.term-grid-row')!
+    expect(row.dataset.blockId).toBe('block-7')
+    expect(row.dataset.artifactVersion).toBe('artifact-v4')
+    expect(row.dataset.logicalLine).toBe('12')
+  })
+
   it('paints backend rows through the shared row painter', () => {
     const block = document.createElement('article')
 

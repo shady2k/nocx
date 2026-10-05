@@ -66,7 +66,7 @@ export function createMapping(snapshot: ScreenSnapshot): PixelMapping {
       if (row < 0 || row >= rows) return null
       const col = Math.floor(x / cellWidth)
       if (col < 0 || col >= cols) return null
-      return { col: clusterOf(snapshot, row, col, cols), row }
+      return { col: columnToCell(snapshot, row, col), row }
     },
   }
 }
@@ -75,7 +75,8 @@ export function createMapping(snapshot: ScreenSnapshot): PixelMapping {
  *  before it, spacerHead to the one after (the wire's width 3 and 4). The
  *  walks are bounded by the row's length, so a lone spacer at an edge
  *  resolves to its nearest inked neighbour. */
-function clusterOf(snapshot: ScreenSnapshot, row: number, col: number, cols: number): number {
+export function columnToCell(snapshot: ScreenSnapshot, row: number, col: number): number {
+  const cols = snapshot.geometry.cols
   let c = col
   while (c > 0 && snapshot.cellAt(row, c)?.width === 3) c--
   while (c < cols - 1 && snapshot.cellAt(row, c)?.width === 4) c++

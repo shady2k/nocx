@@ -1,27 +1,34 @@
-# Report — nocx-zg3k3.3.2 helper effect carrier
+# Report — nocx-zg3k3.14.1 effects client route
 
-## Wired
+## Delivered
 
-The helper now carries each runtime effect as its own `TypeSessionEffect` frame, separate from `TypeScreenFrame`. The frame preserves the session and subscriber ids, runtime generation, effect id, kind, and body. The helper session drain sends each effect identity once per subscriber drain. The client delivers it only to the matching attachment. Unknown kinds and malformed frames are refused. Full screen snapshots remain effect-free.
+The app forwards identity-bearing helper effects from both fresh hosted opens and session readoption to the current WebSocket subscriber as `session.effect`. The notification has a closed effect-kind set and a JSON Schema contract with regenerated TypeScript types. It remains on the control plane; full `session.frame` snapshots do not carry or replay effects.
 
-This is the helper-carrier slice only. Effects are not yet forwarded by the app to the WebSocket client, no `contracts/` schema or generated frontend type was added, and the renderer handlers, permission flow, and replay/reconnect deduplication are not wired. Those are required follow-up work; this commit does not complete the bead's end-to-end acceptance. No schema was added because this commit only changes the helper's binary frame protocol.
+The client validates each event, deduplicates on runtime generation plus effect id for the lifetime of the session, and buffers delivery until a pane registers its handler. The renderer routes bell, notification, clipboard, title, and cwd to the existing callbacks. Clipboard delivery still uses the existing permission gate.
 
 ## Tests and red-first evidence
 
-Added `TestEffectFrameRoundTripsIdentityAndBody`, `TestEffectFrameRefusesUnknownKind`, `TestEffectFrameRejectsShortHeader`, `TestTheEffectFrameTypeIsInTheClosedSet`, `TestASubscriberReceivesAnIdentityBearingEffect`, and `TestAnEffectFrameReachesItsNamedAttachment`.
+Added Go tests `TestPublishSessionEffect_ReachesSubscriberAsIdentityBearingNotification`, `TestPublishSessionEffect_RefusesUnknownKind`, `TestSessionEffectDTOConformsToContract`, and `TestSessionEffect_OverTheWireConformsToContract`.
 
-The first test attempt was blocked because the pinned libghostty-vt archive was missing. After `make vt-archives`, I temporarily removed the new codec implementation and reran the new codec tests; they failed on the missing `EffectFrame`/codec symbols. Restoring the implementation made them pass.
+Added frontend tests under `session.effect notification` for duplicate delivery, notification replay, a full frame without side effects, unknown kinds, malformed identities, and early-event buffering; `runtime effect dispatch` for all five handlers; and `runtime clipboard effects keep the existing permission gate` for denied and allowed writes.
+
+The Go publisher test was authored before the backend route. Its first run could not reach the assertion because the pinned libghostty-vt archive was missing; `make vt-archives` initially received HTTP 504, then succeeded on retry. With dependencies available, temporarily forcing the WebSocket publisher to refuse delivery made the over-the-wire contract test fail at its publish assertion; restoring it made the test pass. The frontend tests were added after implementation, then the event subscription was temporarily disabled as a negative control: delivery and early-buffer tests failed, and passed again after restoration. This provided red-to-green behavioral evidence, but the frontend tests were not written before the implementation; that is a deviation from strict TDD chronology.
 
 ## Checks
 
-- `make vt-archives` — passed.
-- `gofmt` on all touched Go files — passed.
-- `go test ./internal/helper/session ./internal/helper/proto ./internal/helper/host ./internal/helper/client -count=1` — passed.
-- `go vet -tags gtk3 ./internal/sessionruntime/` — passed.
-- `go test -tags gtk3 -count=1 ./internal/sessionruntime/` — passed.
-- `go vet ./internal/helper/session ./internal/helper/proto ./internal/helper/host ./internal/helper/client` — passed.
-- `git diff --check` — passed.
+- `make vt-archives` — passed on retry; pinned archives and headers verified.
+- `gofmt` — passed on changed Go files.
+- `go test -tags gtk3 -count=1 ./internal/app ./internal/transport` — passed.
+- Focused Go session-effect tests — passed after adding the unknown-kind refusal test.
+- `go vet -tags gtk3 ./internal/app/ ./internal/transport/` — passed.
+- `cd frontend && npm run contracts:check` — passed.
+- `cd frontend && npx tsc --noEmit -p tsconfig.json` — passed.
+- `cd frontend && npm run format:check` — passed.
+- `cd frontend && npx vitest run src/ipc.test.ts src/renderers/xterm.test.ts src/terminal-content.test.ts` — passed.
+- Commit hooks, including Go format/lint ratchets, both frontend lint jobs, contract checks, and TypeScript checks — passed.
+- Did not run `make ci-full`, containerized jobs, or e2e.
 
-## Commit
+## Commits
 
-Pending.
+- `cf3cffdc6ce5f7753b70ae2c578c4382fbcfa9ba` — `feat(transport): publish identity-bearing runtime effects (nocx-zg3k3.14.1)`
+- `5f6e32390fa956b05348fba4436bdb75aefa2230` — `feat(frontend): dispatch deduplicated runtime effects (nocx-zg3k3.14.1)`

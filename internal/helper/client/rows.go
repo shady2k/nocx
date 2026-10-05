@@ -151,41 +151,6 @@ func (a *AttachedSession) deliverClearBoundary() {
 	obs()
 }
 
-// OutputStartRow is the absolute row position where command output begins.
-type OutputStartRow struct{ FromRow uint64 }
-
-// OnOutputStartRow registers the ordered output-position marker consumer.
-func (a *AttachedSession) OnOutputStartRow(f func(OutputStartRow)) {
-	a.mu.Lock()
-	a.outputStartRowObs = f
-	a.mu.Unlock()
-}
-
-func (a *AttachedSession) deliverOutputStartRow(mark OutputStartRow) {
-	a.mu.Lock()
-	obs := a.outputStartRowObs
-	a.mu.Unlock()
-	if obs != nil {
-		obs(mark)
-	}
-}
-
-func (c *Client) outputStartRow(payload []byte) {
-	f, err := proto.DecodeOutputStartRowFrame(payload)
-	if err != nil {
-		c.log.Warn("malformed output-start-row frame", "err", err, "bytes", len(payload))
-		return
-	}
-	c.mu.Lock()
-	a := c.attachments[f.Subscriber]
-	c.mu.Unlock()
-	if a == nil || a.session != f.Session {
-		c.log.Warn("output-start-row frame dropped: no matching attachment", "fromRow", f.FromRow)
-		return
-	}
-	a.deliverOutputStartRow(OutputStartRow{FromRow: f.FromRow})
-}
-
 // outputRows is one TypeOutputRows frame arriving: decode, find the
 // attachment the frame names, deliver. A frame whose attachment is gone is
 // dropped with a log line — the rows belonged to a reader that left, the

@@ -25,7 +25,7 @@ import (
 // end marker. One slice, because the order between the two kinds is the
 // seam's whole point — a row can never be attributed to the wrong interval.
 type rowEvent struct {
-	kind    string // "rows" | "end" | "clear" | "output-start"
+	kind    string // "rows" | "end" | "clear"
 	from    uint64
 	lost    uint64
 	rows    []emulator.Row
@@ -59,12 +59,6 @@ func (r *recordingRowStream) ClearBoundary() {
 	r.events = append(r.events, rowEvent{kind: "clear"})
 }
 
-func (r *recordingRowStream) OutputStartRow(from uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.events = append(r.events, rowEvent{kind: "output-start", from: from})
-}
-
 func (r *recordingRowStream) snapshot() []rowEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -90,32 +84,6 @@ func streamRowText(r emulator.Row) string {
 		}
 	}
 	return strings.TrimRight(sb.String(), " ")
-}
-
-// The output mark names the absolute stream position where command output
-// starts. It is ordered before rows emitted after OSC 133 C.
-func TestOutputMarkEmitsItsAbsoluteRowPositionOnTheRowStream(t *testing.T) {
-	s, rs := streamSession(t, harnessGeometry(80, 24))
-	obsFeed(t, s, 0, 80)
-	before := s.DepartedRowCount()
-	if err := s.Ingest([]byte("\x1b]133;C\a")); err != nil {
-		t.Fatalf("ingest output mark: %v", err)
-	}
-	events := rs.snapshot()
-	if len(events) == 0 || events[len(events)-1].kind != "output-start" {
-		t.Fatalf("events = %+v, want output-start after prior rows", events)
-	}
-	if got := events[len(events)-1].from; got != before {
-		t.Fatalf("output-start row = %d, want absolute stream position %d", got, before)
-	}
-	// A replacement reader receives the current mark before it can consume
-	// the runtime's resend rows.
-	replacement := &recordingRowStream{}
-	s.SetRowStream(replacement)
-	replayed := replacement.snapshot()
-	if len(replayed) != 1 || replayed[0].kind != "output-start" || replayed[0].from != before {
-		t.Fatalf("replacement stream marks = %+v, want output-start at %d", replayed, before)
-	}
 }
 
 // The boundary's two halves are ONE instant. The end marker stops at the row

@@ -29,13 +29,11 @@ import (
 // rowsSink is a Sink that records the rows-plane frames the pump sends, in
 // order, and keeps the raw payloads for the contract checks.
 type rowsSink struct {
-	mu           sync.Mutex
-	rows         []proto.OutputRowsFrame
-	ends         []proto.IntervalEndFrame
-	clears       []proto.ClearBoundaryFrame
-	outputStarts []proto.OutputStartRowFrame
-	events       []string
-	rawRow       [][]byte
+	mu     sync.Mutex
+	rows   []proto.OutputRowsFrame
+	ends   []proto.IntervalEndFrame
+	clears []proto.ClearBoundaryFrame
+	rawRow [][]byte
 	// changed is signalled after every recorded frame: what a test waits on
 	// is the frame arriving, never a duration passing.
 	changed chan struct{}
@@ -54,18 +52,6 @@ func (s *rowsSink) signal() {
 // end markers and nClears clear boundaries, woken by each delivery. A pump
 // that never delivers them hangs into go test's own timeout, which names this
 // frame.
-func (s *rowsSink) waitForOutputStarts(n int) {
-	for {
-		s.mu.Lock()
-		done := len(s.outputStarts) >= n
-		s.mu.Unlock()
-		if done {
-			return
-		}
-		<-s.changed
-	}
-}
-
 func (s *rowsSink) waitFor(nRows, nEnds, nClears int) {
 	for {
 		s.mu.Lock()
@@ -87,18 +73,8 @@ func (s *rowsSink) SendScreenFrame(proto.ScreenDataFrame) error {
 
 func (s *rowsSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	s.mu.Lock()
-	s.events = append(s.events, "rows")
 	s.rows = append(s.rows, f)
 	s.rawRow = append(s.rawRow, f.Payload)
-	s.mu.Unlock()
-	s.signal()
-	return nil
-}
-
-func (s *rowsSink) SendOutputStartRow(f proto.OutputStartRowFrame) error {
-	s.mu.Lock()
-	s.events = append(s.events, "output-start")
-	s.outputStarts = append(s.outputStarts, f)
 	s.mu.Unlock()
 	s.signal()
 	return nil

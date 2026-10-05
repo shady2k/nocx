@@ -89,11 +89,10 @@ func (f *fakeSink) BlockOutputIncomplete(_ session.ID, fromRow uint64) {
 
 // fakeSource is the attachment's registration half.
 type fakeSource struct {
-	mu             sync.Mutex
-	rows           func(client.OutputRows)
-	end            func(client.IntervalEnd)
-	clear          func()
-	outputStartRow func(client.OutputStartRow)
+	mu    sync.Mutex
+	rows  func(client.OutputRows)
+	end   func(client.IntervalEnd)
+	clear func()
 }
 
 func (s *fakeSource) OnOutputRows(f func(client.OutputRows)) {
@@ -112,12 +111,6 @@ func (s *fakeSource) OnClearBoundary(f func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clear = f
-}
-
-func (s *fakeSource) OnOutputStartRow(f func(client.OutputStartRow)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.outputStartRow = f
 }
 
 func (s *fakeSource) deliverRows(o client.OutputRows) {
@@ -169,10 +162,6 @@ func rowsN(n int) []emulator.Row { return make([]emulator.Row, n) }
 // is still in flight does not stop the next delivery from being handed to
 // the transport, and the marks that pile up meanwhile collapse to the
 // newest one — the mark is a watermark, so the highest is all of them.
-func (f *fakeSink) SetBlockOutputReplay(session.ID, func() error) {}
-func (f *fakeSink) BlockOutputStartPlaneAttached(session.ID)      {}
-func (f *fakeSink) BlockOutputStartRow(session.ID, uint64)        {}
-
 func TestTheRowsReadLoopNeverWaitsOnAConfirmation(t *testing.T) {
 	// The exclusive mark: the helper's UpToRow is one past the last row it
 	// may believe written (proto.ConfirmRowsParams), so ten rows from 0 are

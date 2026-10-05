@@ -21,10 +21,6 @@ package proto
 //	bytes 32..39  end-row        uint64 big-endian
 //	bytes 40..    payload        one session.interval-end document
 //
-// The payload of a TypeOutputStartRow frame is exactly 40 bytes: the same
-// two identities followed by the output mark's absolute row index. The mark
-// shares the ordered stream but carries no lifecycle authority.
-//
 // It is the screen frame's layout reduced to what a row needs, and its
 // reasons are the screen frame's own (ADR-0073): identity is the HOST
 // SESSION's id plus the SUBSCRIBER it is for; there is no lease epoch,
@@ -84,8 +80,6 @@ const (
 	// neither, because the store resolves what it bounds from the
 	// session id alone (content.RecordClearBoundary).
 	TypeClearBoundary FrameType = 16
-	// TypeOutputStartRow carries the OSC 133 C output mark on the ordered row plane.
-	TypeOutputStartRow FrameType = 17
 )
 
 // OutputRowsFrameHeaderLen is 16 (session) + 16 (subscriber) + 8 (row
@@ -102,9 +96,6 @@ const MaxOutputRowsPayloadBytes = MaxFrameBytes - OutputRowsFrameHeaderLen
 // Like its siblings it is an answer, not a failure of the connection: the
 // frame is dropped and the wire continues.
 var ErrOutputRowsFrameTooShort = errors.New("proto: rows frame shorter than its header")
-
-// ErrOutputStartRowFrameSize reports a mark frame with a non-exact header.
-var ErrOutputStartRowFrameSize = errors.New("proto: output-start-row frame has invalid size")
 
 // ErrOutputRowsFrameTooLarge reports an encode whose payload would not fit
 // one frame. The bridge that produces these documents bounds them by
@@ -297,29 +288,4 @@ type IntervalEndDoc struct {
 	EndRow  uint64          `json:"endRow"`
 	Closing json.RawMessage `json:"closing"`
 	NoFence bool            `json:"noFence"`
-}
-
-// OutputStartRowFrame places the command-output boundary in the same absolute
-// row-index space as output batches, on the same ordered carrier.
-type OutputStartRowFrame struct {
-	Session    [16]byte
-	Subscriber [16]byte
-	FromRow    uint64
-}
-
-const OutputStartRowFrameHeaderLen = 40
-
-func EncodeOutputStartRowFrame(f OutputStartRowFrame) ([]byte, error) {
-	return encodeRowsPlaneFrame(f.Session, f.Subscriber, f.FromRow, nil)
-}
-
-func DecodeOutputStartRowFrame(payload []byte) (OutputStartRowFrame, error) {
-	if len(payload) != OutputStartRowFrameHeaderLen {
-		return OutputStartRowFrame{}, ErrOutputStartRowFrameSize
-	}
-	var f OutputStartRowFrame
-	copy(f.Session[:], payload[:16])
-	copy(f.Subscriber[:], payload[16:32])
-	f.FromRow = binary.BigEndian.Uint64(payload[32:40])
-	return f, nil
 }

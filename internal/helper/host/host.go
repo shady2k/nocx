@@ -433,15 +433,6 @@ func (h *Host) SendClearBoundary(f proto.ClearBoundaryFrame) error {
 	return h.write(proto.TypeClearBoundary, raw)
 }
 
-// SendOutputStartRow writes one ordered command-output position mark.
-func (h *Host) SendOutputStartRow(f proto.OutputStartRowFrame) error {
-	raw, err := proto.EncodeOutputStartRowFrame(f)
-	if err != nil {
-		return err
-	}
-	return h.write(proto.TypeOutputStartRow, raw)
-}
-
 // clearBoundaryData handles an inbound clear-boundary frame, for the reason
 // rowsData does: the wire's direction runs the other way.
 func (h *Host) clearBoundaryData(ctx context.Context, payload []byte) {

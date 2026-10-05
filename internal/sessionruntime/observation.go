@@ -111,11 +111,6 @@ type observationOpen struct {
 	// counts is exactly how much of the prefix a scroll has since carried
 	// off — still by position, still never by text (outputMarkSkipLocked).
 	OutputMarkDeparted uint64
-	// OutputStartStreamRow is the absolute index in the ordered row stream at
-	// which OSC 133 C was sighted. It differs from screenDepartedRows when a
-	// prior interval's boundary screen is suppressed and must therefore be
-	// carried independently from the screen-cut position above.
-	OutputStartStreamRow uint64
 	// OutputStartTrack pins the row OutputStartRow names, so the closing
 	// screen's cut is read from where that row is NOW, whatever a geometry
 	// commit re-laid (outputStartSkipLocked, nocx-2v80t.5). The interval owns
@@ -863,11 +858,6 @@ func (s *Session) sightOutputMarkLocked() {
 		return
 	}
 	o.OutputMarked = true
-	// The mark shares the ordered rows carrier. Use the stream's row index,
-	// not the separate feed/departure counter or a wall-clock estimate.
-	if marker, ok := s.rowStream.(OutputStartMarker); ok {
-		marker.OutputStartRow(s.departedRows)
-	}
 	scr, ok := s.takeObservationScreenLocked()
 	if !ok {
 		return
@@ -884,7 +874,6 @@ func (s *Session) sightOutputMarkLocked() {
 	}
 	o.OutputStartRow = startRow
 	o.OutputMarkDeparted = s.screenDepartedRows
-	o.OutputStartStreamRow = s.departedRows
 	if startRow > 0 {
 		o.OutputPrefix = cloneObservationRows(rows[:startRow])
 	}
@@ -936,7 +925,6 @@ func (s *Session) sightEraseDisplayLocked() {
 	releaseTrack(o.OutputStartTrack)
 	o.OutputStartTrack, o.OutputPrefix = nil, nil
 	o.OutputStartRow, o.OutputMarkDeparted = 0, s.screenDepartedRows
-	o.OutputStartStreamRow = s.departedRows
 }
 
 func (s *Session) sightClearBoundaryLocked() {

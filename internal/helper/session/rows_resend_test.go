@@ -133,8 +133,6 @@ func TestNewReaderReplaysUnconfirmedRowsBeforeQueuedOutput(t *testing.T) {
 	if err := hs.confirmRows(first, "coord-1", 16); err != nil {
 		t.Fatalf("confirm the stored prefix: %v", err)
 	}
-	// The replacement stream carries the position before its retained prefix.
-	(&rowBridge{hs: hs}).OutputStartRow(16)
 	<-hs.requestRowsDrain()
 	hs.mu.Lock()
 	delete(hs.subs, "coord-1")
@@ -161,47 +159,12 @@ func TestNewReaderReplaysUnconfirmedRowsBeforeQueuedOutput(t *testing.T) {
 		}
 		frames = decodeResentRows(t, second.rowFrames())
 	}
-	second.mu.Lock()
-	starts := append([]proto.OutputStartRowFrame(nil), second.outputStarts...)
-	events := append([]string(nil), second.events...)
-	second.mu.Unlock()
-	if len(starts) == 0 || starts[len(starts)-1].FromRow != 16 {
-		t.Fatalf("replacement reader output mark = %+v, want position 16", starts)
-	}
-	if len(events) < 2 || events[0] != "output-start" || events[1] != "rows" {
-		t.Fatalf("replacement reader stream order = %v, want mark before retained rows", events)
-	}
 	if len(frames) == 0 || frames[0].from != 16 {
 		var got uint64
 		if len(frames) != 0 {
 			got = frames[0].from
 		}
 		t.Fatalf("new reader's first rows start at %d, want unconfirmed watermark 16", got)
-	}
-}
-
-func TestNewReaderGetsTheOutputStartMarkWhenNoRowsNeedResending(t *testing.T) {
-	hs, rt, first := rowsBridgeSession(t, 80, 24)
-	rowsFeed(t, rt, 0, 45)
-	first.waitFor(1, 0, 0)
-	confirmed := rt.DepartedRowCount()
-	if err := hs.confirmRows(first, "coord-1", confirmed); err != nil {
-		t.Fatalf("confirm the whole row prefix: %v", err)
-	}
-	<-hs.requestRowsDrain()
-	(&rowBridge{hs: hs}).OutputStartRow(confirmed)
-	<-hs.requestRowsDrain()
-
-	second := newRowsSink()
-	rowsAttachReader(t, hs, "33333333333333333333333333333333", second)
-	second.waitForOutputStarts(1)
-	second.mu.Lock()
-	defer second.mu.Unlock()
-	if got := second.outputStarts[0].FromRow; got != confirmed {
-		t.Fatalf("replacement reader output mark = %d, want %d", got, confirmed)
-	}
-	if len(second.rows) != 0 {
-		t.Fatalf("replacement with fully confirmed rows replayed %d rows, want only the position mark", len(second.rows))
 	}
 }
 

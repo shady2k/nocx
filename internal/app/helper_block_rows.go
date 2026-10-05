@@ -46,9 +46,6 @@ type blockRowsSink interface {
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
-	BlockOutputStartPlaneAttached(sid session.ID)
-	SetBlockOutputReplay(sid session.ID, replay func() error)
-	BlockOutputStartRow(sid session.ID, fromRow uint64)
 	// BlockOutputIncomplete is the helper's one marker that its row buffer
 	// overflowed (nocx-2v80t.3.36), on the same ordered sequence.
 	BlockOutputIncomplete(sid session.ID, fromRow uint64)
@@ -92,20 +89,11 @@ type rowsSource interface {
 	OnOutputRows(func(client.OutputRows))
 	OnIntervalEnd(func(client.IntervalEnd))
 	OnClearBoundary(func())
-	OnOutputStartRow(func(client.OutputStartRow))
 }
 
 func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, src rowsSource, conf confirmer) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	marks := newMarkSlot()
-	sink.BlockOutputStartPlaneAttached(sid)
-	var replay func() error
-	var replayNow func() error
-	if requester, ok := conf.(interface{ ReplayOutputRows(context.Context) error }); ok {
-		replay = func() error { marks.requestReplay(); return nil }
-		replayNow = func() error { return requester.ReplayOutputRows(ctx) }
-	}
-	sink.SetBlockOutputReplay(sid, replay)
 	if withConfirmation, ok := sink.(blockRowsConfirmationSink); ok {
 		withConfirmation.AttachBlockRowsWithConfirmation(sid, marks.offer)
 	} else {
@@ -113,18 +101,9 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	}
 	go func() {
 		for {
-			mark, replayRequested, ok := marks.next(ctx)
+			mark, ok := marks.next(ctx)
 			if !ok {
 				return
-			}
-			if replayRequested {
-				if replayNow != nil {
-					if err := replayNow(); err != nil && ctx.Err() == nil {
-						nocxlog.From(ctx).Warn("block rows retained-window replay request failed",
-							"session", string(sid), "error", err)
-					}
-				}
-				continue
 			}
 			if err := conf.ConfirmWritten(ctx, mark); err != nil && ctx.Err() == nil {
 				// A refused or lost confirmation is not fatal: the helper's
@@ -151,9 +130,6 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	src.OnClearBoundary(func() {
 		sink.BlockClearBoundary(sid)
 	})
-	src.OnOutputStartRow(func(mark client.OutputStartRow) {
-		sink.BlockOutputStartRow(sid, mark.FromRow)
-	})
 
 	var once sync.Once
 	return func() {
@@ -161,8 +137,6 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 			src.OnOutputRows(nil)
 			src.OnIntervalEnd(nil)
 			src.OnClearBoundary(nil)
-			src.OnOutputStartRow(nil)
-			sink.SetBlockOutputReplay(sid, nil)
 			sink.DetachBlockRows(sid)
 			cancel()
 		})
@@ -186,21 +160,19 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 // It is a rowsSource, so the ordinary bridge (bindBlockRowsTo) registers its
 // consumers on it exactly as it would on the attachment.
 type heldRows struct {
-	mu             sync.Mutex
-	bound          bool
-	held           []heldFrame
-	rows           func(client.OutputRows)
-	end            func(client.IntervalEnd)
-	clear          func()
-	outputStartRow func(client.OutputStartRow)
+	mu    sync.Mutex
+	bound bool
+	held  []heldFrame
+	rows  func(client.OutputRows)
+	end   func(client.IntervalEnd)
+	clear func()
 }
 
 // heldFrame is one rows-plane frame, of whichever kind, in arrival order.
 type heldFrame struct {
-	rows           *client.OutputRows
-	end            *client.IntervalEnd
-	clear          bool
-	outputStartRow *client.OutputStartRow
+	rows  *client.OutputRows
+	end   *client.IntervalEnd
+	clear bool
 }
 
 // observe registers the hold on an attachment's rows plane.
@@ -208,7 +180,6 @@ func (h *heldRows) observe(src rowsSource) {
 	src.OnOutputRows(h.takeRows)
 	src.OnIntervalEnd(h.takeEnd)
 	src.OnClearBoundary(h.takeClear)
-	src.OnOutputStartRow(h.takeOutputStartRow)
 }
 
 // holdRowsBeforeAttach is the attach option that registers a hold, and the
@@ -261,24 +232,6 @@ func (h *heldRows) takeClear() {
 	}
 }
 
-func (h *heldRows) takeOutputStartRow(mark client.OutputStartRow) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.bound {
-		h.held = append(h.held, heldFrame{outputStartRow: &mark})
-		return
-	}
-	if h.outputStartRow != nil {
-		h.outputStartRow(mark)
-	}
-}
-
-func (h *heldRows) OnOutputStartRow(f func(client.OutputStartRow)) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.outputStartRow = f
-}
-
 // OnOutputRows, OnIntervalEnd and OnClearBoundary make the hold the bridge's
 // rowsSource: the consumers the bridge registers are the stream's.
 func (h *heldRows) OnOutputRows(f func(client.OutputRows)) {
@@ -317,10 +270,6 @@ func (h *heldRows) release() {
 		case f.clear:
 			if h.clear != nil {
 				h.clear()
-			}
-		case f.outputStartRow != nil:
-			if h.outputStartRow != nil {
-				h.outputStartRow(*f.outputStartRow)
 			}
 		}
 	}
@@ -369,12 +318,11 @@ func boundaryLossTo(sink blockRowsSink) client.BoundaryLost {
 // markSlot holds the newest confirmed mark not yet sent. offer never blocks;
 // next waits for a mark higher than the last one it returned.
 type markSlot struct {
-	mu              sync.Mutex
-	pending         uint64
-	has             bool
-	sent            uint64
-	replayRequested bool
-	wake            chan struct{}
+	mu      sync.Mutex
+	pending uint64
+	has     bool
+	sent    uint64
+	wake    chan struct{}
 }
 
 func newMarkSlot() *markSlot { return &markSlot{wake: make(chan struct{}, 1)} }
@@ -391,34 +339,19 @@ func (m *markSlot) offer(mark uint64) {
 	}
 }
 
-func (m *markSlot) requestReplay() {
-	m.mu.Lock()
-	m.replayRequested = true
-	m.mu.Unlock()
-	select {
-	case m.wake <- struct{}{}:
-	default:
-	}
-}
-
-func (m *markSlot) next(ctx context.Context) (mark uint64, replayRequested, ok bool) {
+func (m *markSlot) next(ctx context.Context) (uint64, bool) {
 	for {
 		m.mu.Lock()
-		if m.replayRequested {
-			m.replayRequested = false
-			m.mu.Unlock()
-			return 0, true, true
-		}
 		if m.has {
 			mark := m.pending
 			m.has, m.sent = false, mark
 			m.mu.Unlock()
-			return mark, false, true
+			return mark, true
 		}
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
-			return 0, false, false
+			return 0, false
 		case <-m.wake:
 		}
 	}

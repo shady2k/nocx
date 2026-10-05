@@ -57,6 +57,36 @@ fi
 # developer's core count. NOCX_CI_CPUS=0 opts out.
 CPUS="${NOCX_CI_CPUS:-4}"
 
+# HOW MANY VITEST WORKERS, AND HOW BIG EACH NODE HEAP MAY GET (nocx-n7yrq).
+#
+# The `frontend` job was one of the two legs the merged-tree gate died on: on a
+# 12 GB box shared with other agents the kernel's global OOM killer took it, so
+# CI became the first place a frontend change was ever checked. Two things in
+# this job grow without a bound of their own.
+#
+# vitest forks one node PROCESS per worker and sizes the pool from the CPU
+# count, which inside the container is the HOST's — a cgroup CPU quota does not
+# change what `os.cpus()` answers — so `--cpus=4` bounds the CPU and not the
+# memory. Measured 2026-10-05 on w-n7yrq: four workers at 2.0/1.1/0.7/0.6 GB
+# beside a 2.2 GB `eslint .`. VITEST_MAX_FORKS is the suite's own pool bound
+# (vitest 3 reads it in its config resolution), so the SAME test files still
+# run — only how many run beside each other changes.
+#
+# `--max-old-space-size` is the second half and is a SOFT bound of node's own:
+# V8 garbage-collects harder as the old space approaches it, exactly as Go's
+# GOMEMLIMIT does for the Go legs, rather than aborting at the line. It is
+# applied to every node process in the job — eslint, tsc, the two vitest runs
+# and the vite build — because any of them is capable of the peak.
+#
+# Neither is a timing cap, and the distinction matters: AGENTS.md refuses a leg
+# that imitates a slower machine so a timing-dependent test can pass. A test
+# that depends on how many OTHER tests run beside it, or on how much heap the
+# process has, is broken on a fast machine too — it simply has not been caught.
+#
+# Both are overridable, and NOCX_CI_VITEST_FORKS=0 leaves vitest's own default.
+VITEST_FORKS="${NOCX_CI_VITEST_FORKS:-2}"
+NODE_HEAP_MB="${NOCX_CI_NODE_HEAP_MB:-3072}"
+
 # One heavy containerized run at a time on this machine.
 . "$(dirname "$0")/gate-lock.sh"
 trap gate_lock_release EXIT INT TERM
@@ -144,7 +174,8 @@ if [ -f "$REPO/.git" ]; then
     [ -n "$git_common" ] && git_flag=(-v "$git_common:$git_common:ro")
 fi
 
-printf '=== frontend job on %s — %s cpus ===\n' "$IMAGE" "$CPUS"
+printf '=== frontend job on %s — %s cpus, vitest forks %s, node heap %s MB ===\n' \
+    "$IMAGE" "$CPUS" "$VITEST_FORKS" "$NODE_HEAP_MB"
 exec docker run --rm -i \
     ${cpu_flag[@]+"${cpu_flag[@]}"} \
     ${git_flag[@]+"${git_flag[@]}"} \
@@ -155,6 +186,8 @@ exec docker run --rm -i \
     -e RUN_ROOT="$RUN_ROOT" \
     -e HOST_UID="$(id -u)" \
     -e HOST_GID="$(id -g)" \
+    -e NODE_OPTIONS="--max-old-space-size=$NODE_HEAP_MB" \
+    -e VITEST_MAX_FORKS="$VITEST_FORKS" \
     -w /work \
     "$IMAGE" \
     bash -c "$inner"

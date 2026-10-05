@@ -65,6 +65,7 @@
 @import './styles/components/status-dot.css';
 @import './styles/components/connection-overlay.css';
 @import './styles/components/action-group.css';
+@import './styles/components/terminal-input.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';
 @import './styles/components/prompt.css';

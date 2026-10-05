@@ -197,6 +197,48 @@ const rendererOf = (content: TerminalContent): RendererMock => {
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
+
+/** The pane's input element (nocx-zg3k3.3.1): the seam a person's keyboard now
+ *  reaches, where xterm's onData used to be. Private, reached the same way
+ *  editorOf and sessionOf reach theirs. */
+const intentElementOf = (content: TerminalContent): HTMLTextAreaElement => {
+  const withInput = content as unknown as {
+    _intentInput: { element: HTMLTextAreaElement } | null
+  }
+  const element = withInput._intentInput?.element
+  if (!element) throw new Error('the pane has no input element mounted')
+  return element
+}
+
+/** Type into the pane the way a person does: a physical key for a control key
+ *  or a chord, and the committed text the layout produced for a character. The
+ *  old `_fireData` drove xterm's onData with encoded bytes, which is no longer
+ *  the person's path — the bytes on it now are the client's own writes. */
+function typeIntoPane(content: TerminalContent, ...keys: string[]): void {
+  const element = intentElementOf(content)
+  const press = (code: string, key: string, init: KeyboardEventInit = {}): void => {
+    element.dispatchEvent(
+      new KeyboardEvent('keydown', { code, key, bubbles: true, cancelable: true, ...init }),
+    )
+  }
+  for (const sequence of keys) {
+    if (sequence === '\r') {
+      press('Enter', 'Enter')
+      continue
+    }
+    if (sequence === '\x03') {
+      press('KeyC', 'c', { ctrlKey: true })
+      continue
+    }
+    for (const ch of sequence) {
+      press(/[a-z]/i.test(ch) ? `Key${ch.toUpperCase()}` : 'Unidentified', ch)
+      const committed = new Event('input', { bubbles: true })
+      Object.defineProperty(committed, 'data', { value: ch })
+      Object.defineProperty(committed, 'inputType', { value: 'insertText' })
+      element.dispatchEvent(committed)
+    }
+  }
+}
 /** Adapt the public-only fake at the injected adoption seam. SessionHandle's
  * private client prevents structural typing even though all used methods match. */
 const asSessionHandleForTest = (session: SessionFake): SessionHandle =>
@@ -5672,12 +5714,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
-      const focusMock = (renderer as unknown as { focus: ReturnType<typeof vi.fn> }).focus
+      // The keyboard belongs to the pane's INPUT ELEMENT since nocx-zg3k3.3.1,
+      // so the handoff is asserted where it lands rather than on the renderer
+      // that used to hold it.
+      const focusElement = vi.spyOn(intentElementOf(content), 'focus')
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
-      focusMock.mockClear()
+      focusElement.mockClear()
 
       // WRITABLE IS NOT ENOUGH — the grid must also be FOCUSED, and in the
       // same synchronous step. The editor gives the keyboard up at commit
@@ -5698,7 +5742,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(ed.isVisible).toBe(false)
       // Synchronously: no await between the dispatch and this assertion, so
       // the RPC cannot have resolved and this can only be the handoff.
-      expect(focusMock).toHaveBeenCalled()
+      expect(focusElement).toHaveBeenCalled()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -5728,11 +5772,10 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // (ADR-0024 §5), while the keyboard changed hands at the commit. So
       // this is a real window a user types into: `read` is what they are
       // answering, and the answer must not arrive before the question.
-      renderer._fireData('h')
-      renderer._fireData('i')
-      renderer._fireData('\r')
-      // Held: not one byte of it has been sent yet.
+      typeIntoPane(content, 'h', 'i', '\r')
+      // Held: nothing of it has been sent yet, as bytes or as intent.
       expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
 
       // The attempt settles, the command goes out, and what was typed
       // behind it follows — in the order it was typed.
@@ -5742,12 +5785,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // renderer's paste (it owns bracketed-paste wrapping) and a paste is
       // an onData, so it is subject to the same hold — which is why the
       // hold is lifted before the write rather than after it.
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
-        'read x',
-        '\r',
-        'h',
-        'i',
-        '\r',
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r'])
+      // The answer somebody typed while the command was in flight follows it as
+      // INTENT (nocx-zg3k3.3.1), in the order it was produced.
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'h'],
+        ['text', 'i'],
+        ['key', 'enter'],
       ])
       // `paste` is a method declaration on TerminalRenderer, so referencing it
       // detached trips unbound-method; the mock property type does not.
@@ -5775,7 +5819,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const withScrollback = content as unknown as { scrollback: ScrollbackController }
       const handler = factHandler(client)
@@ -5804,7 +5847,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // its parser is consuming the accepted line — running what is left of
       // it, which is not the command that was typed. The person's own
       // gesture says the line is not to run, so it never goes out.
-      renderer._fireData('\x03')
+      typeIntoPane(content, '\x03')
 
       resolveAttempt({
         id: 'att-cancelled',
@@ -5853,7 +5896,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const withScrollback = content as unknown as { scrollback: ScrollbackController }
       const handler = factHandler(client)
@@ -5868,15 +5910,24 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // line, and ^C discards that line — a terminal with ISIG set flushes
       // the input queue it has not read yet, which is what every shell does
       // with the half-typed command somebody interrupts.
-      renderer._fireData('ab')
+      typeIntoPane(content, 'ab')
       expect(session.send).not.toHaveBeenCalled()
 
       // What followed the ^C is not part of the line it discarded: after the
       // flush the shell is at a fresh prompt, and these bytes belong to it,
       // so they are delivered (the old behaviour for everything that is not
       // the pending line) rather than swallowed with it.
-      renderer._fireData('\x03cd')
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+      // Three acts, in the order a person made them: the interrupt, then the
+      // two keys typed at the fresh prompt it leaves behind.
+      typeIntoPane(content, '\x03', 'c', 'd')
+      // 'c' and 'd' are NOT part of the line the interrupt discarded: after the
+      // flush the shell is at a fresh prompt, and they belong to it. They go out
+      // as intent, at once, rather than being swallowed with the line.
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'c'],
+        ['text', 'd'],
+      ])
 
       resolveAttempt({
         id: 'att-cancelled',
@@ -5891,7 +5942,11 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
       // The command never ran, and 'cd' is the only byte the pty ever saw.
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'c'],
+        ['text', 'd'],
+      ])
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -5906,7 +5961,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -5920,9 +5974,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // write: the command and its CR are at the pty, and there is no pending
       // line left for a ^C to cancel.
       await vi.waitFor(() => expect(session.send.mock.calls.length).toBe(2))
-      renderer._fireData('\x03')
+      typeIntoPane(content, '\x03')
 
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r', '\x03'])
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r'])
+      // A Ctrl-C with no pending line is the shell's own interrupt, and it goes
+      // out as the KEY the person pressed: what it means at the pty is the
+      // runtime's decision, never this client's (nocx-zg3k3.3.1).
+      expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']])
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -11233,7 +11291,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       await summonChord(content)
       expect(ed.isVisible).toBe(true)
       const renderer = rendererOf(content)
-      const focus = vi.spyOn(renderer, 'focus')
+      const focus = vi.spyOn(intentElementOf(content), 'focus')
       focus.mockClear()
       const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
         (data: string) => void

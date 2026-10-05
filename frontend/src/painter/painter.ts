@@ -86,6 +86,18 @@ export interface CellPainterOptions {
   /** The theme the wire's palette colours resolve against. Defaults to the
    *  same snapshot the frozen path falls back to. */
   readonly palette?: TerminalSnapshot
+  /** Told where the caret was just placed, in the surface's own CSS pixels —
+   *  the same coordinates the overlay is drawn at.
+   *
+   *  ONE OWNER, TWO READERS. "Where is the terminal caret" is answered here and
+   *  nowhere else (createMapping's cellToPixel, the mapping the rows and the
+   *  overlay already share), and the pane's input element is the second reader:
+   *  an IME draws its candidate window against a focused element's position, so
+   *  the element that carries the keyboard has to sit ON the caret
+   *  (nocx-zg3k3.3.1). Fired on every placement, including one where the
+   *  program has hidden its cursor: the anchor is about where typing goes, and
+   *  a hidden caret is still a place the person is typing at. */
+  readonly onCaretPlaced?: (at: { left: number; top: number; height: number }) => void
 }
 
 export interface CellPainter {
@@ -167,6 +179,13 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
 
   function placeCursor(snapshot: ScreenSnapshot): void {
     const position = createMapping(snapshot).cellToPixel(snapshot.cursor.x, snapshot.cursor.y)
+    const height = devicePxToCssPx(snapshot.geometry.cellHeightPx, displayDpr())
+    if (position !== null) {
+      // Told whatever the program decided about VISIBILITY: an IME's candidate
+      // window follows where typing goes, not whether the caret is painted, and
+      // a full-screen program that hid its cursor is still typed into.
+      opts.onCaretPlaced?.({ left: position.x, top: position.y, height })
+    }
     if (!snapshot.cursor.visible || position === null) {
       cursor.hidden = true
       return
@@ -175,7 +194,7 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
     cursor.style.left = `${position.x}px`
     cursor.style.top = `${position.y}px`
     cursor.style.width = `${devicePxToCssPx(snapshot.geometry.cellWidthPx, displayDpr())}px`
-    cursor.style.height = `${devicePxToCssPx(snapshot.geometry.cellHeightPx, displayDpr())}px`
+    cursor.style.height = `${height}px`
   }
 
   return {

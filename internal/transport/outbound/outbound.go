@@ -287,6 +287,14 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 // a result, an error, or a closed connection, never silence. After Close it
 // returns ErrConnClosed.
 func (c *Conn) TryEnqueueResponse(data []byte) error {
+	return c.TryEnqueueResponseFrame(TextMessage, data)
+}
+
+// TryEnqueueResponseFrame queues one non-refreshable WebSocket frame on the
+// reserved response FIFO. It is for a data-plane carrier that must be written
+// before a JSON-RPC response naming it; ordinary refreshable frames must use
+// TryEnqueue so their stall policy remains unchanged.
+func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
 	select {
 	case <-c.closed:
 		return ErrConnClosed
@@ -298,7 +306,7 @@ func (c *Conn) TryEnqueueResponse(data []byte) error {
 		return ErrStalled
 	}
 	select {
-	case c.respQueue <- Frame{MsgType: TextMessage, Data: data}:
+	case c.respQueue <- Frame{MsgType: msgType, Data: data}:
 		return nil
 	default:
 		if c.budget != nil {

@@ -31,6 +31,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
 } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
@@ -94,21 +95,9 @@ async function openVaultPage(page: Page): Promise<void> {
 async function setupVault(page: Page): Promise<void> {
   await openVaultPage(page)
   await page.getByRole('button', { name: 'Set up protection', exact: true }).click()
-  const setupDialog = page
-    .locator('.ui-prompt-overlay')
-    .filter({ has: page.locator('#vault-setup-passphrase') })
-  await expect(setupDialog).toBeVisible({ timeout: 10_000 })
-  await page.locator('#vault-setup-passphrase').fill(passphrase)
-  await page.locator('#vault-setup-confirm').fill(passphrase)
-  await page
-    .getByRole('dialog')
-    .getByRole('button', { name: /Set Up/i })
-    .click()
-  await expect(page.locator('.ui-vault-code-block-wrap .ui-code-block')).toBeVisible({
-    timeout: 10_000,
-  })
-  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
-  await expect(setupDialog).not.toBeVisible({ timeout: 10_000 })
+  // The sheet's own two steps live in ONE place, and it is not this file: this
+  // copy is the one that lost its submit in CI (nocx-xn63t.6.20).
+  await setUpVaultThroughTheSheet(page, passphrase)
 }
 
 /** Lock the vault from the Vault settings page. */

@@ -412,18 +412,22 @@ export class LiveHistorySurface {
 
   /** Grow while the reader is near the top and the emulator holds more. */
   private _pump(): void {
-    if (!this._active || this._inflight) return
-    if (this._awaitingRows !== null) return
+    if (!this._active) return
     if (this._source === null) return
     if (this._columns() === null) return
     // THE DEPARTURE, seen synchronously: the follow sentinel's callback is
     // a frame behind the scroll that crossed the live end, and the rebuild
     // (when the past is stale) belongs to the first scroll away — before
     // the reader is deep enough into the past for a rebuild to move them.
+    // This must precede the in-flight guards: a scroll event is how we learn
+    // that a reader left while a page was outstanding, and dropping that
+    // event lets its completion rebuild the past under the reader.
     if (!this._away && !isAtTail(this._scroller)) {
       this.leftTail()
-      if (this._inflight) return
+      if (this._inflight || this._awaitingRows !== null) return
     }
+    if (this._inflight) return
+    if (this._awaitingRows !== null) return
     // Growth is for a reader who LEFT the live end: at the tail of a
     // painted history there is nothing to scroll towards, and paging
     // there would chain one page past the head on every install. An

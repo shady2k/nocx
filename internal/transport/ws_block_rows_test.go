@@ -236,12 +236,12 @@ func TestBlockRowsArrived_AppendsToTheAuthenticatedCommand(t *testing.T) {
 	}
 }
 
-func TestOutputStartMarkFiltersPreMarkRowsAfterAuthenticatedStart(t *testing.T) {
+func TestOutputStartMarkDoesNotChangeFreshAuthenticatedStart(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
-	// When a mark exists, it arrives before the output on the same ordered
-	// rows plane even if lifecycle Start is still travelling separately.
+	// A position mark can arrive before the authenticated start on the rows
+	// plane. It must not change a fresh block's ordinary row-zero boundary.
 	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
@@ -250,14 +250,14 @@ func TestOutputStartMarkFiltersPreMarkRowsAfterAuthenticatedStart(t *testing.T) 
 		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
 	}
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
-		t.Fatalf("admitted rows = %+v, want only output at absolute row 2", rows)
+	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
+		t.Fatalf("fresh block rows = %+v, want the full row-zero stream", rows)
 	}
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 3, 0, []emulator.Row{aStreamRow("tail")}, ""); !confirm || up != 4 {
 		t.Fatalf("post-mark ack = (%d, %v), want 4 confirmed", up, confirm)
 	}
 	rows = streamRows(t, db, attempt)
-	if len(rows) != 2 || rows[1].Text != "tail" || rows[1].From != 3 {
+	if len(rows) != 4 || rows[3].Text != "tail" || rows[3].From != 3 {
 		t.Fatalf("final rows = %+v", rows)
 	}
 }
@@ -267,12 +267,18 @@ func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T
 	e.ws.AttachBlockRows(session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
 	startsACommand(t, e, pub, lane, h, 2, "printf first")
-	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 
 	bs := e.ws.blockStream
 	bs.mu.Lock()
 	current := bs.current[session.ID(sid)]
+	current.recoveredOutputInterval = true // model a block adopted from durable storage
+	current.outputStartKnown = true
+	current.outputStartMarked = true
+	current.outputStartRow = 2
 	current.awaitingOutputReplay = true
+	bs.mu.Unlock()
+
+	bs.mu.Lock()
 	bs.queued[session.ID(sid)] = "next-attempt"
 	bs.mu.Unlock()
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("held")}, ""); confirm || up != 0 {
@@ -289,6 +295,28 @@ func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T
 	bs.mu.Unlock()
 	if awaitingReplay || pending != 0 || queuedMark {
 		t.Fatalf("current replay state = awaiting %v, pending %d, queued mark %v", awaitingReplay, pending, queuedMark)
+	}
+}
+
+func TestRecoveredOutputMarkDoesNotSkipPastEmptyDurableCursor(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf recovery")
+
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	bs.current[session.ID(sid)].recoveredOutputInterval = true
+	bs.mu.Unlock()
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
+		aStreamRow("first owed row"), aStreamRow("second owed row"), aStreamRow("third owed row"),
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("recovered rows ack = (%d, %v), want the whole undurable prefix", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 3 || rows[0].Text != "first owed row" || rows[0].From != 0 {
+		t.Fatalf("recovered rows = %+v, want all rows from the empty durable cursor", rows)
 	}
 }
 
@@ -321,8 +349,8 @@ func TestOutputStartMarkDoesNotAuthorizeABlockAndCanPrecedeStart(t *testing.T) {
 		t.Fatalf("resend ack = (%d, %v), want 3", up, confirm)
 	}
 	rows := streamRows(t, db, attempt)
-	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
-		t.Fatalf("admitted rows = %+v, want only output at absolute row 2", rows)
+	if len(rows) != 3 || rows[0].Text != "prompt" || rows[0].From != 0 || rows[2].Text != "output" {
+		t.Fatalf("fresh authenticated rows = %+v, want full row-zero stream", rows)
 	}
 }
 

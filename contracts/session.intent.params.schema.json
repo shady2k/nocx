@@ -5,7 +5,7 @@
   "description": "Structured interactive intent from the pane controller. The helper runtime encodes it against modes the program set; this is never PTY bytes.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "accessEpoch", "kind", "payload"],
+  "required": ["sessionId", "kind", "payload"],
   "properties": {
     "sessionId": {
       "type": "string",
@@ -13,8 +13,8 @@
     },
     "accessEpoch": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Pane access epoch last observed by the controller. Refused access_revoked with zero bytes if it is no longer current."
+      "minimum": 0,
+      "description": "The pane access epoch the controller last observed, or 0/absent when it has none yet (an open that could not read one). It is not defaulted to anything: any value that is not the epoch in force is refused access_revoked with zero bytes, and the result names the epoch in force — so a controller with none writes nothing and learns the one to present (nocx-zg3k3.3.1)."
     },
     "kind": {
       "type": "string",

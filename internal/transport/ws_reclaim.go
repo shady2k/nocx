@@ -112,6 +112,16 @@ type attachResult struct {
 	// — sessionAwaitsIntegration, off the one axis map the transport already
 	// keeps (AD-8) — never re-derived from this handler's own state.
 	AwaitsIntegration bool `json:"awaitsIntegration"`
+	// AccessEpoch is attach's own half of the field open carries
+	// (nocx-zg3k3.3.1): the epoch this pane's controller presents with its
+	// intents, read from the helper that holds the pane, before this ack is
+	// built. A reclaim is how a renderer comes to hold a session it did not
+	// open — a reconnect, or a pane adopted after a backend restart — and it
+	// types through the same intent wire an open does, so it needs the same
+	// number. Absent (0) when nothing could answer, which the wire admits:
+	// the renderer then presents none, is refused with the epoch in force,
+	// and writes nothing.
+	AccessEpoch uint64 `json:"accessEpoch,omitempty"`
 }
 
 // sessionDisplacedParams is the params object of the session.displaced

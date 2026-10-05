@@ -215,6 +215,27 @@ func (h helperPaneClient) IntentStatus(ctx context.Context, _ string, tokenID st
 	return h.client.IntentStatus(ctx, h.id, tokenID)
 }
 
+// AccessEpoch answers the epoch the pane's controller must present with its
+// next intent (nocx-zg3k3.3.1), read from the helper that holds the pane.
+//
+// IT IS A SNAPSHOT AND NOT A GUESS. session.snapshot is the op that reports the
+// epoch (spec §6.1, snapshots.go's own AccessEpoch), and it is the only one:
+// nothing on the coordinator side may derive the number, because the session
+// and its epoch live in the helper and the coordinator would then hold a second
+// opinion about a value it cannot see. The cost is one helper round trip at
+// open, paid once per pane, which is what makes a renderer able to type at all.
+func (p *paneScreen) AccessEpoch(ctx context.Context, sessionID string) (uint64, error) {
+	c, id, err := p.owner(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	snap, err := c.Snapshot(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	return snap.AccessEpoch, nil
+}
+
 // Intent sends structured input to the helper that owns the pane. The helper's
 // session.intent owner applies the access epoch and encodes against the
 // program's current terminal modes; this coordinator never produces PTY bytes.

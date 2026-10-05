@@ -17,6 +17,10 @@ export interface SessionIntentResult {
     'executed' | 'refused' | 'failed_partial' | 'delivery_unknown' | 'cancelled' | 'in_progress'
   bytesWritten: number
   fenceAfter: number
+  /**
+   * The epoch this pane's session was in when the answer was decided (nocx-zg3k3.3.1). A controller presents it with its next intent, and a refusal naming a DIFFERENT value than the one it presented is the signal to re-present the same intent — nothing was written, so the retry is the same write. Absent only when no session decided the answer (a refusal reached before the session was consulted: busy, closing).
+   */
+  accessEpoch?: number
   retryAfterMs?: number
   refusal?: {
     cause:

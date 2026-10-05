@@ -281,6 +281,12 @@ func (hs *hostSession) renderIntentResult(res ownerResult, tok Token) proto.Inte
 		State:        state,
 		BytesWritten: res.BytesWritten,
 		FenceAfter:   uint64(res.FenceAfter),
+		// The epoch in force, read once here and not derived from the
+		// request: this is the number the controller must present next, and a
+		// session that bumped while an intent was queued is exactly the case
+		// that makes reading it (rather than echoing the caller's) the whole
+		// point (nocx-zg3k3.3.1).
+		AccessEpoch: hs.owner.currentAccessEpoch(),
 	}
 	if state == "in_progress" {
 		out.RetryAfterMs = retryAfterInProgressMs

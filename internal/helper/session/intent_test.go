@@ -791,3 +791,74 @@ func TestInteractiveMouseAndFocusIntentsFollowTheProgramsModes(t *testing.T) {
 		}
 	}
 }
+
+// A refusal is also an ANSWER: the controller that presented a stale epoch is
+// told the one in force, so the intent it just failed to have written can be
+// sent again (nocx-zg3k3.3.1). The interval this closes is "from the refusal
+// until the renderer holds a current epoch" — without the epoch in the answer
+// it stays stale, and every later keystroke is refused exactly the same way,
+// zero bytes at a time, forever.
+func TestARefusedInteractiveIntentAnswersWithTheEpochInForce(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+	if bump := awaitResult(t, submitBump(t, hs, 1)); bump.Epoch != 2 {
+		t.Fatalf("access bump = %+v, want epoch 2", bump)
+	}
+
+	stale, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if stale.State != "refused" || stale.Refusal == nil || stale.Refusal.Cause != "access_revoked" {
+		t.Fatalf("stale intent = %+v, want refused/access_revoked", stale)
+	}
+	if stale.AccessEpoch != 2 {
+		t.Fatalf("the refusal named epoch %d, want the 2 in force", stale.AccessEpoch)
+	}
+
+	// The same intent, presented with the epoch the refusal named, is the
+	// write the first attempt was not allowed to make.
+	again, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: stale.AccessEpoch, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	if again.State != "executed" {
+		t.Fatalf("resend with the named epoch = %+v, want executed", again)
+	}
+	if written := proc.writtenPayloads(); len(written) != 1 || string(written[0]) != "stale" {
+		t.Fatalf("writes = %q, want the intent written exactly once", written)
+	}
+}
+
+// A controller that has no epoch yet — one whose open could not read it — is a
+// case the wire admits rather than one it guesses at: the intent is refused
+// with the epoch in force and writes nothing, which is the same answer a stale
+// one gets and the only one that is safe. It is what makes the first attempt
+// from a fresh renderer cost nothing but a round trip.
+func TestAnInteractiveIntentWithNoEpochYetIsRefusedWithTheOneInForce(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 0, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("first"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "refused" || got.Refusal == nil || got.Refusal.Cause != "access_revoked" {
+		t.Fatalf("epochless intent = %+v, want refused/access_revoked", got)
+	}
+	if got.AccessEpoch != 1 {
+		t.Fatalf("the refusal named epoch %d, want the 1 in force", got.AccessEpoch)
+	}
+	if got.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("an epochless intent wrote bytes: %+v %q", got, proc.writtenPayloads())
+	}
+}

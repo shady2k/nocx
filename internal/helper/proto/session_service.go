@@ -358,6 +358,26 @@ type SpawnParams struct {
 	// running one; the helper clamps it to its own ceiling. Past it the block
 	// in flight ends incomplete. Zero means the helper's default.
 	RowBufferBytes int64 `json:"rowBufferBytes"`
+	// Agents is the ENABLED agent set the launched shell's wrappers are
+	// generated from (nocx-t5e7d): the names the record offers, as a SET.
+	//
+	// A SET and not a directory to go and read. The daemon is a separate
+	// process and is built without the release tag, so a profile directory
+	// resolved in it would be the development one under a release app; the
+	// backend owns "which agents does this machine offer" and the helper
+	// receives the answer.
+	//
+	// A MAP and not a []string, for the reason Env above is one: D3 refuses an
+	// operation whose params carry a free-form string list, because such a list
+	// is argv and a helper that accepts argv is a remote shell. A map cannot
+	// express a positional argument, and the names here are membership rather
+	// than a sequence — the order they are rendered in is the generator's, and
+	// internal/shellintegration sorts them.
+	//
+	// Empty is legitimate: a caller that has no record to read gets the
+	// build's own set, and a pane is still orchestrated for the agents this
+	// build ships.
+	Agents map[string]bool `json:"agents,omitempty"`
 	// Lifecycle is optional for conventional sessions. When present, the
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.

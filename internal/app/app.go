@@ -824,7 +824,16 @@ func New(opts ...Option) (*App, error) {
 	// does not carry. Built here, once, so both sides hold the SAME map
 	// rather than two that could drift.
 	hostKeys := newHostKeyObserver()
-	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys}
+	// A pane on THIS machine gets the record's own set too (nocx-t5e7d): the
+	// opener hands it to the daemon in the spawn request, because the daemon is
+	// a separate process built without the release tag and must not resolve a
+	// profile itself. A closure rather than a list, so an edit reaches the next
+	// pane; and wired from the SAME store the published bundle reads, so the
+	// set a shell offers and the set the record describes have one owner.
+	localOpener := &localHelperOpener{
+		log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys,
+		agentNames: agentRecords.EnabledNames,
+	}
 	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
 	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
 	// of a local PTY in this repository and it lives in the daemon
@@ -1759,7 +1768,11 @@ func New(opts ...Option) (*App, error) {
 			// And the binary that child's agent execs as its MCP adapter,
 			// from the same holder and never from this process's environment
 			// (nocx-e2bws).
-			localOpener.installedHelperBinary)),
+			localOpener.installedHelperBinary,
+			// And the agents that child's shell wraps (nocx-t5e7d), from the
+			// record: a nested local shell is a local pane, so it offers what
+			// every other local pane on this machine offers.
+			agentRecords.EnabledNames)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the

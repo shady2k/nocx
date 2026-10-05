@@ -730,20 +730,13 @@ __nocx_agent_run() {
         __stage_reason="$__nocx_agent_stage_reason"
         builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
-    # Claude's --mcp-config option is variadic: placing it before "$@" would
-    # swallow a user's positional prompt as another config path. Keep it last.
-    # If a future Claude subcommand rejects trailing flags, update this
-    # argv proof and feed the prompt through stdin instead of moving the flag
-    # ahead of user arguments.
-    #
-    # THIS IS THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it is deliberately
-    # not part of the generated wrapper block above (nocx-t5e7d): the block
-    # carries NAMES, because this script is published to hosts nobody here
-    # controls and a person's own arguments are not theirs to receive. Where a
-    # tool-surface argument belongs instead is the launch record's `args`,
-    # applied where nocx runs — nocx-xn63t.5.2's argv builder. Until that
-    # exists, this append is unconditional, so it applies to every agent the
-    # block wraps and not only to the one whose flag it spells.
+    # THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it does not reach a host:
+    # the wrapper block above carries NAMES because this script is published to
+    # hosts nobody here controls, and the staged exec below is rendered with a
+    # tool-surface argument for a LOCAL pane and without one for a published
+    # generation (nocx-t5e7d). The argument is Claude's and its rule is kept
+    # where it is used: variadic, so it goes LAST — placed before "$@" it would
+    # swallow a user's positional prompt as another config path.
     # Cleared before the agent is exec'd: the staging above has taken its copy,
     # nothing after this point needs the bearer, and a shell that ran a child
     # with it still in its own variable space is one `printenv`-style accident
@@ -751,11 +744,12 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
-    if (( __staged )); then
-        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
-    else
-        command "$__agent" "$@"
-    fi
+    # THE STAGED EXEC, and the ONE block that differs by delivery (nocx-t5e7d):
+    # a pane on this machine is pointed at its tool surface, while a published
+    # generation carries agent names and no per-agent argument at all, because
+    # that argument is this machine's configuration and a host is not ours.
+    # agents.go renders both forms and says why.
+    # @NOCX_TOOL_SURFACE@
     __rc=$?
     # The withdrawal closes the interval the enrolment opened, and it runs
     # whatever the agent returned — a crash, an interrupt and a clean exit

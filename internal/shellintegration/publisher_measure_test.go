@@ -194,9 +194,10 @@ import (
 // two files. The CALL count is unchanged at 63.
 //
 // AND THEY MOVED AGAIN when the agent wrappers became GENERATED from the agent
-// record instead of hand-written (nocx-t5e7d): the worst path writes 85917
-// bytes, up from 85902 — the marker line the authored scripts carry is
-// replaced by a generated block in both files. The CALL count is unchanged at
+// record instead of hand-written, and again when the tool-surface argument
+// stopped travelling to a host (nocx-t5e7d): the worst path writes 85659 bytes,
+// down from 85902 — one block generated into both scripts, and the published
+// pair no longer carrying a per-agent argument. The CALL count is unchanged at
 // 63.
 //
 // REPORT-p3-measure.md, which the failure messages below tell you to update
@@ -205,7 +206,7 @@ import (
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 85917
+	measuredMaxPublishBytes = 85659
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

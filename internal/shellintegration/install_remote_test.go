@@ -240,10 +240,14 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 		t.Error("launch carrier content differs from the bundle's")
 	}
 
-	// The generation files are the embedded scripts, byte for byte.
+	// The generation files are the PUBLISHED rendering of the scripts, byte for
+	// byte — which is not the embedded pair (nocx-t5e7d): a published script
+	// carries the agent NAMES and no per-agent argument, while the script a
+	// local pane is handed carries both. The delivery is named here rather than
+	// left implicit, because the difference is the rule.
 	want := map[string]string{
-		"nocx.bash":  bashScript,
-		"nocx.zsh":   zshScript,
+		"nocx.bash":  renderScript(bashScriptRaw, shippedAgentNames(), DeliveryPublished),
+		"nocx.zsh":   renderScript(zshScriptRaw, shippedAgentNames(), DeliveryPublished),
 		"nocx.posix": posixScript,
 	}
 	for name, script := range want {

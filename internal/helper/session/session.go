@@ -66,6 +66,11 @@ type ProcessGroupSignaller interface {
 // command — host.Register refuses argv-shaped params, and this is the same
 // rule one layer in.
 type SpawnRequest struct {
+	// Agents is the enabled agent set the launched shell's wrappers are
+	// generated from (nocx-t5e7d), carried from the request that asked for the
+	// pane and never resolved here: this process must not read the app
+	// directory (see proto.SpawnParams.Agents).
+	Agents []string
 	// SessionID is minted by the helper before launch so the in-memory shell
 	// integration can identify the session without an installed script.
 	SessionID string

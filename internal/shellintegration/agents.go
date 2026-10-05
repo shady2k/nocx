@@ -92,11 +92,67 @@ func agentWrappers(names []string) string {
 }
 
 // renderScript is the ONE place a script's bytes are produced: the authored
-// text with its marker replaced by the block for exactly these names, then
-// comment-stripped as every delivered script is. Both delivery paths go through
-// it — the embedded scripts a local pane is handed and the generation files a
-// host is published — so the shape a person's own pane sees and the shape a far
-// host sees cannot drift.
-func renderScript(raw string, names []string) string {
-	return stripShellComments(strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names)))
+// text with its markers replaced — the wrapper block for exactly these names,
+// and the staged-exec block for this delivery — then comment-stripped as every
+// delivered script is. Both delivery paths go through it, so what a person's
+// own pane sees and what a far host receives can differ only in the ways the
+// rule above allows, and a marker nobody replaced cannot survive unnoticed.
+func renderScript(raw string, names []string, delivery Delivery) string {
+	surface := toolSurfaceLocal
+	if delivery == DeliveryPublished {
+		surface = toolSurfacePublished
+	}
+	out := strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names))
+	out = strings.ReplaceAll(out, toolSurfaceMarker, surface)
+	return stripShellComments(out)
 }
+
+// Delivery is WHICH of the two paths a script is rendered for, and the
+// distinction is a RULE rather than a detail: the embedded script a pane on
+// THIS machine is handed may carry nocx's own per-agent plumbing, while a
+// generation file published to a host carries agent NAMES and nothing else
+// (the owner's decision of 2026-10-05). One generator renders both, so the
+// rule lives at the generator's own boundary instead of in the difference
+// between two functions that would drift.
+type Delivery int
+
+const (
+	// DeliveryLocal is a script handed to a shell on the machine nocx runs on:
+	// the pane the person is sitting in front of.
+	DeliveryLocal Delivery = iota
+	// DeliveryPublished is a generation file carried to a host nobody here
+	// controls. Nothing of this machine's configuration travels with it.
+	DeliveryPublished
+)
+
+// toolSurfaceMarker is where the staged-exec block goes in the authored
+// scripts. The two rendered forms differ by more than an argument: a host has
+// no tool surface to point an agent at, because the surface's own path and
+// configuration are this machine's.
+const toolSurfaceMarker = "# @NOCX_TOOL_SURFACE@"
+
+// toolSurfaceLocal is what a LOCAL pane runs: nocx's tool surface reaches the
+// agent through an argument, and this is the only delivery that carries one.
+//
+// Claude's --mcp-config option is variadic, so it goes LAST: placed before
+// "$@" it would swallow a user's positional prompt as another config path. If a
+// future Claude subcommand rejects trailing flags, update this argv proof and
+// feed the prompt through stdin instead of moving the flag ahead of the user's
+// arguments.
+const toolSurfaceLocal = `if (( __staged )); then
+        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+    else
+        command "$__agent" "$@"
+    fi`
+
+// toolSurfacePublished is what a HOST runs instead: the agent, the person's own
+// arguments, and NO per-agent argument at all.
+//
+// The tool surface is not lost for want of a flag but because its target does
+// not exist there: `mcp.json` is written into this launch's directory by the
+// staging step, and the argv that points an agent at it is per-agent
+// configuration, which this delivery refuses to carry (agents.go). Where a
+// per-agent argument belongs is the launch record's `args`, applied where nocx
+// runs — nocx-xn63t.5.2's argv builder — and until that exists a host-side
+// agent starts with no tool surface rather than with a flag invented for it.
+const toolSurfacePublished = `command "$__agent" "$@"`

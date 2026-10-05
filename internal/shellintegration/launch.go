@@ -235,8 +235,8 @@ func launchBundle(agents []string) Bundle {
 		Version:  version,
 		Agents:   names,
 		Files: []BundleFile{
-			{Name: "nocx.bash", Mode: 0o600, Data: []byte(renderScript(bashScriptRaw, names))},
-			{Name: "nocx.zsh", Mode: 0o600, Data: []byte(renderScript(zshScriptRaw, names))},
+			{Name: "nocx.bash", Mode: 0o600, Data: []byte(renderScript(bashScriptRaw, names, DeliveryPublished))},
+			{Name: "nocx.zsh", Mode: 0o600, Data: []byte(renderScript(zshScriptRaw, names, DeliveryPublished))},
 			{Name: "nocx.posix", Mode: 0o600, Data: []byte(posixScript)},
 			{Name: launchName, Mode: 0o700, Data: []byte(launchCarrier())},
 		},

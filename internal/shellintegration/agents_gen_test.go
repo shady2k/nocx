@@ -309,3 +309,69 @@ func TestTheGeneratedBlockParsesAndItsWrappersCallInBothShells(t *testing.T) {
 		}
 	}
 }
+
+// THE DELIVERY DISTINCTION, which is the rule rather than a detail (nocx-t5e7d,
+// the owner's decision of 2026-10-05): nocx's own tool-surface argument reaches
+// a pane on THIS machine and reaches no host at all. One generator renders
+// both, so this asserts both halves of the same rule against the real bytes.
+func TestTheToolSurfaceArgumentIsLocalOnly(t *testing.T) {
+	local, err := LocalBashRcfile(LaunchOptions{SessionID: "s-1", Enhanced: true})
+	if err != nil {
+		t.Fatalf("LocalBashRcfile: %v", err)
+	}
+	if !strings.Contains(local, `--mcp-config "$__nocx_agent_launch_dir/mcp.json"`) {
+		t.Fatalf("the local rcfile does not point its agent at the tool surface:\n%s", local)
+	}
+
+	published := string(fileOf(t, launchBundle([]string{"claude"}), "nocx.bash"))
+	if strings.Contains(published, "--mcp-config") {
+		t.Fatalf("the published script carries a per-agent argument, and a host receives names and nothing else")
+	}
+	if !strings.Contains(published, `command "$__agent" "$@"`) {
+		t.Fatalf("the published script does not run the agent at all:\n%s", published)
+	}
+	// And the same rule in the other shell: the entry the wrapper runs is
+	// generated per delivery, not per file.
+	zsh := string(fileOf(t, launchBundle([]string{"claude"}), "nocx.zsh"))
+	if strings.Contains(zsh, "--mcp-config") {
+		t.Fatalf("the published zsh script carries a per-agent argument")
+	}
+	if !strings.Contains(zshScript, "--mcp-config") {
+		t.Fatalf("the local zsh script does not point its agent at the tool surface")
+	}
+}
+
+// The local pane offers the agents the RECORD gives it, not the ones the build
+// happens to carry: a person's own agent is wrapped and one they switched off
+// is not, without either of them having to be in the binary.
+func TestTheLocalPaneOffersTheAgentsItIsGiven(t *testing.T) {
+	// The set a person's record produces: their own agent added, the build's
+	// agent switched off, which is what internal/agentrecord.EnabledNames
+	// returns for that record (its own test pins that half).
+	given := []string{"myagent", "codex"}
+	rc, err := LocalBashRcfile(LaunchOptions{SessionID: "s-1", Enhanced: true, Agents: given})
+	if err != nil {
+		t.Fatalf("LocalBashRcfile: %v", err)
+	}
+	for _, agent := range given {
+		want := agent + "() { __nocx_agent_run " + agent + ` "$@"; }`
+		if !strings.Contains(rc, want) {
+			t.Fatalf("the local pane does not wrap %q, which the record offered:\n%s", agent, rc)
+		}
+	}
+	if strings.Contains(rc, "claude()") {
+		t.Fatalf("the local pane still wraps an agent the record did not offer")
+	}
+	// A caller that named no agents gets this build's own set rather than none:
+	// a shell with no wrappers at all is a terminal that quietly stopped being
+	// orchestrated.
+	plain, err := LocalBashRcfile(LaunchOptions{SessionID: "s-1", Enhanced: true})
+	if err != nil {
+		t.Fatalf("LocalBashRcfile: %v", err)
+	}
+	for _, agent := range agentrecord.ShippedNames() {
+		if !strings.Contains(plain, agent+"() {") {
+			t.Fatalf("a caller that named no agents got no wrapper for %q", agent)
+		}
+	}
+}

@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 
@@ -473,23 +474,52 @@ type readResult struct {
 func readPTY(ptmx io.Reader, started time.Time, done chan<- readResult) {
 	buf := make([]byte, 32*1024)
 	result := readResult{}
+	var pending []byte
+	pendingAt := int64(0)
 	for {
 		n, err := ptmx.Read(buf)
 		if n > 0 {
-			data := string(buf[:n])
-			result.chunks = append(result.chunks, agentcapture.Chunk{
-				AtMs:   time.Since(started).Milliseconds(),
-				Offset: result.bytes,
-				Data:   data,
-			})
-			result.bytes += n
+			at := time.Since(started).Milliseconds()
+			data := append(pending, buf[:n]...)
+			if len(pending) > 0 {
+				at = pendingAt
+			}
+			complete := completeUTF8Prefix(data)
+			if complete > 0 {
+				text := string(data[:complete])
+				result.chunks = append(result.chunks, agentcapture.Chunk{
+					AtMs: at, Offset: result.bytes, Data: text,
+				})
+				result.bytes += complete
+			}
+			pending = append(pending[:0], data[complete:]...)
+			if len(pending) > 0 {
+				pendingAt = at
+			}
 		}
 		if err != nil {
 			result.err = err
+			if len(pending) > 0 {
+				result.err = fmt.Errorf("PTY ended with incomplete UTF-8 sequence")
+			}
 			break
 		}
 	}
 	done <- result
+}
+
+// completeUTF8Prefix leaves only a trailing, incomplete rune for the next PTY
+// read. JSON strings cannot preserve an invalid UTF-8 fragment, so capture
+// boundaries must not split a rune even though the PTY read may.
+func completeUTF8Prefix(data []byte) int {
+	start := len(data) - 1
+	for start >= 0 && len(data)-start < 4 && !utf8.RuneStart(data[start]) {
+		start--
+	}
+	if start >= 0 && len(data)-start < 4 && !utf8.FullRune(data[start:]) {
+		return start
+	}
+	return len(data)
 }
 
 func driveScript(ptmx io.Writer, started time.Time, steps []scriptStep, stop <-chan struct{}, scriptDone chan<- struct{}, scriptErr chan<- error) {

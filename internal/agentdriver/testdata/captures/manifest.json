@@ -429,6 +429,70 @@
       "atMs": 50000,
       "state": "free_text",
       "note": "a one-paragraph task bracketed-pasted into the box and left unsubmitted, drawn over FOUR content rows — the shape whose reading session.message confirms its own paste on (nocx-xn63t.4.5). No moment of its own in the inventory: it is not one of spec §6.4's five states, it is a free_text box that is TALL, and its rule-level expectation lives in input_text_test.go, where the reading itself is asserted rather than a label"
+    },
+    {
+      "agent": "codex",
+      "candidateMoment": "ready-for-input",
+      "ownerPending": true,
+      "capture": "codex-0.160.0-startup",
+      "atMs": 5000,
+      "note": "Real `codex` v0.160.0 PTY startup, 120x40; replay shows the TUI welcome and `Ask Codex to do anything` composer. Run: `cmd/agent-capture capture ... -- codex` (8s smoke capture). No prompt was submitted; sending a prompt caused the CLI sign-in flow instead. Mark selected from replay, not from elapsed-time assumption."
+    },
+    {
+      "agent": "codex",
+      "candidateMoment": "error",
+      "ownerPending": true,
+      "capture": "codex-0.160.0-exec-auth-error",
+      "atMs": 5000,
+      "note": "Real `codex exec \"Reply with exactly the word ready.\"` under `cmd/agent-capture`, 120x40; it retries then exits because the existing refresh token is reported already used/expired. This is an emitted auth failure, not a model response. No OAuth URL or token is in this recording."
+    },
+    {
+      "agent": "omp",
+      "candidateMoment": "ready-for-input",
+      "ownerPending": true,
+      "capture": "omp-18.4.10-session-prompt",
+      "atMs": 5000,
+      "note": "Real omp v18.4.10 PTY on 120x40, launched `omp --no-session --cwd /tmp \"Write a detailed 1200-word story about a lighthouse keeper. Do not use tools or edit files; continue until the full story is complete.\"`. At this mark its welcome screen shows an empty composer while the launch request is in progress; label whether this is actually ready from the frame."
+    },
+    {
+      "agent": "omp",
+      "candidateMoment": "error",
+      "ownerPending": true,
+      "capture": "omp-18.4.10-session-prompt",
+      "atMs": 10000,
+      "note": "Same real omp run as above. Replay shows the provider's 429 weekly/monthly limit exhausted message and retry failure. It did not produce a turn. Request ID and limit reset text are the CLI output as captured."
+    },
+    {
+      "agent": "prime-agent",
+      "candidateMoment": "ready-for-input",
+      "ownerPending": true,
+      "capture": "prime-agent-0.9.8-startup",
+      "atMs": 5000,
+      "note": "Real prime-agent v0.9.8 PTY startup, 120x40, command `prime-agent --no-session --cwd /tmp --no-tools`; replay shows the welcome/model screen and empty prompt. No conversation was started."
+    },
+    {
+      "agent": "prime-agent",
+      "candidateMoment": "waiting-spinner-before-answer",
+      "ownerPending": true,
+      "capture": "prime-agent-0.9.8-prompt",
+      "atMs": 2500,
+      "note": "Real prime-agent v0.9.8, 120x40, ephemeral no-tools launch with a harmless lighthouse-story prompt. Replay at 2500ms shows `Waiting · 0s` for the model request; this is not a human clarification/menu. Mark selected from replay."
+    },
+    {
+      "agent": "prime-agent",
+      "candidateMoment": "early-working",
+      "ownerPending": true,
+      "capture": "prime-agent-0.9.8-prompt",
+      "atMs": 4000,
+      "note": "Same real prime-agent prompt run. Replay shows generated story text and `Thinking · 2s`; early turn in progress."
+    },
+    {
+      "agent": "prime-agent",
+      "candidateMoment": "finished",
+      "ownerPending": true,
+      "capture": "prime-agent-0.9.8-prompt",
+      "atMs": 59000,
+      "note": "Same real prime-agent prompt run. Replay shows the complete story, empty prompt and no active spinner by this mark; candidate finished moment."
     }
   ]
 }

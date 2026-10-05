@@ -41,13 +41,16 @@ type manifest struct {
 }
 
 type manifestEntry struct {
-	Moment     string            `json:"moment,omitempty"`
-	Capture    string            `json:"capture,omitempty"`
-	AtMs       *int64            `json:"atMs,omitempty"`
-	State      agentdriver.State `json:"state,omitempty"`
-	Branch     *int              `json:"branch,omitempty"`
-	Unverified string            `json:"unverified,omitempty"`
-	Note       string            `json:"note,omitempty"`
+	Agent           string            `json:"agent,omitempty"`
+	CandidateMoment string            `json:"candidateMoment,omitempty"`
+	OwnerPending    bool              `json:"ownerPending,omitempty"`
+	Moment          string            `json:"moment,omitempty"`
+	Capture         string            `json:"capture,omitempty"`
+	AtMs            *int64            `json:"atMs,omitempty"`
+	State           agentdriver.State `json:"state,omitempty"`
+	Branch          *int              `json:"branch,omitempty"`
+	Unverified      string            `json:"unverified,omitempty"`
+	Note            string            `json:"note,omitempty"`
 	// Menu is the rule's menu reading at this moment, asserted alongside the
 	// state for every menu moment the inventory names. It is optional because
 	// most entries name no menu at all — a spinner, an idle box, a finished
@@ -66,7 +69,7 @@ type manifestMenu struct {
 	Selected int      `json:"selected"`
 }
 
-func (e manifestEntry) recorded() bool { return e.Unverified == "" }
+func (e manifestEntry) recorded() bool { return !e.OwnerPending && e.Unverified == "" }
 
 func (e manifestEntry) String() string {
 	if !e.recorded() {
@@ -110,11 +113,40 @@ func loadManifest(path string) (manifest, error) {
 		inventory[id] = 0
 	}
 	for i, e := range m.Entries {
-		if e.Moment != "" {
-			if _, ok := inventory[e.Moment]; !ok {
-				return manifest{}, fmt.Errorf("entry %d names moment %q, which is not in the inventory", i, e.Moment)
+		if e.OwnerPending {
+			if e.Agent == "" || e.Agent == m.Agent || e.CandidateMoment == "" || e.Capture == "" || e.AtMs == nil || e.Note == "" {
+				return m, fmt.Errorf("entry %d is owner-pending but lacks a distinct agent, candidate moment, capture, mark or note", i)
 			}
-			inventory[e.Moment]++
+			if e.Moment != "" || e.State != "" || e.Branch != nil || e.Menu != nil || e.Unverified != "" {
+				return m, fmt.Errorf("entry %d is owner-pending and also asserts a label", i)
+			}
+			if *e.AtMs < 0 {
+				return m, fmt.Errorf("entry %d has a negative mark", i)
+			}
+			header, chunks, err := agentcapture.Read(filepath.Join(filepath.Dir(path), e.Capture+".jsonl"))
+			if err != nil {
+				return m, fmt.Errorf("entry %d capture %s: %w", i, e.Capture, err)
+			}
+			if header.Agent != e.Agent {
+				return m, fmt.Errorf("entry %d capture %s is agent %q, want %q", i, e.Capture, header.Agent, e.Agent)
+			}
+			if _, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, header, chunks, []int64{*e.AtMs}); err != nil {
+				return m, fmt.Errorf("entry %d frame %s@%dms: %w", i, e.Capture, *e.AtMs, err)
+			}
+			continue
+		}
+		if e.CandidateMoment != "" {
+			return m, fmt.Errorf("entry %d names candidateMoment without an owner-pending label", i)
+		}
+		if e.Moment != "" {
+			inventoryKey := e.Moment
+			if e.Agent != "" && e.Agent != m.Agent {
+				inventoryKey = e.Agent + ":" + e.Moment
+			}
+			if _, ok := inventory[inventoryKey]; !ok {
+				return m, fmt.Errorf("entry %d names moment %q for agent %q, which is not in the inventory", i, e.Moment, e.Agent)
+			}
+			inventory[inventoryKey]++
 		}
 		if !e.recorded() {
 			if e.Moment == "" {
@@ -155,7 +187,7 @@ func checkManifest(m manifest, dir string, reg *agentdriver.Registry) []error {
 	byCapture := map[string][]manifestEntry{}
 	var names []string
 	for _, e := range m.Entries {
-		if !e.recorded() {
+		if e.OwnerPending || !e.recorded() || (e.Agent != "" && e.Agent != m.Agent) {
 			continue
 		}
 		if _, seen := byCapture[e.Capture]; !seen {

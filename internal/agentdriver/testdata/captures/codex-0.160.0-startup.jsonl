@@ -1,0 +1,35 @@
+{"agent":"codex","argv":["codex"],"cols":120,"rows":40,"started":"2026-10-05T10:39:10.124477374Z","script":[]}
+{"atMs":901,"offset":0,"data":"\u001b[?2004h"}
+{"atMs":901,"offset":8,"data":"\u001b[\u003e4;0m\u001b[\u003e7u\u001b[?1004h"}
+{"atMs":904,"offset":28,"data":"\u001b[6n\u001b]10;?\u001b\\\u001b]11;?\u001b\\\u001b[?u\u001b[c"}
+{"atMs":1154,"offset":55,"data":"\u001b[?2026h\u001b[?25l\u001b[?1049h"}
+{"atMs":1154,"offset":77,"data":"\u001b[\u003e4;0m\u001b[\u003e7u"}
+{"atMs":1154,"offset":89,"data":"\u001b[?1007l\u001b[?1000h\u001b[?1002h\u001b[?1003h"}
+{"atMs":1154,"offset":121,"data":"\u001b[?1006h\u001b[?25l\u001b[1;1H\u001b[J"}
+{"atMs":1173,"offset":144,"data":"\u001b[?2026h\u001b[?25l"}
+{"atMs":1179,"offset":158,"data":"\u001b[2;3H\u003e_\u001b[2;6H\u001b[1mOpenAI Codex\u001b[22m\u001b[2m\u001b[2m (v0.160.0)\u001b[3;6Hloading\u001b[5;3H\u001b[22mWhat’s\u001b[5;10Htoday’s\u001b[5;18Hlittle\u001b[5;25Hadventure?\u001b[12;56H\u001b[2m⣀⣤⣤⣤⣀⣀\u001b[13;53H⣠⣶⣿⣿⣿⣿⣿⣿⣿⣿⣦⣤⣤⣤⣤⣤⣤⡀\u001b[14;51H⢀⣾⣿⣿⠿⠋⠉⠉⢉⣭⣿⣿⣿⣿⣿⠿⣿⣿⣿⣿⣷⣄\u001b[15;50H⣀⣾⣿⣿⠃\u001b[15;56H⣀⣴⣾⣿⣿⡿⠟⠋\u001b[15;65H⣀⡀\u001b[15;68H⠈⠙⢿⣿⣿⣧\u001b[16;47H⣀⣶⣿⣿⣿⣿⡇\u001b[16;55H⢸⣿⣿⡿⠛⠉⢀⣠⣴⣿⣿⣿⣷⣦⣀⠈⢻⣿⣿⡇\u001b[17;46H⣰⣿⣿⡿⢿⣿⣿⡇\u001b[17;55H⢸⣿⣿⢀⣤⣶⣿⣿⣿⠟⠛⠻⣿⣿⣿⣿⣮⣿⣿⡷\u001b[18;45H⢰⣿⣿⡟⠁⢸⣿⣿⡇\u001b[18;55H⢸⣿⣿⣿⣿⠿⠿⣿⣿⣿⣦⣄⡀⠈⠛⠿⣿⣿⣿⣧⡀\u001b[19;45H⣾⣿⣿⠃\u001b[19;50H⢸⣿⣿⡇\u001b[19;55H⢸⣿⣿⠋⠁\u001b[19;62H⠈⠙⢻⣿⣿⣿⣶⣤⡀\u001b[19;72H⠹⢿⣿⣷⡄\u001b[20;45H⢸⣿⣿⣇\u001b[20;50H⠸⣿⣿⣷⣦⣼⣿⣿\u001b[20;64H⢸⣿⣿⠻⢿⣿⣿⡇\u001b[20;73H⠘⣿⣿⣿\u001b[21;45H⠈⢿⣿⣿⣦⡀⠈⠛⠿⣿⣿⣿⣿⣄⡀\u001b[21;62H⢀⣠⣼⣿⣿\u001b[21;69H⣿⣿⡇\u001b[21;74H⣿⣿⣿⠇\u001b[22;47H⢻⣿⣿⣿⣷⣦⣀⠈⠙⠻⣿⣿⣿⣶⣶⣿⣿⣿⣿⣿\u001b[22;69H⣿⣿⡇\u001b[22;73H⣠⣿⣿⣿\u001b[23;47H⢸⣿⣿⡿⢿⣿⣿⣿⣦⣠⣴⣿⣿⣿⡿⠟⠋⢸⣿⣿\u001b[23;69H⣿⣿⣷⣴⣿⣿⣿⠃\u001b[24;47H⠘⣿⣿⣷\u001b[24;52H⠈⠛⢿⣿⣿⣿⠿⠋⠉\u001b[24;62H⣠⣴⣿⣿⣿\u001b[24;69H⣿⣿⣿⣿⣿⠟⠁\u001b[25;48H⠻⣿⣿⣿⣤⣀\u001b[25;55H⠈⠉\u001b[25;58H⢀⣤⣶⣿⣿⣿⠿⠟⠁\u001b[25;68H⣰⣿⣿⡟⠋⠁\u001b[26;49H⠈⠿⣿⣿⣿⣿⣶⣾⣿⣿⣿⣿⠟⠋⠁\u001b[26;66H⣠⣼⣿⣿⡟\u001b[27;52H⠙⠛⠛⠛⠻⠛⢿⣿⣿⣿⣿⣷⣾⣿⣿⣿⡿⠏\u001b[28;59H⠈⠙⠛⠿⠿⠿⠿⠛⠉\u001b[37;1H\u001b[22m\u001b[1m›\u001b[37;3H\u001b[22m\u001b[2m\u001b[2mAsk Codex to do anything\u001b[40;3H\u001b[22m\u001b[1m?\u001b[40;5H\u001b[22mfor\u001b[40;9Hshortcuts\u001b[m\u001b[m\u001b[0m\u001b[1;1H\u001b[0 q\u001b[1;1H \u001b[m\u001b[m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l\u001b[?2026l"}
+{"atMs":1187,"offset":1956,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":1192,"offset":1981,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":1206,"offset":1995,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":1206,"offset":2020,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":1217,"offset":2034,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":1220,"offset":2059,"data":"\u001b[?25h"}
+{"atMs":1225,"offset":2065,"data":"\u001b[?2026l"}
+{"atMs":1234,"offset":2073,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":1236,"offset":2098,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":1276,"offset":2112,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":1279,"offset":2137,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":2506,"offset":2151,"data":"\u001b[?2026h\u001b[?25l\u001b[3;6H\u001b[2m~/.herdr/worktrees/nocx/w-label-frames\u001b[m\u001b[m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"}
+{"atMs":2522,"offset":2244,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"}
+{"atMs":2562,"offset":2283,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"}
+{"atMs":2606,"offset":2322,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":2610,"offset":2347,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":3407,"offset":2361,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":3411,"offset":2386,"data":"\u001b[?25h\u001b[?2026l"}
+{"atMs":3467,"offset":2400,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H\u001b[?25h\u001b[?2026l"}
+{"atMs":5035,"offset":2439,"data":"\u001b[?2026h\u001b[m\u001b[m\u001b[0m\u001b[37;3H"}
+{"atMs":5040,"offset":2464,"data":"\u001b[?25h"}
+{"atMs":5040,"offset":2470,"data":"\u001b[?2026l"}
+{"atMs":5596,"offset":2478,"data":"\u001b[?1006l\u001b[?1015l\u001b[?1003l\u001b[?1002l\u001b[?1000l"}
+{"atMs":5597,"offset":2518,"data":"\u001b[?1007h\u001b[?2026h\u001b[?25l"}
+{"atMs":5599,"offset":2540,"data":"\u001b[2;2H\u001b[0m\u001b[m\u001b[K\u001b[5;2H\u001b[0m\u001b[m\u001b[K\u001b[12;30H\u001b[0m\u001b[m\u001b[K\u001b[13;26H\u001b[0m\u001b[m\u001b[K\u001b[14;2H\u001b[0m\u001b[m\u001b[K\u001b[15;26H\u001b[0m\u001b[m\u001b[K\u001b[16;2H\u001b[0m\u001b[m\u001b[K\u001b[17;2H\u001b[0m\u001b[m\u001b[K\u001b[18;2H\u001b[0m\u001b[m\u001b[K\u001b[19;2H\u001b[0m\u001b[m\u001b[K\u001b[20;2H\u001b[0m\u001b[m\u001b[K\u001b[21;2H\u001b[0m\u001b[m\u001b[K\u001b[22;2H\u001b[0m\u001b[m\u001b[K\u001b[23;2H\u001b[0m\u001b[m\u001b[K\u001b[24;2H\u001b[0m\u001b[m\u001b[K\u001b[25;2H\u001b[0m\u001b[m\u001b[K\u001b[26;2H\u001b[0m\u001b[m\u001b[K\u001b[27;2H\u001b[0m\u001b[m\u001b[K\u001b[28;2H\u001b[0m\u001b[m\u001b[K\u001b[37;2H\u001b[0m\u001b[m\u001b[K\u001b[40;2H\u001b[0m\u001b[m\u001b[K\u001b[1;3HWelcome\u001b[1;11Hto\u001b[1;14H\u001b[1mCodex\u001b[22m,\u001b[1;21HOpenAI's\u001b[1;30Hcommand-line\u001b[1;43Hcoding\u001b[1;50Hagent\u001b[3;3HSign in with ChatGPT to use Codex as part\u001b[3;45Hof\u001b[3;48Hyour\u001b[3;53Hpaid\u001b[3;58Hplan\u001b[4;3Hor\u001b[4;6Hconnect\u001b[4;14Han\u001b[4;17HAPI\u001b[4;21Hkey\u001b[4;25Hfor\u001b[4;29Husage-based\u001b[4;41Hbilling\u001b[6;1H\u001b[2m\u003e 1. \u001b[22mSign in with ChatGPT\u001b[7;1H\u001b[2m     Usage included with Plus, Pro, Business, and Enterprise plans\u001b[9;3H\u001b[22m2.\u001b[9;6HSign\u001b[9;11Hin\u001b[9;14Hwith\u001b[9;19HDevice\u001b[9;26HCode\u001b[10;1H\u001b[2m     Sign in from another device with a one-time code\u001b[12;3H\u001b[22m3.\u001b[12;6HProvide\u001b[12;14Hyour\u001b[12;19Hown\u001b[12;23HAPI\u001b[12;27Hkey\u001b[13;1H\u001b[2m     Pay for what you use\u001b[15;1H  Press \u001b[22m\u001b[1menter\u001b[22m\u001b[2m\u001b[2m to continue\u001b[37;1H\u001b[22m \u001b[m\u001b[m\u001b[0m\u001b[?2026l"}

@@ -1,0 +1,138 @@
+{"agent":"codex","argv":["codex","exec","Reply with exactly the word ready."],"cols":120,"rows":40,"started":"2026-10-05T10:48:36.33306287Z","script":[]}
+{"atMs":1453,"offset":0,"data":"2026-10-05T10:48:37.786021Z ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some(\"refresh_token_reused\"), error_message: Some(\"Your refresh token has already been used to generate a new access token. Please try signing in again.\"), .. }\r\n2026-10-05T10:48:37.786069Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2110,"offset":518,"data":"2026-10-05T10:48:38.443194Z ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some(\"refresh_token_reused\"), error_message: Some(\"Your refresh token has already been used to generate a new access token. Please try signing in again.\"), .. }\r\n"}
+{"atMs":2110,"offset":828,"data":"2026-10-05T10:48:38.443245Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2130,"offset":1036,"data":"2026-10-05T10:48:38.462673Z ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some(\"refresh_token_reused\"), error_message: Some(\"Your refresh token has already been used to generate a new access token. Please try signing in again.\"), .. }\r\n"}
+{"atMs":2130,"offset":1346,"data":"2026-10-05T10:48:38.462743Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2131,"offset":1554,"data":"2026-10-05T10:48:38.464805Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2131,"offset":1762,"data":"2026-10-05T10:48:38.464890Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2131,"offset":1970,"data":"2026-10-05T10:48:38.464942Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2131,"offset":2178,"data":"2026-10-05T10:48:38.464985Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2139,"offset":2386,"data":"2026-10-05T10:48:38.472436Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":2868,"offset":2594,"data":"2026-10-05T10:48:39.200674Z ERROR codex_models_manager::manager: failed to refresh available models: unexpected status 401 Unauthorized: Provided authentication token is expired. Please try signing in again., url: https://chatgpt.com/backend-api/codex/models?client_version=0.160.0, cf-ray: a45bdaebcde29991-ORD, request id: req_a0ebe10fceb049cd97f5415d75567f7b, auth error: 401, auth error code: token_expired\r\n"}
+{"atMs":2871,"offset":3006,"data":"2026-10-05T10:48:39.204116Z ERROR codex_models_manager::manager: failed to refresh available models: unexpected status 401 Unauthorized: Provided authentication token is expired. Please try signing in again., url: https://chatgpt.com/backend-api/codex/models?client_version=0.160.0, cf-ray: a45bdaebefd42c83-ORD, request id: req_e2a25dd176264805a4ab70c520b76336, auth error: 401, auth error code: token_expired\r\n"}
+{"atMs":2872,"offset":3418,"data":"2026-10-05T10:48:39.205386Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3043,"offset":3626,"data":"2026-10-05T10:48:39.376285Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3098,"offset":3834,"data":"OpenAI Codex v0.160.0\r\n--------\r\n"}
+{"atMs":3101,"offset":3867,"data":"workdir: /home/dev/.herdr/worktrees/nocx/w-label-frames\r\nmodel: gpt-5.6-sol\r\nprovider: openai\r\napproval: on-request\r\nsandbox: workspace-write [workdir, /tmp, $TMPDIR]\r\nreasoning effort: high\r\nreasoning summaries: none\r\nsession id: 01a10bae-0d38-77f0-887e-14662fa85af3\r\n--------\r\nuser\r\nReply with exactly the word ready.\r\n"}
+{"atMs":3101,"offset":4188,"data":"2026-10-05T10:48:39.432495Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3104,"offset":4396,"data":"2026-10-05T10:48:39.436881Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3104,"offset":4604,"data":"2026-10-05T10:48:39.437257Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3104,"offset":4812,"data":"2026-10-05T10:48:39.437802Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3104,"offset":5020,"data":"2026-10-05T10:48:39.437851Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3106,"offset":5228,"data":"2026-10-05T10:48:39.440025Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3120,"offset":5436,"data":"2026-10-05T10:48:39.453733Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3154,"offset":5644,"data":"2026-10-05T10:48:39.487482Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3169,"offset":5852,"data":"warning: Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\r\n  user (/home/dev/.codex/config.toml): `mcp_servers.deja.type` is ignored.\r\nwarning: Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.\r\n  user (/home/dev/.codex/config.toml): `mcp_servers.deja.type` is ignored.\r\n"}
+{"atMs":3219,"offset":6216,"data":"2026-10-05T10:48:39.552695Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3224,"offset":6424,"data":"2026-10-05T10:48:39.557471Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3224,"offset":6632,"data":"2026-10-05T10:48:39.557716Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3224,"offset":6840,"data":"2026-10-05T10:48:39.557786Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3749,"offset":7048,"data":"2026-10-05T10:48:40.082793Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedServerResponse(\"HTTP 401: {\\n  \\\"error\\\": {\\n    \\\"message\\\": \\\"Provided authentication token is expired. Please try signing in again.\\\",\\n    \\\"type\\\": \\\"invalid_request_error\\\",\\n    \\\"code\\\": \\\"token_expired\\\",\\n    \\\"param\\\": null\\n  },\\n  \\\"status\\\": 401,\\n  \\\"detail\\\": {\\n    \\\"code\\\": \\\"token_expired\\\",\\n    \\\"message\\\": \\\"Provided authentication token is expired. Please try signing in again.\\\"\\n  }\\n}\")\r\n"}
+{"atMs":3759,"offset":7588,"data":"2026-10-05T10:48:40.092194Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":3999,"offset":7796,"data":"2026-10-05T10:48:40.332144Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when UnexpectedServerResponse(\"HTTP 401: {\\n  \\\"error\\\": {\\n    \\\"message\\\": \\\"Provided authentication token is expired. Please try signing in again.\\\",\\n    \\\"type\\\": \\\"invalid_request_error\\\",\\n    \\\"code\\\": \\\"token_expired\\\",\\n    \\\"param\\\": null\\n  },\\n  \\\"status\\\": 401,\\n  \\\"detail\\\": {\\n    \\\"code\\\": \\\"token_expired\\\",\\n    \\\"message\\\": \\\"Provided authentication token is expired. Please try signing in again.\\\"\\n  }\\n}\")\r\n"}
+{"atMs":4634,"offset":8336,"data":"2026-10-05T10:48:40.967285Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":5302,"offset":8544,"data":"2026-10-05T10:48:41.634637Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":5908,"offset":8752,"data":"2026-10-05T10:48:42.237474Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":6512,"offset":8960,"data":"2026-10-05T10:48:42.845091Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":7286,"offset":9168,"data":"hook: SessionStart\r\nhook: SessionStart\r\nhook: SessionStart\r\nhook: SessionStart\r\nhook: SessionStart\r\n"}
+{"atMs":17322,"offset":9268,"data":"2026-10-05T10:48:53.655046Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":17334,"offset":9476,"data":"hook:"}
+{"atMs":17334,"offset":9481,"data":" "}
+{"atMs":17335,"offset":9482,"data":"SessionStart"}
+{"atMs":17335,"offset":9494,"data":" "}
+{"atMs":17335,"offset":9495,"data":"Completed"}
+{"atMs":17335,"offset":9504,"data":"\r\n"}
+{"atMs":17335,"offset":9506,"data":"hook:"}
+{"atMs":17335,"offset":9511,"data":" "}
+{"atMs":17335,"offset":9512,"data":"SessionStart"}
+{"atMs":17335,"offset":9524,"data":" "}
+{"atMs":17335,"offset":9525,"data":"Failed"}
+{"atMs":17335,"offset":9531,"data":"\r\n"}
+{"atMs":17335,"offset":9533,"data":"hook:"}
+{"atMs":17335,"offset":9538,"data":" "}
+{"atMs":17335,"offset":9539,"data":"SessionStart"}
+{"atMs":17335,"offset":9551,"data":" "}
+{"atMs":17335,"offset":9552,"data":"Completed"}
+{"atMs":17335,"offset":9561,"data":"\r\n"}
+{"atMs":17335,"offset":9563,"data":"hook:"}
+{"atMs":17336,"offset":9568,"data":" "}
+{"atMs":17336,"offset":9569,"data":"SessionStart"}
+{"atMs":17336,"offset":9581,"data":" "}
+{"atMs":17336,"offset":9582,"data":"Completed"}
+{"atMs":17336,"offset":9591,"data":"\r\n"}
+{"atMs":17336,"offset":9593,"data":"hook:"}
+{"atMs":17336,"offset":9598,"data":" "}
+{"atMs":17336,"offset":9599,"data":"SessionStart"}
+{"atMs":17336,"offset":9611,"data":" "}
+{"atMs":17336,"offset":9612,"data":"Completed"}
+{"atMs":17336,"offset":9621,"data":"\r\n"}
+{"atMs":17348,"offset":9623,"data":"hook: UserPromptSubmit\r\nhook: UserPromptSubmit\r\nhook: UserPromptSubmit\r\nhook: UserPromptSubmit\r\n"}
+{"atMs":18020,"offset":9719,"data":"2026-10-05T10:48:54.351571Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":18337,"offset":9927,"data":"hook:"}
+{"atMs":18337,"offset":9932,"data":" "}
+{"atMs":18337,"offset":9933,"data":"UserPromptSubmit Completed\r\nhook: "}
+{"atMs":18337,"offset":9967,"data":"UserPromptSubmit "}
+{"atMs":18337,"offset":9984,"data":"Completed"}
+{"atMs":18337,"offset":9993,"data":"\r\n"}
+{"atMs":18337,"offset":9995,"data":"hook: "}
+{"atMs":18337,"offset":10001,"data":"UserPromptSubmit "}
+{"atMs":18337,"offset":10018,"data":"Completed"}
+{"atMs":18337,"offset":10027,"data":"\r\n"}
+{"atMs":18337,"offset":10029,"data":"hook:"}
+{"atMs":18337,"offset":10034,"data":" "}
+{"atMs":18337,"offset":10035,"data":"UserPromptSubmit"}
+{"atMs":18337,"offset":10051,"data":" "}
+{"atMs":18337,"offset":10052,"data":"Completed"}
+{"atMs":18337,"offset":10061,"data":"\r\n"}
+{"atMs":18360,"offset":10063,"data":"2026-10-05T10:48:54.693228Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":18360,"offset":10271,"data":"2026-10-05T10:48:54.693412Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":18360,"offset":10479,"data":"2026-10-05T10:48:54.693443Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":18592,"offset":10687,"data":"2026-10-05T10:48:54.925802Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":19324,"offset":10895,"data":"2026-10-05T10:48:55.657054Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":19845,"offset":11103,"data":"2026-10-05T10:48:56.178143Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":19845,"offset":11311,"data":"2026-10-05T10:48:56.178188Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:48:56.178217Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":19927,"offset":11727,"data":"2026-10-05T10:48:56.260803Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":20517,"offset":11935,"data":"2026-10-05T10:48:56.850321Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":21130,"offset":12143,"data":"ERROR:"}
+{"atMs":21130,"offset":12149,"data":" Reconnecting... 2/5\r\n"}
+{"atMs":21166,"offset":12171,"data":"2026-10-05T10:48:57.499443Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":21511,"offset":12379,"data":"2026-10-05T10:48:57.844201Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:48:57.844254Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:48:57.844283Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":21805,"offset":13003,"data":"2026-10-05T10:48:58.138152Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":22427,"offset":13211,"data":"2026-10-05T10:48:58.760097Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":22728,"offset":13419,"data":"ERROR: Reconnecting... 3/5\r\n"}
+{"atMs":23580,"offset":13447,"data":"2026-10-05T10:48:59.913172Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":23581,"offset":13655,"data":"2026-10-05T10:48:59.914745Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:48:59.914828Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":24808,"offset":14071,"data":"ERROR: Reconnecting... 4/5\r\n"}
+{"atMs":26400,"offset":14099,"data":"2026-10-05T10:49:02.732933Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:49:02.732981Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":26400,"offset":14515,"data":"2026-10-05T10:49:02.733656Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":27713,"offset":14723,"data":"ERROR: Reconnecting... 5/5\r\n"}
+{"atMs":30976,"offset":14751,"data":"2026-10-05T10:49:07.309142Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":30976,"offset":14959,"data":"2026-10-05T10:49:07.309188Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":30976,"offset":15167,"data":"2026-10-05T10:49:07.309218Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":32225,"offset":15375,"data":"2026-10-05T10:49:08.558432Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":32225,"offset":15583,"data":"2026-10-05T10:49:08.558481Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":32226,"offset":15791,"data":"2026-10-05T10:49:08.558506Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\nwarning: Falling back from WebSockets to HTTPS transport. workspace routing discovery unauthorized (401)\r\n"}
+{"atMs":33470,"offset":16105,"data":"ERROR: Reconnecting... 1/5\r\n"}
+{"atMs":33674,"offset":16133,"data":"2026-10-05T10:49:10.007157Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":33674,"offset":16341,"data":"2026-10-05T10:49:10.007762Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":33674,"offset":16549,"data":"2026-10-05T10:49:10.007827Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":34890,"offset":16757,"data":"ERROR: Reconnecting... 2/5\r\n"}
+{"atMs":35268,"offset":16785,"data":"2026-10-05T10:49:11.601527Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":35268,"offset":16993,"data":"2026-10-05T10:49:11.601585Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":35268,"offset":17201,"data":"2026-10-05T10:49:11.601617Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":36491,"offset":17409,"data":"ERROR: Reconnecting... 3/5\r\n"}
+{"atMs":37292,"offset":17437,"data":"2026-10-05T10:49:13.625281Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:49:13.625365Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:49:13.625416Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":38578,"offset":18061,"data":"ERROR: Reconnecting... 4/5\r\n"}
+{"atMs":40109,"offset":18089,"data":"2026-10-05T10:49:16.442001Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:49:16.442051Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n2026-10-05T10:49:16.442079Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":41425,"offset":18713,"data":"ERROR: Reconnecting... 5/5\r\n"}
+{"atMs":44655,"offset":18741,"data":"2026-10-05T10:49:20.988317Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":44655,"offset":18949,"data":"2026-10-05T10:49:20.988379Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":44655,"offset":19157,"data":"2026-10-05T10:49:20.988416Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":45919,"offset":19365,"data":"ERROR:"}
+{"atMs":45919,"offset":19371,"data":" workspace routing discovery unauthorized (401)\r\n"}
+{"atMs":45924,"offset":19420,"data":"2026-10-05T10:49:22.257915Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.\r\n"}
+{"atMs":45941,"offset":19628,"data":"ERROR:"}
+{"atMs":45941,"offset":19634,"data":" "}
+{"atMs":45941,"offset":19635,"data":"workspace routing discovery unauthorized (401)"}
+{"atMs":45941,"offset":19681,"data":"\r\n"}

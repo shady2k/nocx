@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/agentcapture/replaylocal"
 )
 
 func TestParseScriptCommittedForms(t *testing.T) {
@@ -118,5 +121,56 @@ func TestCaptureProgramEndsWhenScriptExhausted(t *testing.T) {
 	}
 	if header.Agent != "bash" || len(chunks) == 0 {
 		t.Fatalf("capture = agent %q, %d chunks; want bash and output", header.Agent, len(chunks))
+	}
+}
+
+type splitReader struct {
+	parts [][]byte
+}
+
+func (r *splitReader) Read(p []byte) (int, error) {
+	if len(r.parts) == 0 {
+		return 0, io.EOF
+	}
+	part := r.parts[0]
+	r.parts = r.parts[1:]
+	return copy(p, part), nil
+}
+
+func TestCapturePreservesUTF8SplitAcrossPTYReads(t *testing.T) {
+	payload := []byte("\x1b[2J\x1b[1;1H☃")
+	snowman := []byte("☃")
+	split := bytes.Index(payload, snowman) + 1
+	done := make(chan readResult, 1)
+	readPTY(&splitReader{parts: [][]byte{payload[:split], payload[split:]}}, time.Now(), done)
+	result := <-done
+	if result.err != io.EOF {
+		t.Fatalf("readPTY error = %v, want EOF", result.err)
+	}
+
+	capture := filepath.Join(t.TempDir(), "split-utf8.jsonl")
+	header := agentcapture.Header{Agent: "test", Argv: []string{"test"}, Cols: 20, Rows: 2}
+	if err := agentcapture.Write(capture, header, result.chunks); err != nil {
+		t.Fatalf("write capture: %v", err)
+	}
+	decodedHeader, decodedChunks, err := agentcapture.Read(capture)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	var decoded []byte
+	for _, chunk := range decodedChunks {
+		decoded = append(decoded, chunk.Data...)
+	}
+	if !bytes.Equal(decoded, payload) {
+		t.Fatalf("decoded stream = %q, want original bytes %q", decoded, payload)
+	}
+
+	mark := decodedChunks[len(decodedChunks)-1].AtMs
+	moments, err := agentcapture.Frames(context.Background(), replaylocal.Replayer{}, decodedHeader, decodedChunks, []int64{mark})
+	if err != nil {
+		t.Fatalf("replay capture: %v", err)
+	}
+	if got := moments[0].Frame.Lines[0][0].Text; got != "☃" {
+		t.Fatalf("replayed frame first cell = %q, want original glyph ☃", got)
 	}
 }

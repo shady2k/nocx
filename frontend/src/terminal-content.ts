@@ -7371,13 +7371,18 @@ export class TerminalContent extends BasePaneContent {
       // on past the end would make this a second owner of the scroll position
       // for the whole of a long streamed answer.
       if (settle && typeof ResizeObserver !== 'undefined') {
-        let seatedHeight = -1
+        let seatedHeight: number | null = null
         const observer = new ResizeObserver((entries) => {
-          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight
-          const grew = height !== seatedHeight
+          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight ?? 0
+          // The first delivery is only a baseline. WebKit may report the
+          // overlay box before the reparented answer has grown in flow, while
+          // the old scroller is still at its tail; that measurement is not
+          // evidence the seated tail has landed.
+          const baseline = seatedHeight === null
+          const grew = !baseline && height !== seatedHeight
           seatedHeight = height
           followSeatedTail()
-          if (!grew || settle.tailReached()) observer.disconnect()
+          if (!baseline && (!grew || settle.tailReached())) observer.disconnect()
         })
         observer.observe(tail)
       }

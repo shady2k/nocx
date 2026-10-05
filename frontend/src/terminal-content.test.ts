@@ -14831,11 +14831,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const area = scrollback.scrollbackArea
-      // The full-screen state the probe measured: the program fills the
-      // scroller exactly, so there is nothing to scroll YET.
-      let scrollHeight = 816
-      let scrollTop = 0
-      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 816 })
+      // A previous transcript already overflows, and the old scroller is
+      // genuinely at its tail. Its first ResizeObserver delivery is still a
+      // pre-growth baseline; that stale tail measurement must not release the
+      // hold before the seated answer's own box grows.
+      let scrollHeight = 900
+      let scrollTop = 500
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
       Object.defineProperty(area, 'scrollHeight', { configurable: true, get: () => scrollHeight })
       // A scroller clamps a write AT THE MOMENT OF THE WRITE and keeps the
       // clamped value — which is exactly why a scroll issued before the

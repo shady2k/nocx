@@ -1770,6 +1770,12 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	// The append committed, so the artifact's cursor is now the exclusive end
 	// of this delivery. The close reads it to place its closing screen.
 	bs.mu.Lock()
+	if block.rows == 0 && block.floor == 0 {
+		// The first accepted append may start above row zero. Record the
+		// store's actual floor so a resend of the missing head is prepended,
+		// not mistaken for an already-stored overlap.
+		block.floor = fromRow
+	}
 	block.rows = writtenUpTo
 	bs.mu.Unlock()
 	if len(rows) > 0 {
@@ -1779,7 +1785,16 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		})
 	}
 	s.finishDirectDelivery(ctx, sid, block, rows)
-	return writtenUpTo, true
+	bs.mu.Lock()
+	floor, storedUpTo := block.floor, block.rows
+	bs.mu.Unlock()
+	if floor > 0 {
+		// A watermark is a contiguous prefix, not the end of an artifact
+		// whose first stored row is later. Keep the helper's head until it
+		// reaches the floor and prependBlockHead joins it to the artifact.
+		return 0, false
+	}
+	return storedUpTo, true
 }
 
 // finishDirectDelivery is the direct path's completion tail, run on every
@@ -3231,7 +3246,11 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 		// delivery, the instant it stops being "in flight to the store" and
 		// becomes rows the store already holds.
 		bs.mu.Lock()
+		if block.rows == 0 && block.floor == 0 {
+			block.floor = delivery.from
+		}
 		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
+		floor := block.floor
 		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
@@ -3239,7 +3258,9 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
-		confirmPendingRows(ctx, confirm, delivery)
+		if floor == 0 {
+			confirmPendingRows(ctx, confirm, delivery)
+		}
 	}
 	next := bs.takePendingRows(sid, block.attempt)
 	if len(next) == 0 {

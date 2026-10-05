@@ -225,6 +225,33 @@ if [ "$cpus" != "0" ]; then
   cpu_flag=(--cpus "$cpus")
 fi
 
+# THE CONTAINER'S OWN MEMORY CEILING (nocx-n7yrq), and it is a cap rather than a
+# second gate: the same command, the same two browsers, the same specs.
+#
+# This container was the largest single consumer of the merged-tree gate.
+# Measured 2026-10-05 on w-n7yrq at 7e6004254, one `docker run` per browser and
+# each one's own cgroup `memory.peak`: chromium 3.88 GB, webkit 4.59 GB. Docker
+# here sets no memory limit of its own, so all of that is charged to a 12 GB
+# host shared with other agents, and the kill it earned was the KERNEL's global
+# OOM (`oom-kill:constraint=CONSTRAINT_NONE ... global_oom`) — which takes
+# whatever process it likes, in this repo or in somebody else's.
+#
+# 6 GiB is headroom, deliberately: above every measured peak, so an ordinary run
+# is not slowed or failed by it, and below the host's total, so the container's
+# own cgroup OOM fires before the host's global one. Docker then allows the same
+# amount again as swap while --memory-swap is unset, and that is left alone on
+# purpose — it is the headroom a transient overshoot is meant to spill into
+# rather than being killed for. THE TRADE, stated: a genuine overshoot now dies
+# INSIDE this container, where the log and the exit status say so, instead of
+# taking the host's other work down with it. Raise it with NOCX_E2E_MEM when a
+# new spec legitimately needs more, and say in that commit what was measured;
+# NOCX_E2E_MEM=0 removes the cap.
+e2e_mem="${NOCX_E2E_MEM:-6g}"
+mem_flag=()
+if [ "$e2e_mem" != "0" ]; then
+  mem_flag=(--memory "$e2e_mem")
+fi
+
 # A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
 # `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
 # container then answers "fatal: not a git repository", and because
@@ -273,6 +300,7 @@ fi
 run_one() {
   docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
     ${cpu_flag[@]+"${cpu_flag[@]}"} \
+    ${mem_flag[@]+"${mem_flag[@]}"} \
     ${git_flag[@]+"${git_flag[@]}"} \
     -v "$repo_root:/work" \
     -v "$NODE_VOL":/work/node_modules \

@@ -704,6 +704,44 @@ FRAMECHECK_TEST_TAGS := nocx_framecheck$(if $(WAILS_PLATFORM_TAGS),$(comma)$(WAI
 # whose files do. The lint pass gets the same composition the test pass does.
 GOLANGCI_LOCAL_SSH_TAGS := --build-tags=$(LOCAL_SSH_TAGS)
 
+# --- THE MEMORY BOUND ON THE HEAVY LEGS (nocx-n7yrq) -------------------------
+#
+# AGENTS.md makes the coordinator run `make ci-full` on the merged tree, once,
+# before pushing to `main`. On this VM it could not: the legs below were killed
+# for memory on a 12 GB box shared with other agents, so CI became the first
+# place a merge was ever checked. The kill is the kernel's GLOBAL OOM killer
+# (`oom-kill:constraint=CONSTRAINT_NONE ... global_oom`), not a cgroup limit and
+# not a limit of the tool's own: docker here has no memcg cap, so every leg's
+# peak is charged to the host.
+#
+# WHAT WAS MEASURED, 2026-10-05, worktree w-n7yrq at 7e6004254, `golangci-lint
+# run --build-tags=gtk3 ./...` against a COLD cache (a warm one finishes in
+# seconds and proves nothing about the peak):
+#
+#   default (GOGC=100, concurrency=GOMAXPROCS=6)   31.6s   3407 MB
+#   GOGC=50                                       74.9s*  2056 MB   (*concurrency=2)
+#   GOGC=50 GOMEMLIMIT=1500MiB, default concurrency  43.6s   1713 MB
+#   GOGC=50 GOMEMLIMIT=1500MiB, concurrency=1     161.2s   1382 MB
+#
+# So the lever is the GARBAGE COLLECTOR's, not the worker count: concurrency
+# alone bought 8% and cost 85% more wall time, while GOGC+GOMEMLIMIT halved the
+# peak for 38% more wall time. GOMEMLIMIT is a SOFT limit (the Go runtime GCs
+# harder as the heap approaches it rather than failing), so a linter whose live
+# heap genuinely needs more slows down instead of dying — which is why this is
+# the bound chosen over `--concurrency=1`, and why no linter is dropped, no
+# package narrowed and no file skipped: the same `run ./...` still happens.
+#
+# `-p` IS THE SAME BOUND FOR THE TEST PASSES, and it is a MEMORY bound rather
+# than the timing cap AGENTS.md refuses. `go test` runs one test BINARY per
+# package and defaults to GOMAXPROCS of them at once; a race-instrumented
+# binary of internal/notify measured 3.3 GB on its own, so six at once is where
+# the merged-tree gate died. `-p` changes how many run at once, never which
+# tests run — and a test that depends on how many packages run beside it is
+# broken on a fast machine too, which is the rule AGENTS.md already states.
+GOLANGCI_GOGC ?= 50
+GOLANGCI_GOMEMLIMIT ?= 1500MiB
+GO_TEST_P ?= 2
+
 # BOTH keyring variants here too, and the comment above already said so —
 # "both variants run over the whole partition" — while the recipe passed
 # --no-keyring and ran the portable half once. CI's backend-linux runs
@@ -715,7 +753,8 @@ ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
 	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_PORTABLE_PKGS)' \
 	NOCX_ALLOC_BUDGET_PKGS='$(ALLOC_BUDGET_PKGS)' \
-	  ./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
+	NOCX_CI_TEST_P='$(GO_TEST_P)' \
+	  ./scripts/ci-linux.sh -- $$($(PORTABLE_PKGS_CMD))
 
 # THE ALLOCATION BUDGETS RUN WITHOUT -race (nocx-zg3k3.5.8). Every other Go pass
 # here and in ci.yml runs -race, and the race detector instruments and adds
@@ -741,6 +780,7 @@ test-alloc-budgets:
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_OS_PKGS)' \
+	NOCX_CI_TEST_P='$(GO_TEST_P)' \
 	  ./scripts/ci-linux.sh -- $(OS_PKGS)
 
 # ci-os-split re-derives the OS package list from the build constraints and
@@ -786,8 +826,22 @@ OS_EXEMPT := internal/pty internal/storage
 print-os-pkgs:
 	@echo '$(OS_PKGS)'
 
+# THE PORTABLE HALF OF ./..., DERIVED ONCE (nocx-eo47x). It is held as a
+# COMMAND rather than an expanded list so that both callers can share the one
+# derivation: CI asks over `make -s print-portable-pkgs`, and `ci-backend`
+# hands the same thing to the runner.
+#
+# IT IS COMMAND TEXT AND NOT `$$($(MAKE) -s ...)` ON PURPOSE, and that is the
+# defect this replaced. make treats a recipe line that mentions $(MAKE) as
+# RECURSIVE and runs it even under -n, so `make -n ci-backend` — a dry run —
+# really built the ubuntu-24.04 image, took the shared container gate lock and
+# ran a containerized leg, with the package list set to the PRINTED TEXT of the
+# derivation instead of its output (it died on `package go is not in std`).
+# Held as text, this expands into something make only PRINTS under -n.
+PORTABLE_PKGS_CMD = $(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
+
 print-portable-pkgs:
-	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)' | grep -vE 'nocx/$(PORTABLE_EXEMPT_RE)(/|$$)'
+	@$(PORTABLE_PKGS_CMD)
 
 # The tagged set (nocx-xk1di), by the same rule: ci.yml's jobs ask for the half
 # they own rather than carrying a copy. print-local-ssh-pkgs is the whole set,
@@ -940,10 +994,10 @@ ci-mac:
 	  NOCX_TEST_APP_DIR="$$root/profile" HOME="$$root/home" TMPDIR="$$root/tmp" \
 	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
-	         $(GO) test -race -count=1 $(OS_PKGS) && \
+	         $(GO) test -race -count=1 -p $(GO_TEST_P) $(OS_PKGS) && \
 	         echo "" && \
 	         echo "=== the shipped profile directory (-tags release) ===" && \
-	         $(GO) test -race -count=1 -tags release ./internal/storage/...'
+	         $(GO) test -race -count=1 -p $(GO_TEST_P) -tags release ./internal/storage/...'
 	@echo ""
 	@echo "=== ci-mac green — NOTE: the login keychain is shared with your Mac"
 	@echo "    and is the one thing a disposable root cannot isolate. ==="
@@ -975,7 +1029,10 @@ lint-ci:
 	@# host and dies before it lints anything, which took `make ci-full` --
 	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
 	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
-	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
+	@# GOGC/GOMEMLIMIT are the memory bound (nocx-n7yrq) — the same `run ./...`,
+	@# the same linters, a heap that does not grow to 3.4 GB on a shared box.
+	GOGC=$(GOLANGCI_GOGC) GOMEMLIMIT=$(GOLANGCI_GOMEMLIMIT) \
+	  $(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
 	@echo ""
 	@echo "=== golangci-lint (the packages that exist only under $(LOCAL_SSH_TAG)) ==="
 	@# A SECOND pass, because the tag and the absence of the tag select different
@@ -985,7 +1042,8 @@ lint-ci:
 	@# (nocx-xk1di). Scoped to the packages that carry one, because the tag can
 	@# change no other package, and golangci-lint over ./... twice is minutes
 	@# spent to lint the same files again.
-	$(GOLANGCI_LINT) run $(GOLANGCI_LOCAL_SSH_TAGS) $(LOCAL_SSH_PKGS)
+	GOGC=$(GOLANGCI_GOGC) GOMEMLIMIT=$(GOLANGCI_GOMEMLIMIT) \
+	  $(GOLANGCI_LINT) run $(GOLANGCI_LOCAL_SSH_TAGS) $(LOCAL_SSH_PKGS)
 
 # THE ONE PACKAGE A HOST IS NOT REQUIRED TO BE ABLE TO RUN, and why this
 # target is no longer a bare `go test ./...`.
@@ -1063,7 +1121,7 @@ test-ci:
 	    printf '%b\n' "$$claude_notice"; \
 	  fi; \
 	  pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
-	  $(GO) test -race -count=1 -tags "$(FRAMECHECK_TEST_TAGS)" $$pkgs; \
+	  $(GO) test -race -count=1 -p $(GO_TEST_P) -tags "$(FRAMECHECK_TEST_TAGS)" $$pkgs; \
 	  if [ "$$run_claude" -eq 1 ]; then \
 	    echo ""; \
 	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \
@@ -1080,7 +1138,7 @@ test-ci:
 	@# (internal/storage/appdir.go), so the ordinary run never compiles it. The
 	@# `backend` job runs this; this target did not, which is exactly the kind
 	@# of gap that makes a green local gate mean nothing.
-	$(GO) test -race -count=1 -tags release ./internal/storage/...
+	$(GO) test -race -count=1 -p $(GO_TEST_P) -tags release ./internal/storage/...
 	@echo ""
 	@# The allocation budgets skip themselves under -race; this is where the
 	@# host gate measures them (see test-alloc-budgets).
@@ -1094,7 +1152,7 @@ test-ci:
 	@# the tag does not appear in `go list ./...`, so no pass here ever compiled
 	@# it, let alone ran its tests. LOCAL_SSH_PKGS is derived and checked by
 	@# `make ci-local-ssh-split` — one list, asked for by ci.yml's jobs too.
-	$(GO) test -race -count=1 -tags "$(LOCAL_SSH_TAGS),nocx_framecheck" $(LOCAL_SSH_PKGS)
+	$(GO) test -race -count=1 -p $(GO_TEST_P) -tags "$(LOCAL_SSH_TAGS),nocx_framecheck" $(LOCAL_SSH_PKGS)
 
 build-ci:
 	@echo "=== go build ./... ==="

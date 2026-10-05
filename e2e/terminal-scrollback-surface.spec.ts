@@ -232,7 +232,6 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       rowText: anchorRow,
     }
     expect(anchor.rows[anchor.index]).toMatch(/SCROLLBK-\d{3}/)
-    const visibleBefore = visibleRowsBefore
     const anchorTop = await page.evaluate((text) => {
       const area = document.querySelector('.pane.active .scrollback-area')
       if (area === null) return null
@@ -249,26 +248,14 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     await expect.poll(async () => liveRows(), { timeout: 25_000 }).toContain(lateMarker)
     const visibleAfter = await readVisibleRows()
     expect(visibleAfter.filter((row) => row.includes(lateMarker)).length).toBeLessThanOrEqual(1)
-    const withoutLateMarker = (rows: string[]): string[] =>
-      rows.flatMap((row) => {
-        if (!row.includes(lateMarker)) return [row]
-        const remaining = row.replace(lateMarker, '').trim()
-        return remaining === '' ? [] : [remaining]
-      })
-
-    // The row identity and its position are the live anchor. Then restore the
-    // history start and check the visible content window survived virtualization.
-    const anchorTopAfter = await page.evaluate((text) => {
-      const area = document.querySelector('.pane.active .scrollback-area')
-      if (area === null) return null
-      const clip = area.getBoundingClientRect()
-      const row = Array.from(area.querySelectorAll('.live-history-page .term-grid-row')).find(
-        (candidate) => (candidate.textContent ?? '').trim() === text,
-      )
-      if (row === undefined) return null
-      const bounds = row.getBoundingClientRect()
-      return bounds.bottom > clip.top && bounds.top < clip.bottom ? bounds.top : null
-    }, anchor.rowText)
+    // The row identity is the live anchor. Restore the history start and check
+    // the visible content window survived virtualization.
+    //
+    // A second read of the anchor row's viewport position stood here, with the
+    // strip that removed the late marker from the visible window. Both fed the
+    // delayed-output comparison nocx-zg3k3.15.2 owns, whose check now stands at
+    // the end of this body behind that bead's fixme — the note there says why
+    // nothing may follow it.
     await scrollToHistoryStart()
     const visibleAnchorAfter = await readVisibleRows()
     const anchorIndexAfter = visibleAnchorAfter.findIndex((text) => text === anchor.rowText)
@@ -384,9 +371,16 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       true,
       'nocx-zg3k3.15.2: origin/main shows the same delayed-output viewport jump; baseline defect.',
     )
-    expect(anchorTopAfter).not.toBeNull()
-    expect(anchorTopAfter).toBeCloseTo(anchorTop!, 0)
-    expect(withoutLateMarker(visibleAfter)).toEqual(visibleBefore)
+    // THE FIXME ENDS THE BODY, so nothing may stand below it. Three assertions
+    // did until 2026-10-06: the anchored row's top after the late output
+    // (anchorTopAfter, against anchorTop above) and the visible window with the
+    // late marker stripped (withoutLateMarker(visibleAfter) against
+    // visibleBefore). A runtime test.fixme is a SKIP, not an annotation — a
+    // probe spec printing either side of one printed only the line before it
+    // and reported "1 skipped" — so all three were unreachable while this
+    // spec's own passing runs reported skipped, reading in the file as
+    // coverage. They are the check nocx-zg3k3.15.2 owes, so they come back with
+    // that bead's fix, ABOVE this line rather than below it.
   } finally {
     try {
       const info = await resolveBackend(page)

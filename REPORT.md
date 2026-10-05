@@ -25,14 +25,17 @@ However, `origin/main` contains commit `b5080c2e3` (PR #263), whose squash inclu
 
 ## Validation and status
 
-- Restart acceptance after the final changes: `go test -tags gtk3 -count=5 -run "^TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart$" ./internal/app` — passed 5/5.
-- Full app package: `go test -tags gtk3 -count=1 ./internal/app` — passed four times after the write-lease fix. The latest run used the final replay-worker implementation (159.9 s).
+- Restart acceptance after the correction: `go test -tags gtk3 -count=5 -run "^TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart$" ./internal/app` — passed 5/5.
+- Full app package: `go test -tags gtk3 -count=1 ./internal/app` — passed on the corrected tree (171.7 s).
 - The two app tests exposed by the first full run, `TestCapture_SaveNowAndSaveLaterOverTheRealSocket` and `TestAnAttachToAnIdleSessionWithNoSizeReceivesTheScreenItShows`, passed after preserving the existing writer epoch on a same-subscriber attach.
-- Changed package suites: `go test -tags gtk3 -count=1 ./internal/sessionruntime ./internal/helper/proto ./internal/helper/client ./internal/helper/session ./internal/transport` — passed.
+- Full helper-session and transport packages: `go test -tags gtk3 -count=1 ./internal/helper/session ./internal/transport` — passed (147.5 s and 264.3 s).
 - Retained-window resend and position-mark order/empty-suffix tests passed in `internal/helper/session`.
 - `go test -tags gtk3 -count=1 -run "^TestOutputStart" ./internal/transport` — passed, including the current-block replay mark queued-attempt regression test.
 - Vet: `go vet -tags gtk3 ./internal/sessionruntime ./internal/helper/proto ./internal/helper/client ./internal/helper/session ./internal/app ./internal/transport` — passed.
 - `git diff --check` — passed.
-- `make ci-full`, containerized tests and e2e were not run, as directed.
+- Containerized block regressions: `e2e/run-in-container.sh e2e/notification-block-finished.spec.ts e2e/block-actions-keyboard.spec.ts e2e/notification-centre.spec.ts e2e/block-outcome.spec.ts` — all six tests passed in Chromium and WebKit.
+- The complete CI suite was not run.
 
-The product fix is implemented and validated. The replay request is queued on the existing per-attachment confirmation worker, so it adds no control-handler goroutine. The implementation commit is recorded; the branch push is pending.
+PR #267 exposed two regressions. A replacement reader could receive a queued old output-start mark and then the same mark again through retained-window replay. Mark emissions now carry a sequence; a subscriber that joined after a mark skips that queued copy and gets the replayed mark once, before retained rows. Ordinary shells that do not emit OSC 133 C now use the authenticated Start at row zero instead of waiting forever for a mark. The sequence change initially introduced a `rowMu`/runtime lock inversion; `DepartedRowCount` is now read before `rowMu` is acquired.
+
+The protocol version remains 15; this change did not alter its value. The replay request remains on the existing per-attachment confirmation worker and adds no control-handler goroutine. The corrected implementation is validated and ready to re-offer from this branch.

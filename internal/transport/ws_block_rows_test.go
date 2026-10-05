@@ -240,18 +240,15 @@ func TestOutputStartMarkFiltersPreMarkRowsAfterAuthenticatedStart(t *testing.T) 
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	// When a mark exists, it arrives before the output on the same ordered
+	// rows plane even if lifecycle Start is still travelling separately.
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf output")
-	// Retain only because authenticated Start has opened the attempt. The mark
-	// has not arrived yet, so the rows cannot be admitted to its artifact.
 	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{
 		aStreamRow("prompt"), aStreamRow("prior"), aStreamRow("output"),
-	}, ""); confirm || up != 0 {
-		t.Fatalf("pre-mark ack = (%d, %v), want no acknowledgement", up, confirm)
+	}, ""); !confirm || up != 3 {
+		t.Fatalf("marked rows ack = (%d, %v), want 3", up, confirm)
 	}
-	if rows := streamRows(t, db, attempt); len(rows) != 0 {
-		t.Fatalf("pre-mark rows were admitted: %+v", rows)
-	}
-	e.ws.BlockOutputStartRow(session.ID(sid), 2)
 	rows := streamRows(t, db, attempt)
 	if len(rows) != 1 || rows[0].Text != "output" || rows[0].From != 2 {
 		t.Fatalf("admitted rows = %+v, want only output at absolute row 2", rows)
@@ -292,6 +289,20 @@ func TestOutputStartReplayMarkJoinsCurrentBlockAheadOfQueuedAttempt(t *testing.T
 	bs.mu.Unlock()
 	if awaitingReplay || pending != 0 || queuedMark {
 		t.Fatalf("current replay state = awaiting %v, pending %d, queued mark %v", awaitingReplay, pending, queuedMark)
+	}
+}
+
+func TestAuthenticatedStartKeepsTheRowZeroPathWhenNoOutputMarkExists(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.BlockOutputStartPlaneAttached(session.ID(sid))
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf without shell integration")
+	if up, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("ordinary output")}, ""); !confirm || up != 1 {
+		t.Fatalf("ordinary no-mark row = (%d, %v), want row 1 confirmed", up, confirm)
+	}
+	rows := streamRows(t, db, attempt)
+	if len(rows) != 1 || rows[0].From != 0 || rows[0].Text != "ordinary output" {
+		t.Fatalf("ordinary no-mark rows = %+v, want output at authenticated row-zero boundary", rows)
 	}
 }
 

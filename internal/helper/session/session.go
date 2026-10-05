@@ -275,8 +275,9 @@ const creditLimit = 64 * 1024
 // SUBSCRIBER's and outlives the connection that carried it (D2), which is why
 // `ack` is keyed by subscriber and session and never by attachment.
 type subscriber struct {
-	id  proto.SubscriberID
-	raw [16]byte
+	id                  proto.SubscriberID
+	raw                 [16]byte
+	outputStartSequence uint64
 
 	// screenCons is this subscriber's own consumer of the session runtime's
 	// screen deliveries, and screenDone closes when its drain ends. One per
@@ -414,12 +415,13 @@ type hostSession struct {
 	// bridge records (nocx-2v80t.3.36), and rowStreamNext is the index one
 	// past the last batch the runtime handed over, recorded or not — where
 	// the incomplete marker says recording stopped when a marker overflows.
-	rowMu            sync.Mutex
-	rowQueue         []rowEmission
-	rowState         rowRecording
-	rowStreamNext    uint64
-	outputStartRow   uint64
-	outputStartKnown bool
+	rowMu               sync.Mutex
+	rowQueue            []rowEmission
+	rowState            rowRecording
+	rowStreamNext       uint64
+	outputStartRow      uint64
+	outputStartKnown    bool
+	outputStartSequence uint64
 	// rowWake wakes the pump when the queue was empty and a new emission
 	// arrived; capacity 1, because a pending wake means "the queue is
 	// non-empty" and coalesces the same way a watermark does — the pump
@@ -697,14 +699,18 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	// deliverRowEmission takes the same lock while checking resendDue, so a
 	// queued live emission cannot overtake the replay in the gap between the
 	// pump's due check and its fan-out.
+	departedRows := uint64(0)
 	if s.runtime != nil {
-		needsReplay := s.rowsConfirmed < s.runtime.DepartedRowCount()
-		s.rowMu.Lock()
-		if needsReplay || s.outputStartKnown {
-			s.resendDue = true
-		}
-		s.rowMu.Unlock()
+		departedRows = s.runtime.DepartedRowCount()
 	}
+	s.rowMu.Lock()
+	outputStartSequence := s.outputStartSequence
+	outputMarkKnown := s.outputStartKnown
+	needsReplay := s.runtime != nil && s.rowsConfirmed < departedRows
+	if needsReplay || outputMarkKnown {
+		s.resendDue = true
+	}
+	s.rowMu.Unlock()
 
 	// One pump per subscriber: a second attach by the same subscriber
 	// REPLACES the first, because a subscriber is one reader and two pumps on
@@ -734,7 +740,8 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 
 	sub := &subscriber{
 		id: p.Subscriber, raw: raw,
-		sent: resume.From, acked: resume.From,
+		outputStartSequence: outputStartSequence,
+		sent:                resume.From, acked: resume.From,
 		lifecycleSent: lifecycleResume.From, lifecycleAcked: lifecycleResume.From,
 		wake: newGate(), lifecycleWake: newGate(),
 		stop: stop, done: make(chan struct{}), lifecycleDone: make(chan struct{}),

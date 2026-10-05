@@ -791,9 +791,11 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 			b.outputStartRow = bs.outputStartMarks[sid]
 			delete(bs.outputStartKnown, sid)
 			delete(bs.outputStartMarks, sid)
-		} else if bs.outputStartEnabled[sid] {
-			b.awaitingOutputStart = true
 		} else {
+			// No mark has been observed for this interval. Preserve the
+			// authenticated start's ordinary row-zero boundary; a mark that
+			// arrives later on the ordered rows plane replaces it before the
+			// output it governs.
 			b.outputStartKnown = true
 		}
 		bs.open[sid][found.EntryID] = b
@@ -1265,8 +1267,9 @@ func (s *WSServer) BlockOutputStartPlaneAttached(sid session.ID) {
 			// stream marker; do not admit later rows ahead of it.
 			block.awaitingOutputReplay = true
 		} else {
-			block.outputStartKnown = false
-			block.awaitingOutputStart = true
+			block.outputStartKnown = true
+			block.outputStartRow = 0
+			block.awaitingOutputStart = false
 		}
 	}
 	bs.mu.Unlock()
@@ -3094,11 +3097,10 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		b.outputStartRow = bs.outputStartMarks[sid]
 		delete(bs.outputStartKnown, sid)
 		delete(bs.outputStartMarks, sid)
-	} else if bs.outputStartEnabled[sid] {
-		b.awaitingOutputStart = true
 	} else {
-		// Direct transport users without the new ordered mark carrier keep
-		// the boundary at row zero; production enables the mark plane at bind.
+		// Authenticated Start remains sufficient for shells that do not emit
+		// OSC 133 C. If the position mark is present, the ordered rows plane
+		// will replace this fallback before the command's output rows arrive.
 		b.outputStartKnown = true
 	}
 	b.shouldReplayOnStart = bs.outputStartEnabled[sid]

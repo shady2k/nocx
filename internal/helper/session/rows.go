@@ -75,14 +75,15 @@ const (
 // runtime's gift — freshly copied by the emulator's report, owned by whoever
 // takes them next — so the pump marshals them OFF the runtime's lock.
 type rowEmission struct {
-	end         bool
-	clear       bool
-	outputStart bool
-	nonce       sessionruntime.FenceNonce
-	from        uint64
-	lost        uint64
-	rows        []emulator.Row
-	closing     []emulator.Row
+	end          bool
+	clear        bool
+	outputStart  bool
+	markSequence uint64
+	nonce        sessionruntime.FenceNonce
+	from         uint64
+	lost         uint64
+	rows         []emulator.Row
+	closing      []emulator.Row
 	// noFence is an end marker's settledWithoutFence (nocx-2v80t.3.29).
 	noFence bool
 	// incomplete makes this emission the buffer's one overflow marker
@@ -144,8 +145,10 @@ func (b *rowBridge) OutputStartRow(from uint64) {
 	b.hs.rowMu.Lock()
 	b.hs.outputStartRow = from
 	b.hs.outputStartKnown = true
+	b.hs.outputStartSequence++
+	sequence := b.hs.outputStartSequence
 	b.hs.rowMu.Unlock()
-	b.hs.enqueueRowEmission(rowEmission{outputStart: true, from: from})
+	b.hs.enqueueRowEmission(rowEmission{outputStart: true, from: from, markSequence: sequence})
 }
 
 // enqueueRowEmission appends one emission to the FIFO if the buffer can hold
@@ -911,6 +914,9 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 		subs := s.subscribersLocked()
 		s.mu.Unlock()
 		for _, sub := range subs {
+			if sub.outputStartSequence >= em.markSequence {
+				continue
+			}
 			sink, ok := sub.sink.(interface {
 				SendOutputStartRow(proto.OutputStartRowFrame) error
 			})

@@ -540,9 +540,9 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
       .last()
       .fill('NOCX_AGENT_PROBE=before')
     await page.getByRole('button', { name: 'Add agent' }).click()
-    await expect(page.getByRole('status')).toContainText(
-      'Agent added. It is available in new shells.',
-    )
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Agent added. It is available in new shells.' }),
+    ).toHaveText('Agent added. It is available in new shells.')
 
     // Edit the durable record through Settings. The process is launched only
     // after the edit; restarting nocx here would hide a stale in-memory read.

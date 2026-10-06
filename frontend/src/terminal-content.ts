@@ -2717,8 +2717,7 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (text: string) => renderer.paste(text),
-        (data: string) => this.session!.send(data),
+        (intent) => this.sendIntent(intent),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
@@ -3091,7 +3090,7 @@ export class TerminalContent extends BasePaneContent {
           // the shell target owned both behaviours directly.
           submitEmpty: () => {
             if (this.inputTargets?.active().routesToShell === false) return
-            this.session?.send('\r')
+            this.sendIntent({ kind: 'key', payload: 'enter' })
           },
           cancel: () => {
             const target = this.inputTargets?.active()
@@ -3106,13 +3105,13 @@ export class TerminalContent extends BasePaneContent {
               }
               return true
             }
-            // Ctrl-C at a prompt is a keystroke to the SHELL — its line
-            // editor discards the line and prints a fresh prompt — and the
-            // byte is what delivers that. Over a RUNNING command the same
-            // key is an interrupt addressed to the execution, which is the
-            // active block's business and goes through the one owner of it.
+            // Ctrl-C at a prompt is a key intent to the SHELL — its line
+            // editor discards the line and prints a fresh prompt. The runtime
+            // owns its encoding. Over a RUNNING command the same key is an
+            // interrupt addressed to the execution, which is the active
+            // block's business and goes through the one owner of it.
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
-            else this.session?.send('\x03')
+            else this.sendIntent({ kind: 'key', payload: 'Ctrl+c' })
             return true
           },
           // The editor's own overlay/IME arbiters run first. An unclaimed
@@ -4982,12 +4981,11 @@ export class TerminalContent extends BasePaneContent {
     // the runtime owns both (ADR-0065/0066).
     //
     // WHAT IS LEFT ON onData BELOW IS NOT THE PERSON'S KEYBOARD. xterm still
-    // receives this session's bytes (renderer.write), still answers the
-    // program's queries and still wraps the few writes the CLIENT asks it to
-    // make; those arrive here as bytes and go out as bytes. Moving them is the
-    // rest of the bead, and it is not mechanical: the submit paths read a
-    // synchronous "did it go" from renderer.paste, and a control-plane intent
-    // answers that question asynchronously.
+    // receives this session's bytes (renderer.write), answers program queries
+    // and handles explicit client writes such as the grid's context-menu paste;
+    // those arrive here as bytes and go out as bytes. Shell submission no
+    // longer uses that path: its paste and Enter are session intents, serialized
+    // by the queue above. The remaining xterm writes are a separate cutover.
     renderer.onData((data: string) => {
       // The integration gate stays where it was (nocx-ui8q6.1): the bytes that
       // still travel this way are the client's own writes, and a write to a
@@ -8530,12 +8528,11 @@ export class TerminalContent extends BasePaneContent {
       if (beforeWrite && !beforeWrite()) return
       // Detach the queue BEFORE the command goes out, flush it after.
       //
-      // Both halves matter and the order is the whole point. The command is
-      // delivered through renderer.paste, and a paste is itself an onData —
-      // so a queue still armed here would swallow the command and put it
-      // BEHIND the keys that were waiting for it, which is the same
-      // reordering with the operands swapped (measured: a bare `\r`
-      // reaching the pty ahead of its own command line).
+      // Both halves matter and the order is the whole point. Close the held
+      // window before submitting so the command's paste and Enter enter the
+      // session-intent queue first; then replay keys captured during the
+      // attempt RPC. The serial queue keeps those later intents behind the
+      // command, rather than allowing Enter to bypass its paste.
       const taken = this.takeHeldWindow()
       try {
         // A Ctrl-C that arrived while this submission was in flight

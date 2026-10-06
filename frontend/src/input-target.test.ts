@@ -32,30 +32,30 @@ describe('InputTargetRegistry', () => {
 
 describe('ShellInputTarget', () => {
   it('the shell IS the human — its author is the entries.kind value (nocx-iadtt)', () => {
-    const t = new ShellInputTarget(vi.fn(), vi.fn())
+    const t = new ShellInputTarget(vi.fn())
     expect(t.author).toBe('shell')
   })
-  it('delegates paste semantics to the renderer, then sends CR', async () => {
-    const paste = vi.fn()
-    const sendRaw = vi.fn()
-    const t = new ShellInputTarget(paste, sendRaw)
+  it('submits paste then Enter as ordered session intents', async () => {
+    const sendIntent = vi.fn()
+    const t = new ShellInputTarget(sendIntent)
     expect(t.routesToShell).toBe(true)
+
     await t.submit('echo hi')
 
-    expect(paste).toHaveBeenCalledTimes(1)
-    expect(paste).toHaveBeenCalledWith('echo hi')
-    expect(sendRaw).toHaveBeenCalledTimes(1)
-    expect(sendRaw).toHaveBeenCalledWith('\r')
-    expect(paste.mock.invocationCallOrder[0]).toBeLessThan(sendRaw.mock.invocationCallOrder[0])
+    expect(sendIntent.mock.calls).toEqual([
+      [{ kind: 'paste', payload: 'echo hi' }],
+      [{ kind: 'key', payload: 'enter' }],
+    ])
   })
-  it('preserves \\n so every line executes as a command separator (nocx-4ff.14)', async () => {
-    const paste = vi.fn()
-    const sendRaw = vi.fn()
-    const t = new ShellInputTarget(paste, sendRaw)
+  it('preserves \n so every line executes as a command separator (nocx-4ff.14)', async () => {
+    const sendIntent = vi.fn()
+    const t = new ShellInputTarget(sendIntent)
     expect(t.routesToShell).toBe(true)
     await t.submit('a\nb')
-    expect(paste).toHaveBeenCalledWith('a\nb')
-    expect(sendRaw).toHaveBeenCalledWith('\r')
+    expect(sendIntent.mock.calls).toEqual([
+      [{ kind: 'paste', payload: 'a\nb' }],
+      [{ kind: 'key', payload: 'enter' }],
+    ])
   })
 })
 

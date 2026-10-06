@@ -5,6 +5,7 @@
 
 import type { Extension } from '@codemirror/state'
 import type { CommandAuthor } from './command-ledger'
+import type { SessionIntent } from './intent-input'
 export interface SubmitContext {
   readonly targetId: string
 }
@@ -44,12 +45,11 @@ export interface InputTargetRegistry {
   active(): InputTarget
 }
 
-// ShellInputTarget routes a submitted document to the active PTY using the
-// ADR-0004 §2 atomic handoff: the editor hides itself (caller's job), then the
-// renderer pastes the complete document before raw CR accepts it. The renderer
-// owns mode-2004 wrapping because only the terminal engine knows whether the
-// running shell enabled bracketed paste. Newlines stay in the single document,
-// so multi-line compositions still execute every line (nocx-4ff.14).
+// ShellInputTarget routes the submitted document as one ordered stream of
+// session intents. The same queue carries the paste body and the Enter key, so
+// submission cannot race a separately-sent raw CR. The runtime owns mode-2004
+// wrapping and key encoding; newlines stay in the single paste payload so
+// multi-line compositions still execute every line (nocx-4ff.14).
 export class ShellInputTarget implements InputTarget {
   /** The shell IS the human: a command submitted through this target is
    *  attributed to the person, even while another registered target's
@@ -59,8 +59,7 @@ export class ShellInputTarget implements InputTarget {
   readonly label = 'Shell'
   readonly routesToShell = true
   constructor(
-    private readonly paste: (text: string) => void,
-    private readonly sendRaw: (data: string) => void,
+    private readonly sendIntent: (intent: SessionIntent) => void,
     /** The shell's editor extensions (highlighting + completion), composed
      *  at the root and carried through the target so the seam is exercised:
      *  the editor receives its surface from the target, never from itself. */
@@ -72,8 +71,8 @@ export class ShellInputTarget implements InputTarget {
   }
 
   submit(doc: string): Promise<void> {
-    this.paste(doc)
-    this.sendRaw('\r')
+    this.sendIntent({ kind: 'paste', payload: doc })
+    this.sendIntent({ kind: 'key', payload: 'enter' })
     return Promise.resolve()
   }
 }

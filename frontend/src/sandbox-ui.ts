@@ -14,6 +14,9 @@ type SandboxClient = Pick<
   | 'sandboxCancel'
   | 'sandboxOperation'
   | 'sandboxGrant'
+  | 'sandboxAccessList'
+  | 'sandboxResolveAccess'
+  | 'onSandboxAccessChanged'
 >
 
 /** Capture before activating Settings; never substitute the newly active pane. */
@@ -31,6 +34,7 @@ export type SandboxNavigationRequest = (context: SandboxPaneContext) => Promise<
 export interface SandboxSettingsServices {
   readonly client: SandboxClient
   readonly workspaces: () => readonly Pick<Workspace, 'id' | 'name'>[]
+  readonly defaultWorkspaceId: () => string
   readonly bindCandidate: (
     context: SandboxPaneContext,
     operation: SandboxOperationResult,

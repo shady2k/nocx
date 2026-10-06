@@ -85,3 +85,21 @@ func (c *Client) SandboxRollback(ctx context.Context, operationID, launchID stri
 	entry := mapSessionEntry(*result.Entry)
 	return &entry, nil
 }
+
+func (c *Client) SandboxAccessList(ctx context.Context, params proto.SandboxAccessListParams) (proto.SandboxAccessListResult, error) {
+	var result proto.SandboxAccessListResult
+	err := c.Call(ctx, proto.ServiceSession, proto.OpSandboxAccessList, params, &result)
+	return result, err
+}
+
+func (c *Client) SandboxAccessReserve(ctx context.Context, params proto.SandboxAccessReserveParams) (proto.SandboxAccessReserveResult, error) {
+	var result proto.SandboxAccessReserveResult
+	err := c.Call(ctx, proto.ServiceSession, proto.OpSandboxAccessReserve, params, &result)
+	return result, err
+}
+
+func (c *Client) SandboxAccessFinish(ctx context.Context, params proto.SandboxAccessFinishParams) (proto.SandboxAccessFinishResult, error) {
+	var result proto.SandboxAccessFinishResult
+	err := c.Call(ctx, proto.ServiceSession, proto.OpSandboxAccessFinish, params, &result)
+	return result, err
+}

@@ -504,6 +504,7 @@ type AttachedSession struct {
 	// the same ordered stream and guarded the same way as the two above.
 	clearBoundaryObs  func()
 	outputStartRowObs func(OutputStartRow)
+	accessChangedObs  func(proto.SandboxAccessChanged)
 }
 
 // inbound is one item in an attachment's delivery order: bytes the wire
@@ -874,6 +875,23 @@ func (a *AttachedSession) reportLiveness(responsive bool, roundTripMS int64) {
 	a.mu.Unlock()
 	if obs != nil {
 		obs(responsive, roundTripMS)
+	}
+}
+
+// OnSandboxAccessChanged observes metadata-only changes for this exact helper
+// session incarnation. Paths and records remain available only through list.
+func (a *AttachedSession) OnSandboxAccessChanged(f func(proto.SandboxAccessChanged)) {
+	a.mu.Lock()
+	a.accessChangedObs = f
+	a.mu.Unlock()
+}
+
+func (a *AttachedSession) reportSandboxAccessChanged(change proto.SandboxAccessChanged) {
+	a.mu.Lock()
+	obs := a.accessChangedObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(change)
 	}
 }
 

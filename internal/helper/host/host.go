@@ -508,6 +508,39 @@ func (h *Host) SendNotification(n proto.Notification) error {
 	return h.write(proto.TypeNotify, raw)
 }
 
+// TrySendNotification delivers a metadata hint without joining an unbounded
+// carrier write. Missing hints are recovered by an authoritative snapshot.
+// A partial frame closes only this connection; helper sessions outlive it.
+func (h *Host) TrySendNotification(notification proto.Notification, deadline time.Time) bool {
+	if !time.Now().Before(deadline) || !h.mu.TryLock() {
+		return false
+	}
+	defer h.mu.Unlock()
+	writer, ok := h.out.(interface {
+		io.Writer
+		SetWriteDeadline(time.Time) error
+		Close() error
+	})
+	if !ok {
+		return false
+	}
+	raw, err := json.Marshal(notification)
+	if err != nil {
+		return false
+	}
+	if err = writer.SetWriteDeadline(deadline); err != nil {
+		return false
+	}
+	frame := proto.EncodeFrame(proto.TypeNotify, 0, 0, raw)
+	n, writeErr := writer.Write(frame)
+	resetErr := writer.SetWriteDeadline(time.Time{})
+	if (n != 0 && n != len(frame)) || resetErr != nil {
+		_ = writer.Close()
+		return false
+	}
+	return writeErr == nil && n == len(frame)
+}
+
 // request serves one request on its own goroutine, so a blocking handler
 // never stalls the read loop or another request (D13). reqCtx is the
 // per-request context the read loop already stored by id, so a TypeCancel

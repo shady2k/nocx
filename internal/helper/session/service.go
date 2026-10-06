@@ -519,6 +519,7 @@ func (s *Service) Ops() []string {
 		proto.OpSetScrollback,
 		proto.OpHistoryPage,
 		proto.OpSandboxPrepare, proto.OpSandboxLaunch, proto.OpSandboxGet, proto.OpSandboxDiscard,
+		proto.OpSandboxAccessList, proto.OpSandboxAccessReserve, proto.OpSandboxAccessFinish,
 	}
 }
 
@@ -532,6 +533,12 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.SandboxGetParams{})
 	case proto.OpSandboxDiscard:
 		return host.SchemaFor(proto.SandboxDiscardParams{})
+	case proto.OpSandboxAccessList:
+		return host.SchemaFor(proto.SandboxAccessListParams{})
+	case proto.OpSandboxAccessReserve:
+		return host.SchemaFor(proto.SandboxAccessReserveParams{})
+	case proto.OpSandboxAccessFinish:
+		return host.SchemaFor(proto.SandboxAccessFinishParams{})
 	case proto.OpSpawn:
 		return host.SchemaFor(proto.SpawnParams{})
 	case proto.OpSpawnSSH:
@@ -582,22 +589,18 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 	return nil
 }
 
-// intentServiceMutations are the two ops a caller's cancelled context must
-// never be read as "not executed" (D11, nocx-6q1uh.6, spec §6.5's own
-// framing: "transport cancellation never implies not executed"). session.intent
-// runs to its commit point once the owner has it — bytes on a PTY cannot be
-// recalled, and a half-applied bump would leave some queued intents refused
-// under the new epoch and others still judged by the old one. Every other op
-// here is a single read with nothing to half-apply.
+// These owner mutations reach their commit point despite transport cancellation.
+// Cancellation is never evidence that PTY input, launch or an event resolution
+// was not executed.
 var intentServiceMutations = map[string]bool{
-	proto.OpIntent:        true,
-	proto.OpAccessBump:    true,
-	proto.OpSandboxLaunch: true,
+	proto.OpIntent:               true,
+	proto.OpAccessBump:           true,
+	proto.OpSandboxLaunch:        true,
+	proto.OpSandboxAccessReserve: true,
+	proto.OpSandboxAccessFinish:  true,
 }
 
-// RefusesCancel: session.intent and session.access-bump refuse cancellation
-// (above); every other operation here is short and none half-applies — the
-// long-running thing is the SESSION, and a session is not a request.
+// RefusesCancel preserves the admitted owner's outcome across caller loss.
 func (s *Service) RefusesCancel(op string) bool { return intentServiceMutations[op] }
 
 // Refusal codes this service's errors for the wire, so the coordinator
@@ -639,6 +642,14 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return "sandbox_conflict", nil
 	case errors.Is(err, errSandboxCapacity):
 		return "sandbox_capacity", nil
+	case errors.Is(err, errDiagnosticConflict):
+		return "diagnostic_conflict", nil
+	case errors.Is(err, errDiagnosticRetarget):
+		return "diagnostic_retarget", nil
+	case errors.Is(err, errDiagnosticUnknown):
+		return "diagnostic_location_unknown", nil
+	case errors.Is(err, errDiagnosticPending):
+		return "diagnostic_pending", nil
 	case errors.Is(err, errSandboxParams):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrNoSuchSession):
@@ -700,6 +711,24 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.sandboxDiscard(ctx, p)
+	case proto.OpSandboxAccessList:
+		var p proto.SandboxAccessListParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxAccessList(p)
+	case proto.OpSandboxAccessReserve:
+		var p proto.SandboxAccessReserveParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxAccessReserve(p)
+	case proto.OpSandboxAccessFinish:
+		var p proto.SandboxAccessFinishParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxAccessFinish(p)
 	case proto.OpSpawn:
 		var p proto.SpawnParams
 		if err := decode(params, &p); err != nil {
@@ -1561,6 +1590,11 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		rowsDone:        make(chan struct{}),
 		rowBufferBytes:  shape.rowBuffer,
 	}
+	if shape.sandbox != nil && shape.sandbox.LaunchID != "" {
+		if diagnostic, ok := proc.(nativeDiagnosticProcess); ok && diagnostic.nativeDiagnostics() != nil {
+			diagnostic.nativeDiagnostics().bindNotice(hs.id, shape.sandbox.LaunchID, s.notifyAccessChanged)
+		}
+	}
 	hs.scrollback.Store(shape.scrollback)
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.
@@ -2001,6 +2035,27 @@ func (s *Service) notifyExit(e proto.SessionExit) {
 			Service: proto.ServiceSession, Event: proto.EventSessionExit, Params: e,
 		}); err != nil {
 			s.log.Warn("exit notification not delivered", "session", e.Session.Session, "err", err)
+		}
+	}
+}
+
+// notifyAccessChanged broadcasts bounded inbox metadata to every bound helper
+// connection. It is called only by the inbox's process-owned coalescing worker.
+func (s *Service) notifyAccessChanged(change proto.SandboxAccessChanged) {
+	s.mu.Lock()
+	sinks := make([]Sink, 0, len(s.sinks))
+	for sink := range s.sinks {
+		sinks = append(sinks, sink)
+	}
+	s.mu.Unlock()
+	notification := proto.Notification{Service: proto.ServiceSession, Event: proto.EventSandboxAccessChanged, Params: change}
+	deadline := time.Now().Add(50 * time.Millisecond)
+	for _, sink := range sinks {
+		carrier, ok := sink.(interface {
+			TrySendNotification(proto.Notification, time.Time) bool
+		})
+		if ok {
+			carrier.TrySendNotification(notification, deadline)
 		}
 	}
 }

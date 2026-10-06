@@ -27,6 +27,8 @@ func TestRunnerPlanRoundTripAndRejectsAuthorityTransportChanges(t *testing.T) {
 		change func(*RunnerPlan)
 	}{
 		{"digest", func(p *RunnerPlan) { p.Digest = strings.Repeat("0", 64) }},
+		{"previous-private-protocol", func(p *RunnerPlan) { p.Version = RunnerPlanVersion - 1 }},
+		{"linux-observer-nonce", func(p *RunnerPlan) { p.ObserverNonce = strings.Repeat("a", 32) }},
 		{"unsupported-backend-version", func(p *RunnerPlan) {
 			p.Policy.Backend = LinuxLandlock
 			p.Policy.BackendVersion = 3
@@ -56,8 +58,16 @@ func TestRunnerPlanAcceptsOnlyFixedDarwinBackendV1(t *testing.T) {
 	_, p.Digest, _ = EncodePolicy(p.Policy)
 	p.ProbePath = "/private/tmp/seatbelt-probe"
 	p.ProbeSocket = p.Policy.WorkspaceRoot + "/host-probe.sock"
+	p.ObserverNonce = strings.Repeat("a", 32)
 	if _, err := EncodeRunnerPlan(p); err != nil {
 		t.Fatalf("valid macOS v1 plan rejected: %v", err)
+	}
+	for _, nonce := range []string{"", strings.Repeat("a", 31), strings.Repeat("A", 32), strings.Repeat("z", 32)} {
+		invalid := p
+		invalid.ObserverNonce = nonce
+		if _, err := EncodeRunnerPlan(invalid); err == nil {
+			t.Fatal("accepted malformed collector correlation")
+		}
 	}
 	p.Policy.BackendVersion++
 	_, p.Digest, _ = EncodePolicy(p.Policy)
@@ -84,7 +94,7 @@ func TestReadRunnerPlanRejectsUnknownTrailingAndOversizedDocuments(t *testing.T)
 	}{
 		{"unknown-field", append(append([]byte{}, plan[:len(plan)-1]...), []byte(`,"unexpected":true}`)...)},
 		{"trailing-value", append(append([]byte{}, plan...), []byte(` {}`)...)},
-		{"duplicate-field", []byte(strings.Replace(string(plan), `"version":1`, `"version":1,"version":1`, 1))},
+		{"duplicate-field", []byte(strings.Replace(string(plan), `"digest":`, `"digest":"","digest":`, 1))},
 		{"oversized", []byte(strings.Repeat("x", MaxRunnerPlanBytes+1))},
 	}
 	for _, tc := range cases {

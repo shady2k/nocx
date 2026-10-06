@@ -770,7 +770,14 @@ function main(): void {
             ? 'Sandbox — Enforce'
             : state === 'off'
               ? 'Sandbox — Off'
-              : `Sandbox — ${status.reason || status.head?.state || 'state unknown'}`,
+              : `Sandbox — ${
+                  status.reason ||
+                  (status.preparingOperationId
+                    ? 'replacement pending'
+                    : status.head?.state === 'active'
+                      ? 'enforcement unknown'
+                      : status.head?.state || 'state unknown')
+                }`,
       })
     } catch (error) {
       if (generation !== sandboxStatusGeneration || !context.isCurrent()) return
@@ -785,6 +792,10 @@ function main(): void {
   const sandboxServices: SandboxSettingsServices = {
     client,
     workspaces: sandboxWorkspaces,
+    defaultWorkspaceId: () => {
+      sandboxPaneRevision()
+      return layout.defaultWorkspaceId()
+    },
     bindCandidate: async (context, operation) => {
       if (!context.isCurrent() || context.kind !== 'local' || !(await context.registered)) {
         return false

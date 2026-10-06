@@ -333,7 +333,8 @@ type localHelperOpener struct {
 	// publishScreen is the screen plane's transport half, bound late by the
 	// composition root once the transport exists (the opener itself is built
 	// before it). Nil is a legitimate wiring and registers no observer.
-	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishScreen        func(sid session.ID, revision uint64, doc []byte) bool
+	publishSandboxAccess func(transport.SandboxAccessChanged)
 	// blockRows is the streamed block output's transport half, bound late for
 	// the same reason publishScreen is (helper_block_rows.go). Nil wires
 	// nothing.
@@ -696,11 +697,11 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	spawn := hostedSpawn{
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
-		publishScreen:      o.publishScreen,
-		blockRows:          o.blockRows,
-		environmentEntries: o.environmentEntries,
-		cursors:            o.lifecycleCursors,
-		stopping:           o.lifecycleStopping,
+		publishScreen:        o.publishScreen,
+		publishSandboxAccess: o.publishSandboxAccess,
+		blockRows:            o.blockRows,
+		cursors:              o.lifecycleCursors,
+		stopping:             o.lifecycleStopping,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is

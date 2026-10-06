@@ -2185,6 +2185,7 @@ func New(opts ...Option) (*App, error) {
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
 	localOpener.publishScreen = tp.PublishScreenFrame
+	localOpener.publishSandboxAccess = tp.PublishSandboxAccessChanged
 	localOpener.blockRows = tp
 	// The two row buffers are the person's settings (nocx-2v80t.3.36): the
 	// helper's rides each spawn, the coordinator's is the transport's for

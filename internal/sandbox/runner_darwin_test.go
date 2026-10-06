@@ -5,9 +5,9 @@ package sandbox
 import (
 	"context"
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,9 +62,13 @@ func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
 		}
 		policy.Roots = append(policy.Roots, Root{Path: actual, Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot})
 	}
-	profile, err := CompileSeatbeltProfile(policy)
+	const observerNonce = "0123456789abcdef0123456789abcdef"
+	profile, err := CompileSeatbeltProfile(policy, observerNonce)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(profile, `(deny default (with message "`+observerNonce+`"))`) {
+		t.Fatal("Seatbelt profile does not annotate default denials with the observer nonce")
 	}
 	file, writer, err := os.Pipe()
 	if err != nil {

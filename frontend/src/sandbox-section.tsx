@@ -8,6 +8,7 @@ import type { SandboxGrantResult } from './generated/sandbox.grant.get'
 import { Button, Checkbox, EditableRowList, PageSection, Select, StatusCard, TextField } from './ui'
 import { Dialog } from './ui/dialog'
 import { showToast } from './ui/toast'
+import { SandboxDiagnosticsSection } from './sandbox-diagnostics-section'
 
 export interface SandboxSectionProps {
   services?: SandboxSettingsServices
@@ -100,10 +101,14 @@ export function SandboxSection(props: SandboxSectionProps) {
       return
     }
     try {
-      const isNamedWorkspace = s.workspaces().some((workspace) => workspace.id === c.workspaceId)
-      const result = await s.client.sandboxProfile(
-        isNamedWorkspace ? { workspaceId: c.workspaceId } : {},
-      )
+      const defaultWorkspaceId = s.defaultWorkspaceId()
+      if (!defaultWorkspaceId) {
+        setPinnedProfile(null)
+        return
+      }
+      const result = await s.client.sandboxProfile({
+        workspaceId: c.workspaceId === defaultWorkspaceId ? '' : c.workspaceId,
+      })
       if (!disposed() && request === pinnedProfileRead && context()?.workspaceId === c.workspaceId)
         setPinnedProfile(result)
     } catch (e) {
@@ -122,6 +127,7 @@ export function SandboxSection(props: SandboxSectionProps) {
   createEffect(() => {
     void context()?.workspaceId
     service()?.workspaces()
+    service()?.defaultWorkspaceId()
     void readPinnedProfile()
   })
   const saveProfile = async () => {
@@ -354,6 +360,26 @@ export function SandboxSection(props: SandboxSectionProps) {
   const policy = () => preview()?.policy ?? operationInFlight()?.policy
   const confirmation = () => preview() ?? operationInFlight()
   const targetIsCurrent = () => !!context()?.isCurrent()
+  const applyDiagnosticProfile = (updated: SandboxProfileResult) => {
+    setPinnedProfile(updated)
+    const editorWorkspace = selectedWorkspace()
+    const boundWorkspace = updated.workspace?.workspaceId
+    const updatedWorkspace =
+      boundWorkspace && boundWorkspace !== service()?.defaultWorkspaceId() ? boundWorkspace : null
+    if (editorWorkspace !== updatedWorkspace) return
+    const current = profile()
+    if (!current) return
+    const draftMatches =
+      roRoots().length === current.effective.readOnlyDirs.length &&
+      roRoots().every((root, index) => root === current.effective.readOnlyDirs[index]) &&
+      rwRoots().length === current.effective.readWriteDirs.length &&
+      rwRoots().every((root, index) => root === current.effective.readWriteDirs[index])
+    setProfile(updated)
+    if (draftMatches) {
+      setRoRoots(updated.effective.readOnlyDirs)
+      setRwRoots(updated.effective.readWriteDirs)
+    }
+  }
 
   return (
     <PageSection title="Песочница">
@@ -411,8 +437,35 @@ export function SandboxSection(props: SandboxSectionProps) {
                         ? 'Нативная песочница доступна'
                         : 'Нативная песочница недоступна'
                     }
-                    description={current().reason || 'Диагностика событий пока недоступна.'}
+                    description={
+                      current().reason ||
+                      'Доступность механизма не меняет права текущего запуска. Состояние наблюдателя показано в журнале диагностики.'
+                    }
                   />
+                )}
+              </Show>
+              <Show when={status()}>
+                {(current) => (
+                  <For
+                    each={
+                      current().paneId === context()?.paneId &&
+                      context()?.kind === 'local' &&
+                      current().head?.mode === 'enforce' &&
+                      current().head?.state === 'active' &&
+                      current().head?.launchId
+                        ? [current().head!.launchId]
+                        : []
+                    }
+                  >
+                    {(launchId) => (
+                      <SandboxDiagnosticsSection
+                        services={service()!}
+                        context={context()!}
+                        launchId={launchId}
+                        onProfileResolved={applyDiagnosticProfile}
+                      />
+                    )}
+                  </For>
                 )}
               </Show>
               <Checkbox

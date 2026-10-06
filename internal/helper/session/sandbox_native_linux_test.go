@@ -19,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/runner"
 	"github.com/shady2k/nocx/internal/sandbox"
+	"golang.org/x/sys/unix"
 )
 
 // Native acceptance must never skip a missing backend. This additional
@@ -116,4 +117,95 @@ func TestNativeTerminalCreationFailureKillsHUPIgnoringCandidateBeforeRuntimeClea
 	if spawner.NativeCleanupPending() {
 		t.Fatal("confirmed candidate death retained unknown-cleanup launch guard")
 	}
+}
+
+func TestNativeDiagnosticListenerFailureOnlyKillsItsOwnShell(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	work := filepath.Join(home, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runnerPath, err := runner.Install(filepath.Join(root, "runner"))
+	if errors.Is(err, runner.ErrNotBuilt) && os.Getenv("NOCX_SANDBOX_SMOKE_MANDATORY") != "1" {
+		t.Skip("runner artifact is not embedded in this test build")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := sandbox.Prepare(sandbox.BuildRequest{
+		WorkspaceID: "listener-failure", Cwd: work, HostHome: home, Shell: "/bin/sh", Runner: runnerPath,
+		StandardRevision: 1, ProfileProvenance: sandbox.StandardRoot, RuntimeBase: filepath.Join(root, "runtime"),
+	})
+	var unsupported *sandbox.BuildError
+	if errors.As(err, &unsupported) && unsupported.Code == "backend_unsupported" && os.Getenv("NOCX_SANDBOX_SMOKE_MANDATORY") != "1" {
+		t.Skip("host does not support the mandatory Linux policy ABI")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = prepared.Cleanup() }()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	spawner := NewLocalSpawner(logger, Shell{Path: "/bin/sh", Args: []string{"-c", "while :; do sleep 1; done"}}, "")
+	ordinary, err := spawner.Spawn(SpawnRequest{SessionID: "ordinary-listener-neighbor", Cwd: work, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ordinary.Close() }()
+	restricted, err := spawner.Spawn(SpawnRequest{SessionID: "native-listener-failure", Native: prepared, Cwd: work, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restricted.Close() }()
+	native, ok := restricted.(*localProcess)
+	if !ok {
+		t.Fatalf("native spawner returned unexpected process type %T", restricted)
+	}
+	observer, ok := native.observer.(*linuxNativeObserver)
+	if !ok || observer.file == nil {
+		if os.Getenv("NOCX_SANDBOX_SMOKE_MANDATORY") != "1" {
+			t.Skip("seccomp user notification observer is unavailable")
+		}
+		t.Fatal("mandatory native listener was not installed")
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Close() }()
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	// Hold the os.File descriptor reference through the atomic replacement.
+	// The observer may close it immediately after seeing the injected HUP.
+	rawListener, err := observer.file.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replacementErr error
+	if err := rawListener.Control(func(fd uintptr) {
+		replacementErr = unix.Dup3(int(reader.Fd()), int(fd), unix.O_CLOEXEC)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if replacementErr != nil {
+		t.Fatal(replacementErr)
+	}
+	select {
+	case <-restricted.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("installed listener death did not terminate its sandbox shell")
+	}
+	if err := syscall.Kill(restricted.Pid(), 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("affected sandbox shell still exists: %v", err)
+	}
+	select {
+	case <-ordinary.Done():
+		t.Fatal("listener failure terminated the unrelated ordinary shell")
+	default:
+	}
+	if err := syscall.Kill(ordinary.Pid(), 0); err != nil {
+		t.Fatalf("unrelated ordinary shell did not survive: %v", err)
+	}
+	t.Log("NATIVE_INSTALLED_LISTENER_FAILURE_AFFECTED_ONLY_PROOF_COMPLETE")
 }

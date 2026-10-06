@@ -36,6 +36,9 @@ type nativeLaunch struct {
 	probePath     string
 	probeListener *net.UnixListener
 	deadline      time.Time
+	observer      sandbox.ObserverStatus
+	observerNonce string
+	listener      *os.File
 }
 
 func prepareNativeLaunch(prepared *sandbox.Prepared, cfg *pty.Config) (_ *nativeLaunch, err error) {
@@ -60,6 +63,12 @@ func prepareNativeLaunch(prepared *sandbox.Prepared, cfg *pty.Config) (_ *native
 			return nil, errNativeLaunch
 		}
 		plan.ProbeSocket = filepath.Join(prepared.Policy.WorkspaceRoot, ".nxsb-"+hex.EncodeToString(nonce[:])+".sock")
+		var observerNonce [16]byte
+		if _, err = rand.Read(observerNonce[:]); err != nil {
+			return nil, errNativeLaunch
+		}
+		plan.ObserverNonce = hex.EncodeToString(observerNonce[:])
+		launch.observerNonce = plan.ObserverNonce
 		launch.probeListener, err = net.ListenUnix("unix", &net.UnixAddr{Name: plan.ProbeSocket, Net: "unix"})
 		if err != nil {
 			return nil, errNativeLaunch
@@ -189,6 +198,10 @@ func (launch *nativeLaunch) closeChildCopies() {
 
 func (launch *nativeLaunch) Close() {
 	launch.closeChildCopies()
+	if launch.listener != nil {
+		_ = launch.listener.Close()
+		launch.listener = nil
+	}
 	if launch.probeListener != nil {
 		_ = launch.probeListener.Close()
 		launch.probeListener = nil
@@ -226,10 +239,27 @@ func (launch *nativeLaunch) waitReady(proc localPTY) error {
 		}
 		ready, descriptors, err = receiveNativeStatus(launch.ready)
 	}
-	closeNativeDescriptors(descriptors)
-	if err != nil || len(descriptors) != 0 || ready.Status != "ready" {
+	if err != nil || ready.Status != "ready" {
+		closeNativeDescriptors(descriptors)
 		return errNativeLaunch
 	}
+	switch ready.Observer {
+	case sandbox.ObserverActive, sandbox.ObserverUnavailable, sandbox.ObserverUnsupported, sandbox.ObserverFailed:
+	default:
+		closeNativeDescriptors(descriptors)
+		return errNativeLaunch
+	}
+	if launch.prepared.Policy.Backend == sandbox.LinuxLandlock && ready.Observer == sandbox.ObserverActive {
+		if len(descriptors) != 1 {
+			closeNativeDescriptors(descriptors)
+			return errNativeLaunch
+		}
+		launch.listener = os.NewFile(uintptr(descriptors[0]), "native-observer")
+	} else if len(descriptors) != 0 {
+		closeNativeDescriptors(descriptors)
+		return errNativeLaunch
+	}
+	launch.observer = ready.Observer
 	if err = launch.errorReader.SetReadDeadline(launch.deadline); err != nil {
 		return errNativeLaunch
 	}

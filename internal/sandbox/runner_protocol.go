@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	RunnerPlanVersion  = 1
-	RunnerReadyVersion = 1
+	RunnerPlanVersion  = 2
+	RunnerReadyVersion = 2
 	RunnerFDPlan       = 5
 	RunnerFDReady      = 6
 	RunnerFDError      = 7
@@ -29,20 +29,22 @@ var ErrInvalidRunnerPlan = errors.New("sandbox runner: invalid launch plan")
 // RunnerPlan is private launch input carried only on inherited FD5. Descriptor
 // numbers are ephemeral transport data and are never part of Policy or its digest.
 type RunnerPlan struct {
-	Version     int      `json:"version"`
-	Policy      Policy   `json:"policy"`
-	Digest      string   `json:"digest"`
-	Args        []string `json:"args"`
-	RootFDs     []int    `json:"rootFds"`
-	WorkspaceFD int      `json:"workspaceFd"`
-	KeepFDs     []int    `json:"keepFds"`
-	ProbePath   string   `json:"probePath,omitempty"`   // Private startup denial probe, never policy authority.
-	ProbeSocket string   `json:"probeSocket,omitempty"` // Host-created endpoint under workspace RW.
+	Version       int      `json:"version"`
+	Policy        Policy   `json:"policy"`
+	Digest        string   `json:"digest"`
+	Args          []string `json:"args"`
+	RootFDs       []int    `json:"rootFds"`
+	WorkspaceFD   int      `json:"workspaceFd"`
+	KeepFDs       []int    `json:"keepFds"`
+	ProbePath     string   `json:"probePath,omitempty"`     // Private startup denial probe, never policy authority.
+	ProbeSocket   string   `json:"probeSocket,omitempty"`   // Host-created endpoint under workspace RW.
+	ObserverNonce string   `json:"observerNonce,omitempty"` // Private collector correlation, never policy authority.
 }
 
 type RunnerReady struct {
-	Version int    `json:"version"`
-	Status  string `json:"status"`
+	Version  int            `json:"version"`
+	Status   string         `json:"status"`
+	Observer ObserverStatus `json:"observer,omitempty"`
 }
 
 type RunnerFailure struct {
@@ -53,9 +55,10 @@ type RunnerFailure struct {
 // RunnerStatus is one FD6 SOCK_SEQPACKET record; failure records identify the
 // bounded reason while a successful record confirms native policy installation.
 type RunnerStatus struct {
-	Version int    `json:"version"`
-	Status  string `json:"status"`
-	Code    string `json:"code,omitempty"`
+	Version  int            `json:"version"`
+	Status   string         `json:"status"`
+	Code     string         `json:"code,omitempty"`
+	Observer ObserverStatus `json:"observer,omitempty"`
 }
 
 // ReadRunnerPlan strictly decodes the bounded document inherited on FD5.
@@ -126,12 +129,20 @@ func validateRunnerPlan(plan RunnerPlan) error {
 		if !canonicalRunnerPath(plan.ProbeSocket) || len(plan.ProbeSocket) >= 104 || !contained(plan.Policy.WorkspaceRoot, plan.ProbeSocket) {
 			return runnerErr("probe-socket")
 		}
+		if len(plan.ObserverNonce) != 32 {
+			return runnerErr("observer-nonce")
+		}
+		for _, c := range plan.ObserverNonce {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return runnerErr("observer-nonce")
+			}
+		}
 		for _, root := range plan.Policy.Roots {
 			if root.Access == ReadWrite && contained(root.Path, plan.ProbePath) {
 				return runnerErr("probe-authority")
 			}
 		}
-	} else if plan.ProbePath != "" || plan.ProbeSocket != "" {
+	} else if plan.ProbePath != "" || plan.ProbeSocket != "" || plan.ObserverNonce != "" {
 		return runnerErr("probe-path")
 	}
 	for i := 1; i < len(plan.Policy.Roots); i++ {

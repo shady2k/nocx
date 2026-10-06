@@ -45,7 +45,7 @@ func RunRunner() int {
 	if err := clearCloseOnExec(planCopy); err != nil {
 		return runnerFailure("plan-copy")
 	}
-	profileText, err := CompileSeatbeltProfile(plan.Policy)
+	profileText, err := CompileSeatbeltProfile(plan.Policy, plan.ObserverNonce)
 	if err != nil {
 		return runnerFailure("profile-invalid")
 	}
@@ -95,8 +95,8 @@ func RunRunner() int {
 	return 0
 }
 
-func CompileSeatbeltProfile(policy Policy) (string, error) {
-	if policy.Backend != MacOSSeatbelt || policy.BackendVersion != MacOSBaselineVersion || policy.Version != PolicyVersion || len(policy.Roots) == 0 || len(policy.Roots) > MaxEffectiveRoots || !canonicalRunnerPath(policy.Runtime.Root) || policy.Runtime.Root == "/" {
+func CompileSeatbeltProfile(policy Policy, observerNonce string) (string, error) {
+	if policy.Backend != MacOSSeatbelt || policy.BackendVersion != MacOSBaselineVersion || policy.Version != PolicyVersion || len(policy.Roots) == 0 || len(policy.Roots) > MaxEffectiveRoots || !canonicalRunnerPath(policy.Runtime.Root) || policy.Runtime.Root == "/" || !validObserverNonce(observerNonce) {
 		return "", errors.New("unsupported Seatbelt policy")
 	}
 	for _, root := range policy.Roots {
@@ -122,8 +122,9 @@ func CompileSeatbeltProfile(policy Policy) (string, error) {
 	}
 	var b strings.Builder
 	b.Grow(512 + len(policy.Roots)*160)
-	// This is a filesystem boundary, not a blanket process/Mach/IP policy.
-	b.WriteString("(version 1)\n(allow default)\n")
+	// The private nonce annotates Seatbelt denials for the helper's log stream.
+	// It is launch metadata, deliberately excluded from Policy and its digest.
+	b.WriteString("(version 1)\n(deny default (with message \"" + observerNonce + "\"))\n")
 	for _, operation := range [...]string{"file-read*", "file-write*", "file-ioctl"} {
 		if err := writeSeatbeltFilesystemBoundary(&b, operation, policy); err != nil {
 			return "", err
@@ -136,6 +137,20 @@ func CompileSeatbeltProfile(policy Policy) (string, error) {
 		return "", errors.New("Seatbelt profile exceeds bound")
 	}
 	return b.String(), nil
+}
+
+func validObserverNonce(nonce string) bool {
+	if len(nonce) != 32 {
+		return false
+	}
+	for _, c := range nonce {
+		if c < '0' || c > '9' {
+			if c < 'a' || c > 'f' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, policy Policy) error {
@@ -401,7 +416,7 @@ func runSeatbeltShim() int {
 	if err := closeRunnerDescriptors(plan); err != nil {
 		return runnerFailure("descriptor-cleanup")
 	}
-	if err := sendRunnerPacket(RunnerStatus{Version: RunnerReadyVersion, Status: "ready"}); err != nil {
+	if err := sendRunnerPacket(RunnerStatus{Version: RunnerReadyVersion, Status: "ready", Observer: ObserverUnavailable}); err != nil {
 		return runnerFailure("readiness-channel")
 	}
 	if err := unix.Close(RunnerFDReady); err != nil {

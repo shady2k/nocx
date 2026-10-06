@@ -45,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport"
 )
 
 // hostedSpawn is the three acts, with the seams they need and nothing that
@@ -72,7 +73,8 @@ type hostedSpawn struct {
 	// data plane's reserved seat. Nil is a legitimate wiring — a server
 	// built without a transport — and registers no observer rather than
 	// dropping frames nobody asked for.
-	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishScreen        func(sid session.ID, revision uint64, doc []byte) bool
+	publishSandboxAccess func(transport.SandboxAccessChanged)
 	// blockRows is the streamed block output's transport half
 	// (helper_block_rows.go): the rows that leave the screen and each
 	// command's end become the command's block in history. Nil wires nothing.
@@ -415,6 +417,23 @@ func (h hostedSpawn) openCandidateStages(ctx context.Context, cfg session.Config
 			}
 			return hostedSpawnResult{}, errors.Join(adoptErr, closeCandidate(publishCtx, stopBlockRows))
 		}
+		if h.publishSandboxAccess != nil && cfg.LaunchBinding.LaunchID != "" && cfg.PaneID != "" {
+			expected := proto.HostSessionID{
+				Generation: proto.GenerationID(entry.HostSessionID.Generation),
+				Session:    entry.HostSessionID.Session,
+			}
+			publishNotice := sandboxAccessNoticeRelay(sess, h.publishSandboxAccess)
+			attached.OnSandboxAccessChanged(func(change proto.SandboxAccessChanged) {
+				if change.Session != expected || change.LaunchID != cfg.LaunchBinding.LaunchID {
+					return
+				}
+				publishNotice(transport.SandboxAccessChanged{
+					PaneID: cfg.PaneID, LaunchID: change.LaunchID,
+					Revision: change.Revision, Dropped: change.Dropped,
+					Observer: change.Observer, Total: change.Total,
+				})
+			})
+		}
 		bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
 		if stopDownlink != nil {
 			bindDownlinkToSession(sess, stopDownlink)
@@ -479,4 +498,34 @@ func bindBlockEndToSession(sess session.Session, attached *helperclient.Attached
 		}
 		stop()
 	}()
+}
+
+// sandboxAccessNoticeRelay keeps the helper client's read loop out of the
+// coordinator's durable-head lookup and renderer broadcast path.
+func sandboxAccessNoticeRelay(sess session.Session, publish func(transport.SandboxAccessChanged)) func(transport.SandboxAccessChanged) {
+	var mu sync.Mutex
+	var latest transport.SandboxAccessChanged
+	wake := make(chan struct{}, 1)
+	go func() {
+		for {
+			select {
+			case <-sess.Done():
+				return
+			case <-wake:
+				mu.Lock()
+				change := latest
+				mu.Unlock()
+				publish(change)
+			}
+		}
+	}()
+	return func(change transport.SandboxAccessChanged) {
+		mu.Lock()
+		latest = change
+		mu.Unlock()
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
+	}
 }

@@ -470,6 +470,21 @@ func (c *Client) sessionNotify(payload []byte) {
 		c.sessionReset(raw)
 	case proto.EventSessionLiveness:
 		c.sessionLiveness(raw)
+	case proto.EventSandboxAccessChanged:
+		c.sandboxAccessChanged(raw)
+	}
+}
+
+func (c *Client) sandboxAccessChanged(raw json.RawMessage) {
+	var change proto.SandboxAccessChanged
+	if err := json.Unmarshal(raw, &change); err != nil {
+		c.log.Warn("malformed sandbox access notification", "err", err)
+		return
+	}
+	for _, attached := range c.attachedTo(change.Session.Session, "") {
+		if attached.generation == change.Session.Generation {
+			attached.reportSandboxAccessChanged(change)
+		}
 	}
 }
 

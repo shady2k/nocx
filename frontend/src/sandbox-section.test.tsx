@@ -124,6 +124,43 @@ function services(overrides: Partial<SandboxSettingsServices['client']> = {}) {
       policyDigest: 'digest-fixed',
       policyVersion: 1,
     }),
+    sandboxAccessList: vi.fn().mockResolvedValue({
+      paneId: context.paneId,
+      launchId: 'launch-current',
+      workspaceId: context.workspaceId,
+      standardRevision: 7,
+      workspaceRevision: 3,
+      reason: '',
+      inbox: {
+        observer: 'unavailable',
+        revision: 0,
+        dropped: 0,
+        discontinuity: false,
+        total: 0,
+        nextCursor: 0,
+        records: [],
+      },
+    }),
+    sandboxResolveAccess: vi.fn().mockResolvedValue({
+      record: {
+        id: '',
+        revision: 0,
+        executable: '',
+        path: '',
+        operation: '',
+        access: 'unknown',
+        pathKnown: false,
+        source: 'linux-seccomp',
+        precision: 'unknown',
+        prediction: 'unknown',
+        count: 0,
+        state: 'unresolved',
+        futureRevision: 0,
+        proposal: null,
+      },
+      profile,
+    }),
+    onSandboxAccessChanged: vi.fn().mockReturnValue(() => {}),
     ...overrides,
   }
   const bindCandidate = vi.fn().mockResolvedValue(true)
@@ -131,6 +168,7 @@ function services(overrides: Partial<SandboxSettingsServices['client']> = {}) {
     value: {
       client,
       workspaces: () => [{ id: 'workspace-captured', name: 'workspace' }],
+      defaultWorkspaceId: () => 'workspace-default',
       bindCandidate,
       statusChanged: vi.fn(),
     } satisfies SandboxSettingsServices,
@@ -145,6 +183,111 @@ async function settledPage(svc: SandboxSettingsServices) {
 }
 
 describe('Sandbox Settings consumers', () => {
+  it.each(['named', 'standard'] as const)(
+    'preserves the %s editor draft while advancing its next CAS after diagnostic promotion',
+    async (scope) => {
+      const standardScope = scope === 'standard'
+      const initialProfile: SandboxProfileResult = standardScope
+        ? {
+            ...profile,
+            workspace: null,
+            effective: profile.standard,
+            profileSource: 'standard',
+          }
+        : profile
+      const promoted: SandboxProfileResult = standardScope
+        ? {
+            standard: { ...profile.standard, revision: 8, readOnlyDirs: ['/promoted'] },
+            workspace: { workspaceId: context.workspaceId, revision: 0, override: null },
+            effective: { readOnlyDirs: ['/promoted'], readWriteDirs: [] },
+            profileSource: 'standard',
+          }
+        : {
+            ...profile,
+            workspace: {
+              workspaceId: context.workspaceId,
+              revision: 4,
+              override: { readOnlyDirs: ['/promoted'], readWriteDirs: [] },
+            },
+            effective: { readOnlyDirs: ['/promoted'], readWriteDirs: [] },
+          }
+      const resolvedRecord = {
+        id: 'event-promote',
+        revision: 2,
+        executable: '/bin/tool',
+        path: '/workspace/item',
+        operation: 'openat',
+        access: 'read' as const,
+        pathKnown: true,
+        source: 'linux-seccomp' as const,
+        precision: 'attempted' as const,
+        prediction: 'denied' as const,
+        count: 1,
+        state: 'future-policy' as const,
+        futureRevision: standardScope ? 8 : 4,
+        proposal: { directory: '/workspace', basis: 'directory' as const, missingTarget: false },
+      }
+      const initialPage = {
+        paneId: context.paneId,
+        launchId: 'launch-current',
+        workspaceId: context.workspaceId,
+        standardRevision: 7,
+        workspaceRevision: standardScope ? 0 : 3,
+        reason: '',
+        inbox: {
+          observer: 'active' as const,
+          revision: 3,
+          dropped: 0,
+          discontinuity: false,
+          total: 1,
+          nextCursor: 0,
+          records: [
+            { ...resolvedRecord, revision: 1, state: 'unresolved' as const, futureRevision: 0 },
+          ],
+        },
+      }
+      const svc = services({
+        sandboxProfile: vi.fn().mockResolvedValue(initialProfile),
+        sandboxAccessList: vi
+          .fn()
+          .mockResolvedValueOnce(initialPage)
+          .mockResolvedValue({
+            ...initialPage,
+            standardRevision: standardScope ? 8 : 7,
+            workspaceRevision: standardScope ? 0 : 4,
+            inbox: { ...initialPage.inbox, revision: 4, records: [resolvedRecord] },
+          }),
+        sandboxResolveAccess: vi
+          .fn()
+          .mockResolvedValue({ record: resolvedRecord, profile: promoted }),
+      })
+      if (standardScope) {
+        svc.value.defaultWorkspaceId = () => context.workspaceId
+        svc.value.workspaces = () => []
+      }
+      render(() => <SandboxSection services={svc.value} context={context} />)
+      const root = await screen.findByLabelText<HTMLInputElement>('Корень только для чтения 1')
+      fireEvent.input(root, { target: { value: '/draft-root' } })
+      fireEvent.click(await screen.findByRole('button', { name: 'Разрешить чтение в будущем' }))
+      const dialog = await screen.findByRole('dialog')
+      fireEvent.click(
+        dialog.querySelectorAll('button')[dialog.querySelectorAll('button').length - 1],
+      )
+      await waitFor(() => expect(document.querySelectorAll('dialog[open]')).toHaveLength(0))
+      expect(root.value).toBe('/draft-root')
+      fireEvent.click(screen.getByRole('button', { name: 'Сохранить профиль' }))
+      await waitFor(() =>
+        expect(svc.client.sandboxUpdateProfile).toHaveBeenCalledWith({
+          ...(standardScope ? { enabled: true } : { workspaceId: context.workspaceId }),
+          expectedRevision: standardScope ? 8 : 4,
+          roots: {
+            readOnlyDirs: ['/draft-root'],
+            readWriteDirs: initialProfile.effective.readWriteDirs,
+          },
+        }),
+      )
+    },
+  )
   it('advances the visible workspace clock after save and reset while restoring inherited roots', async () => {
     const updated: SandboxProfileResult = {
       ...profile,

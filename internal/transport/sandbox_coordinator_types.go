@@ -134,6 +134,48 @@ type SandboxOperationResult struct {
 	Open        *openResult         `json:"open"`
 }
 
+type SandboxAccessListRequest struct {
+	PaneID   string `json:"paneId"`
+	LaunchID string `json:"launchId"`
+	Cursor   uint16 `json:"cursor"`
+	Limit    uint16 `json:"limit"`
+}
+
+type SandboxAccessListResult struct {
+	PaneID            string                 `json:"paneId"`
+	LaunchID          string                 `json:"launchId"`
+	WorkspaceID       string                 `json:"workspaceId"`
+	StandardRevision  uint64                 `json:"standardRevision"`
+	WorkspaceRevision uint64                 `json:"workspaceRevision"`
+	Reason            string                 `json:"reason"`
+	Inbox             sandbox.DiagnosticPage `json:"inbox"`
+}
+
+type SandboxAccessResolveRequest struct {
+	PaneID                    string                     `json:"paneId"`
+	LaunchID                  string                     `json:"launchId"`
+	EventID                   string                     `json:"eventId"`
+	EventRevision             uint64                     `json:"eventRevision"`
+	Decision                  sandbox.DiagnosticDecision `json:"decision"`
+	ExpectedStandardRevision  uint64                     `json:"expectedStandardRevision"`
+	ExpectedWorkspaceRevision uint64                     `json:"expectedWorkspaceRevision"`
+}
+
+type SandboxAccessResolveResult struct {
+	Record  sandbox.DiagnosticRecord `json:"record"`
+	Profile SandboxProfileResult     `json:"profile"`
+}
+
+// SandboxAccessChanged is metadata-only and qualifies the logical pane and launch.
+type SandboxAccessChanged struct {
+	PaneID   string                 `json:"paneId"`
+	LaunchID string                 `json:"launchId"`
+	Revision uint64                 `json:"revision"`
+	Dropped  uint64                 `json:"dropped"`
+	Observer sandbox.ObserverStatus `json:"observer"`
+	Total    uint16                 `json:"total"`
+}
+
 // SandboxControl is trusted-UI control. It is never an agent tool capability.
 type SandboxControl interface {
 	Status(context.Context, SandboxStatusRequest) (SandboxStatusResult, error)
@@ -145,7 +187,10 @@ type SandboxControl interface {
 	Cancel(context.Context, SandboxReplaceRequest) error
 	Operation(context.Context, SandboxOperationRequest) (SandboxOperation, error)
 	Grant(context.Context, SandboxGrantRequest) (SandboxGrantResult, error)
+	AccessList(context.Context, SandboxAccessListRequest) (SandboxAccessListResult, error)
+	AccessResolve(context.Context, SandboxAccessResolveRequest) (SandboxAccessResolveResult, error)
 	PermitOrdinaryOpen(context.Context, string) error
+	SandboxAccessNoticeCurrent(string, string) bool
 	BindPublisher(func(context.Context, OpenedSession) error)
 }
 

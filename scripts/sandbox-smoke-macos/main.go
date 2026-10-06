@@ -203,7 +203,7 @@ func main() {
 		content.Tab{ID: "tab-native-proof", WorkspaceID: "ws-native-proof", Layout: content.LayoutRow},
 		content.Pane{ID: "pane-native-proof", TabID: "tab-native-proof", Cwd: work, Kind: content.PaneLocal, SizeShare: 1})
 	must(err, "persist proof workspace")
-	identity := content.HelperIdentity{Host: "local", Account: "native-proof", Generation: source.HostSessionID.Generation, SessionID: source.HostSessionID.Session}
+	identity := content.HelperIdentity{Host: "local", Generation: source.HostSessionID.Generation, SessionID: source.HostSessionID.Session}
 	must(db.Ledger().CreateSession(ctx, content.Session{
 		ID: identity.SessionID, WorkspaceID: "ws-native-proof", Host: identity.Host,
 		Account: identity.Account, Generation: identity.Generation, PaneID: "pane-native-proof",
@@ -389,16 +389,72 @@ func main() {
 	})
 	must(err, "attach to restricted helper PTY")
 	defer func() { _ = attachment.Close() }()
+	deniedProbePath := filepath.Join(outside, "denied")
+	if !filepath.IsAbs(deniedProbePath) || strings.ContainsAny(deniedProbePath, " \t\r\n'\"()") {
+		panic("dedicated native diagnostics path is not an unambiguous absolute path")
+	}
 	command := strings.Join([]string{
 		shellQuote(probePath), shellQuote(work), shellQuote(readOnly), shellQuote(outside), shellQuote(workspaceSocket),
 		shellQuote(currentSocket), shellQuote(oldSocket), shellQuote(coordinatorSocket), shellQuote(tcpListener.Addr().String()),
 		shellQuote(prepared.Policy.Runtime.Root), shellQuote(prepared.Policy.Runtime.Home), shellQuote(prepared.Policy.WorkspaceRoot),
-	}, " ") + "\n"
+	}, " ") + "\n" + shellQuote("/bin/cat") + " " + shellQuote(deniedProbePath) + " >/dev/null 2>&1\n"
 	_, err = attachment.Write([]byte(command))
 	must(err, "send native probe to protected PTY")
 	if err = waitForProof(ctx, attachment); err != nil {
 		panic("native Seatbelt probe failed")
 	}
+	diagnostic := waitForNativeDenial(ctx, currentClient, candidate.HostSessionID, prepared.LaunchID, deniedProbePath)
+	reserved, err := currentClient.SandboxAccessReserve(ctx, proto.SandboxAccessReserveParams{
+		Session: proto.HostSessionID{Generation: proto.GenerationID(candidate.HostSessionID.Generation), Session: candidate.HostSessionID.Session},
+		EventID: diagnostic.ID, Revision: diagnostic.Revision, Decision: sandbox.DecisionAllowRO,
+	})
+	must(err, "reserve native denial receipt without profile mutation")
+	if reserved.LaunchID != prepared.LaunchID || reserved.Record.ID != diagnostic.ID || reserved.Record.State != sandbox.DiagnosticPending {
+		panic("helper reserved a different native denial receipt")
+	}
+	finished, err := currentClient.SandboxAccessFinish(ctx, proto.SandboxAccessFinishParams{
+		Session: proto.HostSessionID{Generation: proto.GenerationID(candidate.HostSessionID.Generation), Session: candidate.HostSessionID.Session},
+		EventID: diagnostic.ID, Reservation: reserved.Reservation, Committed: false,
+	})
+	must(err, "abort uncommitted native denial reservation")
+	if finished.LaunchID != prepared.LaunchID || finished.Record.ID != diagnostic.ID || finished.Record.State != sandbox.DiagnosticUnresolved {
+		panic("helper did not retain the unresolved native denial receipt")
+	}
+	retained, err := currentClient.SandboxAccessList(ctx, proto.SandboxAccessListParams{
+		Session: proto.HostSessionID{Generation: proto.GenerationID(candidate.HostSessionID.Generation), Session: candidate.HostSessionID.Session},
+		Limit:   200,
+	})
+	must(err, "read retained native denial receipt")
+	if retained.LaunchID != prepared.LaunchID || retained.Inbox.Observer != sandbox.ObserverActive {
+		panic("native diagnostic inbox lost launch correlation or observer status")
+	}
+	retainedReceipt := false
+	for _, record := range retained.Inbox.Records {
+		if record.ID == diagnostic.ID && record.Source == sandbox.DiagnosticMacSeatbelt &&
+			record.Precision == sandbox.PrecisionReportedDenial && record.PathKnown &&
+			record.Path == deniedProbePath && record.State == sandbox.DiagnosticUnresolved {
+			retainedReceipt = true
+			break
+		}
+	}
+	if !retainedReceipt {
+		panic("helper did not retain the uncommitted native denial receipt")
+	}
+	postDiagnostics, err := currentClient.SandboxGet(ctx, candidate.HostSessionID)
+	must(err, "read native binding after diagnostic processing")
+	if postDiagnostics.Mode != binding.Mode || postDiagnostics.Enforcement != binding.Enforcement ||
+		postDiagnostics.Grant == nil || postDiagnostics.Grant.ID != binding.Grant.ID || postDiagnostics.Grant.Digest != binding.Grant.Digest {
+		panic("diagnostic processing changed the live native grant or enforcement")
+	}
+	if _, err = attachment.Write([]byte("if " + shellQuote("/bin/cat") + " " + shellQuote(deniedProbePath) +
+		" >/dev/null 2>&1; then printf 'MACOS_NATIVE_DIAGNOSTIC_POLICY_%s\\n' CHANGED; else printf 'MACOS_NATIVE_DIAGNOSTIC_POLICY_%s\\n' UNCHANGED; fi\n")); err != nil {
+		panic("send post-diagnostic native denial check")
+	}
+	if err = waitForMarker(ctx, attachment, "MACOS_NATIVE_DIAGNOSTIC_POLICY_UNCHANGED"); err != nil {
+		panic("native shell denial did not remain after diagnostic processing")
+	}
+	report("REAL_SEATBELT_DENIAL_CORRELATED_AND_RECEIPT_RETAINED")
+	report("DIAGNOSTIC_PROCESSING_PRESERVED_LIVE_GRANT_AND_NATIVE_DENIAL")
 	entries, err := currentClient.Sessions(ctx)
 	must(err, "query current helper source inventory")
 	if !containsSession(entries, source.HostSessionID) {
@@ -652,6 +708,70 @@ func waitForProof(ctx context.Context, attachment *client.AttachedSession) error
 				}
 				if output.Len() > 128<<10 {
 					read <- errors.New("probe output bound exceeded")
+					return
+				}
+			}
+			if err != nil {
+				read <- err
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-read:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForNativeDenial(ctx context.Context, lane *client.Client, session client.HostSessionID, launchID, expectedPath string) sandbox.DiagnosticRecord {
+	deadline, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for {
+		result, err := lane.SandboxAccessList(deadline, proto.SandboxAccessListParams{
+			Session: proto.HostSessionID{Generation: proto.GenerationID(session.Generation), Session: session.Session},
+			Limit:   200,
+		})
+		must(err, "read real native diagnostic inbox")
+		if result.Session.Generation != proto.GenerationID(session.Generation) || result.Session.Session != session.Session ||
+			result.LaunchID != launchID || result.Inbox.Observer != sandbox.ObserverActive {
+			panic("native diagnostic inbox identity or required observer status mismatch")
+		}
+		for _, record := range result.Inbox.Records {
+			if record.Source == sandbox.DiagnosticMacSeatbelt && record.Precision == sandbox.PrecisionReportedDenial &&
+				record.PathKnown && record.Path == expectedPath && record.Access == sandbox.DiagnosticRead &&
+				strings.HasPrefix(record.Operation, "file-read") {
+				return record
+			}
+		}
+		select {
+		case <-deadline.Done():
+			panic("required correlated Seatbelt denial was not collected before deadline")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func waitForMarker(ctx context.Context, attachment *client.AttachedSession, marker string) error {
+	read := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 1024)
+		var output strings.Builder
+		for {
+			n, err := attachment.Read(buffer)
+			if n > 0 {
+				output.Write(buffer[:n])
+				if strings.Contains(output.String(), marker) {
+					read <- nil
+					return
+				}
+				if strings.Contains(output.String(), "MACOS_NATIVE_DIAGNOSTIC_POLICY_CHANGED") {
+					read <- errors.New("sandbox policy changed")
+					return
+				}
+				if output.Len() > 4096 {
+					read <- errors.New("post-diagnostic marker output bound exceeded")
 					return
 				}
 			}

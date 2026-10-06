@@ -58,8 +58,22 @@ func RunRunner() int {
 	if err := landlock.V9.RestrictPaths(rules...); err != nil {
 		return runnerFailure("landlock-unsupported")
 	}
-	if err := sendRunnerPacket(RunnerReady{Version: RunnerReadyVersion, Status: "ready"}); err != nil {
-		return runnerFailure("readiness-channel")
+	observer, listener, installErr := installOpenNotificationFilter()
+	if installErr != nil {
+		if listener >= 0 {
+			_ = unix.Close(listener)
+		}
+		if sendErr := sendRunnerPacket(RunnerReady{Version: RunnerReadyVersion, Status: "ready", Observer: observer}); sendErr != nil {
+			return runnerFailure("readiness-channel")
+		}
+	} else {
+		if err := sendRunnerPacketWithFD(RunnerReady{Version: RunnerReadyVersion, Status: "ready", Observer: observer}, listener); err != nil {
+			_ = unix.Close(listener)
+			return runnerFailure("listener-handoff")
+		}
+		if err := unix.Close(listener); err != nil {
+			return runnerFailure("listener-close")
+		}
 	}
 	if err := prepareExecDescriptors(plan); err != nil {
 		return runnerFailure("descriptor-cleanup")

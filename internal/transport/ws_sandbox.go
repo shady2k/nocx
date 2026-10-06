@@ -115,6 +115,24 @@ func (s *WSServer) sandboxSpecs() []methodSpec {
 				})
 			}
 		}),
+		regResponder(queue, "sandbox.access.list", params(validateSandboxAccessListRaw), func(r Responder) handlerFunc {
+			return func(ctx context.Context, req jsonrpcRequest) {
+				s.sandboxCall(ctx, r, req, "sandbox.access.list", func(c SandboxControl) (any, error) {
+					var p SandboxAccessListRequest
+					_ = json.Unmarshal(req.Params, &p)
+					return c.AccessList(ctx, p)
+				})
+			}
+		}),
+		regResponder(queue, "sandbox.access.resolve", params(validateSandboxAccessResolveRaw), func(r Responder) handlerFunc {
+			return func(ctx context.Context, req jsonrpcRequest) {
+				s.sandboxCall(ctx, r, req, "sandbox.access.resolve", func(c SandboxControl) (any, error) {
+					var p SandboxAccessResolveRequest
+					_ = json.Unmarshal(req.Params, &p)
+					return c.AccessResolve(ctx, p)
+				})
+			}
+		}),
 	}
 }
 
@@ -264,4 +282,29 @@ func validateSandboxOperationRaw(raw json.RawMessage) string {
 func validateSandboxGrantRaw(raw json.RawMessage) string {
 	var p SandboxGrantRequest
 	return sandboxRequired(raw, &p, "launchId")
+}
+
+func validateSandboxAccessListRaw(raw json.RawMessage) string {
+	var p SandboxAccessListRequest
+	if reason := sandboxRequired(raw, &p, "paneId", "launchId", "cursor", "limit"); reason != "" {
+		return reason
+	}
+	if p.PaneID == "" || p.LaunchID == "" || p.Cursor > 500 || p.Limit > 200 {
+		return "invalid params"
+	}
+	return ""
+}
+
+func validateSandboxAccessResolveRaw(raw json.RawMessage) string {
+	var p SandboxAccessResolveRequest
+	if reason := sandboxRequired(raw, &p, "paneId", "launchId", "eventId", "eventRevision", "decision", "expectedStandardRevision", "expectedWorkspaceRevision"); reason != "" {
+		return reason
+	}
+	if p.PaneID == "" || p.LaunchID == "" || p.EventID == "" || len(p.EventID) > 256 || p.EventRevision == 0 {
+		return "invalid params"
+	}
+	if p.Decision != "dismiss" && p.Decision != "allow-ro" && p.Decision != "allow-rw" {
+		return "invalid params"
+	}
+	return ""
 }

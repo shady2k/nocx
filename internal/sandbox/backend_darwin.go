@@ -41,7 +41,7 @@ func backendAvailable() error {
 		Version: PolicyVersion, Backend: MacOSSeatbelt, BackendVersion: MacOSBaselineVersion,
 		WorkspaceRoot: "/", Shell: "/usr/bin/true", Runner: "/usr/bin/true",
 		Runtime: RuntimePaths{Root: tempRoot}, Roots: roots,
-	})
+	}, "0123456789abcdef0123456789abcdef")
 	if err != nil {
 		return errors.New("Seatbelt profile unsupported")
 	}

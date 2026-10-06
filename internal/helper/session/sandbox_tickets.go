@@ -394,6 +394,9 @@ func (s *Service) sandboxGet(p proto.SandboxGetParams) (proto.SandboxGetResult, 
 	}
 	result := *hs.sandbox
 	result.Session = hs.id
+	if diagnostic, ok := hs.proc.(nativeDiagnosticProcess); ok && diagnostic.nativeDiagnostics() != nil {
+		result.Observer = string(diagnostic.nativeDiagnostics().observerStatus())
+	}
 	if hs.exit != nil {
 		result.Enforcement = "ended"
 	}

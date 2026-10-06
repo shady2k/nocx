@@ -67,8 +67,8 @@ func (o *localHelperOpener) SandboxOpenCandidate(ctx context.Context, cfg sessio
 	}
 	spawn := hostedSpawn{
 		client: c, registry: o.registry, lifecycle: o.kernel, loss: o.lifecycleLoss,
-		publishScreen: o.publishScreen, blockRows: o.blockRows,
-		environmentEntries: o.environmentEntries, cursors: o.lifecycleCursors,
+		publishScreen: o.publishScreen, publishSandboxAccess: o.publishSandboxAccess,
+		blockRows: o.blockRows, environmentEntries: o.environmentEntries, cursors: o.lifecycleCursors,
 		stopping: o.lifecycleStopping, helloTimeout: lifecycle.HelloTimeout, log: o.log,
 	}
 	candidate, err := spawn.openCandidate(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
@@ -197,4 +197,55 @@ func (o *localHelperOpener) sandboxGeneration(ctx context.Context, generation st
 		return nil, fmt.Errorf("%w: %w", errLocalEndpointUnreachable, err)
 	}
 	return c, nil
+}
+
+func (o *localHelperOpener) SandboxAccessList(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessListParams) (proto.SandboxAccessListResult, error) {
+	if identity.Host != "" || identity.Account != "" || identity.Generation == "" || identity.SessionID == "" {
+		return proto.SandboxAccessListResult{}, content.ErrInvalidLaunch
+	}
+	c, err := o.sandboxGeneration(ctx, identity.Generation)
+	if err != nil {
+		return proto.SandboxAccessListResult{}, err
+	}
+	defer func() { _ = c.Close() }()
+	params.Session = proto.HostSessionID{Generation: proto.GenerationID(identity.Generation), Session: identity.SessionID}
+	return c.SandboxAccessList(ctx, params)
+}
+
+func (o *localHelperOpener) SandboxAccessReserve(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessReserveParams) (proto.SandboxAccessReserveResult, error) {
+	if identity.Host != "" || identity.Account != "" || identity.Generation == "" || identity.SessionID == "" {
+		return proto.SandboxAccessReserveResult{}, content.ErrInvalidLaunch
+	}
+	c, err := o.sandboxGeneration(ctx, identity.Generation)
+	if err != nil {
+		return proto.SandboxAccessReserveResult{}, err
+	}
+	defer func() { _ = c.Close() }()
+	params.Session = proto.HostSessionID{Generation: proto.GenerationID(identity.Generation), Session: identity.SessionID}
+	return c.SandboxAccessReserve(ctx, params)
+}
+
+func (o *localHelperOpener) SandboxAccessFinish(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessFinishParams) (proto.SandboxAccessFinishResult, error) {
+	if identity.Host != "" || identity.Account != "" || identity.Generation == "" || identity.SessionID == "" {
+		return proto.SandboxAccessFinishResult{}, content.ErrInvalidLaunch
+	}
+	c, err := o.sandboxGeneration(ctx, identity.Generation)
+	if err != nil {
+		return proto.SandboxAccessFinishResult{}, err
+	}
+	defer func() { _ = c.Close() }()
+	params.Session = proto.HostSessionID{Generation: proto.GenerationID(identity.Generation), Session: identity.SessionID}
+	return c.SandboxAccessFinish(ctx, params)
+}
+
+func (h *hostedOpeners) SandboxAccessList(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessListParams) (proto.SandboxAccessListResult, error) {
+	return h.local.SandboxAccessList(ctx, identity, params)
+}
+
+func (h *hostedOpeners) SandboxAccessReserve(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessReserveParams) (proto.SandboxAccessReserveResult, error) {
+	return h.local.SandboxAccessReserve(ctx, identity, params)
+}
+
+func (h *hostedOpeners) SandboxAccessFinish(ctx context.Context, identity content.HelperIdentity, params proto.SandboxAccessFinishParams) (proto.SandboxAccessFinishResult, error) {
+	return h.local.SandboxAccessFinish(ctx, identity, params)
 }

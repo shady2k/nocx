@@ -309,6 +309,8 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		release()
 		return nil, err
 	}
+	var observer nativeObserver
+	var diagnostics *nativeInbox
 	if native != nil {
 		if err := native.waitReady(lp); err != nil {
 			abortErr := s.abortNativeCandidate(lp, req.Native)
@@ -318,8 +320,27 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			}
 			return nil, errNativeLaunch
 		}
+		diagnostics = newNativeInbox(req.Native.Policy, req.SessionID)
+		diagnostics.SetObserver(native.observer)
+		if native.listener != nil || req.Native.Policy.Backend == sandbox.MacOSSeatbelt {
+			observer = startNativeObserver(nativeObserverConfig{
+				PID: lp.Pid(), Done: lp.Done(), Policy: req.Native.Policy, Listener: native.listener,
+				Nonce: native.observerNonce, Sink: diagnostics,
+				// Stop the raw PTY, not localProcess.Close: the collector must
+				// never join itself through process-owned observer cleanup.
+				Fatal: func() { _ = lp.Close() },
+			})
+			native.listener = nil
+		}
 		native.Close()
-		go func() { <-lp.Done(); _ = req.Native.Cleanup() }()
+		go func() {
+			<-lp.Done()
+			if observer != nil {
+				observer.Close()
+			}
+			diagnostics.stopWorkers()
+			_ = req.Native.Cleanup()
+		}()
 	}
 	if len(launch.Bootstrap) > 0 {
 		// The bootstrap is a LINE INTO THE TERMINAL — `. /dev/fd/3` for the
@@ -344,7 +365,7 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	if launch.Cleanup != nil {
 		launch.Cleanup()
 	}
-	return &localProcess{localPTY: lp, lifecycle: lifecycleParent, shell: shellPath, native: req.Native, nativeOwner: s}, nil
+	return &localProcess{localPTY: lp, lifecycle: lifecycleParent, shell: shellPath, native: req.Native, nativeOwner: s, observer: observer, diagnostics: diagnostics}, nil
 }
 
 func (s *LocalSpawner) resolveShell() (string, []string) {
@@ -400,7 +421,11 @@ type localProcess struct {
 	shell       string
 	native      *sandbox.Prepared
 	nativeOwner *LocalSpawner
+	observer    nativeObserver
+	diagnostics *nativeInbox
 }
+
+func (p *localProcess) nativeDiagnostics() *nativeInbox { return p.diagnostics }
 
 func (p *localProcess) abortNativeCandidate() error {
 	return p.nativeOwner.abortNativeCandidate(p.localPTY, p.native)
@@ -422,6 +447,12 @@ func (p *localProcess) Lifecycle() io.ReadWriteCloser {
 
 func (p *localProcess) Close() error {
 	err := p.localPTY.Close()
+	if p.observer != nil {
+		p.observer.Close()
+	}
+	if p.diagnostics != nil {
+		p.diagnostics.stopWorkers()
+	}
 	if p.lifecycle != nil {
 		closeErr := p.lifecycle.Close()
 		if err == nil {

@@ -118,10 +118,13 @@ const (
 	// itself, bounded the same way as any other closing screen.
 	OpLifecycleEntered = "lifecycle-entered"
 	// Sandbox operations are additive: existing spawn/inventory shapes stay frozen.
-	OpSandboxPrepare = "sandbox-prepare"
-	OpSandboxLaunch  = "sandbox-launch"
-	OpSandboxGet     = "sandbox-get"
-	OpSandboxDiscard = "sandbox-discard"
+	OpSandboxPrepare       = "sandbox-prepare"
+	OpSandboxLaunch        = "sandbox-launch"
+	OpSandboxGet           = "sandbox-get"
+	OpSandboxDiscard       = "sandbox-discard"
+	OpSandboxAccessList    = "sandbox-access-list"
+	OpSandboxAccessReserve = "sandbox-access-reserve"
+	OpSandboxAccessFinish  = "sandbox-access-finish"
 )
 
 // Incarnation is a session runtime's identity on the wire: the session the
@@ -288,6 +291,8 @@ const (
 	// far end answering late, or not at all yet — which has no "the process
 	// ended" fact to ride.
 	EventSessionLiveness = "liveness"
+	// EventSandboxAccessChanged carries coalesced, metadata-only inbox state.
+	EventSandboxAccessChanged = "sandbox-access-changed"
 )
 
 // Notification is the payload of a TypeNotify frame: a service, an event and

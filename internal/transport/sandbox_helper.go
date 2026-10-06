@@ -35,4 +35,7 @@ type SandboxHelper interface {
 	SandboxInventory(context.Context, string) ([]helperclient.SessionEntry, error)
 	SandboxRollback(context.Context, string, string, string) (*helperclient.SessionEntry, error)
 	SandboxClose(context.Context, content.HelperIdentity) error
+	SandboxAccessList(context.Context, content.HelperIdentity, proto.SandboxAccessListParams) (proto.SandboxAccessListResult, error)
+	SandboxAccessReserve(context.Context, content.HelperIdentity, proto.SandboxAccessReserveParams) (proto.SandboxAccessReserveResult, error)
+	SandboxAccessFinish(context.Context, content.HelperIdentity, proto.SandboxAccessFinishParams) (proto.SandboxAccessFinishResult, error)
 }

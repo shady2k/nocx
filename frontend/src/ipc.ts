@@ -16,8 +16,27 @@ import type { SandboxStatusResult } from './generated/sandbox.status'
 import type { SandboxProfileResult } from './generated/sandbox.profile.get'
 import type { SandboxPreviewResult } from './generated/sandbox.preview'
 import type { SandboxOperationResult } from './generated/sandbox.replace'
-import type { SandboxGrantResult } from './generated/sandbox.grant.get'
 import type { SandboxCancelResult } from './generated/sandbox.cancel'
+import type { SandboxGrantResult } from './generated/sandbox.grant.get'
+import type { SandboxAccessListResult } from './generated/sandbox.access.list'
+import type { SandboxAccessResolveResult } from './generated/sandbox.access.resolve'
+import type { SandboxAccessChanged } from './generated/sandbox.access.changed'
+
+type SandboxAccessListRequest = {
+  paneId: string
+  launchId: string
+  cursor: number
+  limit: number
+}
+type SandboxAccessResolveRequest = {
+  paneId: string
+  launchId: string
+  eventId: string
+  eventRevision: number
+  decision: 'dismiss' | 'allow-ro' | 'allow-rw'
+  expectedStandardRevision: number
+  expectedWorkspaceRevision: number
+}
 
 type SandboxStatusRequest = Pick<SandboxStatusResult, 'paneId'>
 type SandboxProfileRequest = { workspaceId?: string }
@@ -734,6 +753,7 @@ export class WSClient {
   // own shape for the created fact's own reason — a broadcast, and the window
   // drawing the strip is not the caller that asked for the close.
   private workerTabClosedHandlers = new Set<(fact: WorkersTabClosed) => void>()
+  private sandboxAccessChangedHandlers = new Set<(fact: SandboxAccessChanged) => void>()
 
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
@@ -1049,6 +1069,21 @@ export class WSClient {
       if (typeof sid !== 'string') return
       this.sessions.get(sid)?.inputStalledCallback?.()
     })
+    this.dispatcher.subscribe('sandbox.access.changed', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      if (
+        typeof raw.paneId !== 'string' ||
+        typeof raw.launchId !== 'string' ||
+        typeof raw.revision !== 'number' ||
+        typeof raw.dropped !== 'number' ||
+        !['unavailable', 'active', 'unsupported', 'failed'].includes(String(raw.observer)) ||
+        typeof raw.total !== 'number'
+      )
+        return
+      const fact = raw as unknown as SandboxAccessChanged
+      for (const handler of this.sandboxAccessChangedHandlers) handler(fact)
+    })
   }
 
   /** The shared control-plane dispatcher (the sealed-access seam installed
@@ -1261,6 +1296,18 @@ export class WSClient {
 
   sandboxGrant(request: SandboxGrantRequest): Promise<SandboxGrantResult> {
     return this.dispatcher.call<SandboxGrantResult>('sandbox.grant.get', request)
+  }
+  sandboxAccessList(request: SandboxAccessListRequest): Promise<SandboxAccessListResult> {
+    return this.dispatcher.call<SandboxAccessListResult>('sandbox.access.list', request)
+  }
+
+  sandboxResolveAccess(request: SandboxAccessResolveRequest): Promise<SandboxAccessResolveResult> {
+    return this.dispatcher.call<SandboxAccessResolveResult>('sandbox.access.resolve', request)
+  }
+
+  onSandboxAccessChanged(handler: (fact: SandboxAccessChanged) => void): () => void {
+    this.sandboxAccessChangedHandlers.add(handler)
+    return () => this.sandboxAccessChangedHandlers.delete(handler)
   }
 
   /** Replace the pane's sandbox head. The server publishes and subscribes the

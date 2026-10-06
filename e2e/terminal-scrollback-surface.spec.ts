@@ -232,7 +232,6 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       rowText: anchorRow,
     }
     expect(anchor.rows[anchor.index]).toMatch(/SCROLLBK-\d{3}/)
-    const visibleBefore = visibleRowsBefore
     const anchorTop = await page.evaluate((text) => {
       const area = document.querySelector('.pane.active .scrollback-area')
       if (area === null) return null
@@ -249,26 +248,14 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     await expect.poll(async () => liveRows(), { timeout: 25_000 }).toContain(lateMarker)
     const visibleAfter = await readVisibleRows()
     expect(visibleAfter.filter((row) => row.includes(lateMarker)).length).toBeLessThanOrEqual(1)
-    const withoutLateMarker = (rows: string[]): string[] =>
-      rows.flatMap((row) => {
-        if (!row.includes(lateMarker)) return [row]
-        const remaining = row.replace(lateMarker, '').trim()
-        return remaining === '' ? [] : [remaining]
-      })
-
-    // The row identity and its position are the live anchor. Then restore the
-    // history start and check the visible content window survived virtualization.
-    const anchorTopAfter = await page.evaluate((text) => {
-      const area = document.querySelector('.pane.active .scrollback-area')
-      if (area === null) return null
-      const clip = area.getBoundingClientRect()
-      const row = Array.from(area.querySelectorAll('.live-history-page .term-grid-row')).find(
-        (candidate) => (candidate.textContent ?? '').trim() === text,
-      )
-      if (row === undefined) return null
-      const bounds = row.getBoundingClientRect()
-      return bounds.bottom > clip.top && bounds.top < clip.bottom ? bounds.top : null
-    }, anchor.rowText)
+    // The row identity is the live anchor. Restore the history start and check
+    // the visible content window survived virtualization.
+    //
+    // A second read of the anchor row's viewport position stood here, with the
+    // strip that removed the late marker from the visible window. Both fed the
+    // delayed-output comparison nocx-zg3k3.15.2 owns, whose check now stands at
+    // the end of this body behind that bead's fixme — the note there says why
+    // nothing may follow it.
     await scrollToHistoryStart()
     const visibleAnchorAfter = await readVisibleRows()
     const anchorIndexAfter = visibleAnchorAfter.findIndex((text) => text === anchor.rowText)
@@ -324,6 +311,7 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     // ── Clause 5: a full-screen program's pane reveals no primary rows ──
     // Fresh history first. The person must be able to wheel back to its first
     // row before the program takes the pane.
+    await pane.locator('.xterm-live-container').click()
     await type_(`for i in $(seq 1 120); do echo ${'SCROLLBK-'}$(printf '%03d' $i); done`)
     await expect.poll(async () => liveRows(), { timeout: 30_000 }).toContain(label(120))
     await expect
@@ -336,22 +324,39 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
         { timeout: 30_000, intervals: [300] },
       )
       .toBe(true)
+    const altRow = `ALT-${nonce}`
+    await type_(`printf '\\033[?1049h'; echo ${altRow}; sleep 60`)
 
-    await type_(`printf '\\033[?1049h'; echo ALT-${nonce}; sleep 60`)
-    await expect.poll(async () => liveRows(), { timeout: 20_000 }).toContain(`ALT-${nonce}`)
-    const alternateRows = await liveRows()
-    expect(alternateRows).not.toMatch(/SCROLLBK-\d{3}/)
+    // WAIT ON THE PROGRAM'S OWN ROW, NOT ON THE MARKER ANYWHERE. The shell
+    // echoes the typed line — marker and all — before it runs it, so a
+    // substring test over the joined rows is satisfied by that ECHO, and the
+    // read that follows lands while the pane still paints the primary screen:
+    // the program has not started yet. Measured on the merged-tree gate run of
+    // 2026-10-06 (webkit): the failed read carried SCROLLBK-080..120 plus the
+    // echoed command line, and the trace's DOM snapshot at that instant shows
+    // `.xterm-live-container live-unstructured` with the history surface still
+    // visible, the alternate screen taking the pane ~25 ms later. The row the
+    // shell did not echo is the one that says the program owns the pane.
+    const altScreenIsUp = async (): Promise<boolean> =>
+      liveRows().then((rows) => rows.split('\n').some((row) => row.trim() === altRow))
+    await expect.poll(altScreenIsUp, { timeout: 20_000 }).toBe(true)
+    // WHAT THE PERSON CAN SEE, on the viewport and not on the mounted rows: the
+    // live grid is the whole of this mode's visible surface, and the visible
+    // union beside it covers the history surface the program must have taken
+    // away.
     expect(labelsInRows(await readVisibleRows())).toEqual([])
     // The sleeping shell may echo queued key sequences. Assert the contract
-    // directly: ALT stays visible and primary scrollback labels stay absent.
+    // directly: ALT stays visible and primary scrollback labels stay absent —
+    // through the two gestures that used to reach the primary's rows.
     await page.keyboard.press('PageUp')
     await page.mouse.wheel(0, -1000)
-    await expect.poll(async () => liveRows()).toContain(`ALT-${nonce}`)
+    await expect.poll(altScreenIsUp, { timeout: 20_000 }).toBe(true)
     expect(labelsInRows(await readVisibleRows())).toEqual([])
 
     // Leaving the program restores the primary history, which the reader can
     // still reach by its visible first row.
     await page.keyboard.press('Control+C')
+    await pane.locator('.xterm-live-container').click()
     await type_(`printf '\\033[?1049l'`)
     await expect
       .poll(
@@ -368,9 +373,16 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       true,
       'nocx-zg3k3.15.2: origin/main shows the same delayed-output viewport jump; baseline defect.',
     )
-    expect(anchorTopAfter).not.toBeNull()
-    expect(anchorTopAfter).toBeCloseTo(anchorTop!, 0)
-    expect(withoutLateMarker(visibleAfter)).toEqual(visibleBefore)
+    // THE FIXME ENDS THE BODY, so nothing may stand below it. Three assertions
+    // did until 2026-10-06: the anchored row's top after the late output
+    // (anchorTopAfter, against anchorTop above) and the visible window with the
+    // late marker stripped (withoutLateMarker(visibleAfter) against
+    // visibleBefore). A runtime test.fixme is a SKIP, not an annotation — a
+    // probe spec printing either side of one printed only the line before it
+    // and reported "1 skipped" — so all three were unreachable while this
+    // spec's own passing runs reported skipped, reading in the file as
+    // coverage. They are the check nocx-zg3k3.15.2 owes, so they come back with
+    // that bead's fix, ABOVE this line rather than below it.
   } finally {
     try {
       const info = await resolveBackend(page)

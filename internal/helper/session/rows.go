@@ -973,6 +973,19 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 		return len(subs) > 0
 	}
 	if em.end {
+		// WHICH KIND OF BOUNDARY THIS IS, SAID OUT LOUD (nocx-n5ent). A
+		// settled-without-fence end marker is the one shape that reaches the
+		// coordinator's block stream with NO closing screen — the census's
+		// `truncated=gap` with `endRow == cursor` — and until this line the
+		// runner's log carried the seal and nothing about what asked for it:
+		// the interval's own fence sighting, or one of the settles the
+		// authenticated channel drives (a completion for another nonce, an
+		// environment entry, the rendezvous bound) or the session's end.
+		if em.noFence {
+			s.log.Debug("interval end settled without its fence: no closing screen",
+				"session", s.id.Session, "nonce", hex.EncodeToString(em.nonce[:]),
+				"endRow", em.from, "closingRows", len(em.closing))
+		}
 		closing, err := encodedRowsOrNothing(em.closing)
 		if err != nil {
 			s.log.Warn("session closing screen not encodable", "session", s.id.Session, "err", err)

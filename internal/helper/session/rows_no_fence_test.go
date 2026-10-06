@@ -22,11 +22,19 @@ func endNoFence(t *testing.T, payload []byte) bool {
 	return *doc.NoFence
 }
 
-// An interval the runtime settled without its fence (ADR-0074 decision 3)
-// reaches the wire saying so, over the real runtime and the real bridge
-// (nocx-2v80t.3.29): the coordinator stores the block from this marker, and
-// a marker that says nothing is a block that reads whole with its closing
-// screen missing. The payload satisfies its contract.
+// An interval the runtime settled without its fence (ADR-0074 decision 3,
+// amended by nocx-n5ent) reaches the wire saying so, over the real runtime and
+// the real bridge (nocx-2v80t.3.29): the coordinator stores the block from this
+// marker, and a marker that says nothing is a block that reads whole with its
+// closing screen missing. The payload satisfies its contract.
+//
+// The amendment moved only WHEN the settle is taken. The second completion
+// arrives on the authenticated channel, which the command's own bytes are not
+// ordered against, so it defers: the interval keeps its own rows until the byte
+// stream reaches its next boundary. That boundary is the later command's fence
+// sighted below, and that is where the marker this test reads is produced —
+// which is also why an interval whose rows are still unread is no longer frozen
+// at the count the fast channel had reached.
 func TestTheBridgeSaysAnIntervalWasSettledWithoutItsFence(t *testing.T) {
 	_, rt, sink := rowsBridgeSession(t, 80, 24)
 
@@ -37,6 +45,10 @@ func TestTheBridgeSaysAnIntervalWasSettledWithoutItsFence(t *testing.T) {
 	}
 	rt.Completed(rt.Incarnation(), parked, 0)
 	rt.Completed(rt.Incarnation(), later, 0) // the next event: parked's fence will not come
+	// The byte stream reaches its next boundary: the later command's own fence.
+	if err := rt.SightFence(later, []byte("$ ")); err != nil {
+		t.Fatalf("sight the next interval's fence: %v", err)
+	}
 	sink.waitFor(1, 1, 0)
 
 	ends := sink.endFrames()

@@ -32,9 +32,24 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 	if !opts.Enhanced || opts.SessionID == "" {
 		return "", fmt.Errorf("shellintegration: local lifecycle bootstrap requires an enhanced session with a session id")
 	}
-	return bashRcfile(localChild, launcherEnvBlock(opts), bashScript,
+	return bashRcfile(localChild, launcherEnvBlock(opts), localScript(bashScriptRaw, opts),
 		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)), nil
 }
+
+// localScript renders an authored script for a LOCAL pane: this machine's
+// enabled agents, and the delivery that carries a tool-surface argument
+// (agents.go). The embedded constants are the same rendering for a caller that
+// named no agents, so the two spellings cannot disagree about what a pane is.
+func localScript(raw string, opts LaunchOptions) string {
+	if len(opts.Agents) == 0 {
+		return rawScript(raw)
+	}
+	return renderScript(raw, opts.Agents, DeliveryLocal)
+}
+
+// rawScript is the embedded script as this build ships it: rendered for a
+// local pane from the set this BUILD carries.
+func rawScript(raw string) string { return renderScript(raw, shippedAgentNames(), DeliveryLocal) }
 
 // LocalShellKind classifies a login shell PATH into the local tier that starts
 // it. It is the Go-side mirror of the remote dispatcher's case arms
@@ -115,7 +130,7 @@ func LocalEnhancedLaunchInMemory(shellPath string, kind ShellKind, opts LaunchOp
 		// it would be an assignment nothing reads.
 		script := launcherEnvBlock(opts) + "\n" +
 			capabilityLiteral(zshUnsetExport, opts.Capability, opts.Recovery) + "\n" +
-			zshScript + "\n"
+			localScript(zshScriptRaw, opts) + "\n"
 		return pipeLaunch(shellPath, []string{"-l", "-i"}, nil, script, []byte(". /dev/fd/3\n"))
 	case ShellUnknown:
 		// The same substitution, in the POSIX spelling. `export -n` is not in

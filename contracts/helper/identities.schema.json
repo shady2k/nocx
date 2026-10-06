@@ -487,6 +487,11 @@
         "state": { "$ref": "#/$defs/intentState" },
         "bytesWritten": { "type": "integer", "minimum": 0 },
         "fenceAfter": { "$ref": "#/$defs/inputFenceValue" },
+        "accessEpoch": {
+          "description": "The epoch in force in this session when the answer was decided (nocx-zg3k3.3.1). It is what makes a refusal actionable: a controller that presented a stale (or no) epoch is told the current one, so the intent that was refused can be presented again and written. Absent only when nothing in the session decided the answer — a refusal reached before the session was consulted (busy, closing) has no epoch to name.",
+          "type": "integer",
+          "minimum": 1
+        },
         "retryAfterMs": {
           "description": "Present only alongside state 'in_progress': how long before asking session.intent-status again is worth it.",
           "type": "integer",

@@ -33,7 +33,7 @@ func publishForCarrier(t *testing.T) (home, root string) {
 	t.Helper()
 	home = t.TempDir()
 	root = filepath.Join(home, dirName)
-	if _, err := NewPublisher(testLogger(), NewOSFS(), root).Publish(launchBundle()); err != nil {
+	if _, err := NewPublisher(testLogger(), NewOSFS(), root).Publish(shippedBundle()); err != nil {
 		t.Fatalf("Go publish for carrier: %v", err)
 	}
 	return home, root
@@ -155,7 +155,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		writeProfileMarker(t, home)
 		// Alter a generation file: the manifest's recorded hash no longer
 		// matches, so the activation proof fails.
-		path := filepath.Join(root, integrationDir, genDir(version), "nocx.bash")
+		path := filepath.Join(root, integrationDir, shippedBundle().generation(), "nocx.bash")
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0) // #nosec G304 — test-owned.
 		if err != nil {
 			t.Fatal(err)
@@ -187,7 +187,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 	t.Run("symlinked-generation-file", func(t *testing.T) {
 		home, root := publishForCarrier(t)
 		writeProfileMarker(t, home)
-		gen := filepath.Join(root, integrationDir, genDir(version))
+		gen := filepath.Join(root, integrationDir, shippedBundle().generation())
 		if err := os.Remove(filepath.Join(gen, "nocx.bash")); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}

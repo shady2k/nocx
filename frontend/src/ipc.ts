@@ -67,6 +67,14 @@ type OpenResult = {
    *  (AD-7). See SessionHandle.awaitsIntegration for what it does and does
    *  not answer. */
   awaitsIntegration?: Open['awaitsIntegration']
+  /** The epoch this pane's intents present (nocx-zg3k3.3.1). It rides this
+   *  ack rather than a notification because a notification would arrive after
+   *  the person's first key, and a renderer cannot type without it — the
+   *  session refuses an intent presented under any other epoch, and one
+   *  presented under none. Absent when the backend could not read one, which
+   *  the wire admits: the handle then presents none and the refusal names the
+   *  epoch in force. See SessionHandle.accessEpoch. */
+  accessEpoch?: Open['accessEpoch']
 }
 
 /**
@@ -78,6 +86,26 @@ type OpenResult = {
  * every misalignment type-check — which is exactly the defect that put
  * onSetupVault into the onAdoptabilityChange slot.
  */
+/** The wire's encoding of one intent payload: base64 of its UTF-8 bytes, the
+ *  shape contracts/session.intent.params.schema.json declares. It lives here,
+ *  beside the handle that owns every other wire detail of an intent, so no
+ *  surface has to know it. */
+function intentPayload(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/** The kinds of input a person produces, as the wire spells them
+ *  (contracts/session.intent.params.schema.json's `kind`). It is the whole of
+ *  sessionruntime's intent vocabulary and not the printable subset of it: a
+ *  click and a focus change are input too, and this renderer is the only
+ *  source of them (nocx-zg3k3.3.1, design §6.1). What the payload looks like
+ *  follows from the kind — a key name with modifiers, committed text, a paste
+ *  body, a mouse event in cells, or "in"/"out". */
+export type SessionIntentKind = 'key' | 'text' | 'paste' | 'mouse' | 'focus'
+
 export interface OpenAnchor {
   /**
    * The pane this session is the pipe of: the renderer-minted UUIDv7 the
@@ -477,6 +505,21 @@ export class SessionHandle {
      *  direction regardless, since a false default can only ever show a
      *  terminal a fact later says to hide, never the other way round. */
     readonly awaitsIntegration: boolean = false,
+    /** The epoch this pane's intents present (nocx-zg3k3.3.1), or null when
+     *  the backend could not read one.
+     *
+     *  THE HANDLE OWNS IT, and that is the point: the epoch belongs to the
+     *  session the helper holds, not to the surface that draws the pane, and a
+     *  renderer that had to carry it would be holding a second copy of a fact
+     *  it cannot see. It is seated here from the ack that created or claimed
+     *  the session, and re-seated by every answer that names one — which is
+     *  how a revocation heals: the refusal says what to present next, and the
+     *  intent it refused is presented again (intent() below).
+     *
+     *  Null is a state the wire admits rather than a default to invent: an
+     *  open whose helper could not answer carries no epoch, the first intent
+     *  presents none, and the refusal names the one in force. */
+    public accessEpoch: number | null = null,
   ) {}
 
   send(data: string): void {
@@ -564,14 +607,65 @@ export class SessionHandle {
     return this.client.historyPage(this.sessionId, before, limit)
   }
 
-  /** Sends structured input to this pane's helper. The helper owns terminal
-   *  mode interpretation and refuses an obsolete access epoch before writing. */
-  intent(
-    accessEpoch: number,
-    kind: 'key' | 'text' | 'paste',
+  /** Sends structured input to this pane's helper: what the person did, never
+   *  the bytes it means. The helper owns terminal mode interpretation, and it
+   *  refuses an intent presented under an obsolete access epoch before writing
+   *  anything.
+   *
+   *  A REFUSAL IS RE-PRESENTED ONCE, and only one that wrote nothing
+   *  (nocx-zg3k3.3.1). A revocation lands between two keystrokes: the epoch
+   *  this handle holds becomes stale, the session refuses the intent with
+   *  `access_revoked` and zero bytes, and the answer names the epoch in force.
+   *  Re-seating the copy and sending the SAME intent again is what turns that
+   *  from a keystroke lost forever into a round trip — and it is safe for
+   *  exactly the reason the refusal is: nothing was written, so the second
+   *  attempt is the first write. A partial write (bytesWritten > 0) is never
+   *  re-presented, because that one did reach the program. */
+  intent(kind: SessionIntentKind, payload: string): Promise<SessionIntentResult> {
+    return this._intent(kind, payload, true)
+  }
+
+  /** The wire's own encoding of one intent payload, in the one place that
+   *  decides it.
+   *
+   *  THE SCHEMA CARRIES BYTES AND THIS API CARRIES WHAT THE PERSON DID.
+   *  contracts/session.intent.params.schema.json declares `payload` as base64
+   *  (`contentEncoding`), because the intent's argument is bytes on the Go side
+   *  — a key name, committed text, a paste body — and a renderer that sent the
+   *  text raw would be sending a field the transport cannot decode. Measured:
+   *  it cost the whole RAW-mode path, silently — the intent never reached the
+   *  session, no refusal came back, and the shell's `read` waited forever,
+   *  while every unit test passed because they assert the INTENT and not the
+   *  frame it rides in (nocx-zg3k3.3.1).
+   *
+   *  UTF-8 and not `btoa(payload)`: an IME commit is what this carries most
+   *  often, and btoa throws on anything outside Latin-1. */
+
+  private async _intent(
+    kind: SessionIntentKind,
     payload: string,
+    mayRepresent: boolean,
   ): Promise<SessionIntentResult> {
-    return this.client.sessionIntent(this.sessionId, accessEpoch, kind, payload)
+    const presented = this.accessEpoch
+    const result = await this.client.sessionIntent(
+      this.sessionId,
+      presented,
+      kind,
+      intentPayload(payload),
+    )
+    if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
+      this.accessEpoch = result.accessEpoch
+    }
+    if (
+      mayRepresent &&
+      result.state === 'refused' &&
+      result.refusal?.cause === 'access_revoked' &&
+      result.bytesWritten === 0 &&
+      this.accessEpoch !== presented
+    ) {
+      return this._intent(kind, payload, false)
+    }
+    return result
   }
 
   /** Registers a callback for one live-history page's rows: the parsed
@@ -1136,6 +1230,7 @@ export class WSClient {
       result?.workspaceId ?? '',
       null,
       result?.awaitsIntegration ?? false,
+      result?.accessEpoch ?? null,
     )
   }
 
@@ -1390,6 +1485,7 @@ export class WSClient {
                 size: recording.size,
               },
               result.awaitsIntegration,
+              result.accessEpoch ?? null,
             )
           })
           .catch((err) => {
@@ -1512,26 +1608,30 @@ export class WSClient {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
   }
 
-  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
-   *  answer's facts ride the result; the rows ride the screen plane keyed
-   *  by the result's pageId — one socket, one FIFO, so a caller reading in
-   *  order finds the rows already queued when the promise resolves. */
   /** Sends a control-plane session intent for the pane's renderer. Payload is
    *  the schema's base64 string; PTY bytes stay on the separate data plane. */
   sessionIntent(
     sessionId: string,
-    accessEpoch: number,
-    kind: 'key' | 'text' | 'paste',
+    accessEpoch: number | null,
+    kind: SessionIntentKind,
     payload: string,
   ): Promise<SessionIntentResult> {
+    // The epoch is omitted rather than defaulted when the caller has none:
+    // the session refuses an intent presented under a number nobody observed,
+    // and it answers with the epoch in force, so the absence is a question
+    // rather than a claim (contracts/session.intent.params.schema.json).
     return this.dispatcher.call<SessionIntentResult>('session.intent', {
       sessionId,
-      accessEpoch,
       kind,
       payload,
+      ...(accessEpoch !== null && accessEpoch > 0 ? { accessEpoch } : {}),
     })
   }
 
+  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
+   *  answer's facts ride the result; the rows ride the screen plane keyed
+   *  by the result's pageId — one socket, one FIFO, so a caller reading in
+   *  order finds the rows already queued when the promise resolves. */
   historyPage(
     sessionId: string,
     before: number | null,

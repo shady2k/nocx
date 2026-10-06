@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import { SessionHandle, WSClient } from './ipc'
+import { SessionHandle, WSClient, type SessionIntentKind } from './ipc'
 import {
   FRAME_HEADER_SIZE,
   FRAME_VERSION,
@@ -23,6 +23,16 @@ const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionE
 // reported, and with no resize in between that is still the opening one.
 const OPEN_COLS = 80
 const OPEN_ROWS = 24
+
+/** Let the promise chain that answers one intent reach its next step: the
+ *  handle's own re-seating and re-presentation happen in microtasks after the
+ *  socket delivered the answer, and a test that asserted the socket without
+ *  flushing them would be reading the wire before the client wrote to it. */
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
 
 function socket(): MockWebSocket {
   const ws = MockWebSocket.last
@@ -46,7 +56,14 @@ async function connectedSession(): Promise<{
 
   const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
   const openID = socket().requests()[0].id
-  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID, ...OPEN_IDENTITY } })
+  // accessEpoch is the epoch the open ack seats on the handle: the number
+  // every intent from this pane presents, read by the backend from the helper
+  // that holds the pane (nocx-zg3k3.3.1).
+  socket().deliverText({
+    jsonrpc: '2.0',
+    id: openID,
+    result: { sessionId: SID, ...OPEN_IDENTITY, accessEpoch: 3 },
+  })
   const session = await opening
 
   return { client, session, ws: socket() }
@@ -99,28 +116,217 @@ afterEach(() => {
 })
 
 describe('session.intent', () => {
-  it('sends structured input over the control plane and returns its typed outcome', async () => {
+  it('presents the epoch the open ack seated and returns its typed outcome', async () => {
     const { session, ws } = await connectedSession()
-    const pending = session.intent(4, 'key', btoa('Enter'))
+    const pending = session.intent('key', 'Enter')
     const request = ws.requests().find((candidate) => candidate.method === 'session.intent')
 
     expect(request).toBeDefined()
     expect(request?.params).toEqual({
       sessionId: SID,
-      accessEpoch: 4,
+      accessEpoch: 3,
       kind: 'key',
       payload: btoa('Enter'),
     })
     ws.deliverText({
       jsonrpc: '2.0',
       id: request!.id,
-      result: { state: 'executed', bytesWritten: 1, fenceAfter: 7 },
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 7, accessEpoch: 3 },
     })
     await expect(pending).resolves.toEqual({
       state: 'executed',
       bytesWritten: 1,
       fenceAfter: 7,
+      accessEpoch: 3,
     })
+  })
+
+  // A revocation lands between two keystrokes: the epoch the handle holds goes
+  // stale, the session refuses with access_revoked and writes NOTHING, and the
+  // answer names the epoch in force. The intent is presented again on the same
+  // socket with that epoch — once — so the keystroke is a round trip rather
+  // than a keystroke lost (nocx-zg3k3.3.1).
+  it('re-presents a refusal that wrote nothing, with the epoch the refusal named', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('key', 'Enter')
+
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    expect(first.params).toEqual({
+      sessionId: SID,
+      accessEpoch: 3,
+      kind: 'key',
+      payload: btoa('Enter'),
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 4,
+        accessEpoch: 9,
+        refusal: { cause: 'access_revoked' },
+      },
+    })
+
+    await flushMicrotasks()
+    const resent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
+    expect(resent).toHaveLength(2)
+    expect(resent[1].params).toEqual({
+      sessionId: SID,
+      accessEpoch: 9,
+      kind: 'key',
+      payload: btoa('Enter'),
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: resent[1].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 5, accessEpoch: 9 },
+    })
+    await expect(pending).resolves.toEqual({
+      state: 'executed',
+      bytesWritten: 1,
+      fenceAfter: 5,
+      accessEpoch: 9,
+    })
+    expect(session.accessEpoch).toBe(9)
+  })
+
+  // Once, and only once: an answer that names the epoch already presented is
+  // not a re-seating, so the refusal stands rather than looping. A loop here
+  // would be a livelock around a control-plane call on every keystroke.
+  it('does not re-present a refusal that named the epoch it was given', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('key', 'Enter')
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 4,
+        accessEpoch: 3,
+        refusal: { cause: 'access_revoked' },
+      },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'refused' })
+    expect(ws.requests().filter((candidate) => candidate.method === 'session.intent')).toHaveLength(
+      1,
+    )
+  })
+
+  // A PARTIAL WRITE IS NEVER RE-PRESENTED. bytesWritten > 0 means the program
+  // received bytes, and sending them again would type the person's input twice.
+  it('never re-presents an intent that wrote something', async () => {
+    const { session, ws } = await connectedSession()
+    const pending = session.intent('text', 'hi')
+    const first = ws.requests().filter((candidate) => candidate.method === 'session.intent')[0]
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: first.id,
+      result: {
+        state: 'failed_partial',
+        bytesWritten: 1,
+        fenceAfter: 4,
+        accessEpoch: 9,
+        refusal: { cause: 'access_revoked' },
+      },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'failed_partial', bytesWritten: 1 })
+    expect(ws.requests().filter((candidate) => candidate.method === 'session.intent')).toHaveLength(
+      1,
+    )
+  })
+
+  // A handle that holds no epoch presents none: the params carry no
+  // accessEpoch at all, rather than a number nobody observed. The refusal
+  // names the one in force, and the re-presentation above carries it.
+  it('presents no epoch when the open ack carried none', async () => {
+    const client = new WSClient(mockDispatcher())
+    client.start()
+    await Promise.resolve()
+    socket().serverAccepts()
+
+    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
+    const openID = socket().requests()[0].id
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openID,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
+    const session = await opening
+
+    const pending = session.intent('text', 'hi')
+    const request = socket()
+      .requests()
+      .filter((candidate) => candidate.method === 'session.intent')[0]
+    expect(request.params).toEqual({ sessionId: SID, kind: 'text', payload: btoa('hi') })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      result: {
+        state: 'refused',
+        bytesWritten: 0,
+        fenceAfter: 0,
+        accessEpoch: 1,
+        refusal: { cause: 'access_revoked' },
+      },
+    })
+    await flushMicrotasks()
+    const resent = socket()
+      .requests()
+      .filter((candidate) => candidate.method === 'session.intent')
+    expect(resent).toHaveLength(2)
+    expect(resent[1].params).toEqual({
+      sessionId: SID,
+      accessEpoch: 1,
+      kind: 'text',
+      payload: btoa('hi'),
+    })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: resent[1].id,
+      result: { state: 'executed', bytesWritten: 1, fenceAfter: 1, accessEpoch: 1 },
+    })
+    await expect(pending).resolves.toMatchObject({ state: 'executed' })
+  })
+
+  // The kinds are the whole of the runtime's intent vocabulary, and a renderer
+  // sends all five: a click and a focus change are input a person produced and
+  // nobody else can report them (nocx-zg3k3.3.1). A client that could only
+  // spell the printable three would make a click unrepresentable here, and the
+  // helper would never be asked what the program's mouse mode says.
+  it('carries every kind of input, not only the printable ones', async () => {
+    const { session, ws } = await connectedSession()
+    const kinds: SessionIntentKind[] = ['key', 'text', 'paste', 'mouse', 'focus']
+    // The payloads as the CALLER spells them — what the person did. The wire's
+    // base64 is the handle's business, asserted below.
+    const payloads = ['Ctrl+Left', 'hi', 'hi\nthere', 'press left 2 3', 'in']
+    const onTheWire = payloads.map((payload) => btoa(payload))
+
+    for (let i = 0; i < kinds.length; i++) {
+      const pending = session.intent(kinds[i], payloads[i])
+      const sent = ws.requests().filter((candidate) => candidate.method === 'session.intent')
+      const request = sent[sent.length - 1]
+      expect(request?.params).toEqual({
+        sessionId: SID,
+        accessEpoch: 3,
+        kind: kinds[i],
+        payload: onTheWire[i],
+      })
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: { state: 'executed', bytesWritten: 1, fenceAfter: i, accessEpoch: 3 },
+      })
+      await expect(pending).resolves.toEqual({
+        state: 'executed',
+        bytesWritten: 1,
+        fenceAfter: i,
+        accessEpoch: 3,
+      })
+    }
   })
 })
 

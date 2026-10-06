@@ -63,7 +63,7 @@ func New(configDir string, shipped []agentdriver.Document) (*Store, error) {
 	}
 	for _, doc := range shipped {
 		agent := doc.Agent
-		if !agentName.MatchString(agent) {
+		if !storage.ValidDocumentName(agent) {
 			return nil, fmt.Errorf("agentrule: %q is not a name this store can keep a document under", agent)
 		}
 		if _, dup := s.states[agent]; dup {

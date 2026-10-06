@@ -27,6 +27,7 @@ import type { ShellComplete } from './generated/shell.complete'
 import type { CommandSnapshotStore } from './command-snapshot'
 import type { ShellCommandNames } from './generated/shell.commandNames'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
+import { IntentInput, type SessionIntent } from './intent-input'
 import { AgentInputTarget } from './agent-ask'
 import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
@@ -324,7 +325,13 @@ const SETTLE_BACKSTOP_MS = 3000
  * (nocx-xn63t.6.12) — and a literal '\x03' at that decision point would be
  * the second spelling of the same key.
  */
-const INTERRUPT = '\x03'
+/** The interrupt, as the person presses it (nocx-zg3k3.3.1): the payload the
+ *  input element produces for Ctrl-C, matching the runtime's own spelling of
+ *  that key (internal/sessionruntime/intent.go's keyNames, "ctrl" prefix).
+ *  What the key then means — SIGINT at a shell, a byte for a program in raw
+ *  mode — is the runtime's decision, and this is only the identity of the key
+ *  the held window watches for. */
+const INTERRUPT_KEY = 'Ctrl+c'
 
 /**
  * Whether a settle call failed because the backend no longer holds the
@@ -517,16 +524,19 @@ interface HeldRange {
 }
 
 /** The window between a person's submit and the command's own bytes reaching
- *  the pty, as the grid's keystrokes see it: the keys typed into it, and
- *  whether a Ctrl-C cancelled the submission they were waiting for.
+ *  the pty, as the pane's INPUT sees it: the intents produced in it, and
+ *  whether a Ctrl-C cancelled the submission they were waiting for. INTENTS
+ *  rather than bytes since nocx-zg3k3.3.1 — what the person did is what is
+ *  held and what is delivered, and nothing here decides what a key is worth.
  *
  *  Two facts, one object, because they are one state: a cancelled window
  *  holds no keys — the interrupt discards the line it interrupted, and every
  *  key in here belongs to that line. Read as one take (takeHeldWindow) for
  *  the same reason. */
 interface HeldWindow {
-  /** The keys, in the order they were typed. A cancelled window holds none. */
-  keys: string[]
+  /** The intents, in the order they were produced. A cancelled window holds
+   *  none. */
+  keys: SessionIntent[]
   /** True once a Ctrl-C arrived in the window: the submission is not to be
    *  written, and nothing held for it is delivered. */
   cancelled: boolean
@@ -803,6 +813,11 @@ export class TerminalContent extends BasePaneContent {
   // have. Everything else here still uses it through the interface's methods.
   private renderer: XtermRenderer | null = null
   private session: SessionHandle | null = null
+  /** Control-plane calls carry user intent in order. Adjacent committed-text
+   *  events coalesce while queued, so fast typing does not flood the bounded
+   *  executor; intervening keys and other intent kinds remain ordering fences. */
+  private _intentQueue: Array<{ session: SessionHandle; intent: SessionIntent }> = []
+  private _intentSending = false
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -2562,6 +2577,10 @@ export class TerminalContent extends BasePaneContent {
         // fit the stored rows warm — so a cluster new to the session is
         // measured before it paints, not left at the default spacing.
         warm: (candidates) => this._cellFit?.warm(candidates),
+        // The input element rides the caret the painter draws (nocx-zg3k3.3.1):
+        // one owner of "where is the caret", two readers. Read lazily, because
+        // the painter is built before the element is.
+        onCaretPlaced: (at) => this._intentInput?.placeAt(at.left, at.top, at.height),
       })
 
       // ── THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4) ───────────
@@ -2607,6 +2626,29 @@ export class TerminalContent extends BasePaneContent {
         this._readyResolve(false)
         return
       }
+
+      // ── THE PANE'S INPUT ELEMENT (nocx-zg3k3.3.1) ───────────────────────
+      // Appended AFTER the renderer's root, so it is the topmost element and
+      // the pointer and the keyboard land on it: xterm keeps no path from a
+      // person's key any more. What a person SEES is the painter's cells; this
+      // element is invisible, and it exists because an IME draws its candidate
+      // window against a focused editable element's position — so it is placed
+      // where the caret is (onCaretPlaced above), not at the page's fallback
+      // corner.
+      const intentInput = new IntentInput({
+        emit: (intent) => this.onSessionIntent(intent),
+        // THE CHORD IS THE PANE'S, not the program's: consumed before it
+        // becomes an intent, and handed to the ONE opener every keyboard
+        // boundary answers through (design §10.1, AD-8) — the same
+        // handler the editor arbiter calls and the xterm boundary called.
+        consume: (e) => {
+          if (!isSnippetChord(e)) return false
+          this.handleSnippetChord()
+          return true
+        },
+      })
+      this.scrollback.mountTarget.append(intentInput.element)
+      this._intentInput = intentInput
 
       log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
       this.cols = renderer.cols
@@ -2675,8 +2717,7 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (text: string) => renderer.paste(text),
-        (data: string) => this.session!.send(data),
+        (intent) => this.sendIntent(intent),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
@@ -3049,7 +3090,7 @@ export class TerminalContent extends BasePaneContent {
           // the shell target owned both behaviours directly.
           submitEmpty: () => {
             if (this.inputTargets?.active().routesToShell === false) return
-            this.session?.send('\r')
+            this.sendIntent({ kind: 'key', payload: 'enter' })
           },
           cancel: () => {
             const target = this.inputTargets?.active()
@@ -3064,13 +3105,13 @@ export class TerminalContent extends BasePaneContent {
               }
               return true
             }
-            // Ctrl-C at a prompt is a keystroke to the SHELL — its line
-            // editor discards the line and prints a fresh prompt — and the
-            // byte is what delivers that. Over a RUNNING command the same
-            // key is an interrupt addressed to the execution, which is the
-            // active block's business and goes through the one owner of it.
+            // Ctrl-C at a prompt is a key intent to the SHELL — its line
+            // editor discards the line and prints a fresh prompt. The runtime
+            // owns its encoding. Over a RUNNING command the same key is an
+            // interrupt addressed to the execution, which is the active
+            // block's business and goes through the one owner of it.
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
-            else this.session?.send('\x03')
+            else this.sendIntent({ kind: 'key', payload: 'Ctrl+c' })
             return true
           },
           // The editor's own overlay/IME arbiters run first. An unclaimed
@@ -4111,6 +4152,28 @@ export class TerminalContent extends BasePaneContent {
           e.preventDefault()
           void doPaste()
         }
+        // CLICKING THE LIVE GRID TAKES THE KEYBOARD TO THE INTENT ELEMENT
+        // (nocx-zg3k3.3.1). xterm's root is what selects, drags and reports the
+        // mouse, and it is unchanged — but the keyboard must be the element's,
+        // or the keys would still be read and encoded by xterm's own handler.
+        // This listener is on the pane, an ANCESTOR of xterm's root, so a
+        // bubbling mousedown reaches it AFTER xterm has focused itself: the
+        // last focus wins, and this is it.
+        //
+        // ONLY FOR THE LIVE GRID. A click on a frozen block belongs to the
+        // scrollback (selection, and the editor's paste rescue, which stands
+        // down when the focus is already inside the pane) — taking the keyboard
+        // there would put the caret in the grid and swallow the rescue's own
+        // handoff, which is what the block-paste test measures.
+        const live = this.scrollback?.mountTarget ?? null
+        if (
+          e.button === 0 &&
+          live !== null &&
+          e.target instanceof Node &&
+          live.contains(e.target)
+        ) {
+          this.takeKeyboardToGrid()
+        }
       })
 
       renderer.onResize((cols: number, rows: number) => {
@@ -4881,9 +4944,13 @@ export class TerminalContent extends BasePaneContent {
       this.scrollback?.blockManager.noteCommandOutput()
     })
 
-    // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
-    // is enabled (setReadOnly(false)). The editor captures keys while it is
-    // visible and the terminal is read-only, so these only arrive in RAW mode.
+    // THE HELD WINDOW, and the two moments the pane's own input is looked at:
+    // the INTENT handler below (the person's keyboard, an IME commit, a focus
+    // change — the element owns all of it since nocx-zg3k3.3.1) and the byte
+    // handler further down, which is what is left of the client's own writes.
+    //
+    // The editor captures keys while it is visible and the element is not
+    // focused, so these only arrive in RAW mode.
     //
     // Held, never dropped, while a submitted command is still on its way to
     // the pty: the keyboard changed hands at the commit and the command
@@ -4907,32 +4974,24 @@ export class TerminalContent extends BasePaneContent {
     // immediately behind the command is precisely that ordering, so the
     // interrupt is not held and not flushed: it is the person's own "this
     // line is not to run".
+    // THE PERSON'S KEYBOARD, AS INTENT (nocx-zg3k3.3.1). The element above owns
+    // every key, IME commit and focus change, and what reaches here is what the
+    // person DID: a physical key with its modifiers, or the text the layout
+    // produced. Nothing here encodes a byte, and nothing here consults a mode —
+    // the runtime owns both (ADR-0065/0066).
+    //
+    // WHAT IS LEFT ON onData BELOW IS NOT THE PERSON'S KEYBOARD. xterm still
+    // receives this session's bytes (renderer.write), answers program queries
+    // and handles explicit client writes such as the grid's context-menu paste;
+    // those arrive here as bytes and go out as bytes. Shell submission no
+    // longer uses that path: its paste and Enter are session intents, serialized
+    // by the queue above. The remaining xterm writes are a separate cutover.
     renderer.onData((data: string) => {
+      // The integration gate stays where it was (nocx-ui8q6.1): the bytes that
+      // still travel this way are the client's own writes, and a write to a
+      // shell that has not proved itself has nowhere good to land either — the
+      // owner's own words are in the intent handler above.
       if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
-      const held = this._heldRaw
-      if (held !== null && !held.cancelled) {
-        const at = data.indexOf(INTERRUPT)
-        if (at < 0) {
-          held.keys.push(data)
-          return
-        }
-        // The interrupt discards the line it interrupts, which is every key
-        // held in this window: they are the pending line, and a terminal
-        // with ISIG set flushes the input it has not read yet.
-        held.keys = []
-        held.cancelled = true
-        // What followed the interrupt in the same read does NOT belong to
-        // the line it discarded — it was typed at the fresh prompt that
-        // discard leaves — so it is delivered rather than swallowed with
-        // what came before it.
-        const after = data.slice(at + 1)
-        if (after !== '') this.session?.send(after)
-        return
-      }
-      // No window, or one already cancelled: an ordinary keystroke, and the
-      // ordinary route. A second Ctrl-C lands here too, which is right — by
-      // now there is no pending line to discard, so it is the shell's own
-      // interrupt exactly as it is outside the window.
       this.session?.send(data)
     })
     // The pane's classification, for an enrolled agent pane. Registered
@@ -5617,7 +5676,10 @@ export class TerminalContent extends BasePaneContent {
       this.editor.focus()
       return
     }
-    this.renderer?.focus()
+    // Through the ONE method that decides who owns input, never a second
+    // renderer.focus() call: the element and xterm are two different owners of
+    // the keyboard and only this method may choose between them (AD-8).
+    this.takeKeyboardToGrid()
   }
 
   /**
@@ -7788,7 +7850,11 @@ export class TerminalContent extends BasePaneContent {
    *  rule about who owns input (AD-8). */
   private takeKeyboardToGrid(): void {
     this.renderer?.setReadOnly(false)
-    this.renderer?.focus()
+    // THE ELEMENT TAKES THE KEYBOARD, not xterm (nocx-zg3k3.3.1): it is what
+    // reads the person now, and it is where an IME's candidate window is
+    // anchored. xterm's own textarea is still mounted and still holds no
+    // keystroke path.
+    this._intentInput?.focus()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before
@@ -7808,11 +7874,95 @@ export class TerminalContent extends BasePaneContent {
    *
    *  Since nocx-xn63t.6.12 it also carries whether a Ctrl-C arrived in the
    *  window, which cancels the submission rather than flushing the interrupt
-   *  behind it (see HeldWindow, and the onData handler that arms this). */
+   *  behind it (see HeldWindow, and onSessionIntent, which arms this). */
   private _heldRaw: HeldWindow | null = null
 
+  /** The pane's input element (nocx-zg3k3.3.1): a real focusable textarea that
+   *  the keyboard, the IME and the focus are read from, and whose position
+   *  follows the caret the painter draws. Null until mount, and again after
+   *  dispose — the pane outlives no element. */
+  private _intentInput: IntentInput | null = null
+
+  /** One thing a person did, on its way to the session.
+   *
+   *  THE HELD WINDOW IS THE SAME WINDOW IT ALWAYS WAS (see _heldRaw): between a
+   *  submit and the command's own bytes reaching the pty, what follows the
+   *  submit belongs AFTER it, and a Ctrl-C in that window cancels it. It is
+   *  expressed in INTENTS now, so the interrupt is the key the person pressed
+   *  rather than a byte found inside a string, and what is held is delivered as
+   *  intent instead of raw bytes (nocx-zg3k3.3.1).
+   *
+   *  The old byte handler also delivered what FOLLOWED an interrupt inside the
+   *  same read; there is no "same read" here — every intent is one act, so
+   *  whatever the person does next arrives on its own and is delivered on its
+   *  own. That was the point of the tail, and it is preserved by construction. */
+  private onSessionIntent(intent: SessionIntent): void {
+    if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
+    const held = this._heldRaw
+    if (held !== null && !held.cancelled) {
+      if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
+        // The interrupt discards the line it interrupts, which is every intent
+        // held in this window: they are the pending line, and a terminal with
+        // ISIG set flushes the input it has not read yet. The interrupt itself
+        // is NOT sent — the command is not to run, so there is nothing at the
+        // pty for it to mean (nocx-xn63t.6.12), and the shell's own Ctrl-C
+        // arrives as a fresh intent once this window is gone.
+        held.keys = []
+        held.cancelled = true
+        return
+      }
+      held.keys.push(intent)
+      return
+    }
+    this.sendIntent(intent)
+  }
+
+  /** Hand one intent to the session, which decides what it means.
+   *
+   *  The handle owns the access epoch and re-presents a refusal that wrote
+   *  nothing once (ipc.ts), so an intent that raced a revocation costs a round
+   *  trip rather than a keystroke. A rejection here is the transport itself
+   *  failing — a closed socket, a refused call — and it is logged rather than
+   *  swallowed: a keystroke that reached nobody is a fact the person is owed,
+   *  and printing it to a console would be the silent version of it. */
+  private sendIntent(intent: SessionIntent): void {
+    const session = this.session
+    if (!session) return
+    const tail = this._intentQueue[this._intentQueue.length - 1]
+    if (intent.kind === 'text' && tail?.session === session && tail.intent.kind === 'text') {
+      this._intentQueue[this._intentQueue.length - 1] = {
+        session,
+        intent: { kind: 'text', payload: tail.intent.payload + intent.payload },
+      }
+    } else {
+      this._intentQueue.push({ session, intent })
+    }
+    void this.drainIntentQueue()
+  }
+
+  private async drainIntentQueue(): Promise<void> {
+    if (this._intentSending) return
+    this._intentSending = true
+    try {
+      while (this._intentQueue.length > 0) {
+        const { session, intent } = this._intentQueue.shift()!
+        try {
+          await session.intent(intent.kind, intent.payload)
+        } catch (err: unknown) {
+          log.warn('nocx: session intent did not reach the session', {
+            kind: intent.kind,
+            error: String(err),
+          })
+        }
+      }
+    } finally {
+      this._intentSending = false
+      if (this._intentQueue.length > 0) void this.drainIntentQueue()
+    }
+  }
+
   /** Start holding, and hand back the window being held in: from here until
-   *  takeHeldWindow, the grid's bytes queue.
+   *  takeHeldWindow, the pane's input queue.
    *
    *  A second submit inside the window JOINS the existing one — the order is
    *  the invariant, and re-arming would publish the earlier queue twice — so
@@ -8059,6 +8209,11 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    // The input element goes with the pane (nocx-zg3k3.3.1): it holds the
+    // keyboard and a live listener set, and a disposed pane that kept either
+    // would take keys for a session it no longer has.
+    this._intentInput?.destroy()
+    this._intentInput = null
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
@@ -8373,12 +8528,11 @@ export class TerminalContent extends BasePaneContent {
       if (beforeWrite && !beforeWrite()) return
       // Detach the queue BEFORE the command goes out, flush it after.
       //
-      // Both halves matter and the order is the whole point. The command is
-      // delivered through renderer.paste, and a paste is itself an onData —
-      // so a queue still armed here would swallow the command and put it
-      // BEHIND the keys that were waiting for it, which is the same
-      // reordering with the operands swapped (measured: a bare `\r`
-      // reaching the pty ahead of its own command line).
+      // Both halves matter and the order is the whole point. Close the held
+      // window before submitting so the command's paste and Enter enter the
+      // session-intent queue first; then replay keys captured during the
+      // attempt RPC. The serial queue keeps those later intents behind the
+      // command, rather than allowing Enter to bypass its paste.
       const taken = this.takeHeldWindow()
       try {
         // A Ctrl-C that arrived while this submission was in flight
@@ -8413,7 +8567,7 @@ export class TerminalContent extends BasePaneContent {
         // A cancelled window holds no keys — the interrupt discarded them —
         // so this is empty on the withdrawal path by construction, never by
         // a second rule about which keys a cancelled submission may carry.
-        for (const data of taken?.keys ?? []) this.session?.send(data)
+        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
       }
     }
     if (recordLine === '') {

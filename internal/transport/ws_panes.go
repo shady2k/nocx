@@ -83,8 +83,17 @@ func (s *WSServer) unwatchPane(sid session.ID) {
 // paneIntentSource forwards ordinary renderer input to the helper that owns
 // the pane. It extends the same helper session.intent operation used by
 // target-bearing callers; it does not carry PTY bytes on the WebSocket.
+//
+// AccessEpoch is the other half of the same question and rides the same seam
+// rather than a second lookup (nocx-zg3k3.3.1): a controller must present an
+// epoch with every intent, so the transport has to be able to tell it which
+// one — and "which helper holds this pane" is the lookup both methods need, so
+// a second answer to it would be a second owner of one fact (AD-8).
 type paneIntentSource interface {
 	Intent(ctx context.Context, sessionID string, p proto.IntentParams) (proto.IntentResult, error)
+	// AccessEpoch answers the epoch in force for a session's pane, or an
+	// error when no helper holds it — the same cases Intent itself fails in.
+	AccessEpoch(ctx context.Context, sessionID string) (uint64, error)
 }
 
 // WithPaneIntentSource attaches the helper route used by session.intent.

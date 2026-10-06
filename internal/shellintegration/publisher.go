@@ -2,6 +2,8 @@ package shellintegration
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -230,9 +232,17 @@ func publishFSOpBudget(f int) int {
 // absent and replaced when what is installed is not the bytes we ship — before
 // the version check, which may skip everything else (ensureLaunch).
 type Bundle struct {
-	Protocol int          // manifest contract version; must equal ProtocolVersion
-	Version  string       // script version; safe name; names the generation dir v<version>
-	Files    []BundleFile // fixed base filenames; "launch" is the carrier, everything else is generation data
+	Protocol int    // manifest contract version; must equal ProtocolVersion
+	Version  string // script version; safe name; the ORDERING component of the generation
+	// Agents is the enabled agent set the scripts were GENERATED from, in the
+	// canonical order agentNames produces — and it is part of the bundle's
+	// IDENTITY, not decoration: the wrapper block in the scripts is generated
+	// from it, so two bundles of one build that name different agents are
+	// different generations (generation below). It carries NAMES and nothing
+	// else; a person's arguments and environment lines are read where nocx
+	// runs and never reach a host (agents.go).
+	Agents []string
+	Files  []BundleFile // fixed base filenames; "launch" is the carrier, everything else is generation data
 }
 
 // BundleFile is one file in a Bundle.
@@ -702,7 +712,7 @@ func (p *Publisher) publish(bundle Bundle) (res PublishResult, err error) {
 		return PublishResult{}, merr
 	}
 
-	res = PublishResult{Published: true, Generation: genDir(bundle.Version), Version: bundle.Version}
+	res = PublishResult{Published: true, Generation: bundle.generation(), Version: bundle.Version}
 	p.cleanupOrphans(res.Generation)
 	p.log.Info("shellintegration: published", "version", bundle.Version, "generation", res.Generation)
 	return res, nil
@@ -1245,12 +1255,17 @@ func (p *Publisher) checkInstalled(bundle Bundle) (PublishResult, bool, error) {
 	if m.Protocol > bundle.Protocol {
 		return PublishResult{Generation: m.Generation, Version: m.Version, Reason: "incompatible-protocol"}, true, nil
 	}
-	if m.Protocol == bundle.Protocol && compareVersions(m.Version, bundle.Version) >= 0 {
-		reason := "already-installed"
-		if compareVersions(m.Version, bundle.Version) > 0 {
-			reason = "newer-installed"
-		}
-		return PublishResult{Generation: m.Generation, Version: m.Version, Reason: reason}, true, nil
+	// A BUILD THAT IS NEWER WINS, and one that is older never overwrites it:
+	// the ordering rule compareVersions exists for, unchanged.
+	if m.Protocol == bundle.Protocol && compareVersions(m.Version, bundle.Version) > 0 {
+		return PublishResult{Generation: m.Generation, Version: m.Version, Reason: "newer-installed"}, true, nil
+	}
+	// THE SAME BUILD AND THE SAME AGENT SET IS THE SAME BUNDLE. The generation
+	// carries both, so this is an EQUALITY question and not an ordering one —
+	// which is what lets a person's record change the wrapped set without the
+	// publisher reading a digest as a version going backwards.
+	if m.Protocol == bundle.Protocol && m.Generation == bundle.generation() {
+		return PublishResult{Generation: m.Generation, Version: m.Version, Reason: "already-installed"}, true, nil
 	}
 	return PublishResult{}, false, nil
 }
@@ -1459,7 +1474,7 @@ func (p *Publisher) clearStagingSlot() error {
 // name it, or the version check would have skipped us): it is removed first
 // so the rename can succeed.
 func (p *Publisher) commitGeneration(bundle Bundle, nonce string) error {
-	gen := p.join(integrationDir, genDir(bundle.Version))
+	gen := p.join(integrationDir, bundle.generation())
 	info, err := p.fs.Lstat(gen)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -1769,7 +1784,7 @@ func buildManifest(b Bundle) *Manifest {
 	m := &Manifest{
 		Protocol:   b.Protocol,
 		Version:    b.Version,
-		Generation: genDir(b.Version),
+		Generation: b.generation(),
 		Files:      map[string]ManifestFile{},
 	}
 	for _, f := range b.Files {
@@ -1827,10 +1842,70 @@ func validateBundle(b Bundle) error {
 	if gens == 0 {
 		return fmt.Errorf("bundle has no generation files (only the launch carrier)")
 	}
+	// THE AGENT SET IS PART OF WHAT THE SCRIPTS ARE, so a bundle whose list is
+	// not the canonical one is refused: the digest that names its generation is
+	// taken over the canonical form, and a bundle carrying a second spelling of
+	// its own set would claim a generation its scripts were not generated for.
+	if !sameNames(b.Agents, agentNames(b.Agents)) {
+		return fmt.Errorf("bundle's agent set %v is not canonical (sorted, unique, wrappable names): %v", b.Agents, agentNames(b.Agents))
+	}
 	return nil
 }
 
 func genDir(version string) string { return genPrefix + version }
+
+// sameNames compares two name lists exactly, with a nil list and an empty one
+// treated as the same set: a bundle that carries no agents and a bundle whose
+// agent list is empty are the same bundle, and only one of them can be written
+// by hand.
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// generation is the directory THIS bundle is published under: the script
+// version, which is what compareVersions orders and what a downgrade is
+// refused against, plus a digest of the agent set the scripts were generated
+// from.
+//
+// THE DIGEST IS NOT IN Version, DELIBERATELY, and the reason is a trap worth
+// writing down: compareVersions is token-wise and its last rule is that a
+// LEXICALLY smaller token is smaller, so a hex digest placed in the version
+// would make half of all agent-set changes read as "an installed newer
+// generation is here" — the publisher would refuse to publish and the host
+// would keep offering an agent the person had removed. The version therefore
+// keeps meaning "which build's scripts these are", and the set is a second,
+// EQUALITY-compared component of the generation, which is what checkInstalled
+// now asks about.
+// A BUNDLE WITH NO AGENT SET has no set component: its generation is the bare
+// version, which is what a bundle whose scripts wrap nothing is honestly named
+// and what every generation published before the wrappers were generated was
+// called. Every bundle this build PUBLISHES carries at least one name — the
+// record package refuses to ship an empty set at init — so the two spellings
+// cannot collide in the field, and only a bundle built by hand reaches here
+// without a set.
+func (b Bundle) generation() string {
+	if len(b.Agents) == 0 {
+		return genDir(b.Version)
+	}
+	return genDir(b.Version + "-" + b.agentsDigest())
+}
+
+// agentsDigest is a short, stable digest of the enabled agent set. It is taken
+// over the CANONICAL set, so a caller that passed the names in a different
+// order builds the same generation — and short, because it names a directory
+// and is read by a person looking at ~/.nocx.
+func (b Bundle) agentsDigest() string {
+	sum := sha256.Sum256([]byte(strings.Join(agentNames(b.Agents), "\n")))
+	return hex.EncodeToString(sum[:6])
+}
 
 func mustParseMode(s string) os.FileMode {
 	m, err := parseModeStr(s)

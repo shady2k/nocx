@@ -464,6 +464,7 @@ func (m *memStore) mailbox(t *testing.T, box ReaderID) []Message {
 type fakeSpawned struct {
 	live   Liveness
 	wt     Worktree
+	ident  RestartIdentity
 	killed *bool
 	mu     *sync.Mutex
 }
@@ -474,6 +475,12 @@ func (f fakeSpawned) Liveness() Liveness { return f.live }
 // spawner's wt — zero for the tests that are not about worktrees, which is
 // exactly the "created nothing" answer.
 func (f fakeSpawned) WorktreeLocation() Worktree { return f.wt }
+
+// RestartIdentity makes every fakeSpawned a RestartIdentified, so a test can
+// say what a restart would find there. The zero value is the honest answer for
+// the tests that are not about it: a launcher that minted no pane and enrolled
+// no agent.
+func (f fakeSpawned) RestartIdentity() RestartIdentity { return f.ident }
 
 func (f fakeSpawned) Kill(context.Context) error {
 	f.mu.Lock()
@@ -490,6 +497,9 @@ type fakeSpawner struct {
 	live   Liveness
 	// wt is what this spawner's Spawned answers as the checkout it made.
 	wt Worktree
+	// ident is what it answers as the pane, agent and resume identity a
+	// restart would need.
+	ident RestartIdentity
 	// before is called with the request before the fork is reported, so a
 	// test can ask what the record already held at the moment of the fork.
 	before func(SpawnRequest)
@@ -507,7 +517,7 @@ func (f *fakeSpawner) Spawn(_ context.Context, req SpawnRequest) (Spawned, error
 	if f.failOn == n {
 		return nil, fmt.Errorf("spawn: %w", errInjected)
 	}
-	return fakeSpawned{live: f.live, wt: f.wt, killed: &f.killed, mu: &f.mu}, nil
+	return fakeSpawned{live: f.live, wt: f.wt, ident: f.ident, killed: &f.killed, mu: &f.mu}, nil
 }
 
 func (f *fakeSpawner) wasKilled() bool {

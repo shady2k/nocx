@@ -1,0 +1,37 @@
+/* The pane's input element (nocx-zg3k3.3.1, ui/terminal-input-element.ts).
+ *
+ * A REAL, FOCUSABLE TEXTAREA THAT NOBODY SEES. The pane paints cells, so there
+ * is nothing editable under the caret — but an IME places its candidate window
+ * against a focused element's own caret, and with no such element the window
+ * lands at the page's fallback corner instead of under the text being composed.
+ * So the element is a box with no visible presence and a real caret box: the
+ * surface PLACES it (left/top/height, which is placement and not repainting),
+ * and everything about how it looks is here.
+ *
+ * opacity 0 rather than display:none or visibility:hidden, and for the same
+ * reason xterm's own helper textarea uses it: a hidden element has no caret
+ * rect for the IME to measure, while a transparent one lays out normally and
+ * is simply not drawn.
+ */
+.ui-terminal-input {
+  position: absolute;
+  /* One pixel wide on purpose: the caret rect is what the IME measures, and a
+   * box the width of the grid would put the candidate window over the text it
+   * is offering to replace. */
+  width: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: transparent;
+  opacity: 0;
+  /* Pointer-inert: the grid below keeps every click, drag and wheel event it
+   * had (selection, middle-click paste, mouse reporting). This element is
+   * reached by focus() alone — the pane's own click path calls it. */
+  pointer-events: none;
+  z-index: 0;
+}

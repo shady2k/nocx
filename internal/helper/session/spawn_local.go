@@ -228,6 +228,10 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			opts := shellintegration.LaunchOptions{
 				SessionID: req.SessionID,
 				Enhanced:  true,
+				// The enabled agents this pane's shell offers wrappers for
+				// (nocx-t5e7d), from the request: the daemon has no profile to
+				// read, and a list is the fact it needs.
+				Agents: req.Agents,
 				// The REQUEST's endpoint, and nothing else's: this is the
 				// coordinator that opened this pane, which is the only party
 				// that knows which endpoint the pane's tools belong to

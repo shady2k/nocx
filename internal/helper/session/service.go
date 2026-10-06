@@ -882,6 +882,23 @@ func decode(raw json.RawMessage, into any) error {
 // is already one: a repeat that reserved a second window before discovering it
 // was a repeat would refuse itself at the budget on a helper with one session
 // left in it.
+// agentSet turns the wire's set of names into the list the launcher renders
+// wrappers from, in a stable order so two requests that offer the same agents
+// are the same request.
+func agentSet(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for name, offered := range set {
+		if offered {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.SpawnResult, err error) {
 	// THE PANE LAUNCH, SAID OUT LOUD (nocx-n14oo.2). This is where a pane's
 	// shell is actually started, and the three ways it can fail below used to
@@ -969,6 +986,11 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		XPixel:    p.XPixel,
 		YPixel:    p.YPixel,
 		Lifecycle: p.Lifecycle,
+		// The shell's agent wrappers come from the record the CALLER read
+		// (nocx-t5e7d): a fact of the request, like the endpoint below, and
+		// never this daemon's, which has no profile to read. The wire carries
+		// a set and this is where it becomes the list the launcher takes.
+		Agents: agentSet(p.Agents),
 		// The pane's tool endpoint is THIS request's and never this daemon's:
 		// the endpoint socket is keyed by the generation, so several
 		// coordinators ride one daemon (D12) and the caller that opened the

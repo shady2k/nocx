@@ -197,6 +197,48 @@ const rendererOf = (content: TerminalContent): RendererMock => {
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
+
+/** The pane's input element (nocx-zg3k3.3.1): the seam a person's keyboard now
+ *  reaches, where xterm's onData used to be. Private, reached the same way
+ *  editorOf and sessionOf reach theirs. */
+const intentElementOf = (content: TerminalContent): HTMLTextAreaElement => {
+  const withInput = content as unknown as {
+    _intentInput: { element: HTMLTextAreaElement } | null
+  }
+  const element = withInput._intentInput?.element
+  if (!element) throw new Error('the pane has no input element mounted')
+  return element
+}
+
+/** Type into the pane the way a person does: a physical key for a control key
+ *  or a chord, and the committed text the layout produced for a character. The
+ *  old `_fireData` drove xterm's onData with encoded bytes, which is no longer
+ *  the person's path — the bytes on it now are the client's own writes. */
+function typeIntoPane(content: TerminalContent, ...keys: string[]): void {
+  const element = intentElementOf(content)
+  const press = (code: string, key: string, init: KeyboardEventInit = {}): void => {
+    element.dispatchEvent(
+      new KeyboardEvent('keydown', { code, key, bubbles: true, cancelable: true, ...init }),
+    )
+  }
+  for (const sequence of keys) {
+    if (sequence === '\r') {
+      press('Enter', 'Enter')
+      continue
+    }
+    if (sequence === '\x03') {
+      press('KeyC', 'c', { ctrlKey: true })
+      continue
+    }
+    for (const ch of sequence) {
+      press(/[a-z]/i.test(ch) ? `Key${ch.toUpperCase()}` : 'Unidentified', ch)
+      const committed = new Event('input', { bubbles: true })
+      Object.defineProperty(committed, 'data', { value: ch })
+      Object.defineProperty(committed, 'inputType', { value: 'insertText' })
+      element.dispatchEvent(committed)
+    }
+  }
+}
 /** Adapt the public-only fake at the injected adoption seam. SessionHandle's
  * private client prevents structural typing even though all used methods match. */
 const asSessionHandleForTest = (session: SessionFake): SessionHandle =>
@@ -966,8 +1008,13 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // The command and its '\r' — the paste is an onData too (nocx-yb5y).
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
+      // The shell command and Enter share the session-intent queue.
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
+      )
 
       // A non-empty draft opens recall on Up-at-top; the overlay previews
       // the newest row into the editor.
@@ -1106,9 +1153,9 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
   // Reachability + the acceptance that the v4 rule inverted (nocx-w7h.5):
   // navigating previews the command INTO the editor, and Enter executes what
   // you can see through the NORMAL submit path — the same one a typed Enter
-  // takes — with nothing bypassed. The command text reaches the PTY via the
-  // renderer's paste handoff and the trailing '\r' via the session, so both
-  // are asserted: a second, parallel route would look different.
+  // takes — with nothing bypassed. The command paste and Enter reach the
+  // session as ordered intents, so both are asserted: a second, parallel route
+  // would look different.
   it('Enter in the recall overlay takes the command into the line and sends nothing', async () => {
     const { view, ed, content, teardown } = await mountTerminal(makeClipboard())
     const session = (content as unknown as { session: SessionFake }).session
@@ -1124,16 +1171,15 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       ed.show()
       ed.insertText('make deploy')
       key(view, { key: 'Enter' }) // the one legitimate send
-      // Two frames, in this order: the command through the renderer's paste
-      // (which is an onData like any keystroke) and then the '\r' the shell
-      // target appends. The renderer mock used to swallow the paste, so this
-      // read as one frame and the command was invisible here (nocx-yb5y).
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
-      const sentBefore = session.send.mock.calls.length
-      // The send payload is a string; String() gives the linter a typed value
-      // without assuming the exact wire bytes (the '\r' the shell target
-      // appends today could legitimately change).
-      const sentShape = String(session.send.mock.calls[sentBefore - 1][0])
+      // The command paste and Enter are distinct intents, delivered in order
+      // through the same queue; selecting a recall result below sends neither.
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
+      )
+      const sentBefore = session.intent.mock.calls.length
 
       // The submit cleared the editor; Up at the empty prompt opens recall.
       key(view, { key: 'ArrowUp' })
@@ -1146,11 +1192,8 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       // NOTHING went to the pty: the overlay closes with the command in the
       // line, and the next Enter — on a command the person can now read and
       // edit — is the one that runs it (the owner's reversal, 2026-08-19).
-      expect(session.send.mock.calls.length).toBe(sentBefore)
+      expect(session.intent.mock.calls.length).toBe(sentBefore)
       expect(ed.getDoc()).toBe('make deploy')
-      // The shape the typed submit sent is still the reference for what a
-      // real send looks like; nothing here produced one.
-      expect(sentShape).toBe('\r')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
@@ -1903,6 +1946,34 @@ describe('the snippet palette chord (nocx-jj77)', () => {
       // lets it fall through to the editor.
       key(view, { key: 'o', code: 'KeyO', altKey: true, metaKey: true })
       expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("the grid's input element delegates the chord to the SAME opener, and no intent goes out", async () => {
+    const onSnippetChord = vi.fn()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+    })
+    try {
+      const session = sessionOf(content)
+      session.intent.mockClear()
+      const element = intentElementOf(content)
+      element.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'p',
+          code: 'KeyP',
+          altKey: true,
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+      // Consumed, not typed: the chord opens the palette and NO intent was
+      // sent to the session for it — a key the pane owns is not input.
+      expect(session.intent).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -5514,7 +5585,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const renderer = rendererOf(content)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     /* eslint-disable @typescript-eslint/unbound-method */
-    const pasteSpy = renderer.paste
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
     /* eslint-enable @typescript-eslint/unbound-method */
@@ -5536,9 +5606,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(0)
-      // The app-owned attempt opens BEFORE the pty write; the write itself
-      // lands in the microtask after the submit RPC settles.
-      await vi.waitFor(() => expect(pasteSpy).toHaveBeenCalledWith('echo hello'))
+      // Paste and Enter reach the session in order through the intent queue.
+      await vi.waitFor(() =>
+        expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'echo hello'],
+          ['key', 'enter'],
+        ]),
+      )
 
       // 3. The authenticated start attaches to the app attempt; the pane
       //    stays in the running layout with the block visible — output is
@@ -5613,6 +5687,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // 7. PromptReady returns the editor.
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
+      // Ignore the editor's focus transitions; this assertion is about the
+      // next shell submission's ordered input intents.
+      sessionOf(content).intent.mockClear()
 
       // 8. The next submitted command reaches the shell and opens a fresh
       //    attempt — the cycle restarts, not the previous block.
@@ -5620,7 +5697,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      await vi.waitFor(() => expect(pasteSpy).toHaveBeenLastCalledWith('echo again'))
+      await vi.waitFor(() =>
+        expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'echo again'],
+          ['key', 'enter'],
+        ]),
+      )
       // The second command's card opens on its own authenticated start.
       expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
       handler({
@@ -5759,12 +5841,14 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
-      const focusMock = (renderer as unknown as { focus: ReturnType<typeof vi.fn> }).focus
+      // The keyboard belongs to the pane's INPUT ELEMENT since nocx-zg3k3.3.1,
+      // so the handoff is asserted where it lands rather than on the renderer
+      // that used to hold it.
+      const focusElement = vi.spyOn(intentElementOf(content), 'focus')
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
-      focusMock.mockClear()
+      focusElement.mockClear()
 
       // WRITABLE IS NOT ENOUGH — the grid must also be FOCUSED, and in the
       // same synchronous step. The editor gives the keyboard up at commit
@@ -5785,9 +5869,35 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(ed.isVisible).toBe(false)
       // Synchronously: no await between the dispatch and this assertion, so
       // the RPC cannot have resolved and this can only be the handoff.
-      expect(focusMock).toHaveBeenCalled()
+      expect(focusElement).toHaveBeenCalled()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('keeps session intents ordered when the control call is still in flight', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard())
+    try {
+      const session = sessionOf(content)
+      let finishFirst!: (result: unknown) => void
+      const first = new Promise<unknown>((resolve) => {
+        finishFirst = resolve
+      })
+      session.intent.mockImplementationOnce(() => first)
+
+      typeIntoPane(content, 'a', 'b', 'c', '\r')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(1))
+      expect(session.intent.mock.calls).toEqual([['text', 'a']])
+
+      finishFirst({ state: 'executed' })
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(3))
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'a'],
+        ['text', 'bc'],
+        ['key', 'enter'],
+      ])
+    } finally {
       teardown()
     }
   })
@@ -5815,31 +5925,25 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // (ADR-0024 §5), while the keyboard changed hands at the commit. So
       // this is a real window a user types into: `read` is what they are
       // answering, and the answer must not arrive before the question.
-      renderer._fireData('h')
-      renderer._fireData('i')
-      renderer._fireData('\r')
-      // Held: not one byte of it has been sent yet.
+      typeIntoPane(content, 'h', 'i', '\r')
+      // Held: nothing of it has been sent yet, as bytes or as intent.
       expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
 
       // The attempt settles, the command goes out, and what was typed
       // behind it follows — in the order it was typed.
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalled())
-      // The command FIRST, whole, then its '\r', then the answer somebody
-      // typed while it was in flight. The command travels through the
-      // renderer's paste (it owns bracketed-paste wrapping) and a paste is
-      // an onData, so it is subject to the same hold — which is why the
-      // hold is lifted before the write rather than after it.
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
-        'read x',
-        '\r',
-        'h',
-        'i',
-        '\r',
-      ])
-      // `paste` is a method declaration on TerminalRenderer, so referencing it
-      // detached trips unbound-method; the mock property type does not.
-      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
-      expect(pasteMock.paste).toHaveBeenCalledWith('read x')
+      // The command paste and Enter are ahead of the text and key intents
+      // captured while submit was in flight. All four travel on one queue.
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+      expect(renderer.paste).not.toHaveBeenCalled()
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -5862,7 +5966,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const withScrollback = content as unknown as { scrollback: ScrollbackController }
       const handler = factHandler(client)
@@ -5891,7 +5994,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // its parser is consuming the accepted line — running what is left of
       // it, which is not the command that was typed. The person's own
       // gesture says the line is not to run, so it never goes out.
-      renderer._fireData('\x03')
+      typeIntoPane(content, '\x03')
 
       resolveAttempt({
         id: 'att-cancelled',
@@ -5940,7 +6043,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const withScrollback = content as unknown as { scrollback: ScrollbackController }
       const handler = factHandler(client)
@@ -5955,15 +6057,26 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // line, and ^C discards that line — a terminal with ISIG set flushes
       // the input queue it has not read yet, which is what every shell does
       // with the half-typed command somebody interrupts.
-      renderer._fireData('ab')
+      typeIntoPane(content, 'ab')
       expect(session.send).not.toHaveBeenCalled()
 
       // What followed the ^C is not part of the line it discarded: after the
       // flush the shell is at a fresh prompt, and these bytes belong to it,
       // so they are delivered (the old behaviour for everything that is not
       // the pending line) rather than swallowed with it.
-      renderer._fireData('\x03cd')
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+      // Three acts, in the order a person made them: the interrupt, then the
+      // two keys typed at the fresh prompt it leaves behind.
+      typeIntoPane(content, '\x03', 'c', 'd')
+      // 'c' and 'd' are NOT part of the line the interrupt discarded: after the
+      // flush the shell is at a fresh prompt, and they belong to it. They go out
+      // as intent, at once, rather than being swallowed with the line.
+      expect(session.send).not.toHaveBeenCalled()
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['text', 'c'],
+          ['text', 'd'],
+        ]),
+      )
 
       resolveAttempt({
         id: 'att-cancelled',
@@ -5978,7 +6091,11 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       await vi.waitFor(() => expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull())
       // The command never ran, and 'cd' is the only byte the pty ever saw.
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['cd'])
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'c'],
+        ['text', 'd'],
+      ])
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -5993,7 +6110,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     try {
-      const renderer = rendererOf(content)
       const session = sessionOf(content)
       const handler = factHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -6003,13 +6119,26 @@ describe('the projections consume the kernel through the composition root (ADR-0
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      // This fake's attempt answers on its own, so the window closes with the
-      // write: the command and its CR are at the pty, and there is no pending
-      // line left for a ^C to cancel.
-      await vi.waitFor(() => expect(session.send.mock.calls.length).toBe(2))
-      renderer._fireData('\x03')
+      // This fake's attempt answers on its own, so the ordered paste and
+      // Enter intents finish before there is no pending line left for ^C.
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+        ]),
+      )
+      typeIntoPane(content, '\x03')
 
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['read x', '\r', '\x03'])
+      // A Ctrl-C with no pending line is the shell's own interrupt, and it goes
+      // out as the KEY the person pressed: what it means at the pty is the
+      // runtime's decision, never this client's (nocx-zg3k3.3.1).
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['key', 'Ctrl+c'],
+        ]),
+      )
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -6885,7 +7014,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
 
       // Fail-open, unchanged: the refusal did not eat the command.
       await vi.waitFor(() =>
-        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
       )
 
       // The shell's own start, with no token — nothing minted one for this
@@ -7002,7 +7134,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         startedAt: '2026-08-08T12:00:00Z',
       })
       await vi.waitFor(() =>
-        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
       )
       handler({
         lane: 'lane-1',
@@ -7120,7 +7255,6 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
     // editorOf/rendererOf pattern).
     const withSession = content as unknown as { session: SessionFake }
     const session = withSession.session
-    const renderer = rendererOf(content)
     const handler = factHandler(client)
     const restoreScroll = stubScrolling()
     try {
@@ -7158,13 +7292,11 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         startedAt: '2026-08-08T12:00:00Z',
       })
       await vi.waitFor(() =>
-        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
-          'make --token=SECRETVALUE',
-          '\r',
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make --token=SECRETVALUE'],
+          ['key', 'enter'],
         ]),
       )
-      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
-      expect(pasteMock.paste).toHaveBeenCalledWith('make --token=SECRETVALUE')
     } finally {
       restoreScroll()
       teardown()
@@ -7192,10 +7324,15 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       ed.insertText('make deploy')
       key(view, { key: 'Enter' })
 
-      // The write goes out on the synchronous path and no attempt-open call
-      // was ever made — nothing is fabricated for a conventional terminal.
+      // No attempt-open call was made — nothing is fabricated for a
+      // conventional terminal. Both input intents still use the session queue.
       expect(submitAttempt).not.toHaveBeenCalled()
-      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -7227,7 +7364,8 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // the shell still receives its newline.
       expect(submitAttempt).not.toHaveBeenCalled()
       expect(withLedger.ledger.records()).toHaveLength(0)
-      expect(session.send).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(session.intent.mock.calls).toEqual([['key', 'enter']]))
+      expect(session.send).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -7257,7 +7395,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // Fail-open: the domain lost its prompt between the last fact and the
       // Enter, the attempt was refused — and the command still runs, whole.
       await vi.waitFor(() =>
-        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+        expect(session.intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'make deploy'],
+          ['key', 'enter'],
+        ]),
       )
     } finally {
       restoreScroll()
@@ -7599,6 +7740,52 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
   })
 })
 
+describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
+  it('delivers the command paste before Enter through one ordered intent path', async () => {
+    const client = makeClient()
+    const session = makeSession({ awaitsIntegration: true })
+    client.openSession.mockResolvedValue(session)
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    let releasePaste!: () => void
+    const pasteGate = new Promise<void>((resolve) => {
+      releasePaste = resolve
+    })
+    const result = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const delivered: Array<[string, string]> = []
+    session.intent.mockImplementation((kind: string, payload: string) => {
+      delivered.push([kind, payload])
+      return (kind === 'paste' ? pasteGate : Promise.resolve()).then(() => result)
+    })
+    session.send.mockClear()
+    renderer.paste.mockClear()
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('echo hi')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      // Hold the first wire result open. Enter must not even be handed to the
+      // session until that paste has settled; call order alone is not enough.
+      await vi.waitFor(() => expect(delivered).toEqual([['paste', 'echo hi']]))
+      releasePaste()
+      await vi.waitFor(() =>
+        expect(delivered).toEqual([
+          ['paste', 'echo hi'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+      expect(renderer.paste).not.toHaveBeenCalled()
+    } finally {
+      releasePaste()
+      teardown()
+    }
+  })
+})
+
 // ───────────────────────────────────────────────────────────────────────────
 // The ask entry gesture (nocx-4wtlh): nothing but the person changes where
 // Enter goes. Plain Enter submits to the registry's active target; ⌘Enter is
@@ -7819,13 +8006,22 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(indicatorOf(ed)?.textContent).toBe('Run')
       expect(indicatorOf(ed)?.dataset.target).toBe('shell')
 
+      const inputIntentCount = () =>
+        sessionOf(content).intent.mock.calls.filter(([kind]) => kind !== 'focus').length
+
       // ── Plain Enter: the shell receives the line ─────────────────────
-      const sentBefore = sessionOf(content).send.mock.calls.length
+      const sentBefore = inputIntentCount()
       ed.insertText('echo hi')
       submitKey(ed)
-      // The shell got the command and its CR — the ordinary handoff — and
-      // no question ever crossed the control plane.
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
+      // The shell got the paste and Enter through its ordered intent queue;
+      // no question crossed the control plane.
+      await vi.waitFor(() =>
+        expect(sessionOf(content).intent.mock.calls.slice(-2)).toEqual([
+          ['paste', 'echo hi'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(inputIntentCount()).toBe(sentBefore + 2)
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
       // The handoff hid the editor; the registry never moved.
       expect(ed.isVisible).toBe(false)
@@ -7836,7 +8032,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // the indicator still renders what the registry reports.
       ed.show()
       expect(indicatorOf(ed)?.textContent).toBe('Run')
-      const sentAfterShell = sessionOf(content).send.mock.calls.length
+      const sentAfterShell = inputIntentCount()
       typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
@@ -7852,7 +8048,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // and this harness delivers no lifecycle facts. The ask neither
       // opened a record nor a card of its own, and the shell's record is
       // untouched.
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
+      expect(inputIntentCount()).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
       expect(dispatcherCalls.find((c) => c.method === 'history.recorded')).toBeUndefined()
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
@@ -7897,8 +8093,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
       expect(ledger?.records().length).toBe(1)
       expect(ledger?.records()[0].author).toBe('shell')
-      // The shell submit still reached the pty: nothing regressed.
-      expect(sessionOf(content).send.mock.calls.length).toBeGreaterThan(0)
+      // The shell submit still reached the session through ordered intents.
+      await vi.waitFor(() =>
+        expect(sessionOf(content).intent.mock.calls).toEqual([
+          ['paste', 'echo hi'],
+          ['key', 'enter'],
+        ]),
+      )
     } finally {
       teardown()
     }
@@ -11320,7 +11521,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       await summonChord(content)
       expect(ed.isVisible).toBe(true)
       const renderer = rendererOf(content)
-      const focus = vi.spyOn(renderer, 'focus')
+      const focus = vi.spyOn(intentElementOf(content), 'focus')
       focus.mockClear()
       const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
         (data: string) => void
@@ -12268,7 +12469,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
 
-      expect(session.send).not.toHaveBeenCalledWith('\r')
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.intent).not.toHaveBeenCalled()
     } finally {
       restore()
       teardown()
@@ -12299,9 +12501,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       viewOf(ed).contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(session.send).toHaveBeenCalledWith('\r')
+      await vi.waitFor(() => expect(session.intent.mock.calls).toEqual([['key', 'enter']]))
+      expect(session.send).not.toHaveBeenCalled()
 
-      session.send.mockClear()
+      session.intent.mockClear()
       viewOf(ed).contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', {
           key: 'c',
@@ -12310,7 +12513,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           cancelable: true,
         }),
       )
-      expect(session.send).toHaveBeenCalledWith('\x03')
+      await vi.waitFor(() => expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']]))
+      expect(session.send).not.toHaveBeenCalled()
     } finally {
       restore()
       teardown()

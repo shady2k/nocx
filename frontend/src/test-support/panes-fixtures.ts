@@ -414,6 +414,12 @@ export interface SessionFake {
   awaitsIntegration: boolean
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
+  /** Hand one session intent to the pane's helper (nocx-zg3k3.3.1). What a
+   *  person typed, pasted or clicked lands here now, as the kind and payload
+   *  the wire carries — never as bytes. Resolves `executed` by default: the
+   *  case a test that is not about a refusal wants, and the same default
+   *  `signal` uses. */
+  intent: ReturnType<typeof vi.fn>
   /** Address a signal to the command running in this session (nocx-23rph).
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
@@ -487,6 +493,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     awaitsIntegration: false,
     send: vi.fn(),
     sendResize: vi.fn(),
+    intent: vi.fn(() => Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.

@@ -174,6 +174,15 @@ func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, polic
 		// Exact ancestor literals permit traversal, not descendant file data.
 		ancestors := make(map[string]struct{})
 		collect := func(path string) {
+			// macOS exposes these system ancestors through lexical symlinks.
+			// Permit the link inode for traversal, never its whole target tree.
+			if private, ok := strings.CutPrefix(path, "/private/"); ok {
+				component, _, _ := strings.Cut(private, "/")
+				switch component {
+				case "tmp", "var", "etc":
+					ancestors["/"+component] = struct{}{}
+				}
+			}
 			for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
 				if _, exists := ancestors[parent]; exists {
 					return

@@ -66,11 +66,21 @@ func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := privateSeatbeltProfile(runtimeRoot, profile)
+	file, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = file.Close() }()
+	written := make(chan error, 1)
+	go func() {
+		_, writeErr := writer.WriteString(profile)
+		closeErr := writer.Close()
+		if writeErr != nil {
+			written <- writeErr
+		} else {
+			written <- closeErr
+		}
+	}()
 	const script = `exec 3<&-; test "$(cat "$1")" = readable || exit 10; if printf changed >"$1" 2>/dev/null; then exit 11; fi; printf writable >"$2/out.txt"`
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -79,6 +89,9 @@ func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
 	cmd.Env = []string{"PATH=/bin:/usr/bin"}
 	if output, runErr := cmd.CombinedOutput(); runErr != nil {
 		t.Fatalf("Seatbelt RO/RW policy failed: %v (%s)", runErr, output)
+	}
+	if writeErr := <-written; writeErr != nil {
+		t.Fatal(writeErr)
 	}
 	data, err := os.ReadFile(input)
 	if err != nil || string(data) != "readable" {

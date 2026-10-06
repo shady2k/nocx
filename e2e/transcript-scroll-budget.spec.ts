@@ -649,15 +649,19 @@ test.describe('long transcript scroll budget', () => {
     })
   })
 
-  // Skipped 2026-10-05 by the owner's decision to merge #267 with this open: after a
-  // coordinator restart the stored transcript loses the tail of the command - one
+  // WAS SKIPPED 2026-10-05, UN-SKIPPED WITH THE FIX (nocx-n5ent). After a
+  // coordinator restart the stored transcript lost the tail of the command: one
   // sealed artifact, `truncated=gap`, `endRow == cursor` (a seal with no closing
-  // screen) and ~1160 rows never stored, because the interval was frozen at the count
-  // measured while the pty was still draining. That is ADR-0074's settle losing a
-  // person's own output, and the choice between amending the settle and hunting its
-  // trigger is an owner decision. Bead nocx-n5ent (P0) carries the evidence, the two
-  // options and what a person sees under each; un-skip this test when one is taken.
-  test.skip('zero live retention leaves durable output after restart and no live history', async ({
+  // screen) and 1157 rows never stored, because an interval was frozen at the
+  // count measured on the authenticated channel while the pty still held the
+  // command's output. The settle that could do that is deferred now:
+  // a completion for another nonce, an environment entry and the rendezvous
+  // bound no longer freeze an interval whose rows are still in flight — the
+  // interval keeps them and is sealed by its own fence's sighting, or by the
+  // byte stream's next boundary when that fence truly never comes
+  // (internal/sessionruntime/observation.go, deferPendingLocked; ADR-0074
+  // case 3 amended).
+  test('zero live retention leaves durable output after restart and no live history', async ({
     page,
   }, testInfo) => {
     const endpoint = await backend.start()

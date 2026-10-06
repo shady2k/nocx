@@ -293,6 +293,22 @@ type Session struct {
 	// pin could be located; the repair runs when the primary is back
 	// (settleOwedReflowLocked, nocx-2v80t.5).
 	reflowOwed bool
+	// deferredSettle names the interval whose settle an AUTHENTICATED-channel
+	// event asked for and did NOT take (nocx-n5ent; ADR-0074 case 3, amended).
+	// The completion travels the authenticated channel and the command's rows
+	// travel the pty, and the shell sends its completion BEFORE it writes its
+	// fence: so a completion for another nonce is no proof that the parked
+	// interval's own bytes have been read, and settling there froze a
+	// 5000-row command's block at the 3843 rows the fast channel had reached
+	// while the pty still held the rest. The interval therefore stays in
+	// flight — its remaining rows keep streaming as its own — and is sealed
+	// either by its own fence's sighting (with the screen the fence sat on) or,
+	// when that fence truly never comes, by the byte stream's next boundary or
+	// the session's end, with no closing screen as ADR-0074 case 3 records.
+	// deferredSettleSet is its presence: a zero nonce is a real nonce for an
+	// environment entry and must not read as "nothing deferred".
+	deferredSettle    FenceNonce
+	deferredSettleSet bool
 	// markerCarry is the tail of the last feed that could still begin a
 	// marker, searched in front of the next feed (Ingest, nocx-2v80t.8).
 	markerCarry []byte
@@ -1422,12 +1438,16 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if s.avail != AvailabilityAvailable || at != s.inc {
 		return
 	}
-	// One of the events that settles a parked interval: a completion for a
-	// DIFFERENT nonce means the interval before it is done and its fence's
-	// sighting never arrived, so that interval seals here, with no closing
-	// screen and no fence (observation.go). A completion for the parked
-	// nonce is that very interval's own join and settles nothing.
-	s.settlePendingLocked(nonce)
+	// One of the events that asks for a parked interval to be settled: a
+	// completion for a DIFFERENT nonce means the interval before it is done and
+	// its fence's sighting has not been READ — and this carrier cannot tell
+	// "not read yet" from "never written", because the shell sends its
+	// completion before it writes its fence (nocx-n5ent). So the settle is
+	// DEFERRED, not taken: the interval keeps its own rows until the byte
+	// stream reaches its boundary (observation.go, deferPendingLocked). A
+	// completion for the parked nonce is that very interval's own join and
+	// asks for nothing.
+	s.deferPendingLocked(nonce)
 	if e := s.rendezvous[nonce]; e != nil {
 		// The meeting is already tracked. Only a parked sighting with THIS
 		// nonce is the half this completion closes; a duplicate completion,
@@ -1562,7 +1582,12 @@ func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 			}
 			delete(s.rendezvous, nonce)
 			s.rendezvousOrder = append(s.rendezvousOrder[:i], s.rendezvousOrder[i+1:]...)
-			s.settleParkedLocked(nonce)
+			// The bound is a SIZE, and spending a slot is not a proof about
+			// the byte stream: an eviction DEFERS like every other event that
+			// arrives off the authenticated channel (nocx-n5ent,
+			// deferParkedLocked). The interval it names is sealed when the
+			// stream reaches its next boundary, or at the session's end.
+			s.deferParkedLocked(nonce)
 			return true
 		}
 	}
@@ -1586,6 +1611,21 @@ func (s *Session) SightFence(nonce FenceNonce, source []byte) error {
 func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if err := s.live(); err != nil {
 		return err
+	}
+	// A fence's sighting is BYTE STREAM EVIDENCE, and it is what a deferred
+	// settle was waiting for (nocx-n5ent). The sighting that names the deferred
+	// nonce IS that interval's own boundary — the command's output is over and
+	// the fence sat on its closing screen — so the deferral is dropped and the
+	// ordinary join below seals the interval in flight, with its rows and its
+	// screen. A sighting that names ANOTHER nonce is the stream's next
+	// boundary: the deferred interval is over and seals now, with no closing
+	// screen, exactly as ADR-0074 case 3 records.
+	if s.deferredSettleSet {
+		if s.deferredSettle == nonce {
+			s.deferredSettle, s.deferredSettleSet = FenceNonce{}, false
+		} else {
+			s.flushDeferredSettleLocked()
+		}
 	}
 	// A fence's sighting is an interval's start as much as a join: the fence
 	// belongs to the command that just ended, so a sighting for a different
@@ -1791,6 +1831,13 @@ func (s *Session) Fail(cause string) error {
 	// interval nothing else could seal, and this is the last event there is.
 	// It runs before the refusal below so that a second Fail is not the
 	// reason a parked interval leaks.
+	//
+	// A settle the authenticated channel asked for and the byte stream never
+	// proved is taken HERE, at the last event there is (nocx-n5ent): the pty
+	// is over, so no more of the interval's rows can arrive, and what streamed
+	// is all there is. The flush runs first because it seals the interval the
+	// deferral holds; the settle below then finds nothing parked.
+	s.flushDeferredSettleLocked()
 	s.settlePendingLocked(FenceNonce{})
 	// The other pending shape, closed the same way rather than left to leak:
 	// a sighting nobody authenticated authorised nothing while it waited, and

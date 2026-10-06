@@ -137,6 +137,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0077 | [The lifecycle stream resumes at the coordinator's own cursor](0077-the-lifecycle-stream-resumes-at-the-coordinators-own-cursor.md)                                                           | Accepted (2026-09-30; the owner's decision; supersedes ADR-0024's 2026-09-02 amendment bullet "resumes at the lifecycle window's HEAD")                              |
 | 0078 | [The terminal's history has two tiers, and the live one is the emulator's own](0078-the-terminals-history-has-two-tiers-and-the-live-one-is-the-emulators-own.md)                             | Accepted (2026-10-01; the owner's decisions of 2026-09-21, the second narrowed on 2026-10-01; supersedes nothing, states what changed in ADR-0009 and ADR-0066)      |
 
+| 0079 | [A worker's conversation resumes after the backend restarts, from a minimal durable restart record](0079-a-workers-conversation-resumes-after-the-backend-restarts.md) | Accepted (2026-10-05; the owner's herdr-parity scope decision; supersedes D5 of the 2026-08-15 orchestration spec in the half 'workers die with the backend') |
 | 0080 | [An authenticated event defers a settle, it does not take it](0080-an-authenticated-event-defers-a-settle-it-does-not-take-it.md) | Accepted (2026-10-05; the owner's decision on nocx-n5ent; supersedes case 3 of ADR-0074 — a completion for another nonce defers the settle instead of taking it) |
 
 ## Adding one

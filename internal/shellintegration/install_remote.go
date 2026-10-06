@@ -46,7 +46,7 @@ func (s *Impl) EnsureInstalledOverPipe(_ context.Context, fs FS, remoteHome stri
 
 func (s *Impl) publishRemote(fs FS, remoteHome, event string) error {
 	root := path.Join(remoteHome, dirName)
-	res, err := NewPublisher(s.log, fs, root).Publish(launchBundle())
+	res, err := NewPublisher(s.log, fs, root).Publish(launchBundle(s.agentNames()))
 	if err != nil {
 		s.log.Info("remote bundle publish refused",
 			"root", root, "error", err)

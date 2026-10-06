@@ -193,13 +193,20 @@ import (
 // bytes, up from 85826 — the `"attempt":"…"` field and its doc comment in
 // two files. The CALL count is unchanged at 63.
 //
+// AND THEY MOVED AGAIN when the agent wrappers became GENERATED from the agent
+// record instead of hand-written, and again when the tool-surface argument
+// stopped travelling to a host (nocx-t5e7d): the worst path writes 85659 bytes,
+// down from 85902 — one block generated into both scripts, and the published
+// pair no longer carrying a per-agent argument. The CALL count is unchanged at
+// 63.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 85902
+	measuredMaxPublishBytes = 85659
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce
@@ -402,8 +409,15 @@ func newMeasuredPublisher(t *testing.T) (*Publisher, string, *countingFS, *fault
 // prodBundle is the bundle the product actually publishes, at a chosen
 // version. Measuring the test bundle would understate the byte figure by
 // three orders of magnitude.
+// prodGen is the generation a PRODUCTION bundle of this version publishes
+// under: the version plus the digest of the agent set its scripts were
+// generated from (nocx-t5e7d). A test that hard-codes the bare version is
+// asserting the shape of a bundle whose scripts wrap nothing — which is what
+// testBundle builds, and not what prodBundle does.
+func prodGen(version string) string { return prodBundle(version).generation() }
+
 func prodBundle(version string) Bundle {
-	b := launchBundle()
+	b := shippedBundle()
 	b.Version = version
 	return b
 }
@@ -562,7 +576,7 @@ func publishScenarios() []publishScenario {
 			stage: func(t *testing.T, p *Publisher, root string) {
 				t.Helper()
 				stagev("39")(t, p, root)
-				plantGeneration(t, filepath.Join(root, integrationDir), "v40")
+				plantGeneration(t, filepath.Join(root, integrationDir), prodGen("40"))
 			},
 			run: pubv("40"),
 		},
@@ -685,7 +699,7 @@ func TestMeasureFailedCleanup(t *testing.T) {
 		{
 			name: "generation sweep: remove of a swept generation fails",
 			kind: "remove",
-			path: func(root string) string { return filepath.Join(root, integrationDir, "v39", "nocx.bash") },
+			path: func(root string) string { return filepath.Join(root, integrationDir, prodGen("39"), "nocx.bash") },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -723,7 +737,7 @@ func TestMeasureFailedCleanup(t *testing.T) {
 			}
 			// The activation still moved: a failed sweep is residue, never
 			// a failed publish.
-			if got := readManifestT(t, root).Generation; got != "v41" {
+			if got := readManifestT(t, root).Generation; got != prodGen("41") {
 				t.Fatalf("manifest names %s after a failed sweep, want v41", got)
 			}
 		})
@@ -998,7 +1012,7 @@ func plantGeneration(t *testing.T, integration, name string) {
 
 // TestMeasureBundleBytes reports the payload the design sizes B against.
 func TestMeasureBundleBytes(t *testing.T) {
-	b := launchBundle()
+	b := shippedBundle()
 	total := 0
 	names := make([]string, 0, len(b.Files))
 	sizes := map[string]int{}
@@ -1090,7 +1104,7 @@ func TestMeasureWorstBoundedAttempt(t *testing.T) {
 		t.Fatalf("plant manifest temp: %v", err)
 	}
 	// An interrupted attempt at the version we are about to publish.
-	plantGeneration(t, filepath.Join(root, integrationDir), "v41")
+	plantGeneration(t, filepath.Join(root, integrationDir), prodGen("41"))
 
 	cfs.reset()
 	if _, err := pub.Publish(prodBundle("41")); err != nil {

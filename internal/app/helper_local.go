@@ -364,6 +364,17 @@ type localHelperOpener struct {
 	// binds lane to session through laneRegistrar — and one closure doing
 	// both would put two owners on one statement.
 	noteChildDomainParent func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string)
+	// agentNames answers the ENABLED agent set a pane on this machine is born
+	// with (nocx-t5e7d): what its shell offers wrappers for. It is a closure
+	// rather than a captured list because a record the person edits must reach
+	// the NEXT pane, and it is read per spawn for that reason.
+	//
+	// It travels as a LIST in the spawn request, not as a directory the daemon
+	// could read: this machine's helper is built without the release tag, so a
+	// profile it resolved itself would be the development one under a release
+	// app (proto.SpawnParams.Agents). Nil is a legitimate wiring for a test, and
+	// then a pane gets this build's own set.
+	agentNames func() []string
 	// hostKeys is the coordinator's own record of the fingerprint its
 	// verifyHostKey reverse handler judged for a destination, read back
 	// after a successful ssh spawn to give the session a fact its wire does
@@ -627,6 +638,27 @@ func (o *localHelperOpener) installedHelperBinary() string {
 // pane, and this opener serves several panes at once. Handing it to the daemon
 // once — which is what a `NOCX_TOOL_SOCKET` in the daemon's own environment
 // was — made it a fact about whichever coordinator started that daemon.
+// agents is what a pane's shell offers, read per spawn so an edit reaches the
+// next pane; nil means this build's own set (see the field's own note).
+//
+// A SET on the wire, because the helper's own rule refuses a free-form string
+// list in any operation's params: such a list is argv, and a helper that takes
+// argv is a remote shell (D3, proto.SpawnParams.Agents).
+func (o *localHelperOpener) agents() map[string]bool {
+	if o.agentNames == nil {
+		return nil
+	}
+	names := o.agentNames()
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
 func (o *localHelperOpener) toolEndpoint() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -708,6 +740,10 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 				// pane then renders no NOCX_TOOL_SOCKET at all — the soft
 				// degrade, stated above.
 				AgentToolEndpoint: o.toolEndpoint(),
+				// The agents this pane's shell wraps (nocx-t5e7d), read now:
+				// the record's answer, carried as a list. This is a pane on
+				// THIS machine, so its shell is the embedded local tier.
+				Agents: o.agents(),
 			})
 		})
 	}

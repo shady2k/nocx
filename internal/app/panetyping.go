@@ -34,6 +34,16 @@ func (p paneAgents) AgentOn(paneID string) (string, bool) {
 	return "", false
 }
 
+// agentOnPane is the narrow view of that same read a worker's spawn asks for,
+// so a restart record learns which agent a pane enrolled as (ADR-0079) from
+// the one owner of that fact rather than from a derivation of its own. It is a
+// separate interface from paneAgent (session_targets.go) because that one
+// reads a pane's classification and this one reads its name — two questions,
+// two seams, one watcher underneath.
+type agentOnPane interface {
+	AgentOn(paneID string) (string, bool)
+}
+
 // paneInput puts bytes on a pane's own input queue — the same one every
 // keystroke travels.
 //

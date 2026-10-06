@@ -56,6 +56,21 @@ const AgentToolTokenEnvVar = "NOCX_AGENT_TOKEN"
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
+	// Agents is the ENABLED agent set this shell's wrappers are generated from
+	// (nocx-t5e7d): the record's own answer, carried to the helper as a LIST by
+	// the spawn request that asks for the pane.
+	//
+	// It is a list rather than a directory to go and read, deliberately. The
+	// helper is a separate process and is built WITHOUT the release tag, so
+	// storage.ConfigDir() in it would resolve the development profile under a
+	// release app; handing it a list keeps "which agents does this machine
+	// offer" a fact the backend owns and the helper receives, and keeps the
+	// helper out of the app directory altogether.
+	//
+	// Empty means this BUILD's set, which is what a caller with no record to
+	// read — a test, or the in-memory launch of a build that has none — must
+	// get rather than a shell that quietly stopped offering anything.
+	Agents []string
 	// AgentHelperPath and AgentToolSocketPath are non-secret paths used by the
 	// launch-owned MCP bridge. They are exported only when supplied; the
 	// lifecycle capability and report rendezvous remain outside this config.

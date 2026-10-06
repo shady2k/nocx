@@ -219,13 +219,24 @@ func launchCarrier() string {
 // the passport generation field stay in lockstep with what the shells source.
 // validateBundle's constraints are the contract; a change here must satisfy
 // them and the bidirectional conformance tests.
-func launchBundle() Bundle {
+// agents is the machine's own enabled set, and it is an ARGUMENT rather than a
+// package value because the two delivery paths answer it differently: a
+// PUBLISHED bundle is generated from the record this machine holds, while the
+// embedded scripts a local pane is handed were rendered at init from the set
+// this BUILD ships (scripts.go says why the helper cannot read a profile). It
+// is the whole of what varies between two bundles of one build, and it is what
+// the generation is derived from — never a per-session value, because the
+// carrier is published once and reused by every session (tierArg passes an
+// empty environment block for exactly that reason).
+func launchBundle(agents []string) Bundle {
+	names := agentNames(agents)
 	return Bundle{
 		Protocol: ProtocolVersion,
 		Version:  version,
+		Agents:   names,
 		Files: []BundleFile{
-			{Name: "nocx.bash", Mode: 0o600, Data: []byte(bashScript)},
-			{Name: "nocx.zsh", Mode: 0o600, Data: []byte(zshScript)},
+			{Name: "nocx.bash", Mode: 0o600, Data: []byte(renderScript(bashScriptRaw, names, DeliveryPublished))},
+			{Name: "nocx.zsh", Mode: 0o600, Data: []byte(renderScript(zshScriptRaw, names, DeliveryPublished))},
 			{Name: "nocx.posix", Mode: 0o600, Data: []byte(posixScript)},
 			{Name: launchName, Mode: 0o700, Data: []byte(launchCarrier())},
 		},

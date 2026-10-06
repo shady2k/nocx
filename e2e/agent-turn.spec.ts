@@ -452,8 +452,8 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
 
     // ── THE APPLICATION RESTARTS. The shell and the session die with it;
     //    only the encrypted store keeps the turn.
-    const second = await backend.restart()
-    await bindEndpoint(page, second)
+    endpoint = await backend.restart()
+    await bindEndpoint(page, endpoint)
     await page.reload()
     await appReadyForInput(page)
     await expect(page.locator('.pane.active .cmd-block[data-restored="true"]').first()).toBeVisible(

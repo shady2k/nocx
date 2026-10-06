@@ -10,6 +10,11 @@ describe('decodeOsc52', () => {
     expect(result).toBe('hello from osc52')
   })
 
+  it('decodes the full OSC 52 payload carried by a runtime effect', () => {
+    const result = decodeOsc52('52;c;aGVsbG8gZnJvbSBvc2M1Mg==')
+    expect(result).toBe('hello from osc52')
+  })
+
   it('treats empty target as clipboard (default)', () => {
     const result = decodeOsc52(';aGVsbG8=')
     expect(result).toBe('hello')

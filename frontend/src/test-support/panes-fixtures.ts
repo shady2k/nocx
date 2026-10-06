@@ -29,8 +29,7 @@ import type {
   Pane as LayoutPane,
   Workspace as LayoutWorkspace,
 } from '../generated/layout.read'
-import type { ClipboardAccess } from '../clipboard'
-import type { ClipboardGate } from '../clipboard'
+import { decodeOsc52, type ClipboardAccess, type ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
@@ -267,9 +266,11 @@ export function createRendererMock(): RendererMock {
         case 'bell':
           cbs.onBell?.()
           break
-        case 'clipboard':
-          cbs.onClipboardWrite?.(effect.body)
+        case 'clipboard': {
+          const text = decodeOsc52(effect.body)
+          if (text !== null) cbs.onClipboardWrite?.(text)
           break
+        }
         case 'title':
           cbs.onTitle?.(effect.body)
           break

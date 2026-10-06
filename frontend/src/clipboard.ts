@@ -111,8 +111,9 @@ const OSC52_MAX_BASE64 = 1_398_104
  * the payload is invalid, malformed, oversized, zero-byte, or is a read
  * request.
  *
- * Format: `target;base64` where target is `c` (clipboard), empty (defaults
- * to clipboard), or `p`/`q`/`s` (primary/secondary/select — ignored here).
+ * xterm's OSC callback passes `target;base64`; the session.effect wire carries
+ * the full `52;target;base64` body. Both forms use this decoder. Target `c`
+ * (clipboard) and empty (default) are accepted; `p`/`q`/`s` are ignored.
  * The read form `c;?` is refused — no code path for reading the clipboard.
  *
  * xterm.js's parser already caps the raw OSC payload at 1e7 characters, so
@@ -120,6 +121,10 @@ const OSC52_MAX_BASE64 = 1_398_104
  * on the clipboard, not a memory guard.
  */
 export function decodeOsc52(payload: string): string | null {
+  // xterm's OSC handler has already removed `52;`; session.effect carries the
+  // complete OSC body, so accept that wire form through the same decoder.
+  if (payload.startsWith('52;')) payload = payload.slice(3)
+
   const semi = payload.indexOf(';')
   if (semi === -1) return null
 

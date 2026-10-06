@@ -1063,9 +1063,13 @@ export class XtermRenderer implements TerminalRenderer {
       case 'notification':
         for (const sub of this.notificationSubs) sub({ title: '', body: effect.body })
         break
-      case 'clipboard':
-        for (const sub of this.clipboardSubs) sub(effect.body)
+      case 'clipboard': {
+        const text = decodeOsc52(effect.body)
+        if (text !== null) {
+          for (const sub of this.clipboardSubs) sub(text)
+        }
         break
+      }
       case 'title':
         for (const sub of this.titleSubs) sub(effect.body)
         break

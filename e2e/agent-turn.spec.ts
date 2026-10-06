@@ -336,7 +336,7 @@ async function configureAssistant(page: Page, endpointName = ENDPOINT_NAME): Pro
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
-  for (const effect of ['observe', 'mutate-destructive'] as const) {
+  for (const effect of ['observe', 'mutate-destructive', 'delegate'] as const) {
     await answerPermission(page, effect, 'Allowed')
   }
   await backToTerminal(page)

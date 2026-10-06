@@ -33,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -826,6 +827,14 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
+	launchID, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: minting a launch id: %w", err)
+	}
+	commandArgv, err := shellintegration.SplitAgentCommand(req.Command)
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: parsing participant command: %w", err)
+	}
 	coordPane := s.coordinatorPane(req.CoordinatorSession, lg)
 	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used three times
 	// (nocx-ty5ks, nocx-tdiqs): the pane's row records its directory, so a
@@ -864,6 +873,16 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			s.checkouts.recordCreated(ctx, lg, undo, req.Group, req.Task)
 		}
 	}
+	placeholderValues := map[string]string{
+		"UUID":           launchID.String(),
+		"WORKSPACE_ID":   s.workspace,
+		"WORKSPACE_PATH": paneCwd,
+	}
+	if undo != nil {
+		placeholderValues["BRANCH"] = undo.branch
+	}
+	commandLine := shellintegration.QuoteAgentArgv(
+		shellintegration.ExpandAgentArgv(commandArgv, placeholderValues))
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
@@ -987,7 +1006,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			outcome.Status, outcome.Reason)
 	}
 
-	if req.Command != "" && !opened.Session.EnqueueWrite([]byte(req.Command+"\n")) {
+	if commandLine != "" && !opened.Session.EnqueueWrite([]byte(commandLine+"\n")) {
 		// A queue that refused is a session that is already going away.
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
@@ -998,7 +1017,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
 	// launcher's own startup, over which this has no visibility at all, so the
 	// line says what was written rather than that anything ran.
-	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(req.Command)+1)
+	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(commandLine)+1)
 	lg.Info("worker participant spawned",
 		"participant", string(req.Participant), "worker", string(req.Group))
 

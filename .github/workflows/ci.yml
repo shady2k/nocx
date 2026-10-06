@@ -205,6 +205,8 @@ jobs:
           echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-${arch}-macos-${version}" >> "$GITHUB_PATH"
+      - name: Exercise native escaped filesystem rules directly
+        run: go test ./internal/sandbox -run TestSeatbeltEscapingAndFilesystemRights -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof
         run: make sandbox-smoke-macos
   ci-mac:

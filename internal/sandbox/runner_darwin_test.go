@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,9 +13,6 @@ import (
 )
 
 func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
-	if err := backendAvailable(); err != nil {
-		t.Fatalf("native Seatbelt unavailable: %v", err)
-	}
 	root := t.TempDir()
 	weird := filepath.Join(root, "quoted-\"\\-ü")
 	readOnly := filepath.Join(weird, "read-only")
@@ -46,14 +44,23 @@ func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
 		Version: PolicyVersion, Backend: MacOSSeatbelt, BackendVersion: MacOSBaselineVersion,
 		Runtime: RuntimePaths{Root: runtimeRoot},
 		Roots: []Root{
-			{Path: "/usr", Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot},
-			{Path: "/bin", Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot},
-			{Path: "/System/Library", Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot},
 			{Path: readOnly, Access: ReadOnly, Kind: DirectoryRoot, Provenance: StandardRoot},
 			{Path: readWrite, Access: ReadWrite, Kind: DirectoryRoot, Provenance: StandardRoot},
 			{Path: "/bin/sh", Access: ReadOnly, Kind: ArtifactRoot, Provenance: TrustedArtifactRoot},
 			{Path: "/dev/null", Access: ReadWrite, Kind: DeviceRoot, Provenance: WritableDeviceRoot},
 		},
+	}
+	for _, path := range baseline("darwin") {
+		if _, statErr := os.Stat(path); errors.Is(statErr, os.ErrNotExist) {
+			continue
+		} else if statErr != nil {
+			t.Fatal(statErr)
+		}
+		actual, canonicalErr := canonicalDir(path)
+		if canonicalErr != nil {
+			t.Fatal(canonicalErr)
+		}
+		policy.Roots = append(policy.Roots, Root{Path: actual, Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot})
 	}
 	profile, err := CompileSeatbeltProfile(policy)
 	if err != nil {

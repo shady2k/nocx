@@ -303,8 +303,8 @@ func main() {
 		panic("malformed native executable unexpectedly launched")
 	}
 	var spawnRefusal *client.RefusalError
-	if !errors.As(failureErr, &spawnRefusal) || spawnRefusal.Code != proto.ErrCodeSpawnFailed {
-		panic("malformed runner did not reach the helper spawn failure path")
+	if !errors.As(failureErr, &spawnRefusal) || spawnRefusal.Code != "sandbox_launch_failed" {
+		must(failureErr, "malformed runner did not reach the helper native launch failure path")
 	}
 	if _, err = os.Stat(failed.Policy.Runtime.Root); !errors.Is(err, os.ErrNotExist) {
 		panic("failed native candidate runtime was not unwound")

@@ -32,6 +32,8 @@ function draftFromAgent(agent: Agent): AgentRecordDraft {
 function AgentRecordCard(props: {
   agent: Agent
   client: AgentRecordsClient
+  saved: boolean
+  onSaving: (id: string) => void
   onSaved: (agent: Agent) => void
   onRemoved: (id: string) => void
 }) {
@@ -42,17 +44,15 @@ function AgentRecordCard(props: {
   const [disabled, setDisabled] = createSignal(untrack(() => props.agent.disabled))
   const [busy, setBusy] = createSignal(false)
   const [error, setError] = createSignal('')
-  const [saved, setSaved] = createSignal(false)
 
   const changeOffering = async (enabled: boolean): Promise<void> => {
     setBusy(true)
     setError('')
-    setSaved(false)
+    props.onSaving(props.agent.id)
     try {
       const result = await props.client.save({ ...draftFromAgent(props.agent), disabled: !enabled })
       setDisabled(result.agent.disabled)
       props.onSaved(result.agent)
-      setSaved(true)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -63,7 +63,7 @@ function AgentRecordCard(props: {
   const save = async (): Promise<void> => {
     setBusy(true)
     setError('')
-    setSaved(false)
+    props.onSaving(props.agent.id)
     try {
       const result = await props.client.save({
         ...draftFromAgent(props.agent),
@@ -74,7 +74,6 @@ function AgentRecordCard(props: {
         disabled: disabled(),
       })
       props.onSaved(result.agent)
-      setSaved(true)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -128,7 +127,7 @@ function AgentRecordCard(props: {
         <Show when={props.agent.state === 'unreadable'}>
           <p role="alert">This record could not be read: {props.agent.problem}</p>
         </Show>
-        <Show when={saved()}>
+        <Show when={props.saved}>
           <p role="status">Saved. The next launch will use these settings.</p>
         </Show>
         <Show when={error()}>
@@ -151,6 +150,7 @@ function AgentRecordCard(props: {
 
 export function AgentRecordsSection(props: AgentRecordsSectionProps) {
   const [agents, setAgents] = createSignal<Agent[]>([])
+  const [savedAgentIDs, setSavedAgentIDs] = createSignal<ReadonlySet<string>>(new Set())
   const [loading, setLoading] = createSignal(true)
   const [loadError, setLoadError] = createSignal('')
   const [newID, setNewID] = createSignal('')
@@ -174,6 +174,28 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
     }
   }
 
+  const markAgentSaving = (id: string): void => {
+    setSavedAgentIDs((current) => {
+      const next = new Set(current)
+      next.delete(id)
+      return next
+    })
+  }
+
+  const markAgentSaved = (saved: Agent): void => {
+    setSavedAgentIDs((current) => new Set(current).add(saved.id))
+    setAgents((current) => current.map((item) => (item.id === saved.id ? saved : item)))
+  }
+
+  const removeAgent = (id: string): void => {
+    setAgents((current) => current.filter((item) => item.id !== id))
+    setSavedAgentIDs((current) => {
+      const next = new Set(current)
+      next.delete(id)
+      return next
+    })
+  }
+
   onMount(() => {
     void refresh()
   })
@@ -193,6 +215,11 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
         disabled: false,
         env: lines(newEnv()),
         resume: { sessionIdArgs: [], resumeIdArgs: [], resumeCwdArgs: [] },
+      })
+      setSavedAgentIDs((current) => {
+        const next = new Set(current)
+        next.delete(result.agent.id)
+        return next
       })
       setAgents((current) =>
         [...current.filter((agent) => agent.id !== result.agent.id), result.agent].sort((a, b) =>
@@ -229,10 +256,10 @@ export function AgentRecordsSection(props: AgentRecordsSectionProps) {
             <AgentRecordCard
               agent={agent}
               client={props.client}
-              onSaved={(saved) =>
-                setAgents((current) => current.map((item) => (item.id === saved.id ? saved : item)))
-              }
-              onRemoved={(id) => setAgents((current) => current.filter((item) => item.id !== id))}
+              saved={savedAgentIDs().has(agent.id)}
+              onSaving={markAgentSaving}
+              onSaved={markAgentSaved}
+              onRemoved={removeAgent}
             />
           )}
         </For>

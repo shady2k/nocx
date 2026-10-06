@@ -104,6 +104,32 @@ describe('AgentRecordsSection', () => {
     expect(screen.queryByRole('button', { name: 'Remove agent' })).toBeNull()
   })
 
+  it('keeps a successful save confirmation when the parent replaces the list record', async () => {
+    const own = custom({
+      id: 'reviewer',
+      displayName: 'Review agent',
+      command: 'reviewer',
+      args: [],
+      icon: '',
+      colour: '',
+      disabled: false,
+      env: [],
+      resume: { sessionIdArgs: [], resumeIdArgs: [], resumeCwdArgs: [] },
+    })
+    const save = vi.fn((draft: AgentRecordDraft) => Promise.resolve({ agent: custom(draft) }))
+    const api = client({ list: vi.fn().mockResolvedValue({ agents: [own] }), save })
+    render(() => <AgentRecordsSection client={api} />)
+    await waitFor(() => expect(screen.getByText('Agent ID: reviewer')).toBeTruthy())
+    fireEvent.input(screen.getAllByLabelText(/^Command/)[0], { target: { value: '/opt/reviewer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save agent' }))
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(expect.objectContaining({ command: '/opt/reviewer' })),
+    )
+    await waitFor(() =>
+      expect(screen.getByText('Saved. The next launch will use these settings.')).toBeTruthy(),
+    )
+  })
+
   it('writes the offering switch immediately through the record API', async () => {
     const save = vi.fn((draft: AgentRecordDraft) =>
       Promise.resolve({ agent: { ...CLAUDE, ...draft, state: 'user' as const } }),

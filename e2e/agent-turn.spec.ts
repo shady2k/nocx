@@ -86,6 +86,7 @@ const test = base
 const nonce = Date.now().toString(36)
 
 const ENDPOINT_NAME = `E2E Turn ${nonce}`
+const AGENT_ENDPOINT_NAME = `E2E Agent ${nonce}`
 /** The command the run call executes — its own block's header. */
 const RUN_CMD = `echo ran-${nonce}`
 /** What the command prints — the marker the block's real output must show. */
@@ -322,18 +323,18 @@ async function childTops(page: Page, question: string): Promise<number[]> {
 
 /** The assistant is usable end to end: endpoint, default model, and both
  *  rows Allowed so the proposed run and session.read execute rather than ask. */
-async function configureAssistant(page: Page): Promise<void> {
+async function configureAssistant(page: Page, endpointName = ENDPOINT_NAME): Promise<void> {
   await openSettings(page, SETTINGS_AI_NAV)
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
   await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
+    name: endpointName,
     baseUrl: fake.baseUrl(),
     models: ['e2e-model'],
     key: `e2e-key-${nonce}`,
     vaultPassphrase: `vault-pass-${nonce}`,
   })
   await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
+  await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
   for (const effect of ['observe', 'mutate-destructive'] as const) {
     await answerPermission(page, effect, 'Allowed')
@@ -528,7 +529,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
 
     await openApp(page)
     await unsealVaultIfSealed(page)
-    await configureAssistant(page)
+    await configureAssistant(page, AGENT_ENDPOINT_NAME)
     await openSettings(page, SETTINGS_AGENTS_NAV)
     await page.getByLabel('Agent ID').fill(runID)
     await page.getByLabel('Display name').last().fill(`Configured ${runID}`)

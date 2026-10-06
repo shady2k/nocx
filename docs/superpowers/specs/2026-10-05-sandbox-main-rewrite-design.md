@@ -335,7 +335,9 @@ into an accepted path. macOS log records are limited to 16 KiB/line, 256 KiB/bat
 counted without growing buffers. A line collector discards through newline using
 fixed-size chunks, never scanner allocation proportional to an attacker record.
 macOS uses bounded nonce/session-filtered Seatbelt unified-log observations and
-explicit source/precision; unavailable logs do not weaken policy.
+explicit source/precision. The nonce annotates existing filesystem-deny rules,
+never replaces `allow default` with a process/Mach/IP default-deny policy;
+unavailable logs do not weaken policy.
 
 In-memory500 records/launch, pages≤200, resolving slots≤32; coalesce by launch/
 executable/path/operation/access. Monotonic revisions, observed/dropped counts,

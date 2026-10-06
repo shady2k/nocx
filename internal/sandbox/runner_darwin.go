@@ -122,11 +122,11 @@ func CompileSeatbeltProfile(policy Policy, observerNonce string) (string, error)
 	}
 	var b strings.Builder
 	b.Grow(512 + len(policy.Roots)*160)
-	// The private nonce annotates Seatbelt denials for the helper's log stream.
-	// It is launch metadata, deliberately excluded from Policy and its digest.
-	b.WriteString("(version 1)\n(deny default (with message \"" + observerNonce + "\"))\n")
+	// Preserve the filesystem-only boundary; nonce annotations must not turn
+	// diagnostics into a default-deny process, Mach or IP policy.
+	b.WriteString("(version 1)\n(allow default)\n")
 	for _, operation := range [...]string{"file-read*", "file-write*", "file-ioctl"} {
-		if err := writeSeatbeltFilesystemBoundary(&b, operation, policy); err != nil {
+		if err := writeSeatbeltFilesystemBoundary(&b, operation, policy, observerNonce); err != nil {
 			return "", err
 		}
 	}
@@ -153,7 +153,7 @@ func validObserverNonce(nonce string) bool {
 	return true
 }
 
-func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, policy Policy) error {
+func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, policy Policy, observerNonce string) error {
 	var allowed strings.Builder
 	add := func(filter, path string) error {
 		quoted, err := quoteSeatbeltString(path)
@@ -236,6 +236,9 @@ func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, polic
 	}
 	b.WriteString("(deny ")
 	b.WriteString(operation)
+	b.WriteString(" (with message \"")
+	b.WriteString(observerNonce)
+	b.WriteString("\")")
 	if allowed.Len() != 0 {
 		b.WriteString(" (require-not (require-any")
 		b.WriteString(allowed.String())

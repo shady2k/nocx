@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,8 +37,24 @@ const pinnedMain = "7e60042546581fde39035dce29110cd3e6a684ac"
 
 func must(err error, operation string) {
 	if err != nil {
+		var refusal *client.RefusalError
+		if errors.As(err, &refusal) {
+			fmt.Printf("MACOS_NATIVE_FAILURE operation=%q code=%q prepare_code=%q\n", operation, refusal.Code, preparationCode(err))
+		}
 		panic(operation)
 	}
+}
+
+func preparationCode(err error) string {
+	var refusal *client.RefusalError
+	if !errors.As(err, &refusal) || refusal.Code != "sandbox_prepare_failed" {
+		return ""
+	}
+	var detail sandbox.BuildError
+	if json.Unmarshal(refusal.Details, &detail) != nil {
+		return ""
+	}
+	return detail.Code
 }
 
 func report(name string) { fmt.Println("MACOS_NATIVE_PASS " + name) }
@@ -203,6 +220,9 @@ func main() {
 		_ = currentClient.SandboxDiscard(ctx, aliasPreparation.Ticket)
 		panic("case-insensitive reserved-root alias was accepted")
 	}
+	if preparationCode(aliasErr) != "reserved_root_conflict" {
+		must(aliasErr, "reserved-root alias returned the wrong refusal")
+	}
 	report("APFS_CASE_INSENSITIVE_RESERVED_ALIAS_REFUSED")
 
 	invalid, err := currentClient.SandboxPrepare(ctx, proto.SandboxPrepareParams{
@@ -216,6 +236,9 @@ func main() {
 	if err == nil {
 		_ = currentClient.SandboxDiscard(ctx, invalid.Ticket)
 		panic("helper accepted malformed native root instead of refusing Enforce")
+	}
+	if preparationCode(err) != "invalid_root" {
+		must(err, "missing native root returned the wrong refusal")
 	}
 	report("MALFORMED_NATIVE_PREPARE_REFUSED")
 	failed, err := currentClient.SandboxPrepare(ctx, proto.SandboxPrepareParams{

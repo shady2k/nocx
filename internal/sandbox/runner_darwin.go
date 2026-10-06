@@ -180,8 +180,8 @@ func writeSeatbeltUnixBoundary(b *strings.Builder, runtimeRoot string) error {
 	if err != nil {
 		return err
 	}
-	b.WriteString("(deny network-outbound (require-all (remote unix-socket) (require-not (subpath " + quoted + "))))\n")
-	b.WriteString("(deny network-bind (require-all (local unix-socket) (require-not (subpath " + quoted + "))))\n")
+	b.WriteString("(deny network-outbound (remote unix-socket (require-not (subpath " + quoted + "))))\n")
+	b.WriteString("(deny network-bind (local unix-socket (require-not (subpath " + quoted + "))))\n")
 	return nil
 }
 

@@ -33,15 +33,19 @@ func backendAvailable() error {
 		}
 		roots = append(roots, Root{Path: actual, Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot})
 	}
+	tempRoot, err := canonicalDir(os.TempDir())
+	if err != nil {
+		return errors.New("Seatbelt temporary directory unavailable")
+	}
 	profile, err := CompileSeatbeltProfile(Policy{
 		Version: PolicyVersion, Backend: MacOSSeatbelt, BackendVersion: MacOSBaselineVersion,
 		WorkspaceRoot: "/", Shell: "/usr/bin/true", Runner: "/usr/bin/true",
-		Runtime: RuntimePaths{Root: os.TempDir()}, Roots: roots,
+		Runtime: RuntimePaths{Root: tempRoot}, Roots: roots,
 	})
 	if err != nil {
 		return errors.New("Seatbelt profile unsupported")
 	}
-	file, err := privateSeatbeltProfile(os.TempDir(), profile)
+	file, err := privateSeatbeltProfile(tempRoot, profile)
 	if err != nil {
 		return errors.New("Seatbelt private profile unavailable")
 	}

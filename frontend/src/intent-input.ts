@@ -194,6 +194,14 @@ function isDeadKey(e: KeyboardEvent): boolean {
 export interface IntentInputOptions {
   /** Where intents go, in the order they were produced. */
   emit: IntentSink
+  /** The surface's own chords, consulted before this element reads a key at
+   *  all. Returning true CONSUMES the key: nothing is emitted and the
+   *  browser's default is prevented — a chord the pane owns is not input to
+   *  the program, and that is the same contract xterm's custom key handler
+   *  had before it (design §10.1). The pane answers "is this the snippet
+   *  chord" here because a chord is a product rule and this element is the
+   *  kit's, and the kit does not know the product's shortcuts (AD-8). */
+  consume?: (e: KeyboardEvent) => boolean
   /** The element pointer events are read from — the painted grid. Absent
    *  leaves the pointer alone, which is what a surface with no grid wants. */
   surface?: HTMLElement | null
@@ -218,6 +226,7 @@ export class IntentInput {
   readonly element: HTMLTextAreaElement
 
   private readonly emit: IntentSink
+  private readonly consume: ((e: KeyboardEvent) => boolean) | null
   private readonly surface: HTMLElement | null
   private readonly cellAt:
     ((clientX: number, clientY: number) => { x: number; y: number } | null) | null
@@ -238,6 +247,7 @@ export class IntentInput {
 
   constructor(options: IntentInputOptions) {
     this.emit = options.emit
+    this.consume = options.consume ?? null
     this.surface = options.surface ?? null
     this.cellAt = options.cellAt ?? null
 
@@ -303,6 +313,18 @@ export class IntentInput {
   }
 
   private onKeydown(e: KeyboardEvent): void {
+    if (this.consume?.(e)) {
+      // The pane's own chord: consumed here, prevented from reaching the
+      // browser AND from becoming an intent — the caller just opened
+      // whatever the chord opens, and zero bytes belong to the program.
+      e.preventDefault()
+      // The browser may still commit a character for the chord (Option+P is
+      // 'π' on macOS); it belongs to the pane's own gesture, not to the
+      // program, so the next input event is swallowed — and the next keydown,
+      // or a keyup where nothing else happened, clears the suppression.
+      this.suppressText = true
+      return
+    }
     if (isDeadKey(e)) {
       // Nothing on its own; whatever it composes arrives as text.
       this.suppressText = false

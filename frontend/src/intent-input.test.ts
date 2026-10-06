@@ -187,6 +187,47 @@ describe('a physical key and committed text stay distinguishable', () => {
 })
 
 describe('the layout owns the character, and the client does not', () => {
+  // A chord the SURFACE owns is not input to the program: the consume
+  // handler is consulted before this element reads the key at all, and a
+  // consumed key opens whatever the surface opens and produces nothing here —
+  // the same contract xterm's custom key handler had before it (design §10.1).
+  it('consumes a key the surface owns, and emits nothing for it', () => {
+    const intents: SessionIntent[] = []
+    let chordHandled = false
+    const input = new IntentInput({
+      emit: (intent) => intents.push(intent),
+      consume: (e) => {
+        if (e.code === 'KeyP' && e.altKey && e.metaKey) {
+          chordHandled = true
+          return true
+        }
+        return false
+      },
+    })
+    live.push(input)
+
+    input.element.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'p',
+        code: 'KeyP',
+        altKey: true,
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    // A chord the pane owns must not also type a character: whatever the
+    // browser commits for it (Option+P is 'π' on macOS) is swallowed.
+    input.element.dispatchEvent(inputEvent('π', 'insertText'))
+
+    expect(chordHandled).toBe(true)
+    expect(intents).toEqual([])
+
+    // A key the surface does not own still reaches the wire as itself.
+    input.element.dispatchEvent(keydown('Enter', { key: 'Enter' }))
+    expect(intents).toEqual([{ kind: 'key', payload: 'enter' }])
+  })
+
   // The interrupt is a KEY and not a byte to be found inside a string
   // (nocx-zg3k3.3.1): the pane's held window watches for this payload, and the
   // runtime decides what Ctrl-C means to the program that is reading.

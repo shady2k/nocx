@@ -2625,6 +2625,15 @@ export class TerminalContent extends BasePaneContent {
       // corner.
       const intentInput = new IntentInput({
         emit: (intent) => this.onSessionIntent(intent),
+        // THE CHORD IS THE PANE'S, not the program's: consumed before it
+        // becomes an intent, and handed to the ONE opener every keyboard
+        // boundary answers through (design §10.1, AD-8) — the same
+        // handler the editor arbiter calls and the xterm boundary called.
+        consume: (e) => {
+          if (!isSnippetChord(e)) return false
+          this.handleSnippetChord()
+          return true
+        },
       })
       this.scrollback.mountTarget.append(intentInput.element)
       this._intentInput = intentInput

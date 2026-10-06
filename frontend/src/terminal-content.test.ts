@@ -1950,6 +1950,34 @@ describe('the snippet palette chord (nocx-jj77)', () => {
     }
   })
 
+  it("the grid's input element delegates the chord to the SAME opener, and no intent goes out", async () => {
+    const onSnippetChord = vi.fn()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+    })
+    try {
+      const session = sessionOf(content)
+      session.intent.mockClear()
+      const element = intentElementOf(content)
+      element.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'p',
+          code: 'KeyP',
+          altKey: true,
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+      // Consumed, not typed: the chord opens the palette and NO intent was
+      // sent to the session for it — a key the pane owns is not input.
+      expect(session.intent).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
   it('the xterm boundary (the renderer chord registration) delegates to the SAME opener', async () => {
     const onSnippetChord = vi.fn()
     const { content, teardown } = await mountTerminal(makeClipboard(), {

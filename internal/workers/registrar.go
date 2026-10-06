@@ -93,6 +93,19 @@ type Registrar struct {
 	// is the same stance the supervisor takes with an unwired destination.
 	attention *Backstop
 
+	// restarts is the durable restart record (ADR-0079), written at MarkLive
+	// and dropped when the participant is closed or its registration is
+	// compensated. It is a seam and not the Store, because the live store's
+	// subject is what is true right now and a record that outlives the process
+	// is not that: this one is read once, by the startup restore, and its
+	// process state is always interrupted.
+	//
+	// Nil is the absence case every other optional seam here follows, and here
+	// it costs only what a restart cannot do: a backend with no recorder
+	// remembers nothing across a restart, which is D5's behaviour and not an
+	// error.
+	restarts RestartRecorder
+
 	// observations is the settle machine for the facts nocx SEES
 	// (nocx-luqz9.2): what each worker was last read as, since when, and what
 	// has already been placed in a coordinator's mailbox. It is never nil —
@@ -172,10 +185,21 @@ func WithSettleWindow(d time.Duration) Option {
 }
 
 // WithWake replaces the wake the record types at an idle coordinator with
-// unread mail (nocx-luqz9.3). The composition root supplies one wired to the
+// unread mail (nocx-dkawo.3). The composition root supplies one wired to the
 // pane typist and to the notification pipeline; the default is wired to
 // neither and says so at Error at the moment it is needed.
 func WithWake(w *Wake) Option { return func(r *Registrar) { r.wake = w } }
+
+// WithRestartRecords wires the durable restart record (ADR-0079). Without it
+// nothing is persisted across a restart, which is what D5 said and what a
+// backend nobody gave a recorder to should keep doing.
+func WithRestartRecords(rec RestartRecorder) Option {
+	return func(r *Registrar) {
+		if rec != nil {
+			r.restarts = rec
+		}
+	}
+}
 
 // WithCloser wires the seam that ends a participant. Without it Close
 // refuses and says so, rather than reporting a worker ended that is still
@@ -195,6 +219,20 @@ func WithCloser(c Closer) Option { return func(r *Registrar) { r.closer = c } }
 // silent-absence case every other optional seam in this package already
 // treats.
 func (r *Registrar) SetTaskQueue(q TaskQueue) { r.queue = q }
+
+// SetRestartRecords wires the durable restart record (ADR-0079) after
+// construction, and exists beside SetTaskQueue rather than only as an Option
+// because the composition root's own startup pass wants the SAME store the
+// record writes through — and two stores over one document would be two views
+// of one set. Without one, nothing is persisted across a restart, which is D5's
+// behaviour rather than an error. Called once, before any Register runs
+// concurrently — the same assumption every other post-construction setter here
+// relies on.
+func (r *Registrar) SetRestartRecords(rec RestartRecorder) {
+	if rec != nil {
+		r.restarts = rec
+	}
+}
 
 // NewRegistrar wires the record to its four seams.
 func NewRegistrar(s Store, sp Spawner, e Enrolments, sup Supervisor, opts ...Option) *Registrar {
@@ -425,6 +463,27 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	if err := r.sup.Attach(ctx, p); err != nil {
 		return Registration{Participant: p}, r.compensate(ctx, p, spawned, true, fmt.Errorf("worker: attach supervision: %w", err))
 	}
+	// THE RESTART RECORD, LAST (ADR-0079). This is the first moment every
+	// fact it holds exists — the pane and the agent came from the spawn and
+	// the enrolment, and the checkout was accepted two lines above — and it is
+	// after Attach so that the only failure left in the procedure is one whose
+	// compensation below can drop the record again. Written BEFORE the
+	// briefing is enqueued, because that call cannot fail the registration:
+	// a participant that is live and unbriefed is still a participant a
+	// restart must be able to find.
+	//
+	// A refused write is a WARNING and never a refusal, for
+	// workerCheckouts.recordCreated's reason: the worker is real whether or
+	// not the note of it survived, and undoing a live registration over a
+	// bookkeeping failure would kill a running agent over a document.
+	if r.restarts != nil {
+		if src, ok := spawned.(RestartIdentified); ok {
+			if recErr := r.restarts.Record(ctx, restartRecord(p, req, src.RestartIdentity())); recErr != nil {
+				lg.Warn("worker: the participant's restart record could not be written, so a restart cannot resume it",
+					"participant", string(p.ID), "error", recErr)
+			}
+		}
+	}
 	// What became of the task travels OUT with the registration and is never
 	// written into the record (nocx-f545a.3): a task left untyped because the
 	// pane was asking a question is a screen reading, and a screen reading
@@ -474,6 +533,28 @@ func (r *Registrar) Register(ctx context.Context, req RegisterRequest) (_ Regist
 	return reg, nil
 }
 
+// restartRecord assembles the durable tuple from the two halves that hold it:
+// the record's own facts (who, which worker, which checkout) and the launcher's
+// (which pane, which agent, what it was launched as). It is a function and not
+// inline code because the compensation and the close read the same shape, and a
+// record assembled in two places is a record that can be assembled two ways.
+func restartRecord(p Participant, req RegisterRequest, id RestartIdentity) RestartRecord {
+	return RestartRecord{
+		Participant:        p.ID,
+		Group:              p.Group,
+		CoordinatorSession: req.CoordinatorSession,
+		PaneID:             id.PaneID,
+		TabID:              id.TabID,
+		Agent:              id.Agent,
+		Command:            req.Command,
+		Environment:        req.Environment,
+		Cwd:                id.Cwd,
+		Worktree:           p.Worktree,
+		Resume:             id.Resume,
+		RecordedAt:         p.RegisteredAt,
+	}
+}
+
 // compensate undoes what was built, in the reverse order of building it, and
 // returns cause. It never replaces cause with its own error: what the caller
 // needs to know is why the registration failed, and a compensation that also
@@ -502,6 +583,20 @@ func (r *Registrar) compensate(ctx context.Context, p Participant, spawned Spawn
 		// closes it afterwards — the participant it describes dies with this
 		// backend, and so does the record.
 		return errors.Join(cause, fmt.Errorf("worker: terminalize: %w", err))
+	}
+	// AND THE RESTART RECORD WITH IT (ADR-0079). A registration that failed
+	// after the record was written leaves a note of a participant nothing may
+	// ever address, and a restart that read it would relaunch a worker this
+	// backend just killed. It is dropped with the rest of the compensation and
+	// its own failure is not folded into cause: cause is why the registration
+	// failed, and a record that could not be dropped is a fact about the
+	// document, not about the caller's request — the same asymmetry the
+	// revoke below takes.
+	if r.restarts != nil {
+		if forgetErr := r.restarts.Forget(ctx, p.ID); forgetErr != nil {
+			r.log.WithContext(ctx).Warn("worker: could not drop a compensated registration's restart record",
+				"participant", string(p.ID), "error", forgetErr)
+		}
 	}
 	// The participant is now terminal, so anything IT controlled is a
 	// delegation with nobody live behind it (§7.2's "participant
@@ -1011,6 +1106,19 @@ func (r *Registrar) Close(ctx context.Context, coordinatorSession string, id Par
 	if _, revokeErr := r.Revoke(ctx, id, "closed"); revokeErr != nil {
 		r.log.WithContext(ctx).Warn("worker: revoke after close",
 			"participant", string(id), "error", revokeErr)
+	}
+	// AND THE RESTART RECORD, WHICH THE CLOSE ENDS TOO (ADR-0079). Its
+	// interval closed with the participant: a closed worker took its tab out of
+	// the window, so a record naming that pane would have a restore relaunch an
+	// agent into a tab nobody is looking at. Dropped after the close returned
+	// and after `closed` was written, for the reason the state above is — a
+	// close that failed ended nothing, and its own failure is logged beside the
+	// others rather than returned as the close's.
+	if r.restarts != nil {
+		if forgetErr := r.restarts.Forget(ctx, id); forgetErr != nil {
+			r.log.WithContext(ctx).Warn("worker: could not drop a closed participant's restart record",
+				"participant", string(id), "error", forgetErr)
+		}
 	}
 	return left, nil
 }

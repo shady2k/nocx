@@ -227,6 +227,18 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// minted at start (ADR-0077) — the block's identity across
 		// coordinators, so a completion delivered twice closes one block.
 		"55": "8dd3b40e95050d52a6d345253db29559e07517847f94b79daa2472c19558b1f1",
+		// v56: the agent wrappers are GENERATED from the agent record
+		// (nocx-t5e7d). The bundle used to spell one `claude()` line by hand, so
+		// the agents nocx offered in a shell were a fact about this script; the
+		// block is now rendered from the enabled names by the one generator both
+		// delivery paths go through, and a bundle generated from a different set
+		// is a different generation.
+		"56": "2580479b36a733fd8091b1ec50b194508cbd63823a17695e6bb3d5885c84b76d",
+		// v57: the tool-surface argument became LOCAL only (nocx-t5e7d), so the
+		// bytes a HOST receives moved while the embedded pair did not — the same
+		// digest as v56 on purpose, and the bump is what republishes the
+		// generation files.
+		"57": "2580479b36a733fd8091b1ec50b194508cbd63823a17695e6bb3d5885c84b76d",
 	}
 
 	h := sha256.New()

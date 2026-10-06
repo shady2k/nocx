@@ -424,7 +424,11 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 			// Nor a helper binary for the same reason: the child runs on
 			// another machine, where this one's install is not what it execs
 			// (nocx-e2bws).
-			func() string { return "" })))
+			func() string { return "" },
+			// And no agent names: this child runs on ANOTHER machine, whose
+			// shell is given the wrappers by the generation published there,
+			// never by this machine's request (nocx-t5e7d).
+			func() []string { return nil })))
 	facts := &factLog{}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}

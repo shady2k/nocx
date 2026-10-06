@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentcalib"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/agentrule"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
@@ -768,7 +769,27 @@ func New(opts ...Option) (*App, error) {
 	// logrus_containment.go, and the receipt test that pins it.
 	installLogrusContainment(logger)
 
-	shint := shellintegration.New(logger)
+	// THE AGENT RECORD (nocx-t5e7d): the one description of an agent nocx runs
+	// — its command, its arguments, its environment and the three resume
+	// shapes — embedded in this binary and NEVER written out, beside whatever
+	// documents a person has written under this profile's own `agents`
+	// directory.
+	//
+	// It is built HERE, ahead of the shell integration, because the integration
+	// is its first reader: the wrappers a host is published are generated from
+	// this store's enabled names, so the set a shell offers and the set the
+	// record describes have one owner. The startup restore below is its second
+	// reader, and it asks a different question of the same store.
+	agentRecords, agentRecordsErr := agentrecord.New(paths.ConfigDir())
+	if agentRecordsErr != nil {
+		return nil, fmt.Errorf("agent records: %w", agentRecordsErr)
+	}
+
+	// The agent wrappers a published bundle carries are the ENABLED agents of
+	// the record as it stands at the moment of the publish, read through this
+	// closure rather than captured once: a record a person edits reaches the
+	// next host this process connects to, not the next start of the app.
+	shint := shellintegration.New(logger, shellintegration.WithAgentNames(agentRecords.EnabledNames))
 	remoteInstaller := &remoteInstallerAdapter{inner: shint}
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
@@ -803,7 +824,16 @@ func New(opts ...Option) (*App, error) {
 	// does not carry. Built here, once, so both sides hold the SAME map
 	// rather than two that could drift.
 	hostKeys := newHostKeyObserver()
-	localOpener := &localHelperOpener{log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys}
+	// A pane on THIS machine gets the record's own set too (nocx-t5e7d): the
+	// opener hands it to the daemon in the spawn request, because the daemon is
+	// a separate process built without the release tag and must not resolve a
+	// profile itself. A closure rather than a list, so an edit reaches the next
+	// pane; and wired from the SAME store the published bundle reads, so the
+	// set a shell offers and the set the record describes have one owner.
+	localOpener := &localHelperOpener{
+		log: slogger, procs: procs, spawnTokens: &spawnTokens{}, hostKeys: hostKeys,
+		agentNames: agentRecords.EnabledNames,
+	}
 	// THE REGISTRY HAS NO LOCAL PTY FACTORY, and that is the point of
 	// nocx-ie23r.3 rather than an omission. There is exactly one constructor
 	// of a local PTY in this repository and it lives in the daemon
@@ -882,6 +912,13 @@ func New(opts ...Option) (*App, error) {
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	agentApprovals := agentapproval.NewStore(logger, docStore, "agent-approvals.json")
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	// THE DURABLE RESTART RECORD (ADR-0079, nocx-xn63t.5.1): one atomic JSON
+	// document beside the rest of this profile's state, holding the minimal
+	// link from a worker pane to the agent, launch directory and resume
+	// identity a restart needs. It is a separate store from the live worker
+	// record on purpose — that one is MemoryStore and D5 said so — and it is
+	// read at exactly one moment, the startup restore below.
+	workerRestarts := workers.NewFileRestartStore(docStore, "worker-restarts.json")
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -1731,7 +1768,11 @@ func New(opts ...Option) (*App, error) {
 			// And the binary that child's agent execs as its MCP adapter,
 			// from the same holder and never from this process's environment
 			// (nocx-e2bws).
-			localOpener.installedHelperBinary)),
+			localOpener.installedHelperBinary,
+			// And the agents that child's shell wraps (nocx-t5e7d), from the
+			// record: a nested local shell is a local pane, so it offers what
+			// every other local pane on this machine offers.
+			agentRecords.EnabledNames)),
 		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the
@@ -2409,7 +2450,13 @@ func New(opts ...Option) (*App, error) {
 			repos:        gitFactory,
 			worktreeRoot: filepath.Join(paths.DataDir(), "worktrees"),
 			checkouts:    checkouts,
-			log:          logger,
+			// The watcher's own enrolment cache is the one owner of "which
+			// agent runs in this pane" (panetyping.go's own doc), and it is
+			// asked lazily so a spawn that reads it before the enrolment
+			// arrived records nothing rather than the wrong agent
+			// (ADR-0079).
+			agents: paneAgents{watch: paneWatch},
+			log:    logger,
 		},
 		workerEnrol,
 		workerSup,
@@ -2441,6 +2488,12 @@ func New(opts ...Option) (*App, error) {
 		}),
 		workers.WithBound(workerParticipantBound),
 		workers.WithEnrolmentDeadline(workerEnrolmentDeadline),
+		// THE RESTART RECORD'S WRITER (ADR-0079). Without it nothing survives
+		// a restart, which is exactly what D5 said and exactly what this bead
+		// amends; with it, every participant that goes live leaves the tuple a
+		// startup restore reads and every closed or compensated one takes its
+		// record with it.
+		workers.WithRestartRecords(workerRestarts),
 		// How long a worker's pane must hold a state before it is a fact its
 		// coordinator is told about (nocx-luqz9.2, design §4.4). Stated rather
 		// than left to the zero value for the reason the sweep interval below
@@ -2455,6 +2508,19 @@ func New(opts ...Option) (*App, error) {
 	// answer the registrar cannot give.
 	checkouts.held = workerRecord
 	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
+
+	// THE RESTART RECORD'S ONE READ (ADR-0079). It runs here, after the layout
+	// chain and the worker record both exist and before the transport can
+	// serve a question, for the reason clearWindowOnCleanStart gives for its
+	// own position: a backend start IS an application start, so what the last
+	// one left behind is judged now or not at all.
+	//
+	// It classifies and forgets; it does not relaunch (nocx-xn63t.5.2 owns
+	// that, and the launch record it needs does not exist yet). What it does
+	// buy is the half that is true today: a worker whose pane was closed while
+	// nocx was down stops being a record nobody will ever resolve, and one that
+	// cannot be resumed is said so at startup instead of in a document.
+	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The

@@ -131,7 +131,7 @@ func TestBoundedWorkConstantsAgree(t *testing.T) {
 	if got := publishFSOpBudget(4); got != 101 {
 		t.Errorf("publishFSOpBudget(4) = %d, want 101 (a fourth script costs 5+2+2+2)", got)
 	}
-	if got := generationFileCount(launchBundle()); got != 3 {
+	if got := generationFileCount(shippedBundle()); got != 3 {
 		t.Fatalf("the shipped bundle has %d generation files; N was fixed at F=3", got)
 	}
 	var sum time.Duration
@@ -168,7 +168,7 @@ func TestMeasuredMaximumEqualsTheSourceConstant(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, tmpName, "manifest-dead.tmp"), []byte("{}"), 0o600); err != nil {
 		t.Fatalf("plant manifest temp: %v", err)
 	}
-	plantGeneration(t, filepath.Join(root, integrationDir), "v41")
+	plantGeneration(t, filepath.Join(root, integrationDir), prodGen("41"))
 	plantLock(t, root)
 
 	cfs.reset()
@@ -320,7 +320,7 @@ func TestSingleflightJoinsConcurrentCalls(t *testing.T) {
 		if errs[i] != nil {
 			t.Fatalf("caller %d: %v", i, errs[i])
 		}
-		if !results[i].Published || results[i].Generation != "v39" {
+		if !results[i].Published || results[i].Generation != prodGen("39") {
 			t.Fatalf("caller %d did not receive the leader's result: %+v", i, results[i])
 		}
 	}
@@ -335,7 +335,7 @@ func TestSingleflightJoinsConcurrentCalls(t *testing.T) {
 	if got.bytes != want.bytes {
 		t.Errorf("%d concurrent calls wrote %d bytes; one publish writes %d", callers, got.bytes, want.bytes)
 	}
-	assertBoundedFootprint(t, root, "v39")
+	assertBoundedFootprint(t, root, prodGen("39"))
 }
 
 // TestSingleflightDoesNotJoinDifferentDestinations: the key is the seam
@@ -441,7 +441,7 @@ func TestCrossProcessAtMostOneCommitPerDigest(t *testing.T) {
 		if res.Published {
 			commits++
 		}
-		if res.Generation != "v39" {
+		if res.Generation != prodGen("39") {
 			t.Errorf("a publisher reported generation %q, want v39: %+v", res.Generation, res)
 		}
 	}
@@ -449,12 +449,12 @@ func TestCrossProcessAtMostOneCommitPerDigest(t *testing.T) {
 		t.Errorf("%d commits for one content digest across two processes, want exactly 1", commits)
 	}
 	// No torn state: the committed generation verifies against the bundle.
-	assertBoundedFootprint(t, root, "v39")
+	assertBoundedFootprint(t, root, prodGen("39"))
 	for _, f := range prodBundle("39").Files {
 		if f.Name == launchName {
 			continue
 		}
-		got := readFileT(t, filepath.Join(root, integrationDir, "v39", f.Name))
+		got := readFileT(t, filepath.Join(root, integrationDir, prodGen("39"), f.Name))
 		if string(got) != string(f.Data) {
 			t.Errorf("%s lost or corrupted bytes across the race", f.Name)
 		}
@@ -556,10 +556,10 @@ func TestContendedWithACommittedGenerationUsesIt(t *testing.T) {
 	if res.Reason != ReasonContendedExisting {
 		t.Errorf("reason = %q, want %q", res.Reason, ReasonContendedExisting)
 	}
-	if res.Generation != "v39" || res.Version != "39" {
+	if res.Generation != prodGen("39") || res.Version != "39" {
 		t.Errorf("the fallback names %+v, want the committed v39", res)
 	}
-	if got := readManifestT(t, root).Generation; got != "v39" {
+	if got := readManifestT(t, root).Generation; got != prodGen("39") {
 		t.Errorf("the contended attempt moved the activation to %s", got)
 	}
 }
@@ -626,7 +626,7 @@ func TestSecondAttemptAgainstUnclearableResidueCreatesNoSecondSlot(t *testing.T)
 	if _, err := pub.Publish(prodBundle("40")); err != nil {
 		t.Fatalf("retry after the residue became clearable: %v", err)
 	}
-	assertBoundedFootprint(t, root, "v40")
+	assertBoundedFootprint(t, root, prodGen("40"))
 }
 
 // TestStagingResidueBeyondOneSlotIsBounded: whatever tmp/ holds, one
@@ -851,7 +851,7 @@ func TestPublishDeadlineInitiatesNoFurtherRemoteOperation(t *testing.T) {
 	if _, err := pub.Publish(prodBundle("40")); err != nil {
 		t.Fatalf("retry after the deadline expired: %v", err)
 	}
-	assertBoundedFootprint(t, root, "v40")
+	assertBoundedFootprint(t, root, prodGen("40"))
 }
 
 // TestUncommittedGenerationRemovalIsBoundedToOne is bound 2 at its guard.
@@ -866,7 +866,7 @@ func TestUncommittedGenerationRemovalIsBoundedToOne(t *testing.T) {
 	if _, err := pub.Publish(prodBundle("39")); err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
-	plantGeneration(t, filepath.Join(root, integrationDir), "v40")
+	plantGeneration(t, filepath.Join(root, integrationDir), prodGen("40"))
 
 	ap := pub.attempt()
 	ap.at.uncommit = maxUncommittedPerAttempt
@@ -875,7 +875,7 @@ func TestUncommittedGenerationRemovalIsBoundedToOne(t *testing.T) {
 	if !errors.As(err, &re) {
 		t.Fatalf("the second uncommitted removal must refuse, got %T: %v", err, err)
 	}
-	if _, statErr := os.Stat(filepath.Join(root, integrationDir, "v40")); statErr != nil {
+	if _, statErr := os.Stat(filepath.Join(root, integrationDir, prodGen("40"))); statErr != nil {
 		t.Errorf("the refused attempt removed the generation anyway: %v", statErr)
 	}
 }
@@ -1001,7 +1001,7 @@ func (f *panicOnceFS) Lstat(path string) (fs.FileInfo, error) {
 // asserted, because the second is what makes the first stable.
 func TestShippedBundleFitsTheByteCeiling(t *testing.T) {
 	pub, _, cfs, _, _ := fakeClockPublisher(t)
-	if _, err := pub.Publish(launchBundle()); err != nil {
+	if _, err := pub.Publish(shippedBundle()); err != nil {
 		t.Fatalf("first contact: %v", err)
 	}
 	m := cfs.snapshot()

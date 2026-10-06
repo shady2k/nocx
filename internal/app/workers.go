@@ -313,7 +313,16 @@ type workerSpawner struct {
 	// checkout is listed by git regardless, and what is lost is only the
 	// name and task a later coordinator would have read beside it.
 	checkouts *workerCheckouts
-	log       log.Logger
+	// agents answers which agent a pane was enrolled as, which is how a
+	// spawn's pane learns the one fact the restart record needs and cannot
+	// derive (ADR-0079). It is asked LAZILY, at MarkLive, because the
+	// enrolment arrives after Spawn returns: read at spawn it would name no
+	// agent for every worker, which is the silent-degrade shape this file
+	// refuses. Nil is the absence case — the record is then written without
+	// an agent, and the restore refuses it by name rather than guessing a
+	// binary to launch.
+	agents agentOnPane
+	log    log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -513,7 +522,17 @@ func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState, la
 // are the ones internal/workers reaches through the Spawned interface rather
 // than through workerSpawner's own locals.
 type spawnedParticipant struct {
-	tabID    string
+	tabID string
+	// paneID and cwd are the two facts the durable restart record needs
+	// (ADR-0079) and nothing else in this process holds together: the tab is
+	// the close's seat, the pane is the identity a restore reopens and the
+	// cwd is the directory it was launched in — the pane ROW's cwd is where a
+	// restore opens the pane and says nothing about what ran there.
+	paneID string
+	cwd    string
+	// agents answers the pane's agent at the moment the restart record is
+	// written, which is after the enrolment arrived. See workerSpawner.agents.
+	agents   agentOnPane
 	sess     session.Session
 	sessions sessionCloser
 	// layout is asked for tabID's removal. It is the same paneMinter Spawn
@@ -549,6 +568,31 @@ func (s spawnedParticipant) TaskDelivery() workers.TaskDelivery { return s.deliv
 // "attempted nothing says nothing" reading TaskDelivery's own seam uses.
 func (s spawnedParticipant) WorktreeLocation() workers.Worktree {
 	return s.worktree.location()
+}
+
+// RestartIdentity is what a restart would find in this participant's pane
+// (ADR-0079): the pane and tab the spawn minted, the directory it launched in,
+// and the agent that enrolled there.
+//
+// IT IS CALLED AT MarkLive, NOT HERE, and that is the whole reason the agent is
+// a seam rather than a field: the enrolment arrives after Spawn has returned,
+// so an agent read at spawn would be empty for every worker — a record that
+// looks complete and restores as nothing. A restart identity with no agent is
+// still written, because the pane and the checkout are worth keeping and the
+// restore refuses an unknown agent BY NAME rather than guessing one.
+func (s spawnedParticipant) RestartIdentity() workers.RestartIdentity {
+	id := workers.RestartIdentity{PaneID: s.paneID, TabID: s.tabID, Cwd: s.cwd}
+	if s.agents != nil {
+		if agent, known := s.agents.AgentOn(s.paneID); known {
+			id.Agent = agent
+		}
+	}
+	// Resume is deliberately absent: which identity an agent continues its
+	// conversation under is the launch record's (nocx-dz9vj, nocx-2txuc), and
+	// this file has no business deriving one from a command line. Until that
+	// record exists, every persisted worker restores as "cannot resume", which
+	// is the honest answer rather than a guess at `--resume`.
+	return id
 }
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
@@ -888,7 +932,8 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's session is open",
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
-		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		tabID: tabID.String(), paneID: paneID.String(), cwd: paneCwd,
+		agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
 		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 
@@ -1182,6 +1227,8 @@ func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers
 		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
 			"participant", string(participant), "error", err)
 	}
+	// No pane, no cwd and no agent here, and deliberately: this value exists
+	// only to be killed, so it is never asked what a restart would find there.
 	sp := spawnedParticipant{
 		tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout,
 		participant: participant, tabs: s.tabs, worktree: undo,

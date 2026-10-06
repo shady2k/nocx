@@ -30,15 +30,19 @@ package app
 // replaced would already have violated.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentrecord"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
 
@@ -57,7 +61,7 @@ type nestedGrantHarness struct {
 	parent  lifecycle.DomainID
 }
 
-func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() string, localHelper func() string) *nestedGrantHarness {
+func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() string, localHelper func() string, agentNames func() []string) *nestedGrantHarness {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	k := lifecycle.New(lifecycle.Options{})
@@ -70,7 +74,7 @@ func newNestedGrantHarness(t *testing.T, kind transportKind, endpoint func() str
 	// typed is nil: it is the SSH child's delivery seam, and these tests
 	// compose the sudo/su child, which never reaches for it.
 	builder := newChildGrantBuilder(logger,
-		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, nil, endpoint, localHelper)
+		func() *lifecyclepub.Publisher { return pub }, transports, sessions, nil, nil, endpoint, localHelper, agentNames)
 	pub = lifecyclepub.New(k, lifecyclepub.WithGrantBuilder(builder))
 
 	parentLn, err := lifecyclechannel.NewListener(logger, pub)
@@ -134,7 +138,7 @@ func TestNestedLocalChildLaunchNamesTheCoordinatorsToolEndpoint(t *testing.T) {
 	// endpoint at all — the production seam, not a value handed to the test.
 	a.SetLocalToolSocketPath(sock)
 
-	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary, a.localHelper.agentNames)
 	launch := h.grantSudo()
 
 	want := shellintegration.ToolSocketEnvVar + "='" + sock + "'"
@@ -155,7 +159,11 @@ func TestNestedChildOnAnotherMachineNamesNoToolEndpoint(t *testing.T) {
 	t.Setenv(shellintegration.ToolSocketEnvVar, "/run/user/1000/nocx/foreign-coordinator.sock")
 
 	h := newNestedGrantHarness(t, transportKind{port: 41234}, func() string { return "/run/user/1000/nocx/tool.sock" },
-		func() string { return "/home/u/.nocx/helper/installed/nocx-helper" })
+		func() string { return "/home/u/.nocx/helper/installed/nocx-helper" },
+		// The child runs on ANOTHER machine, so this machine's agent set is
+		// not what its shell wraps: the generation published there carries it
+		// (nocx-t5e7d).
+		func() []string { return nil })
 	launch := h.grantSudo()
 
 	if strings.Contains(launch, shellintegration.ToolSocketEnvVar+"=") {
@@ -180,7 +188,7 @@ func TestNestedLocalChildWithNoToolSurfaceNamesNoVariable(t *testing.T) {
 		t.Fatal("newTestApp built no local helper opener to derive the endpoint through")
 	}
 
-	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary, a.localHelper.agentNames)
 	launch := h.grantSudo()
 
 	if strings.Contains(launch, shellintegration.ToolSocketEnvVar+"=") {
@@ -223,7 +231,7 @@ func TestNestedLocalChildNamesThisMachinesInstalledHelperBinary(t *testing.T) {
 	const foreign = "/home/u/.nocx/helper/11-linux-amd64-ffff/nocx-helper"
 	t.Setenv("NOCX_AGENT_HELPER_PATH", foreign)
 
-	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary)
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary, a.localHelper.agentNames)
 	launch := h.grantSudo()
 
 	if want := "NOCX_AGENT_HELPER_PATH='" + installed + "'"; !strings.Contains(launch, want) {
@@ -264,5 +272,49 @@ func TestNestedSSHChildNamesNoToolSurface(t *testing.T) {
 	// there, so an empty options value cannot be satisfied by an empty launch.
 	if opts.SessionID == "" || opts.Lane != string(typedTestRequest().Lane) || opts.Capability == "" {
 		t.Fatalf("the far launch lost its own identity: %+v", opts)
+	}
+}
+
+// A nested child on THIS machine is a local pane, so its shell wraps the
+// record's enabled agents too (nocx-t5e7d) — and the record is read through the
+// composition root's own closure, which is what makes this the end of the chain
+// rather than a double: a person's added agent is wrapped, an agent they
+// switched off is not, and neither fact had to be in the binary.
+func TestANestedChildOnThisMachineWrapsTheRecordsAgents(t *testing.T) {
+	storagetest.Isolate(t)
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		t.Fatalf("app paths: %v", err)
+	}
+	dir := filepath.Join(paths.ConfigDir(), agentrecord.DirName)
+	if merr := os.MkdirAll(dir, 0o700); merr != nil {
+		t.Fatalf("the agent directory: %v", merr)
+	}
+	for id, body := range map[string]string{
+		"myagent": `{"version": 1, "command": "my-agent", "env": ["MYAGENT_KEY=not-a-real-key"]}`,
+		"claude":  `{"version": 1, "command": "claude", "disabled": true}`,
+	} {
+		if werr := os.WriteFile(filepath.Join(dir, id+".json"), []byte(body), 0o600); werr != nil {
+			t.Fatalf("write %s: %v", id, werr)
+		}
+	}
+
+	a, aerr := newTestApp(t)
+	if aerr != nil {
+		t.Fatalf("newTestApp: %v", aerr)
+	}
+	h := newNestedGrantHarness(t, transportKind{local: true}, a.localHelper.toolEndpoint, a.localHelper.installedHelperBinary, a.localHelper.agentNames)
+	launch := h.grantSudo()
+
+	if !strings.Contains(launch, `myagent() { __nocx_agent_run myagent "$@"; }`) {
+		t.Fatalf("the child's shell does not wrap the agent the person added:\n%s", launch)
+	}
+	if strings.Contains(launch, "claude()") {
+		t.Fatalf("the child's shell wraps an agent the person switched off")
+	}
+	// And nothing of their record travelled with it: the wrapper carries the
+	// name, and the environment line they wrote is read where nocx runs.
+	if strings.Contains(launch, "MYAGENT_KEY") {
+		t.Fatalf("the child's launch carries an environment line from the person's record")
 	}
 }

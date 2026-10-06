@@ -127,6 +127,10 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // so a value captured here would be empty for the life of the process. See
 // nestedToolSocket for what it answers and whose value it is.
 //
+// agentNames answers the enabled agents a nested child's shell wraps
+// (nocx-t5e7d), read per grant: a record the person edits reaches the next
+// child shell, and the child is a local pane like any other.
+//
 // localHelperBinary is the same shape one field over, and it answers the other
 // half of a nested child's agent env: NOCX_AGENT_HELPER_PATH, the executable
 // the child's agent runs as its MCP adapter. It is this machine's INSTALLED
@@ -134,7 +138,7 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // never this process's environment — a backend started from inside a pane
 // inherits that pane's path, which belongs to another generation
 // (nocx-e2bws).
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, observers *environmentEntryRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string) lifecyclepub.GrantBuilder {
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry, observers *environmentEntryRegistry, typed *typedRunner, toolEndpoint func() string, localHelperBinary func() string, agentNames func() []string) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
 		// Every outcome is logged, refusals loudest. A refusal here is
 		// invisible by construction — the publisher answers it with an
@@ -174,7 +178,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 		}
 		switch req.Env {
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
-			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint, localHelperBinary)
+			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind, toolEndpoint, localHelperBinary, agentNames)
 		case lifecycle.EnvSSH:
 			return buildSSHChildBootstrap(lg, p, sessions, observers, req, kind, typed)
 		default:
@@ -235,7 +239,7 @@ func nestedToolSocket(kind transportKind, endpoint func() string) string {
 // into the preserved fd; its final line closes the descriptor once bash has
 // read it, so the per-epoch capability it carries cannot be re-read by a
 // descendant.
-func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string, localHelperBinary func() string) (lifecyclepub.GrantBootstrap, error) {
+func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentTransport lifecycle.TransportID, kind transportKind, toolEndpoint func() string, localHelperBinary func() string, agentNames func() []string) (lifecyclepub.GrantBootstrap, error) {
 	sid, ok := sessions.lookup(req.Lane)
 	if !ok {
 		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: no session registered for lane %s", req.Lane)
@@ -257,11 +261,16 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 		// naming a different generation.
 		AgentHelperPath:     localHelperBinary(),
 		AgentToolSocketPath: nestedToolSocket(kind, toolEndpoint),
-		Capability:          hex.EncodeToString(h.Capability[:]),
-		Recovery:            hex.EncodeToString(h.Recovery[:]),
-		Lane:                string(req.Lane),
-		Domain:              string(h.Domain),
-		Epoch:               h.Epoch,
+		// This child's shell runs on THIS machine, so its wrappers are the
+		// record's enabled set like any other local pane's (nocx-t5e7d): a
+		// person who drops into `sudo -i` and types their agent gets the same
+		// orchestration they get outside it.
+		Agents:     agentNames(),
+		Capability: hex.EncodeToString(h.Capability[:]),
+		Recovery:   hex.EncodeToString(h.Recovery[:]),
+		Lane:       string(req.Lane),
+		Domain:     string(h.Domain),
+		Epoch:      h.Epoch,
 	}
 	if kind.local {
 		opts.LifecycleFD = 3 // the inherited socketpair descriptor

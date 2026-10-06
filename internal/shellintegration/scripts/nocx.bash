@@ -952,11 +952,13 @@ __nocx_agent_run() {
         __stage_reason="$__nocx_agent_stage_reason"
         builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
     fi
-    # Claude's --mcp-config option is variadic: placing it before "$@" would
-    # swallow a user's positional prompt as another config path. Keep it last.
-    # If a future Claude subcommand rejects trailing flags, update this
-    # argv proof and feed the prompt through stdin instead of moving the flag
-    # ahead of user arguments.
+    # THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it does not reach a host:
+    # the wrapper block above carries NAMES because this script is published to
+    # hosts nobody here controls, and the staged exec below is rendered with a
+    # tool-surface argument for a LOCAL pane and without one for a published
+    # generation (nocx-t5e7d). The argument is Claude's and its rule is kept
+    # where it is used: variadic, so it goes LAST — placed before "$@" it would
+    # swallow a user's positional prompt as another config path.
     # Cleared before the agent is exec'd: the staging above has taken its copy,
     # nothing after this point needs the bearer, and a shell that ran a child
     # with it still in its own variable space is one `printenv`-style accident
@@ -964,11 +966,12 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
-    if (( __staged )); then
-        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
-    else
-        command "$__agent" "$@"
-    fi
+    # THE STAGED EXEC, and the ONE block that differs by delivery (nocx-t5e7d):
+    # a pane on this machine is pointed at its tool surface, while a published
+    # generation carries agent names and no per-agent argument at all, because
+    # that argument is this machine's configuration and a host is not ours.
+    # agents.go renders both forms and says why.
+    # @NOCX_TOOL_SURFACE@
     __rc=$?
     # The other end of the interval, and it runs whatever the agent returned —
     # a crash, an interrupt and a clean exit all close it. The answer is read
@@ -983,16 +986,18 @@ __nocx_agent_run() {
     return $__rc
 }
 
-# The agents nocx wraps. One today, deliberately: D15 of the orchestration
-# design says one worker first, not three — the mechanism is what is being
-# built and fan-out is cheap once it works. A second name is a second line.
+# The agents nocx wraps, GENERATED from the agent record (nocx-t5e7d): the line
+# below is replaced, before this script is stripped and delivered, by one
+# wrapper per ENABLED agent — by NAME and nothing else, because this script is
+# published to hosts nobody here controls and a person's record is not theirs to
+# receive (agents.go says why in full).
 #
 # A FUNCTION, not an alias, and not exported. What it wraps is what the user
 # TYPES in a nocx pane; a script that runs `claude` in a subshell gets the real
 # binary, because bash does not pass functions to children unless told to. That
 # is the right scope: orchestration is a property of the pane the person is
 # sitting in front of, not of everything that pane ever spawns.
-claude() { __nocx_agent_run claude "$@"; }
+# @NOCX_AGENT_WRAPPERS@
 
 # Classify a typed line as a nested environment. Conservative by design:
 # anything ambiguous is NOT nested and runs conventionally — the honest

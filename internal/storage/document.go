@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 // DocumentStore reads and writes bounded, human-recoverable configuration as
@@ -22,6 +23,25 @@ type DocumentStore interface {
 	// interrupted part-way through.
 	Delete(name string) error
 }
+
+// ---------------------------------------------------------------------------
+// Document names
+// ---------------------------------------------------------------------------
+
+// documentName bounds what may become a FILE name under a directory the app
+// owns. It is one rule with one owner because every per-agent document family
+// here derives a file name from a name that came from somewhere else — a
+// driver this build carries, an agent a person added — and a name that walks
+// out of the app directory is a wiring mistake with a filesystem behind it.
+// Leading dots are out for the same reason a hidden document is out: a record
+// nobody can see is a record nobody can repair by hand, and being readable by
+// hand is most of why these documents are files.
+var documentName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidDocumentName reports whether name may become a document's file name.
+// Callers validate where the name ENTERS — at construction, for a set of
+// names the build carries — and not again at each use.
+func ValidDocumentName(name string) bool { return documentName.MatchString(name) }
 
 // ---------------------------------------------------------------------------
 // Schema version protocol

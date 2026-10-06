@@ -117,7 +117,7 @@ func helperSource(t *testing.T) bytesSource {
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
 		bin := filepath.Join(dir, "nocx-helper")
-		out, err := exec.Command("go", "build", "-o", bin, "../../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
+		out, err := exec.Command("go", "build", "-tags", "nocx_local_ssh", "-o", bin, "../../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
 		if err != nil {
 			buildErr = errors.New(string(out))
 			return

@@ -125,7 +125,8 @@ func main() {
 	if lane == "source" {
 		buildSourceHelper(ctx, currentBinary)
 	} else {
-		currentHash = extractPackagedHelper(currentBinary)
+		currentHash = extractPackagedHelper(currentBinary, true)
+		verifyRemoteOnlyArtifact(ctx, root, work)
 	}
 	oldBinary := filepath.Join(root, "pinned-main-old-helper")
 	buildPinnedOldHelper(ctx, oldBinary)
@@ -287,6 +288,10 @@ func main() {
 	must(err, "stat isolated embedded runner")
 	runnerBytes, err := os.ReadFile(runnerPath) // #nosec G304 -- verified runner installed by this isolated helper fixture.
 	must(err, "read isolated embedded runner copy")
+	runnerDigest := sha256.Sum256(runnerBytes)
+	if filepath.Base(runnerPath) != hex.EncodeToString(runnerDigest[:]) {
+		panic("embedded runner installation is not keyed by its content hash")
+	}
 	must(os.WriteFile(runnerPath, []byte("not a Mach-O executable"), 0o700), "corrupt isolated runner for exec failure") // #nosec G306 -- executable fixture requires owner execute permission.
 	mutatedInfo, err := os.Stat(runnerPath)
 	must(err, "verify isolated runner path")
@@ -479,13 +484,21 @@ func main() {
 	fmt.Printf("MACOS_NATIVE_%s_PROOF_COMPLETE\n", strings.ToUpper(lane))
 }
 
-func extractPackagedHelper(destination string) string {
-	local, ok := artifacts.DefaultSource.(deploy.LocalArtifactSource)
-	if !ok {
-		panic("packaged local helper source is unavailable")
+func extractPackagedHelper(destination string, localVariant bool) string {
+	platform := deploy.Platform{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH}
+	var compressed []byte
+	var expected string
+	var err error
+	if localVariant {
+		local, ok := artifacts.DefaultSource.(deploy.LocalArtifactSource)
+		if !ok {
+			panic("packaged local helper source is unavailable")
+		}
+		compressed, expected, err = local.LocalArtifact(platform)
+	} else {
+		compressed, expected, err = artifacts.DefaultSource.Artifact(platform)
 	}
-	compressed, expected, err := local.LocalArtifact(deploy.Platform{GOOS: "darwin", GOARCH: runtime.GOARCH})
-	must(err, "read embedded packaged local helper")
+	must(err, "read embedded packaged helper")
 	reader, err := gzip.NewReader(bytes.NewReader(compressed))
 	must(err, "open embedded helper artifact")
 	binary, err := io.ReadAll(io.LimitReader(reader, 512<<20))
@@ -497,6 +510,28 @@ func extractPackagedHelper(destination string) string {
 	}
 	must(os.WriteFile(destination, binary, 0o700), "materialize packaged helper in private fixture") // #nosec G306 -- hash-verified executable fixture requires owner execute permission.
 	return expected
+}
+
+func verifyRemoteOnlyArtifact(ctx context.Context, root, work string) {
+	binary := filepath.Join(root, "remote-only-helper")
+	hash := extractPackagedHelper(binary, false)
+	lane, _, stop := startHelper(ctx, binary, filepath.Join(root, "remote-only-home"), hash)
+	defer stop()
+	_, err := lane.SandboxPrepare(ctx, proto.SandboxPrepareParams{
+		OperationID: "remote-artifact-proof", LaunchID: "remote-artifact-proof",
+		Mode: proto.SandboxEnforce, Workspace: "remote-artifact-proof", Cwd: work,
+		Enforce: &proto.SandboxEnforceIntent{Profile: sandbox.ProfileRoots{}, Delta: sandbox.ProfileRoots{}, ProfileProvenance: sandbox.StandardRoot},
+	})
+	var refusal *client.RefusalError
+	if !errors.As(err, &refusal) || refusal.Code != "sandbox_unsupported" {
+		panic("remote-only packaged helper accepted local native preparation")
+	}
+	entries, err := lane.Sessions(ctx)
+	must(err, "read remote-only helper inventory")
+	if len(entries) != 0 {
+		panic("remote-only sandbox refusal created a process")
+	}
+	report("REMOTE_ONLY_ARTIFACT_REFUSES_LOCAL_SANDBOX_WITHOUT_FALLBACK")
 }
 
 func buildSourceHelper(ctx context.Context, destination string) {

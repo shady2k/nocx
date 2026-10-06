@@ -118,6 +118,13 @@ func (rp *readoptPass) protectedLaunch(ctx context.Context, p content.PendingSes
 	if entry.Exit != nil && binding.Enforcement != "ended" {
 		return nil, errors.New("exited helper entry does not have ended sandbox state")
 	}
+	if entry.Exit != nil && launch.State == content.LaunchActive {
+		// Generic exited-session recovery can release retained helper inventory.
+		// Preserve its authenticated exit fact in launch authority first.
+		if err := rp.launches.End(ctx, *launch.Helper); err != nil {
+			return nil, fmt.Errorf("persist protected launch exit before inventory release: %w", err)
+		}
+	}
 	if rp.adopter == nil || rp.registry == nil || rp.registry.registry == nil {
 		return nil, errors.New("protected session adoption is unavailable")
 	}

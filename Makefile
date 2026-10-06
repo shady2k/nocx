@@ -1,6 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean connect ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
-        sandbox-smoke-macos \
+        sandbox-smoke-macos sandbox-smoke-linux sandbox-smoke-artifacts \
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
@@ -249,13 +249,15 @@ define build_helper_artifacts
 zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
 for t in $(1); do \
   os=$${t%/*}; arch=$${t#*/}; \
-  runner_dir="internal/helper/runner/bin/$$os-$$arch"; mkdir -p "$$runner_dir" || exit 1; \
-  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
-    $(GO) build -trimpath -ldflags="-s -w" \
-    -o "$$runner_dir/nocx-sandbox-runner" ./cmd/nocx-sandbox-runner || exit 1; \
-  gzip -9 -f "$$runner_dir/nocx-sandbox-runner" || exit 1; \
-  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
   tags="$(strip $(3))"; if [ "$$os" = linux ]; then tags="$${tags:+$$tags,}vtmusl"; fi; \
+  case ",$$tags," in *,nocx_local_ssh,*) \
+    runner_dir="internal/helper/runner/bin/$$os-$$arch"; mkdir -p "$$runner_dir" || exit 1; \
+    CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+      $(GO) build -trimpath -ldflags="-s -w" \
+      -o "$$runner_dir/nocx-sandbox-runner" ./cmd/nocx-sandbox-runner || exit 1; \
+    gzip -9 -f "$$runner_dir/nocx-sandbox-runner" || exit 1 ;; \
+  esac; \
+  cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
   tagflag=""; [ -n "$$tags" ] && tagflag="-tags $$tags"; \
   CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
     $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tagflag \
@@ -299,6 +301,11 @@ helper-local: vt-archives
 	@for t in $(HELPER_LOCAL_TARGETS); do \
 	  echo "local helper artifact: $(HELPER_LOCAL_DIR)/nocx-helper-$${t%/*}-$${t#*/}.gz"; \
 	done
+sandbox-smoke-linux: helpers-this-machine
+	@test "$(HOST_GOOS)" = linux || { echo "sandbox-smoke-linux requires Linux" >&2; exit 1; }
+	@PATH="$(dir $(GO)):$$PATH" NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-linux source
+	@PATH="$(dir $(GO)):$$PATH" NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-linux packaged
+
 
 # THE BUILD-TIME GATE, and the reason a target that ships or runs the app
 # depends on THIS rather than on helper-local: the local variant for every
@@ -349,6 +356,13 @@ sandbox-smoke-macos:
 	@$(MAKE) helpers-this-machine
 	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos source
 	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos packaged
+
+# Execute the packaged local helper and its embedded runner, and require the
+# separately deployable artifact to refuse local native preparation.
+sandbox-smoke-artifacts: helpers-this-machine
+	@case "$(HOST_GOOS)" in linux|darwin) ;; *) echo "native artifact smoke requires Linux or macOS" >&2; exit 1 ;; esac
+	@native="$(HOST_GOOS)"; [ "$$native" != darwin ] || native=macos; \
+	  PATH="$(dir $(GO)):$$PATH" NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-$$native packaged
 
 all: lint test build
 

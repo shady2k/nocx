@@ -355,7 +355,7 @@ func builtHelperBinary(t *testing.T) (string, proto.GenerationID) {
 			return
 		}
 		bin := filepath.Join(dir, "nocx-helper")
-		out, err := exec.Command("go", "build", "-o", bin, "../../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
+		out, err := exec.Command("go", "build", "-tags", "nocx_local_ssh", "-o", bin, "../../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
 		if err != nil {
 			helperBuildErr = errors.New(string(out))
 			return

@@ -94,7 +94,7 @@ on:
   workflow_dispatch:
     inputs:
       sandbox_native:
-        description: Run the isolated native macOS sandbox proof on this ref
+        description: Run the isolated mandatory Linux and macOS native sandbox proofs on this ref
         required: false
         type: boolean
         default: false
@@ -168,11 +168,11 @@ jobs:
           printf '%s\n' "$files" | sed 's/^/changed: /'
           echo "product=$product"
           echo "product=$product" >> "$GITHUB_OUTPUT"
-  # On-demand only: this is a native kernel-boundary proof, not another broad
-  # quality-suite pass. It checks out the selected workflow_dispatch ref and
-  # runs the same mandatory target used locally.
+  # Product/reusable-release kernel-boundary gate, also selectable on demand
+  # without the broad suite. It executes the same mandatory target used locally.
   sandbox-native-macos:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sandbox_native }}
+    needs: changes
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.sandbox_native) || (needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)) }}
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -213,6 +213,44 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: go test ./internal/app -run '^TestSandboxNative' -count=1 -timeout=180s -v
+  # Kernel-boundary smoke runs as a product gate on the explicit Ubuntu 26.04
+  # hosted image, whose published image manifest specifies Linux 7.0. The
+  # runner checks Landlock ABI9 itself and hard-fails if that kernel/runtime
+  # prerequisite is absent; the image version is not treated as proof.
+  sandbox-smoke-linux:
+    needs: changes
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.sandbox_native) || (needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Install the pinned Zig
+        run: |
+          set -euo pipefail
+          version="$(jq -er '.toolchain.zig' third_party/libghostty-vt/MANIFEST.json)"
+          url="https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz"
+          sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
+      - name: Require Landlock ABI9 on the native runner
+        run: |
+          set -euo pipefail
+          abi="$(python3 -c 'import ctypes, errno; libc=ctypes.CDLL(None, use_errno=True); r=libc.syscall(444, 0, 0, 1); e=ctypes.get_errno(); print(r if r >= 0 else -e)')"
+          if [ "$abi" -lt 9 ]; then
+            echo "::error::native Linux sandbox smoke requires Landlock ABI9; detected $abi"
+            exit 1
+          fi
+          printf 'Landlock ABI %s\n' "$abi"
+      - name: Build packaged helper and run mandatory ABI9 source and packaged proof
+        run: make sandbox-smoke-linux
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

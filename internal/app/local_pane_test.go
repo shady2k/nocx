@@ -79,7 +79,7 @@ func realHelperArtifacts(t *testing.T) fakeArtifacts {
 		}
 		defer func() { _ = os.RemoveAll(dir) }()
 		bin := filepath.Join(dir, "nocx-helper")
-		out, err := exec.Command("go", "build", "-o", bin, "../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
+		out, err := exec.Command("go", "build", "-tags", "nocx_local_ssh", "-o", bin, "../../cmd/nocx-helper").CombinedOutput() //nolint:gosec // the arguments are this test's own constants
 		if err != nil {
 			helperBuildErr = errors.New(string(out))
 			return

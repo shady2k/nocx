@@ -326,12 +326,51 @@ jobs:
             helper-local-hashes.txt
           retention-days: 7
 
+  # Execute the ONE-ORIGIN helper bytes before either app may embed them.
+  # This does not rebuild helpers: the native lanes receive the exact archives
+  # later consumed by the bundle/AppImage jobs and checked by the hash chain.
+  sandbox-packaged:
+    needs: helpers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-26.04
+            backend: linux
+          - runner: macos-latest
+            backend: macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts/bin
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+      - name: Fetch the pinned VT archives for the older-generation fixture
+        run: make vt-archives
+      - name: Execute the actual packaged helper and embedded runner
+        env:
+          NOCX_SANDBOX_SMOKE_MANDATORY: '1'
+          CGO_ENABLED: '1'
+        run: go run ./scripts/sandbox-smoke-${{ matrix.backend }} packaged
+
   # Named for its platform, like build-linux. It was `build` back when macOS was
   # the only target and the qualifier carried no information; once ADR-0007
   # reversed D1 and added the AppImage, an unqualified `build` next to a
   # `build-linux` read as "the build" and hid which platform had failed.
   build-macos:
-    needs: [ci, validate, helpers]
+    needs: [ci, validate, helpers, sandbox-packaged]
     runs-on: macos-15
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -874,7 +913,7 @@ jobs:
   # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
   # promises (see ADR-0007 and the Linux section in README.md).
   build-linux:
-    needs: [ci, validate, helpers]
+    needs: [ci, validate, helpers, sandbox-packaged]
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate.outputs.version }}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,14 +26,18 @@ import (
 // before its normal commit/publication phase can run. The candidate itself is
 // opened by the production local helper adapter and is a real native process.
 func TestSandboxNativePreparingRecoveryRollsBackUnpublishedCandidate(t *testing.T) {
-	testSandboxNativeCrashRecovery(t, false)
+	testSandboxNativeCrashRecovery(t, content.LaunchPreparing)
 }
 
 func TestSandboxNativeCommittedRecoveryPublishesTheSameCandidate(t *testing.T) {
-	testSandboxNativeCrashRecovery(t, true)
+	testSandboxNativeCrashRecovery(t, content.LaunchActive)
 }
 
-func testSandboxNativeCrashRecovery(t *testing.T, committed bool) {
+func TestSandboxNativeExitedWhileCoordinatorAbsentRestoresEnded(t *testing.T) {
+	testSandboxNativeCrashRecovery(t, content.LaunchEnded)
+}
+
+func testSandboxNativeCrashRecovery(t *testing.T, targetState content.LaunchState) {
 	if err := sandbox.NativeAvailable(); err != nil {
 		t.Skipf("native backend unsupported: %v", err)
 	}
@@ -144,7 +149,7 @@ func testSandboxNativeCrashRecovery(t *testing.T, committed bool) {
 	if err != nil || !nativeInventoryHasLive(t, inventory, candidate.Identity.SessionID) {
 		t.Fatalf("candidate absent from native helper inventory: %v %+v", err, inventory)
 	}
-	if committed {
+	if targetState != content.LaunchPreparing {
 		launch, err = first.launches.Commit(ctx, content.LaunchCommit{
 			LaunchID: launch.ID, ExpectedSource: source, SourceCwd: work, Candidate: candidate.Identity,
 			Binding: content.Session{ID: candidate.Identity.SessionID, WorkspaceID: workspaceID, PaneID: paneID, Generation: candidate.Identity.Generation, LifecycleApplied: new(uint64)},
@@ -152,10 +157,51 @@ func testSandboxNativeCrashRecovery(t *testing.T, committed bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Replace the coordinator after its atomic selection, before either
-		// candidate publication or source-process retirement.
+		// Replace the coordinator after atomic selection, before publication
+		// or retirement. The selected native process remains helper-owned.
 		first.Shutdown(ctx)
+		if targetState == content.LaunchEnded {
+			// End only this fixture's exact owned shell after the coordinator
+			// has left. Its helper must retain authoritative exit inventory.
+			if err = syscall.Kill(pid, syscall.SIGKILL); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				entries, inventoryErr := first.sandboxHelper.SandboxInventory(ctx, launch.TargetGeneration)
+				exited := false
+				for _, entry := range entries {
+					if entry.HostSessionID.Session == candidate.Identity.SessionID && entry.Exit != nil {
+						exited = true
+					}
+				}
+				if inventoryErr == nil && exited {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("native exit was not retained while coordinator absent: %v %+v", inventoryErr, entries)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		second := bootLocalAppOn(t, src)
+		if targetState == content.LaunchEnded {
+			status, statusErr := second.sandboxCoordinator.Status(ctx, transport.SandboxStatusRequest{PaneID: paneID})
+			if statusErr != nil || status.Head == nil || status.Head.LaunchID != launch.ID || status.Head.State != content.LaunchEnded || status.Head.Enforcement != "ended" || status.Source != nil {
+				binding, bindingErr := second.sandboxHelper.SandboxBinding(ctx, candidate.Identity)
+				t.Fatalf("cold exited launch is not definitively ended: status=%+v head=%+v error=%v binding=%+v bindingError=%v", status, status.Head, statusErr, binding, bindingErr)
+			}
+			head, headErr := second.launches.Head(ctx, paneID)
+			if headErr != nil || head.ID != launch.ID || head.State != content.LaunchEnded || head.Helper == nil || *head.Helper != candidate.Identity || head.GrantID == nil || *head.GrantID != *launch.GrantID {
+				t.Fatalf("cold exit changed selected launch identity or grant: %+v %v", head, headErr)
+			}
+			entries, inventoryErr := second.sandboxHelper.SandboxInventory(ctx, launch.TargetGeneration)
+			if inventoryErr != nil || nativeInventoryHasLive(t, entries, candidate.Identity.SessionID) {
+				t.Fatalf("cold exit was silently relaunched: %+v %v", entries, inventoryErr)
+			}
+			t.Log("NATIVE_OFFLINE_EXIT_RESTORES_ENDED_WITHOUT_SPAWN_PROOF_COMPLETE")
+			return
+		}
 		recovered, lookupErr := second.Session.Get(session.ID(candidate.Identity.SessionID))
 		if lookupErr != nil {
 			t.Fatalf("committed candidate was not readopted: %v", lookupErr)

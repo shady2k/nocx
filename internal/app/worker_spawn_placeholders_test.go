@@ -26,12 +26,13 @@ func TestAWorkerCommandLineCarriesTheSpawnFactsItsPlaceholdersName(t *testing.T)
 	stand.tabs.cwds = map[string]string{"coord-pane": "/home/dev/repos/iaam"}
 	coordinator := openCoordinatorPane(t, stand, "coord-pane")
 
-	if _, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
+	spawned, err := stand.spawner.Spawn(context.Background(), workers.SpawnRequest{
 		Participant:        "p-placeholders",
 		Group:              "worker-1",
 		CoordinatorSession: string(coordinator),
 		Command:            `agent --in {WORKSPACE_PATH} --for {WORKSPACE_ID} --id {UUID} --keep {NOT_A_PLACEHOLDER}`,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
@@ -50,6 +51,15 @@ func TestAWorkerCommandLineCarriesTheSpawnFactsItsPlaceholdersName(t *testing.T)
 			!strings.Contains(got, "{WORKSPACE_ID}") &&
 			uuidArgOf(got) != ""
 	})
+	line := pty.read()
+	identified, ok := spawned.(workers.RestartIdentified)
+	if !ok {
+		t.Fatalf("spawned %T does not expose its restart identity", spawned)
+	}
+	resume := identified.RestartIdentity().Resume
+	if resume != (workers.ResumeIdentity{Mode: workers.ResumeByID, ID: uuidArgOf(line)}) {
+		t.Fatalf("restart identity = %+v, want the exact id passed to the PTY command %q", resume, uuidArgOf(line))
+	}
 }
 
 // A spawn fact may itself contain spaces, and it must reach the process as

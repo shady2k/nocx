@@ -15,6 +15,7 @@ package app
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -355,6 +356,9 @@ func TestTheAgentRecordDecidesWhetherAPersistedWorkerCanBeLaunched(t *testing.T)
 	if shipped.Request.Agent != "claude" || shipped.Request.Resume.ID != "conv-1" {
 		t.Fatalf("the reconstructed launch = %+v, want the recorded agent and identity", shipped.Request)
 	}
+	if !reflect.DeepEqual(shipped.Request.ResumeArgs, []string{"--resume", "conv-1"}) {
+		t.Fatalf("the reconstructed launch resume args = %q, want Claude's recorded --resume identity", shipped.Request.ResumeArgs)
+	}
 
 	// An agent nocx has no record of: an explicit failure naming it, never an
 	// empty shell that claims the pane came back.
@@ -370,5 +374,75 @@ func TestTheAgentRecordDecidesWhetherAPersistedWorkerCanBeLaunched(t *testing.T)
 	}
 	if !strings.Contains(unknown.Failure.Detail, "not-an-agent") {
 		t.Fatalf("detail = %q, want the agent named so a person can act on it", unknown.Failure.Detail)
+	}
+}
+
+func TestSpawnRestartIdentityUsesLocationAndOnlyItsExplicitSessionID(t *testing.T) {
+	shared := spawnedParticipant{resumeID: "session-shared"}
+	sharedResume := shared.RestartIdentity().Resume
+	if sharedResume != (workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "session-shared"}) {
+		t.Fatalf("shared-checkout resume identity = %+v", sharedResume)
+	}
+
+	lazy := spawnedParticipant{}
+	lazyResume := lazy.RestartIdentity().Resume
+	if lazyResume != (workers.ResumeIdentity{Mode: workers.ResumeNone}) {
+		t.Fatalf("shared-checkout lazy identity = %+v, want explicit unavailable", lazyResume)
+	}
+
+	worktree := spawnedParticipant{
+		resumeID: "session-worktree",
+		worktree: &worktreeUndo{path: "/worktrees/task-one", branch: "task-one"},
+	}
+	worktreeResume := worktree.RestartIdentity().Resume
+	if worktreeResume != (workers.ResumeIdentity{Mode: workers.ResumeByCwd}) {
+		t.Fatalf("worktree resume identity = %+v, want CWD mode without session ID", worktreeResume)
+	}
+}
+
+func TestSharedCheckoutRestoreUsesEachTasksRecordedSessionID(t *testing.T) {
+	ctx := context.Background()
+	store, err := agentrecord.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("agentrecord.New: %v", err)
+	}
+	cwd := t.TempDir()
+	records := []workers.RestartRecord{
+		{Participant: "p-one", Agent: "claude", Cwd: cwd, Resume: workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "session-one"}},
+		{Participant: "p-two", Agent: "claude", Cwd: cwd, Resume: workers.ResumeIdentity{Mode: workers.ResumeByID, ID: "session-two"}},
+	}
+	got := workers.Restore(ctx, records, agentProbe{store: store})
+	if len(got) != 2 {
+		t.Fatalf("restorations = %+v, want both shared-checkout tasks", got)
+	}
+	want := map[workers.ParticipantID][]string{
+		"p-one": {"--resume", "session-one"},
+		"p-two": {"--resume", "session-two"},
+	}
+	for _, restoration := range got {
+		if !restoration.Restorable() {
+			t.Fatalf("task %s was refused: %+v", restoration.Record.Participant, restoration.Failure)
+		}
+		if args := restoration.Request.ResumeArgs; !reflect.DeepEqual(args, want[restoration.Record.Participant]) {
+			t.Fatalf("task %s resume args = %q, want its own ID %q", restoration.Record.Participant, args, want[restoration.Record.Participant])
+		}
+	}
+}
+
+func TestAResumeRecordWithoutItsLazySessionIDIsUnavailable(t *testing.T) {
+	ctx := context.Background()
+	store, err := agentrecord.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("agentrecord.New: %v", err)
+	}
+	got := workers.Restore(ctx, []workers.RestartRecord{{
+		Participant: "p-lazy", Agent: "claude", Cwd: t.TempDir(),
+		Resume: workers.ResumeIdentity{Mode: workers.ResumeNone},
+	}}, agentProbe{store: store})
+	if len(got) != 1 || got[0].Restorable() || got[0].Request != nil {
+		t.Fatalf("lazy-ID restoration = %+v, want explicit unavailable without a launch request", got)
+	}
+	if got[0].Failure.Reason != workers.RestoreResumeUnavailable || !strings.Contains(got[0].Failure.Detail, "none") {
+		t.Fatalf("lazy-ID failure = %+v, want resume-unavailable naming the missing recorded identity", got[0].Failure)
 	}
 }

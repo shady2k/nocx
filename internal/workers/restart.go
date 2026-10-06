@@ -109,6 +109,22 @@ func (r ResumeIdentity) Complete() bool {
 	}
 }
 
+// ResumeIdentityFor chooses the resume identity from the task's location,
+// never from whichever mode an agent happens to prefer. A worktree has a
+// private working directory, so its agent resumes the most recent session
+// for that directory. A shared checkout must use the explicit id recorded
+// for that task; without one, resumption is explicitly unavailable rather
+// than guessed from a later or most-recent session.
+func ResumeIdentityFor(worktree Worktree, sessionID string) ResumeIdentity {
+	if worktree.Path != "" {
+		return ResumeIdentity{Mode: ResumeByCwd}
+	}
+	if sessionID != "" {
+		return ResumeIdentity{Mode: ResumeByID, ID: sessionID}
+	}
+	return ResumeIdentity{Mode: ResumeNone}
+}
+
 // RestartRecord is the durable tuple for one worker pane: which pane it was,
 // which agent ran there, where it was launched, and the identity its
 // conversation continues under. Everything else about the participant is the
@@ -158,14 +174,13 @@ type RestartRecord struct {
 	RecordedAt time.Time
 }
 
-// RestoreRequest is what a persisted record reconstructs: everything this
-// record holds about a launch, in one value.
+// RestoreRequest is what a persisted record reconstructs: the launch facts it
+// owns plus resume argv built from the current agent record.
 //
-// It is a type of its own rather than a SpawnRequest because the launch
-// record (nocx-dz9vj) does not exist yet, so there is no argv to build and no
-// resume arguments to carry: a SpawnRequest whose Worktree was the ASK and no
-// way to express "resume this conversation" would advertise a launch nobody can
-// perform. nocx-xn63t.5.2 turns this into the real request.
+// It is distinct from SpawnRequest because this is a restore of an existing
+// worker, not a new task. The persisted identity chooses the correct resume
+// shape, and the restart probe returns that agent's current arguments without
+// persisting launch syntax. nocx-xn63t.5.2 turns this into the real PTY launch.
 type RestoreRequest struct {
 	Participant        ParticipantID
 	Group              ID
@@ -178,6 +193,10 @@ type RestoreRequest struct {
 	Cwd                string
 	Worktree           Worktree
 	Resume             ResumeIdentity
+	// ResumeArgs is the agent-record-derived invocation for Resume. It is
+	// built during restore, never stored: the durable record keeps identity,
+	// while launch syntax remains owned by the current agent record.
+	ResumeArgs []string
 }
 
 // Request is the launch this record reconstructs.
@@ -262,9 +281,9 @@ type RestartProbe interface {
 	// facts are carried because a record may name either: the worktree's path
 	// when the spawn made one, the cwd otherwise.
 	Checkout(ctx context.Context, worktree Worktree, cwd string) error
-	// Resume answers whether this agent and resume identity name a
-	// conversation that can be continued.
-	Resume(ctx context.Context, agent string, resume ResumeIdentity) error
+	// Resume verifies that this agent and identity can be continued, then
+	// returns the agent-record-derived argv for the selected resume mode.
+	Resume(ctx context.Context, agent string, worktree Worktree, resume ResumeIdentity) ([]string, error)
 }
 
 // DiskProbe is the probe nocx ships: the checkout question is answered against
@@ -303,14 +322,20 @@ func (DiskProbe) Checkout(_ context.Context, worktree Worktree, cwd string) erro
 // refuses an agent nocx never saw and an identity that names nothing, and it
 // otherwise accepts: whether the agent's own store still holds the
 // conversation is a question for the relaunch.
-func (DiskProbe) Resume(_ context.Context, agent string, resume ResumeIdentity) error {
+func (DiskProbe) Resume(_ context.Context, agent string, worktree Worktree, resume ResumeIdentity) ([]string, error) {
 	if agent == "" {
-		return errors.New("the record names no agent, so there is nothing to launch")
+		return nil, errors.New("the record names no agent, so there is nothing to launch")
 	}
 	if !resume.Complete() {
-		return fmt.Errorf("the record's resume identity (%q) names no conversation", resume.Mode)
+		return nil, fmt.Errorf("the record's resume identity (%q) names no conversation", resume.Mode)
 	}
-	return nil
+	if worktree.Path != "" && resume.Mode != ResumeByCwd {
+		return nil, fmt.Errorf("a worktree restore needs resume-by-cwd, not %q", resume.Mode)
+	}
+	if worktree.Path == "" && resume.Mode != ResumeByID {
+		return nil, fmt.Errorf("a shared-checkout restore needs an explicit resume-by-id, not %q", resume.Mode)
+	}
+	return nil, nil
 }
 
 // Restore is the one read of the restart record: every persisted record,
@@ -344,11 +369,13 @@ func restoreOne(ctx context.Context, rec RestartRecord, probe RestartProbe) Rest
 		x.Failure = &RestoreFailure{Reason: RestoreCheckoutUnavailable, Detail: fmt.Sprint(err)}
 		return x
 	}
-	if err := probe.Resume(ctx, rec.Agent, rec.Resume); err != nil {
+	resumeArgs, err := probe.Resume(ctx, rec.Agent, rec.Worktree, rec.Resume)
+	if err != nil {
 		x.Failure = &RestoreFailure{Reason: RestoreResumeUnavailable, Detail: fmt.Sprint(err)}
 		return x
 	}
 	request := rec.Request()
+	request.ResumeArgs = append([]string(nil), resumeArgs...)
 	x.Request = &request
 	return x
 }

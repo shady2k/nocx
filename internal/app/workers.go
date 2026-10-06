@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -531,6 +532,11 @@ type spawnedParticipant struct {
 	// restore opens the pane and says nothing about what ran there.
 	paneID string
 	cwd    string
+	// resumeID is the explicit session id this spawn passed through the
+	// {UUID} argument placeholder. It is empty when the agent is expected
+	// to mint an id lazily, which makes a shared-checkout restart unavailable
+	// rather than a guess at a later session.
+	resumeID string
 	// agents answers the pane's agent at the moment the restart record is
 	// written, which is after the enrolment arrived. See workerSpawner.agents.
 	agents   agentOnPane
@@ -588,11 +594,15 @@ func (s spawnedParticipant) RestartIdentity() workers.RestartIdentity {
 			id.Agent = agent
 		}
 	}
-	// Resume is deliberately absent: which identity an agent continues its
-	// conversation under is the launch record's (nocx-dz9vj, nocx-2txuc), and
-	// this file has no business deriving one from a command line. Until that
-	// record exists, every persisted worker restores as "cannot resume", which
-	// is the honest answer rather than a guess at `--resume`.
+	// Location chooses the resume shape: a worktree's CWD is private to
+	// this task, while a shared checkout must use only the stable session id
+	// that the launch line explicitly received. No UUID placeholder means a
+	// lazy-id agent is recorded as non-resumable, not as "resume latest".
+	var worktree workers.Worktree
+	if s.worktree != nil {
+		worktree = s.worktree.location()
+	}
+	id.Resume = workers.ResumeIdentityFor(worktree, s.resumeID)
 	return id
 }
 
@@ -881,6 +891,13 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if undo != nil {
 		placeholderValues["BRANCH"] = undo.branch
 	}
+	resumeID := ""
+	for _, arg := range commandArgv {
+		if strings.Contains(strings.ToUpper(arg), "{UUID}") {
+			resumeID = launchID.String()
+			break
+		}
+	}
 	commandLine := shellintegration.QuoteAgentArgv(
 		shellintegration.ExpandAgentArgv(commandArgv, placeholderValues))
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
@@ -952,7 +969,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), paneID: paneID.String(), cwd: paneCwd,
-		agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		resumeID: resumeID, agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
 		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 

@@ -105,6 +105,9 @@ type ContentDB interface {
 	// checkouts: a reader joins it against git's answer and drops the rows
 	// whose checkout has gone.
 	WorkerCheckouts() WorkerCheckoutRepository
+	// Launches owns immutable pane launch authority and exact helper-session
+	// retirement obligations, independently of mutable profiles.
+	Launches() LaunchRepository
 }
 
 // SkillCheck is one model's verdict on one skill, keyed by name. Digest is

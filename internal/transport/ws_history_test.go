@@ -40,6 +40,7 @@ func (f *fakeHistoryDB) Layout() content.LayoutRepository              { return 
 
 func (f *fakeHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
+func (f *fakeHistoryDB) Launches() content.LaunchRepository             { return (&content.Stub{}).Launches() }
 
 // Reconcile: this fake inherited no sessions, so there is nothing to
 // reconcile and no reconciler to hand out.

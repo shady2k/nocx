@@ -6,6 +6,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -88,6 +89,13 @@ type SkillStore interface {
 	RestoreSnapshot(skill.Snapshot) error
 }
 
+// SandboxStore carries only mutable PrivateMetadata configuration. A backup
+// cannot confer launch authority or import helper bindings, runtimes or events.
+type SandboxStore interface {
+	ExportConfiguration() (sandbox.ConfigurationSnapshot, error)
+	WithConfigurationRestore(func(sandbox.ConfigurationRestorer) error) error
+}
+
 // ── Document envelope ────────────────────────────────────────────────────
 
 // Document is the on-disk/wire shape of a nocx backup file.
@@ -109,7 +117,8 @@ type Document struct {
 	// library alone in that case, and the same holds one level down for a
 	// backup written before installed skills travelled — an absent `installed`
 	// decodes as nil and restore writes nothing into that root.
-	Skills *skill.Snapshot `json:"skills,omitempty"`
+	Skills  *skill.Snapshot                `json:"skills,omitempty"`
+	Sandbox *sandbox.ConfigurationSnapshot `json:"sandbox,omitempty"`
 }
 
 // BackupNote is the wire shape of one note. The title is deliberately

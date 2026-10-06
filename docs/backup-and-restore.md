@@ -2,9 +2,9 @@
 
 **Settings → Backup & Restore**
 
-A backup is one JSON file holding your settings, your SSH connections and your connection
-groups. You can read it, diff it and edit it in any text editor, and you can restore it
-onto another machine.
+A backup is one JSON file holding your settings, SSH connections, connection groups
+and filesystem sandbox defaults. You can read it, diff it and edit it in any text
+editor, and restore its portable configuration onto another machine.
 
 It contains **no passwords, no key passphrases and no credential records**. That is the
 first thing to know about it, because it decides everything else on this page: a restored
@@ -21,9 +21,10 @@ Cancel the dialog and nothing is written. The backup was built in memory and is 
 If there is no save dialog to open — a Linux box without `zenity`, or nocx running in a
 browser — the file downloads instead.
 
-Whichever way the file lands, the message tells you what went into it: settings overrides,
-connections and groups included, plus the credential bindings and group-default keys that
-were left behind (see [What is left out](#what-is-left-out)).
+Whichever way the file lands, the message tells you what went into it: settings
+overrides, connections, groups and filesystem sandbox profiles included, plus the
+credential bindings and group-default keys left behind
+(see [What is left out](#what-is-left-out)).
 
 ## What is in the file
 
@@ -78,6 +79,18 @@ A connection that had one carries `"requiresCredential": true` in its place.
 `auth`, `keepaliveInterval`, `keepaliveCountMax`, `readyTimeout`, `jumpHost`,
 `agentForward`, `desiredMode`, `portDiscovery`.
 
+**Filesystem sandbox configuration** — the optional `sandbox` section holds the typed
+standard document (`schemaVersion`, `revision`, `enabled`, `readOnlyDirs`,
+`readWriteDirs`) and named workspace profiles (`workspaceId`, `revision`,
+`override`). It contains future-launch defaults only. A backup never exports launch
+grants, pane heads, helper bindings, runtime directories or observations, and
+restoring configuration never creates, adopts or widens a running process.
+
+Named workspace identities must already exist on the destination; an unknown ID
+refuses restoration rather than creating layout or guessing a different workspace.
+The default workspace always inherits standard. Imported revisions are not adopted:
+successful import and rollback advance the destination's local CAS clocks.
+
 ### What is left out
 
 - **Credentials.** Credential records live in the same `profiles.json` on disk and are
@@ -89,6 +102,9 @@ A connection that had one carries `"requiresCredential": true` in its place.
 - **Keychain material.** No password or passphrase is read during create or written during
   restore. The keychain is not touched by either.
 - **Command history and AI conversations** (`content.db`). Not in v1.
+- **Live filesystem authority.** Launch grants, pane launch heads, helper bindings,
+  diagnostic observations and runtime directories are never part of the portable
+  configuration document.
 - **Two group-default keys by name** — `keyPath` and `behaviorOnSessionEnd` — plus any key
   the format does not recognise. They are listed in `omittedDefaultKeys` on the group, and
   counted for you on the create and preview screens.
@@ -119,6 +135,14 @@ list, in its order, with no credential bindings at all.
 Neither strategy deletes a credential or a keychain entry. The backup cannot describe them,
 so restoring one cannot destroy them.
 
+When `sandbox` is included, both strategies restore its standard values. **Merge**
+changes the listed workspace profiles and keeps unlisted profiles. **Replace**
+also resets unlisted known workspace profiles to standard inheritance, without
+deleting their workspace, tabs or panes. Older files without `sandbox` leave current
+sandbox configuration untouched under either strategy. Existing process grants
+remain unchanged; applying changed defaults to a shell requires a separately
+confirmed new launch.
+
 ### The preview, and why it can go stale
 
 Before anything is written you see:
@@ -129,10 +153,10 @@ Before anything is written you see:
   group-default keys the format does not carry.
 
 The preview is bound to the exact file, the strategy you chose and the state of this
-machine at the moment it was computed. If any of those change before you press confirm —
-you edit a setting in another window, another session adds a connection — the restore is
-refused before it writes anything and the preview is recomputed. Read the new numbers; they
-are describing a different machine than the ones you just read.
+machine at the moment it was computed. If any of those change before you press
+confirm — a setting, connection or sandbox profile changes in another window —
+the restore refuses before writing and recomputes the preview. Read the new
+numbers; they describe a different state.
 
 ### After the restore
 
@@ -145,13 +169,20 @@ do, the connection looks complete and will fail on connect.
 A restore writes a journal before it touches anything, so there is no state where half of a
 backup has been applied. If nocx is killed, crashes or loses power during one:
 
-- interrupted **before** the write completed — the next start rolls connections and
-  settings back to exactly what they were before you pressed confirm;
+- interrupted **before** the write completed — the next start restores connections,
+  settings and mutable sandbox configuration to their prior values; sandbox CAS
+  clocks advance rather than rewind;
 - interrupted **after** it completed — the restored state is correct and the next start
   just clears the journal.
 
 Either way it happens at startup, before the window appears, and you do not have to do
 anything.
+
+Sandbox import/recovery owns an exclusive feature restore scope. Concurrent profile
+edits and launch-grant CAS refuse while it is active; ordinary reads remain available.
+Journal and other filesystem IO do not hold the configuration mutex. Startup restores
+settings prerequisites before opening ContentDB and workspace/default configuration
+before exposing transport.
 
 If the journal itself is unreadable — a corrupt file, or one written by a newer nocx —
 **nocx refuses to start** and reports the error rather than opening with a configuration it
@@ -161,7 +192,8 @@ copy, or remove the journal document if you accept losing the interrupted restor
 ## Keep the file private
 
 The backup carries no secrets, but it carries hostnames, usernames, jump hosts, port
-forwards and every setting you have changed — a full map of what you connect to and how.
+forwards, changed settings and filesystem sandbox root paths — private configuration
+about what you connect to and which directories future shells may access.
 
 It is plaintext by design, so that it stays readable and repairable by hand. Encryption is
 your filesystem's job: keep it on an encrypted volume, and do not upload it anywhere you

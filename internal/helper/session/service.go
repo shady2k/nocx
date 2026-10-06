@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
@@ -255,9 +256,10 @@ type Options struct {
 	// questions. Nil is the shipped engine — see defaultScreen, which is the
 	// one place that choice is named — so production leaves it nil and the
 	// seam exists for a test that needs a screen it can read back.
-	Screen ScreenFactory
-	Log    *slog.Logger
-	Limits Limits
+	Screen  ScreenFactory
+	Sandbox SandboxEnvironment
+	Log     *slog.Logger
+	Limits  Limits
 	// Now and NewID are seams for tests. Production leaves them nil.
 	Now   func() time.Time
 	NewID func() ([16]byte, error)
@@ -283,15 +285,17 @@ const defaultSweepInterval = 10 * time.Minute
 
 // Service is the helper's `session` service.
 type Service struct {
-	generation proto.GenerationID
-	spawner    Spawner
-	sshSpawner SSHSpawner
-	inspector  Inspector
-	screen     ScreenFactory
-	log        *slog.Logger
-	limits     Limits
-	now        func() time.Time
-	newID      func() ([16]byte, error)
+	generation         proto.GenerationID
+	spawner            Spawner
+	sshSpawner         SSHSpawner
+	inspector          Inspector
+	screen             ScreenFactory
+	log                *slog.Logger
+	limits             Limits
+	now                func() time.Time
+	newID              func() ([16]byte, error)
+	sandboxEnvironment SandboxEnvironment
+	sandboxTickets     *sandboxTicketState
 	// sweepStop ends the scheduled sweep goroutine (nocx-isjh4); closed
 	// exactly once, by sweepStopOnce, from Close.
 	sweepStop     chan struct{}
@@ -342,20 +346,22 @@ var (
 // no PTY, and the first spawn is what makes this generation resident.
 func New(opts Options) *Service {
 	s := &Service{
-		generation: opts.Generation,
-		spawner:    opts.Spawner,
-		sshSpawner: opts.SSHSpawner,
-		inspector:  opts.Inspector,
-		screen:     opts.Screen,
-		log:        opts.Log,
-		limits:     opts.Limits.withDefaults(),
-		now:        opts.Now,
-		newID:      opts.NewID,
-		sessions:   make(map[string]*hostSession),
-		keys:       make(map[string]*keyClaim),
-		sinks:      make(map[Sink]struct{}),
-		sweepStop:  make(chan struct{}),
-		sweepDone:  make(chan struct{}),
+		generation:         opts.Generation,
+		spawner:            opts.Spawner,
+		sshSpawner:         opts.SSHSpawner,
+		inspector:          opts.Inspector,
+		screen:             opts.Screen,
+		log:                opts.Log,
+		limits:             opts.Limits.withDefaults(),
+		now:                opts.Now,
+		newID:              opts.NewID,
+		sandboxEnvironment: opts.Sandbox,
+		sandboxTickets:     newSandboxTicketState(),
+		sessions:           make(map[string]*hostSession),
+		keys:               make(map[string]*keyClaim),
+		sinks:              make(map[Sink]struct{}),
+		sweepStop:          make(chan struct{}),
+		sweepDone:          make(chan struct{}),
 	}
 	if s.screen == nil {
 		s.screen = defaultScreen
@@ -384,6 +390,7 @@ func New(opts Options) *Service {
 	// alone, so a test can drive that half with a fake clock and this half
 	// with a real, short interval, without the two seams touching each other.
 	go s.sweepLoop(interval)
+	go s.sandboxSweepLoop()
 	return s
 }
 
@@ -450,6 +457,7 @@ func (s *Service) Bind(sink Sink) (release func()) {
 // running could race a caller's own read of a Service it was just told is
 // finished with.
 func (s *Service) Close() {
+	s.closeSandboxPreparations()
 	s.sweepStopOnce.Do(func() { close(s.sweepStop) })
 	<-s.sweepDone
 
@@ -510,11 +518,20 @@ func (s *Service) Ops() []string {
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 		proto.OpSetScrollback,
 		proto.OpHistoryPage,
+		proto.OpSandboxPrepare, proto.OpSandboxLaunch, proto.OpSandboxGet, proto.OpSandboxDiscard,
 	}
 }
 
 func (s *Service) ParamsSchema(op string) *host.Schema {
 	switch op {
+	case proto.OpSandboxPrepare:
+		return host.SchemaFor(proto.SandboxPrepareParams{})
+	case proto.OpSandboxLaunch:
+		return host.SchemaFor(proto.SandboxLaunchParams{})
+	case proto.OpSandboxGet:
+		return host.SchemaFor(proto.SandboxGetParams{})
+	case proto.OpSandboxDiscard:
+		return host.SchemaFor(proto.SandboxDiscardParams{})
 	case proto.OpSpawn:
 		return host.SchemaFor(proto.SpawnParams{})
 	case proto.OpSpawnSSH:
@@ -573,8 +590,9 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 // under the new epoch and others still judged by the old one. Every other op
 // here is a single read with nothing to half-apply.
 var intentServiceMutations = map[string]bool{
-	proto.OpIntent:     true,
-	proto.OpAccessBump: true,
+	proto.OpIntent:        true,
+	proto.OpAccessBump:    true,
+	proto.OpSandboxLaunch: true,
 }
 
 // RefusesCancel: session.intent and session.access-bump refuse cancellation
@@ -603,7 +621,26 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 	if errors.As(err, &refusal) {
 		return refusal.Code, refusal.Details
 	}
+	var buildFailure *sandbox.BuildError
+	if errors.As(err, &buildFailure) {
+		details, _ := json.Marshal(buildFailure)
+		return "sandbox_prepare_failed", details
+	}
 	switch {
+	case errors.Is(err, errNativeClosePending):
+		return "sandbox_close_pending", nil
+	case errors.Is(err, errNativeLaunch):
+		return "sandbox_launch_failed", nil
+	case errors.Is(err, errSandboxUnsupported):
+		return "sandbox_unsupported", nil
+	case errors.Is(err, errSandboxTicketExpired):
+		return "sandbox_ticket_expired", nil
+	case errors.Is(err, errSandboxMismatch):
+		return "sandbox_conflict", nil
+	case errors.Is(err, errSandboxCapacity):
+		return "sandbox_capacity", nil
+	case errors.Is(err, errSandboxParams):
+		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrNoSuchSession):
 		return proto.ErrCodeNoSuchSession, nil
 	case errors.Is(err, ErrNotAttached), errors.Is(err, ErrBadSubscriber),
@@ -639,6 +676,30 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 
 func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (any, error) {
 	switch op {
+	case proto.OpSandboxPrepare:
+		var p proto.SandboxPrepareParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxPrepare(ctx, p)
+	case proto.OpSandboxLaunch:
+		var p proto.SandboxLaunchParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxLaunch(ctx, p)
+	case proto.OpSandboxGet:
+		var p proto.SandboxGetParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxGet(p)
+	case proto.OpSandboxDiscard:
+		var p proto.SandboxDiscardParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.sandboxDiscard(p), nil
 	case proto.OpSpawn:
 		var p proto.SpawnParams
 		if err := decode(params, &p); err != nil {
@@ -900,15 +961,21 @@ func agentSet(set map[string]bool) []string {
 }
 
 func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.SpawnResult, err error) {
+	return s.spawnLocal(ctx, p, nil, nil)
+}
+
+func (s *Service) spawnLocal(ctx context.Context, p proto.SpawnParams, native *sandbox.Prepared, binding *proto.SandboxGetResult) (_ proto.SpawnResult, err error) {
 	// THE PANE LAUNCH, SAID OUT LOUD (nocx-n14oo.2). This is where a pane's
 	// shell is actually started, and the three ways it can fail below used to
 	// return an ErrSpawn that named a cause nowhere. A backend waiting thirty
 	// seconds for a hello it will never get learns from these lines which
 	// shell was started, with what geometry, and whether it was given a
 	// lifecycle carrier at all.
-	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn",
-		"cwd", p.Cwd, "cols", p.Cols, "rows", p.Rows,
-		"workspace", p.Workspace, "lifecycle_requested", p.Lifecycle != nil)
+	fields := []any{"cwd", p.Cwd, "cols", p.Cols, "rows", p.Rows, "workspace", p.Workspace, "lifecycle_requested", p.Lifecycle != nil}
+	if binding != nil {
+		fields = []any{"cols", p.Cols, "rows", p.Rows, "mode", binding.Mode, "lifecycle_requested", p.Lifecycle != nil}
+	}
+	ctx, lg, end := nocxlog.Start(ctx, nocxlog.NewSlogAdapter(s.log), "helper.session.spawn", fields...)
 	defer func() { end(err) }()
 	if len(p.IdempotencyKey) > proto.MaxIdempotencyKey {
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d characters, the limit is %d",
@@ -979,6 +1046,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 
 	proc, err := s.spawner.Spawn(SpawnRequest{
 		SessionID: proto.SessionHex(raw),
+		Native:    native,
 		Cwd:       p.Cwd,
 		Env:       p.Env,
 		Cols:      cols,
@@ -1006,6 +1074,12 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		s.mu.Lock()
 		s.budget -= reserved
 		s.mu.Unlock()
+		if binding != nil {
+			if errors.Is(err, errNativeClosePending) {
+				return proto.SpawnResult{}, err
+			}
+			return proto.SpawnResult{}, fmt.Errorf("%w: %w", ErrSpawn, errNativeLaunch)
+		}
 		lg.Error("helper: the pane's shell could not be started", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
@@ -1026,6 +1100,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
 		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
+		sandbox: binding,
 	}, lg, &spawned)
 }
 
@@ -1348,6 +1423,7 @@ type spawnShape struct {
 	// nocx-zg3k3.10.1).
 	scrollback uint64
 	lifecycle  *proto.LifecycleLaunch
+	sandbox    *proto.SandboxGetResult
 }
 
 // finishSpawn builds the session around a process that ALREADY EXISTS: the
@@ -1367,11 +1443,21 @@ type spawnShape struct {
 // session that was never registered, and none on which a reserved window is
 // leaked by a spawn that produced nothing.
 func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.LaunchRecord, shape spawnShape, lg nocxlog.Logger, spawned *bool) (proto.SpawnResult, error) {
-	release := func() {
-		_ = proc.Close()
+	release := func() error {
+		var closeErr error
+		if shape.sandbox != nil && shape.sandbox.Mode == proto.SandboxEnforce {
+			if candidate, ok := proc.(interface{ abortNativeCandidate() error }); ok {
+				closeErr = candidate.abortNativeCandidate()
+			} else {
+				closeErr = errNativeClosePending
+			}
+		} else {
+			_ = proc.Close()
+		}
 		s.mu.Lock()
 		s.budget -= shape.reserved
 		s.mu.Unlock()
+		return closeErr
 	}
 	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, shape.xpixel, shape.ypixel)
 	if err != nil {
@@ -1379,7 +1465,9 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		// registered, so the spawn has produced nothing: end it rather than
 		// leave a process running with no terminal state behind it, give the
 		// reserved window back, and report the refusal the caller acts on.
-		release()
+		if closeErr := release(); errors.Is(closeErr, errNativeClosePending) {
+			return proto.SpawnResult{}, closeErr
+		}
 		lg.Error("helper: the session's terminal could not be created", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
@@ -1399,7 +1487,10 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// and "the emulator refused" is a sentence about this pane, not a
 	// default to run under.
 	if err := rt.ApplyScrollback(shape.scrollback); err != nil {
-		release()
+		screen.Close()
+		if closeErr := release(); errors.Is(closeErr, errNativeClosePending) {
+			return proto.SpawnResult{}, closeErr
+		}
 		lg.Error("helper: the session's scrollback budget could not be applied", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
@@ -1463,6 +1554,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		lifecycleLaunch: adoptableLaunch(shape.lifecycle, lifecycleWin),
 		log:             s.log,
 		launch:          launch,
+		sandbox:         shape.sandbox,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
 		rowWake:         make(chan struct{}, 1),
@@ -1493,13 +1585,14 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	}
 	go hs.watchExit(s.now, s.notifyExit)
 
-	lg.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
-		"kind", string(launch.Kind), "shell", launch.Shell(),
-		"pid", launch.LocalPid(), "pgid", launch.LocalPgid(), "windowBytes", shape.bound,
-		// The fact the hello-timeout hangs on: a pane with no carrier can
-		// never authenticate, and that is knowable here rather than a
-		// deadline later.
-		"lifecycle_carrier", lifecycleCarrier != nil)
+	if shape.sandbox == nil {
+		lg.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
+			"kind", string(launch.Kind), "shell", launch.Shell(),
+			"pid", launch.LocalPid(), "pgid", launch.LocalPgid(), "windowBytes", shape.bound,
+			"lifecycle_carrier", lifecycleCarrier != nil)
+	} else {
+		lg.Info("sandbox session spawned", "session", hs.id.Session, "generation", string(s.generation), "mode", shape.sandbox.Mode, "pid", launch.LocalPid(), "lifecycle_carrier", lifecycleCarrier != nil)
+	}
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
 }
 

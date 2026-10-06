@@ -498,7 +498,7 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
-const schemaVersion = 21
+const schemaVersion = 22
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -660,6 +660,51 @@ CREATE TABLE IF NOT EXISTS panes (
   size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0),
   closed_at  INTEGER,                      -- NULL: in the window
   digest     TEXT NOT NULL DEFAULT ''      -- the create key's content binding
+) STRICT;
+CREATE TABLE IF NOT EXISTS pane_launches (
+  id                    TEXT PRIMARY KEY,
+  pane_id               TEXT NOT NULL REFERENCES panes(id) ON DELETE CASCADE,
+  workspace_id          TEXT NOT NULL,
+  standard_revision     INTEGER NOT NULL CHECK (standard_revision >= 0),
+  workspace_revision    INTEGER NOT NULL CHECK (workspace_revision >= 0),
+  source_session_id     TEXT NOT NULL,
+  source_head_id        TEXT,
+  source_host           TEXT NOT NULL,
+  source_account        TEXT NOT NULL,
+  source_generation     TEXT NOT NULL,
+  mode                  TEXT NOT NULL CHECK (mode IN ('off','enforce')),
+  state                 TEXT NOT NULL CHECK (state IN ('preparing','active','ended','failed')),
+  helper_session_id     TEXT,
+  helper_host           TEXT,
+  helper_account        TEXT,
+  helper_generation     TEXT,
+  policy_digest         TEXT,
+  policy_version        INTEGER,
+  policy                TEXT CHECK (policy IS NULL OR json_valid(policy)),
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  CHECK ((mode = 'off' AND policy IS NULL AND policy_digest IS NULL AND policy_version IS NULL)
+      OR (mode = 'enforce' AND policy IS NOT NULL AND policy_digest IS NOT NULL AND policy_version IS NOT NULL)),
+  CHECK ((state = 'active' AND helper_session_id IS NOT NULL AND helper_host IS NOT NULL
+          AND helper_account IS NOT NULL AND helper_generation IS NOT NULL)
+      OR (state <> 'active'))
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS pane_launches_one_open
+  ON pane_launches(pane_id) WHERE state IN ('preparing','active');
+CREATE TABLE IF NOT EXISTS pane_launch_heads (
+  pane_id   TEXT PRIMARY KEY REFERENCES panes(id) ON DELETE CASCADE,
+  launch_id TEXT NOT NULL UNIQUE REFERENCES pane_launches(id) ON DELETE CASCADE
+) STRICT;
+CREATE TABLE IF NOT EXISTS session_retirements (
+  host_session_id TEXT NOT NULL,
+  host             TEXT NOT NULL,
+  account          TEXT NOT NULL,
+  generation       TEXT NOT NULL,
+  operation_id     TEXT NOT NULL,
+  cause             TEXT NOT NULL,
+  close_pending     INTEGER NOT NULL CHECK (close_pending IN (0,1)),
+  created_at        INTEGER NOT NULL,
+  PRIMARY KEY (host, account, generation, host_session_id)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -833,17 +878,29 @@ CREATE TABLE IF NOT EXISTS executions (
 
 CREATE TABLE IF NOT EXISTS authority_grants (
   id           INTEGER PRIMARY KEY,
-  execution_id INTEGER NOT NULL UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  execution_id INTEGER UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  launch_id    TEXT UNIQUE REFERENCES pane_launches(id) ON DELETE CASCADE,
   version      INTEGER NOT NULL,
-  issued_at    INTEGER NOT NULL,           -- backend wall clock
-  expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
-  -- policy is the decision MATRIX as JSON (ADR-0020 §7 as amended
-  -- 2026-08-16); the CHECK replaced the old preset enum, and the column
-  -- stays SQLite's discipline in a weaker form: a grant whose policy is
-  -- not even JSON cannot be recorded.
+  issued_at    INTEGER NOT NULL,
+  expires_at   INTEGER,
   policy       TEXT NOT NULL CHECK (json_valid(policy)),
-  payload      TEXT NOT NULL DEFAULT '{}'
+  payload      TEXT NOT NULL DEFAULT '{}',
+  CHECK ((execution_id IS NOT NULL AND launch_id IS NULL AND expires_at IS NOT NULL)
+      OR (execution_id IS NULL AND launch_id IS NOT NULL AND expires_at IS NULL))
 ) STRICT;
+CREATE TRIGGER IF NOT EXISTS authority_grant_launch_enforce
+BEFORE INSERT ON authority_grants
+WHEN NEW.launch_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1 FROM pane_launches WHERE id = NEW.launch_id AND mode = 'enforce'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'launch grant requires enforce mode');
+END;
+CREATE TRIGGER IF NOT EXISTS authority_grant_immutable
+BEFORE UPDATE ON authority_grants
+BEGIN
+  SELECT RAISE(ABORT, 'authority grants are immutable');
+END;
 
 CREATE TABLE IF NOT EXISTS grant_scopes (
   grant_id      INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
@@ -1234,6 +1291,10 @@ func (s *sqliteContent) Backup(ctx context.Context, destPath string) error {
 	})
 	return err
 }
+
+// Launches is the typed repository for immutable pane launch grants and
+// helper-session retirement obligations.
+func (s *sqliteContent) Launches() LaunchRepository { return s }
 
 // ── ContentDB surface ────────────────────────────────────────────────────
 

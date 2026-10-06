@@ -7,6 +7,7 @@
   "required": [
     "strategy",
     "skills",
+    "sandbox",
     "settingsChanged",
     "settingsReset",
     "connectionsAdded",
@@ -22,6 +23,7 @@
   "properties": {
     "strategy": { "type": "string", "enum": ["merge", "replace"] },
     "skills": { "type": "integer" },
+    "sandbox": { "type": "boolean" },
     "settingsChanged": { "type": "integer" },
     "settingsReset": { "type": "integer" },
     "connectionsAdded": { "type": "integer" },

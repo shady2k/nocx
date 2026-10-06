@@ -117,6 +117,11 @@ const (
 	// runtime's SealEnvironmentEntry, which reads the screen at the entry
 	// itself, bounded the same way as any other closing screen.
 	OpLifecycleEntered = "lifecycle-entered"
+	// Sandbox operations are additive: existing spawn/inventory shapes stay frozen.
+	OpSandboxPrepare = "sandbox-prepare"
+	OpSandboxLaunch  = "sandbox-launch"
+	OpSandboxGet     = "sandbox-get"
+	OpSandboxDiscard = "sandbox-discard"
 )
 
 // Incarnation is a session runtime's identity on the wire: the session the

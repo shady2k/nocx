@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -25,9 +26,10 @@ type restoreJournal struct {
 	// Snippets is the library at journal time, captured for rollback. A
 	// journal written before this field existed carries none; recovery then
 	// rolls back connections and settings only.
-	Snippets *[]BackupSnippet `json:"snippets,omitempty"`
-	Notes    *[]BackupNote    `json:"notes,omitempty"`
-	Skills   *skill.Snapshot  `json:"skills,omitempty"`
+	Snippets *[]BackupSnippet               `json:"snippets,omitempty"`
+	Notes    *[]BackupNote                  `json:"notes,omitempty"`
+	Skills   *skill.Snapshot                `json:"skills,omitempty"`
+	Sandbox  *sandbox.ConfigurationSnapshot `json:"sandbox,omitempty"`
 }
 
 // journalState is the in-memory representation.
@@ -38,6 +40,7 @@ type journalState struct {
 	snippets    *[]BackupSnippet
 	notes       *[]BackupNote
 	skills      *skill.Snapshot
+	sandbox     *sandbox.ConfigurationSnapshot
 }
 
 // readJournal loads the journal document. Missing → idle.
@@ -69,6 +72,7 @@ func readJournal(doc storage.DocumentStore) (journalState, error) {
 		js.snippets = j.Snippets
 		js.notes = j.Notes
 		js.skills = j.Skills
+		js.sandbox = j.Sandbox
 	default:
 		return journalState{}, fmt.Errorf("%w: unknown journal state %q", ErrRecoveryRequired, j.State)
 	}
@@ -79,7 +83,7 @@ func readJournal(doc storage.DocumentStore) (journalState, error) {
 // writeJournal persists the journal. Passing nil writes "idle" without payload.
 // Library snapshots are optional for backward-compatible journals created
 // before their corresponding store was wired.
-func writeJournal(doc storage.DocumentStore, state string, conn *profile.ConnectionSnapshot, settings *map[string]any, snippets *[]BackupSnippet, notes *[]BackupNote, skills *skill.Snapshot) error {
+func writeJournal(doc storage.DocumentStore, state string, conn *profile.ConnectionSnapshot, settings *map[string]any, snippets *[]BackupSnippet, notes *[]BackupNote, skills *skill.Snapshot, sandboxConfig *sandbox.ConfigurationSnapshot) error {
 	var j restoreJournal
 	j.Version = journalVersion
 	j.State = state
@@ -92,6 +96,7 @@ func writeJournal(doc storage.DocumentStore, state string, conn *profile.Connect
 		j.Snippets = snippets
 		j.Notes = notes
 		j.Skills = skills
+		j.Sandbox = sandboxConfig
 	}
 	b, err := json.Marshal(j)
 	if err != nil {
@@ -102,5 +107,5 @@ func writeJournal(doc storage.DocumentStore, state string, conn *profile.Connect
 
 // cleanupJournal attempts to write idle. Failure is logged but not fatal.
 func cleanupJournal(doc storage.DocumentStore) {
-	_ = writeJournal(doc, "idle", nil, nil, nil, nil, nil)
+	_ = writeJournal(doc, "idle", nil, nil, nil, nil, nil, nil)
 }

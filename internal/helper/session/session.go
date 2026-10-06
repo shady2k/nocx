@@ -13,6 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	nocxlog "github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
@@ -74,10 +75,12 @@ type SpawnRequest struct {
 	// SessionID is minted by the helper before launch so the in-memory shell
 	// integration can identify the session without an installed script.
 	SessionID string
-	Cwd       string
-	Env       map[string]string
-	Cols      uint16
-	Rows      uint16
+	// Native is an already prepared immutable launch strategy, never wire argv.
+	Native *sandbox.Prepared
+	Cwd    string
+	Env    map[string]string
+	Cols   uint16
+	Rows   uint16
 	// XPixel/YPixel are the client's cell metrics in TIOCSWINSZ's own units
 	// — the WHOLE text area in pixels — and zero means the client has not
 	// measured itself yet. They reach the pty's winsize at spawn; the
@@ -363,6 +366,7 @@ type hostSession struct {
 	key       string
 	startedAt time.Time
 	launch    proto.LaunchRecord
+	sandbox   *proto.SandboxGetResult
 	proc      Process
 	win       *window
 	// runtime is this session's ONE terminal-state owner (ADR-0066): the

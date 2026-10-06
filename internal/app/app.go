@@ -62,6 +62,7 @@ import (
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/reveal"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -1058,6 +1059,7 @@ func New(opts ...Option) (*App, error) {
 	// and history.query answers source=session, which the overlay labels
 	// honestly).
 	var contentDB content.ContentDB = content.NewStub(logger)
+	var sandboxWorkspaceStore sandbox.WorkspaceProfileStore
 
 	// The provider comes from the stance and from nowhere else: building one
 	// here would be the second opinion keystore.go exists to make
@@ -1221,8 +1223,7 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills)
-	if recoverErr := backupService.Recover(); recoverErr != nil {
+	if recoverErr := backup.RecoverPrerequisites(profileStore, settingsRegistry, docStore); recoverErr != nil {
 		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 
@@ -1269,6 +1270,7 @@ func New(opts ...Option) (*App, error) {
 		historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())
 	} else {
 		contentDB = db
+		sandboxWorkspaceStore = db.Layout()
 		// The closing event, named. Nothing has raised on this path today —
 		// Clear is a no-op on a status that starts available — but the
 		// interval is stated at both ends here rather than left to be
@@ -1294,6 +1296,16 @@ func New(opts ...Option) (*App, error) {
 		// the transport needs the session store. That is the same ordering
 		// argument this file already makes about `Open` — judge nothing until
 		// the thing that can ask has been built.
+	}
+
+	sandboxProfiles := sandbox.NewProfileRepository(docStore, sandbox.StandardDocumentName, sandboxWorkspaceStore)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills, sandboxProfiles)
+	if recoverErr := backupService.Recover(); recoverErr != nil {
+		_ = contentDB.Close()
+		if noteCloser != nil {
+			_ = noteCloser.Close()
+		}
+		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The

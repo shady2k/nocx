@@ -13,6 +13,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -29,6 +30,7 @@ type Service struct {
 	snippets    SnippetStore // nil → the backup has no snippets section
 	notes       NoteStore    // nil → the backup has no notes section
 	skills      SkillStore   // nil → the backup has no skills section
+	sandbox     SandboxStore
 }
 
 // NewService wires the backup service from its dependencies. A nil library
@@ -41,6 +43,7 @@ func NewService(
 	snippets SnippetStore,
 	notes NoteStore,
 	skills SkillStore,
+	sandboxStore SandboxStore,
 ) *Service {
 	return &Service{
 		connections: connections,
@@ -49,6 +52,7 @@ func NewService(
 		snippets:    snippets,
 		notes:       notes,
 		skills:      skills,
+		sandbox:     sandboxStore,
 	}
 }
 
@@ -62,15 +66,16 @@ type CreateResult struct {
 }
 
 type CreateSummary struct {
-	Settings                       int `json:"settings"`
-	Connections                    int `json:"connections"`
-	Groups                         int `json:"groups"`
-	Snippets                       int `json:"snippets"`
-	Notes                          int `json:"notes"`
-	Skills                         int `json:"skills"`
-	CredentialBindingsRemoved      int `json:"credentialBindingsRemoved"`
-	GroupCredentialBindingsRemoved int `json:"groupCredentialBindingsRemoved"`
-	GroupDefaultKeysOmitted        int `json:"groupDefaultKeysOmitted"`
+	Settings                       int  `json:"settings"`
+	Connections                    int  `json:"connections"`
+	Groups                         int  `json:"groups"`
+	Snippets                       int  `json:"snippets"`
+	Notes                          int  `json:"notes"`
+	Skills                         int  `json:"skills"`
+	Sandbox                        bool `json:"sandbox"`
+	CredentialBindingsRemoved      int  `json:"credentialBindingsRemoved"`
+	GroupCredentialBindingsRemoved int  `json:"groupCredentialBindingsRemoved"`
+	GroupDefaultKeysOmitted        int  `json:"groupDefaultKeysOmitted"`
 }
 
 // RestorePreview is the JSON-RPC result for backup.preview.
@@ -84,6 +89,7 @@ type RestorePreview struct {
 	Snippets                       SnippetsPreview    `json:"snippets"`
 	Skills                         SkillsPreview      `json:"skills"`
 	Notes                          NotesPreview       `json:"notes"`
+	Sandbox                        bool               `json:"sandbox"`
 	ConnectionsRequiringCredential []ProfileRef       `json:"connectionsRequiringCredential"`
 	Omissions                      RestoreOmissions   `json:"omissions"`
 }
@@ -143,6 +149,7 @@ type RestoreOmissions struct {
 type RestoreResult struct {
 	Strategy                       RestoreStrategy `json:"strategy"`
 	Skills                         int             `json:"skills"`
+	Sandbox                        bool            `json:"sandbox"`
 	SettingsChanged                int             `json:"settingsChanged"`
 	SettingsReset                  int             `json:"settingsReset"`
 	ConnectionsAdded               int             `json:"connectionsAdded"`
@@ -178,6 +185,17 @@ func (s *Service) loadSkills() (*skill.Snapshot, error) {
 	return &snapshot, nil
 }
 
+func (s *Service) loadSandbox() (*sandbox.ConfigurationSnapshot, error) {
+	if s.sandbox == nil {
+		return nil, nil
+	}
+	snapshot, err := s.sandbox.ExportConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("load sandbox configuration: %w", err)
+	}
+	return &snapshot, nil
+}
+
 // ── Create ────────────────────────────────────────────────────────────────
 
 // Create builds a backup document from the current live state.
@@ -201,6 +219,11 @@ func (s *Service) Create() (*CreateResult, error) {
 	}
 
 	doc, summary := buildDocument(snap, overrides, snips, notes, skills)
+	doc.Sandbox, err = s.loadSandbox()
+	if err != nil {
+		return nil, err
+	}
+	summary.Sandbox = doc.Sandbox != nil
 	doc.CreatedAt = time.Now().UTC()
 
 	raw, err := json.MarshalIndent(doc, "", "  ")
@@ -250,7 +273,11 @@ func (s *Service) Preview(contents string, strategy RestoreStrategy) (*RestorePr
 
 	preview.CreatedAt = doc.CreatedAt.UTC().Format(time.RFC3339)
 
-	token := computePreviewToken(contents, strategy, snap, overrides, skills)
+	sandboxConfig, err := s.loadSandbox()
+	if err != nil {
+		return nil, err
+	}
+	token := computePreviewToken(contents, strategy, snap, overrides, skills, sandboxConfig)
 	preview.PreviewToken = token
 
 	return preview, nil
@@ -261,6 +288,23 @@ func (s *Service) Preview(contents string, strategy RestoreStrategy) (*RestorePr
 // Restore applies a backup file under the given strategy, gated by a
 // preview token that must match current state.
 func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToken string) (*RestoreResult, error) {
+	var result *RestoreResult
+	err := s.withSandboxRestore(func(restorer sandbox.ConfigurationRestorer) error {
+		var err error
+		result, err = s.restore(contents, strategy, previewToken, restorer)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) withSandboxRestore(fn func(sandbox.ConfigurationRestorer) error) error {
+	if s.sandbox == nil {
+		return fn(nil)
+	}
+	return s.sandbox.WithConfigurationRestore(fn)
+}
+
+func (s *Service) restore(contents string, strategy RestoreStrategy, previewToken string, restorer sandbox.ConfigurationRestorer) (*RestoreResult, error) {
 	doc, omissions, err := parseAndValidate(contents, s.settings)
 	if err != nil {
 		return nil, err
@@ -287,7 +331,11 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
 
-	expectedToken := computePreviewToken(contents, strategy, snap, overrides, beforeSkills)
+	beforeSandbox, err := s.loadSandbox()
+	if err != nil {
+		return nil, err
+	}
+	expectedToken := computePreviewToken(contents, strategy, snap, overrides, beforeSkills, beforeSandbox)
 	if previewToken != expectedToken {
 		return nil, fmt.Errorf("%w: preview is stale", ErrInvalidDocument)
 	}
@@ -310,18 +358,21 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	if doc.Skills != nil && s.skills == nil {
 		return nil, fmt.Errorf("restore: backup carries skills but no skill store is wired")
 	}
+	if doc.Sandbox != nil && s.sandbox == nil {
+		return nil, fmt.Errorf("restore: backup carries sandbox configuration but no store is wired")
+	}
 
 	beforeSnap := snap
 	beforeOverrides := overrides
 	beforeSnippets := toBackupSnippets(beforeSnips)
 	beforeNotes := toBackupNotes(beforeNotesLib)
 
-	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); jerr != nil {
+	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills, beforeSandbox); jerr != nil {
 		return nil, fmt.Errorf("journal prepared: %w", jerr)
 	}
 
 	if cerr := s.connections.ReplaceConnectionSnapshot(targetSnap); cerr != nil {
-		if recErr := s.Recover(); recErr != nil {
+		if recErr := s.recover(restorer); recErr != nil {
 			return nil, fmt.Errorf("replace connections: %w; recovery failed: %w", cerr, recErr)
 		}
 		return nil, fmt.Errorf("replace connections: %w", cerr)
@@ -330,7 +381,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	var pn settings.PendingNotification
 	pn, err = s.settings.ReplaceNonSecretOverrides(targetOverrides)
 	if err != nil {
-		if recErr := s.Recover(); recErr != nil {
+		if recErr := s.recover(restorer); recErr != nil {
 			return nil, fmt.Errorf("replace settings: %w; recovery failed: %w", err, recErr)
 		}
 		return nil, fmt.Errorf("replace settings: %w", err)
@@ -341,7 +392,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// settings, or the restore looks successful everywhere it was not.
 	if writeSnips {
 		if serr := s.snippets.SaveAll(targetSnips); serr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.recover(restorer); recErr != nil {
 				return nil, fmt.Errorf("replace snippets: %w; recovery failed: %w", serr, recErr)
 			}
 			return nil, fmt.Errorf("replace snippets: %w", serr)
@@ -353,7 +404,7 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// the restore looks successful everywhere it was not.
 	if writeNotes {
 		if nerr := s.notes.ReplaceNotes(targetNotes); nerr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.recover(restorer); recErr != nil {
 				return nil, fmt.Errorf("replace notes: %w; recovery failed: %w", nerr, recErr)
 			}
 			return nil, fmt.Errorf("replace notes: %w", nerr)
@@ -365,15 +416,25 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	// after any rename is rolled back by Recover before the error returns.
 	if doc.Skills != nil {
 		if serr := s.skills.RestoreSnapshot(*doc.Skills); serr != nil {
-			if recErr := s.Recover(); recErr != nil {
+			if recErr := s.recover(restorer); recErr != nil {
 				return nil, fmt.Errorf("replace skills: %w; recovery failed: %w", serr, recErr)
 			}
 			return nil, fmt.Errorf("replace skills: %w", serr)
 		}
 		result.Skills = doc.Skills.TreeCount()
 	}
-	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills); werr != nil {
-		if recErr := s.Recover(); recErr != nil {
+	if doc.Sandbox != nil {
+		target := sandboxRestoreTarget(*doc.Sandbox, *beforeSandbox, strategy)
+		if err := restorer.RestoreConfiguration(target); err != nil {
+			if recErr := s.recover(restorer); recErr != nil {
+				return nil, fmt.Errorf("replace sandbox configuration: %w; recovery failed: %w", err, recErr)
+			}
+			return nil, fmt.Errorf("replace sandbox configuration: %w", err)
+		}
+		result.Sandbox = true
+	}
+	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes, beforeSkills, beforeSandbox); werr != nil {
+		if recErr := s.recover(restorer); recErr != nil {
 			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", werr, recErr)
 		}
 		return nil, fmt.Errorf("journal committed: %w", werr)
@@ -385,10 +446,34 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 	return result, nil
 }
 
+func sandboxRestoreTarget(in, current sandbox.ConfigurationSnapshot, strategy RestoreStrategy) sandbox.ConfigurationSnapshot {
+	if strategy != RestoreReplace {
+		return in
+	}
+	target := in
+	target.Workspaces = append([]sandbox.WorkspaceProfile(nil), in.Workspaces...)
+	present := make(map[string]struct{}, len(in.Workspaces))
+	for _, profile := range in.Workspaces {
+		present[profile.WorkspaceID] = struct{}{}
+	}
+	for _, profile := range current.Workspaces {
+		if _, exists := present[profile.WorkspaceID]; exists {
+			continue
+		}
+		profile.Override = nil
+		target.Workspaces = append(target.Workspaces, profile)
+	}
+	return target
+}
+
 // ── Recover ───────────────────────────────────────────────────────────────
 
 // Recover resolves any in-flight journal state on startup or after a crash.
 func (s *Service) Recover() error {
+	return s.withSandboxRestore(s.recover)
+}
+
+func (s *Service) recover(restorer sandbox.ConfigurationRestorer) error {
 	js, err := readJournal(s.doc)
 	if err != nil {
 		return err
@@ -422,6 +507,14 @@ func (s *Service) Recover() error {
 		if js.skills != nil && s.skills != nil {
 			if err := s.skills.RestoreSnapshot(*js.skills); err != nil {
 				return fmt.Errorf("%w: rollback skills: %w", ErrRecoveryRequired, err)
+			}
+		}
+		if js.sandbox != nil {
+			if restorer == nil {
+				return fmt.Errorf("%w: sandbox configuration store unavailable", ErrRecoveryRequired)
+			}
+			if err := restorer.RestoreConfiguration(*js.sandbox); err != nil {
+				return fmt.Errorf("%w: rollback sandbox configuration: %w", ErrRecoveryRequired, err)
 			}
 		}
 		cleanupJournal(s.doc)
@@ -1041,6 +1134,11 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 			}
 		}
 	}
+	if doc.Sandbox != nil {
+		if err := sandbox.ValidateConfigurationSnapshot(*doc.Sandbox); err != nil {
+			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: sandbox configuration: %w", ErrInvalidDocument, err)
+		}
+	}
 
 	omissions := RestoreOmissions{}
 	for _, g := range doc.Connections.Groups {
@@ -1174,7 +1272,7 @@ func valuesEqual(a, b any) bool {
 
 // ── Internal: preview token ──────────────────────────────────────────────
 
-func computePreviewToken(contents string, strategy RestoreStrategy, snap profile.ConnectionSnapshot, overrides map[string]any, skills *skill.Snapshot) string {
+func computePreviewToken(contents string, strategy RestoreStrategy, snap profile.ConnectionSnapshot, overrides map[string]any, skills *skill.Snapshot, sandboxConfig *sandbox.ConfigurationSnapshot) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%d:", len(contents))
 	h.Write([]byte(contents))
@@ -1182,6 +1280,7 @@ func computePreviewToken(contents string, strategy RestoreStrategy, snap profile
 	canonicalize(h, snap)
 	canonicalize(h, overrides)
 	canonicalize(h, skills)
+	canonicalize(h, sandboxConfig)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -1206,6 +1305,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	if doc.Skills != nil {
 		p.Skills.Included = doc.Skills.TreeCount()
 	}
+	p.Sandbox = doc.Sandbox != nil
 	// What a person reads before deciding to restore over what they have.
 	p.Notes.Included = len(doc.Notes)
 

@@ -22,6 +22,10 @@ export interface BackupRestorePreview {
   skills: {
     included: number
   }
+  /**
+   * The backup carries mutable filesystem sandbox configuration, never process authority.
+   */
+  sandbox: boolean
   connectionsRequiringCredential: ProfileRef[]
   omissions: {
     credentialBindingsRemoved: number

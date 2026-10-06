@@ -24,6 +24,10 @@ export interface BackupCreateResult {
      * The number of authored, managed and installed skill trees in the backup. Builtins are embedded and never carried.
      */
     skills: number
+    /**
+     * Mutable filesystem sandbox profiles are included, without live grants or session bindings.
+     */
+    sandbox: boolean
     credentialBindingsRemoved: number
     groupCredentialBindingsRemoved: number
     groupDefaultKeysOmitted: number

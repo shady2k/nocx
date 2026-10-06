@@ -2,16 +2,19 @@ package session
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
 	"sort"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
@@ -32,8 +35,9 @@ import (
 // when a test or a future product decision names it — and it travels by
 // construction rather than by request.
 type LocalSpawner struct {
-	log   log.Logger
-	shell Shell
+	log           log.Logger
+	nativePending atomic.Int32
+	shell         Shell
 	// openPTY is internal/pty's constructor, held as a value so the failure
 	// arms of Spawn can be driven without a real shell. Production wires
 	// pty.NewLocal in NewLocalSpawner; nothing else may replace it, which is
@@ -133,11 +137,9 @@ func NewLocalSpawner(logger *slog.Logger, shell Shell, agentHelperPath string) *
 // shell leads its own process group and the helper owns that group — which is
 // what makes signalling a job on the host possible at all (D3).
 func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
-	shellPath, shellArgs := s.shell.Path, s.shell.Args
-	if shellPath == "" {
-		shell := loginshell.New().Resolve()
-		shellPath = shell.Path
-		shellArgs = nil
+	shellPath, shellArgs := s.resolveShell()
+	if req.Native != nil {
+		shellPath = req.Native.Policy.Shell
 	}
 
 	cfg := pty.Config{
@@ -154,6 +156,7 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		YPixel: req.YPixel,
 	}
 	var launch shellintegration.LocalLaunch
+	var native *nativeLaunch
 	var lifecycleParent, lifecycleChild *os.File
 	var err error
 
@@ -176,6 +179,9 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	// socketpair is closed here explicitly the way the surviving arms already
 	// closed it.
 	release := func() {
+		if native != nil {
+			native.Close()
+		}
 		if launch.Abort != nil {
 			launch.Abort()
 		}
@@ -206,14 +212,18 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	launchKind := shellintegration.LocalShellKind(shellPath)
 	enhanced := req.SessionID != "" && len(shellArgs) == 0 &&
 		(launchKind == shellintegration.ShellBash || launchKind == shellintegration.ShellZsh)
-	s.log.Info("pane launch decided",
-		"session", req.SessionID,
-		"shell", shellPath,
-		"shell_kind", string(launchKind),
-		"enhanced", enhanced,
-		"explicit_shell_args", len(shellArgs),
-		"tool_endpoint", req.AgentToolEndpoint,
-		"lifecycle_requested", req.Lifecycle != nil)
+	if req.Native == nil {
+		s.log.Info("pane launch decided",
+			"session", req.SessionID,
+			"shell", shellPath,
+			"shell_kind", string(launchKind),
+			"enhanced", enhanced,
+			"explicit_shell_args", len(shellArgs),
+			"tool_endpoint", req.AgentToolEndpoint,
+			"lifecycle_requested", req.Lifecycle != nil)
+	} else {
+		s.log.Info("sandbox launch decided", "session", req.SessionID, "shell_kind", string(launchKind), "enhanced", enhanced, "lifecycle_requested", req.Lifecycle != nil)
+	}
 
 	if req.SessionID != "" && len(shellArgs) == 0 {
 		kind := launchKind
@@ -255,18 +265,21 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			}
 			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
 			if err != nil {
-				s.log.Error("pane launch: the enhanced tier could not be built",
-					"session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
+				if req.Native == nil {
+					s.log.Error("pane launch: the enhanced tier could not be built", "session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
+				}
 				release()
 				return nil, err
 			}
 			// The argv SHAPE and not its contents: the capability rides in
 			// the script text these arguments point at, and printing it would
 			// put a bearer token in a log file.
-			s.log.Info("pane launch: the enhanced tier is built",
-				"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
-				"extra_files", len(launch.ExtraFiles), "bootstrap_bytes", len(launch.Bootstrap),
-				"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch)
+			if req.Native == nil {
+				s.log.Info("pane launch: the enhanced tier is built",
+					"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
+					"extra_files", len(launch.ExtraFiles), "bootstrap_bytes", len(launch.Bootstrap),
+					"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch)
+			}
 			if lifecycleChild != nil {
 				launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
 				previousCleanup := launch.Cleanup
@@ -281,21 +294,47 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 			cfg.ExtraFiles = launch.ExtraFiles
 		}
 	}
+	if req.Native != nil {
+		native, err = prepareNativeLaunch(req.Native, &cfg)
+		if err != nil {
+			release()
+			return nil, err
+		}
+	}
 	lp, err := s.openPTY(s.log, cfg)
 	if err != nil {
-		s.log.Error("pane launch: the pty could not be opened",
-			"session", req.SessionID, "shell", cfg.Command, "error", err)
+		if req.Native == nil {
+			s.log.Error("pane launch: the pty could not be opened", "session", req.SessionID, "shell", cfg.Command, "error", err)
+		}
 		release()
 		return nil, err
+	}
+	if native != nil {
+		if err := native.waitReady(lp); err != nil {
+			abortErr := s.abortNativeCandidate(lp, req.Native)
+			release()
+			if errors.Is(abortErr, errNativeClosePending) {
+				return nil, errNativeClosePending
+			}
+			return nil, errNativeLaunch
+		}
+		native.Close()
+		go func() { <-lp.Done(); _ = req.Native.Cleanup() }()
 	}
 	if len(launch.Bootstrap) > 0 {
 		// The bootstrap is a LINE INTO THE TERMINAL — `. /dev/fd/3` for the
 		// tiers that cannot take a descriptor as an rcfile — so it is the one
 		// thing here that shares a channel with the user's own input.
 		if _, err := lp.Write(launch.Bootstrap); err != nil {
-			s.log.Error("pane launch: the bootstrap line could not be written",
-				"session", req.SessionID, "bytes", len(launch.Bootstrap), "error", err)
-			_ = lp.Close()
+			s.log.Error("pane launch: the bootstrap line could not be written", "session", req.SessionID, "bytes", len(launch.Bootstrap))
+			if req.Native != nil {
+				if errors.Is(s.abortNativeCandidate(lp, req.Native), errNativeClosePending) {
+					release()
+					return nil, errNativeClosePending
+				}
+			} else {
+				_ = lp.Close()
+			}
 			release()
 			return nil, err
 		}
@@ -305,7 +344,30 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	if launch.Cleanup != nil {
 		launch.Cleanup()
 	}
-	return &localProcess{localPTY: lp, lifecycle: lifecycleParent}, nil
+	return &localProcess{localPTY: lp, lifecycle: lifecycleParent, shell: shellPath, native: req.Native, nativeOwner: s}, nil
+}
+
+func (s *LocalSpawner) resolveShell() (string, []string) {
+	if s.shell.Path != "" {
+		return s.shell.Path, s.shell.Args
+	}
+	return loginshell.New().Resolve().Path, nil
+}
+
+func (s *LocalSpawner) PrepareSandbox(request sandbox.BuildRequest) (*sandbox.Prepared, error) {
+	request.Shell, _ = s.resolveShell()
+	return sandbox.Prepare(request)
+}
+
+func (s *LocalSpawner) NativeCleanupPending() bool { return s.nativePending.Load() != 0 }
+
+func (s *LocalSpawner) abortNativeCandidate(proc localPTY, prepared *sandbox.Prepared) error {
+	err := abortNative(proc, prepared)
+	if errors.Is(err, errNativeClosePending) {
+		s.nativePending.Add(1)
+		go func() { <-proc.Done(); _ = prepared.Cleanup(); s.nativePending.Add(-1) }()
+	}
+	return err
 }
 
 // envSlice turns the wire's map into exec's slice, in a STABLE order. The wire
@@ -334,7 +396,21 @@ func envSlice(env map[string]string) []string {
 // started, and which process group the helper owns for it.
 type localProcess struct {
 	localPTY
-	lifecycle *os.File
+	lifecycle   *os.File
+	shell       string
+	native      *sandbox.Prepared
+	nativeOwner *LocalSpawner
+}
+
+func (p *localProcess) abortNativeCandidate() error {
+	return p.nativeOwner.abortNativeCandidate(p.localPTY, p.native)
+}
+
+func (p *localProcess) Shell() string {
+	if p.shell != "" {
+		return p.shell
+	}
+	return p.localPTY.Shell()
 }
 
 func (p *localProcess) Lifecycle() io.ReadWriteCloser {

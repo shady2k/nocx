@@ -71,6 +71,7 @@ func newSkillsBackupService(t *testing.T, configDir string, skills *skill.Store)
 		nil,
 		nil,
 		skills,
+		nil,
 	)
 }
 
@@ -325,6 +326,7 @@ func TestSkillsRestoreFailureRollsBackTheJournalledSnapshot(t *testing.T) {
 		nil,
 		nil,
 		sourceSkills,
+		nil,
 	)
 	created, err := source.Create()
 	if err != nil {
@@ -340,6 +342,7 @@ func TestSkillsRestoreFailureRollsBackTheJournalledSnapshot(t *testing.T) {
 		nil,
 		nil,
 		destinationSkills,
+		nil,
 	)
 	preview, err := destination.Preview(created.Contents, backup.RestoreMerge)
 	if err != nil {
@@ -401,6 +404,7 @@ func TestSkillsMutationAfterPreviewInvalidatesRestoreToken(t *testing.T) {
 		nil,
 		nil,
 		&journalSkillStore{current: target},
+		nil,
 	)
 	created, err := source.Create()
 	if err != nil {
@@ -415,6 +419,7 @@ func TestSkillsMutationAfterPreviewInvalidatesRestoreToken(t *testing.T) {
 		nil,
 		nil,
 		destinationSkills,
+		nil,
 	)
 	preview, err := destination.Preview(created.Contents, backup.RestoreMerge)
 	if err != nil {

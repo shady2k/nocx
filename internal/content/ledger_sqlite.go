@@ -1028,7 +1028,7 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 				return fmt.Errorf("authority grant policy: %w", err)
 			}
 			g, err := tx.ExecContext(ctx, `INSERT INTO authority_grants
-				(execution_id, version, issued_at, expires_at, policy) VALUES (?, ?, ?, ?, ?)`,
+				(execution_id, launch_id, version, issued_at, expires_at, policy) VALUES (?, NULL, ?, ?, ?, ?)`,
 				id, in.Grant.Version, time.Now().UnixMilli(), in.Grant.ExpiresAt,
 				string(policyJSON))
 			if err != nil {
@@ -1716,7 +1716,7 @@ func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant
 	var grantID int64
 	var policyJSON string
 	err := s.conn(ctx).QueryRowContext(ctx, `SELECT id, version, expires_at, policy
-		FROM authority_grants WHERE execution_id = ?`, executionID).Scan(
+		FROM authority_grants WHERE execution_id = ? AND launch_id IS NULL`, executionID).Scan(
 		&grantID, &g.Version, &g.ExpiresAt, &policyJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

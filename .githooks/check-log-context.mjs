@@ -57,9 +57,10 @@ export const BASELINE_PATH = resolve(__dirname, 'log-context-baseline.json')
 // Directories excluded from the scan outright — see the file doc.
 const EXCLUDED_DIRS = ['internal/log/']
 
-// A call site: `<ident>.<Method>(` at a word boundary, method one of the
-// four above. Captures the receiver identifier and the method.
-const CALL_RE = /(?:^|[^.\w])([A-Za-z_]\w*)\.(Debug|Info|Warn|Error)\(/g
+// A logging call requires a message argument. Zero-argument methods such as
+// os.DirEntry.Info() and error.Error() are not log calls, regardless of receiver.
+// Captures the receiver identifier and method; keeps multiline message calls.
+const CALL_RE = /(?:^|[^.\w])([A-Za-z_]\w*)\.(Debug|Info|Warn|Error)\((?!\s*\))/g
 
 // The import line for internal/log, with or without an explicit alias:
 //   "github.com/shady2k/nocx/internal/log"

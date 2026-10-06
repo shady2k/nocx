@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
 
 // Stub is the no-op implementation of ContentDB. Every repository method logs
@@ -247,6 +248,40 @@ func (s *Stub) WorkerCheckouts() WorkerCheckoutRepository {
 	return &workerCheckoutStub{log: s.log}
 }
 
+func (s *Stub) Launches() LaunchRepository { return &launchStub{} }
+
+type launchStub struct{}
+
+func (s *launchStub) Prepare(context.Context, LaunchPrepare) (Launch, error) {
+	return Launch{}, ErrNotImplemented
+}
+
+func (s *launchStub) Commit(context.Context, LaunchCommit) (Launch, error) {
+	return Launch{}, ErrNotImplemented
+}
+
+func (s *launchStub) Fail(context.Context, string, *HelperIdentity) error { return ErrNotImplemented }
+
+func (s *launchStub) RecordRetirement(context.Context, SessionRetirement) error {
+	return ErrNotImplemented
+}
+
+func (s *launchStub) CompleteRetirement(context.Context, RetirementConfirmation) error {
+	return ErrNotImplemented
+}
+func (s *launchStub) End(context.Context, HelperIdentity) error { return ErrNotImplemented }
+func (s *launchStub) GetLaunch(context.Context, string) (Launch, error) {
+	return Launch{}, ErrNotImplemented
+}
+
+func (s *launchStub) Head(context.Context, string) (Launch, error) {
+	return Launch{}, ErrNotImplemented
+}
+func (s *launchStub) Preparing(context.Context) ([]Launch, error) { return nil, ErrNotImplemented }
+func (s *launchStub) PendingRetirements(context.Context, int) ([]SessionRetirement, error) {
+	return nil, ErrNotImplemented
+}
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
@@ -476,6 +511,22 @@ var _ LayoutRepository = (*layoutStub)(nil)
 // layoutStub implements LayoutRepository for the stub.
 type layoutStub struct {
 	log log.Logger
+}
+
+func (s *layoutStub) GetWorkspaceProfile(context.Context, string) (sandbox.WorkspaceProfile, error) {
+	return sandbox.WorkspaceProfile{}, ErrNotImplemented
+}
+
+func (s *layoutStub) UpdateWorkspaceProfile(context.Context, string, uint64, *sandbox.ProfileRoots) (sandbox.WorkspaceProfile, error) {
+	return sandbox.WorkspaceProfile{}, ErrNotImplemented
+}
+
+func (s *layoutStub) ListWorkspaceProfiles(context.Context) ([]sandbox.WorkspaceProfile, error) {
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) RestoreWorkspaceProfiles(context.Context, []sandbox.WorkspaceProfile) error {
+	return ErrNotImplemented
 }
 
 func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace, firstTab Tab, firstPane Pane) (Created[NewWorkspace], error) {

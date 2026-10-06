@@ -1,5 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean connect ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
+        sandbox-smoke-macos \
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
@@ -248,6 +249,11 @@ define build_helper_artifacts
 zig="$$($(GO) run ./cmd/vtfetch zig --bin "$(ZIG)" --manifest $(VT_MANIFEST))" || exit 1; \
 for t in $(1); do \
   os=$${t%/*}; arch=$${t#*/}; \
+  runner_dir="internal/helper/runner/bin/$$os-$$arch"; mkdir -p "$$runner_dir" || exit 1; \
+  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+    $(GO) build -trimpath -ldflags="-s -w" \
+    -o "$$runner_dir/nocx-sandbox-runner" ./cmd/nocx-sandbox-runner || exit 1; \
+  gzip -9 -f "$$runner_dir/nocx-sandbox-runner" || exit 1; \
   cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
   tags="$(strip $(3))"; if [ "$$os" = linux ]; then tags="$${tags:+$$tags,}vtmusl"; fi; \
   tagflag=""; [ -n "$$tags" ] && tagflag="-tags $$tags"; \
@@ -334,6 +340,15 @@ require-local-helper: helper-local
 # passes on the command line for HELPER_LOCAL_TARGETS.
 helpers-this-machine: HELPER_TARGETS := $(HELPER_LOCAL_PLATFORM)
 helpers-this-machine: helpers require-local-helper
+
+# Mandatory source and packaged native Seatbelt proof. Both lanes exercise real
+# helper sessions, persisted authority and kernel enforcement. Missing native
+# support fails this isolated macOS gate instead of reporting a pass.
+sandbox-smoke-macos:
+	@test "$(HOST_GOOS)" = darwin || { echo "sandbox-smoke-macos requires macOS" >&2; exit 1; }
+	@$(MAKE) require-local-helper
+	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos source
+	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos packaged
 
 all: lint test build
 

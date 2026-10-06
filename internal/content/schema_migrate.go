@@ -159,6 +159,7 @@ var schemaLadder = []migrationStep{
 	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
 	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
+	{from: 21, to: 22, apply: migrateLaunchAuthority21to22, schemaDigest: "e8aff917885c58a4812e3420b62289767bdab92057ec30382506eed85eadcd3a"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -293,40 +294,17 @@ func validateOnDiskSchemaShapeFor(ctx context.Context, conn *sql.Conn, version, 
 
 // schemaShapeDigests pins the complete SQLite catalog for the historical
 // shapes this build migrates. The current shape is derived from schemaV1 at
-// runtime so it has one source of truth rather than a second digest constant.
 var schemaShapeDigests = map[int]string{
 	14: "302e4e2479855b3aa0abdce4a9ecb0f3c5a8af7f06ad102f9a9049e6818fd4c2",
 	15: "75eb0aea40034a9db5c8f19648215e638234a9e9f0031a5a7275e2d8af7c3ff4",
-	// 16 is pinned now that schemaVersion moved past it (nocx-e5f55): until
-	// then 16 WAS current and its shape was derived at runtime by
-	// currentSchemaShape, which is exactly the branch that stops running the
-	// moment a newer version takes over as current. Taken from
-	// testdata/schema_v16.sql — the shape as it stood at 882f34b5, the last
-	// commit before skill_checks was added — because the working tree's
-	// schemaV1 already carries that table and would pin the shape of a v16 that
-	// never existed, which Open would then accept without having checked
-	// anything.
 	16: "014fa0face729e1f650b37d3d9ac7abb2d68490c98c3c6c48d6d74490702687f",
-	// 17 is pinned for the same reason, in the commit that dethroned it: it is
-	// testdata/schema_v17.sql, which is 16 plus skill_checks and is where
-	// executions.termination_reason still refused `answer-revoked`.
 	17: "623ffa936faf719fe2fad36b9a0e1393c0bfeabac4358a95f972559c92f5169a",
-	// 18 is pinned in the commit that dethroned it, from
-	// testdata/schema_v18.sql — the schemaV1 constant lifted verbatim out of
-	// the tree where `const schemaVersion` held 18. 19 adds worker_checkouts
-	// on top of exactly that shape (nocx-xn63t.1.4).
 	18: "76e33ea9af9fdd50931180239ad2b9501650b13a161d27aabff77e1760d93bc4",
-	// 19 is pinned in the commit that dethroned it, from
-	// testdata/schema_v19.sql — the schemaV1 constant lifted verbatim out of
-	// the tree where `const schemaVersion` held 19. 20 widens
-	// artifacts.media_type's CHECK for application/x-nocx-rows on top of
-	// exactly that shape (nocx-2v80t.3.7).
 	19: "fc842a885ae4009a928c0d099a9be047b71bb6f3710f2407139a9290ccb67eef",
-	// 20 is pinned in the commit that dethrones it, from
-	// testdata/schema_v20.sql — the schemaV1 constant lifted verbatim out of
-	// the tree where `const schemaVersion` held 20. 21 adds clear_boundaries
-	// on top of exactly that shape (nocx-2v80t.3.17).
 	20: "cbf78b0cf92ee5ef3543e35af94ff5fbf83ee31394403d08e07a85e529a84aad",
+	// Filled from the frozen testdata/schema_v21.sql shape; schema 21 was schema
+	// 20 plus the released clear_boundaries table and partial index.
+	21: "2dea93020d4274a210e4ba2cce5f5b7c19d5ece098daf7f09fc766c6c28b148b",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -337,6 +315,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	18: schema18ObjectNames(),
 	19: schema19ObjectNames(),
 	20: schema20ObjectNames(),
+	21: schema21ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -438,6 +417,14 @@ func schema19ObjectNames() map[string]struct{} {
 // edge keeps (17→18 is the other example, schema18ObjectNames above).
 func schema20ObjectNames() map[string]struct{} {
 	return schema19ObjectNames()
+}
+
+func schema21ObjectNames() map[string]struct{} {
+	result := schema20ObjectNames()
+	result["table:clear_boundaries"] = struct{}{}
+	result["index:sqlite_autoindex_clear_boundaries_1"] = struct{}{}
+	result["index:clear_boundaries_by_pane"] = struct{}{}
+	return result
 }
 
 type sqliteSchemaObject struct {
@@ -1147,4 +1134,37 @@ func migrateBlockRowsMediaTypes19to20(ctx context.Context, tx *sql.Tx) error {
 		return errors.New("widen artifacts.media_type: the rebuilt schema fails foreign_key_check")
 	}
 	return rows.Err()
+}
+
+// migrateLaunchAuthority21to22 changes authority_grants from execution-only
+// rows to an XOR subject while copying every existing execution grant byte for
+// byte. Foreign keys are suspended by the migration walker; child scope/effect
+// tables keep referencing the same table name and their grant ids are retained.
+func migrateLaunchAuthority21to22(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		`CREATE TABLE authority_grants_v22 (
+			id INTEGER PRIMARY KEY,
+			execution_id INTEGER UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+			launch_id TEXT UNIQUE REFERENCES pane_launches(id) ON DELETE CASCADE,
+			version INTEGER NOT NULL,
+			issued_at INTEGER NOT NULL,
+			expires_at INTEGER,
+			policy TEXT NOT NULL CHECK (json_valid(policy)),
+			payload TEXT NOT NULL DEFAULT '{}',
+			CHECK ((execution_id IS NOT NULL AND launch_id IS NULL AND expires_at IS NOT NULL)
+			    OR (execution_id IS NULL AND launch_id IS NOT NULL AND expires_at IS NULL))
+		) STRICT`,
+		`INSERT INTO authority_grants_v22
+			(id, execution_id, launch_id, version, issued_at, expires_at, policy, payload)
+			SELECT id, execution_id, NULL, version, issued_at, expires_at, policy, payload
+			FROM authority_grants`,
+		`DROP TABLE authority_grants`,
+		`ALTER TABLE authority_grants_v22 RENAME TO authority_grants`,
+	}
+	for i, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("rebuild authority_grants, statement %d: %w", i+1, err)
+		}
+	}
+	return nil
 }

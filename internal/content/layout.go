@@ -70,7 +70,11 @@ package content
 // for, and what it remembers it owns — which is the invariant §4.1 moved into
 // this process precisely to give an owner. Its wire method is layout.read.
 
-import "context"
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/sandbox"
+)
 
 // TabLayout is the direction a tab arranges its panes in. Direction is a
 // property of the SET, size a property of the member (§5) — which is why the
@@ -308,225 +312,54 @@ type NewTab struct {
 // day a mover is added. MovePane moves a pane between TABS and is not that
 // mover: it touches panes.tab_id and nothing on tabs.
 type LayoutRepository interface {
-	// CreateWorkspace records one workspace TOGETHER WITH its first tab and
-	// that tab's first pane, in one transaction. A call with no first tab is
-	// ErrNoFirstTab and a call with no first pane ErrNoFirstPane: an empty
-	// workspace was proposed and rejected by the owner — it has no meaning,
-	// and refusing it also removes the "open a tab somewhere it does not
-	// belong, then move it out" path. An id already taken FAILS; it never
-	// overwrites (§7).
-	//
-	// The first tab's WorkspaceID and the first pane's TabID may be left
-	// empty: this call is what creates those containers. Naming a DIFFERENT
-	// one is ErrMismatchedContainer rather than a silent re-parent.
-	// A create is IDEMPOTENT on the store's own digest of what was asked
-	// for (§7): the same request twice returns the same three rows and
-	// writes none the second time, and the same id asking for something else
-	// is ErrIDConflict with nothing changed.
+	// WorkspaceProfileStore is implemented here so workspace payload has one writer.
+	sandbox.WorkspaceProfileStore
+	// CreateWorkspace records a workspace with its first tab and pane atomically.
 	CreateWorkspace(ctx context.Context, ws Workspace, firstTab Tab, firstPane Pane) (Created[NewWorkspace], error)
-	// Snapshot returns the whole chain: what a renderer draws itself from,
-	// and the read this repository shipped without (nocx-isoph.4). Every
-	// other method here changes one thing and answers about that thing; this
-	// is the only one that answers "what is there", which is what makes
-	// "order and decoration come from the backend" a fact rather than a
-	// slogan — a renderer that cannot ask has to remember, and what it
-	// remembers it owns.
+	// Snapshot returns the whole workspace, tab and pane chain.
 	Snapshot(ctx context.Context) (LayoutSnapshot, error)
 	// Workspaces returns every workspace in position order.
 	Workspaces(ctx context.Context) ([]Workspace, error)
-	// RenameWorkspace gives one workspace a new name and returns the stored
-	// row. ErrNoSuchWorkspace when the id names none — a rename never
-	// creates, because a create is the only thing that may fix an id.
+	// RenameWorkspace updates the name of an existing workspace.
 	RenameWorkspace(ctx context.Context, id, name string) (Workspace, error)
-	// RecolourWorkspace sets the workspace's colour, or clears it with nil,
-	// and returns the stored row. Nil is an operation and not an omission —
-	// see RecolourTab, whose shape and reasoning this follows exactly rather
-	// than inventing a second vocabulary for one act.
+	// RecolourWorkspace sets or clears a workspace colour.
 	RecolourWorkspace(ctx context.Context, id string, colour *string) (Workspace, error)
-	// ReorderWorkspaces takes the whole USER-MADE order and writes it in one
-	// transaction. ids must be a permutation of every workspace EXCEPT the
-	// default; anything else is ErrNotAPermutation and nothing moves. It
-	// answers with every workspace in the order that now stands, the default
-	// included, because the caller replaces its cache with what comes back.
-	//
-	// THE DEFAULT IS NOT A MEMBER OF THE ARRANGEMENT. It renders no chrome at
-	// all (§4.2), so no surface can offer to move it, and it keeps position 0
-	// — the user's workspaces are written after it. Requiring it in the
-	// permutation made this method unreachable rather than strict: the wire
-	// checks that every id it is given is a UUIDv7 (§7 — durable,
-	// client-minted ids), and the default's is the reserved `workspace:default`
-	// instead, so a renderer that included it was refused by the transport and
-	// one that omitted it was refused by the store. Every reorder failed,
-	// whichever way it was sent.
+	// ReorderWorkspaces applies the user's order to all non-default workspaces.
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]Workspace, error)
-	// DeleteWorkspace removes a workspace — the ONE row in this chain that is
-	// still deleted (see the block above the interface). Its tabs and their
-	// panes are MARKED CLOSED first and keep their rows; the tabs then
-	// outlive the workspace with a null workspace_id, which is what
-	// ON DELETE SET NULL is for here. The sessions recorded under it do go,
-	// through their own cascade. If it held the last open tabs in the
-	// application, the replacement is minted in the same transaction.
-	//
-	// The DEFAULT workspace is refused with ErrDefaultWorkspace. It never
-	// renders, so nothing can offer the affordance, and its row is where the
-	// replacement tab goes and where the ledger records every session nobody
-	// named a workspace for.
+	// DeleteWorkspace closes its open tabs and removes the workspace atomically.
 	DeleteWorkspace(ctx context.Context, id string, next Replacement) error
-	// CreateTab records one tab under an existing workspace TOGETHER WITH its
-	// first pane. This is §4.4's "dragging a pane out of a tab mints a tab
-	// for it" — the pane is what the tab is minted around, so a tab with no
-	// pane is ErrNoFirstPane. A lineage parent that names no tab, that names
-	// the tab itself, or that would join a chain longer than lineage.MaxDepth
-	// is refused and nothing is written.
+	// CreateTab records a tab together with its first pane.
 	CreateTab(ctx context.Context, tab Tab, firstPane Pane) (Created[NewTab], error)
-	// CreateTabAfter records that same tab-and-first-pane pair AND places it
-	// in its workspace's strip, immediately after the open tab `after` names
-	// (nocx-tdiqs). Everything CreateTab refuses is refused here in the same
-	// words and for the same reasons — the lineage admission, the replay of a
-	// retried id, the id conflict — and the placement is part of the SAME
-	// transaction, so a create that fails leaves no tab, no moved neighbour
-	// and no workspace with two tabs at one position.
-	//
-	// IT EXISTS BECAUSE A STRIP IS ORDERED AND A CREATE IS NOT A REORDER. The
-	// renderer's own tabs.create states a position, which is legitimate for a
-	// caller that is deciding where a tab goes; the backend minting a tab for
-	// a worker knows something a position cannot express — that the new tab
-	// belongs immediately after a particular existing one — and a position
-	// computed out here would be a second owner of what "immediately after"
-	// means the moment two tabs share a seat. So the seat is the store's:
-	// it reads the strip, seats the new tab after the anchor, and renumbers
-	// 0..n-1 exactly as ReorderTabs does, through the same writer.
-	//
-	// `after` IS AN OPEN TAB OF THE SAME WORKSPACE, or the new tab goes LAST.
-	// Empty is that case, and so is an id nobody knows and one that names a
-	// tab of another workspace: a strip is one workspace's, so a tab outside
-	// it names no seat on it, and refusing the create over that would fail a
-	// write over a fact that is not wrong — merely unattributable.
-	//
-	// THE REQUEST'S Position IS NOT THE SEAT. The placement decides that, and
-	// the field is therefore left out of the id-conflict digest as well: an
-	// ask retried with a different number there is the same ask, because the
-	// number was never honoured.
+	// CreateTabAfter creates a tab and seats it after an open sibling.
 	CreateTabAfter(ctx context.Context, tab Tab, firstPane Pane, after string) (Created[NewTab], error)
 	// Tabs returns one workspace's tabs in position order.
 	Tabs(ctx context.Context, workspaceID string) ([]Tab, error)
-	// RenameTab sets or CLEARS the name the user typed. nil is not "no
-	// change": it is the tab going back to the label derived from its panes
-	// (§4.5), which is a real product state and the normal one.
+	// RenameTab sets or clears a tab name.
 	RenameTab(ctx context.Context, id string, name *string) (Tab, error)
-	// RecolourTab sets or clears the tab's colour; nil is an undecorated tab.
+	// RecolourTab sets or clears a tab colour.
 	RecolourTab(ctx context.Context, id string, colour *string) (Tab, error)
-	// PinTab keeps a tab at the head of the strip, or stops doing so.
+	// PinTab controls whether a tab is kept at the head of its strip.
 	PinTab(ctx context.Context, id string, pinned bool) (Tab, error)
-	// ReorderTabs takes the whole strip order for ONE workspace. ids must be
-	// a permutation of that workspace's tabs — a tab belonging to another
-	// workspace is not a member, so naming one is ErrNotAPermutation and not
-	// a move: reordering a strip never changes membership.
+	// ReorderTabs applies a complete order to one workspace's tabs.
 	ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]Tab, error)
-	// DeleteTab takes a tab OUT OF THE WINDOW: the tab and its panes are
-	// marked closed and every row stays. A tab that records it as lineage
-	// parent is untouched — the parent it names is now simply a tab nobody is
-	// looking at, which is a better answer than the null the delete used to
-	// leave.
-	//
-	// If it was its workspace's last OPEN tab the workspace is deleted, and
-	// if it was the application's last the replacement is minted — all in the
-	// one transaction.
+	// DeleteTab closes a tab and dissolves containers left empty.
 	DeleteTab(ctx context.Context, id string, next Replacement) error
-	// CreatePane records one pane under an existing tab: a SPLIT, the one
-	// creation that adds a member to a container that already exists. The
-	// first pane of a tab arrives with the tab, through CreateTab.
+	// CreatePane adds a pane to an existing tab.
 	CreatePane(ctx context.Context, pane Pane) (Created[Pane], error)
-	// SetPaneCwd records where the pane's shell IS, which is where a restore
-	// reopens it (design §5). It is the only writer of panes.cwd after
-	// creation, and the delay in having one was deliberate: the column had no
-	// second writer until something read it across a restart.
-	//
-	// The caller must only report a cwd it VERIFIED (AD-5: an OSC 7 the shell
-	// sent, never a provider's session-open fallback, which is a guess). This
-	// method cannot tell the two apart and does not try — one owner of that
-	// distinction, and it is the renderer that holds the evidence.
-	//
-	// Idempotent: the same cwd twice answers the same pane. ErrNoSuchPane for
-	// an id no pane carries, never a silent no-op — a cwd reported for a pane
-	// the chain does not hold is a defect somewhere, and swallowing it hides
-	// which.
+	// SetPaneCwd records a verified current directory for a pane.
 	SetPaneCwd(ctx context.Context, paneID, cwd string) (Pane, error)
-	// MovePane changes which tab a pane is in — §4.4's other direction —
-	// and removes the tab it leaves empty, in the same transaction. The
-	// pane's identity, its cwd, its blocks and its live pipe are untouched,
-	// because only a reference moved: this is an UPDATE of one column on the
-	// row that was already there, never a delete and an insert.
-	//
-	// A move whose destination tab is in ANOTHER WORKSPACE is refused with
-	// ErrCrossWorkspaceMove. Whether that is allowed is open (§12 q. 5, and
-	// §4.4 of the workspaces design), the atomicity model for a subtree move
-	// is undesigned, and the inherited requirement is that a partial move
-	// FAILS CLOSED. Refusing the whole move is the form of failing closed
-	// that leaves the pane in exactly one place.
-	// It answers with the pane AS STORED, which is what the wire sends back:
-	// read from the row rather than echoed from the request, so what the
-	// renderer draws is what the backend holds.
+	// MovePane moves a pane to another tab, dissolving the old empty tab.
 	MovePane(ctx context.Context, paneID, tabID string) (Pane, error)
-	// PaneCwd answers where one pane is standing — the column SetPaneCwd
-	// writes and a restore reads. It is a read of that owner and not a
-	// second one: what it returns is exactly what the renderer last
-	// verified, and "" is a real answer meaning no cwd has ever been
-	// reported for this pane (a pane whose shell has no integration, or one
-	// that has not reached its first prompt).
-	//
-	// It exists because something other than a restore now needs it: a
-	// worker's pane opens where its coordinator's pane is standing
-	// (nocx-ty5ks), and resolving that from the pane id is this chain's job
-	// for the same reason WorkspaceForPane's is — one owner of the walk, so
-	// it cannot go out of step with the row.
-	//
-	// ErrNoSuchPane for an id no pane carries, never "" — the two are
-	// different facts and a caller choosing a directory must be able to tell
-	// "nobody reported one" from "there is no such pane".
+	// PaneCwd returns the last verified cwd for a pane.
 	PaneCwd(ctx context.Context, paneID string) (string, error)
-	// TabForPane walks pane → tab: which tab currently holds this pane. It is
-	// the rung above PaneCwd's, read from the same row, and it exists for the
-	// same reason — a caller with a PANE and a question about its container
-	// asks the chain rather than walking it itself (nocx-tdiqs: a worker's
-	// tab is placed after its coordinator's, and the coordinator is known by
-	// its session's pane).
-	//
-	// It joins tabs the way WorkspaceForPane does, and for the same reason:
-	// the window's chain is both rungs, and a closed tab is not a container
-	// anything may be placed into. ErrNoSuchPane for an id no open pane
-	// carries, never "" — the same two facts PaneCwd keeps apart.
+	// TabForPane resolves the pane's current tab.
 	TabForPane(ctx context.Context, paneID string) (string, error)
-	// WorkspaceForPane walks pane → tab → workspace. This is what §4.5 means
-	// by workspaceId moving off the session: the backend owns the whole chain
-	// and RESOLVES the answer rather than being told it, so there is one
-	// owner of "which workspace is this in" and it cannot go out of step with
-	// a pane that was dragged elsewhere.
+	// WorkspaceForPane resolves the pane's current workspace from the layout chain.
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
-	// Panes returns one tab's panes in id order. A pane has no stored
-	// position: §5 gives the member a SHARE and the set a direction, and
-	// nothing else. Ordering within a tab becomes a user-visible operation
-	// with drag (nocx-8m2x6), and that is where the column belongs if it
-	// turns out to be needed — inventing it here would put it in the wire
-	// contract and the whole chain before anything can say what it means.
+	// Panes returns one tab's panes in id order.
 	Panes(ctx context.Context, tabID string) ([]Pane, error)
-	// DeletePane takes a pane out of the window — and with it the tab it was
-	// the last open pane of, the workspace that tab was the last open tab of,
-	// and, if that emptied the application, mints the replacement. One
-	// transaction, whichever of those rungs it reaches.
-	//
-	// The pane's ROW never goes. It is the durable identity (§5) and the
-	// anchor every block it printed hangs on (entries.pane_id), so deleting
-	// it — which this did until nocx-l21ib.4 — made an ordinary Cmd-W a
-	// permanent loss of that pane's history.
+	// DeletePane closes a pane and dissolves containers left empty.
 	DeletePane(ctx context.Context, id string, next Replacement) error
-	// ClearWindow marks EVERY open tab and pane closed, in one transaction,
-	// and deletes the workspaces left holding no open tab. It is the clean
-	// start (settings: restore.onStartup off) and nothing else calls it: what
-	// the chain holds as open is then always the last session, so turning the
-	// setting back on reopens THAT session rather than the one before it.
-	//
-	// It mints no replacement, unlike every close: the window that follows a
-	// clean start is the renderer's to open, and it opens one immediately.
+	// ClearWindow closes all open tabs and panes in one transaction.
 	ClearWindow(ctx context.Context) error
 }

@@ -22,6 +22,7 @@
         "snippets",
         "notes",
         "skills",
+        "sandbox",
         "credentialBindingsRemoved",
         "groupCredentialBindingsRemoved",
         "groupDefaultKeysOmitted"
@@ -43,6 +44,10 @@
         "skills": {
           "description": "The number of authored, managed and installed skill trees in the backup. Builtins are embedded and never carried.",
           "type": "integer"
+        },
+        "sandbox": {
+          "description": "Mutable filesystem sandbox profiles are included, without live grants or session bindings.",
+          "type": "boolean"
         },
         "credentialBindingsRemoved": {
           "type": "integer"

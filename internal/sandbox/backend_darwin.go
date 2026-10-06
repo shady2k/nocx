@@ -1,0 +1,82 @@
+//go:build darwin
+
+package sandbox
+
+import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"time"
+)
+
+const seatbeltExecutable = "/usr/bin/sandbox-exec"
+
+func backendAvailable() error {
+	info, err := os.Stat(seatbeltExecutable)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return errors.New("sandbox-exec unavailable")
+	}
+	paths := baseline("darwin")
+	roots := make([]Root, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.IsDir() {
+			return errors.New("Seatbelt baseline unavailable")
+		}
+		actual, err := canonicalDir(path)
+		if err != nil {
+			return errors.New("Seatbelt baseline unavailable")
+		}
+		roots = append(roots, Root{Path: actual, Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot})
+	}
+	profile, err := CompileSeatbeltProfile(Policy{
+		Version: PolicyVersion, Backend: MacOSSeatbelt, BackendVersion: MacOSBaselineVersion,
+		WorkspaceRoot: "/", Shell: "/usr/bin/true", Runner: "/usr/bin/true",
+		Runtime: RuntimePaths{Root: os.TempDir()}, Roots: roots,
+	})
+	if err != nil {
+		return errors.New("Seatbelt profile unsupported")
+	}
+	file, err := privateSeatbeltProfile(os.TempDir(), profile)
+	if err != nil {
+		return errors.New("Seatbelt private profile unavailable")
+	}
+	defer func() { _ = file.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, seatbeltExecutable, "-f", "/dev/fd/3", "/usr/bin/true")
+	command.ExtraFiles = []*os.File{file}
+	command.Env = []string{"PATH=/usr/bin:/bin"}
+	command.WaitDelay = 2 * time.Second
+	if err := command.Run(); err != nil {
+		return errors.New("Seatbelt enforcement unavailable")
+	}
+	return nil
+}
+
+func privateSeatbeltProfile(directory, text string) (_ *os.File, err error) {
+	file, err := os.CreateTemp(directory, ".seatbelt-profile-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = file.Close()
+			_ = os.Remove(file.Name())
+		}
+	}()
+	if err = os.Remove(file.Name()); err == nil {
+		_, err = file.WriteString(text)
+	}
+	if err == nil {
+		_, err = file.Seek(0, 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
+}

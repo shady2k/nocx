@@ -34,7 +34,7 @@ interface State {
   previewAttempt: number
 }
 
-const PLAINTEXT_WARNING = `The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.`
+const PLAINTEXT_WARNING = `The backup file is plaintext JSON. Settings values, hostnames, connection names, inline usernames, auth modes, and filesystem sandbox profile paths are stored without encryption. Credential secrets (passwords, key passphrases) are never included. Launch grants and live session bindings are not exported.`
 
 /** A file the person picked that `readBackupText` could not read, in their words. */
 function readBackupFileSentence(err: unknown): string {
@@ -118,6 +118,7 @@ export function BackupRestoreSection(props: Props) {
           savedPath !== null ? `Backup saved to ${savedPath}.` : 'Backup downloaded.',
           `${result.summary.settings} settings, ${result.summary.connections} connections, ${result.summary.groups} groups.`,
         ]
+        if (result.summary.sandbox) parts.push('Filesystem sandbox profiles included.')
         if (result.summary.credentialBindingsRemoved > 0)
           parts.push(`${result.summary.credentialBindingsRemoved} credential binding(s) removed.`)
         if (result.summary.groupCredentialBindingsRemoved > 0)
@@ -201,7 +202,14 @@ export function BackupRestoreSection(props: Props) {
     const msg = isReplace
       ? 'Replace will reset all connections and settings to match the backup exactly. Extra connections and settings overrides will be removed. Credential metadata and keychain entries are not affected. Continue?'
       : 'Merge will apply backup settings and connections on top of your current configuration. Existing items not in the backup are kept. Continue?'
-    const confirmed = await showConfirm(msg, isReplace ? 'Replace' : 'Merge', 'Cancel')
+    const sandboxWarning = state.preview.sandbox
+      ? ' Filesystem sandbox defaults will change; existing process grants remain unchanged. Unknown workspace identities refuse restoration.'
+      : ''
+    const confirmed = await showConfirm(
+      msg + sandboxWarning,
+      isReplace ? 'Replace' : 'Merge',
+      'Cancel',
+    )
     if (!confirmed) return
 
     setState('restoring', true)
@@ -212,6 +220,7 @@ export function BackupRestoreSection(props: Props) {
         state.preview.previewToken,
       )
       const parts = [`Restore complete (${result.strategy}).`]
+      if (result.sandbox) parts.push('Filesystem sandbox defaults restored; live grants unchanged.')
       if (result.settingsChanged > 0) parts.push(`${result.settingsChanged} settings changed.`)
       if (result.settingsReset > 0) parts.push(`${result.settingsReset} settings reset.`)
       if (result.connectionsAdded > 0) parts.push(`${result.connectionsAdded} connections added.`)
@@ -257,16 +266,16 @@ export function BackupRestoreSection(props: Props) {
     <div class="backup-restore">
       <PageSection
         title="Create backup"
-        description="Download a versioned backup file containing your non-secret settings, SSH connections, and connection groups. Credential records and secrets are never included."
+        description="Download a versioned backup file containing your non-secret settings, SSH connections, connection groups, and filesystem sandbox defaults. Credential records and secrets are never included."
       >
         <MarkerList
           items={[
             {
-              text: 'Settings overrides (non-secret), SSH connections (without credential IDs), and connection groups (typed defaults subset without credential bindings).',
+              text: 'Settings overrides (non-secret), SSH connections (without credential IDs), connection groups (without credential bindings), and filesystem sandbox defaults and workspace overrides.',
               tone: 'included',
             },
             {
-              text: 'Credential records, secret references, OS keychain material, ContentDB, and declared defaults.',
+              text: 'Credential records, secret references, OS keychain material, ContentDB, launch grants, live session bindings, and unchanged settings-registry defaults.',
               tone: 'excluded',
             },
           ]}
@@ -342,6 +351,12 @@ export function BackupRestoreSection(props: Props) {
             <div class="backup-restore__preview">
               <h4>Preview — {p().strategy}</h4>
               <p>Backup created: {p().createdAt}</p>
+              <Show when={p().sandbox}>
+                <p>
+                  Includes filesystem sandbox defaults and workspace overrides. Live process grants
+                  remain unchanged; unknown workspace identities refuse restoration.
+                </p>
+              </Show>
               <table class="backup-restore__counts">
                 <thead>
                   <tr>

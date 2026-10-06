@@ -92,6 +92,12 @@ on:
   push:
     branches: ['release/**']
   workflow_dispatch:
+    inputs:
+      sandbox_native:
+        description: Run the isolated native macOS sandbox proof on this ref
+        required: false
+        type: boolean
+        default: false
   workflow_call:
 
 # Least privilege: the quality gates only read the repo. When release.yml calls
@@ -131,8 +137,13 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SANDBOX_NATIVE: ${{ github.event.inputs.sandbox_native }}
         run: |
           set -eu
+          if [ "$EVENT" = workflow_dispatch ] && [ "$SANDBOX_NATIVE" = true ]; then
+            echo "product=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$EVENT" != pull_request ]; then
             echo "product=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -157,6 +168,23 @@ jobs:
           printf '%s\n' "$files" | sed 's/^/changed: /'
           echo "product=$product"
           echo "product=$product" >> "$GITHUB_OUTPUT"
+  # On-demand only: this is a native kernel-boundary proof, not another broad
+  # quality-suite pass. It checks out the selected workflow_dispatch ref and
+  # runs the same mandatory target used locally.
+  sandbox-native-macos:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.sandbox_native }}
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Build packaged helper and run mandatory native Seatbelt proof
+        run: make sandbox-smoke-macos
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

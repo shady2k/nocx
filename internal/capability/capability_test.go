@@ -603,6 +603,7 @@ func (f *fakeContentDB) Reconcile() content.SessionReconciler { return nil }
 func (f *fakeContentDB) SkillChecks() content.SkillCheckRepository { return nil }
 
 func (f *fakeContentDB) WorkerCheckouts() content.WorkerCheckoutRepository { return nil }
+func (f *fakeContentDB) Launches() content.LaunchRepository                { return (&content.Stub{}).Launches() }
 
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {

@@ -35,6 +35,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/shady2k/nocx/internal/git/hostsvc"
@@ -44,9 +46,11 @@ import (
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/notices"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/runner"
 	"github.com/shady2k/nocx/internal/helper/session"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/mcpstdio"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 func main() {
@@ -251,6 +255,7 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		SSHSpawner: sshCap.sessionSpawner,
 		Inspector:  session.NewInspector(),
 		Log:        log,
+		Sandbox:    nativeSandboxEnvironment(dir),
 		Limits:     session.DefaultLimits(),
 	})
 	defer sessions.Close()
@@ -283,6 +288,35 @@ func serve(ctx context.Context, log *slog.Logger, dir string, generation proto.G
 		return 1
 	}
 	return 0
+}
+
+func nativeSandboxEnvironment(endpointDir string) session.SandboxEnvironment {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return session.SandboxEnvironment{}
+	}
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		return session.SandboxEnvironment{}
+	}
+	runnerPath, err := runner.Install(filepath.Join(endpointDir, "sandbox-runners"))
+	if err != nil {
+		return session.SandboxEnvironment{}
+	}
+	reserved := []string{filepath.Join(home, ".nocx"), endpointDir}
+	for _, location := range []string{paths.ConfigDir(), paths.DataDir(), paths.CacheDir()} {
+		reserved = append(reserved, location)
+		for _, profile := range []string{"nocx", "nocx-dev"} {
+			reserved = append(reserved, filepath.Join(filepath.Dir(location), profile))
+		}
+	}
+	switch runtime.GOOS {
+	case "linux":
+		reserved = append(reserved, filepath.Join(home, ".local", "share", "keyrings"))
+	case "darwin":
+		reserved = append(reserved, filepath.Join(home, "Library", "Keychains"))
+	}
+	return session.SandboxEnvironment{HostHome: home, RunnerPath: runnerPath, RuntimeBase: filepath.Join(endpointDir, "sandbox-runtimes"), ReservedRoots: reserved}
 }
 
 // alreadyServing asks whether a helper of this generation is already holding

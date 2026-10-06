@@ -510,6 +510,7 @@ describe('SettingsContent', () => {
         snippets: { included: 0 },
         notes: { included: 0 },
         skills: { included: 0 },
+        sandbox: false,
         connectionsRequiringCredential: [],
         omissions: {
           credentialBindingsRemoved: 0,

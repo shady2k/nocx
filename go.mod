@@ -8,6 +8,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/gorilla/websocket v1.5.3
+	github.com/landlock-lsm/go-landlock v0.9.0
 	github.com/meguminnnnnnnnn/go-openai v0.1.2
 	github.com/ncruces/go-sqlite3 v0.35.2
 	github.com/pkg/sftp v1.13.11
@@ -26,6 +27,7 @@ require (
 	github.com/kr/text v0.2.0 // indirect
 	github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e // indirect
 	gopkg.in/check.v1 v1.0.0-20200227125254-8fa46927fb4f // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 )
 
 require (

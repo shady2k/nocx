@@ -23,6 +23,9 @@ const resultAliases = new Map([
   ['agent.rules.set', 'agent.rules.schema.json'],
   ['agent.rules.setEnabled', 'agent.rules.schema.json'],
   ['agent.rules.delete', 'agent.rules.schema.json'],
+  ['sandbox.operation.get', 'sandbox.replace.schema.json'],
+  ['sandbox.profile.update', 'sandbox.profile.get.schema.json'],
+  ['sandbox.profile.reset', 'sandbox.profile.get.schema.json'],
 ])
 
 function ref(file) {

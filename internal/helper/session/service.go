@@ -699,7 +699,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.sandboxDiscard(p), nil
+		return s.sandboxDiscard(ctx, p)
 	case proto.OpSpawn:
 		var p proto.SpawnParams
 		if err := decode(params, &p); err != nil {

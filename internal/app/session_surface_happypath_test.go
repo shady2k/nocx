@@ -235,6 +235,10 @@ func (h *s14FakeHelper) HelperFor(context.Context, string) (paneHelpers, bool) {
 	return h, true
 }
 
+func (h *s14FakeHelper) WithInput(_ context.Context, _ string, input func() error) error {
+	return input()
+}
+
 func (h *s14FakeHelper) Snapshot(_ context.Context, sessionID string) (proto.SnapshotResult, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

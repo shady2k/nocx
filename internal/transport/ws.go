@@ -62,8 +62,9 @@ type sessionRx struct {
 	ring        *outputRing
 	mu          sync.Mutex // protects subscriber, subState
 	subscriber  *wsConn    // current attached connection (nil if none)
-	subState    *connState // subscriber's connection-scoped state
+	subState    *connState
 	monitorOnce sync.Once
+	outputOnce  sync.Once
 	// inputStalled is true from the moment this session's write queue
 	// refuses a frame until it accepts one again. It exists to make the
 	// notification fire once per stall rather than once per keystroke:
@@ -698,7 +699,8 @@ type WSServer struct {
 	// (nocx-dkawo.6). It is built where the method set is assembled, because
 	// that is where the admission gates it runs under exist — which is
 	// NewWSServer, so it is ready before the server serves anything.
-	opener *sessionOpener
+	opener  *sessionOpener
+	sandbox SandboxControl
 	// workerStore is the worker record a coordinator run reaches through its tools
 	// (nocx-dkawo.8). Wired by the composition root; nil leaves the two worker
 	// tools refusing with a sentence rather than starting a worker into
@@ -1259,6 +1261,11 @@ func WithAssistantProbeStore(store *assistant.ProbeStore) WSServerOption {
 // WSServerOption configures a WSServer.
 type WSServerOption func(*WSServer)
 
+// WithSandboxControl attaches the trusted-UI sandbox coordinator.
+func WithSandboxControl(control SandboxControl) WSServerOption {
+	return func(s *WSServer) { s.sandbox = control }
+}
+
 // WithProfileRepository attaches a profile repository to the server, enabling
 // the profiles.* JSON-RPC methods.
 func WithProfileRepository(pr profile.ProfileRepository) WSServerOption {
@@ -1732,6 +1739,9 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		o(s)
 	}
 	s.buildControlPlane()
+	if s.sandbox != nil {
+		s.sandbox.BindPublisher(s.publishOpenedSession)
+	}
 	return s
 }
 
@@ -1808,6 +1818,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, s.sandboxSpecs()...)
 	specs = append(specs, whenAvailable(
 		s.hostSessionInventorySpecs(inventorySub)[0],
 		func() bool { return s.hostSessionInventory != nil },

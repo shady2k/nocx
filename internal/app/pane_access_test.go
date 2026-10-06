@@ -85,6 +85,12 @@ func (l *fakeLookup) HelperFor(_ context.Context, sessionID string) (paneHelpers
 	return h, ok
 }
 
+// WithInput is an isolated test admission: tests that exercise the registry
+// fence use a dedicated lookup carrying a real registry and exact Ref.
+func (l *fakeLookup) WithInput(_ context.Context, _ string, input func() error) error {
+	return input()
+}
+
 // fakePaneClock is a monotonicClock a test moves by hand — the "wait on an
 // observable state change, never on a duration" rule applied to §7.2's
 // commitBy wait: a test drives "the deadline has passed" as an explicit

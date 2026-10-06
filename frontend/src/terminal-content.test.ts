@@ -17288,3 +17288,84 @@ describe('the prompt prediction measures at the real block width, once per frame
     }
   })
 })
+
+describe('TerminalContent binds an already-published replacement session', () => {
+  it('resets only the live grid, preserves the draft, and ignores the prior pipe', async () => {
+    const client = makeClient()
+    const previous = makeSession()
+    client.openSession.mockResolvedValue(previous)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      const reset = vi.spyOn(renderer, 'reset')
+      const write = vi.spyOn(renderer, 'write')
+      const ed = editorOf(content)
+      const view = viewOf(ed)
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: 'keep this draft' } })
+      const replacement = makeSession()
+
+      await expect(content.bindSession(asSessionHandleForTest(replacement))).resolves.toBe(true)
+
+      expect(reset).toHaveBeenCalled()
+      expect(tab.pane.querySelector('[data-reconnect-boundary="true"]')).not.toBeNull()
+      expect(view.state.doc.toString()).toBe('keep this draft')
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+      write.mockClear()
+      previous.fireData('stale output')
+      expect(write).not.toHaveBeenCalled()
+      replacement.fireData('replacement output')
+      expect(write).toHaveBeenCalledWith('replacement output')
+      ed.hide()
+      renderer._fireData('typed on replacement')
+      expect(replacement.send).toHaveBeenCalledWith('typed on replacement')
+      expect(previous.detach).toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('persisted sandbox recovery never opens an ordinary fallback', () => {
+  it.each(['pending', 'ended', 'error'] as const)('keeps a %s launch blocked', async (kind) => {
+    const client = makeClient()
+    client.recoverSandboxPane.mockResolvedValue({ kind, reason: 'launch_unavailable' })
+    const adopt = vi.fn().mockRejectedValue(new Error('old binding unavailable'))
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { expectedReady: false, hooks: { adoptSession: adopt } },
+      client,
+    )
+    try {
+      expect(client.openSession).not.toHaveBeenCalled()
+      expect(adopt).not.toHaveBeenCalled()
+      expect(tab.pane.textContent).toContain('launch_unavailable')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('binds the recovered native pipe instead of taking an ordinary adoption path', async () => {
+    const client = makeClient()
+    const recovered = makeSession()
+    client.recoverSandboxPane.mockResolvedValue({
+      kind: 'live',
+      handle: asSessionHandleForTest(recovered),
+    })
+    const adopt = vi.fn().mockRejectedValue(new Error('stale inventory'))
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { adoptSession: adopt } },
+      client,
+    )
+    try {
+      expect(client.openSession).not.toHaveBeenCalled()
+      expect(adopt).not.toHaveBeenCalled()
+      const write = vi.spyOn(rendererOf(content), 'write')
+      write.mockClear()
+      recovered.fireData('still running under the native grant')
+      expect(write).toHaveBeenCalledWith('still running under the native grant')
+    } finally {
+      teardown()
+    }
+  })
+})

@@ -12,6 +12,36 @@ import type {
   Run as WireRun,
   SessionOutput,
 } from './generated/session.output'
+import type { SandboxStatusResult } from './generated/sandbox.status'
+import type { SandboxProfileResult } from './generated/sandbox.profile.get'
+import type { SandboxPreviewResult } from './generated/sandbox.preview'
+import type { SandboxOperationResult } from './generated/sandbox.replace'
+import type { SandboxGrantResult } from './generated/sandbox.grant.get'
+import type { SandboxCancelResult } from './generated/sandbox.cancel'
+
+type SandboxStatusRequest = Pick<SandboxStatusResult, 'paneId'>
+type SandboxProfileRequest = { workspaceId?: string }
+type SandboxProfileUpdateRequest = SandboxProfileRequest & {
+  expectedRevision: number
+  enabled?: boolean
+  roots: SandboxProfileResult['effective']
+}
+type SandboxProfileResetRequest = { workspaceId: string; expectedRevision: number }
+type SandboxPreviewRequest = {
+  paneId: string
+  source: SandboxStatusResult['source']
+  expectedHeadId: string
+  mode: SandboxPreviewResult['mode']
+  delta: SandboxProfileResult['effective']
+}
+type SandboxReplaceRequest = Pick<SandboxPreviewResult, 'operationId' | 'confirmationId'>
+type SandboxOperationRequest = Pick<SandboxOperationResult, 'operationId'>
+type SandboxGrantRequest = Pick<SandboxGrantResult, 'launchId'>
+
+export type SandboxRecovery =
+  | { kind: 'ordinary' }
+  | { kind: 'live'; handle: SessionHandle }
+  | { kind: 'ended' | 'pending' | 'error'; reason: string }
 
 // The one report shape — grid plus whole-text-area pixels — re-exported so
 // the surfaces that compute a report spell the same type the client sends
@@ -1203,6 +1233,93 @@ export class WSClient {
         ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result, size))
+  }
+  sandboxStatus(request: SandboxStatusRequest): Promise<SandboxStatusResult> {
+    return this.dispatcher.call<SandboxStatusResult>('sandbox.status', request)
+  }
+
+  sandboxProfile(request: SandboxProfileRequest): Promise<SandboxProfileResult> {
+    return this.dispatcher.call<SandboxProfileResult>('sandbox.profile.get', request)
+  }
+
+  sandboxUpdateProfile(request: SandboxProfileUpdateRequest): Promise<SandboxProfileResult> {
+    return this.dispatcher.call<SandboxProfileResult>('sandbox.profile.update', request)
+  }
+
+  sandboxResetProfile(request: SandboxProfileResetRequest): Promise<SandboxProfileResult> {
+    return this.dispatcher.call<SandboxProfileResult>('sandbox.profile.reset', request)
+  }
+
+  sandboxPreview(request: SandboxPreviewRequest): Promise<SandboxPreviewResult> {
+    return this.dispatcher.call<SandboxPreviewResult>('sandbox.preview', request)
+  }
+
+  sandboxCancel(request: SandboxReplaceRequest): Promise<SandboxCancelResult> {
+    return this.dispatcher.call<SandboxCancelResult>('sandbox.cancel', request)
+  }
+
+  sandboxGrant(request: SandboxGrantRequest): Promise<SandboxGrantResult> {
+    return this.dispatcher.call<SandboxGrantResult>('sandbox.grant.get', request)
+  }
+
+  /** Replace the pane's sandbox head. The server publishes and subscribes the
+   *  committed session before returning its ordinary open acknowledgement. */
+  sandboxReplace(request: SandboxReplaceRequest): Promise<SandboxOperationResult> {
+    return this.dispatcher.call<SandboxOperationResult>('sandbox.replace', request)
+  }
+
+  /** Read an operation's settled result; an included open ack binds the
+   *  already-published session and must not trigger another open/attach. */
+  sandboxOperation(request: SandboxOperationRequest): Promise<SandboxOperationResult> {
+    return this.dispatcher.call<SandboxOperationResult>('sandbox.operation.get', request)
+  }
+
+  /** Construct the normal runtime handle from a nested sandbox operation ack.
+   *  No session RPC is sent: the server installed this connection's subscriber
+   *  before it returned the acknowledgement. */
+  registerSandboxOperation(result: SandboxOperationResult): SessionHandle | null {
+    if (result.open === null) return null
+    return this._registerHandle(result.open, result.open.effectiveSize)
+  }
+
+  /** A persisted sandbox head is never a reason to fall back to ordinary open.
+   *  Only operation.get may recover its already-committed runtime. */
+  async recoverSandboxPane(paneId: string): Promise<SandboxRecovery> {
+    let status: SandboxStatusResult
+    try {
+      status = await this.sandboxStatus({ paneId })
+    } catch {
+      return { kind: 'pending', reason: 'status_unavailable' }
+    }
+    if (
+      status.availability === 'unknown' ||
+      ['store_unavailable', 'profile_unavailable', 'head_unavailable', 'cleanup_unknown'].includes(
+        status.reason,
+      )
+    ) {
+      return { kind: 'pending', reason: status.reason || 'head_unavailable' }
+    }
+    if (status.preparingOperationId !== '') {
+      return { kind: 'pending', reason: 'cleanup_pending' }
+    }
+    if (status.head === null) return { kind: 'ordinary' }
+    if (status.head.state === 'ended') return { kind: 'ended', reason: 'launch_ended' }
+    if (status.head.state === 'failed') return { kind: 'error', reason: 'launch_failed' }
+    if (status.source === null || status.head.enforcement === 'unknown') {
+      return { kind: 'pending', reason: 'helper_unknown' }
+    }
+    try {
+      const operation = await this.sandboxOperation({ operationId: status.head.launchId })
+      if (operation.state === 'ended') return { kind: 'ended', reason: 'launch_ended' }
+      if (operation.state === 'failed') return { kind: 'error', reason: operation.reason }
+      if (operation.state !== 'active' || operation.open === null) {
+        return { kind: 'pending', reason: operation.reason || 'publication_pending' }
+      }
+      const handle = this.registerSandboxOperation(operation)
+      return handle ? { kind: 'live', handle } : { kind: 'error', reason: 'binding_unavailable' }
+    } catch {
+      return { kind: 'pending', reason: 'operation_unavailable' }
+    }
   }
 
   /** The open ack's wire shape (contracts/open.schema.json). Every open —

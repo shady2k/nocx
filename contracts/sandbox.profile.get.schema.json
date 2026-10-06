@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.get.schema.json",
+  "title": "SandboxProfileResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["standard", "workspace", "effective", "profileSource"],
+  "properties": {
+    "standard": { "$ref": "sandbox.standard.schema.json" },
+    "workspace": { "oneOf": [{ "$ref": "sandbox.workspace.schema.json" }, { "type": "null" }] },
+    "effective": { "$ref": "sandbox.roots.schema.json" },
+    "profileSource": { "type": "string" }
+  }
+}

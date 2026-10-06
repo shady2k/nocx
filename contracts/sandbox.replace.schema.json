@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.replace.schema.json",
+  "title": "SandboxOperationResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operationId", "paneId", "state", "mode", "reason", "open"],
+  "properties": {
+    "operationId": { "type": "string" },
+    "paneId": { "type": "string" },
+    "state": { "type": "string", "enum": ["preparing", "active", "ended", "failed"] },
+    "mode": { "type": "string", "enum": ["off", "enforce"] },
+    "reason": { "type": "string" },
+    "open": { "oneOf": [{ "$ref": "open.schema.json" }, { "type": "null" }] }
+  }
+}

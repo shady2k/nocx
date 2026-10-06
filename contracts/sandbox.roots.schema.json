@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.roots.schema.json",
+  "title": "SandboxProfileRoots",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["readOnlyDirs", "readWriteDirs"],
+  "properties": {
+    "readOnlyDirs": { "type": "array", "items": { "type": "string" } },
+    "readWriteDirs": { "type": "array", "items": { "type": "string" } }
+  }
+}

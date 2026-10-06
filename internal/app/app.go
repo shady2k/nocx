@@ -181,8 +181,13 @@ type App struct {
 	// begins listening, keeps the "the pass finishes before a client can ask"
 	// invariant reconcileSessions's own doc names, while giving it a carrier
 	// that can actually answer.
-	sessionReconciler content.SessionReconciler
-	sessionRoutes     hostRouteResolver
+	sessionReconciler  content.SessionReconciler
+	launches           content.LaunchRepository
+	sandboxCoordinator *transport.SandboxCoordinator
+	sandboxHelper      transport.SandboxHelper
+	sandboxRoot        context.Context
+	sandboxCancel      context.CancelFunc
+	sessionRoutes      hostRouteResolver
 	// paneViews is the store every observation, typing decision and worker
 	// read goes through (nocx-ygxjv.3): the composition root's object, held
 	// here for the same reason the enroller and the registry are.
@@ -1825,6 +1830,20 @@ func New(opts ...Option) (*App, error) {
 	// settings surface can read them back and unmake one. Appended here
 	// rather than in the literal above because the service is built with the
 	// session registry, which does not exist that early (nocx-6jbad).
+	sandboxRoot, sandboxCancel := context.WithCancel(log.WithLogger(context.Background(), logger))
+	sandboxOwned := false
+	defer func() {
+		if !sandboxOwned {
+			sandboxCancel()
+		}
+	}()
+	sandboxCoordinator := transport.NewSandboxCoordinator(transport.SandboxCoordinatorOptions{
+		Context: sandboxRoot, Profiles: sandboxProfiles,
+		Launches: contentDB.Launches(), Layout: contentDB.Layout(),
+		Registry: sess, Helper: hosted,
+		RetireSource: agentApprovalService.Forget,
+	})
+	tpOpts = append(tpOpts, transport.WithSandboxControl(sandboxCoordinator))
 	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
@@ -2748,6 +2767,11 @@ func New(opts ...Option) (*App, error) {
 		helperArtifacts:     localHelperArtifacts(o),
 		localHelper:         localOpener,
 		sessionReconciler:   sessionReconciler,
+		launches:            contentDB.Launches(),
+		sandboxCoordinator:  sandboxCoordinator,
+		sandboxHelper:       hosted,
+		sandboxRoot:         sandboxRoot,
+		sandboxCancel:       sandboxCancel,
 		sessionRoutes:       sessionRoutes,
 		paneViews:           paneViews,
 		logFilePath:         logFilePath,
@@ -2787,6 +2811,7 @@ func New(opts ...Option) (*App, error) {
 	tp.SetAttentionActivation(attention)
 
 	logger.Info("application initialized")
+	sandboxOwned = true
 	return app, nil
 }
 
@@ -3094,6 +3119,11 @@ func (a *App) Start(ctx context.Context) error {
 		}
 		a.installLocalHelper(ctx, home)
 	}
+	if a.sandboxCoordinator != nil {
+		if err := a.sandboxCoordinator.Recover(a.sandboxRoot); err != nil {
+			a.Logger.Warn("sandbox recovery remains unresolved", "error", err)
+		}
+	}
 
 	// nocx-73aln: reconciliation runs from here now, once installLocalHelper
 	// above has had its chance to put this machine's own generation on disk
@@ -3126,7 +3156,8 @@ func (a *App) Start(ctx context.Context) error {
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
-			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
+			local: a.localHelper, launches: a.launches, sandbox: a.sandboxHelper,
+			publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
@@ -3224,6 +3255,7 @@ func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struc
 			&readoptPass{
 				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
 				local: a.localHelper, timeout: vaultSealedRetryAttempt,
+				launches: a.launches, sandbox: a.sandboxHelper,
 				publishScreen: a.Transport.PublishScreenFrame,
 				blockRows:     a.Transport,
 			},
@@ -3333,11 +3365,19 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	// First, before any session is closed: no lifecycle frame is applied
 	// from here on (lifecycleCursor.applyFrame).
+	if a.sandboxCancel != nil {
+		a.sandboxCancel()
+	}
 	if a.lifecycleStopping != nil {
 		a.lifecycleStopping.Store(true)
 	}
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	if a.sandboxCoordinator != nil {
+		if err := a.sandboxCoordinator.Drain(ctx); err != nil {
+			a.Logger.Error("sandbox shutdown drain error", "error", err)
+		}
 	}
 	// After the transport, so no pane can still be opening. The daemon and
 	// every session on it survive this — closing the connection is this

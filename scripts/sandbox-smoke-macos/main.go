@@ -274,6 +274,7 @@ func main() {
 	}), "persist failure source session")
 	failedGrant, err := failureDB.Launches().Prepare(ctx, content.LaunchPrepare{
 		ID: failed.LaunchID, PaneID: "pane-native-failure", WorkspaceID: "ws-native-failure", Source: identity,
+		TargetGeneration: identity.Generation,
 		StandardRevision: 1, WorkspaceRevision: 0, Mode: content.LaunchEnforce,
 		Policy: failed.Policy, PolicyDigest: failed.Digest, PolicyVersion: sandbox.PolicyVersion,
 	})
@@ -358,6 +359,7 @@ func main() {
 	}
 	launch, err := db.Launches().Prepare(ctx, content.LaunchPrepare{
 		ID: prepared.LaunchID, PaneID: "pane-native-proof", WorkspaceID: "ws-native-proof", Source: identity,
+		TargetGeneration: identity.Generation,
 		StandardRevision: 1, WorkspaceRevision: 0, Mode: content.LaunchEnforce,
 		Policy: prepared.Policy, PolicyDigest: prepared.Digest, PolicyVersion: sandbox.PolicyVersion,
 	})

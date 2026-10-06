@@ -139,6 +139,14 @@ const (
 	ExitInterrupted ExitCause = "interrupted"
 )
 
+type LaunchBinding struct {
+	Mode     string
+	LaunchID string
+	GrantID  int64
+	Digest   string
+	Version  int
+}
+
 type Config struct {
 	Kind   Kind
 	Cwd    string
@@ -190,6 +198,9 @@ type Config struct {
 	// It is recorded rather than derived, unlike the workspace beside it —
 	// see the note on Session.PaneID.
 	PaneID string
+	// LaunchBinding is immutable authority metadata for this incarnation.
+	// Its zero value denotes an ordinary session.
+	LaunchBinding LaunchBinding
 }
 
 // clientSize is the geometry this config reports, as one value. One reader
@@ -654,27 +665,24 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 
 	s := &realSession{
-		id:           id,
-		openedAt:     time.Now(),
-		identity:     Identity{InstanceID: r.instanceID, Epoch: epoch},
-		parent:       cfg.Parent,
-		kind:         cfg.Kind,
-		host:         cfg.Host,
-		cwd:          resolveSessionCwd(cfg.Cwd),
-		paneID:       cfg.PaneID,
-		profileID:    cfg.ProfileID,
-		credentialID: cfg.CredentialID,
-		sshOpts:      opts,
-		ch:           ch,
-		size:         eff,
-		// THE SESSION KEEPS THE EXCHANGE THAT OPENED IT (nocx-n14oo.3). A
-		// session outlives the call that made it and is written about from
-		// timers, pumps and goroutines that hold no context, so binding the
-		// caller's trace ONCE here is the only place it can be done — and it
-		// is what puts a pane's whole life under the spawn that asked for it.
-		log:       r.log.WithContext(ctx).With("session_id", string(id)),
-		writeCh:   make(chan writeJob, writeQueueDepth),
-		writeDone: make(chan struct{}),
+		id:            id,
+		openedAt:      time.Now(),
+		identity:      Identity{InstanceID: r.instanceID, Epoch: epoch},
+		parent:        cfg.Parent,
+		kind:          cfg.Kind,
+		host:          cfg.Host,
+		cwd:           resolveSessionCwd(cfg.Cwd),
+		paneID:        cfg.PaneID,
+		profileID:     cfg.ProfileID,
+		credentialID:  cfg.CredentialID,
+		launchBinding: cfg.LaunchBinding,
+		sshOpts:       opts,
+		ch:            ch,
+		size:          eff,
+		log:           r.log.WithContext(ctx).With("session_id", string(id)),
+		writeCh:       make(chan writeJob, writeQueueDepth),
+		writeDone:     make(chan struct{}),
+		inputGate:     newInputGate(),
 	}
 	s.startWriteLoop()
 
@@ -727,8 +735,9 @@ func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session
 		id: id, openedAt: openedAt, identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
-		sshOpts: opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
-		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}),
+		launchBinding: cfg.LaunchBinding,
+		sshOpts:       opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
+		writeCh: make(chan writeJob, writeQueueDepth), writeDone: make(chan struct{}), inputGate: newInputGate(),
 	}
 	r.mu.Lock()
 	if _, exists := r.sessions[id]; exists {
@@ -744,6 +753,72 @@ func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
 	return s, nil
+}
+
+// LaunchBinding returns the immutable launch authority metadata for a live
+// session incarnation. The boolean is false for an unknown or stale id.
+func (r *Reg) LaunchBinding(id ID) (LaunchBinding, bool) {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	r.mu.Unlock()
+	if !ok {
+		return LaunchBinding{}, false
+	}
+	return s.launchBinding, true
+}
+
+// InputAllowed answers whether this exact current incarnation accepts input.
+func (r *Reg) InputAllowed(id ID) bool {
+	r.mu.Lock()
+	s, ok := r.sessions[id]
+	r.mu.Unlock()
+	return ok && s.inputGate.allowed()
+}
+
+// ToolAdmissionAllowed answers whether a new tool connection may be admitted.
+func (r *Reg) ToolAdmissionAllowed(id ID) bool { return r.InputAllowed(id) }
+
+// WithInput holds an incarnation-scoped admission through the direct write.
+func (r *Reg) WithInput(ctx context.Context, ref Ref, write func() error) error {
+	s, ok := r.exactSession(ref)
+	if !ok || !s.inputGate.admit() {
+		return ErrInputFenced
+	}
+	defer s.inputGate.finish()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return write()
+}
+
+// WithToolAdmission makes publication atomic with respect to a source fence.
+func (r *Reg) WithToolAdmission(ref Ref, publish func() bool) bool {
+	s, ok := r.exactSession(ref)
+	if !ok || !s.inputGate.admit() {
+		return false
+	}
+	defer s.inputGate.finish()
+	return publish()
+}
+
+func (r *Reg) exactSession(ref Ref) (*realSession, bool) {
+	if ref.Zero() {
+		return nil, false
+	}
+	r.mu.Lock()
+	s, ok := r.sessions[ref.ID]
+	r.mu.Unlock()
+	return s, ok && ref.Identity.SameIncarnation(ref.ID, s)
+}
+
+// FenceInput closes admission, drains every admitted write, then commits.
+// A failed/cancelled fence resumes admission; a committed fence retires it.
+func (r *Reg) FenceInput(ctx context.Context, ref Ref, commit func() error, retire func()) error {
+	s, ok := r.exactSession(ref)
+	if !ok {
+		return ErrInputFenced
+	}
+	return s.inputGate.fence(ctx, commit, retire)
 }
 
 // InstanceID is this backend instance's identity: the value stamped on every
@@ -1193,8 +1268,10 @@ type realSession struct {
 	// moment Close runs — and a send on a closed channel is a panic that
 	// takes the whole backend down, not one tab. writeDone is the stop
 	// signal instead; a send on an open channel is always safe.
-	writeCh   chan writeJob
-	writeDone chan struct{}
+	writeCh       chan writeJob
+	writeDone     chan struct{}
+	launchBinding LaunchBinding
+	inputGate     *inputGate
 
 	// window is the open bootstrap window's tap, or nil (design §5.5).
 	// inputQuarantined is the same interval seen from the input side: while
@@ -1207,20 +1284,13 @@ type realSession struct {
 	inputQuarantined bool
 }
 
-// writeJob carries a payload and its result channel. The result is
-// best-effort: the transport logs errors and does not block on them,
-// but returning the error keeps the Write signature honest.
+// writeJob carries one accepted write through completion or discard.
 type writeJob struct {
-	p   []byte
-	res chan writeResult
-	// holds is the condition the payload was queued under, asked at the WRITE
-	// (EnqueueInputIf). nil means unconditional — every
-	// EnqueueWrite.
-	holds func() bool
-	// settle receives the verdict on the writing goroutine, exactly once —
-	// EnqueueInputIf's caller, which must not wait for it. nil for every
-	// caller that waits on res or does not want the answer at all.
+	p      []byte
+	res    chan writeResult
+	holds  func() bool
 	settle func(written bool, err error)
+	gate   *inputGate
 }
 
 type writeResult struct {
@@ -1237,8 +1307,6 @@ func (s *realSession) OpenedAt() time.Time { return s.openedAt }
 func (s *realSession) Host() string        { return s.host }
 func (s *realSession) Cwd() string         { return s.cwd }
 
-// OwnedProcessPID exposes the launch fact to transport projections without
-// exposing a mutator on Session.
 func (s *realSession) OwnedProcessPID() (int, bool) {
 	s.ownedProcessMu.RLock()
 	defer s.ownedProcessMu.RUnlock()
@@ -1253,6 +1321,10 @@ func (s *realSession) CredentialID() string            { return s.credentialID }
 func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {
+	if !s.inputGate.admit() {
+		return 0, ErrInputRefused
+	}
+	defer s.inputGate.finish()
 	res := make(chan writeResult, 1)
 	select {
 	case s.writeCh <- writeJob{p: p, res: res}:
@@ -1296,24 +1368,24 @@ func (s *realSession) Write(p []byte) (int, error) {
 // here means the queue took it; the channel write happens later on
 // writeLoop and can still fail.
 func (s *realSession) EnqueueWrite(p []byte) bool {
+	if !s.inputGate.admit() {
+		return false
+	}
 	select {
 	case <-s.writeDone:
+		s.inputGate.finish()
 		return false
 	default:
 	}
-	// The input quarantine (design §5.3). This is the USER's path — every
-	// keystroke, paste and synthetic input arrives here — so this is where
-	// the bootstrap window refuses them. REFUSED, not buffered: a buffered
-	// keystroke is a command the user did not knowingly run, executed later
-	// at a prompt they were not looking at. Resize and the other control
-	// events do not travel this way and keep working.
 	if s.inputRefused() {
+		s.inputGate.finish()
 		return false
 	}
 	select {
-	case s.writeCh <- writeJob{p: p}:
+	case s.writeCh <- writeJob{p: p, gate: s.inputGate}:
 		return true
 	default:
+		s.inputGate.finish()
 		return false
 	}
 }
@@ -1321,22 +1393,30 @@ func (s *realSession) EnqueueWrite(p []byte) bool {
 // EnqueueInputIf queues the payload with its condition, and lets the writing
 // goroutine settle it. See the interface.
 func (s *realSession) EnqueueInputIf(p []byte, holds func() bool, settle func(written bool, err error)) bool {
+	if !s.inputGate.admit() {
+		return false
+	}
 	select {
 	case <-s.writeDone:
+		s.inputGate.finish()
 		return false
 	default:
 	}
 	if s.inputRefused() {
+		s.inputGate.finish()
 		return false
 	}
 	select {
-	case s.writeCh <- writeJob{p: p, holds: holds, settle: settle}:
+	case s.writeCh <- writeJob{p: p, holds: holds, settle: settle, gate: s.inputGate}:
 		return true
 	case <-s.writeDone:
+		s.inputGate.finish()
 		return false
 	case <-s.ch.Done():
+		s.inputGate.finish()
 		return false
 	default:
+		s.inputGate.finish()
 		return false
 	}
 }
@@ -1349,50 +1429,42 @@ func (s *realSession) startWriteLoop() {
 		for {
 			select {
 			case <-s.writeDone:
-				return
-			case job := <-s.writeCh:
-				if job.holds != nil && !job.holds() {
-					// The condition the payload was queued under no longer
-					// holds AT THE MOMENT OF THE WRITE. It is discarded rather
-					// than written into whatever holds the terminal now, and
-					// the caller is told (written false, no error: not an
-					// error, an outcome).
-					if job.settle != nil {
-						job.settle(false, nil)
+				for {
+					select {
+					case job := <-s.writeCh:
+						if job.gate != nil {
+							job.gate.finish()
+						}
+					default:
+						return
 					}
-					continue
 				}
-				n, err := s.ch.Write(job.p)
-				if job.settle != nil {
-					// The caller that must not wait is told HERE, on this
-					// goroutine: this is the only place a queued payload's
-					// verdict exists.
-					job.settle(n == len(job.p), err)
-					continue
-				}
-				// res == nil is the TRANSPORT's path — every byte the user
-				// types arrives here, and nobody is waiting for the result.
-				// So an error here had exactly one reader and it was
-				// discarded: a keystroke that never reached the pty looked
-				// identical to one that did, from every log this product
-				// keeps. That is the shape of "input is trapped", and it must
-				// not be silent (nocx-xplc).
-				//
-				// Warn on the error, because a failed write on the input path
-				// is the user typing into nothing. Debug on the short write —
-				// same question, lower volume.
-				switch {
-				case job.res != nil:
-					// A caller is waiting; the result is theirs to read, and
-					// theirs to report.
-					job.res <- writeResult{n: n, err: err}
-				case err != nil:
-					s.log.Warn("session input write failed; keystrokes did not reach the terminal",
-						"error", err, "bytes", len(job.p), "written", n)
-				case n != len(job.p):
-					s.log.Debug("session input short write",
-						"bytes", len(job.p), "written", n)
-				}
+			case job := <-s.writeCh:
+				func() {
+					if job.gate != nil {
+						defer job.gate.finish()
+					}
+					if job.holds != nil && !job.holds() {
+						if job.settle != nil {
+							job.settle(false, nil)
+						}
+						return
+					}
+					n, err := s.ch.Write(job.p)
+					if job.settle != nil {
+						job.settle(n == len(job.p), err)
+						return
+					}
+					switch {
+					case job.res != nil:
+						job.res <- writeResult{n: n, err: err}
+					case err != nil:
+						s.log.Warn("session input write failed; keystrokes did not reach the terminal",
+							"error", err, "bytes", len(job.p), "written", n)
+					case n != len(job.p):
+						s.log.Debug("session input short write", "bytes", len(job.p), "written", n)
+					}
+				}()
 			}
 		}
 	}()

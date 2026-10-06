@@ -15,6 +15,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { compileFromFile } from 'json-schema-to-typescript'
+import { format } from 'prettier'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const contractsDir = resolve(here, '../../contracts')
@@ -34,6 +35,29 @@ const BANNER = `/**
 
 function outputName(schemaFile) {
   return schemaFile.replace(/\.schema\.json$/, '.ts')
+}
+
+// Shared DTOs keep their schema module as the type owner. Opted-in results
+// import those declarations instead of exporting another copy of each DTO.
+async function sharedTypeImports(schema) {
+  const refs = new Set()
+  function visit(value) {
+    if (typeof value !== 'object' || value === null) return
+    if (typeof value.$ref === 'string' && !value.$ref.startsWith('#')) {
+      if (value.$ref.includes('#')) {
+        throw new Error('shared type imports require a whole-schema reference')
+      }
+      refs.add(basename(new URL(value.$ref, 'https://nocx.local/contracts/').pathname))
+    }
+    for (const child of Object.values(value)) visit(child)
+  }
+  visit(schema)
+  const imports = []
+  for (const file of [...refs].sort()) {
+    const owner = JSON.parse(await readFile(join(contractsDir, file), 'utf8'))
+    imports.push(`import type { ${owner.title} } from './${outputName(file).slice(0, -3)}'`)
+  }
+  return imports.join('\n')
 }
 
 async function main() {
@@ -61,11 +85,16 @@ async function main() {
   let stale = false
 
   for (const schemaFile of entries) {
-    const generated = await compileFromFile(join(contractsDir, schemaFile), {
-      bannerComment: BANNER.replace('%SCHEMA%', schemaFile),
+    const schema = JSON.parse(await readFile(join(contractsDir, schemaFile), 'utf8'))
+    const shared = schema['x-nocx-sharedTypes'] === true
+    const imports = shared ? await sharedTypeImports(schema) : ''
+    let generated = await compileFromFile(join(contractsDir, schemaFile), {
+      bannerComment: BANNER.replace('%SCHEMA%', schemaFile) + (imports ? '\n' + imports : ''),
       additionalProperties: false,
+      declareExternallyReferenced: !shared,
       style,
     })
+    if (shared) generated = await format(generated, { ...style, parser: 'typescript' })
     const target = join(outDir, outputName(schemaFile))
 
     if (check) {

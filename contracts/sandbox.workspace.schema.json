@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.workspace.schema.json",
+  "title": "SandboxWorkspaceProfile",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaceId", "revision", "override"],
+  "properties": {
+    "workspaceId": { "type": "string" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "override": { "oneOf": [{ "$ref": "sandbox.roots.schema.json" }, { "type": "null" }] }
+  }
+}

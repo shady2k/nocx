@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.standard.schema.json",
+  "title": "SandboxStandardDocument",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "revision", "enabled", "readOnlyDirs", "readWriteDirs"],
+  "properties": {
+    "schemaVersion": { "type": "integer" },
+    "revision": { "type": "integer", "minimum": 0 },
+    "enabled": { "type": "boolean" },
+    "readOnlyDirs": { "type": "array", "items": { "type": "string" } },
+    "readWriteDirs": { "type": "array", "items": { "type": "string" } }
+  }
+}

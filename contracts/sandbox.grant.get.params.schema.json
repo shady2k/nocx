@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.grant.get.params.schema.json",
+  "title": "SandboxGrantRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["launchId"],
+  "properties": { "launchId": { "type": "string", "minLength": 1 } }
+}

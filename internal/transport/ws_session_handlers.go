@@ -333,6 +333,14 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 	if answerHelperConsentNeeded(r, req, err) {
 		return
 	}
+	var sandboxErr *SandboxError
+	if errors.As(err, &sandboxErr) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "open: " + sandboxErr.Reason,
+			Data: map[string]string{"reason": sandboxErr.Reason},
+		})
+		return
+	}
 	// A gate refusal: another operation holds the config or session
 	// domain — the request is refused, never queued.
 	if capability.IsRefused(err) {
@@ -583,7 +591,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// immediately: StartOutput installs the handler and starts that pump on
 	// its own goroutine rather than blocking, so nothing may hang off its
 	// return as though it meant "the output is over" (nocx-szb40.5).
-	go h.sess.pumpToRing(context.Background(), sess, rx.ring)
+	rx.outputOnce.Do(func() { go h.sess.pumpToRing(context.Background(), sess, rx.ring) })
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).
 	rx.monitorOnce.Do(func() {
@@ -1106,8 +1114,8 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		launcher: s.remoteLauncher, installer: s.remoteInstaller,
 		lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
 		ledger: sessionLedger, helper: s.helperSessionOpener,
-		laneRegistrar: laneRegistrar,
-		paneOpened:    s.paneOpenedNote,
+		sandbox: s.sandbox, laneRegistrar: laneRegistrar,
+		paneOpened: s.paneOpenedNote,
 	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	// The whole-domain operation sessions.live reads the registry under, beside

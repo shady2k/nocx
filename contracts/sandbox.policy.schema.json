@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.policy.schema.json",
+  "title": "SandboxPolicy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "backend",
+    "backendVersion",
+    "workspaceId",
+    "workspaceRoot",
+    "standardRevision",
+    "workspaceRevision",
+    "shell",
+    "runner",
+    "runtime",
+    "roots"
+  ],
+  "properties": {
+    "version": { "type": "integer" },
+    "backend": { "type": "string", "enum": ["linux-landlock", "macos-seatbelt"] },
+    "backendVersion": { "type": "integer" },
+    "workspaceId": { "type": "string" },
+    "workspaceRoot": { "type": "string" },
+    "standardRevision": { "type": "integer", "minimum": 0 },
+    "workspaceRevision": { "type": "integer", "minimum": 0 },
+    "shell": { "type": "string" },
+    "runner": { "type": "string" },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "home", "config", "data", "cache", "state", "temp"],
+      "properties": {
+        "root": { "type": "string" },
+        "home": { "type": "string" },
+        "config": { "type": "string" },
+        "data": { "type": "string" },
+        "cache": { "type": "string" },
+        "state": { "type": "string" },
+        "temp": { "type": "string" }
+      }
+    },
+    "roots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "access", "kind", "provenance", "identity"],
+        "properties": {
+          "path": { "type": "string" },
+          "access": { "type": "string", "enum": ["ro", "rw"] },
+          "kind": { "type": "string", "enum": ["directory", "artifact", "device"] },
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "workspace",
+              "standard",
+              "workspace-profile",
+              "launch-delta",
+              "git",
+              "runtime",
+              "system",
+              "dependency",
+              "trusted-artifact",
+              "writable-device"
+            ]
+          },
+          "identity": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["device", "inode"],
+            "properties": {
+              "device": { "type": "integer", "minimum": 0 },
+              "inode": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

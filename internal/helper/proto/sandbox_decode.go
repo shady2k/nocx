@@ -42,6 +42,24 @@ func (params *SandboxLaunchParams) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+func (params *SandboxDiscardParams) UnmarshalJSON(data []byte) error {
+	if len(data) > 1024 {
+		return errSandboxJSON
+	}
+	type plain SandboxDiscardParams
+	var decoded plain
+	if err := decodeSandboxJSON(data, &decoded); err != nil {
+		return err
+	}
+	ticket := decoded.Ticket != "" && len(decoded.Ticket) <= 128 && decoded.OperationID == "" && decoded.LaunchID == ""
+	correlation := decoded.Ticket == "" && decoded.OperationID != "" && decoded.LaunchID != "" && len(decoded.OperationID) <= 128 && len(decoded.LaunchID) <= 128
+	if !ticket && !correlation {
+		return errSandboxJSON
+	}
+	*params = SandboxDiscardParams(decoded)
+	return nil
+}
+
 func decodeSandboxJSON(data []byte, target any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()

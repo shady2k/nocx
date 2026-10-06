@@ -179,8 +179,9 @@ type sessionOpener struct {
 	panes paneWorkspaces
 	// ledger is the durable writer for the helper binding — the existing
 	// content ledger seam, never a second session store.
-	ledger content.LedgerRepository
-	helper HelperSessionOpener
+	ledger  content.LedgerRepository
+	helper  HelperSessionOpener
+	sandbox SandboxControl
 	// laneRegistrar records the lifecycle lane a helper-hosted open returned.
 	// It is a seam and not the whole machine because what this needs is one
 	// statement: this lane belongs to this session.
@@ -241,6 +242,11 @@ func (o *sessionOpener) workspaceForOpen(ctx context.Context, paneID string) (st
 // the generation that qualifies its id space; a failed write closes the
 // session rather than exposing one no inventory may safely judge.
 func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession, error) {
+	if o.sandbox != nil {
+		if err := o.sandbox.PermitOrdinaryOpen(ctx, spec.PaneID); err != nil {
+			return OpenedSession{}, err
+		}
+	}
 	workspaceID, wsErr := o.workspaceForOpen(ctx, spec.PaneID)
 	if wsErr != nil {
 		return OpenedSession{}, refuse(-32602, "Invalid params: "+wsErr.Error())
@@ -711,113 +717,46 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	if err != nil {
 		return OpenedSession{}, err
 	}
-	// THE AXIS IS ENTERED HERE TOO, and until nocx-ui8q6.4 it was not: this
-	// call started the lifecycle leg below but never called
-	// registerOpenedIntegration, so a backend-opened pane's shell-integration
-	// status was never written to s.integrations at all. Nothing noticed
-	// because nothing before nocx-ui8q6.4 ever read that axis for a
-	// backend-opened session — AwaitIntegration is the first reader. This
-	// does not double-register anything: the handler's own call to
-	// registerOpenedIntegration (ws_session_handlers.go) is for a SEPARATE
-	// session, the one a renderer's own `session.open` produced, never this
-	// one — the two callers each open a different session and each
-	// registers its own, exactly once.
-	s.registerOpenedIntegration(opened.Session, opened.Config, opened.Hosted)
-	// THE LIFECYCLE LEG IS STARTED HERE, and this is the one place the two
-	// callers legitimately differ in TIMING rather than in behaviour. The
-	// handler starts it after the ack, because AD-7 requires every
-	// session-scoped notification to follow the open result and the shell can
-	// authenticate the moment the bridge is pumping. A backend caller has no
-	// ack to order against, so there is nothing to wait for.
-	//
-	// It was missing entirely until nocx-ie23r.3, and it did not show: the
-	// only backend-opened sessions were worker participants, and until this
-	// machine's panes became helper sessions none of them was hosted. A
-	// hosted session whose bridge is never pumped integrates never — its
-	// shell says hello into a pipe nobody reads and the handshake bound
-	// expires ten seconds later, which is a working terminal with the
-	// integration silently off.
-	//
-	// SAID, and said in both directions (nocx-n14oo.7). A backend-opened pane
-	// whose lifecycle leg is never pumped is a working terminal with the
-	// integration silently off, and the log could not tell that apart from a
-	// pane that was pumped and heard nothing back: the call left no trace at
-	// all. The line names the lane, which is what joins it to the adapter's
-	// own "established" and "lost".
+	if err := s.publishOpenedSession(ctx, opened); err != nil {
+		return OpenedSession{}, err
+	}
+	return opened, nil
+}
+
+// publishOpenedSession finalizes an already committed and registered session.
+// Ordinary backend opens and sandbox publication share this one lifecycle.
+func (s *WSServer) publishOpenedSession(ctx context.Context, opened OpenedSession) error {
+	if opened.Session == nil {
+		return errors.New("transport: cannot publish an empty session")
+	}
+	sess, cfg := opened.Session, opened.Config
+	s.registerOpenedIntegration(sess, cfg, opened.Hosted)
 	lg := log.From(ctx)
 	switch {
 	case opened.Hosted == nil:
-		lg.Debug("backend open: the pane is not hosted, so it has no lifecycle leg",
-			"pane_id", spec.PaneID)
+		lg.Debug("backend open: the pane is not hosted, so it has no lifecycle leg", "pane_id", cfg.PaneID)
 	case opened.Hosted.StartLifecycle == nil:
-		lg.Warn("backend open: a hosted pane came back with no lifecycle leg to start",
-			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
+		lg.Warn("backend open: a hosted pane came back with no lifecycle leg to start", "pane_id", cfg.PaneID, "lane", string(opened.Hosted.LifecycleLane))
 	default:
 		opened.Hosted.StartLifecycle()
-		lg.Info("backend open: the pane's lifecycle leg is pumping",
-			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
+		lg.Info("backend open: the pane's lifecycle leg is pumping", "pane_id", cfg.PaneID, "lane", string(opened.Hosted.LifecycleLane))
 	}
-	// The leg's orderly handover is armed on the session itself, whatever
-	// the start switch above did: a session whose leg failed to start still
-	// detaches cleanly on the coordinator's way out. The registry's Close —
-	// the coordinator-detach verb — runs it before the channel closes; see
-	// realSession's own field comment for why the order is load-bearing
-	// (ADR-0076).
 	if opened.Hosted != nil && opened.Hosted.DetachLifecycle != nil {
-		if detacher, ok := opened.Session.(interface {
-			SetLifecycleDetach(func())
-		}); ok {
+		if detacher, ok := sess.(interface{ SetLifecycleDetach(func()) }); ok {
 			detacher.SetLifecycleDetach(opened.Hosted.DetachLifecycle)
 		}
 	}
-	// THE DATA LEG IS STARTED HERE TOO, and until nocx-ui8q6.5 it was not
-	// (found writing that bead's own check, which is what this comment
-	// documents rather than a report written after the fact). session.Session
-	// is a single-consumer stream — StartOutput may be called exactly once,
-	// by whichever pump reads it — and the only caller that ever did was
-	// handleOpen (ws_session_handlers.go), reached exclusively by a
-	// RENDERER'S OWN `session.open`. A backend-opened session — every worker
-	// participant, since workerSpawner is this method's only caller — got no
-	// rx and no pump: its pty was never read, so no screen was ever derived
-	// it, paneobserve could never classify it past its enrolled-but-blank
-	// starting state, and internal/agenttyping's free_text gate could never
-	// open. deliverTask's own awaitFreeText polls exactly that answer, so
-	// nocx-66gd0's "type the task once the pane says it is ready" waited out
-	// its whole deadline on every real spawn and failed the participant —
-	// not silently: the compensation path undid the tab and the caller saw
-	// "the pane never became typable". The same missing rx is also why a
-	// renderer could never attach to a worker's own tab afterwards either:
-	// handleAttach refuses when getRx answers nil, and getRx answers nil for
-	// exactly the sessions this method opens.
-	//
-	// The fix starts the same two things handleOpen starts — the ring pump
-	// and the exit monitor — unconditionally, for every session this method
-	// opens. It cannot double a renderer's own pump: a renderer never calls
-	// this method (its path is handleOpen, over session.open), and this
-	// method's own session ids are freshly minted, so getOrCreateRx always
-	// creates rather than joins here. What handleOpen additionally does —
-	// deferring the pump past a JSON-RPC ack, replaying lifecycle facts to a
-	// subscriber, installing a websocket subscriber — has no counterpart on
-	// this path, because there is no ack to order against and no connection
-	// subscribed yet; a renderer that later attaches does so through
-	// handleAttach, which joins the SAME rx this call creates.
-	//
-	// Background is deliberate, the same class handleOpen's own pump is in.
-	// Owner: the session and its replay ring, which outlive this call and
-	// (AD-9) every WebSocket that ever attaches to them. Closing event:
-	// session teardown — monitorExit below, started once per session, waits
-	// on the session's own Done and ends the read pump StartOutput starts.
-	if rx := s.getOrCreateRx(opened.Session.ID()); rx != nil {
-		if opened.Hosted != nil && opened.Hosted.ObserveOutputHoles != nil {
-			ring := rx.ring
-			opened.Hosted.ObserveOutputHoles(func(lost uint64, reason string) {
-				ring.hole(lost, sessionOutputHoleReason(reason))
-			})
-		}
-		go s.pumpToRing(context.Background(), opened.Session, rx.ring)
-		rx.monitorOnce.Do(func() {
-			go s.monitorExit(rx, opened.Session)
+	rx := s.getOrCreateRx(sess.ID())
+	if rx == nil {
+		return nil
+	}
+	if opened.Hosted != nil && opened.Hosted.ObserveOutputHoles != nil {
+		ring := rx.ring
+		opened.Hosted.ObserveOutputHoles(func(lost uint64, reason string) {
+			ring.hole(lost, sessionOutputHoleReason(reason))
 		})
 	}
-	return opened, nil
+	rx.outputOnce.Do(func() { go s.pumpToRing(context.Background(), sess, rx.ring) })
+	rx.monitorOnce.Do(func() { go s.monitorExit(rx, sess) })
+	return nil
 }

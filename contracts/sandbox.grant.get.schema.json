@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.grant.get.schema.json",
+  "title": "SandboxGrantResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["launchId", "grantId", "mode", "policy", "policyDigest", "policyVersion"],
+  "properties": {
+    "launchId": { "type": "string" },
+    "grantId": { "type": ["integer", "null"] },
+    "mode": { "type": "string", "enum": ["off", "enforce"] },
+    "policy": { "oneOf": [{ "$ref": "sandbox.policy.schema.json" }, { "type": "null" }] },
+    "policyDigest": { "type": "string" },
+    "policyVersion": { "type": "integer" }
+  }
+}

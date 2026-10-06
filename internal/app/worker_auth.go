@@ -28,6 +28,24 @@ type workerAuthSessions interface {
 	OwnedProcessPID(session.ID) (int, bool)
 }
 
+type workerAuthLaunchAdmission interface {
+	ToolAdmissionAllowed(session.ID) bool
+	LaunchBinding(session.ID) (session.LaunchBinding, bool)
+	WithToolAdmission(session.Ref, func() bool) bool
+}
+
+func (a *toolAuthorizer) launchAdmissionAllowed(id session.ID) bool {
+	gate, ok := a.sessions.(workerAuthLaunchAdmission)
+	if !ok {
+		return true
+	}
+	binding, found := gate.LaunchBinding(id)
+	if !found || !gate.ToolAdmissionAllowed(id) {
+		return false
+	}
+	return binding.Mode == "" || binding.Mode == "off"
+}
+
 // workerAuthEnrolments is the live interval opened by agent_enrol and closed by
 // agent_withdraw. The pane grid is lifecycle-owned, so a session that is no
 // longer watched cannot remain an admitting principal.
@@ -348,6 +366,9 @@ func (a *toolAuthorizer) admittedPeer(peer toolendpoint.Peer) (session.ID, sessi
 		if sid == "" || !a.enrolments.Watched(string(sid)) {
 			continue
 		}
+		if !a.launchAdmissionAllowed(sid) {
+			continue
+		}
 		rootPID, known := a.sessions.OwnedProcessPID(sid)
 		if !known {
 			// A false second result is a refusal, never a zero pid to pin:
@@ -427,6 +448,9 @@ func (a *toolAuthorizer) admittedPane(pane, token string) (session.ID, session.S
 	}
 	sess, err := a.sessions.Get(sid)
 	if err != nil || sess == nil {
+		return "", nil, 0, toolendpoint.ErrNotEnrolled
+	}
+	if !a.launchAdmissionAllowed(sid) {
 		return "", nil, 0, toolendpoint.ErrNotEnrolled
 	}
 	if sess.Kind() != session.KindRemote {
@@ -559,7 +583,18 @@ func (a *toolAuthorizer) Admit(peer toolendpoint.Peer, publish func(session stri
 	if a.sessionMessages != nil {
 		invocation.RunContext.SessionMessages = a.sessionMessages
 	}
-	if !publish(string(admitted), epoch) {
+	published := false
+	if gate, ok := a.sessions.(workerAuthLaunchAdmission); ok {
+		published = gate.WithToolAdmission(session.Ref{ID: admitted, Identity: admittedSession.Identity()}, func() bool {
+			if !a.launchAdmissionAllowed(admitted) {
+				return false
+			}
+			return publish(string(admitted), epoch)
+		})
+	} else {
+		published = a.launchAdmissionAllowed(admitted) && publish(string(admitted), epoch)
+	}
+	if !published {
 		release()
 		return assistant.ToolInvocation{}, nil, toolendpoint.ErrNotEnrolled
 	}

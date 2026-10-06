@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.operation.get.params.schema.json",
+  "title": "SandboxOperationRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operationId"],
+  "properties": { "operationId": { "type": "string", "minLength": 1 } }
+}

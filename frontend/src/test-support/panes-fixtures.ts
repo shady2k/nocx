@@ -8,6 +8,7 @@
 // open. The fake must carry both.
 import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
+import type { SandboxRecovery } from '../ipc'
 import type { SessionFrame } from '../generated/session.frame'
 import type {
   CommandMarkerCallback,
@@ -669,6 +670,7 @@ export interface ClientFake {
   /** Take one of those back. Answers a fresh session by default, so a pane
    *  that adopts one still has a handle to drive. */
   reclaimSession: ReturnType<typeof vi.fn>
+  recoverSandboxPane: Mock<(paneId: string) => Promise<SandboxRecovery>>
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
   /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
@@ -778,6 +780,9 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     listLiveSessions: vi.fn(() => Promise.resolve([])),
     reclaimSession: vi.fn(() => Promise.resolve(newSession())),
+    recoverSandboxPane: vi.fn<(paneId: string) => Promise<SandboxRecovery>>().mockResolvedValue({
+      kind: 'ordinary',
+    }),
     listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),

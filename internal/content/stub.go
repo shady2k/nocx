@@ -274,6 +274,18 @@ func (s *launchStub) GetLaunch(context.Context, string) (Launch, error) {
 	return Launch{}, ErrNotImplemented
 }
 
+func (s *launchStub) SourceBinding(context.Context, string, string) (HelperIdentity, error) {
+	return HelperIdentity{}, ErrNotImplemented
+}
+
+func (s *launchStub) ByHelper(context.Context, HelperIdentity) (Launch, error) {
+	return Launch{}, ErrNotImplemented
+}
+
+func (s *launchStub) Retirement(context.Context, HelperIdentity) (SessionRetirement, error) {
+	return SessionRetirement{}, ErrNotImplemented
+}
+
 func (s *launchStub) Head(context.Context, string) (Launch, error) {
 	return Launch{}, ErrNotImplemented
 }

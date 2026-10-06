@@ -663,7 +663,7 @@ CREATE TABLE IF NOT EXISTS panes (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS pane_launches (
   id                    TEXT PRIMARY KEY,
-  pane_id               TEXT NOT NULL REFERENCES panes(id) ON DELETE CASCADE,
+  pane_id               TEXT NOT NULL,
   workspace_id          TEXT NOT NULL,
   standard_revision     INTEGER NOT NULL CHECK (standard_revision >= 0),
   workspace_revision    INTEGER NOT NULL CHECK (workspace_revision >= 0),
@@ -689,8 +689,8 @@ CREATE TABLE IF NOT EXISTS pane_launches (
           AND helper_account IS NOT NULL AND helper_generation IS NOT NULL)
       OR (state <> 'active'))
 ) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS pane_launches_one_open
-  ON pane_launches(pane_id) WHERE state IN ('preparing','active');
+CREATE UNIQUE INDEX IF NOT EXISTS pane_launches_one_preparing
+  ON pane_launches(pane_id) WHERE state = 'preparing';
 CREATE TABLE IF NOT EXISTS pane_launch_heads (
   pane_id   TEXT PRIMARY KEY REFERENCES panes(id) ON DELETE CASCADE,
   launch_id TEXT NOT NULL UNIQUE REFERENCES pane_launches(id) ON DELETE CASCADE
@@ -706,6 +706,30 @@ CREATE TABLE IF NOT EXISTS session_retirements (
   created_at        INTEGER NOT NULL,
   PRIMARY KEY (host, account, generation, host_session_id)
 ) STRICT;
+CREATE TRIGGER IF NOT EXISTS pane_close_retires_launch
+AFTER UPDATE OF closed_at ON panes
+WHEN OLD.closed_at IS NULL AND NEW.closed_at IS NOT NULL
+BEGIN
+  INSERT INTO session_retirements
+    (host_session_id,host,account,generation,operation_id,cause,close_pending,created_at)
+    SELECT helper_session_id,helper_host,helper_account,helper_generation,id,'replacement',1,NEW.closed_at
+    FROM pane_launches WHERE pane_id=NEW.id AND state='active'
+    ON CONFLICT(host,account,generation,host_session_id) DO UPDATE SET close_pending=1;
+  UPDATE pane_launches SET state='ended',updated_at=NEW.closed_at WHERE pane_id=NEW.id AND state='active';
+  DELETE FROM pane_launch_heads WHERE pane_id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS pane_delete_retires_launch
+BEFORE DELETE ON panes
+BEGIN
+  INSERT INTO session_retirements
+    (host_session_id,host,account,generation,operation_id,cause,close_pending,created_at)
+    SELECT helper_session_id,helper_host,helper_account,helper_generation,id,'replacement',1,
+           COALESCE(OLD.closed_at,CAST(unixepoch('subsec')*1000 AS INTEGER))
+    FROM pane_launches WHERE pane_id=OLD.id AND state='active'
+    ON CONFLICT(host,account,generation,host_session_id) DO UPDATE SET close_pending=1;
+  UPDATE pane_launches SET state='ended',updated_at=COALESCE(OLD.closed_at,CAST(unixepoch('subsec')*1000 AS INTEGER))
+    WHERE pane_id=OLD.id AND state='active';
+END;
 
 CREATE TABLE IF NOT EXISTS sessions (
   id           TEXT PRIMARY KEY,           -- server-authoritative (AD-7)

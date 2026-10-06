@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -194,34 +195,40 @@ func (k *paneKeys) commitStep(ctx context.Context, da *DescendantPaneAccess, ses
 	if k.hub.lookup == nil {
 		return assistant.KeysResult{}, fmt.Errorf("session.keys: %w", errNoPaneRuntime)
 	}
-	helper, ok := k.hub.lookup.HelperFor(ctx, sessionID)
-	if !ok {
-		return assistant.KeysResult{}, fmt.Errorf("session.keys: %w", errNoPaneRuntime)
-	}
-	now := k.clockNow()
-	commitBy := now + Nanos(commitWindow)
-	k.hub.noteCommitBy(sessionID, commitBy)
 
-	result, err := helper.Intent(ctx, sessionID, proto.IntentParams{
-		Token: token, AccessEpoch: accessEpoch, CommitBy: int64(commitBy), Kind: kind, Payload: payload,
+	var result assistant.KeysResult
+	err := k.hub.lookup.WithInput(ctx, sessionID, func() error {
+		helper, ok := k.hub.lookup.HelperFor(ctx, sessionID)
+		if !ok {
+			return fmt.Errorf("session.keys: %w", errNoPaneRuntime)
+		}
+		commitBy := k.clockNow() + Nanos(commitWindow)
+		k.hub.noteCommitBy(sessionID, commitBy)
+
+		intent, err := helper.Intent(ctx, sessionID, proto.IntentParams{
+			Token: token, AccessEpoch: accessEpoch, CommitBy: int64(commitBy), Kind: kind, Payload: payload,
+		})
+		if err == nil {
+			result = fromIntentResult(intent, 0)
+			return nil
+		}
+		// Hold source input admission until recovery reaches a terminal answer
+		// or the shared helper clock proves this intent can no longer commit.
+		result, err = k.pollStatus(ctx, sessionID, tokenID, commitBy)
+		return err
 	})
-	if err == nil {
-		return fromIntentResult(result, 0), nil
+	if errors.Is(err, session.ErrInputFenced) {
+		return refused("access_revoked"), nil
 	}
-	// The RPC itself failed: this step's own outcome is unknown, never
-	// assumed not to have happened (design §7.2). session.intent.status
-	// (never presenting the payload again) is asked before anything is
-	// reported; pollStatus tries it at least once even if commitBy has
-	// already passed, and reports indeterminate — never cancelled — once
-	// neither the call nor the poll can answer.
-	return k.pollStatus(ctx, sessionID, tokenID, commitBy)
+	return result, err
 }
 
 // pollStatus is commitStep's short recovery loop: retry session.intent.status
 // until it answers a terminal result or commitBy passes, never longer —
 // once commitBy has passed, no old intent can still commit (design §7.2),
 // so an answer of "unknown" or "in_progress" past that point is reported
-// indeterminate rather than waited on further.
+// indeterminate rather than waited on further. Caller cancellation does not
+// release source admission while the helper may still commit this intent.
 func (k *paneKeys) pollStatus(ctx context.Context, sessionID, tokenID string, commitBy Nanos) (assistant.KeysResult, error) {
 	if k.hub.lookup == nil {
 		return assistant.KeysResult{State: "indeterminate"}, nil
@@ -238,11 +245,7 @@ func (k *paneKeys) pollStatus(ctx context.Context, sessionID, tokenID string, co
 		if k.clockNow() >= commitBy {
 			return assistant.KeysResult{State: "indeterminate"}, nil
 		}
-		select {
-		case <-ctx.Done():
-			return assistant.KeysResult{State: "indeterminate"}, nil
-		case <-time.After(20 * time.Millisecond):
-		}
+		<-time.After(20 * time.Millisecond)
 	}
 }
 

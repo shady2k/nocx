@@ -95,6 +95,7 @@ type paneHelpers interface {
 // stale intent.
 type paneHelperLookup interface {
 	HelperFor(ctx context.Context, sessionID string) (paneHelpers, bool)
+	WithInput(ctx context.Context, sessionID string, input func() error) error
 }
 
 // paneAccessParticipants answers a participant's own liveness — in

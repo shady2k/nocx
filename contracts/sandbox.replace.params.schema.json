@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.replace.params.schema.json",
+  "title": "SandboxReplaceRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["operationId", "confirmationId"],
+  "properties": {
+    "operationId": { "type": "string", "minLength": 1 },
+    "confirmationId": { "type": "string", "minLength": 1 }
+  }
+}

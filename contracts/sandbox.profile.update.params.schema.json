@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.profile.update.params.schema.json",
+  "title": "SandboxProfileUpdateRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["expectedRevision", "roots"],
+  "properties": {
+    "workspaceId": { "type": "string" },
+    "expectedRevision": { "type": "integer", "minimum": 0 },
+    "enabled": { "type": "boolean" },
+    "roots": { "$ref": "sandbox.roots.schema.json" }
+  }
+}

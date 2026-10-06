@@ -273,7 +273,16 @@ func (s *Service) sandboxLaunch(ctx context.Context, p proto.SandboxLaunchParams
 	return result, err
 }
 
-func (s *Service) sandboxDiscard(p proto.SandboxDiscardParams) proto.SandboxDiscardResult {
+func (s *Service) sandboxDiscard(ctx context.Context, p proto.SandboxDiscardParams) (proto.SandboxDiscardResult, error) {
+	if p.Ticket == "" {
+		if !validSandboxID(p.OperationID) || !validSandboxID(p.LaunchID) {
+			return proto.SandboxDiscardResult{}, errSandboxParams
+		}
+		return s.sandboxRollback(ctx, p.OperationID, p.LaunchID)
+	}
+	if p.OperationID != "" || p.LaunchID != "" || !validSandboxID(p.Ticket) {
+		return proto.SandboxDiscardResult{}, errSandboxParams
+	}
 	state := s.sandboxTickets
 	state.mu.Lock()
 	ticket := state.pending[p.Ticket]
@@ -291,7 +300,86 @@ func (s *Service) sandboxDiscard(p proto.SandboxDiscardParams) proto.SandboxDisc
 	if prepared != nil {
 		_ = prepared.Cleanup()
 	}
-	return proto.SandboxDiscardResult{}
+	return proto.SandboxDiscardResult{}, nil
+}
+
+// sandboxRollback linearizes unused-ticket cancellation with consumption, then
+// waits for an already-consumed attempt before reporting its exact candidate.
+// Inventory absence alone cannot do this: native startup outlives a lost caller.
+func (s *Service) sandboxRollback(ctx context.Context, operationID, launchID string) (proto.SandboxDiscardResult, error) {
+	state := s.sandboxTickets
+	state.mu.Lock()
+	var consumed *sandboxTicket
+	var prepared *sandbox.Prepared
+	for token, ticket := range state.pending {
+		if ticket.intent.OperationID != operationID && ticket.intent.LaunchID != launchID {
+			continue
+		}
+		if ticket.intent.OperationID != operationID || ticket.intent.LaunchID != launchID {
+			state.mu.Unlock()
+			return proto.SandboxDiscardResult{}, errSandboxMismatch
+		}
+		ticket.expired = true
+		delete(state.pending, token)
+		select {
+		case <-ticket.preparing:
+			prepared = ticket.prepared
+		default:
+		}
+		break
+	}
+	for _, ticket := range state.consumed {
+		if ticket.intent.OperationID != operationID && ticket.intent.LaunchID != launchID {
+			continue
+		}
+		if ticket.intent.OperationID != operationID || ticket.intent.LaunchID != launchID {
+			state.mu.Unlock()
+			return proto.SandboxDiscardResult{}, errSandboxMismatch
+		}
+		consumed = ticket
+		break
+	}
+	state.mu.Unlock()
+	if prepared != nil {
+		if err := prepared.Cleanup(); err != nil {
+			return proto.SandboxDiscardResult{}, errNativeClosePending
+		}
+	}
+	if consumed != nil {
+		select {
+		case <-consumed.done:
+		case <-ctx.Done():
+			return proto.SandboxDiscardResult{}, ctx.Err()
+		}
+		state.mu.Lock()
+		result, launchErr := consumed.result, consumed.err
+		state.mu.Unlock()
+		if errors.Is(launchErr, errNativeClosePending) {
+			if preparer, ok := s.spawner.(sandboxPreparer); !ok || preparer.NativeCleanupPending() {
+				return proto.SandboxDiscardResult{}, launchErr
+			}
+		}
+		if result.Entry.Session.Session != "" {
+			return proto.SandboxDiscardResult{Entry: &result.Entry}, nil
+		}
+	}
+	// Live launch facts outlast the bounded consumed-result cache.
+	s.mu.Lock()
+	live := s.live()
+	s.mu.Unlock()
+	for _, hs := range live {
+		hs.mu.Lock()
+		matches := hs.sandbox != nil && hs.sandbox.OperationID == operationID && hs.sandbox.LaunchID == launchID
+		hs.mu.Unlock()
+		if matches {
+			entry := hs.entry(s.inspector)
+			return proto.SandboxDiscardResult{Entry: &entry}, nil
+		}
+	}
+	if preparer, ok := s.spawner.(sandboxPreparer); ok && preparer.NativeCleanupPending() {
+		return proto.SandboxDiscardResult{}, errNativeClosePending
+	}
+	return proto.SandboxDiscardResult{}, nil
 }
 
 func (s *Service) sandboxGet(p proto.SandboxGetParams) (proto.SandboxGetResult, error) {

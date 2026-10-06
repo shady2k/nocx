@@ -159,7 +159,7 @@ var schemaLadder = []migrationStep{
 	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
 	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
-	{from: 21, to: 22, apply: migrateLaunchAuthority21to22, schemaDigest: "e8aff917885c58a4812e3420b62289767bdab92057ec30382506eed85eadcd3a"},
+	{from: 21, to: 22, apply: migrateLaunchAuthority21to22, schemaDigest: "9a5435c5597139cb6f0623a78185b0fd93e64842599d01d0af6e22fd30e99116"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.

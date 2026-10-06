@@ -16,9 +16,13 @@ type launchQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+type launchScanner interface {
+	Scan(...any) error
+}
+
 const launchColumns = `l.id,l.pane_id,l.workspace_id,l.standard_revision,l.workspace_revision,l.source_session_id,l.source_head_id,l.source_host,l.source_account,l.source_generation,l.mode,l.state,l.helper_session_id,l.helper_host,l.helper_account,l.helper_generation,l.policy_digest,l.policy_version,l.policy,l.created_at,l.updated_at,g.id`
 
-func scanLaunch(row *sql.Row) (Launch, error) {
+func scanLaunch(row launchScanner) (Launch, error) {
 	var out Launch
 	var sourceID, sourceHeadID, helperID, helperHost, helperAccount, helperGeneration sql.NullString
 	var digest, policyJSON sql.NullString
@@ -34,6 +38,7 @@ func scanLaunch(row *sql.Row) (Launch, error) {
 	}
 	out.Source.SessionID = sourceID.String
 	out.SourceHeadID = sourceHeadID.String
+	out.TargetGeneration = helperGeneration.String
 	if helperID.Valid {
 		h := HelperIdentity{Host: helperHost.String, Account: helperAccount.String, Generation: helperGeneration.String, SessionID: helperID.String}
 		if !h.valid() {
@@ -85,7 +90,7 @@ func launchByID(ctx context.Context, q launchQueryer, id string) (Launch, error)
 }
 
 func (s *sqliteContent) Prepare(ctx context.Context, in LaunchPrepare) (Launch, error) {
-	if in.ID == "" || in.PaneID == "" || in.WorkspaceID == "" || !in.Source.valid() || in.Mode != LaunchOff && in.Mode != LaunchEnforce {
+	if in.ID == "" || in.PaneID == "" || in.WorkspaceID == "" || !in.Source.valid() || in.TargetGeneration == "" || in.Mode != LaunchOff && in.Mode != LaunchEnforce {
 		return Launch{}, ErrInvalidLaunch
 	}
 	var policyJSON string
@@ -127,11 +132,30 @@ func (s *sqliteContent) Prepare(ctx context.Context, in LaunchPrepare) (Launch, 
 		if err = validateWorkspaceRevision(ctx, tx, in.WorkspaceID, in.WorkspaceRevision); err != nil {
 			return err
 		}
-		if err = validateSource(ctx, tx, in.Source, in.PaneID, in.WorkspaceID); err != nil {
-			return err
-		}
 		if err = validateCurrentHead(ctx, tx, in.PaneID, in.ExpectedHeadID, in.Source); err != nil {
 			return err
+		}
+		if in.ExpectedHeadID == "" {
+			if err = validateSource(ctx, tx, in.Source, in.PaneID, in.WorkspaceID); err != nil {
+				return err
+			}
+		} else {
+			head, headErr := launchByID(ctx, tx, in.ExpectedHeadID)
+			if headErr != nil {
+				return headErr
+			}
+			if head.State != LaunchEnded {
+				if err = validateSource(ctx, tx, in.Source, in.PaneID, in.WorkspaceID); err != nil {
+					return err
+				}
+			}
+		}
+		var preparing int
+		if err = tx.QueryRowContext(ctx, `SELECT count(*) FROM pane_launches WHERE state='preparing'`).Scan(&preparing); err != nil {
+			return err
+		}
+		if preparing >= 32 {
+			return ErrLaunchConflict
 		}
 		now := time.Now().UnixMilli()
 		var encoded any = policyJSON
@@ -146,7 +170,7 @@ func (s *sqliteContent) Prepare(ctx context.Context, in LaunchPrepare) (Launch, 
 		if in.ExpectedHeadID == "" {
 			expectedHead = nil
 		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO pane_launches (id,pane_id,workspace_id,standard_revision,workspace_revision,source_session_id,source_head_id,source_host,source_account,source_generation,mode,state,policy_digest,policy_version,policy,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'preparing',?,?,?,?,?)`, in.ID, in.PaneID, in.WorkspaceID, in.StandardRevision, in.WorkspaceRevision, in.Source.SessionID, expectedHead, in.Source.Host, in.Source.Account, in.Source.Generation, in.Mode, digest, version, encoded, now, now)
+		_, err = tx.ExecContext(ctx, `INSERT INTO pane_launches (id,pane_id,workspace_id,standard_revision,workspace_revision,source_session_id,source_head_id,source_host,source_account,source_generation,mode,state,helper_host,helper_account,helper_generation,policy_digest,policy_version,policy,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'preparing',?,?,?,?,?,?,?,?)`, in.ID, in.PaneID, in.WorkspaceID, in.StandardRevision, in.WorkspaceRevision, in.Source.SessionID, expectedHead, in.Source.Host, in.Source.Account, in.Source.Generation, in.Mode, in.Source.Host, in.Source.Account, in.TargetGeneration, digest, version, encoded, now, now)
 		if err != nil {
 			return mapLaunchWriteError(err)
 		}
@@ -165,7 +189,7 @@ func (s *sqliteContent) Prepare(ctx context.Context, in LaunchPrepare) (Launch, 
 }
 
 func sameLaunchIntent(existing Launch, in LaunchPrepare) bool {
-	if existing.PaneID != in.PaneID || existing.WorkspaceID != in.WorkspaceID || existing.Source != in.Source || existing.SourceHeadID != in.ExpectedHeadID || existing.StandardRevision != in.StandardRevision || existing.WorkspaceRevision != in.WorkspaceRevision || existing.Mode != in.Mode || existing.PolicyDigest != in.PolicyDigest || existing.PolicyVersion != in.PolicyVersion {
+	if existing.PaneID != in.PaneID || existing.WorkspaceID != in.WorkspaceID || existing.Source != in.Source || existing.SourceHeadID != in.ExpectedHeadID || existing.TargetGeneration != in.TargetGeneration || existing.StandardRevision != in.StandardRevision || existing.WorkspaceRevision != in.WorkspaceRevision || existing.Mode != in.Mode || existing.PolicyDigest != in.PolicyDigest || existing.PolicyVersion != in.PolicyVersion {
 		return false
 	}
 	if existing.Mode == LaunchEnforce {
@@ -222,7 +246,7 @@ func validateCurrentHead(ctx context.Context, q launchQueryer, paneID, expectedH
 	if err != nil {
 		return ErrLaunchConflict
 	}
-	if current.State != LaunchActive || current.Helper == nil || *current.Helper != source {
+	if current.State != LaunchActive && current.State != LaunchEnded || current.Helper == nil || *current.Helper != source {
 		return ErrLaunchConflict
 	}
 	return nil
@@ -236,7 +260,7 @@ func mapLaunchWriteError(err error) error {
 }
 
 func (s *sqliteContent) Commit(ctx context.Context, in LaunchCommit) (Launch, error) {
-	if in.LaunchID == "" || !in.ExpectedSource.valid() || !in.Candidate.valid() || in.Candidate == in.ExpectedSource {
+	if in.LaunchID == "" || in.SourceCwd == "" || !in.ExpectedSource.valid() || !in.Candidate.valid() || in.Candidate == in.ExpectedSource {
 		return Launch{}, ErrInvalidLaunch
 	}
 	var result Launch
@@ -260,16 +284,48 @@ func (s *sqliteContent) Commit(ctx context.Context, in LaunchCommit) (Launch, er
 		if launch.State != LaunchPreparing || launch.Source != in.ExpectedSource || launch.SourceHeadID != in.ExpectedHeadID {
 			return ErrLaunchConflict
 		}
+		if in.Candidate.Generation != launch.TargetGeneration || in.Candidate.Host != launch.Source.Host || in.Candidate.Account != launch.Source.Account || in.Binding.ID != in.Candidate.SessionID || in.Binding.WorkspaceID != launch.WorkspaceID || in.Binding.PaneID != launch.PaneID || in.Binding.Generation != in.Candidate.Generation || in.Binding.Host != in.Candidate.Host || in.Binding.Account != in.Candidate.Account || in.Binding.LifecycleApplied == nil || *in.Binding.LifecycleApplied != 0 {
+			return ErrInvalidLaunch
+		}
 		if err = validatePaneWorkspace(ctx, tx, launch.PaneID, launch.WorkspaceID); err != nil {
 			return err
 		}
-		if err = validateSource(ctx, tx, in.ExpectedSource, launch.PaneID, launch.WorkspaceID); err != nil {
+		var cwd string
+		if err = tx.QueryRowContext(ctx, `SELECT cwd FROM panes WHERE id=?`, launch.PaneID).Scan(&cwd); err != nil {
+			return err
+		}
+		if cwd != in.SourceCwd {
+			return ErrLaunchConflict
+		}
+		if err = validateWorkspaceRevision(ctx, tx, launch.WorkspaceID, launch.WorkspaceRevision); err != nil {
 			return err
 		}
 		if err = validateCurrentHead(ctx, tx, launch.PaneID, in.ExpectedHeadID, in.ExpectedSource); err != nil {
 			return err
 		}
+		if in.ExpectedHeadID == "" {
+			if err = validateSource(ctx, tx, in.ExpectedSource, launch.PaneID, launch.WorkspaceID); err != nil {
+				return err
+			}
+		} else {
+			head, headErr := launchByID(ctx, tx, in.ExpectedHeadID)
+			if headErr != nil {
+				return headErr
+			}
+			if head.State != LaunchEnded {
+				if err = validateSource(ctx, tx, in.ExpectedSource, launch.PaneID, launch.WorkspaceID); err != nil {
+					return err
+				}
+			}
+		}
 		now := time.Now().UnixMilli()
+		payload, payloadErr := encodeSessionPayload(in.Binding)
+		if payloadErr != nil {
+			return payloadErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO sessions (id,workspace_id,started_at,payload) VALUES (?,?,?,?)`, in.Binding.ID, launch.WorkspaceID, now, payload); err != nil {
+			return err
+		}
 		var previous string
 		headErr := tx.QueryRowContext(ctx, `SELECT launch_id FROM pane_launch_heads WHERE pane_id=?`, launch.PaneID).Scan(&previous)
 		if headErr != nil && !errors.Is(headErr, sql.ErrNoRows) {
@@ -402,7 +458,7 @@ func (s *sqliteContent) CompleteRetirement(ctx context.Context, in RetirementCon
 		return ErrInvalidLaunch
 	}
 	return s.run(ctx, func(ctx context.Context) error {
-		result, err := s.db.ExecContext(ctx, `DELETE FROM session_retirements WHERE host=? AND account=? AND generation=? AND host_session_id=? AND close_pending=1`, in.Identity.Host, in.Identity.Account, in.Identity.Generation, in.Identity.SessionID)
+		result, err := s.db.ExecContext(ctx, `UPDATE session_retirements SET close_pending=0 WHERE host=? AND account=? AND generation=? AND host_session_id=?`, in.Identity.Host, in.Identity.Account, in.Identity.Generation, in.Identity.SessionID)
 		if err != nil {
 			return err
 		}
@@ -421,6 +477,52 @@ func (s *sqliteContent) GetLaunch(ctx context.Context, id string) (Launch, error
 	return launchByID(ctx, s.db, id)
 }
 
+// SourceBinding reads the ordinary opener's durable restore key, not a second
+// routing table. A closed source cannot authorize a fresh replacement.
+func (s *sqliteContent) SourceBinding(ctx context.Context, paneID, sessionID string) (HelperIdentity, error) {
+	if paneID == "" || sessionID == "" {
+		return HelperIdentity{}, ErrInvalidLaunch
+	}
+	out := HelperIdentity{SessionID: sessionID}
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(json_extract(payload,'$.host'),''),COALESCE(json_extract(payload,'$.account'),''),COALESCE(json_extract(payload,'$.generation'),'') FROM sessions WHERE id=? AND json_extract(payload,'$.pane')=? AND ended_at IS NULL`, sessionID, paneID).Scan(&out.Host, &out.Account, &out.Generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HelperIdentity{}, ErrNotFound
+	}
+	if err != nil {
+		return HelperIdentity{}, err
+	}
+	if !out.valid() {
+		return HelperIdentity{}, ErrInvalidLaunch
+	}
+	return out, nil
+}
+
+func (s *sqliteContent) ByHelper(ctx context.Context, identity HelperIdentity) (Launch, error) {
+	if !identity.valid() {
+		return Launch{}, ErrInvalidLaunch
+	}
+	return scanLaunch(s.db.QueryRowContext(ctx, `SELECT `+launchColumns+` FROM pane_launches l LEFT JOIN authority_grants g ON g.launch_id=l.id AND g.execution_id IS NULL WHERE l.helper_session_id=? AND l.helper_host=? AND l.helper_account=? AND l.helper_generation=?`, identity.SessionID, identity.Host, identity.Account, identity.Generation))
+}
+
+func (s *sqliteContent) Retirement(ctx context.Context, identity HelperIdentity) (SessionRetirement, error) {
+	if !identity.valid() {
+		return SessionRetirement{}, ErrInvalidLaunch
+	}
+	var out SessionRetirement
+	var pending int
+	var created int64
+	err := s.db.QueryRowContext(ctx, `SELECT host_session_id,host,account,generation,operation_id,cause,close_pending,created_at FROM session_retirements WHERE host=? AND account=? AND generation=? AND host_session_id=?`, identity.Host, identity.Account, identity.Generation, identity.SessionID).Scan(&out.Identity.SessionID, &out.Identity.Host, &out.Identity.Account, &out.Identity.Generation, &out.OperationID, &out.Cause, &pending, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionRetirement{}, ErrNotFound
+	}
+	if err != nil {
+		return SessionRetirement{}, err
+	}
+	out.ClosePending = pending == 1
+	out.CreatedAt = time.UnixMilli(created)
+	return out, nil
+}
+
 func (s *sqliteContent) Head(ctx context.Context, paneID string) (Launch, error) {
 	return scanLaunch(s.db.QueryRowContext(ctx, `SELECT `+launchColumns+` FROM pane_launch_heads h JOIN pane_launches l ON l.id=h.launch_id LEFT JOIN authority_grants g ON g.launch_id=l.id AND g.execution_id IS NULL WHERE h.pane_id=?`, paneID))
 }
@@ -436,53 +538,13 @@ func (s *sqliteContent) Preparing(ctx context.Context) ([]Launch, error) {
 		if len(out) == 32 {
 			return nil, ErrLaunchConflict
 		}
-		item, err := scanLaunchRow(rows)
+		item, err := scanLaunch(rows)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, item)
 	}
 	return out, rows.Err()
-}
-
-func scanLaunchRow(row *sql.Rows) (Launch, error) {
-	var out Launch
-	var sourceID, sourceHeadID, helperID, helperHost, helperAccount, helperGeneration sql.NullString
-	var digest, policyJSON sql.NullString
-	var version, grantID sql.NullInt64
-	var created, updated int64
-	err := row.Scan(&out.ID, &out.PaneID, &out.WorkspaceID, &out.StandardRevision, &out.WorkspaceRevision, &sourceID, &sourceHeadID, &out.Source.Host, &out.Source.Account, &out.Source.Generation, &out.Mode, &out.State, &helperID, &helperHost, &helperAccount, &helperGeneration, &digest, &version, &policyJSON, &created, &updated, &grantID)
-	if err != nil {
-		return Launch{}, err
-	}
-	out.Source.SessionID = sourceID.String
-	out.SourceHeadID = sourceHeadID.String
-	out.PolicyDigest = digest.String
-	out.PolicyVersion = int(version.Int64)
-	if helperID.Valid {
-		h := HelperIdentity{SessionID: helperID.String, Host: helperHost.String, Account: helperAccount.String, Generation: helperGeneration.String}
-		if !h.valid() {
-			return Launch{}, ErrInvalidLaunch
-		}
-		out.Helper = &h
-	}
-	if policyJSON.Valid {
-		p, e := decodeStoredLaunchPolicy(policyJSON.String, out.PolicyDigest, out.PolicyVersion)
-		if e != nil {
-			return Launch{}, e
-		}
-		out.Policy = &p
-	}
-	if grantID.Valid {
-		v := grantID.Int64
-		out.GrantID = &v
-	}
-	if out.Mode == LaunchEnforce && out.GrantID == nil || out.Mode == LaunchOff && out.GrantID != nil {
-		return Launch{}, ErrInvalidLaunch
-	}
-	out.CreatedAt = time.UnixMilli(created)
-	out.UpdatedAt = time.UnixMilli(updated)
-	return out, nil
 }
 
 func (s *sqliteContent) PendingRetirements(ctx context.Context, limit int) ([]SessionRetirement, error) {

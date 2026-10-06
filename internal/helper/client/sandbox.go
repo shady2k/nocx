@@ -71,3 +71,17 @@ func (c *Client) SandboxGet(ctx context.Context, id HostSessionID) (SandboxSessi
 func (c *Client) SandboxDiscard(ctx context.Context, ticket string) error {
 	return c.Call(ctx, proto.ServiceSession, proto.OpSandboxDiscard, proto.SandboxDiscardParams{Ticket: ticket}, nil)
 }
+
+// SandboxRollback cancels an unused preparation or waits for its one consumed
+// attempt. A nil entry is authoritative only after this helper-owned barrier.
+func (c *Client) SandboxRollback(ctx context.Context, operationID, launchID string) (*SessionEntry, error) {
+	var result proto.SandboxDiscardResult
+	if err := c.Call(ctx, proto.ServiceSession, proto.OpSandboxDiscard, proto.SandboxDiscardParams{OperationID: operationID, LaunchID: launchID}, &result); err != nil {
+		return nil, err
+	}
+	if result.Entry == nil {
+		return nil, nil
+	}
+	entry := mapSessionEntry(*result.Entry)
+	return &entry, nil
+}

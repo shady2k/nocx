@@ -2321,9 +2321,18 @@ export class TerminalContent extends BasePaneContent {
    * the open goes out exactly as it did before this bead, unanchored.
    */
   private async openRequestedSession(renderer: TerminalRenderer): Promise<SessionHandle> {
+    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    if (anchor.paneId && !this.sshOpts) {
+      const recovery = await this.client.recoverSandboxPane(anchor.paneId)
+      if (recovery.kind === 'live') return recovery.handle
+      if (recovery.kind !== 'ordinary') {
+        throw new Error(
+          `Sandbox recovery ${recovery.kind}: ${recovery.reason}. Open Sandbox settings to inspect or explicitly relaunch.`,
+        )
+      }
+    }
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
-    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
       return this.client.openSession(this._reportedSize(renderer), anchor)
     }
@@ -4497,17 +4506,78 @@ export class TerminalContent extends BasePaneContent {
    *
    * Returns whether a session was bound.
    */
+  /** Bind a session already published and subscribed by a sandbox operation.
+   *  This is deliberately distinct from reconnect/open: the supplied handle
+   *  already represents the server's completed binding transaction. */
+  async bindSession(handle: SessionHandle): Promise<boolean> {
+    if (this._disposed || this.renderer === null || this.session === null) return false
+    const renderer = this.renderer
+    this._lifecycleUnsub?.()
+    this._lifecycleUnsub = null
+    this._historyRecordedUnsub?.()
+    this._historyRecordedUnsub = null
+    this._integrationUnsub?.()
+    this._integrationUnsub = null
+    this._signalUndeliveredUnsub?.()
+    this._signalUndeliveredUnsub = null
+    this._toolSurfaceUnsub?.()
+    this._toolSurfaceUnsub = null
+    this._dropToolSurfaceNotice()
+    this._toolSurface = null
+    for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
+    this._blockRowsUnsubs = []
+    this._blockRowsInFlight.clear()
+    const previous = this.session
+    paneScreenReaders.delete(previous.sessionId)
+    previous.detach()
+    this.session = null
+    this._recoveryAcking = false
+    this._recoveryAckClaim = null
+    this._recovery = null
+    this._sessionExited = false
+    this._sessionLost = false
+    this._liveness = null
+    this._integrationWaitingDispose?.()
+    this._integrationWaitingDispose = null
+    this._recoveryNoticeDispose?.()
+    this._recoveryNoticeDispose = null
+    this._unreconciledNoticeDispose?.()
+    this._unreconciledNoticeDispose = null
+    this._projections?.reset()
+    this.lifecycle.reset()
+    this._disposeAllMarkers()
+    this.env?.detach()
+    this.env = null
+    clearTimeout(this._settleTimer)
+    this._settleTimer = undefined
+    ++this._bindGeneration
+    this._integration = null
+    this._awaitsIntegration = false
+    this._integrationFailed = false
+    this._heldRaw = null
+    this.scrollback?.blockManager.markReconnected()
+    renderer.reset()
+    this._publishConnectionCondition()
+    const bound = await this._bindSession(new AbortController().signal, renderer, true, handle)
+    if (bound) {
+      this._publishConnectionCondition()
+      this._publishTabMark()
+    }
+    return bound
+  }
+
   private async _bindSession(
     signal: AbortSignal,
     renderer: XtermRenderer,
     rebind: boolean,
+    supplied?: SessionHandle,
   ): Promise<boolean> {
+    const generation = ++this._bindGeneration
     // Bumped for every bind, including this one: the recovery-ack claim
     // further below (_recoveryAckClaim) reads this._bindGeneration directly
     // to tell its own bind apart from a later one. Advancing it here has no
     // local reader any more — the establishment-acknowledgement closures
     // that used to capture it were removed with the mechanism (ADR-0062).
-    ++this._bindGeneration
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
@@ -4527,6 +4597,7 @@ export class TerminalContent extends BasePaneContent {
     const lifecycleSubscription = new LifecycleClient(
       this.client.dispatcher,
     ).subscribeLifecycleChanged((fact) => {
+      if (this._bindGeneration !== generation) return
       // ADR-0024 decision 8: a lost fact carrying a recovery contract
       // opens a restoration episode — the channel died while the shell
       // was reachable, and the shell will restore its visible native
@@ -4585,6 +4656,7 @@ export class TerminalContent extends BasePaneContent {
       })
     })
     const historySubscription = subscribeHistoryRecorded(this.client, (receipt) => {
+      if (this._bindGeneration !== generation) return
       const block = this.scrollback?.blockManager.blockForAttempt(receipt.attemptId)
       this.attachRecordedAck(0, block, receipt)
       const ledgerId = this.attemptEntryIds.get(receipt.attemptId)
@@ -4599,12 +4671,14 @@ export class TerminalContent extends BasePaneContent {
     this._lifecycleUnsub = lifecycleSubscription.unsubscribe
     const refreshBlockRows = (params: unknown): void => {
       if (typeof params !== 'object' || params === null) return
+      if (this._bindGeneration !== generation) return
       if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
         return
       void this._refreshBlockRows(params.entryId)
     }
     const onBlockClosed = (params: unknown): void => {
       // BlockClosed (contracts/block.closed.schema.json, nocx-2v80t.3.27):
+      if (this._bindGeneration !== generation) return
       // the backend met the command's completion with its end marker, and
       // the block's rows are whole. It is the ONE event a finished block
       // closes on — the renderer no longer watches the stream for a fence of
@@ -4624,6 +4698,7 @@ export class TerminalContent extends BasePaneContent {
     }
     const onBlockCleared = (params: unknown): void => {
       // BlockCleared (contracts/block.cleared.schema.json, nocx-2v80t.3.17):
+      if (this._bindGeneration !== generation) return
       // the backend sighted a real erase and this is the LIVE half of it —
       // the client no longer decides a clear from the command's text.
       if (typeof params !== 'object' || params === null || !('keepEntryId' in params)) return
@@ -4647,10 +4722,11 @@ export class TerminalContent extends BasePaneContent {
       this.client.dispatcher.subscribe('block.closed', onBlockClosed),
       this.client.dispatcher.subscribe('block.cleared', onBlockCleared),
     )
-    const session = await this.openSessionWithHostKeyRecovery(signal, renderer)
+    const session = supplied ?? (await this.openSessionWithHostKeyRecovery(signal, renderer))
 
     if (signal.aborted) {
-      session.close()
+      if (supplied === undefined) session.close()
+      else session.detach()
       // A FIRST bind that is aborted takes the pane down with it: nothing
       // has been shown and there is nothing to leave behind. A REBIND that
       // is aborted must leave the pane exactly as it was — its scrollback
@@ -4765,14 +4841,17 @@ export class TerminalContent extends BasePaneContent {
     // Subscribed beside the integration axis, before anything else touches the
     // session, so a notice cannot be raised into a pane that is not listening.
     this._signalUndeliveredUnsub = subscribeSignalUndelivered(this.client.dispatcher, (fact) => {
+      if (this._bindGeneration !== generation) return
       if (fact.sessionId !== session.sessionId) return
       this._applySignalUndelivered(fact)
     })
     this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
+      if (this._bindGeneration !== generation) return
       if (fact.sessionId !== session.sessionId) return
       this._applyIntegration(fact)
     })
     this._toolSurfaceUnsub = subscribeToolSurfaceChanged(this.client.dispatcher, (fact) => {
+      if (this._bindGeneration !== generation) return
       if (fact.sessionId !== session.sessionId) return
       this._applyToolSurface(fact)
     })
@@ -4833,6 +4912,7 @@ export class TerminalContent extends BasePaneContent {
     this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
     session.onData((data: string) => {
+      if (this._bindGeneration !== generation) return
       log.debug('nocx: session data received', { length: data.length })
       renderer.write(data)
       if (this._bufferType === 'normal') {
@@ -4876,6 +4956,7 @@ export class TerminalContent extends BasePaneContent {
     installPaneScreenSeam()
     paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
+      if (this._bindGeneration !== generation) return
       const model = this._cellModel
       if (model === null) return
       try {
@@ -4924,6 +5005,7 @@ export class TerminalContent extends BasePaneContent {
     // that had already finished (2026-08-19 frame capture). Nothing else
     // could correct it, because for a fast command there is no next chunk.
     renderer.onWriteParsed(() => {
+      if (this._bindGeneration !== generation) return
       this.scheduleLiveResize()
       // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
       this._screenWriteGeneration++
@@ -4991,6 +5073,7 @@ export class TerminalContent extends BasePaneContent {
       // still travel this way are the client's own writes, and a write to a
       // shell that has not proved itself has nowhere good to land either — the
       // owner's own words are in the intent handler above.
+      if (this._bindGeneration !== generation) return
       if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
       this.session?.send(data)
     })
@@ -5001,9 +5084,11 @@ export class TerminalContent extends BasePaneContent {
     // of a pane that then sits still — which for a settled agent is
     // forever.
     session.onObservation((observation) => {
+      if (this._bindGeneration !== generation) return
       this.hooks.onPaneObservationChange?.(observation.state, observation.children ?? [])
     })
     session.onExit((exit) => {
+      if (this._bindGeneration !== generation) return
       log.info('nocx: session exited', {
         sid: exit.sessionId,
         cause: exit.cause,
@@ -5034,6 +5119,7 @@ export class TerminalContent extends BasePaneContent {
       host.requestClose()
     })
     session.onInputStalled(() => {
+      if (this._bindGeneration !== generation) return
       // The backend is dropping what this tab sends. Say so: a terminal
       // that swallows keystrokes in silence is indistinguishable from one
       // that is simply ignoring the person at it (nocx-o2le).
@@ -5044,6 +5130,7 @@ export class TerminalContent extends BasePaneContent {
       })
     })
     session.onLiveness((liveness) => {
+      if (this._bindGeneration !== generation) return
       // The backend has revised what it believes about REACHING this
       // session's host: it has stopped answering, it is answering late, or
       // it is answering again. Nothing has ENDED — that is the exit
@@ -5064,6 +5151,7 @@ export class TerminalContent extends BasePaneContent {
       this._publishConnectionCondition()
     })
     session.onReset(() => {
+      if (this._bindGeneration !== generation) return
       renderer.reset()
       this._projections?.reset()
       this.lifecycle.reset()

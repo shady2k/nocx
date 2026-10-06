@@ -41,7 +41,8 @@ type HelperIdentity struct {
 }
 
 func (h HelperIdentity) valid() bool {
-	return h.Host != "" && h.Account != "" && h.Generation != "" && h.SessionID != ""
+	// Local helper bindings deliberately leave both route fields empty.
+	return h.Generation != "" && h.SessionID != "" && (h.Host == "") == (h.Account == "")
 }
 
 type Launch struct {
@@ -51,6 +52,7 @@ type Launch struct {
 	StandardRevision  uint64
 	WorkspaceRevision uint64
 	Source            HelperIdentity
+	TargetGeneration  string
 	SourceHeadID      string
 	Mode              LaunchMode
 	State             LaunchState
@@ -68,6 +70,7 @@ type LaunchPrepare struct {
 	PaneID            string
 	WorkspaceID       string
 	Source            HelperIdentity
+	TargetGeneration  string
 	ExpectedHeadID    string
 	StandardRevision  uint64
 	WorkspaceRevision uint64
@@ -81,7 +84,9 @@ type LaunchCommit struct {
 	LaunchID       string
 	ExpectedSource HelperIdentity
 	ExpectedHeadID string
+	SourceCwd      string
 	Candidate      HelperIdentity
+	Binding        Session
 }
 
 type RetirementCause string
@@ -119,6 +124,9 @@ type LaunchRepository interface {
 	RecordRetirement(context.Context, SessionRetirement) error
 	CompleteRetirement(context.Context, RetirementConfirmation) error
 	GetLaunch(context.Context, string) (Launch, error)
+	SourceBinding(context.Context, string, string) (HelperIdentity, error)
+	ByHelper(context.Context, HelperIdentity) (Launch, error)
+	Retirement(context.Context, HelperIdentity) (SessionRetirement, error)
 	Head(context.Context, string) (Launch, error)
 	Preparing(context.Context) ([]Launch, error)
 	PendingRetirements(context.Context, int) ([]SessionRetirement, error)

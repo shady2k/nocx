@@ -89,3 +89,71 @@ func TestSandboxTicketExpiryCannotMintAuthority(t *testing.T) {
 		t.Fatalf("expired ticket attempted %d forks", attempts)
 	}
 }
+
+func TestSandboxRollbackCancelsUnusedLaunchWithoutForking(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	prepared := call[proto.SandboxPrepareResult](t, svc, proto.OpSandboxPrepare, proto.SandboxPrepareParams{OperationID: "unused-operation", LaunchID: "unused-launch", Mode: proto.SandboxOff, Cwd: t.TempDir()})
+	result := call[proto.SandboxDiscardResult](t, svc, proto.OpSandboxDiscard, proto.SandboxDiscardParams{OperationID: prepared.OperationID, LaunchID: prepared.LaunchID})
+	if result.Entry != nil {
+		t.Fatalf("unused rollback returned a process: %+v", result.Entry)
+	}
+	if err := sandboxCallError(t, svc, proto.OpSandboxLaunch, proto.SandboxLaunchParams{Ticket: prepared.Ticket, OperationID: prepared.OperationID, LaunchID: prepared.LaunchID, Mode: proto.SandboxOff}); err == nil {
+		t.Fatal("rolled-back ticket spawned")
+	}
+	spawner.mu.Lock()
+	defer spawner.mu.Unlock()
+	if len(spawner.reqs) != 0 {
+		t.Fatalf("rollback forked %d processes", len(spawner.reqs))
+	}
+}
+
+func TestSandboxRollbackCancellationNeverReportsAnInflightLaunchAbsent(t *testing.T) {
+	spawner := newGatedSpawner()
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	prepared := call[proto.SandboxPrepareResult](t, svc, proto.OpSandboxPrepare, proto.SandboxPrepareParams{OperationID: "inflight-operation", LaunchID: "inflight-launch", Mode: proto.SandboxOff, Cwd: t.TempDir()})
+	launchParams, err := json.Marshal(proto.SandboxLaunchParams{Ticket: prepared.Ticket, OperationID: prepared.OperationID, LaunchID: prepared.LaunchID, Mode: proto.SandboxOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		value any
+		err   error
+	}
+	launched := make(chan result, 1)
+	go func() {
+		value, launchErr := svc.Call(context.Background(), proto.OpSandboxLaunch, launchParams)
+		launched <- result{value, launchErr}
+	}()
+	<-spawner.entered
+	rollbackParams, err := json.Marshal(proto.SandboxDiscardParams{OperationID: prepared.OperationID, LaunchID: prepared.LaunchID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = svc.Call(cancelled, proto.OpSandboxDiscard, rollbackParams); !errors.Is(err, context.Canceled) {
+		t.Fatalf("inflight rollback reported absence instead of uncertainty: %v", err)
+	}
+	close(spawner.release)
+	outcome := <-launched
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	spawn, ok := outcome.value.(proto.SpawnResult)
+	if !ok {
+		t.Fatalf("native launch returned %T instead of a spawn result", outcome.value)
+	}
+	rollback := call[proto.SandboxDiscardResult](t, svc, proto.OpSandboxDiscard, proto.SandboxDiscardParams{OperationID: prepared.OperationID, LaunchID: prepared.LaunchID})
+	if rollback.Entry == nil || rollback.Entry.Session != spawn.Entry.Session {
+		t.Fatalf("rollback lost the consumed candidate: %+v", rollback)
+	}
+	if err = sandboxCallError(t, svc, proto.OpSandboxDiscard, proto.SandboxDiscardParams{OperationID: prepared.OperationID, LaunchID: "another-launch"}); err == nil {
+		t.Fatal("rollback accepted mismatched correlation")
+	}
+	spawner.inner.mu.Lock()
+	defer spawner.inner.mu.Unlock()
+	if len(spawner.inner.reqs) != 1 {
+		t.Fatalf("rollback changed the one-attempt launch: %d forks", len(spawner.inner.reqs))
+	}
+}

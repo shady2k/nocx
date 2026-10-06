@@ -15,12 +15,16 @@ package app
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	sessionlog "github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneview"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 	"github.com/shady2k/nocx/internal/workers"
@@ -534,3 +538,118 @@ func TestAnOptionAlreadySelectedConfirmsInOneStep(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+type registryInputLookup struct {
+	reg    *session.Reg
+	ref    session.Ref
+	helper paneHelpers
+}
+
+func (l *registryInputLookup) HelperFor(context.Context, string) (paneHelpers, bool) {
+	return l.helper, true
+}
+
+func (l *registryInputLookup) WithInput(ctx context.Context, _ string, input func() error) error {
+	return l.reg.WithInput(ctx, l.ref, input)
+}
+
+type heldIntentHelper struct {
+	paneHelpers
+	entered       chan struct{}
+	statusEntered chan struct{}
+	release       chan struct{}
+}
+
+func (h *heldIntentHelper) Intent(context.Context, string, proto.IntentParams) (proto.IntentResult, error) {
+	close(h.entered)
+	return proto.IntentResult{}, errors.New("response lost")
+}
+
+func (h *heldIntentHelper) IntentStatus(context.Context, string, string) (proto.IntentStatusResult, error) {
+	close(h.statusEntered)
+	<-h.release
+	result := proto.IntentResult{State: "executed", BytesWritten: 1, FenceAfter: 1}
+	return proto.IntentStatusResult{Result: &result}, nil
+}
+
+func TestDelegatedIntentAdmissionDrainsBeforeRetirement(t *testing.T) {
+	logger := sessionlog.NewSlogAdapter(discardLogger(t))
+	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	sess, err := reg.Open(context.Background(), session.Config{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	helper := &heldIntentHelper{
+		entered: make(chan struct{}), statusEntered: make(chan struct{}), release: make(chan struct{}),
+	}
+	hub, access, chain, sessionID := newTestPaneAccess(t, "input-fence", helper)
+	hub.lookup = &registryInputLookup{
+		reg: reg, ref: session.Ref{ID: sess.ID(), Identity: sess.Identity()}, helper: helper,
+	}
+	reader := &fakeKeysReader{records: inputTargetRecord(access, chain, sessionID)}
+	keys := newPaneKeys(reader, hub)
+
+	enter := assistant.KeyName("Enter")
+	intentDone := make(chan error, 1)
+	go func() {
+		_, sendErr := keys.Send(context.Background(), access, assistant.KeysRequest{
+			SessionID: sessionID, TokenID: "tok-1", Key: &enter,
+		})
+		intentDone <- sendErr
+	}()
+	<-helper.entered
+	<-helper.statusEntered
+
+	committed := make(chan struct{})
+	fenceDone := make(chan error, 1)
+	go func() {
+		fenceDone <- reg.FenceInput(context.Background(), session.Ref{
+			ID: sess.ID(), Identity: sess.Identity(),
+		}, func() error {
+			close(committed)
+			return nil
+		}, nil)
+	}()
+	deadline := time.After(time.Second)
+	for reg.InputAllowed(sess.ID()) {
+		select {
+		case <-deadline:
+			t.Fatal("source fence did not close input admission")
+		default:
+			runtime.Gosched()
+		}
+	}
+	select {
+	case <-committed:
+		t.Fatal("source fence committed while admitted delegated intent was unresolved")
+	default:
+	}
+	close(helper.release)
+	if err := <-intentDone; err != nil {
+		t.Fatalf("delegated intent: %v", err)
+	}
+	if err := <-fenceDone; err != nil {
+		t.Fatalf("source fence: %v", err)
+	}
+	select {
+	case <-committed:
+	default:
+		t.Fatal("source fence did not commit after delegated intent completed")
+	}
+
+	key := assistant.KeyName("Enter")
+	for _, req := range []assistant.KeysRequest{
+		{SessionID: sessionID, TokenID: "tok-1", Key: &key},
+		{SessionID: sessionID, TokenID: "tok-1", Text: strPtr("pasted text")},
+	} {
+		res, err := keys.Send(context.Background(), access, req)
+		if err != nil {
+			t.Fatalf("retired delegated input: %v", err)
+		}
+		if res.State != "refused" || res.Refusal == nil || res.Refusal.Cause != "access_revoked" {
+			t.Fatalf("retired delegated input result = %+v, want refused/access_revoked", res)
+		}
+	}
+}

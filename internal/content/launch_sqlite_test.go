@@ -21,7 +21,7 @@ func launchStoreFixture(t *testing.T) (*sqliteContent, HelperIdentity) {
 	if _, err := db.Layout().CreateWorkspace(ctx, Workspace{ID: "ws-launch", Name: "sandbox"}, Tab{ID: "tab-launch", WorkspaceID: "ws-launch", Layout: LayoutRow}, Pane{ID: "pane-launch", TabID: "tab-launch", Cwd: "/work", Kind: PaneLocal, SizeShare: 1}); err != nil {
 		t.Fatal(err)
 	}
-	source := HelperIdentity{Host: "local-host", Account: "local-account", Generation: "helper-generation-1", SessionID: "session-source"}
+	source := HelperIdentity{Generation: "helper-generation-1", SessionID: "session-source"}
 	if err := db.Ledger().CreateSession(ctx, Session{ID: source.SessionID, WorkspaceID: "ws-launch", Host: source.Host, Account: source.Account, Generation: source.Generation, PaneID: "pane-launch"}); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func enforceLaunchIntent(t *testing.T, source HelperIdentity) LaunchPrepare {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return LaunchPrepare{ID: "launch-operation-1", PaneID: "pane-launch", WorkspaceID: "ws-launch", Source: source, ExpectedHeadID: "", StandardRevision: 1, WorkspaceRevision: 0, Mode: LaunchEnforce, Policy: &policy, PolicyDigest: digest, PolicyVersion: sandbox.PolicyVersion}
+	return LaunchPrepare{ID: "launch-operation-1", PaneID: "pane-launch", WorkspaceID: "ws-launch", Source: source, TargetGeneration: source.Generation, ExpectedHeadID: "", StandardRevision: 1, WorkspaceRevision: 0, Mode: LaunchEnforce, Policy: &policy, PolicyDigest: digest, PolicyVersion: sandbox.PolicyVersion}
 }
 
 func TestLaunchPrepareCommitGrantAndRetirementAreAtomic(t *testing.T) {
@@ -53,7 +53,7 @@ func TestLaunchPrepareCommitGrantAndRetirementAreAtomic(t *testing.T) {
 	if replay.ID != first.ID || replay.State != LaunchPreparing {
 		t.Fatalf("prepare replay=%+v", replay)
 	}
-	if _, err = store.Launches().Prepare(ctx, LaunchPrepare{ID: "second-operation", PaneID: intent.PaneID, WorkspaceID: intent.WorkspaceID, Source: source, StandardRevision: 1, WorkspaceRevision: 0, Mode: LaunchOff}); !errors.Is(err, ErrLaunchConflict) {
+	if _, err = store.Launches().Prepare(ctx, LaunchPrepare{ID: "second-operation", PaneID: intent.PaneID, WorkspaceID: intent.WorkspaceID, Source: source, TargetGeneration: source.Generation, StandardRevision: 1, WorkspaceRevision: 0, Mode: LaunchOff}); !errors.Is(err, ErrLaunchConflict) {
 		t.Fatalf("second preparing operation error=%v", err)
 	}
 	if first.GrantID == nil {
@@ -70,7 +70,7 @@ func TestLaunchPrepareCommitGrantAndRetirementAreAtomic(t *testing.T) {
 		t.Fatal("immutable launch grant was updated")
 	}
 	candidate := HelperIdentity{Host: source.Host, Account: source.Account, Generation: source.Generation, SessionID: "session-candidate"}
-	committed, err := store.Launches().Commit(ctx, LaunchCommit{LaunchID: first.ID, ExpectedSource: source, ExpectedHeadID: "", Candidate: candidate})
+	committed, err := store.Launches().Commit(ctx, LaunchCommit{LaunchID: first.ID, ExpectedSource: source, SourceCwd: "/work", ExpectedHeadID: "", Candidate: candidate, Binding: Session{ID: candidate.SessionID, WorkspaceID: intent.WorkspaceID, Generation: candidate.Generation, PaneID: intent.PaneID, LifecycleApplied: new(uint64)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestOffLaunchHasNoGrantAndCommitRejectsStaleSourceOrClosedPane(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			store, source := launchStoreFixture(t)
 			ctx := context.Background()
-			intent := LaunchPrepare{ID: "off-operation", PaneID: "pane-launch", WorkspaceID: "ws-launch", Source: source, Mode: LaunchOff}
+			intent := LaunchPrepare{ID: "off-operation", PaneID: "pane-launch", WorkspaceID: "ws-launch", Source: source, TargetGeneration: source.Generation, Mode: LaunchOff}
 			launch, err := store.Launches().Prepare(ctx, intent)
 			if err != nil {
 				t.Fatal(err)
@@ -142,7 +142,7 @@ func TestOffLaunchHasNoGrantAndCommitRejectsStaleSourceOrClosedPane(t *testing.T
 				t.Fatal(err)
 			}
 			candidate := HelperIdentity{Host: source.Host, Account: source.Account, Generation: source.Generation, SessionID: "candidate-off"}
-			if _, err = store.Launches().Commit(ctx, LaunchCommit{LaunchID: launch.ID, ExpectedSource: source, Candidate: candidate}); !errors.Is(err, ErrLaunchConflict) {
+			if _, err = store.Launches().Commit(ctx, LaunchCommit{LaunchID: launch.ID, ExpectedSource: source, SourceCwd: "/work", Candidate: candidate, Binding: Session{ID: candidate.SessionID, WorkspaceID: intent.WorkspaceID, Generation: candidate.Generation, PaneID: intent.PaneID, LifecycleApplied: new(uint64)}}); !errors.Is(err, ErrLaunchConflict) {
 				t.Fatalf("stale commit error=%v", err)
 			}
 			got, err := store.Launches().GetLaunch(ctx, launch.ID)

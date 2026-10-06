@@ -179,6 +179,19 @@ func (p *paneScreen) HelperFor(ctx context.Context, sessionID string) (paneHelpe
 	return helperPaneClient{client: c, id: id}, true
 }
 
+// WithInput holds the exact current session incarnation's input admission
+// through a delegated helper intent, including its status recovery.
+func (p *paneScreen) WithInput(ctx context.Context, sessionID string, input func() error) error {
+	s, err := p.registry.Get(session.ID(sessionID))
+	if err != nil {
+		return session.ErrInputFenced
+	}
+	return p.registry.WithInput(ctx, session.Ref{
+		ID:       s.ID(),
+		Identity: s.Identity(),
+	}, input)
+}
+
 // helperPaneClient adapts a helper's wire client to paneHelpers for ONE
 // session's HostSessionID, resolved once by HelperFor above. The sessionID
 // parameter each method still takes is part of the paneHelpers contract

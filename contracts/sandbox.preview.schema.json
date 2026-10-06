@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.preview.schema.json",
+  "title": "SandboxPreviewResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operationId",
+    "confirmationId",
+    "expiresAt",
+    "workspaceId",
+    "mode",
+    "policy",
+    "policyDigest",
+    "policyVersion"
+  ],
+  "properties": {
+    "operationId": { "type": "string" },
+    "confirmationId": { "type": "string" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "workspaceId": { "type": "string" },
+    "mode": { "type": "string", "enum": ["off", "enforce"] },
+    "policy": { "oneOf": [{ "$ref": "sandbox.policy.schema.json" }, { "type": "null" }] },
+    "policyDigest": { "type": "string" },
+    "policyVersion": { "type": "integer" }
+  }
+}

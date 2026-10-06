@@ -31,6 +31,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net"
 	"sync"
@@ -118,6 +119,7 @@ type hostedSpawnResult struct {
 	// this is the departure.
 	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
+	candidate          *hostedSpawnCandidate
 }
 
 // spawnFunc is the ONE act that differs between the panes this opener hosts:
@@ -140,15 +142,86 @@ type hostedSpawnResult struct {
 // knows which of them carries the launch.
 type spawnFunc func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error)
 
-// run spawns, attaches and adopts.
-//
-// THE ORDER IS THE ROLLBACK and each step names what is true if the next one
-// fails: a lifecycle leg that is established and then not used is aborted; a
-// session that is spawned and then not attached is closed on the helper; a
-// session that is attached and then not adopted is closed on both sides. The
-// one thing no arm does is close the connection, for the reason the file
-// header gives.
 func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFunc) (hostedSpawnResult, error) {
+	candidate, err := h.openCandidate(ctx, cfg, spawn)
+	if err != nil {
+		return hostedSpawnResult{}, err
+	}
+	return candidate.Publish(ctx)
+}
+
+func (h hostedSpawn) openCandidate(ctx context.Context, cfg session.Config, spawn spawnFunc) (*hostedSpawnCandidate, error) {
+	out, err := h.openCandidateStages(ctx, cfg, spawn)
+	if err != nil {
+		return nil, err
+	}
+	if out.candidate == nil {
+		return nil, errors.New("hosted helper open did not produce a private candidate")
+	}
+	return out.candidate, nil
+}
+
+type hostedSpawnCandidate struct {
+	entry       helperclient.SessionEntry
+	publish     func(context.Context) (hostedSpawnResult, error)
+	abort       func(context.Context) error
+	publishOnce sync.Once
+	abortOnce   sync.Once
+	mu          sync.Mutex
+	started     bool
+	completed   bool
+	published   bool
+	aborted     bool
+	result      hostedSpawnResult
+	err         error
+	abortErr    error
+}
+
+func (c *hostedSpawnCandidate) Publish(ctx context.Context) (hostedSpawnResult, error) {
+	if c == nil {
+		return hostedSpawnResult{}, errors.New("nil hosted candidate")
+	}
+	c.publishOnce.Do(func() {
+		c.mu.Lock()
+		if c.aborted {
+			c.completed = true
+			c.err = errors.New("hosted candidate was aborted before publication")
+			c.mu.Unlock()
+			return
+		}
+		c.started = true
+		c.mu.Unlock()
+		result, err := c.publish(ctx)
+		c.mu.Lock()
+		c.result, c.err = result, err
+		c.published, c.completed = result.Session != nil, true
+		c.mu.Unlock()
+	})
+	return c.result, c.err
+}
+
+func (c *hostedSpawnCandidate) Abort(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	started, completed, published := c.started, c.completed, c.published
+	if !started && !completed && !published {
+		c.aborted = true
+	}
+	err := c.err
+	c.mu.Unlock()
+	if published || (started && !completed) {
+		return errors.New("cannot abort a publishing or published hosted session")
+	}
+	if completed {
+		return err
+	}
+	c.abortOnce.Do(func() { c.abortErr = c.abort(ctx) })
+	return c.abortErr
+}
+
+func (h hostedSpawn) openCandidateStages(ctx context.Context, cfg session.Config, spawn spawnFunc) (hostedSpawnResult, error) {
 	var subscriberRaw [16]byte
 	if _, err := rand.Read(subscriberRaw[:]); err != nil {
 		return hostedSpawnResult{}, err
@@ -157,6 +230,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 
 	var lifecycleAdapter *lifecyclechannel.Adapter
 	var lifecyclePeer net.Conn
+	var lifecyclePublished atomic.Bool
 	// life is the launch the adapter mints, held here rather than written onto
 	// a params struct this function no longer owns: which struct carries it is
 	// the caller's business (see spawnFunc).
@@ -207,7 +281,11 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		coordinatorConn, peerConn := net.Pipe()
 		cursor = newLifecycleCursor(ctx, h.cursors, h.stopping)
 		opts := []lifecyclechannel.Option{
-			lifecyclechannel.WithLossReporter(h.loss),
+			lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+				if lifecyclePublished.Load() && h.loss != nil {
+					h.loss(lane, cause)
+				}
+			}),
 			lifecyclechannel.WithFrameScope(cursor.applyFrame),
 		}
 		if h.helloTimeout > 0 {
@@ -236,14 +314,16 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// THE ROLLBACK ENDS THE DOWNLINK TOO: every arm below that aborts the
 	// lifecycle leg is an open that never became a pane, and a delivery
 	// context with no pane is exactly the lifetime this file refuses to keep.
-	abortLifecycleNow := func() {
+	abortLifecycleNow := func() error {
+		var lifecycleErr, peerErr error
 		if lifecycleAdapter != nil {
-			_ = lifecycleAdapter.Close()
-			_ = lifecyclePeer.Close()
+			lifecycleErr = lifecycleAdapter.Close()
+			peerErr = lifecyclePeer.Close()
 		}
 		if stopDownlink != nil {
 			stopDownlink()
 		}
+		return errors.Join(lifecycleErr, peerErr)
 	}
 	// The detach mirrors the rollback but ends the adapter with Detach, not
 	// Close: the leg's adapter learns the handover from this side instead of
@@ -260,11 +340,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 
 	entry, err := spawn(ctx, life)
 	if err != nil {
-		abortLifecycleNow()
-		return hostedSpawnResult{}, err
-	}
-	if downlink != nil {
-		downlink.Bind(entry.HostSessionID)
+		return hostedSpawnResult{}, errors.Join(err, abortLifecycleNow())
 	}
 
 	// The rows plane is held from the first frame, for the reason the
@@ -280,102 +356,93 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
 	}, holdOpt)
 	if err != nil {
-		abortLifecycleNow()
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
-		return hostedSpawnResult{}, err
+		closeErr := h.client.CloseSession(ctx, entry.HostSessionID)
+		return hostedSpawnResult{}, errors.Join(err, abortLifecycleNow(), closeErr)
 	}
 	if cursor != nil {
 		cursor.bind(entry.HostSessionID.Session, attached.LifecycleIngested())
 	}
 
-	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
-	// pane has no far end to probe (cfg.Host is empty, by the same rule
-	// readopt's own comment states — a local carrier reports no destination),
-	// so the wire notification never arrives for one and this is a no-op
-	// registration rather than a local/remote branch to keep in step by
-	// hand. ObserveHost is the SAME producer the coordinator's own
-	// non-helper dials have always fed (hostLivenessObserver); a helper's
-	// notification is just a second producer for the one function that
-	// decides what either means.
-	if cfg.Host != "" {
-		attached.OnLiveness(func(responsive bool, roundTripMS int64) {
-			h.registry.ObserveHost(cfg.Host, ssh.Reachability{
-				Responsive: responsive,
-				RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
-			})
-		})
-	}
-
-	// THE SCREEN DRAIN'S PUBLISH (nocx-zg3k3.2.2): every full snapshot the
-	// runtime publishes for this subscriber goes to the transport's screen
-	// plane, named by the session the pane is adopted under — which is this
-	// helper session's own id, the one the adoption carries. The carrier's
-	// own losses are not silent either: they are logged here, with the
-	// assembler's named reason, at the one place that knows both ends.
-	if h.publishScreen != nil {
-		screenSid := session.ID(entry.HostSessionID.Session)
-		attached.OnScreenFrame(func(revision uint64, doc []byte) {
-			h.publishScreen(screenSid, revision, doc)
-		})
-		attached.OnScreenLost(func(reason string) {
-			log.From(ctx).Warn("screen assembly lost on the carrier",
-				"session", string(screenSid), "reason", reason)
-		})
-	}
-
-	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
-	// adopt, like the screen drain, so no row the runtime streams from its
-	// first output is dropped at a door nobody opened yet.
-	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
-
-	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
-	if err != nil {
-		stopBlockRows()
-		_ = attached.Close()
-		abortLifecycleNow()
-		_ = h.client.CloseSession(ctx, entry.HostSessionID)
-		return hostedSpawnResult{}, err
-	}
-	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
-	if stopDownlink != nil {
-		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
-		// the delivery context ends when it does.
-		bindDownlinkToSession(sess, stopDownlink)
-	}
-
-	out := hostedSpawnResult{
-		Session: sess, Entry: entry,
-		ObserveOutputHoles: attached.OnOutputHole,
-	}
-	if lifecycleAdapter != nil {
-		out.LifecycleLane = lifecycleAdapter.Lane()
-		out.LifecycleTransport = lifecycleAdapter.TransportID()
-		if h.environmentEntries != nil && downlink != nil {
-			// Forgotten when the pane's lifetime ends — its session's end or
-			// the rollback's — the same context the downlink stops with.
-			h.environmentEntries.register(paneLife, out.LifecycleLane, downlink)
+	candidate := &hostedSpawnCandidate{entry: entry}
+	closeCandidate := func(closeCtx context.Context, stopRows func()) error {
+		if stopRows != nil {
+			stopRows()
 		}
-		var startOnce sync.Once
-		out.StartLifecycle = func() {
-			startOnce.Do(func() {
-				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
-					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle(), cursor, attached)
+		attachErr := attached.Close()
+		lifecycleErr := abortLifecycleNow()
+		closeErr := h.client.CloseSession(closeCtx, entry.HostSessionID)
+		return errors.Join(attachErr, lifecycleErr, closeErr)
+	}
+	candidate.abort = func(abortCtx context.Context) error {
+		return closeCandidate(abortCtx, nil)
+	}
+	candidate.publish = func(publishCtx context.Context) (hostedSpawnResult, error) {
+		lifecyclePublished.Store(true)
+		if downlink != nil {
+			downlink.Bind(entry.HostSessionID)
+		}
+		// Public projections are installed only after this publication stage
+		// is entered. Attach may drain privately while the durable commit runs.
+		if cfg.Host != "" {
+			attached.OnLiveness(func(responsive bool, roundTripMS int64) {
+				h.registry.ObserveHost(cfg.Host, ssh.Reachability{
+					Responsive: responsive,
+					RoundTrip:  time.Duration(roundTripMS) * time.Millisecond,
+				})
 			})
 		}
-		var abortOnce sync.Once
-		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
-		var detachOnce sync.Once
-		out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
+		if h.publishScreen != nil {
+			screenSid := session.ID(entry.HostSessionID.Session)
+			attached.OnScreenFrame(func(revision uint64, doc []byte) {
+				h.publishScreen(screenSid, revision, doc)
+			})
+			attached.OnScreenLost(func(reason string) {
+				log.From(publishCtx).Warn("screen assembly lost on the carrier",
+					"session", string(screenSid), "reason", reason)
+			})
+		}
+		stopBlockRows := bindHeldBlockRows(publishCtx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
+		sess, adoptErr := h.registry.Adopt(publishCtx, cfg, session.ID(entry.HostSessionID.Session), attached)
+		if adoptErr != nil {
+			if cfg.LaunchBinding.LaunchID != "" {
+				// Selection already committed. Detach this failed publisher;
+				// exact-head recovery, not rollback, owns the live process.
+				if stopBlockRows != nil {
+					stopBlockRows()
+				}
+				detachLifecycleNow()
+				return hostedSpawnResult{}, errors.Join(adoptErr, attached.Close())
+			}
+			return hostedSpawnResult{}, errors.Join(adoptErr, closeCandidate(publishCtx, stopBlockRows))
+		}
+		bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
+		if stopDownlink != nil {
+			bindDownlinkToSession(sess, stopDownlink)
+		}
+		out := hostedSpawnResult{Session: sess, Entry: entry, ObserveOutputHoles: attached.OnOutputHole}
+		if lifecycleAdapter != nil {
+			out.LifecycleLane = lifecycleAdapter.Lane()
+			out.LifecycleTransport = lifecycleAdapter.TransportID()
+			if h.environmentEntries != nil && downlink != nil {
+				h.environmentEntries.register(paneLife, out.LifecycleLane, downlink)
+			}
+			var startOnce sync.Once
+			out.StartLifecycle = func() {
+				startOnce.Do(func() {
+					bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(publishCtx),
+						lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle(), cursor, attached)
+				})
+			}
+			var abortOnce sync.Once
+			out.AbortLifecycle = func() { abortOnce.Do(func() { _ = abortLifecycleNow() }) }
+			var detachOnce sync.Once
+			out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
+		}
+		return out, nil
 	}
-	return out, nil
+	return hostedSpawnResult{Entry: entry, candidate: candidate}, nil
 }
 
-// bindDownlinkToSession ends a completion downlink's delivery context when
-// the hosted session's own lifetime ends. sess.Done() is the signal the
-// transport's teardown owner already waits on (monitorExit), so the downlink
-// hangs off the existing edge rather than owning a lifetime of its own — two
-// owners of one lifetime being the defect whichever wins. One goroutine per
-// hosted pane, exactly like that monitor; it exits at the session's end.
 // bindDownlinkToSession ends a completion downlink's delivery context when
 // the hosted session's own lifetime ends. sess.Done() is the signal the
 // transport's teardown owner already waits on (monitorExit), so the downlink

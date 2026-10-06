@@ -91,7 +91,13 @@ type SandboxGetResult struct {
 }
 
 type SandboxDiscardParams struct {
-	Ticket string `json:"ticket"`
+	Ticket      string `json:"ticket,omitempty"`
+	OperationID string `json:"operationId,omitempty"`
+	LaunchID    string `json:"launchId,omitempty"`
 }
 
-type SandboxDiscardResult struct{}
+// Correlation discard is the coordinator's rollback barrier after a crash.
+// A terminal entry is returned without creating or closing another process.
+type SandboxDiscardResult struct {
+	Entry *SessionEntry `json:"entry,omitempty"`
+}

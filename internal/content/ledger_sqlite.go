@@ -38,35 +38,9 @@ import (
 
 func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 	return s.run(ctx, func(ctx context.Context) error {
-		payload := struct {
-			Generation string `json:"generation,omitempty"`
-			Host       string `json:"host,omitempty"`
-			Account    string `json:"account,omitempty"`
-			// The route back (nocx-k6p18.30). omitempty on all three: a
-			// session with no route recorded writes the same payload it
-			// always did, so "no route" and "an older row" are one state
-			// rather than two that have to be told apart.
-			Pane          string `json:"pane,omitempty"`
-			Profile       string `json:"profile,omitempty"`
-			HelperCommand string `json:"helperCommand,omitempty"`
-			Fingerprint   string `json:"fingerprint,omitempty"`
-			// The coordinator's lifecycle cursor (ADR-0077), omitted when
-			// the binding records none — "no record" and "offset 0" are
-			// two states a re-adopt must tell apart.
-			LifecycleApplied *uint64 `json:"lifecycleApplied,omitempty"`
-		}{
-			Generation:       sess.Generation,
-			Host:             sess.Host,
-			Account:          sess.Account,
-			Pane:             sess.PaneID,
-			Profile:          sess.ProfileID,
-			HelperCommand:    sess.HelperCommand,
-			Fingerprint:      sess.Fingerprint,
-			LifecycleApplied: sess.LifecycleApplied,
-		}
-		raw, err := json.Marshal(payload)
+		raw, err := encodeSessionPayload(sess)
 		if err != nil {
-			return fmt.Errorf("content: encode session metadata: %w", err)
+			return err
 		}
 		// THE DEFAULT WORKSPACE IS A FALLBACK ROW THIS REPOSITORY ALREADY
 		// WRITES, and it is written here for the same reason it is written in
@@ -92,11 +66,33 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 		}
 		_, err = s.conn(ctx).ExecContext(ctx,
 			`INSERT INTO sessions (id, workspace_id, started_at, payload) VALUES (?, ?, ?, ?)`,
-			// string(raw), not raw: `sessions` is STRICT and `payload` is
-			// TEXT, so a []byte binds as a BLOB and the constraint refuses it.
-			sess.ID, sess.WorkspaceID, time.Now().UnixMilli(), string(raw))
+			sess.ID, sess.WorkspaceID, time.Now().UnixMilli(), raw)
 		return err
 	})
+}
+
+// encodeSessionPayload is shared by ordinary creation and the atomic launch
+// selection transaction; both persist the same sparse recovery binding.
+func encodeSessionPayload(sess Session) (string, error) {
+	payload := struct {
+		Generation       string  `json:"generation,omitempty"`
+		Host             string  `json:"host,omitempty"`
+		Account          string  `json:"account,omitempty"`
+		Pane             string  `json:"pane,omitempty"`
+		Profile          string  `json:"profile,omitempty"`
+		HelperCommand    string  `json:"helperCommand,omitempty"`
+		Fingerprint      string  `json:"fingerprint,omitempty"`
+		LifecycleApplied *uint64 `json:"lifecycleApplied,omitempty"`
+	}{
+		Generation: sess.Generation, Host: sess.Host, Account: sess.Account,
+		Pane: sess.PaneID, Profile: sess.ProfileID, HelperCommand: sess.HelperCommand,
+		Fingerprint: sess.Fingerprint, LifecycleApplied: sess.LifecycleApplied,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("content: encode session metadata: %w", err)
+	}
+	return string(raw), nil
 }
 
 // recordLifecycleApplied moves the binding's lifecycle cursor forward

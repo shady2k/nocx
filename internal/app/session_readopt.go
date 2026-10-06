@@ -189,6 +189,10 @@ type readoptPass struct {
 	// the fresh-open path carries: a restored pane's runtime goes on streaming
 	// the rows that leave its screen (helper_block_rows.go). Nil wires nothing.
 	blockRows blockRowsSink
+	// launches supplies durable replacement provenance before generic recovery.
+	// Nil keeps legacy coordinators on their existing readopt path.
+	launches content.LaunchRepository
+	sandbox  transport.SandboxHelper
 }
 
 var _ sessionReadopter = (*readoptPass)(nil)
@@ -243,6 +247,19 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 	// OpenHosted says so at the field it leaves empty). Falling through would
 	// keep answering `noInventory` for every local session, which is the
 	// false "may still be running" this bead was filed to end.
+	if rp.launches != nil {
+		protected, err := rp.protectedLaunch(ctx, p)
+		if errors.Is(err, errProtectedExcluded) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if protected != nil {
+			return protected, nil
+		}
+	}
+
 	if isLocalBinding(p) {
 		return rp.readoptLocal(ctx, p)
 	}
@@ -821,7 +838,7 @@ func (rp *readoptPass) readopt(
 			}
 			attached.AdoptExitStatus(*entry.Exit, proto.StreamOffset(entry.Window.Written))
 		}
-		if !attached.WriteGranted() {
+		if !attached.WriteGranted() && entry.Exit == nil {
 			// Another coordinator is holding this session's one write
 			// capability (D12 serves a second coordinator rather than refusing
 			// it; nocx-k6p18.16 binds the lease to the connection that holds
@@ -845,6 +862,19 @@ func (rp *readoptPass) readopt(
 			_ = attached.Close()
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("adopt the re-attached session: %w", err)
+		}
+		if entry.Exit != nil {
+			// A confirmed exited process is re-adopted only to drain its
+			// retained stream. Fence input and new tool admission before the
+			// transport receives the recovered session.
+			ref := session.Ref{ID: sess.ID(), Identity: sess.Identity()}
+			if fenceErr := rp.registry.registry.FenceInput(ctx, ref, func() error { return nil }, func() {}); fenceErr != nil {
+				stopBlockRows()
+				_ = attached.Close()
+				adoption.abort()
+				_ = rp.registry.registry.Close(sid)
+				return transport.HostedSessionOpen{}, fmt.Errorf("fence exited protected session input: %w", fenceErr)
+			}
 		}
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
 		// again, and the downlink the adoption built ends when it does.

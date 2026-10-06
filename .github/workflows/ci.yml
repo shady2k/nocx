@@ -209,6 +209,10 @@ jobs:
         run: go test ./internal/sandbox -run 'TestSeatbeltEscapingAndFilesystemRights|TestDarwinDevicePinRequiresItsActualNamespaceWithoutOpeningTTY' -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof
         run: make sandbox-smoke-macos
+      - name: Exercise native replacement, cancellation and crash recovery
+        env:
+          CGO_ENABLED: '1'
+        run: go test ./internal/app -run '^TestSandboxNative' -count=1 -timeout=180s -v
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

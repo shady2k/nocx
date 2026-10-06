@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.head.schema.json",
+  "title": "SandboxHeadSummary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "launchId",
+    "mode",
+    "state",
+    "grantId",
+    "policyDigest",
+    "policyVersion",
+    "enforcement",
+    "observer"
+  ],
+  "properties": {
+    "launchId": { "type": "string" },
+    "mode": { "type": "string", "enum": ["off", "enforce"] },
+    "state": { "type": "string", "enum": ["preparing", "active", "ended", "failed"] },
+    "grantId": { "type": ["integer", "null"] },
+    "policyDigest": { "type": "string" },
+    "policyVersion": { "type": "integer" },
+    "enforcement": { "type": "string" },
+    "observer": { "type": "string" }
+  }
+}

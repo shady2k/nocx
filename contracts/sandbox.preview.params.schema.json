@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.preview.params.schema.json",
+  "title": "SandboxPreviewRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "source", "expectedHeadId", "mode", "delta"],
+  "properties": {
+    "paneId": { "type": "string", "minLength": 1 },
+    "source": { "oneOf": [{ "$ref": "sandbox.source.schema.json" }, { "type": "null" }] },
+    "expectedHeadId": { "type": "string" },
+    "mode": { "type": "string", "enum": ["off", "enforce"] },
+    "delta": { "$ref": "sandbox.roots.schema.json" }
+  }
+}

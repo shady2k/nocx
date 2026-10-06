@@ -17326,19 +17326,24 @@ describe('TerminalContent binds an already-published replacement session', () =>
 })
 
 describe('persisted sandbox recovery never opens an ordinary fallback', () => {
-  it.each(['pending', 'ended', 'error'] as const)('keeps a %s launch blocked', async (kind) => {
+  it('mounts an ended protected pane and binds only an explicit Relaunch without losing its draft', async () => {
     const client = makeClient()
-    client.recoverSandboxPane.mockResolvedValue({ kind, reason: 'launch_unavailable' })
-    const adopt = vi.fn().mockRejectedValue(new Error('old binding unavailable'))
-    const { tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { expectedReady: false, hooks: { adoptSession: adopt } },
-      client,
-    )
+    client.recoverSandboxPane.mockResolvedValue({ kind: 'ended', reason: 'launch_ended' })
+    const { content, tab, view, ed, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      expect(client.openSession).not.toHaveBeenCalled()
-      expect(adopt).not.toHaveBeenCalled()
-      expect(tab.pane.textContent).toContain('launch_unavailable')
+      view.dispatch({ changes: { from: 0, insert: 'draft before explicit relaunch' } })
+      expect(tab.pane.textContent).toContain('launch_ended')
+      await expect(content.reconnect()).resolves.toBe(false)
+      const replacement = makeSession()
+      await expect(content.bindSession(asSessionHandleForTest(replacement))).resolves.toBe(true)
+      expect(tab.pane.querySelector('[data-sandbox-recovery]')).toBeNull()
+      expect(view.state.doc.toString()).toBe('draft before explicit relaunch')
+      const write = vi.spyOn(rendererOf(content), 'write')
+      replacement.fireData('explicitly relaunched native process')
+      expect(write).toHaveBeenCalledWith('explicitly relaunched native process')
+      ed.hide()
+      rendererOf(content)._fireData('input after explicit relaunch')
+      expect(replacement.send).toHaveBeenCalledWith('input after explicit relaunch')
     } finally {
       teardown()
     }

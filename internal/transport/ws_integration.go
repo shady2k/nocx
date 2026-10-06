@@ -147,6 +147,9 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 // expressed (the schema says so in as many words), and a raw-mode connection
 // has no integration to nag about.
 func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen) {
+	if hosted != nil && hosted.LifecycleLane != "" {
+		s.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
+	}
 	if hosted != nil && hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
 		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason)
 		return

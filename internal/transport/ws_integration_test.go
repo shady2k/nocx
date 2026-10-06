@@ -152,7 +152,13 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	pub.SetEmitter(e.ws)
 	sid := e.openSession(t, 1)
 	const lane = lifecycle.LaneID("lane-1")
-	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	sess, getErr := e.ws.registry.Get(session.ID(sid))
+	if getErr != nil {
+		t.Fatalf("registered hosted session: %v", getErr)
+	}
+	e.ws.registerOpenedIntegration(sess, session.Config{}, &HostedSessionOpen{
+		LifecycleLane: lane, IntegrationShell: "/bin/bash", IntegrationStatus: IntegrationStarting,
+	})
 	if err := pub.BindTransport("T", noopPort{}); err != nil {
 		t.Fatal(err)
 	}

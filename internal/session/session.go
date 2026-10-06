@@ -1599,6 +1599,17 @@ func (s *realSession) ShellIntegrationReason() ssh.RefusalReason {
 // including a channel that was closed before its watcher recorded, is a
 // loss, and a loss never carries a fabricated status.
 func (s *realSession) ExitOutcome() (ExitCause, int) {
+	if s.inputGate != nil {
+		s.inputGate.mu.Lock()
+		retired := s.inputGate.retired
+		s.inputGate.mu.Unlock()
+		if retired {
+			// Retirement belongs to a committed replacement, not to the
+			// shell's exit intent. Its old pipe may end before the new
+			// binding reaches the renderer; that must not close the pane.
+			return ExitInterrupted, 0
+		}
+	}
 	provider, ok := s.ch.(interface{ WaitErr() (error, bool) })
 	if !ok {
 		return ExitInterrupted, 0

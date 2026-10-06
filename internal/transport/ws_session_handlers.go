@@ -1102,10 +1102,6 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	if s.contentDB != nil {
 		sessionLedger = s.contentDB.Ledger()
 	}
-	// The lane registrar is taken by assertion because not every machine
-	// handed to these handlers has one — the test doubles do not — and a
-	// helper-hosted open is the only path that produces a lane at all.
-	laneRegistrar, _ := any(s).(lifecycleLaneRegistrar)
 	// One opener per server, not one per request: it holds no per-connection
 	// state, and the backend's own callers reach the same instance
 	// (nocx-dkawo.6).
@@ -1114,7 +1110,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		launcher: s.remoteLauncher, installer: s.remoteInstaller,
 		lifecycle: s.remoteLifecycle, panes: s.layoutReader(),
 		ledger: sessionLedger, helper: s.helperSessionOpener,
-		sandbox: s.sandbox, laneRegistrar: laneRegistrar,
+		sandbox:    s.sandbox,
 		paneOpened: s.paneOpenedNote,
 	}
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)

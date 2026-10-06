@@ -79,8 +79,12 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
  *  nothing to follow. Raise both or neither. */
 const MAX_ROWS = 30
 
+export type InternalSubmitDisposition = 'pass' | 'consumed' | 'refused'
+
 export interface EditorActions {
   submit: (doc: string, plan?: SubmitPlan) => void
+  /** Handles internal commands before planning or forwarding them to the shell. */
+  internalSubmit?: (doc: string) => InternalSubmitDisposition | Promise<InternalSubmitDisposition>
   /** Enter on an empty (or whitespace-only) draft. It is not a command — no
    *  block, no attempt, no ledger record — but it IS a keystroke a shell
    *  answers with a fresh prompt, so the newline still has to reach the pty.
@@ -821,53 +825,69 @@ export class CommandEditor {
     this.clearDoc()
   }
 
-  /** True while a beforeSubmit verdict is in flight: a second Enter in that
-   *  window must not start a second resolve (each would commit a duplicate
-   *  ledger record on success). Cleared when the verdict lands. */
+  /** True while either submit hook is awaiting its verdict. */
   private _submitInFlight = false
 
-  /** Submit the current document, then hide and clear (ADR-0004 §2). Also
-   *  the overlay's execution path: RecallOverlay calls this so Enter in the
-   *  palette runs the previewed command through exactly the same path a
-   *  typed Enter takes. With a beforeSubmit hook registered, the atomic
-   *  handoff waits for the verdict — a reference line resolves first, a
-   *  veto keeps the draft with the host's report already on screen. */
+  /** Submit the current document, then hide and clear (ADR-0004 §2). */
   submit(): void {
     const doc = this.view.state.doc.toString()
-    // An empty prompt is not a command, and this is the only place that can
-    // say so before any state moves. CommandLedger.open already owns the rule
-    // — it refuses an empty string — but it is downstream of commit(), which
-    // clears and hides FIRST (the atomic handoff below). So an empty Enter
-    // threw out of onKeydown with the editor already hidden and no input-state
-    // transition to show it again: the prompt vanished for the rest of the
-    // session. Asking the question here keeps one answer to "is this a
-    // command" and keeps it on the side of the handoff that can still decline.
-    // Whitespace alone counts as empty for the same reason — it would open a
-    // block for a command nobody typed. Only the DECISION trims; what a real
-    // command sends is still the document byte-for-byte, so a leading-space
-    // line (` ls`, kept out of shell history on purpose) is untouched.
-    // Not a command — but still a keystroke. The draft is cleared (it holds
-    // only whitespace) and the bare newline goes to the pty, so the shell
-    // answers with a fresh prompt exactly as it would in a plain terminal.
-    // Neither the ledger nor the attempt path is entered, which is what
-    // keeps the editor from being hidden by a handoff that then throws.
-    // And the bare newline goes to the pty only when the line was going to
-    // the SHELL. With Ask active there is nothing to ask and no reason to
-    // poke the shell — an empty Enter in a mode the person chose must not
-    // reach a program that is waiting on stdin. The seam is the same one
-    // authority the handoff reads (the registry's active target), never a
-    // second answer to "where does Enter go".
+    // Empty input retains its established newline/clear behavior and is not
+    // offered to internal commands or the planner.
     if (doc.trim() === '') {
       this.clearDoc()
       if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
     }
+    if (this._submitInFlight) return
+
+    const internalSubmit = this.actions.internalSubmit
+    if (!internalSubmit) {
+      void this.runBeforeSubmit(doc)
+      return
+    }
+
+    let disposition: InternalSubmitDisposition | Promise<InternalSubmitDisposition>
+    try {
+      disposition = internalSubmit(doc)
+    } catch {
+      // A failed internal request must leave the user's draft untouched.
+      return
+    }
+    if (typeof (disposition as Promise<InternalSubmitDisposition>).then === 'function') {
+      this._submitInFlight = true
+      void Promise.resolve(disposition as Promise<InternalSubmitDisposition>)
+        .then((result) => {
+          if (result === 'consumed') {
+            if (this.view.state.doc.toString() === doc) this.clearDoc()
+          } else if (result === 'pass' && this.view.state.doc.toString() === doc) {
+            return this.runBeforeSubmit(doc)
+          }
+          // Refusal and unknown runtime results preserve the draft.
+        })
+        .catch(() => {
+          // A rejected navigation/request preserves the draft.
+        })
+        .finally(() => {
+          this._submitInFlight = false
+        })
+      return
+    }
+
+    if (disposition === 'consumed') {
+      if (this.view.state.doc.toString() === doc) this.clearDoc()
+      return
+    }
+    if (disposition === 'refused') return
+    if (disposition === 'pass') void this.runBeforeSubmit(doc)
+  }
+
+  /** Continue the existing planner/commit path after an internal pass. */
+  private runBeforeSubmit(doc: string): void | Promise<void> {
     const hook = this.actions.beforeSubmit
     if (!hook) {
       this.commit(doc)
       return
     }
-    if (this._submitInFlight) return
     let result: SubmitPlan | Promise<SubmitPlan | false> | false
     try {
       result = hook(doc)
@@ -877,27 +897,20 @@ export class CommandEditor {
     }
     if (result === false) return
     if (typeof (result as Promise<SubmitPlan | false>).then === 'function') {
-      // The verdict is in flight (a line with references resolves over the
-      // wire). A second Enter is swallowed; an edit to the draft drops the
-      // stale plan — the user's new text is the draft.
-      this._submitInFlight = true
-      void Promise.resolve(result as Promise<SubmitPlan | false>)
+      const pending = Promise.resolve(result as Promise<SubmitPlan | false>)
         .then((plan) => {
           if (plan !== false && this.view.state.doc.toString() === doc)
             this.commit(plan.sendLine, plan)
         })
         .catch(() => {
-          // Fail-open: the draft stays.
+          // Fail-open: a rejected planner leaves the draft untouched.
         })
-        .finally(() => {
-          this._submitInFlight = false
-        })
-      return
+      if (this._submitInFlight) return pending
+      this._submitInFlight = true
+      return pending.finally(() => {
+        this._submitInFlight = false
+      })
     }
-    // A SYNCHRONOUS verdict (a plain line — no references, no wire call):
-    // the atomic handoff runs NOW, with no microtask gap. A gap would let a
-    // fast-typed key change the draft and drop the commit under the stale-
-    // plan guard, and it would break the sync-after-Enter observers.
     const plan = result as SubmitPlan
     this.commit(plan.sendLine, plan)
   }

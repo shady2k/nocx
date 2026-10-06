@@ -92,6 +92,7 @@ import type { IntegrationMethod } from './host-key-dialog'
 import type { SessionHomeSource } from './where/session-home'
 import type { BranchSource } from './where/branch-source'
 import type { OutputRecordingSource } from './integration/status'
+import type { SandboxNavigationRequest, SandboxPaneContext } from './sandbox-ui'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -884,6 +885,7 @@ export class PaneManager {
    *  the same reason it is beside onCreateEndpoint — a line on screen names
    *  the one page that governs what it is about — and wired by main.tsx. */
   onManagePermissions?: () => void
+  onOpenSandbox?: SandboxNavigationRequest
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -1574,6 +1576,7 @@ export class PaneManager {
         createBranchSource: this.createBranchSource,
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
+        onOpenSandbox: (paneId) => this.openSandboxForPane(paneId),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
@@ -1684,6 +1687,7 @@ export class PaneManager {
           paneRef.current?.updateConnectionCondition(condition),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
+        onOpenSandbox: (paneId) => this.openSandboxForPane(paneId),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
         onHelperConsentAsk: this.onHelperConsentAsk,
@@ -2560,6 +2564,35 @@ export class PaneManager {
   activeTerminalContent(): TerminalContent | null {
     const content = this.activePane?.content
     return content instanceof TerminalContent ? content : null
+  }
+
+  activeSandboxContext(): SandboxPaneContext | null {
+    return this.sandboxContextForPane(this.activePane?.wireId ?? '')
+  }
+
+  sandboxContextForPane(paneId: string): SandboxPaneContext | null {
+    const pane = this.panes.find((candidate) => candidate.wireId === paneId)
+    if (!pane || !(pane.content instanceof TerminalContent)) return null
+    const workspaceId = this.layout.tabOf(pane.wireId)?.workspaceId
+    if (!workspaceId) return null
+    return pane.content.sandboxPaneContext(
+      workspaceId,
+      () =>
+        this.panes.includes(pane) && this.layout.tabOf(pane.wireId)?.workspaceId === workspaceId,
+    )
+  }
+
+  private openSandboxForPane(paneId: string): Promise<boolean> {
+    const context = this.sandboxContextForPane(paneId)
+    if (!context || !this.onOpenSandbox) return Promise.resolve(false)
+    return this.onOpenSandbox(context)
+  }
+
+  bindSandboxCandidate(context: SandboxPaneContext, handle: SessionHandle): Promise<boolean> {
+    if (!context.isCurrent()) return Promise.resolve(false)
+    const pane = this.panes.find((candidate) => candidate.wireId === context.paneId)
+    if (!pane || !(pane.content instanceof TerminalContent)) return Promise.resolve(false)
+    return pane.content.bindSession(handle)
   }
 
   /**

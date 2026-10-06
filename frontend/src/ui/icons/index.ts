@@ -47,3 +47,4 @@ export { default as GitBranchIcon } from './GitBranchIcon'
 export { iconElement } from './icon-element'
 
 export { default as CheckIcon } from './CheckIcon'
+export { default as ShieldIcon } from './ShieldIcon'

@@ -15,7 +15,7 @@ import {
 } from './lifecycle/state'
 import { LifecycleProjections } from './lifecycle/projections'
 import type { UnattributedCommand } from './lifecycle/projections'
-import { CommandEditor } from './editor'
+import { CommandEditor, type InternalSubmitDisposition } from './editor'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
@@ -151,7 +151,8 @@ import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
-import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SandboxRecovery } from './ipc'
+import type { SandboxPaneContext } from './sandbox-ui'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -550,6 +551,8 @@ export interface TerminalContentHooks {
    *  when the title already says it. Only TerminalContent holds both halves
    *  of that question. */
   onSubtitleChange?: (subtitle: string) => void
+  /** The exact internal shell command opens the existing Settings surface. */
+  onOpenSandbox?: (paneId: string) => Promise<boolean>
   /** The program's own OSC 0/2 title, delivered separately from the
    *  composed display title. Agent-state classification keys on THIS,
    *  never on the composed title — which is usually a filesystem path or
@@ -800,6 +803,16 @@ export interface PaneBlock {
   readonly command: string
   readonly status: CommandStatus
   readonly exitCode: number | null
+}
+
+type BlockedSandboxRecovery = Extract<SandboxRecovery, { reason: string }>
+
+class SandboxRecoveryBlockedError extends Error {
+  constructor(readonly recovery: BlockedSandboxRecovery) {
+    super(
+      `Sandbox recovery ${recovery.kind}: ${recovery.reason}. Open Sandbox settings to inspect or explicitly relaunch.`,
+    )
+  }
 }
 
 export class TerminalContent extends BasePaneContent {
@@ -1280,6 +1293,7 @@ export class TerminalContent extends BasePaneContent {
    *  the backend emitted before the session died — must not clear it
    *  (nocx-ictcq). */
   private _sessionLost = false
+  private _sandboxRecoveryBlocked: BlockedSandboxRecovery | null = null
   private _host = ''
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
@@ -1485,7 +1499,8 @@ export class TerminalContent extends BasePaneContent {
   private _syncReconnectOffer(): void {
     const target = this._paneTarget
     if (!target) return
-    const wanted = this._sessionLost || this._reconnecting
+    const wanted =
+      this._sandboxRecoveryBlocked === null && (this._sessionLost || this._reconnecting)
     if (!wanted) {
       this._offer?.dispose()
       this._offer = null
@@ -2326,9 +2341,7 @@ export class TerminalContent extends BasePaneContent {
       const recovery = await this.client.recoverSandboxPane(anchor.paneId)
       if (recovery.kind === 'live') return recovery.handle
       if (recovery.kind !== 'ordinary') {
-        throw new Error(
-          `Sandbox recovery ${recovery.kind}: ${recovery.reason}. Open Sandbox settings to inspect or explicitly relaunch.`,
-        )
+        throw new SandboxRecoveryBlockedError(recovery)
       }
     }
     const adopted = await this.adoptLiveSession()
@@ -2982,6 +2995,14 @@ export class TerminalContent extends BasePaneContent {
 
       this.editor = new CommandEditor(
         {
+          internalSubmit: (doc): InternalSubmitDisposition | Promise<InternalSubmitDisposition> => {
+            if (doc.trim() !== '/sandbox' || this.inputTargets?.active().routesToShell !== true) {
+              return 'pass'
+            }
+            const navigate = this.hooks.onOpenSandbox
+            if (!navigate) return 'refused'
+            return navigate(this.pane.paneId).then((opened) => (opened ? 'consumed' : 'refused'))
+          },
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
           // with references is resolved through vault.resolveLine; the
           // RESOLVED line goes to the PTY, the reference-intact line to
@@ -4067,10 +4088,6 @@ export class TerminalContent extends BasePaneContent {
         this.env?.recordCwd(path)
       })
 
-      // The session and everything hanging off it. Extracted so it can run
-      // again: a reconnect rebuilds exactly this and nothing above it.
-      if (!(await this._bindSession(signal, renderer, false))) return
-
       renderer.onBell(() => {
         // TWO facts, not one, and neither replaces the other. The tab dot is
         // "something happened in a pane you are not looking at" — local,
@@ -4325,6 +4342,27 @@ export class TerminalContent extends BasePaneContent {
       document.addEventListener('pointerdown', this.onSelectionPointerDown, true)
       document.addEventListener('pointerup', this.onSelectionPointerUp, true)
       document.addEventListener('pointercancel', this.onSelectionPointerUp, true)
+      // Pane-owned listeners exist even when a protected head has no live
+      // process. Explicit Relaunch can then bind a candidate without remount.
+      try {
+        if (!(await this._bindSession(signal, renderer, false))) return
+      } catch (err) {
+        if (!(err instanceof SandboxRecoveryBlockedError)) throw err
+        if (signal.aborted || this._disposed) return
+        this._sandboxRecoveryBlocked = err.recovery
+        this._sessionLost = true
+        this._lifecycleUnsub?.()
+        this._lifecycleUnsub = null
+        this._historyRecordedUnsub?.()
+        this._historyRecordedUnsub = null
+        const notice = document.createElement('pre')
+        notice.className = 'pane-error'
+        notice.dataset.sandboxRecovery = ''
+        notice.textContent = err.message
+        target.prepend(notice)
+        this._publishConnectionCondition()
+        this._publishTabMark()
+      }
       this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
@@ -4402,7 +4440,7 @@ export class TerminalContent extends BasePaneContent {
    * the enforcement.
    */
   async reconnect(): Promise<boolean> {
-    if (this._disposed || this._reconnecting) return false
+    if (this._disposed || this._reconnecting || this._sandboxRecoveryBlocked !== null) return false
     if (!this._sessionLost) return false
     const renderer = this.renderer
     if (renderer === null) return false
@@ -4482,6 +4520,16 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
+  sandboxPaneContext(workspaceId: string, isCurrent: () => boolean): SandboxPaneContext {
+    return {
+      paneId: this.pane.paneId,
+      workspaceId,
+      kind: this.sshOpts ? 'ssh' : 'local',
+      registered: this.pane.registered,
+      isCurrent: () => !this._disposed && isCurrent(),
+    }
+  }
+
   /**
    * Give this pane a live backend session, and wire everything that hangs off
    * one.
@@ -4510,7 +4558,8 @@ export class TerminalContent extends BasePaneContent {
    *  This is deliberately distinct from reconnect/open: the supplied handle
    *  already represents the server's completed binding transaction. */
   async bindSession(handle: SessionHandle): Promise<boolean> {
-    if (this._disposed || this.renderer === null || this.session === null) return false
+    if (this._disposed || !this._mounted || this.renderer === null) return false
+    if (this.session === handle) return true
     const renderer = this.renderer
     this._lifecycleUnsub?.()
     this._lifecycleUnsub = null
@@ -4528,8 +4577,10 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
     const previous = this.session
-    paneScreenReaders.delete(previous.sessionId)
-    previous.detach()
+    if (previous !== null) {
+      paneScreenReaders.delete(previous.sessionId)
+      previous.detach()
+    }
     this.session = null
     this._recoveryAcking = false
     this._recoveryAckClaim = null
@@ -4560,6 +4611,8 @@ export class TerminalContent extends BasePaneContent {
     this._publishConnectionCondition()
     const bound = await this._bindSession(new AbortController().signal, renderer, true, handle)
     if (bound) {
+      this._sandboxRecoveryBlocked = null
+      this._paneTarget?.querySelector('[data-sandbox-recovery]')?.remove()
       this._publishConnectionCondition()
       this._publishTabMark()
     }
@@ -5388,10 +5441,10 @@ export class TerminalContent extends BasePaneContent {
    * area in DEVICE pixels, cols × the renderer's device cell
    * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
    * unit, the helper's cellGeometry decodes it, and nothing else converts).
-   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
-   * cell — it is the unit where the metric is exact, and the one a
-   * rounding step cannot drift (review round 1). One shape at every door —
-   * open, attach, resize (SessionSize).
+   * DEVICE pixels, never rounded CSS cell dimensions. Measurements can carry
+   * fractional device-pixel noise, so round the complete extent once for the
+   * integer native winsize contract. One shape at every door — open, attach,
+   * resize (SessionSize).
    *
    * The renderer is a parameter because the OPEN reports before this
    * window's renderer field exists: _bindSession runs while `renderer` is
@@ -5416,8 +5469,8 @@ export class TerminalContent extends BasePaneContent {
     const report = {
       cols: this.cols,
       rows: this.rows,
-      xpixel: dims !== null ? this.cols * dims.width : 0,
-      ypixel: dims !== null ? this.rows * dims.height : 0,
+      xpixel: dims !== null ? Math.round(this.cols * dims.width) : 0,
+      ypixel: dims !== null ? Math.round(this.rows * dims.height) : 0,
     }
     this._lastReport = report
     return report

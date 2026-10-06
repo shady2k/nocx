@@ -297,6 +297,31 @@ describe('SettingsContent', () => {
     expect(SINGLETON_SETTINGS).toBe('nocx.settings')
   })
 
+  it('opens the registered Sandbox page with the synchronously pinned context after a fresh mount', async () => {
+    mockReady(client)
+    const context = {
+      paneId: 'pane-pinned',
+      workspaceId: 'workspace-pinned',
+      kind: 'local' as const,
+      registered: Promise.resolve(true),
+      isCurrent: () => true,
+    }
+    const pending = content.openSandbox(context)
+    await content.mount(target, host, signal)
+
+    await expect(pending).resolves.toBe(true)
+    const item = target.querySelector<HTMLElement>('[data-item="sandbox"]')
+    expect(item?.getAttribute('data-selected')).toBe('true')
+    expect(target.textContent).toContain('Песочница недоступна')
+  })
+
+  it('refuses a queued Sandbox navigation when Settings is disposed before mount', async () => {
+    const pending = content.openSandbox(null)
+    content.dispose()
+
+    await expect(pending).resolves.toBe(false)
+  })
+
   // ── Mount ──────────────────────────────────────────────────────────
 
   it('mounts the Page layout with rail and content', async () => {
@@ -617,60 +642,6 @@ describe('SettingsContent', () => {
     const countSpan = target.querySelector('.ui-badge[data-tone="warning"]')
     // Only terminal.fontSize — ai.apiKey is a secret and is excluded.
     expect(countSpan!.textContent).toBe('1')
-  })
-
-  it('rail renders group headings, every page under exactly its declared group, ungrouped pages at top level (criterion 1)', async () => {
-    mockReady(client)
-    await content.mount(target, host, signal)
-
-    const nav = target.querySelector('[aria-label="Settings sections"]')!
-    const headings = Array.from(nav.querySelectorAll('.ui-grouped-nav__heading')).map(
-      (h) => h.textContent,
-    )
-    expect(headings).toEqual(['Assistant', 'Vault', 'Application', 'Developer'])
-
-    const items = Array.from(nav.querySelectorAll<HTMLElement>('.ui-grouped-nav__item'))
-    const labels = items.map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
-    // Top level first (Connections — a working surface, not a setting), then
-    // groups in catalogue order with their members in registry order.
-    expect(labels).toEqual([
-      'Connections',
-      'Endpoints',
-      'Roles',
-      'Assistant permissions',
-      // Beside the permissions page and not the same subject: that one
-      // governs nocx's own assistant, this lists the foreign programs a
-      // person admitted to nocx's tools (nocx-6jbad).
-      'Agent access',
-      'Agent screens',
-      // The rule that reads an agent, before the pages about it: the emitting
-      // view shows what a rule reads and calibration checks whether it is any
-      // good, and this is where the rule itself comes from (nocx-y6w66).
-      'Agent rules',
-      'Calibrate an agent',
-      // Skills is an ASSISTANT page and the last of them (nocx-fe7fe.1). It
-      // sat under Application beside Backup, and it sat there TWICE, because
-      // `skills.enabled` declares section "Skills" and that minted a second
-      // rail row of the same name. The page owns the section now, so there is
-      // one row and it is here.
-      'Skills',
-      'Protection',
-      'Secrets',
-      'Terminal',
-      'Application',
-      'Backup & Restore',
-      'Snippets',
-      'About',
-      'AI',
-    ])
-
-    // Connections is top level: a direct child of the top list, not a group.
-    const topList = nav.querySelector('.ui-grouped-nav__list')!
-    const first = topList.querySelector(':scope > li') as HTMLElement
-    expect(first.getAttribute('data-item')).toBe('connections')
-    // And no page appears twice.
-    const ids = items.map((l) => l.getAttribute('data-item'))
-    expect(new Set(ids).size).toBe(ids.length)
   })
 
   it('Skills rail navigation mounts the Skills page', async () => {

@@ -162,6 +162,17 @@ export interface SidebarAction {
   readonly onActivate: () => void
 }
 
+/** A contextual top-zone action, never a sidebar view or a capability rail. */
+export interface SidebarContextAction {
+  readonly id: string
+  readonly afterViewId: string
+  readonly title: () => string
+  readonly icon: Component
+  readonly selected: () => boolean
+  readonly disabled: () => boolean
+  readonly onActivate: () => void
+}
+
 /** The sidebar's remembered state, and the seam that records a change.
  *
  *  It used to be `localStorage` under `nocx.sidebar.collapsed`, which is
@@ -307,6 +318,7 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
+  contextAction: SidebarContextAction | null
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
@@ -435,7 +447,7 @@ function SidebarSolid(props: SidebarSolidProps) {
   const handleKeyDown = (e: KeyboardEvent) => {
     const toolbar = props.bar.querySelector('[role="toolbar"]')
     if (!toolbar) return
-    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button')]
+    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button:not(:disabled)')]
     if (buttons.length === 0) return
 
     const currentIdx = buttons.findIndex((b) => b.getAttribute('tabindex') === '0')
@@ -506,48 +518,69 @@ function SidebarSolid(props: SidebarSolidProps) {
             const label = () =>
               count() === 0 ? view.title : `${view.title} — ${count()} ${COUNT_WORD[kind()]}`
             return (
-              <IconButton
-                size="lg"
-                selected={
-                  view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
-                }
-                data-view={view.id}
-                title={label()}
-                ariaLabel={label()}
-                tabIndex={view.id === tabbableId() ? 0 : -1}
-                railIndicator={true}
-                onClick={() => handleViewClick(view)}
-              >
-                <view.icon />
-                {/* Inside the button, not beside it: the button is the
+              <>
+                <IconButton
+                  size="lg"
+                  selected={
+                    view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
+                  }
+                  data-view={view.id}
+                  title={label()}
+                  ariaLabel={label()}
+                  tabIndex={view.id === tabbableId() ? 0 : -1}
+                  railIndicator={true}
+                  onClick={() => handleViewClick(view)}
+                >
+                  <view.icon />
+                  {/* Inside the button, not beside it: the button is the
                     positioning context and the only toolbar stop, so a mark
                     drawn on it cannot become a second thing to tab to. Both
                     are pointer-events:none in CSS — the whole button is one
                     target. */}
-                <Show when={count() > 0}>
-                  <span class="activity-bar-badge" data-view-badge={view.id}>
-                    <Badge tone="info" variant="solid">
-                      {count() > 99 ? '99+' : String(count())}
-                    </Badge>
-                  </span>
-                </Show>
-                {/* The guard is on PRESENCE and not on truthiness: zero is a
+                  <Show when={count() > 0}>
+                    <span class="activity-bar-badge" data-view-badge={view.id}>
+                      <Badge tone="info" variant="solid">
+                        {count() > 99 ? '99+' : String(count())}
+                      </Badge>
+                    </span>
+                  </Show>
+                  {/* The guard is on PRESENCE and not on truthiness: zero is a
                     real fraction, and `when={progress()}` would hide the bar
                     for a transfer that has not moved a byte yet. */}
-                <Show when={progress() !== null}>
-                  <span class="activity-bar-progress" data-view-progress={view.id}>
-                    {/* Non-null inside this branch by the guard above, which
+                  <Show when={progress() !== null}>
+                    <span class="activity-bar-progress" data-view-progress={view.id}>
+                      {/* Non-null inside this branch by the guard above, which
                         is what the cast rests on. Deliberately not
                         `progress() ?? 0`: a default painted at the render
                         site is a fraction the view never produced and cannot
                         see. */}
-                    <ProgressBar
-                      value={progress() as number}
-                      ariaLabel={`${view.title} progress`}
-                    />
-                  </span>
+                      <ProgressBar
+                        value={progress() as number}
+                        ariaLabel={`${view.title} progress`}
+                      />
+                    </span>
+                  </Show>
+                </IconButton>
+                <Show
+                  when={props.contextAction?.afterViewId === view.id ? props.contextAction : null}
+                  keyed
+                >
+                  {(action) => (
+                    <IconButton
+                      size="lg"
+                      selected={action.selected()}
+                      disabled={action.disabled()}
+                      data-context-action={action.id}
+                      title={action.title()}
+                      ariaLabel={action.title()}
+                      tabIndex={!action.disabled() && action.id === tabbableId() ? 0 : -1}
+                      onClick={action.onActivate}
+                    >
+                      <action.icon />
+                    </IconButton>
+                  )}
                 </Show>
-              </IconButton>
+              </>
             )
           }}
         </For>
@@ -626,6 +659,7 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
+  contextAction?: SidebarContextAction,
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
@@ -666,6 +700,7 @@ export function mountSidebar(
         panel={panel}
         views={views}
         actions={actions}
+        contextAction={contextAction ?? null}
         persistence={persistence ?? null}
         state={state}
         storeActions={storeActions}

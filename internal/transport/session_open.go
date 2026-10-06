@@ -38,7 +38,6 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -182,10 +181,6 @@ type sessionOpener struct {
 	ledger  content.LedgerRepository
 	helper  HelperSessionOpener
 	sandbox SandboxControl
-	// laneRegistrar records the lifecycle lane a helper-hosted open returned.
-	// It is a seam and not the whole machine because what this needs is one
-	// statement: this lane belongs to this session.
-	laneRegistrar lifecycleLaneRegistrar
 	// paneOpened is told about every pane THIS opener successfully opened,
 	// with the spec it was asked for — the one door both callers (a
 	// renderer's `open` and the backend's OpenSession) already share
@@ -200,12 +195,6 @@ type sessionOpener struct {
 // from it, or fails because of it; the receiver owns whatever the fact is
 // worth.
 type paneOpenedNote func(spec OpenSpec, sid session.ID)
-
-// lifecycleLaneRegistrar is the narrow view of "remember which session this
-// lane speaks for" (AD-8).
-type lifecycleLaneRegistrar interface {
-	RegisterLifecycleLane(lifecycle.LaneID, session.ID)
-}
 
 // workspaceForOpen derives the workspace this session belongs to.
 //
@@ -385,10 +374,6 @@ func (o *sessionOpener) Open(ctx context.Context, spec OpenSpec) (OpenedSession,
 	// unconditional line.
 	if hosted != nil {
 		log.From(ctx).Info("session opened", "id", string(sess.ID()), "kind", hostedKindName(cfg.Kind), "profile_id", cfg.ProfileID)
-	}
-
-	if hosted != nil && hosted.LifecycleLane != "" && o.laneRegistrar != nil {
-		o.laneRegistrar.RegisterLifecycleLane(hosted.LifecycleLane, sess.ID())
 	}
 
 	ownedPID := 0

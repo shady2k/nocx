@@ -72,6 +72,8 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
+import { SandboxSection } from './sandbox-section'
+import type { SandboxSettingsServices, SandboxPaneContext } from './sandbox-ui'
 import { AboutSection } from './about-section'
 import type { AboutClient } from './about-client'
 import type { ClipboardAccess } from './clipboard'
@@ -202,6 +204,8 @@ export interface SettingsComponentHandle {
    * lands.
    */
   openPage(id: string): void
+  /** Open Sandbox while pinning the context captured before Settings activation. */
+  openSandbox(context: SandboxPaneContext | null): Promise<boolean>
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -270,6 +274,8 @@ export interface SettingsComponentProps {
    *  name on the tab. Optional — without it the picker says what the wire
    *  said, which is honest and unmemorable. */
   paneName?: (sessionId: string) => string | null
+  /** The root-owned sandbox client and exact-target candidate binder. */
+  sandboxServices?: SandboxSettingsServices
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -297,6 +303,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [newEndpointRequest, setNewEndpointRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
   const [newSecretValue, setNewSecretValue] = createSignal('')
+  const [sandboxContext, setSandboxContext] = createSignal<SandboxPaneContext | null>(null)
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
   // The rail's group catalogue and the section→group mapping, straight from
   // the settings.describe snapshot. The rail renders from these; there is no
@@ -353,7 +360,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // ── Observer ───────────────────────────────────────────────────────
   let cleanupObserver: (() => void) | null = null
 
+  let settingsDisposed = false
   onCleanup(() => {
+    settingsDisposed = true
     cleanupObserver?.()
   })
 
@@ -660,6 +669,16 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    const sandboxPage: SettingsPage = {
+      kind: 'component',
+      id: 'sandbox',
+      title: 'Песочница',
+      groupId: 'application',
+      scrollMode: 'page',
+      renderContent: () => (
+        <SandboxSection services={props.sandboxServices} context={sandboxContext()} />
+      ),
+    }
 
     const rolesPage: SettingsPage = {
       kind: 'component',
@@ -860,6 +879,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // Last in Assistant, after the two pages that decide what the assistant
       // may do at all: a skill is what it does once that is settled.
       skillsPage,
+      sandboxPage,
       aboutPage,
     ])
   })
@@ -1227,11 +1247,28 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setNewEndpointRequest((n) => n + 1)
     },
     openPage(id: string): void {
-      // Same reason as newConnection: an active search or section filter
-      // hides the page the request is addressed to.
+      // A direct Sandbox deep-link has no terminal to pin; it remains useful
+      // for editing standard and named-workspace defaults.
+      if (id === 'sandbox') setSandboxContext(null)
       setSearchQuery('')
       setSectionFilter(null)
       setActiveComponentPage(id)
+    },
+    openSandbox(context: SandboxPaneContext | null): Promise<boolean> {
+      setSandboxContext(context)
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('sandbox')
+      return readyPromise.then(
+        () =>
+          untrack(
+            () =>
+              !settingsDisposed &&
+              activeComponentPage() === 'sandbox' &&
+              settingsPages().some((page) => page.kind === 'component' && page.id === 'sandbox'),
+          ),
+        () => false,
+      )
     },
     ready(): Promise<void> {
       return readyPromise

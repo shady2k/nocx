@@ -20,6 +20,7 @@ import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
 import type { CheckoutsStatusStore } from './checkouts-status'
+import type { SandboxSettingsServices, SandboxPaneContext } from './sandbox-ui'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -85,6 +86,8 @@ export class SettingsContent extends SolidPaneContent {
      *  to the Worktrees section, which otherwise offers a period that
      *  governs nothing when the checkout record was never wired. */
     private readonly checkoutsStatus?: CheckoutsStatusStore,
+    /** Root-owned sandbox services; absent in non-native/test embeddings. */
+    private readonly sandboxServices?: SandboxSettingsServices,
   ) {
     super()
   }
@@ -114,6 +117,7 @@ export class SettingsContent extends SolidPaneContent {
           checkoutsStatus: this.checkoutsStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,
+          sandboxServices: this.sandboxServices,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)
@@ -127,30 +131,51 @@ export class SettingsContent extends SolidPaneContent {
   // ── PaneContent ───────────────────────────────────────────────────────
 
   async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
-    if (this._disposed || this._hostElement) return
-    if (signal.aborted) return
+    if (this._disposed || this._hostElement || signal.aborted) {
+      this.pendingSandbox?.resolve(false)
+      this.pendingSandbox = null
+      return
+    }
 
     host.setTitle('Settings')
     await super.mount(target, host, signal)
-    this.handle = this.handleRef.current!
-    await this.handle.ready()
-    if (this.pendingNewConnection) {
-      this.pendingNewConnection = false
-      this.handle.newConnection()
+    const handle = this.handleRef.current
+    this.handle = handle
+    if (handle === null) {
+      this.pendingSandbox?.resolve(false)
+      this.pendingSandbox = null
+      return
     }
-    if (this.pendingNewSecret !== null) {
-      const queued = this.pendingNewSecret
-      this.pendingNewSecret = null
-      this.handle.newSecret(queued.name, queued.value)
-    }
-    if (this.pendingNewEndpoint) {
-      this.pendingNewEndpoint = false
-      this.handle.newEndpoint()
-    }
-    if (this.pendingPage !== null) {
-      const id = this.pendingPage
-      this.pendingPage = null
-      this.handle.openPage(id)
+    try {
+      await handle.ready()
+      if (this._disposed) return
+      if (this.pendingSandbox) {
+        const request = this.pendingSandbox
+        this.pendingSandbox = null
+        const opened = await handle.openSandbox(request.context)
+        request.resolve(!this._disposed && opened)
+      }
+      if (this.pendingNewConnection) {
+        this.pendingNewConnection = false
+        handle.newConnection()
+      }
+      if (this.pendingNewSecret !== null) {
+        const queued = this.pendingNewSecret
+        this.pendingNewSecret = null
+        handle.newSecret(queued.name, queued.value)
+      }
+      if (this.pendingNewEndpoint) {
+        this.pendingNewEndpoint = false
+        handle.newEndpoint()
+      }
+      if (this.pendingPage !== null) {
+        const id = this.pendingPage
+        this.pendingPage = null
+        handle.openPage(id)
+      }
+    } catch {
+      this.pendingSandbox?.resolve(false)
+      this.pendingSandbox = null
     }
   }
 
@@ -162,9 +187,8 @@ export class SettingsContent extends SolidPaneContent {
   // narrow breakpoint in CSS now (base.css @media max-width: 640px), so Settings
   // has nothing to do with the viewport and does not override it.
 
-  // dispose() inherited from SolidPaneContent — it tears down the root
-  // element and Solid root. The handle reference becomes stale naturally
-  // as the component disposes.
+  // dispose() settles a queued Sandbox request before the Solid root is torn
+  // down, then the base class tears down the root and host element.
 
   // ── Deep link ───────────────────────────────────────────────────────
 
@@ -230,13 +254,31 @@ export class SettingsContent extends SolidPaneContent {
     }
     this.pendingPage = id
   }
+  /**
+   * Queue Sandbox navigation before activation; root starts the mount by
+   * activating Settings after this method has synchronously recorded context.
+   */
+  openSandbox(context: SandboxPaneContext | null): Promise<boolean> {
+    if (this._disposed) return Promise.resolve(false)
+    this.pendingSandbox?.resolve(false)
+    if (this.handle) return this.handle.openSandbox(context)
+    return new Promise<boolean>((resolve) => {
+      this.pendingSandbox = { context, resolve }
+    })
+  }
+
+  dispose(): void {
+    this.pendingSandbox?.resolve(false)
+    this.pendingSandbox = null
+    super.dispose()
+  }
 
   private pendingNewConnection = false
-  /** The queued request's prefilled name and value, or null when nothing is
-   *  queued. An object (with either field '') means "asked"; null means
-   *  "nobody asked". */
   private pendingNewSecret: { name: string; value: string } | null = null
   private pendingNewEndpoint = false
-  /** The queued page id, or null when nobody asked. */
   private pendingPage: string | null = null
+  private pendingSandbox: {
+    context: SandboxPaneContext | null
+    resolve: (opened: boolean) => void
+  } | null = null
 }

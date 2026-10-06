@@ -667,6 +667,98 @@ describe('CommandEditor', () => {
   })
 })
 
+describe('internal submit handling', () => {
+  it('guards repeated Enter while the internal request is deferred, then consumes without forwarding', async () => {
+    let resolve!: (disposition: 'consumed' | 'pass' | 'refused') => void
+    const internalSubmit = vi.fn(
+      () =>
+        new Promise<'consumed' | 'pass' | 'refused'>((accept) => {
+          resolve = accept
+        }),
+    )
+    const beforeSubmit = vi.fn()
+    const { ed, view, submit } = setup({ internalSubmit, beforeSubmit })
+    ed.show()
+    ed.insertText('/sandbox')
+
+    enter(view)
+    enter(view)
+    expect(internalSubmit).toHaveBeenCalledTimes(1)
+    expect(beforeSubmit).not.toHaveBeenCalled()
+    expect(submit).not.toHaveBeenCalled()
+    resolve('consumed')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(ed.getDoc()).toBe('')
+    expect(submit).not.toHaveBeenCalled()
+    expect(beforeSubmit).not.toHaveBeenCalled()
+  })
+
+  it('preserves the draft on refusal, synchronous throw, and rejection', async () => {
+    const refused = setup({ internalSubmit: () => 'refused' })
+    refused.ed.show()
+    refused.ed.insertText('/sandbox')
+    enter(refused.view)
+    expect(refused.ed.getDoc()).toBe('/sandbox')
+    expect(refused.submit).not.toHaveBeenCalled()
+
+    const thrown = setup({
+      internalSubmit: () => {
+        throw new Error('navigation failed')
+      },
+    })
+    thrown.ed.show()
+    thrown.ed.insertText('/sandbox')
+    enter(thrown.view)
+    expect(thrown.ed.getDoc()).toBe('/sandbox')
+    expect(thrown.submit).not.toHaveBeenCalled()
+
+    const rejected = setup({
+      internalSubmit: () => Promise.reject(new Error('navigation failed')),
+    })
+    rejected.ed.show()
+    rejected.ed.insertText('/sandbox')
+    enter(rejected.view)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(rejected.ed.getDoc()).toBe('/sandbox')
+    expect(rejected.submit).not.toHaveBeenCalled()
+  })
+
+  it('does not clear a draft edited while a consumed request is pending', async () => {
+    let resolve!: (disposition: 'consumed' | 'pass' | 'refused') => void
+    const { ed, view, submit } = setup({
+      internalSubmit: () =>
+        new Promise<'consumed' | 'pass' | 'refused'>((accept) => {
+          resolve = accept
+        }),
+    })
+    ed.show()
+    ed.insertText('/sandbox')
+    enter(view)
+    ed.insertText(' later')
+    resolve('consumed')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(ed.getDoc()).toBe('/sandbox later')
+    expect(submit).not.toHaveBeenCalled()
+  })
+
+  it('passes synchronously into the existing beforeSubmit planner and submits synchronously', () => {
+    const plan = { sendLine: 'resolved command', recordLine: 'original command', refs: [] }
+    const internalSubmit = vi.fn(() => 'pass' as const)
+    const beforeSubmit = vi.fn(() => plan)
+    const { ed, view, submit } = setup({ internalSubmit, beforeSubmit })
+    ed.show()
+    ed.insertText('original command')
+    enter(view)
+    expect(internalSubmit).toHaveBeenCalledWith('original command')
+    expect(beforeSubmit).toHaveBeenCalledWith('original command')
+    expect(submit).toHaveBeenCalledWith('resolved command', plan)
+    expect(ed.getDoc()).toBe('')
+  })
+})
+
 describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)', () => {
   /** A host-shaped provider for the ssh argument position — the dropdown's
    *  rows in the state the user is in (`ssh ` + Tab). */

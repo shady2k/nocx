@@ -208,6 +208,23 @@ func TestExitOutcome_HelperExitWithNoCauseStaysExited(t *testing.T) {
 	}
 }
 
+func TestExitOutcome_CommittedRetirementIsNotAShellExit(t *testing.T) {
+	ch := &waitErrChannel{done: make(chan struct{})}
+	s := sessionWithChannel(ch)
+	s.inputGate = newInputGate()
+	if err := s.inputGate.fence(context.Background(), func() error { return nil }, nil); err != nil {
+		t.Fatal(err)
+	}
+	// The helper's termination report may arrive before the candidate's
+	// publication ack. It ends the retired pipe, not the logical pane.
+	ch.waitErr = &fakeHelperExit{code: -1}
+	ch.waitSet = true
+	cause, status := s.ExitOutcome()
+	if cause != ExitInterrupted || status != 0 {
+		t.Fatalf("retired source outcome = (%q, %d), want interrupted without status", cause, status)
+	}
+}
+
 // fakeHelperExit stands in for client.ExitStatus: it carries an exit code
 // AND, optionally, a named cause, exactly the two optional-interface seams
 // ExitOutcome probes.

@@ -16,6 +16,8 @@ import {
   type SidebarViewDescriptor,
   type SidebarViewStatus,
 } from './sidebar'
+import type { SandboxPaneContext, SandboxSettingsServices } from './sandbox-ui'
+import type { Workspace } from './generated/layout.read'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
@@ -52,7 +54,14 @@ import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connection-overlay'
 import { IconButton } from './ui/icon-button'
-import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import {
+  BellIcon,
+  CheckCircleIcon,
+  PlugIcon,
+  RefreshIcon,
+  SettingsIcon,
+  ShieldIcon,
+} from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountClientHost } from './client-host'
@@ -679,6 +688,130 @@ function main(): void {
   tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)
+  let sandboxWorkspaceRows: readonly Workspace[] | null = null
+  let sandboxDefaultWorkspace = ''
+  const [sandboxWorkspaces, setSandboxWorkspaces] = createSignal<
+    readonly Pick<Workspace, 'id' | 'name'>[]
+  >([])
+  const [sandboxPaneRevision, setSandboxPaneRevision] = createSignal(0)
+  layout.onChange(() => {
+    setSandboxPaneRevision((revision) => revision + 1)
+    const rows = layout.workspaces()
+    const defaultId = layout.defaultWorkspaceId()
+    if (rows === sandboxWorkspaceRows && defaultId === sandboxDefaultWorkspace) return
+    sandboxWorkspaceRows = rows
+    sandboxDefaultWorkspace = defaultId
+    setSandboxWorkspaces(rows.filter((workspace) => workspace.id !== defaultId))
+  })
+
+  interface SandboxShieldViewState {
+    context: SandboxPaneContext | null
+    state: 'off' | 'enforced' | 'unknown'
+    disabled: boolean
+    title: string
+  }
+  const [sandboxShield, setSandboxShield] = createSignal<SandboxShieldViewState>({
+    context: null,
+    state: 'unknown',
+    disabled: true,
+    title: 'Sandbox — no terminal pane selected',
+  })
+  let sandboxStatusGeneration = 0
+  async function refreshSandboxShield(): Promise<void> {
+    const context = tm.activeSandboxContext()
+    const generation = ++sandboxStatusGeneration
+    if (!context || context.kind !== 'local') {
+      setSandboxShield({
+        context,
+        state: 'unknown',
+        disabled: true,
+        title: context ? 'Sandbox — SSH is not supported' : 'Sandbox — no terminal pane selected',
+      })
+      return
+    }
+    setSandboxShield({
+      context,
+      state: 'unknown',
+      disabled: true,
+      title: 'Sandbox — checking pane',
+    })
+    try {
+      const registered = await context.registered
+      if (generation !== sandboxStatusGeneration || !context.isCurrent()) return
+      if (!registered) {
+        setSandboxShield({
+          context,
+          state: 'unknown',
+          disabled: true,
+          title: 'Sandbox — this pane is not registered',
+        })
+        return
+      }
+      const status = await client.sandboxStatus({ paneId: context.paneId })
+      if (generation !== sandboxStatusGeneration || !context.isCurrent()) return
+      let state: SandboxShieldViewState['state'] = 'unknown'
+      if (status.availability !== 'unknown' && !status.preparingOperationId) {
+        if (status.head?.state === 'active') {
+          if (status.head.mode === 'enforce' && status.head.enforcement === 'enforced') {
+            state = 'enforced'
+          } else if (status.head.mode === 'off' && status.head.enforcement === 'off') {
+            state = 'off'
+          }
+        } else if (status.head === null && status.availability === 'available') {
+          state = 'off'
+        }
+      }
+      setSandboxShield({
+        context,
+        state,
+        disabled: status.availability === 'unavailable' && status.head === null,
+        title:
+          state === 'enforced'
+            ? 'Sandbox — Enforce'
+            : state === 'off'
+              ? 'Sandbox — Off'
+              : `Sandbox — ${status.reason || status.head?.state || 'state unknown'}`,
+      })
+    } catch (error) {
+      if (generation !== sandboxStatusGeneration || !context.isCurrent()) return
+      setSandboxShield({
+        context,
+        state: 'unknown',
+        disabled: false,
+        title: `Sandbox — status unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+  const sandboxServices: SandboxSettingsServices = {
+    client,
+    workspaces: sandboxWorkspaces,
+    bindCandidate: async (context, operation) => {
+      if (!context.isCurrent() || context.kind !== 'local' || !(await context.registered)) {
+        return false
+      }
+      if (!context.isCurrent()) return false
+      const handle = client.registerSandboxOperation(operation)
+      if (handle === null) return false
+      const bound = await tm.bindSandboxCandidate(context, handle)
+      void refreshSandboxShield()
+      return bound
+    },
+    statusChanged: () => void refreshSandboxShield(),
+  }
+  tm.onOpenSandbox = async (context) => {
+    if (!context.isCurrent() || context.kind !== 'local' || !(await context.registered)) {
+      return false
+    }
+    if (!context.isCurrent()) return false
+    const settings = openSettingsPane()
+    return settings.openSandbox({
+      ...context,
+      isCurrent: () => {
+        sandboxPaneRevision()
+        return context.isCurrent()
+      },
+    })
+  }
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -716,6 +849,7 @@ function main(): void {
         // the Settings page would be a second owner of what a pane is called.
         (sessionId: string) => tm.sessionDisplayName(sessionId),
         checkoutsStatusStore,
+        sandboxServices,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -772,6 +906,7 @@ function main(): void {
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
     rescopeFiles()
+    void refreshSandboxShield()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -1464,6 +1599,7 @@ function main(): void {
     throw new Error('nocx: Files must be the first activity-bar view')
   }
   let sidebar: SidebarHandle | null = null
+  void refreshSandboxShield()
   const mountConnectedSidebar = (): void => {
     // The sidebar is connection-scoped: its panel clients must disappear with
     // the socket so no stale "not connected" state survives an outage.
@@ -1501,6 +1637,23 @@ function main(): void {
       () => activeOrigin(),
       sidebarWidthCtrl,
       () => activeSurfaceType() === SURFACE_SETTINGS,
+      {
+        id: 'sandbox',
+        afterViewId: FILES_VIEW_ID,
+        title: () => sandboxShield().title,
+        icon: () => (
+          <ShieldIcon
+            enforced={sandboxShield().state === 'enforced'}
+            uncertain={sandboxShield().state === 'unknown'}
+          />
+        ),
+        selected: () => sandboxShield().state === 'enforced',
+        disabled: () => sandboxShield().disabled,
+        onActivate: () => {
+          const context = tm.activeSandboxContext()
+          if (context && !sandboxShield().disabled) void tm.onOpenSandbox?.(context)
+        },
+      },
     )
   }
 

@@ -183,6 +183,28 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
+      # Same version/hash check as release.yml; these are the official macOS
+      # tarball hashes from https://ziglang.org/download/index.json.
+      - name: Install the pinned Zig
+        run: |
+          set -euo pipefail
+          version="$(jq -er '.toolchain.zig' third_party/libghostty-vt/MANIFEST.json)"
+          case "$(uname -m)" in
+            arm64)
+              arch=aarch64
+              sha=b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+              ;;
+            x86_64)
+              arch=x86_64
+              sha=0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7
+              ;;
+            *) echo "::error::unsupported native Zig architecture"; exit 1 ;;
+          esac
+          url="https://ziglang.org/download/${version}/zig-${arch}-macos-${version}.tar.xz"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-${arch}-macos-${version}" >> "$GITHUB_PATH"
       - name: Build packaged helper and run mandatory native Seatbelt proof
         run: make sandbox-smoke-macos
   ci-mac:

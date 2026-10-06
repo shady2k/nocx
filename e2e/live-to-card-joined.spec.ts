@@ -36,7 +36,7 @@ test('a drag from a historical card to live output copies the pinned text and ke
   // line is a hard line boundary. The completed output is a historical card.
   // Generate the long output in the shell instead of typing a long command
   // into the PTY, where key-rate limits could truncate the test fixture.
-  await page.keyboard.type(`printf '${soft}-%*s\n' 180 '' | tr ' ' x; printf '%s\n' '${hard}'`)
+  await page.keyboard.type(`printf '${soft}-%*s\\n' 180 '' | tr ' ' x; printf '%s\\n' '${hard}'`)
   await page.keyboard.press('Enter')
   const card = page.locator('.cmd-block').filter({ hasText: soft }).last()
   await expect(card).toBeVisible()
@@ -46,7 +46,7 @@ test('a drag from a historical card to live output copies the pinned text and ke
   // Leave a real PTY reader running. Sending input to it during the drag
   // produces a frame on demand, without a timer or a timing-dependent wait.
   await promptReady(page)
-  await page.keyboard.type(`printf '%s\n' '${live}'; cat`)
+  await page.keyboard.type(`printf '%s\\n' '${live}'; cat`)
   await page.keyboard.press('Enter')
   const liveRow = page
     .locator('.pane.active .xterm-live-container .term-grid-row', { hasText: live })

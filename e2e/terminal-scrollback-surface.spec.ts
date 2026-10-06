@@ -311,6 +311,7 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     // ── Clause 5: a full-screen program's pane reveals no primary rows ──
     // Fresh history first. The person must be able to wheel back to its first
     // row before the program takes the pane.
+    await pane.locator('.xterm-live-container').click()
     await type_(`for i in $(seq 1 120); do echo ${'SCROLLBK-'}$(printf '%03d' $i); done`)
     await expect.poll(async () => liveRows(), { timeout: 30_000 }).toContain(label(120))
     await expect
@@ -355,6 +356,7 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     // Leaving the program restores the primary history, which the reader can
     // still reach by its visible first row.
     await page.keyboard.press('Control+C')
+    await pane.locator('.xterm-live-container').click()
     await type_(`printf '\\033[?1049l'`)
     await expect
       .poll(

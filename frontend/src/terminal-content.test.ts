@@ -5777,6 +5777,32 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('keeps session intents ordered when the control call is still in flight', async () => {
+    const { content, teardown } = await mountTerminal(makeClipboard())
+    try {
+      const session = sessionOf(content)
+      let finishFirst!: (result: unknown) => void
+      const first = new Promise<unknown>((resolve) => {
+        finishFirst = resolve
+      })
+      session.intent.mockImplementationOnce(() => first)
+
+      typeIntoPane(content, 'a', 'b', 'c', '\r')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(1))
+      expect(session.intent.mock.calls).toEqual([['text', 'a']])
+
+      finishFirst({ state: 'executed' })
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(3))
+      expect(session.intent.mock.calls).toEqual([
+        ['text', 'a'],
+        ['text', 'bc'],
+        ['key', 'enter'],
+      ])
+    } finally {
+      teardown()
+    }
+  })
+
   it('keys typed while the command is still in flight reach the pty BEHIND it (nocx-yb5y)', async () => {
     const client = makeClient()
     const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -5952,10 +5978,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // flush the shell is at a fresh prompt, and they belong to it. They go out
       // as intent, at once, rather than being swallowed with the line.
       expect(session.send).not.toHaveBeenCalled()
-      expect(session.intent.mock.calls).toEqual([
-        ['text', 'c'],
-        ['text', 'd'],
-      ])
+      await vi.waitFor(() =>
+        expect(session.intent.mock.calls).toEqual([
+          ['text', 'c'],
+          ['text', 'd'],
+        ]),
+      )
 
       resolveAttempt({
         id: 'att-cancelled',

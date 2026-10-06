@@ -812,6 +812,11 @@ export class TerminalContent extends BasePaneContent {
   // have. Everything else here still uses it through the interface's methods.
   private renderer: XtermRenderer | null = null
   private session: SessionHandle | null = null
+  /** Control-plane calls carry user intent in order. Adjacent committed-text
+   *  events coalesce while queued, so fast typing does not flood the bounded
+   *  executor; intervening keys and other intent kinds remain ordering fences. */
+  private _intentQueue: Array<{ session: SessionHandle; intent: SessionIntent }> = []
+  private _intentSending = false
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -7891,12 +7896,37 @@ export class TerminalContent extends BasePaneContent {
   private sendIntent(intent: SessionIntent): void {
     const session = this.session
     if (!session) return
-    void session.intent(intent.kind, intent.payload).catch((err: unknown) => {
-      log.warn('nocx: session intent did not reach the session', {
-        kind: intent.kind,
-        error: String(err),
-      })
-    })
+    const tail = this._intentQueue[this._intentQueue.length - 1]
+    if (intent.kind === 'text' && tail?.session === session && tail.intent.kind === 'text') {
+      this._intentQueue[this._intentQueue.length - 1] = {
+        session,
+        intent: { kind: 'text', payload: tail.intent.payload + intent.payload },
+      }
+    } else {
+      this._intentQueue.push({ session, intent })
+    }
+    void this.drainIntentQueue()
+  }
+
+  private async drainIntentQueue(): Promise<void> {
+    if (this._intentSending) return
+    this._intentSending = true
+    try {
+      while (this._intentQueue.length > 0) {
+        const { session, intent } = this._intentQueue.shift()!
+        try {
+          await session.intent(intent.kind, intent.payload)
+        } catch (err: unknown) {
+          log.warn('nocx: session intent did not reach the session', {
+            kind: intent.kind,
+            error: String(err),
+          })
+        }
+      }
+    } finally {
+      this._intentSending = false
+      if (this._intentQueue.length > 0) void this.drainIntentQueue()
+    }
   }
 
   /** Start holding, and hand back the window being held in: from here until

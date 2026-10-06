@@ -99,6 +99,7 @@ func TestSandboxNativeReplacementKeepsPidAcrossRestartAndRemoveIsOneAttempt(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer logSandboxNativeScreenOnFailure(t, first, sid)
 	pid, known := first.Session.OwnedProcessPID(sid)
 	if !known || pid <= 0 {
 		t.Fatal("native process PID was not recorded")
@@ -253,5 +254,26 @@ func waitSandboxNativeResult(t *testing.T, path string) string {
 			t.Fatalf("native program did not complete; observed %q", body)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func logSandboxNativeScreenOnFailure(t *testing.T, a *App, sid session.ID) {
+	t.Helper()
+	if !t.Failed() {
+		return
+	}
+	if err := a.paneViews.Enrol(string(sid)); err != nil {
+		t.Logf("native fixture screen enrolment: %v", err)
+		return
+	}
+	frame, err := a.paneViews.Frame(string(sid))
+	if err != nil {
+		t.Logf("native fixture screen read: %v", err)
+		return
+	}
+	for row := range frame.Rows {
+		if line := strings.TrimSpace(frame.Text(row)); line != "" {
+			t.Logf("native fixture screen row %d: %s", row+1, line)
+		}
 	}
 }

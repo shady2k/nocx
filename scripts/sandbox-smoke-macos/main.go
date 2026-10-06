@@ -747,7 +747,7 @@ func waitForNativeDenial(ctx context.Context, lane *client.Client, session clien
 		}
 		select {
 		case <-deadline.Done():
-			panic("required correlated Seatbelt denial was not collected before deadline")
+			panic(fmt.Sprintf("required correlated Seatbelt denial was not collected: observer=%s total=%d dropped=%d revision=%d", result.Inbox.Observer, result.Inbox.Total, result.Inbox.Dropped, result.Inbox.Revision))
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

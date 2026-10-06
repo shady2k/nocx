@@ -203,7 +203,7 @@ func main() {
 		content.Tab{ID: "tab-native-proof", WorkspaceID: "ws-native-proof", Layout: content.LayoutRow},
 		content.Pane{ID: "pane-native-proof", TabID: "tab-native-proof", Cwd: work, Kind: content.PaneLocal, SizeShare: 1})
 	must(err, "persist proof workspace")
-	identity := content.HelperIdentity{Host: "local", Generation: source.HostSessionID.Generation, SessionID: source.HostSessionID.Session}
+	identity := content.HelperIdentity{Generation: source.HostSessionID.Generation, SessionID: source.HostSessionID.Session}
 	must(db.Ledger().CreateSession(ctx, content.Session{
 		ID: identity.SessionID, WorkspaceID: "ws-native-proof", Host: identity.Host,
 		Account: identity.Account, Generation: identity.Generation, PaneID: "pane-native-proof",

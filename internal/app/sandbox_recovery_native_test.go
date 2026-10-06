@@ -160,7 +160,6 @@ func testSandboxNativeCrashRecovery(t *testing.T, committed bool) {
 		if lookupErr != nil {
 			t.Fatalf("committed candidate was not readopted: %v", lookupErr)
 		}
-		defer logSandboxNativeScreenOnFailure(t, second, recovered.ID())
 		recoveredPID, pidKnown := second.Session.OwnedProcessPID(recovered.ID())
 		grant, grantKnown := second.Session.LaunchBinding(recovered.ID())
 		if !pidKnown || recoveredPID != pid || !grantKnown || grant.LaunchID != launch.ID || grant.GrantID != *launch.GrantID || grant.Digest != launch.PolicyDigest || grant.Version != launch.PolicyVersion {

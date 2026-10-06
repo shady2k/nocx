@@ -11,6 +11,7 @@ import {
 } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SandboxOperationResult } from './generated/sandbox.replace'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -1202,6 +1203,50 @@ describe('ack throttling', () => {
     expect(acks).toHaveLength(1)
     // Offset should be the total of both frames.
     expect(acks[0].params).toEqual({ sessionId: session.sessionId, offset: 6 })
+  })
+
+  it('preserves output decoding and the byte cursor when a sandbox operation is registered again', async () => {
+    const client = new WSClient(mockDispatcher())
+    client.start()
+    await Promise.resolve()
+    const ws = socket()
+    ws.serverAccepts()
+    const operation: SandboxOperationResult = {
+      operationId: 'native-operation',
+      paneId: 'native-pane',
+      state: 'active',
+      mode: 'enforce',
+      reason: '',
+      open: {
+        sessionId: SID,
+        ...OPEN_IDENTITY,
+        workspaceId: 'native-workspace',
+        cwd: '/project',
+        desiredMode: 'script',
+        effectiveSize: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+        parent: null,
+        awaitsIntegration: false,
+      },
+    }
+    try {
+      const handle = client.registerSandboxOperation(operation)
+      if (handle === null) throw new Error('native operation fixture has no open acknowledgement')
+      const seen: string[] = []
+      handle.onData((data) => seen.push(data))
+      const payload = new TextEncoder().encode('a🙂')
+      ws.deliverBinary(encodeFrame(SID, payload.subarray(0, 3)))
+      client.registerSandboxOperation(operation)
+      client.registerSandboxOperation(operation)
+      ws.deliverBinary(encodeFrame(SID, payload.subarray(3)))
+      ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('next')))
+      expect(seen).toEqual(['a', '🙂', 'next'])
+      vi.advanceTimersByTime(ACK_INTERVAL_MS)
+      const acks = ws.requests().filter((request) => request.method === 'ack')
+      expect(acks).toHaveLength(1)
+      expect(acks[0].params).toEqual({ sessionId: SID, offset: 9 })
+    } finally {
+      client.close()
+    }
   })
 
   it('does not send an ack when the connection is not open', async () => {

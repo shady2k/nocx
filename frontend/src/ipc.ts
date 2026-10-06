@@ -377,6 +377,7 @@ class UTF8StreamDecoder {
 
 interface SessionState {
   decoder: UTF8StreamDecoder
+  handle: SessionHandle | null
 
   // The session's incarnation identity (nocx-3oupk), as minted by the
   // backend at open (AD-7): instanceId + sessionEpoch. Every observation
@@ -1279,6 +1280,14 @@ export class WSClient {
    *  before it returned the acknowledgement. */
   registerSandboxOperation(result: SandboxOperationResult): SessionHandle | null {
     if (result.open === null) return null
+    const current = this.sessions.get(result.open.sessionId)
+    if (
+      current?.handle &&
+      current.instanceId === result.open.instanceId &&
+      current.sessionEpoch === result.open.sessionEpoch
+    ) {
+      return current.handle
+    }
     return this._registerHandle(result.open, result.open.effectiveSize)
   }
 
@@ -1337,8 +1346,8 @@ export class WSClient {
     if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
       throw new Error(`nocx: invalid session identity from server: ${sid}`)
     }
-    this._registerSession(sid, { instanceId, sessionEpoch }, 0, reported)
-    return new SessionHandle(
+    const state = this._registerSession(sid, { instanceId, sessionEpoch }, 0, reported)
+    const handle = new SessionHandle(
       this,
       sid,
       result?.cwd ?? '',
@@ -1349,6 +1358,8 @@ export class WSClient {
       result?.awaitsIntegration ?? false,
       result?.accessEpoch ?? null,
     )
+    state.handle = handle
+    return handle
   }
 
   /** Mint the per-session state this client keeps. ONE PLACE, because an open
@@ -1361,9 +1372,10 @@ export class WSClient {
     identity: { instanceId: string; sessionEpoch: number },
     offset: number,
     reported: SessionSize | null = null,
-  ): void {
-    this.sessions.set(sessionId, {
+  ): SessionState {
+    const state: SessionState = {
       decoder: new UTF8StreamDecoder(),
+      handle: null,
       offset,
       reported,
       dataCallback: null,
@@ -1378,7 +1390,9 @@ export class WSClient {
       livenessEpoch: 0,
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
-    })
+    }
+    this.sessions.set(sessionId, state)
+    return state
   }
 
   // --- reattach -----------------------------------------------------------
@@ -1589,7 +1603,7 @@ export class WSClient {
             // handing the pane a grid — a default here would have been the
             // exact defect this bead exists to close, not a safe omission
             // like the fields above.
-            return new SessionHandle(
+            const handle = new SessionHandle(
               this,
               entry.sessionId,
               '',
@@ -1604,6 +1618,8 @@ export class WSClient {
               result.awaitsIntegration,
               result.accessEpoch ?? null,
             )
+            if (attached) attached.handle = handle
+            return handle
           })
           .catch((err) => {
             // A refused claim leaves NOTHING behind: the map must not hold a

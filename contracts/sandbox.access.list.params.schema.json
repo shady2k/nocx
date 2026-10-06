@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.list.params.schema.json",
+  "title": "SandboxAccessListRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "launchId", "cursor", "limit"],
+  "properties": {
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "launchId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 200
+    }
+  }
+}

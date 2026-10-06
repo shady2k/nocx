@@ -1,4 +1,4 @@
-# ADR-0079 — Filesystem authority belongs to one helper-owned launch
+# ADR-0081 — Filesystem authority belongs to one helper-owned launch
 
 - **Status:** Accepted (approved rewrite design; implementation acceptance pending)
 - **Date:** 2026-10-05

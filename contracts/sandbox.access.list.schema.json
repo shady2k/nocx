@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.list.schema.json",
+  "title": "SandboxAccessListResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "paneId",
+    "launchId",
+    "workspaceId",
+    "standardRevision",
+    "workspaceRevision",
+    "reason",
+    "inbox"
+  ],
+  "properties": {
+    "paneId": {
+      "type": "string"
+    },
+    "launchId": {
+      "type": "string"
+    },
+    "workspaceId": {
+      "type": "string"
+    },
+    "standardRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "workspaceRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string"
+    },
+    "inbox": {
+      "$ref": "sandbox.access.page.schema.json"
+    }
+  }
+}

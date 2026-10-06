@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.record.schema.json",
+  "title": "DiagnosticRecord",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "revision",
+    "executable",
+    "path",
+    "operation",
+    "access",
+    "pathKnown",
+    "source",
+    "precision",
+    "prediction",
+    "count",
+    "state",
+    "futureRevision",
+    "proposal"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "executable": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "path": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "operation": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "access": {
+      "type": "string",
+      "enum": ["read", "write", "unknown"]
+    },
+    "pathKnown": {
+      "type": "boolean"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["linux-seccomp", "macos-seatbelt"]
+    },
+    "precision": {
+      "type": "string",
+      "enum": ["attempted", "reported-denial", "unknown"]
+    },
+    "prediction": {
+      "type": "string",
+      "enum": ["denied", "allowed", "unknown"]
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": ["unresolved", "pending", "dismissed", "future-policy", "uncertain"]
+    },
+    "futureRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "proposal": {
+      "oneOf": [
+        {
+          "$ref": "sandbox.access.proposal.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

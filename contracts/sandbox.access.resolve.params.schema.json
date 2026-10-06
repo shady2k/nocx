@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.resolve.params.schema.json",
+  "title": "SandboxAccessResolveRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "paneId",
+    "launchId",
+    "eventId",
+    "eventRevision",
+    "decision",
+    "expectedStandardRevision",
+    "expectedWorkspaceRevision"
+  ],
+  "properties": {
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "launchId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "eventRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["dismiss", "allow-ro", "allow-rw"]
+    },
+    "expectedStandardRevision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expectedWorkspaceRevision": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

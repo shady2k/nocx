@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.resolve.schema.json",
+  "title": "SandboxAccessResolveResult",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["record", "profile"],
+  "properties": {
+    "record": {
+      "$ref": "sandbox.access.record.schema.json"
+    },
+    "profile": {
+      "$ref": "sandbox.profile.get.schema.json"
+    }
+  }
+}

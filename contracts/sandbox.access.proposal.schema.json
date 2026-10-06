@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.proposal.schema.json",
+  "title": "DiagnosticProposal",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["directory", "basis", "missingTarget"],
+  "properties": {
+    "directory": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "basis": {
+      "type": "string",
+      "enum": ["directory", "parent"]
+    },
+    "missingTarget": {
+      "type": "boolean"
+    }
+  }
+}

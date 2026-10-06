@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.page.schema.json",
+  "title": "DiagnosticPage",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "observer",
+    "revision",
+    "dropped",
+    "discontinuity",
+    "total",
+    "nextCursor",
+    "records"
+  ],
+  "properties": {
+    "observer": {
+      "type": "string",
+      "enum": ["unavailable", "active", "unsupported", "failed"]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "discontinuity": {
+      "type": "boolean"
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    },
+    "nextCursor": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    },
+    "records": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "$ref": "sandbox.access.record.schema.json"
+      }
+    }
+  }
+}

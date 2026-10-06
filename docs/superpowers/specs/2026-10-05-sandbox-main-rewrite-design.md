@@ -14,7 +14,7 @@ cherry-picking or copying PR #91. The approved rewrite supersedes its integratio
 points, not its requirement for a shell usable with arbitrary local CLI programs.
 Tracking: `nocx-a0qhd.10` through `.16`. Inherit AD-1…AD-10 and ADR-0011,
 ADR-0055, ADR-0057, ADR-0066 and ADR-0068. ADR-0058 remains Proposed; it is not
-an adopted native filesystem contract. New decision record: ADR-0079.
+an adopted native filesystem contract. New decision record: ADR-0081.
 
 Only the helper's **child shell and fork/exec descendants** are restricted. The
 coordinator and shared helper daemon remain trusted and unrestricted. Native

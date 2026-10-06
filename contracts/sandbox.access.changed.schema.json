@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.changed.schema.json",
+  "title": "SandboxAccessChanged",
+  "x-nocx-sharedTypes": true,
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paneId", "launchId", "revision", "dropped", "observer", "total"],
+  "properties": {
+    "paneId": {
+      "type": "string"
+    },
+    "launchId": {
+      "type": "string"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dropped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "observer": {
+      "type": "string",
+      "enum": ["unavailable", "active", "unsupported", "failed"]
+    },
+    "total": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 500
+    }
+  }
+}

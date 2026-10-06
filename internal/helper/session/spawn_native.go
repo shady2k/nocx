@@ -212,20 +212,22 @@ func (launch *nativeLaunch) waitReady(proc localPTY) error {
 	if err := launch.ready.SetReadDeadline(launch.deadline); err != nil {
 		return errNativeLaunch
 	}
-	var packet [1024]byte
-	var ancillary [256]byte
-	n, control, flags, _, err := launch.ready.ReadMsgUnix(packet[:], ancillary[:])
-	if err != nil || n == 0 || control != 0 || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
+	ready, descriptors, err := receiveNativeStatus(launch.ready)
+	if err != nil {
 		return errNativeLaunch
 	}
-	var ready sandbox.RunnerStatus
-	decoder := json.NewDecoder(bytes.NewReader(packet[:n]))
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&ready); err != nil || ready.Version != sandbox.RunnerReadyVersion || ready.Status != "ready" || ready.Code != "" {
-		return errNativeLaunch
+	if runtime.GOOS == "darwin" {
+		if ready.Status != "needs-profile" || len(descriptors) != 2 {
+			closeNativeDescriptors(descriptors)
+			return errNativeLaunch
+		}
+		if relayErr := relaySeatbeltProfile(descriptors, launch.deadline); relayErr != nil {
+			return errNativeLaunch
+		}
+		ready, descriptors, err = receiveNativeStatus(launch.ready)
 	}
-	var extra any
-	if decoder.Decode(&extra) != io.EOF {
+	closeNativeDescriptors(descriptors)
+	if err != nil || len(descriptors) != 0 || ready.Status != "ready" {
 		return errNativeLaunch
 	}
 	if err = launch.errorReader.SetReadDeadline(launch.deadline); err != nil {
@@ -247,6 +249,111 @@ func (launch *nativeLaunch) waitReady(proc localPTY) error {
 		launch.probePath = ""
 	}
 	return launch.prepared.Close()
+}
+
+// Received descriptors become CLOEXEC while holding ForkLock. Holding that
+// lock only for a nonblocking recvmsg avoids leaking a private profile into a
+// concurrent ordinary shell without stalling unrelated launches on netpoll.
+func receiveNativeStatus(connection *net.UnixConn) (sandbox.RunnerStatus, []int, error) {
+	var status sandbox.RunnerStatus
+	raw, err := connection.SyscallConn()
+	if err != nil {
+		return status, nil, errNativeLaunch
+	}
+	var packet [1024]byte
+	var ancillary [256]byte
+	var n, control, flags int
+	var descriptors []int
+	var receiveErr error
+	err = raw.Read(func(fd uintptr) bool {
+		syscall.ForkLock.RLock()
+		defer syscall.ForkLock.RUnlock()
+		n, control, flags, _, receiveErr = unix.Recvmsg(int(fd), packet[:], ancillary[:], 0)
+		if receiveErr == unix.EAGAIN || receiveErr == unix.EWOULDBLOCK || receiveErr == unix.EINTR {
+			return false
+		}
+		if receiveErr != nil {
+			return true
+		}
+		messages, parseErr := unix.ParseSocketControlMessage(ancillary[:control])
+		if parseErr != nil {
+			receiveErr = parseErr
+			return true
+		}
+		for _, message := range messages {
+			rights, rightsErr := unix.ParseUnixRights(&message)
+			if rightsErr != nil {
+				receiveErr = rightsErr
+				continue
+			}
+			descriptors = append(descriptors, rights...)
+			for _, descriptor := range rights {
+				if _, flagErr := unix.FcntlInt(uintptr(descriptor), unix.F_SETFD, unix.FD_CLOEXEC); flagErr != nil {
+					receiveErr = flagErr
+				}
+			}
+		}
+		if receiveErr != nil {
+			closeNativeDescriptors(descriptors)
+			descriptors = nil
+		}
+		return true
+	})
+	if err != nil || receiveErr != nil || n <= 0 || flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 {
+		closeNativeDescriptors(descriptors)
+		return status, nil, errNativeLaunch
+	}
+	decoder := json.NewDecoder(bytes.NewReader(packet[:n]))
+	decoder.DisallowUnknownFields()
+	var trailing any
+	if decoder.Decode(&status) != nil || status.Version != sandbox.RunnerReadyVersion || status.Code != "" || decoder.Decode(&trailing) != io.EOF {
+		closeNativeDescriptors(descriptors)
+		return status, nil, errNativeLaunch
+	}
+	return status, descriptors, nil
+}
+
+func closeNativeDescriptors(descriptors []int) {
+	for _, descriptor := range descriptors {
+		_ = unix.Close(descriptor)
+	}
+}
+
+// sandbox-exec accepts an anonymous pipe but resolves an unlinked regular
+// profile's old basename rather than consuming its inherited file descriptor.
+// Relay the bounded source through the existing private startup channel. There
+// is no readable profile pathname or additional long-lived producer process.
+func relaySeatbeltProfile(descriptors []int, deadline time.Time) error {
+	defer func() { closeNativeDescriptors(descriptors) }()
+	if len(descriptors) != 2 {
+		return errNativeLaunch
+	}
+	var source, target unix.Stat_t
+	if unix.Fstat(descriptors[0], &source) != nil || unix.Fstat(descriptors[1], &target) != nil ||
+		source.Mode&unix.S_IFMT != unix.S_IFREG || source.Mode&0o777 != 0o600 ||
+		int64(source.Uid) != int64(os.Getuid()) || source.Size <= 0 || source.Size > sandbox.MaxRunnerPlanBytes ||
+		target.Mode&unix.S_IFMT != unix.S_IFIFO {
+		return errNativeLaunch
+	}
+	if _, err := unix.Seek(descriptors[0], 0, io.SeekStart); err != nil {
+		return errNativeLaunch
+	}
+	if err := unix.SetNonblock(descriptors[1], true); err != nil {
+		return errNativeLaunch
+	}
+	reader := os.NewFile(uintptr(descriptors[0]), "sandbox-profile-source")
+	writer := os.NewFile(uintptr(descriptors[1]), "sandbox-profile-pipe")
+	// os.File owns these handles from here, including when a deadline fails.
+	descriptors = nil
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	if err := writer.SetWriteDeadline(deadline); err != nil {
+		return errNativeLaunch
+	}
+	if _, err := io.CopyN(writer, reader, source.Size); err != nil {
+		return errNativeLaunch
+	}
+	return nil
 }
 
 // abortNative observes actual process death before removing its runtime. A

@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,11 +53,28 @@ func RunRunner() int {
 	if err != nil {
 		return runnerFailure("profile-create")
 	}
-	profileFD := int(profile.Fd())
-	if profileFD < RunnerFDRoots {
-		// ReadRunnerPlan closes FD5; keep the profile outside protocol slots.
-		profileFD, err = unix.FcntlInt(profile.Fd(), unix.F_DUPFD_CLOEXEC, RunnerFDRoots)
+	profileReader, profileWriter, err := os.Pipe()
+	if err != nil {
 		_ = profile.Close()
+		return runnerFailure("profile-pipe")
+	}
+	request, err := json.Marshal(RunnerStatus{Version: RunnerReadyVersion, Status: "needs-profile"})
+	if err != nil {
+		return runnerFailure("profile-request")
+	}
+	control := unix.UnixRights(int(profile.Fd()), int(profileWriter.Fd()))
+	sent, err := unix.SendmsgN(RunnerFDReady, request, control, nil, 0)
+	_ = profile.Close()
+	_ = profileWriter.Close()
+	if err != nil || sent != len(request) {
+		_ = profileReader.Close()
+		return runnerFailure("profile-handoff")
+	}
+	profileFD := int(profileReader.Fd())
+	if profileFD < RunnerFDRoots {
+		// ReadRunnerPlan closes FD5; keep the pipe outside protocol slots.
+		profileFD, err = unix.FcntlInt(profileReader.Fd(), unix.F_DUPFD_CLOEXEC, RunnerFDRoots)
+		_ = profileReader.Close()
 		if err != nil {
 			return runnerFailure("profile-descriptor")
 		}
@@ -148,6 +167,36 @@ func writeSeatbeltFilesystemBoundary(b *strings.Builder, operation string, polic
 		}
 		if err := add(filter, root.Path); err != nil {
 			return err
+		}
+	}
+	if operation == "file-read*" {
+		// Seatbelt checks directory reads during path traversal, including "/".
+		// Exact ancestor literals permit traversal, not descendant file data.
+		ancestors := make(map[string]struct{})
+		collect := func(path string) {
+			for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+				if _, exists := ancestors[parent]; exists {
+					return
+				}
+				ancestors[parent] = struct{}{}
+				if parent == "/" {
+					return
+				}
+			}
+		}
+		collect(policy.Runtime.Root)
+		for _, root := range policy.Roots {
+			collect(root.Path)
+		}
+		paths := make([]string, 0, len(ancestors))
+		for path := range ancestors {
+			paths = append(paths, path)
+		}
+		slices.Sort(paths)
+		for _, path := range paths {
+			if err := add("literal", path); err != nil {
+				return err
+			}
 		}
 	}
 	if operation == "file-ioctl" {

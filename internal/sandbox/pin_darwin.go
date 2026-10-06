@@ -18,7 +18,7 @@ import (
 func openPinned(path string) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		fd, err = unix.Open(path, 0x8000|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		fd, err = unix.Open(path, unix.O_EVTONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	}
 	if err != nil {
 		return nil, err
@@ -77,7 +77,7 @@ func dupPinned(source *os.File) (*os.File, error) {
 func canonicalActual(path string) (string, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
-		fd, err = unix.Open(path, 0x8000|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+		fd, err = unix.Open(path, unix.O_EVTONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	}
 	if err != nil {
 		return "", err
@@ -88,7 +88,7 @@ func canonicalActual(path string) (string, error) {
 
 func descriptorActual(fd int) (string, error) {
 	var buf [4096]byte
-	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), 50, uintptr(unsafe.Pointer(&buf[0])))
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), unix.F_GETPATH, uintptr(unsafe.Pointer(&buf[0])))
 	if errno != 0 {
 		return "", errno
 	}

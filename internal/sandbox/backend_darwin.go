@@ -45,18 +45,27 @@ func backendAvailable() error {
 	if err != nil {
 		return errors.New("Seatbelt profile unsupported")
 	}
-	file, err := privateSeatbeltProfile(tempRoot, profile)
+	file, writer, err := os.Pipe()
 	if err != nil {
 		return errors.New("Seatbelt private profile unavailable")
 	}
 	defer func() { _ = file.Close() }()
+	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, seatbeltExecutable, "-f", "/dev/fd/3", "/usr/bin/true")
 	command.ExtraFiles = []*os.File{file}
 	command.Env = []string{"PATH=/usr/bin:/bin"}
 	command.WaitDelay = 2 * time.Second
-	if err := command.Run(); err != nil {
+	if err = command.Start(); err != nil {
+		return errors.New("Seatbelt enforcement unavailable")
+	}
+	// Only the child keeps the read end: cancellation must break a blocked write.
+	_ = file.Close()
+	_, writeErr := writer.WriteString(profile)
+	closeErr := writer.Close()
+	runErr := command.Wait()
+	if writeErr != nil || closeErr != nil || runErr != nil {
 		return errors.New("Seatbelt enforcement unavailable")
 	}
 	return nil

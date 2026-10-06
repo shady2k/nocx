@@ -191,9 +191,21 @@ policy and explicit outbound pathname Unix deny outside private launch runtime;
 bind/connect inside runtime works. No TCP/UDP/process blanket sandbox. Seatbelt
 path identities rechecked before spawn, not claimed equivalent to Linux pinning.
 Native escaping/socket semantics must pass probe or Enforce is unsupported.
+Seatbelt read rules include exact ancestor-directory literals for native path
+traversal (including `/`), never ancestor subpaths or additional writable roots.
+Ancestor directory names may be enumerated; descendant file contents remain
+denied unless the effective policy grants them. Native RO/RW and outside-read
+probes must still pass with this platform baseline.
 
 Policy via anonymous/unlinked owner-only file or pipe inherited FD, never argv/env
 or readable policy pathname. macOS `-f /dev/fd/N`, never `-p` private policy.
+For macOS, the runner sends an unlinked bounded profile source and anonymous pipe
+writer via SCM_RIGHTS on private FD6. The ordinary helper relays the source with
+the same startup deadline and closes the writer; sandbox-exec consumes only the
+inherited reader. Received FDs become CLOEXEC under the nonblocking ForkLock
+critical section before any concurrent ordinary spawn can inherit them. This is
+profile provisioning, not a publication/commit acknowledgement. There is no
+additional producer process, readable profile file, or private-policy argument.
 Minimal restricted shim closes policy FD before shell. Keep existing bootstrap/
 lifecycle FD numbers; add new ones after them. Allowlist inherited FDs; no
 preconnected helper/coordinator/control socket or renderer token enters shell.

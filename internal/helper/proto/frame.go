@@ -82,7 +82,7 @@ const (
 	TypeScreenFrame FrameType = 13
 	// TypeSessionEffect carries one identity-bearing non-visual runtime effect.
 	// It is separate from TypeScreenFrame so snapshots never replay effects.
-	TypeSessionEffect FrameType = 17
+	TypeSessionEffect FrameType = 18
 )
 
 // valid reports whether the type belongs to the closed set above. A byte

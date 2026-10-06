@@ -417,7 +417,7 @@ func extractPackagedHelper(destination string) string {
 }
 
 func buildSourceHelper(ctx context.Context, destination string) {
-	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", destination, "./cmd/nocx-helper")
+	command := exec.CommandContext(ctx, "go", "build", "-trimpath", "-tags", "nocx_local_ssh", "-o", destination, "./cmd/nocx-helper")
 	command.Dir = repositoryRoot()
 	command.Env = append(os.Environ(), "CGO_ENABLED=1", "GOOS=darwin", "GOARCH="+runtime.GOARCH)
 	if _, err := command.CombinedOutput(); err != nil {
@@ -606,6 +606,11 @@ func waitForProof(ctx context.Context, attachment *client.AttachedSession) error
 				output.Write(buffer[:n])
 				text := output.String()
 				if strings.Contains(text, "NATIVE_FAIL") {
+					for _, line := range strings.Split(text, "\n") {
+						if strings.HasPrefix(line, "NATIVE_FAIL ") {
+							fmt.Println(line)
+						}
+					}
 					read <- errors.New("native probe reported failure")
 					return
 				}

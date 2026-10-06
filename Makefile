@@ -346,7 +346,7 @@ helpers-this-machine: helpers require-local-helper
 # support fails this isolated macOS gate instead of reporting a pass.
 sandbox-smoke-macos:
 	@test "$(HOST_GOOS)" = darwin || { echo "sandbox-smoke-macos requires macOS" >&2; exit 1; }
-	@$(MAKE) require-local-helper
+	@$(MAKE) helpers-this-machine
 	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos source
 	@NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-macos packaged
 

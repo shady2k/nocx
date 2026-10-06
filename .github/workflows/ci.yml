@@ -205,8 +205,6 @@ jobs:
           echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-${arch}-macos-${version}" >> "$GITHUB_PATH"
-      - name: Diagnose public device descriptor pinning
-        run: go run ./scripts/sandbox-smoke-macos/pin-diagnostic
       - name: Exercise native escaped filesystem rules directly
         run: go test ./internal/sandbox -run 'TestSeatbeltEscapingAndFilesystemRights|TestDarwinDevicePinRequiresItsActualNamespaceWithoutOpeningTTY' -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof

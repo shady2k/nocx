@@ -5,7 +5,6 @@ package session
 import (
 	"bufio"
 	"io"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"

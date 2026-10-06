@@ -86,6 +86,17 @@ type OpenResult = {
  * every misalignment type-check — which is exactly the defect that put
  * onSetupVault into the onAdoptabilityChange slot.
  */
+/** The wire's encoding of one intent payload: base64 of its UTF-8 bytes, the
+ *  shape contracts/session.intent.params.schema.json declares. It lives here,
+ *  beside the handle that owns every other wire detail of an intent, so no
+ *  surface has to know it. */
+function intentPayload(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
 /** The kinds of input a person produces, as the wire spells them
  *  (contracts/session.intent.params.schema.json's `kind`). It is the whole of
  *  sessionruntime's intent vocabulary and not the printable subset of it: a
@@ -614,13 +625,34 @@ export class SessionHandle {
     return this._intent(kind, payload, true)
   }
 
+  /** The wire's own encoding of one intent payload, in the one place that
+   *  decides it.
+   *
+   *  THE SCHEMA CARRIES BYTES AND THIS API CARRIES WHAT THE PERSON DID.
+   *  contracts/session.intent.params.schema.json declares `payload` as base64
+   *  (`contentEncoding`), because the intent's argument is bytes on the Go side
+   *  — a key name, committed text, a paste body — and a renderer that sent the
+   *  text raw would be sending a field the transport cannot decode. Measured:
+   *  it cost the whole RAW-mode path, silently — the intent never reached the
+   *  session, no refusal came back, and the shell's `read` waited forever,
+   *  while every unit test passed because they assert the INTENT and not the
+   *  frame it rides in (nocx-zg3k3.3.1).
+   *
+   *  UTF-8 and not `btoa(payload)`: an IME commit is what this carries most
+   *  often, and btoa throws on anything outside Latin-1. */
+
   private async _intent(
     kind: SessionIntentKind,
     payload: string,
     mayRepresent: boolean,
   ): Promise<SessionIntentResult> {
     const presented = this.accessEpoch
-    const result = await this.client.sessionIntent(this.sessionId, presented, kind, payload)
+    const result = await this.client.sessionIntent(
+      this.sessionId,
+      presented,
+      kind,
+      intentPayload(payload),
+    )
     if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
       this.accessEpoch = result.accessEpoch
     }

@@ -188,7 +188,9 @@ type boundsRecorder struct {
 	sid session.ID
 	ws  *WSServer
 
-	confirmations chan uint64
+	confirmations chan struct{}
+	confirmed     uint64
+	confirmClosed bool
 	confirmDone   chan struct{}
 	confirmErrors chan error
 	stopConfirm   sync.Once
@@ -230,20 +232,35 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 	// the helper's retained resend copy only after the store accepts these
 	// rows, and cannot run synchronously on the client's read loop.
 	if upTo, confirm := r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, ""); confirm {
-		r.confirmations <- upTo
+		r.offerConfirmation(upTo)
+	}
+}
+
+func (r *boundsRecorder) offerConfirmation(upTo uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.confirmClosed {
+		return
+	}
+	r.confirmed = max(r.confirmed, upTo)
+	select {
+	case r.confirmations <- struct{}{}:
+	default:
 	}
 }
 
 func (r *boundsRecorder) startConfirmations(attached *client.AttachedSession) {
-	// The test emits fewer than 6,000 rows across all three intervals, so
-	// even one confirmation per row fits without blocking the client's read
-	// loop on a response that the same loop must receive.
-	r.confirmations = make(chan uint64, 8192)
+	// Mirror the production latest-wins watermark, including deferred store
+	// flushes. Intermediate marks add no durability and can amplify resends.
+	r.confirmations = make(chan struct{}, 1)
 	r.confirmDone = make(chan struct{})
 	r.confirmErrors = make(chan error, 1)
 	go func() {
 		defer close(r.confirmDone)
-		for upTo := range r.confirmations {
+		for range r.confirmations {
+			r.mu.Lock()
+			upTo := r.confirmed
+			r.mu.Unlock()
 			if err := attached.ConfirmWritten(context.Background(), upTo); err != nil {
 				select {
 				case r.confirmErrors <- err:
@@ -255,7 +272,12 @@ func (r *boundsRecorder) startConfirmations(attached *client.AttachedSession) {
 }
 
 func (r *boundsRecorder) stopConfirmations() {
-	r.stopConfirm.Do(func() { close(r.confirmations) })
+	r.stopConfirm.Do(func() {
+		r.mu.Lock()
+		r.confirmClosed = true
+		close(r.confirmations)
+		r.mu.Unlock()
+	})
 	<-r.confirmDone
 }
 
@@ -487,10 +509,23 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			rec.startConfirmations(attached)
 			attached.OnOutputRows(rec.onRows)
 			attached.OnIntervalEnd(rec.onEnd)
+			// The real helper's byte carrier has a 64 KiB credit window.
+			// Read it concurrently, like the app: Read acknowledges consumed
+			// bytes, so the producer can reach the interval's physical fence.
+			// The rows plane still reaches the real block store unchanged.
+			byteDrainDone := make(chan struct{})
+			go func() {
+				_, _ = io.Copy(io.Discard, attached)
+				close(byteDrainDone)
+			}()
+			t.Cleanup(func() {
+				_ = c.Close()
+				<-byteDrainDone
+			})
 			// The block stream is attached for the session, exactly as the
 			// app's binding does; without a source the stream is inert and
 			// no block would ever open.
-			e.ws.AttachBlockRows(session.ID(sid))
+			e.ws.AttachBlockRowsWithConfirmation(session.ID(sid), rec.offerConfirmation)
 
 			// runCommand runs one command through one block: the real
 			// submit over the ws conn, a command that prints its own

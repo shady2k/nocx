@@ -277,6 +277,15 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 // lifecycle RPC.
 func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, command, requestID string) string {
 	t.Helper()
+	return h.submitLeaseCommandReady(t, tap, sid, command, requestID, nil)
+}
+
+// submitLeaseCommandReady lets a test observe that the shell started executing
+// the command before ledger.bind opens lifecycle accounting. The shell echoes
+// a submitted line before executing it, so the echo alone proves no process
+// startup.
+func (h *runLeaseHarness) submitLeaseCommandReady(t *testing.T, tap *socketTap, sid, command, requestID string, ready func()) string {
+	t.Helper()
 	attemptID := ""
 	if requestID != "" {
 		resp := tapCall(t, h.conn, tap, 41, "lifecycle.submitAttempt", map[string]string{
@@ -316,10 +325,12 @@ func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, 
 		return attemptID
 	}
 
-	// OSC 133 C is represented by the authenticated lifecycle fact. It is
-	// emitted after the shell echoes the submitted command, so the bind RPC
-	// opens accounting after the echo and before command output.
+	// The renderer's shell-start fact corresponds to OSC 133 C, which is
+	// emitted after the shell echoes the submitted command.
 	tapDataFor(t, tap, sid, command, 10*time.Second)
+	if ready != nil {
+		ready()
+	}
 	attempt := lifecycle.AttemptID(attemptID)
 	mustLifecycleIngest(t, h.pub, "T", lifecycleEnv("lane-run-lease", h.domain, 2, lifecycleStartEvt(&attempt, command)))
 	resp := tapCall(t, h.conn, tap, 42, "ledger.bind", map[string]any{
@@ -1030,17 +1041,13 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	// Output that KEEPS COMING until something stops it, rather than one
 	// burst followed by a wait.
 	//
-	// The burst raced the accounting it was meant to exceed. Budget
-	// accounting opens at ledger.bind, which submitLeaseCommand sends after
-	// the shell echoes the command; a fixed 2 KiB written before that RPC
-	// lands is not counted, and `sleep 100` then produces nothing, so the
-	// budget never fires and the WALL CLOCK ends the run 60 seconds later.
-	// Whether that happened was decided by how fast the machine was, and on
-	// the GitHub runner it happened every time (nocx-3n0f3.1).
-	//
-	// A stream cannot lose that race: whenever accounting opens, 512 bytes
-	// arrive within the next fifth of a second. 512 bytes per 100ms is also
-	// slow enough that a run which somehow is NOT bounded floods nothing.
+	// A fixed burst can race ledger.bind and finish before output accounting
+	// starts. This stream keeps delivering after bind, so it cannot lose the
+	// race to the 512-byte budget. Waiting for pidFile in the pre-bind hook
+	// below also makes the lease's first signal target a process known to have
+	// started, rather than racing the shell's echo against process creation.
+	// The cadence remains slow enough that an unbounded run produces a finite
+	// amount of output while the test observes its state.
 	cmd := "sh -c 'echo $$ > " + pidFile + "; while :; do dd if=/dev/zero bs=256 count=2 2>/dev/null; sleep 0.1; done'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
@@ -1050,8 +1057,13 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
-	pid := readPidFile(t, pidFile)
+	var pid int
+	h.submitLeaseCommandReady(t, tap, sid, cmd, requestID, func() {
+		// ledger.bind starts output accounting. Wait until the command has
+		// actually created its child before arming the 512-byte budget, so
+		// process startup is not raced against command echo or lease signals.
+		pid = readPidFile(t, pidFile)
+	})
 
 	// No waitChildAlive here on purpose: the command's own output IS the
 	// thing being bounded, and under -race the budget can fire — and the

@@ -218,10 +218,10 @@ jobs:
             fi
             echo "NATIVE_PROFILE_DIAGNOSTIC ${name} exit=${status}"
           }
-          diagnose nested-unix '(version 1) (allow default) (deny network-outbound (remote unix-socket (require-not (subpath "/private/tmp")))) (deny network-bind (local unix-socket (require-not (subpath "/private/tmp"))))'
-          diagnose boolean-unix '(version 1) (allow default) (deny network-outbound (require-all (remote unix-socket) (require-not (remote unix-socket (subpath "/private/tmp"))))) (deny network-bind (require-all (local unix-socket) (require-not (local unix-socket (subpath "/private/tmp")))))'
-          diagnose filesystem '(version 1) (allow default) (deny file-read* (require-not (require-any (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev")))) (deny file-write* (require-not (subpath "/dev")))'
-          diagnose ioctl '(version 1) (allow default) (deny file-ioctl (require-not (require-any (literal "/dev/null") (literal "/dev/tty"))))'
+          diagnose read-only '(version 1) (allow default) (deny file-read* (require-not (require-any (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev"))))'
+          diagnose write-only '(version 1) (allow default) (deny file-write* (require-not (subpath "/dev")))'
+          diagnose data-only '(version 1) (allow default) (deny file-read-data (require-not (require-any (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev")))) (deny file-write* (require-not (subpath "/dev")))'
+          diagnose root-metadata '(version 1) (allow default) (deny file-read* (require-not (require-any (literal "/") (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev")))) (deny file-write* (require-not (subpath "/dev")))'
       - name: Exercise native escaped filesystem rules directly
         run: go test ./internal/sandbox -run TestSeatbeltEscapingAndFilesystemRights -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof

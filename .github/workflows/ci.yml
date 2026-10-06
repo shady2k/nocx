@@ -205,6 +205,10 @@ jobs:
           echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-${arch}-macos-${version}" >> "$GITHUB_PATH"
+      - name: Diagnose anonymous profile transport with a non-private constant
+        run: |
+          set -euo pipefail
+          printf '%s\n' '(version 1) (allow default)' | /usr/bin/sandbox-exec -f /dev/fd/3 /usr/bin/true 3<&0
       - name: Exercise native escaped filesystem rules directly
         run: go test ./internal/sandbox -run TestSeatbeltEscapingAndFilesystemRights -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof

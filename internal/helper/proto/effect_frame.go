@@ -7,12 +7,15 @@ import (
 
 // EffectFrame carries one non-visual runtime effect to one subscriber. It is
 // separate from ScreenDataFrame: a screen snapshot never owns side effects.
-// Layout: session[16], subscriber[16], generation[8], effect-id[8], kind[1], body.
-const EffectFrameHeaderLen = 49
+// Layout: session[16], subscriber[16], generation[8], effect-id[8], kind[1],
+// title-length[4], title, body. The helper protocol version fences this shape.
+const EffectFrameHeaderLen = 53
 
 var (
-	ErrEffectFrameTooShort = errors.New("proto: effect frame shorter than its header")
-	ErrUnknownEffectKind   = errors.New("proto: unknown effect kind")
+	ErrEffectFrameTooShort     = errors.New("proto: effect frame shorter than its header")
+	ErrEffectFrameTitleLength  = errors.New("proto: effect frame title length exceeds payload")
+	ErrEffectFrameTitleTooLong = errors.New("proto: effect frame title exceeds wire length")
+	ErrUnknownEffectKind       = errors.New("proto: unknown effect kind")
 )
 
 // EffectKind is the closed non-visual effect vocabulary shared with
@@ -35,20 +38,30 @@ type EffectFrame struct {
 	Generation uint64
 	EffectID   uint64
 	Kind       EffectKind
+	Title      []byte
 	Body       []byte
 }
 
 func EncodeEffectFrame(f EffectFrame) []byte {
+	if len(f.Title) > 1<<31-1 {
+		panic(ErrEffectFrameTitleTooLong)
+	}
 	if !f.Kind.valid() {
 		panic(ErrUnknownEffectKind)
 	}
-	b := make([]byte, EffectFrameHeaderLen+len(f.Body))
+	b := make([]byte, EffectFrameHeaderLen+len(f.Title)+len(f.Body))
 	copy(b[:16], f.Session[:])
 	copy(b[16:32], f.Subscriber[:])
 	binary.BigEndian.PutUint64(b[32:40], f.Generation)
 	binary.BigEndian.PutUint64(b[40:48], f.EffectID)
 	b[48] = byte(f.Kind)
-	copy(b[EffectFrameHeaderLen:], f.Body)
+	titleLen := len(f.Title)
+	b[49] = byte((titleLen >> 24) & 0xff)
+	b[50] = byte((titleLen >> 16) & 0xff)
+	b[51] = byte((titleLen >> 8) & 0xff)
+	b[52] = byte(titleLen & 0xff)
+	copy(b[EffectFrameHeaderLen:], f.Title)
+	copy(b[EffectFrameHeaderLen+len(f.Title):], f.Body)
 	return b
 }
 
@@ -66,6 +79,18 @@ func DecodeEffectFrame(b []byte) (EffectFrame, error) {
 	f.Generation = binary.BigEndian.Uint64(b[32:40])
 	f.EffectID = binary.BigEndian.Uint64(b[40:48])
 	f.Kind = k
-	f.Body = append([]byte(nil), b[EffectFrameHeaderLen:]...)
+	titleLen := binary.BigEndian.Uint32(b[49:53])
+	// int is at least 32 bits in Go. This guard makes the conversion safe on
+	// 32-bit hosts too, and the payload bound rejects truncated titles.
+	if titleLen > 1<<31-1 {
+		return EffectFrame{}, ErrEffectFrameTitleLength
+	}
+	titleSize := int(titleLen)
+	if titleSize > len(b)-EffectFrameHeaderLen {
+		return EffectFrame{}, ErrEffectFrameTitleLength
+	}
+	titleEnd := EffectFrameHeaderLen + titleSize
+	f.Title = append([]byte(nil), b[EffectFrameHeaderLen:titleEnd]...)
+	f.Body = append([]byte(nil), b[titleEnd:]...)
 	return f, nil
 }

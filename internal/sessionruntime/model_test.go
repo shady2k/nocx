@@ -1379,7 +1379,7 @@ func (c *consumer) Pending() int { return len(c.queue) }
 func (c *consumer) HeldBytes() int {
 	held := 0
 	for _, p := range c.queue {
-		held += len(p.bytes) + len(p.effect.Body)
+		held += len(p.bytes) + len(p.effect.Title) + len(p.effect.Body)
 	}
 	return held
 }
@@ -1395,7 +1395,10 @@ func (c *consumer) Effects() []Effect {
 	held := make([]Effect, 0, len(c.queue))
 	for _, p := range c.queue {
 		if p.class == DeliveryAtMostOnce {
-			held = append(held, p.effect)
+			effect := p.effect
+			effect.Title = bytes.Clone(effect.Title)
+			effect.Body = bytes.Clone(effect.Body)
+			held = append(held, effect)
 		}
 	}
 	return held

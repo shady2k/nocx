@@ -154,8 +154,8 @@ func TestASubscriberReceivesAnIdentityBearingEffect(t *testing.T) {
 	if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if err := hs.runtime.Ingest([]byte("\x07")); err != nil {
-		t.Fatalf("ingest bell: %v", err)
+	if err := hs.runtime.Ingest([]byte("\x1b]777;notify;Tests failed;2 failed\x07")); err != nil {
+		t.Fatalf("ingest notification: %v", err)
 	}
 	deadline := time.Now().Add(hangLimit)
 	for {
@@ -163,8 +163,8 @@ func TestASubscriberReceivesAnIdentityBearingEffect(t *testing.T) {
 		effects := sink.effectFrames()
 		if len(effects) > 0 {
 			f := effects[0]
-			if f.Session != hs.raw || f.Generation != 1 || f.EffectID != 1 || f.Kind != proto.EffectBell {
-				t.Fatalf("effect frame identity/kind = %+v", f)
+			if f.Session != hs.raw || f.Generation != 1 || f.EffectID != 1 || f.Kind != proto.EffectNotification || string(f.Title) != "Tests failed" || string(f.Body) != "2 failed" {
+				t.Fatalf("effect frame identity/kind/title/body = %+v", f)
 			}
 			if f.Subscriber != mustSubscriberBytes(t, sub) {
 				t.Fatalf("effect delivered to subscriber %x, want %s", f.Subscriber, sub)

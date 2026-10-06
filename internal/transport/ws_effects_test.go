@@ -11,7 +11,7 @@ import (
 
 func TestPublishSessionEffect_ReachesSubscriberAsIdentityBearingNotification(t *testing.T) {
 	ws, sid, _, _, sock := newScreenPublishFixture(t)
-	effect := proto.EffectFrame{EffectID: 7, Generation: 4, Kind: proto.EffectClipboard, Body: []byte("payload")}
+	effect := proto.EffectFrame{EffectID: 7, Generation: 4, Kind: proto.EffectNotification, Title: []byte("Tests failed"), Body: []byte("2 failed")}
 	if !ws.PublishSessionEffect(sid, effect) {
 		t.Fatal("effect was not published")
 	}
@@ -30,13 +30,13 @@ func TestPublishSessionEffect_ReachesSubscriberAsIdentityBearingNotification(t *
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		t.Fatalf("decode params: %v", err)
 	}
-	if params.SessionID != string(sid) || params.Generation != "4" || params.EffectID != "7" || params.Kind != "clipboard" || params.Body != "payload" {
+	if params.SessionID != string(sid) || params.Generation != "4" || params.EffectID != "7" || params.Kind != "notification" || params.Title != "Tests failed" || params.Body != "2 failed" {
 		t.Fatalf("params = %+v", params)
 	}
 }
 
 func TestSessionEffectDTOConformsToContract(t *testing.T) {
-	raw, err := json.Marshal(sessionEffectParams{SessionID: "0123456789abcdef0123456789abcdef", Generation: "4", EffectID: "7", Kind: "clipboard", Body: "text"})
+	raw, err := json.Marshal(sessionEffectParams{SessionID: "0123456789abcdef0123456789abcdef", Generation: "4", EffectID: "7", Kind: "notification", Title: "title", Body: "text"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestSessionEffect_OverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 	sid := openSessionOnConn(t, ws, conn, 1)
-	effect := proto.EffectFrame{Generation: 4, EffectID: 7, Kind: proto.EffectClipboard, Body: []byte("once")}
+	effect := proto.EffectFrame{Generation: 4, EffectID: 7, Kind: proto.EffectNotification, Title: []byte("Deploy"), Body: []byte("staging ready")}
 	if !ws.PublishSessionEffect(session.ID(sid), effect) {
 		t.Fatal("effect not accepted by attached session")
 	}
@@ -76,7 +76,7 @@ func TestSessionEffect_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		t.Fatal(err)
 	}
-	if params.SessionID != sid || params.Generation != "4" || params.EffectID != "7" || params.Kind != "clipboard" || params.Body != "once" {
+	if params.SessionID != sid || params.Generation != "4" || params.EffectID != "7" || params.Kind != "notification" || params.Title != "Deploy" || params.Body != "staging ready" {
 		t.Fatalf("wire params = %+v", params)
 	}
 }

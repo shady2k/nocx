@@ -298,4 +298,8 @@ package proto
 // additionalProperties:false, and cannot provide the controller input path.
 // The row mark above was added at 15 without a bump and the intent field
 // cannot be, so the number moves here and only here.
-const Version = "16"
+// This is 17 rather than 16 because TypeSessionEffect gained the notification
+// title as a separately length-prefixed field beside its body (ADR-0047 §2.2).
+// A 16-helper would decode the title bytes as body text, silently changing the
+// notification, so the hello fence and side-by-side install are required.
+const Version = "17"

@@ -947,7 +947,7 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 			frame := proto.EffectFrame{
 				Session: s.raw, Subscriber: sub.raw,
 				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
-				Kind: kind, Body: effect.Body,
+				Kind: kind, Title: effect.Title, Body: effect.Body,
 			}
 			if err := sub.sink.SendEffectFrame(frame); err != nil {
 				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)

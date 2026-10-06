@@ -12,6 +12,7 @@ type sessionEffectParams struct {
 	Generation string `json:"generation"`
 	EffectID   string `json:"effectId"`
 	Kind       string `json:"kind"`
+	Title      string `json:"title"`
 	Body       string `json:"body"`
 }
 
@@ -47,7 +48,7 @@ func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame
 	if wconn == nil {
 		return false
 	}
-	params := sessionEffectParams{SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10), EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind, Body: string(effect.Body)}
+	params := sessionEffectParams{SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10), EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind, Title: string(effect.Title), Body: string(effect.Body)}
 	if err := wconn.TryNotify("session.effect", mustMarshal(params)); err != nil {
 		s.log.Debug("session.effect dropped", "session", string(sid), "effect_id", effect.EffectID, "error", err)
 		return false

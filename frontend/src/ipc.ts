@@ -916,6 +916,7 @@ export class WSClient {
       const generation = raw.generation
       const effectId = raw.effectId
       const kind = raw.kind
+      const title = raw.title
       const body = raw.body
       if (typeof generation !== 'string' || !/^[1-9][0-9]*$/.test(generation)) return
       if (typeof effectId !== 'string' || !/^[1-9][0-9]*$/.test(effectId)) return
@@ -929,11 +930,11 @@ export class WSClient {
         log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
         return
       }
-      if (typeof body !== 'string') return
+      if (typeof title !== 'string' || typeof body !== 'string') return
       const identity = `${generation}:${effectId}`
       if (state.seenEffects.has(identity)) return
       state.seenEffects.add(identity)
-      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, body }
+      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, title, body }
       if (state.effectCallback) state.effectCallback(effect)
       else state.pendingEffects.push(effect)
     })

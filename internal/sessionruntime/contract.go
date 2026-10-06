@@ -485,9 +485,12 @@ type Effect struct {
 	ID   EffectID
 	At   Incarnation
 	Kind EffectKind
+	// Title is the notification title, empty for OSC 9 and all other effect
+	// kinds. OSC 777 supplies it as a separate value under ADR-0047 §2.2.
+	Title []byte
 	// Body is the effect's argument: the notification text, the clipboard
-	// payload, the title, the reported directory. It is untrusted bytes from
-	// whatever the user ran, and nothing here interprets them.
+	// payload, the terminal title, or the reported directory. It is untrusted
+	// bytes from whatever the user ran, and nothing here interprets them.
 	Body []byte
 }
 

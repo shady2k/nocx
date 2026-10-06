@@ -20,7 +20,6 @@ import { CommandSnapshotStore } from '../command-snapshot'
 function seedSharedHalf(store: CommandSnapshotStore): void {
   store.applySharedNames({ state: 'ready', names: [], ageMs: 0, reason: '', truncated: false })
 }
-import type { OscNotification } from '../osc-notification'
 import {
   CaptureAbortedError,
   CaptureIdentityTracker,
@@ -1629,140 +1628,6 @@ describe('bracketed paste, read from the real parser', () => {
   })
 })
 
-describe('onNotification fan-out (ADR-0047)', () => {
-  // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
-  // code uses during init. Stub them so the terminal can initialise.
-  async function mountRenderer(): Promise<XtermRenderer> {
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })
-    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-    const r = new XtermRenderer()
-    const container = document.createElement('div')
-    Object.defineProperty(container, 'clientWidth', { value: 800 })
-    Object.defineProperty(container, 'clientHeight', { value: 600 })
-    await r.mount(container)
-    return r
-  }
-
-  /** xterm parses writes asynchronously, so the assertion cannot follow the
-   *  write on the same turn. Wait on an observable state change rather than a
-   *  duration (AGENTS.md): write the payloads, then a sentinel notification,
-   *  and return once the sentinel arrives. The parser preserves order, so
-   *  everything written before it has been delivered by then — which is what
-   *  lets a test assert that nothing was raised. */
-  const SENTINEL = '\x1b]777;notify;sentinel;flush\x07'
-
-  async function requestsFrom(r: XtermRenderer, ...writes: string[]) {
-    const seen: OscNotification[] = []
-    const flushed = new Promise<void>((resolve) => {
-      r.onNotification((req) => {
-        if (req.title === 'sentinel') {
-          resolve()
-          return
-        }
-        seen.push(req)
-      })
-    })
-    for (const w of writes) r.write(w)
-    r.write(SENTINEL)
-    await flushed
-    return seen
-  }
-
-  it('carries an OSC 9 payload through the real parser as the body', async () => {
-    const r = await mountRenderer()
-    const seen = await requestsFrom(r, '\x1b]9;build finished\x07')
-    expect(seen).toEqual([{ title: '', body: 'build finished' }])
-  })
-
-  it('splits an OSC 777 payload into title and body', async () => {
-    const r = await mountRenderer()
-    const seen = await requestsFrom(r, '\x1b]777;notify;deploy;to staging\x07')
-    expect(seen).toEqual([{ title: 'deploy', body: 'to staging' }])
-  })
-
-  // The trap this whole path exists to disarm: ESC]9;4;… is the ConEmu
-  // progress protocol, which a progress bar emits continuously. If it
-  // reached the subscriber, any `npm install` would be a notification storm.
-  it('raises nothing for the ConEmu progress form of OSC 9', async () => {
-    const r = await mountRenderer()
-    const seen = await requestsFrom(
-      r,
-      '\x1b]9;4;1;10\x07',
-      '\x1b]9;4;1;50\x07',
-      '\x1b]9;4;0\x07',
-      '\x1b]9;4\x07',
-    )
-    expect(seen).toEqual([])
-  })
-
-  // Untrusted bytes from whatever the user ran: the handler must not throw
-  // inside the parser callback, which would take the renderer down.
-  it('survives malformed payloads on both idents without raising', async () => {
-    const r = await mountRenderer()
-    const seen = await requestsFrom(
-      r,
-      '\x1b]9;\x07',
-      '\x1b]9;   \x07',
-      '\x1b]777;\x07',
-      '\x1b]777;notify\x07',
-      '\x1b]777;precmd;x;y\x07',
-    )
-    expect(seen).toEqual([])
-  })
-
-  it('fans one request out to every subscriber', async () => {
-    const r = await mountRenderer()
-    const a: OscNotification[] = []
-    const b: OscNotification[] = []
-    r.onNotification((req) => a.push(req))
-    r.onNotification((req) => b.push(req))
-    await requestsFrom(r, '\x1b]9;done\x07')
-    expect(a).toEqual([
-      { title: '', body: 'done' },
-      { title: 'sentinel', body: 'flush' },
-    ])
-    expect(b).toEqual(a)
-  })
-
-  // Both idents are one request: nothing downstream may depend on which
-  // spelling a program chose, so they must land on the same subscriber list.
-  it('delivers both spellings to one subscriber list', async () => {
-    const r = await mountRenderer()
-    const seen = await requestsFrom(r, '\x1b]9;one\x07', '\x1b]777;notify;two;three\x07')
-    expect(seen).toEqual([
-      { title: '', body: 'one' },
-      { title: 'two', body: 'three' },
-    ])
-  })
-
-  it('raises nothing after dispose', async () => {
-    const r = await mountRenderer()
-    const seen: OscNotification[] = []
-    r.onNotification((req) => seen.push(req))
-    r.dispose()
-    r.write('\x1b]9;after dispose\x07')
-    // No sentinel is possible here — dispose removed the handler, so nothing
-    // can signal a flush. A generous turn count is the only option, and it is
-    // sound in the negative direction: more turns can only ever ADD a
-    // delivery, never hide one.
-    for (let i = 0; i < 50; i++) await Promise.resolve()
-    expect(seen).toEqual([])
-  })
-})
-
 describe('onBell through the real parser (nocx-n3nfg)', () => {
   /** The same jsdom mount the OSC fan-out suite uses: xterm.js needs
    *  matchMedia and ResizeObserver during init, and neither exists here. */
@@ -2237,21 +2102,25 @@ describe('runtime effect dispatch', () => {
     renderer.onClipboardWrite(clipboard)
     renderer.onTitle(title)
     renderer.onCwd(cwd)
-    const send = (kind: SessionEffect['kind'], body = '') =>
+    const send = (kind: SessionEffect['kind'], body = '', effectTitle = '') =>
       renderer.applySessionEffect({
         sessionId: 'session',
         generation: '1',
         effectId: '1',
         kind,
+        title: effectTitle,
         body,
       })
     send('bell')
     send('notification', 'build finished')
+    send('notification', '2 failed', 'Tests failed')
     send('clipboard', '52;c;aGVsbG8gZnJvbSBvc2M1Mg==')
     send('title', 'shell title')
     send('cwd', '/worktree')
     expect(bell).toHaveBeenCalledTimes(1)
-    expect(notification).toHaveBeenCalledWith({ title: '', body: 'build finished' })
+    expect(notification).toHaveBeenNthCalledWith(1, { title: '', body: 'build finished' })
+    expect(notification).toHaveBeenNthCalledWith(2, { title: 'Tests failed', body: '2 failed' })
+    expect(notification).toHaveBeenCalledTimes(2)
     expect(clipboard).toHaveBeenCalledWith('hello from osc52')
     expect(title).toHaveBeenCalledWith('shell title')
     expect(cwd).toHaveBeenCalledWith({ host: '', path: '/worktree' })

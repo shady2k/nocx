@@ -36,7 +36,6 @@ import { mintLiveFrame } from '../frame/mint'
 import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
-import { parseOscNotification } from '../osc-notification'
 import type { SessionEffect } from '../generated/session.effect'
 import { logDecision, isDecisionTracing } from '../log'
 type BellCallback = () => void
@@ -326,7 +325,6 @@ export class XtermRenderer implements TerminalRenderer {
   private cwdSubs: CwdCallback[] = []
   private bellSubs: BellCallback[] = []
   private clipboardSubs: ClipboardWriteCallback[] = []
-  private notifyOscDisposables: Array<{ dispose(): void }> = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private recoverySubs: Array<(hex: string) => void> = []
@@ -1009,36 +1007,14 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  /** Subscribe to notification requests: a program asked nocx to present a
-   *  message (ADR-0047). OSC 9 and OSC 777 are two spellings of one request,
-   *  so both register here and fan out to one subscriber list — the consumer
-   *  never learns which sequence a program chose, because nothing downstream
-   *  may depend on it.
+  /** Subscribe to notification effects from the session runtime.
    *
-   *  Render-only, exactly like every other OSC on this renderer: the request
-   *  is reported, never granted. This handler decides nothing about where the
-   *  message goes — that is the router's, on the backend — and it cannot,
-   *  because the only thing it can send is the text the program supplied. */
+   * The runtime owns VT parsing now. Its identity-bearing session.effect is
+   * the sole source for this callback; parsing the compatibility renderer's
+   * byte mirror here would report the same OSC once without an effect id and
+   * again through the replay-safe route (nocx-zg3k3.3.3). */
   onNotification(cb: NotificationRequestCallback): void {
     this.notificationSubs.push(cb)
-    if (this.notifyOscDisposables.length || !this.term) return
-    for (const ident of [9, 777] as const) {
-      this.notifyOscDisposables.push(
-        this.term.parser.registerOscHandler(ident, (data: string) => {
-          // Untrusted bytes from whatever the user ran. parseOscNotification
-          // is total and returns null rather than throwing; a throw inside a
-          // parser callback would take the renderer down.
-          const parsed = parseOscNotification(ident, data)
-          if (parsed) {
-            for (const sub of this.notificationSubs) sub(parsed)
-          }
-          // false: xterm.js may also handle the ident. This matters for 9 —
-          // the ConEmu progress payload (9;4;…) parses to null here and must
-          // stay available to anything that renders progress.
-          return false
-        }),
-      )
-    }
   }
 
   /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
@@ -1061,7 +1037,7 @@ export class XtermRenderer implements TerminalRenderer {
         for (const sub of this.bellSubs) sub()
         break
       case 'notification':
-        for (const sub of this.notificationSubs) sub({ title: '', body: effect.body })
+        for (const sub of this.notificationSubs) sub({ title: effect.title, body: effect.body })
         break
       case 'clipboard': {
         const text = decodeOsc52(effect.body)
@@ -1325,8 +1301,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
-    for (const d of this.notifyOscDisposables) d.dispose()
-    this.notifyOscDisposables = []
     this.notificationSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)

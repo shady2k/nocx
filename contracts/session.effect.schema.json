@@ -5,12 +5,13 @@
   "description": "One identity-bearing non-visual effect emitted by the session runtime. A full session.frame never carries or replays effects; the client deduplicates this event across replay and reconnect by generation and effectId.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "generation", "effectId", "kind", "body"],
+  "required": ["sessionId", "generation", "effectId", "kind", "title", "body"],
   "properties": {
     "sessionId": { "type": "string", "minLength": 1 },
     "generation": { "type": "string", "pattern": "^[1-9][0-9]*$" },
     "effectId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
     "kind": { "type": "string", "enum": ["bell", "notification", "clipboard", "title", "cwd"] },
+    "title": { "type": "string" },
     "body": { "type": "string" }
   }
 }

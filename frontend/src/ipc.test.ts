@@ -2295,6 +2295,7 @@ describe('session.effect notification', () => {
       generation: '4',
       effectId: '7',
       kind: 'clipboard',
+      title: '',
       body: 'permitted text',
       ...over,
     },
@@ -2312,6 +2313,7 @@ describe('session.effect notification', () => {
         generation: '4',
         effectId: '7',
         kind: 'clipboard',
+        title: '',
         body: 'permitted text',
       },
     ])
@@ -2331,10 +2333,14 @@ describe('session.effect notification', () => {
     const { session, ws } = await connectedSession()
     const received: SessionEffect[] = []
     session.onEffect((value) => received.push(value))
-    ws.deliverText(effect({ kind: 'notification', body: 'finished' }))
-    ws.deliverText(effect({ kind: 'notification', body: 'finished' }))
+    ws.deliverText(effect({ kind: 'notification', title: 'Tests failed', body: 'finished' }))
+    ws.deliverText(effect({ kind: 'notification', title: 'Tests failed', body: 'finished' }))
     expect(received).toHaveLength(1)
-    expect(received[0]?.kind).toBe('notification')
+    expect(received[0]).toMatchObject({
+      kind: 'notification',
+      title: 'Tests failed',
+      body: 'finished',
+    })
   })
 
   it('refuses unknown kinds and malformed identities', async () => {
@@ -2348,10 +2354,14 @@ describe('session.effect notification', () => {
 
   it('buffers an event delivered before the pane registers its handler', async () => {
     const { session, ws } = await connectedSession()
-    ws.deliverText(effect({ kind: 'notification', body: 'done' }))
+    ws.deliverText(effect({ kind: 'notification', title: 'Build complete', body: 'done' }))
     const received: SessionEffect[] = []
     session.onEffect((value) => received.push(value))
     expect(received).toHaveLength(1)
-    expect(received[0]?.kind).toBe('notification')
+    expect(received[0]).toMatchObject({
+      kind: 'notification',
+      title: 'Build complete',
+      body: 'done',
+    })
   })
 })

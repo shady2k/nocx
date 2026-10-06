@@ -21,11 +21,9 @@ const (
 	// nothing to say: the effect IS the ring.
 	EffectBell
 	// EffectNotification is a desktop notification request (OSC 9 without a
-	// parameter, and OSC 777). Its body is the message text. The port
-	// deliberately carries the text and not a title/body pair: the protocols
-	// that have no title put the whole message in the body, and a program that
-	// supplies one is a formatting decision the surface can make from the text
-	// it has.
+	// parameter, and OSC 777). OSC 9 has an empty title; OSC 777 supplies both
+	// fields. The title and body are carried separately because presentation
+	// requests have the exact shape fixed by ADR-0047 §2.2.
 	EffectNotification
 	// EffectClipboard is a request to write the clipboard (OSC 52 and its
 	// Kitty descendant). Its body is the payload the program supplied, copied.
@@ -134,8 +132,9 @@ const (
 // implementation that kept the pointer would hand a caller a title that was
 // freed a moment ago — and the caller could not tell.
 type Effect struct {
-	Kind EffectKind
-	Body []byte
+	Kind  EffectKind
+	Title []byte
+	Body  []byte
 	// Source is the content an EffectFence was drawn over: the text of the
 	// screen rows at the fence, captured when the fence completed. Nil for
 	// every other kind, and never read except through Kind — a consumer

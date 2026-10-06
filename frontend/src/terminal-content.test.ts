@@ -17305,6 +17305,7 @@ describe('runtime clipboard effects keep the existing permission gate', () => {
         generation: '1',
         effectId: '1',
         kind: 'clipboard' as const,
+        title: '',
         body: '52;c;cnVudGltZSB0ZXh0',
       }
       session.fireEffect(effect)

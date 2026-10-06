@@ -39,7 +39,9 @@ func must(err error, operation string) {
 	if err != nil {
 		var refusal *client.RefusalError
 		if errors.As(err, &refusal) {
-			fmt.Printf("MACOS_NATIVE_FAILURE operation=%q code=%q prepare_code=%q\n", operation, refusal.Code, preparationCode(err))
+			var detail sandbox.BuildError
+			_ = json.Unmarshal(refusal.Details, &detail)
+			fmt.Printf("MACOS_NATIVE_FAILURE operation=%q code=%q prepare_code=%q prepare_field=%q prepare_index=%d\n", operation, refusal.Code, preparationCode(err), detail.Field, detail.Index)
 		}
 		panic(operation)
 	}

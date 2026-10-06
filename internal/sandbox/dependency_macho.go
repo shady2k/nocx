@@ -104,7 +104,7 @@ func discoverMachODependencies(executable string) (resultPaths []string, resultE
 
 func machoLoadsAt(path string) ([]string, []string, error) {
 	if file, err := macho.Open(path); err == nil {
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		if !currentMachOCPU(file.Cpu) {
 			return nil, nil, fmt.Errorf("wrong Mach-O architecture")
 		}
@@ -114,7 +114,7 @@ func machoLoadsAt(path string) ([]string, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer fat.Close()
+	defer func() { _ = fat.Close() }()
 	for _, arch := range fat.Arches {
 		if currentMachOCPU(arch.Cpu) {
 			return machoLoads(arch.File)

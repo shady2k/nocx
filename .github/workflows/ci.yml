@@ -205,23 +205,8 @@ jobs:
           echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | shasum -a 256 -c -
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-${arch}-macos-${version}" >> "$GITHUB_PATH"
-      - name: Diagnose anonymous profile transport with a non-private constant
-        run: |
-          set -euo pipefail
-          printf '%s\n' '(version 1) (allow default)' | /usr/bin/sandbox-exec -f /dev/fd/3 /usr/bin/true 3<&0
-          diagnose() {
-            local name="$1" profile="$2" status
-            if printf '%s\n' "$profile" | /usr/bin/sandbox-exec -f /dev/fd/3 /usr/bin/true 3<&0; then
-              status=0
-            else
-              status=$?
-            fi
-            echo "NATIVE_PROFILE_DIAGNOSTIC ${name} exit=${status}"
-          }
-          diagnose read-only '(version 1) (allow default) (deny file-read* (require-not (require-any (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev"))))'
-          diagnose write-only '(version 1) (allow default) (deny file-write* (require-not (subpath "/dev")))'
-          diagnose data-only '(version 1) (allow default) (deny file-read-data (require-not (require-any (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev")))) (deny file-write* (require-not (subpath "/dev")))'
-          diagnose root-metadata '(version 1) (allow default) (deny file-read* (require-not (require-any (literal "/") (subpath "/System") (subpath "/usr") (subpath "/Library") (subpath "/private") (subpath "/dev")))) (deny file-write* (require-not (subpath "/dev")))'
+      - name: Diagnose public device descriptor pinning
+        run: go run ./scripts/sandbox-smoke-macos/pin-diagnostic
       - name: Exercise native escaped filesystem rules directly
         run: go test ./internal/sandbox -run TestSeatbeltEscapingAndFilesystemRights -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof

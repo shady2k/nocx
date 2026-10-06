@@ -141,7 +141,7 @@ func newBuildRoot(path string, access Access, kind RootKind, provenance Provenan
 	if e != nil {
 		return buildRoot{}, e
 	}
-	pin, e := openPinned(path)
+	pin, e := openPinned(path, kind)
 	if e != nil {
 		return buildRoot{}, e
 	}

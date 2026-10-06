@@ -45,7 +45,7 @@ func TestPinnedRootRejectsRetargetedPathIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd, err := openPinned(canonical)
+	fd, err := openPinned(canonical, DirectoryRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openPinned(path string) (*os.File, error) {
+func openPinned(path string, _ RootKind) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err

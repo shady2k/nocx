@@ -303,8 +303,8 @@ func validateDarwinRunner(plan RunnerPlan, verifyProbe bool) error {
 func validatePinnedObjects(plan RunnerPlan) error {
 	for i, root := range plan.Policy.Roots {
 		fd := plan.RootFDs[i]
-		var st unix.Stat_t
-		if err := unix.Fstat(fd, &st); err != nil {
+		st, statErr := statPinnedDarwin(fd, root.Path, root.Kind)
+		if statErr != nil {
 			return runnerErr("root-fd")
 		}
 		if uint64(st.Dev) != root.Identity.Device || st.Ino != root.Identity.Inode {
@@ -313,7 +313,15 @@ func validatePinnedObjects(plan RunnerPlan) error {
 		if uint32(st.Mode&unix.S_IFMT) != mapRootType(root.Kind) {
 			return runnerErr("root-type")
 		}
-		actual, err := canonicalActual(root.Path)
+		var actual string
+		var err error
+		if root.Kind == DeviceRoot {
+			var parent string
+			parent, err = descriptorActual(fd)
+			actual = filepath.Join(parent, filepath.Base(root.Path))
+		} else {
+			actual, err = canonicalActual(root.Path)
+		}
 		pathIdentity, identityErr := identity(root.Path)
 		if err != nil || identityErr != nil || actual != root.Path || pathIdentity != root.Identity {
 			return runnerErr("root-path-identity")

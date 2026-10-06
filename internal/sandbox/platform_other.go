@@ -16,7 +16,7 @@ func verifyPinned(*os.File, FileIdentity, RootKind) error {
 	return fmt.Errorf("filesystem enforcement is unsupported")
 }
 
-func openPinned(string) (*os.File, error) {
+func openPinned(string, RootKind) (*os.File, error) {
 	return nil, fmt.Errorf("filesystem enforcement is unsupported")
 }
 

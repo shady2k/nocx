@@ -15,15 +15,21 @@ import (
 )
 
 // Seatbelt is path-based; retain a no-follow descriptor for identity recheck.
-func openPinned(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+func openPinned(path string, kind RootKind) (*os.File, error) {
+	target := path
+	if kind == DeviceRoot {
+		// Device aliases such as /dev/tty cannot be opened without a controlling
+		// terminal. Pin the containing namespace and recheck the device itself.
+		target = filepath.Dir(path)
+	}
+	fd, err := unix.Open(target, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		fd, err = unix.Open(path, unix.O_EVTONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		fd, err = unix.Open(target, unix.O_EVTONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return os.NewFile(uintptr(fd), "sandbox-root"), nil
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 func identity(path string) (FileIdentity, error) {
@@ -39,8 +45,8 @@ func identity(path string) (FileIdentity, error) {
 }
 
 func verifyPinned(f *os.File, want FileIdentity, kind RootKind) error {
-	var st syscall.Stat_t
-	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+	st, err := statPinnedDarwin(int(f.Fd()), f.Name(), kind)
+	if err != nil {
 		return err
 	}
 	if uint64(st.Dev) != want.Device || st.Ino != want.Inode {
@@ -64,6 +70,27 @@ func verifyPinned(f *os.File, want FileIdentity, kind RootKind) error {
 		return fmt.Errorf("invalid root kind")
 	}
 	return nil
+}
+
+func statPinnedDarwin(fd int, path string, kind RootKind) (unix.Stat_t, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return st, err
+	}
+	if kind != DeviceRoot {
+		return st, nil
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return st, fmt.Errorf("device namespace kind changed")
+	}
+	parent, err := descriptorActual(fd)
+	if err != nil || parent != filepath.Dir(path) {
+		return st, fmt.Errorf("device namespace identity changed")
+	}
+	if err := unix.Fstatat(fd, filepath.Base(path), &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return st, err
+	}
+	return st, nil
 }
 
 func dupPinned(source *os.File) (*os.File, error) {

@@ -208,7 +208,7 @@ jobs:
       - name: Diagnose public device descriptor pinning
         run: go run ./scripts/sandbox-smoke-macos/pin-diagnostic
       - name: Exercise native escaped filesystem rules directly
-        run: go test ./internal/sandbox -run TestSeatbeltEscapingAndFilesystemRights -count=1 -v
+        run: go test ./internal/sandbox -run 'TestSeatbeltEscapingAndFilesystemRights|TestDarwinDevicePinRequiresItsActualNamespaceWithoutOpeningTTY' -count=1 -v
       - name: Build packaged helper and run mandatory native Seatbelt proof
         run: make sandbox-smoke-macos
   ci-mac:

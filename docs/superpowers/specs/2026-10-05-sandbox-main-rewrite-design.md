@@ -196,6 +196,11 @@ traversal (including `/`), never ancestor subpaths or additional writable roots.
 Ancestor directory names may be enumerated; descendant file contents remain
 denied unless the effective policy grants them. Native RO/RW and outside-read
 probes must still pass with this platform baseline.
+Darwin device roots retain their parent namespace descriptor and verify the
+actual character-device identity with no-follow `fstatat`, before native apply
+and in the restricted shim. Opening `/dev/tty` is not a prerequisite for a helper
+without a controlling terminal. Parent descriptors remain private and are closed
+before the shell; Linux still pins each device directly with O_PATH.
 
 Policy via anonymous/unlinked owner-only file or pipe inherited FD, never argv/env
 or readable policy pathname. macOS `-f /dev/fd/N`, never `-p` private policy.

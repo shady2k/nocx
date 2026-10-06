@@ -431,7 +431,7 @@ func baseline(goos string) []string {
 	if goos == "linux" {
 		return []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev", "/proc", "/sys", "/nix/store"}
 	}
-	return []string{"/usr", "/bin", "/sbin", "/System/Library", "/System/Volumes/Preboot/Cryptexes", "/Library/Developer/CommandLineTools", "/etc", "/dev", "/private/etc", "/private/var/db"}
+	return []string{"/usr", "/bin", "/sbin", "/System/Library", "/System/Volumes/Preboot/Cryptexes", "/Library/Developer/CommandLineTools", "/etc", "/dev", "/private/etc", "/private/var/db", "/private/var/select"}
 }
 
 func backendVersion(goos string) int {

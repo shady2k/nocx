@@ -153,7 +153,7 @@ func machoLoads(file *macho.File) ([]string, []string, error) {
 const systemMachOSentinel = "\x00system-covered"
 
 func darwinBaselineCovers(path string) bool {
-	for _, base := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/System/Library", "/System/Volumes/Preboot/Cryptexes", "/Library/Developer/CommandLineTools", "/private/etc", "/private/var/db"} {
+	for _, base := range baseline("darwin") {
 		root, err := canonicalActual(base)
 		if err == nil && contained(root, path) {
 			return true
@@ -196,7 +196,7 @@ func resolveMachODependency(name, loader, executable string, rpaths []string) st
 				return filepath.Clean(real)
 			}
 		}
-		for _, base := range []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/System/Library", "/System/Volumes/Preboot/Cryptexes", "/Library/Developer/CommandLineTools", "/private/etc", "/private/var/db"} {
+		for _, base := range baseline("darwin") {
 			if contained(base, candidate) {
 				systemCovered = true
 			}

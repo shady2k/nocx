@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentRecords.save.schema.json",
+  "title": "agentRecords.save result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent"],
+  "properties": {
+    "agent": {
+      "$ref": "agentRecords.list.schema.json#/$defs/agent"
+    }
+  }
+}

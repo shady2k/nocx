@@ -41,6 +41,7 @@ import { PolicyClient } from './policy-client'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { EmittingClient } from './emitting-client'
 import { AgentAccessClient } from './agent-access-client'
+import { AgentRecordsClient } from './agent-records-client'
 import { AgentRulesClient } from './agent-rules-client'
 import { CalibrationClient } from './calibration-client'
 import { TypingClient } from './typing-client'
@@ -263,6 +264,7 @@ function main(): void {
   // the interval, and there is nothing here to close.
   const emittingClient = new EmittingClient(dispatcher)
   const agentAccessClient = new AgentAccessClient(dispatcher)
+  const agentRecordsClient = new AgentRecordsClient(dispatcher)
   // The guided calibration (nocx-etejh). Stateless in the same way: the walk
   // it drives lives in the backend, keyed by the pane, so a window that goes
   // away leaves nothing half-open.
@@ -716,6 +718,7 @@ function main(): void {
         // the Settings page would be a second owner of what a pane is called.
         (sessionId: string) => tm.sessionDisplayName(sessionId),
         checkoutsStatusStore,
+        agentRecordsClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

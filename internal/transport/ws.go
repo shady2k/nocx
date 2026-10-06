@@ -260,6 +260,9 @@ type WSServer struct {
 	// available" rather than an empty list, because "nothing is remembered"
 	// and "this window cannot see what is remembered" are different facts.
 	agentAccess AgentAccessStore
+	// agentRecords is the existing per-agent launch record store, surfaced to
+	// Settings so edits change the same source the wrappers and spawner read.
+	agentRecords AgentRecordsStore
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -1234,6 +1237,11 @@ func WithAgentAccess(store AgentAccessStore) WSServerOption {
 	return func(ws *WSServer) { ws.agentAccess = store }
 }
 
+// WithAgentRecords connects Settings to the same store the launcher reads.
+func WithAgentRecords(store AgentRecordsStore) WSServerOption {
+	return func(ws *WSServer) { ws.agentRecords = store }
+}
+
 // WithLiveEffects names which effect classes a declared tool actually
 // carries — policy.get's "live". The value is agenttools.LiveEffects(), read
 // at the composition root beside WithAgentPolicy: the policy says what a run
@@ -1841,6 +1849,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentAccessSpecs()...)
+	specs = append(specs, s.agentRecordsSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)

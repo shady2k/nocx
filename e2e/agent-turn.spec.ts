@@ -53,7 +53,7 @@
  * state change — the turn's `completed` chip, a store row — never a sleep.
  */
 import { expect, type Page } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -76,6 +76,7 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
+const SETTINGS_AGENTS_NAV = '.ui-grouped-nav__item[data-item="agents"]'
 /* `run` is mutate-destructive and session.read observe (registry.go). */
 const APPROVAL_TITLE = 'This action needs your approval'
 
@@ -495,5 +496,66 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await expect(restoredTurn).toHaveAttribute('data-restored', 'true')
     await expect(restoredTurn).toHaveAttribute('data-block-kind', 'ask')
     await expect(restoredTurn.locator(':scope > .cmd-children > .cmd-block')).toHaveCount(5)
+  })
+
+  test('Settings edits reach the real worker process on the next spawn without a restart (nocx-h64wy)', async ({
+    page,
+  }) => {
+    const runID = `custom-${nonce}`
+    const launchMarker = `agent-record-launch-${nonce}`
+    const question = `Start the configured ${runID} agent, ${nonce}`
+    const scriptDir = mkdtempSync(join(tmpdir(), `nocx-agent-record-${nonce}-`))
+    const command = join(scriptDir, 'agent-probe')
+    writeFileSync(
+      command,
+      `#!/bin/sh\nprintf '${launchMarker} args=%s env=%s\\n' "$*" "$NOCX_AGENT_PROBE"\nwhile IFS= read -r line; do printf 'input=%s\\n' "$line"; done\n`,
+    )
+    chmodSync(command, 0o700)
+
+    await openApp(page)
+    await configureAssistant(page)
+    await openSettings(page, SETTINGS_AGENTS_NAV)
+    await page.getByLabel('Agent ID').fill(runID)
+    await page.getByLabel('Display name').last().fill(`Configured ${runID}`)
+    await page.getByLabel('Command').last().fill(command)
+    await page.getByLabel('Arguments (one per line)').last().fill('--stale')
+    await page
+      .getByLabel('Environment (KEY=VALUE, one per line)')
+      .last()
+      .fill('NOCX_AGENT_PROBE=before')
+    await page.getByRole('button', { name: 'Add agent' }).click()
+    await expect(page.getByRole('status')).toContainText(
+      'Agent added. It is available in new shells.',
+    )
+
+    // Edit the durable record through Settings. The process is launched only
+    // after the edit; restarting nocx here would hide a stale in-memory read.
+    const card = page.locator('.ui-section').filter({ hasText: `Agent ID: ${runID}` })
+    await expect(card).toBeVisible()
+    await card.getByLabel('Arguments (one per line)').fill('--fresh')
+    await card.getByLabel('Environment (KEY=VALUE, one per line)').fill('NOCX_AGENT_PROBE=after')
+    await card.getByRole('button', { name: 'Save agent' }).click()
+    await expect(card.getByRole('status')).toContainText('next launch will use these settings')
+
+    await backToTerminal(page)
+    fake.setScript({
+      chunks: ['Starting the configured worker.'],
+      toolCalls: [
+        {
+          name: 'workers.spawn',
+          id: `spawn_${nonce}`,
+          arguments: { command: runID, task: `print ${launchMarker}` },
+        },
+      ],
+    })
+    await askFromPrompt(page, question)
+    await completed(page, question)
+
+    // This is the process output carried back from its actual PTY, not a
+    // fixture of the record or a low-level spawn helper. Both updated values
+    // must be the argv/environment the next spawn launched.
+    await expect(page.locator('body')).toContainText(`${launchMarker} args=--fresh env=after`, {
+      timeout: 30_000,
+    })
   })
 })

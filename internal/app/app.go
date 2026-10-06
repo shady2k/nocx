@@ -1814,6 +1814,7 @@ func New(opts ...Option) (*App, error) {
 	// rather than in the literal above because the service is built with the
 	// session registry, which does not exist that early (nocx-6jbad).
 	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
+	tpOpts = append(tpOpts, transport.WithAgentRecords(agentRecords))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 

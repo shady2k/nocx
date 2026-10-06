@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agentRecords.list.schema.json",
+  "title": "agentRecords.list result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agents"],
+  "properties": {
+    "agents": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    }
+  },
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "builtin",
+        "state",
+        "problem",
+        "displayName",
+        "command",
+        "args",
+        "icon",
+        "colour",
+        "disabled",
+        "env",
+        "resume"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "builtin": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string",
+          "enum": ["shipped", "user", "unreadable"]
+        },
+        "problem": {
+          "type": "string"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "icon": {
+          "type": "string"
+        },
+        "colour": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "boolean"
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resume": {
+          "$ref": "#/$defs/resume"
+        }
+      }
+    },
+    "resume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionIdArgs", "resumeIdArgs", "resumeCwdArgs"],
+      "properties": {
+        "sessionIdArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resumeIdArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "resumeCwdArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

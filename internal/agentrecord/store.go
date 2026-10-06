@@ -36,6 +36,9 @@ const (
 type Entry struct {
 	// ID is the agent's name.
 	ID string
+	// Builtin is the build's answer even when the person's override is unreadable.
+	// It keeps the Settings action guard truthful without handing back launch data.
+	Builtin bool
 	// State is where the record in force comes from.
 	State State
 	// Record is the record in force. It is the ZERO value in
@@ -102,6 +105,78 @@ func New(configDir string) (*Store, error) {
 // somebody typed.
 func (s *Store) Entry(id string) (Entry, bool) { return s.entry(id) }
 
+// List reads every shipped agent and every user document from disk. It does
+// not cache rows: a Settings write is visible to the next read and the next
+// launch in this process. Unreadable user documents remain rows so Settings
+// can show the failure where the person can repair it.
+func (s *Store) List() ([]Entry, error) {
+	if s == nil {
+		return nil, errors.New("agentrecord: record store is unavailable")
+	}
+	ids := make(map[string]struct{}, len(s.shipped))
+	for id := range s.shipped {
+		ids[id] = struct{}{}
+	}
+	files, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("agentrecord: agent records could not be listed: %w", err)
+	}
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(file.Name(), ".json")
+		if storage.ValidDocumentName(id) {
+			ids[id] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	rows := make([]Entry, 0, len(ordered))
+	for _, id := range ordered {
+		if row, ok := s.entry(id); ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+// Save replaces one agent's user document. The whole record is validated and
+// atomically written; shipped values remain embedded and are never copied to
+// disk until a person edits that agent.
+func (s *Store) Save(id string, doc Document) error {
+	if s == nil || !storage.ValidDocumentName(id) {
+		return fmt.Errorf("agentrecord: %q is not a valid agent id", id)
+	}
+	if err := doc.validate(); err != nil {
+		return fmt.Errorf("agentrecord: record for %q is invalid: %w", id, err)
+	}
+	doc.Version = documentVersion
+	if err := s.docs.Write(name(id), doc); err != nil {
+		return fmt.Errorf("agentrecord: record for %q could not be saved: %w", id, err)
+	}
+	return nil
+}
+
+// Remove deletes a user's agent document. A shipped agent is never removed:
+// removing its edit would merely restore the embedded record and obscure what
+// the Settings control promised, so this operation refuses it explicitly.
+func (s *Store) Remove(id string) error {
+	if s == nil || !storage.ValidDocumentName(id) {
+		return fmt.Errorf("agentrecord: %q is not a valid agent id", id)
+	}
+	if _, builtin := s.shipped[id]; builtin {
+		return fmt.Errorf("agentrecord: shipped agent %q cannot be removed", id)
+	}
+	if err := s.docs.Delete(name(id)); err != nil {
+		return fmt.Errorf("agentrecord: record for %q could not be removed: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) entry(id string) (Entry, bool) {
 	if s == nil || !storage.ValidDocumentName(id) {
 		return Entry{}, false
@@ -118,16 +193,17 @@ func (s *Store) entry(id string) (Entry, bool) {
 		// reads an identifier followed by a `.Error(` as a call site whose
 		// context it cannot prove — a false positive the baseline is full of,
 		// and one that may not be added to.
-		return Entry{ID: id, State: StateUnreadable, Problem: fmt.Sprint(problem)}, true
+		return Entry{ID: id, Builtin: isShipped, State: StateUnreadable, Problem: fmt.Sprint(problem)}, true
 	case doc == nil:
 		if !isShipped {
 			return Entry{}, false
 		}
-		return Entry{ID: id, State: StateShipped, Record: shippedRecord}, true
+		return Entry{ID: id, Builtin: true, State: StateShipped, Record: shippedRecord}, true
 	default:
 		return Entry{
-			ID:    id,
-			State: StateUser,
+			ID:      id,
+			Builtin: isShipped,
+			State:   StateUser,
 			// Builtin is the BUILD's answer and never the document's, so a
 			// document cannot make an agent it invented removable-or-not by
 			// claiming so; it is true exactly when this build ships the id.

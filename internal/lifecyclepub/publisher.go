@@ -864,15 +864,20 @@ func (p *Publisher) transitionsBelow(ctx context.Context, before map[lifecycle.A
 
 // Ingest applies one frame and publishes what it changed.
 //
-// THE LANE'S EMISSION TURN IS HELD FOR THE WHOLE FRAME (ADR-0077), not only
-// for the lane fact at its end. A frame's projections write the store, and a
-// frame's writes are one transaction that holds the store's only connection
-// from its first write until the frame ends (content's ApplyLifecycleFrame).
-// ReplayLane takes this same turn and then writes the store through the
-// emitter; were the frame to take the turn only after its first write — the
-// attempt transitions report before the lane fact — the two would each hold
-// what the other waits for. Taken first, the turn orders every frame's store
-// work after any replay of its lane, and the frame's own emissions below run
+// THE LANE'S EMISSION TURN IS HELD BEFORE THE FRAME'S FIRST STORE WRITE AND
+// THROUGH ITS POST-COMMIT EFFECTS. ADR-0077 decision 8 requires taking it
+// before writes: otherwise a replay may hold the store connection while the
+// frame waits for the turn. Keeping it through queued effects also prevents
+// session.open from publishing post-mutation prompt_ready before the shell
+// receives ACCEPT.
+//
+// A frame's projections write the store, and its writes are one transaction
+// that holds the store's only connection until the frame ends (content's
+// ApplyLifecycleFrame). ReplayLane takes this same turn and then writes the
+// store through the emitter; were the frame to take the turn only after its
+// first write — the attempt transitions report before the lane fact — the two
+// would each hold what the other waits for. Taken first, the turn orders every
+// frame's store work after any replay of its lane, and its own emissions run
 // under the turn it already holds (holdsTurn).
 //
 // ctx is the frame's: every emission the frame causes carries it, and with it
@@ -880,11 +885,22 @@ func (p *Publisher) transitionsBelow(ctx context.Context, before map[lifecycle.A
 // shell — the ACCEPT, a grant, an enrolment's answer, any other outbound —
 // waits in the frame's post-commit queue (lifecyclecommit, ADR-0077 decision
 // 12) in the order the kernel minted it, and goes out only if the frame is
-// stored; outside a frame it goes out at once.
+// stored; outside a frame it goes out at once. The turn's release is queued
+// after these effects, so session.open cannot replay the new prompt_ready
+// state before ACCEPT and the frame's own fact are delivered.
 func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
 	turn := p.laneEmission(env.Lane)
 	turn <- struct{}{}
-	defer func() { <-turn }()
+	releaseOnReturn := true
+	defer func() {
+		if releaseOnReturn {
+			<-turn
+		}
+	}()
+	releaseAfterFrame := func() {
+		releaseOnReturn = false
+		lifecyclecommit.After(ctx, nil, func(bool) { <-turn })
+	}
 	ctx = context.WithValue(ctx, heldTurnKey{}, env.Lane)
 
 	// The lane's open attempts are read BEFORE the mutation — the only moment
@@ -906,6 +922,7 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 		// review finding 5 of 1e899f6a).
 		p.transitionsBelow(ctx, before)
 		p.publishLane(ctx, env.Lane)
+		releaseAfterFrame()
 		return err
 	}
 	if req := env.Event.AgentLaunchCancel; env.Event.Kind == lifecycle.KindAgentLaunchCancel && req != nil && p.agentLaunchResolver != nil {
@@ -966,6 +983,7 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 			_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 		})
 	}
+	releaseAfterFrame()
 	return nil
 }
 

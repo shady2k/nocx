@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 )
 
@@ -756,4 +758,84 @@ func TestPublisherDeliversAcceptBeforePublishingPromptReady(t *testing.T) {
 	if len(facts) != 1 || facts[0].Lifecycle != lifecyclepub.LifecyclePromptReady {
 		t.Fatalf("facts = %+v, want exactly one prompt_ready published after the accept", facts)
 	}
+}
+
+// commitOrderedEmitter mirrors the renderer side of a framed publish: the
+// lifecycle fact is visible only after the storage frame commits. It shares an
+// event list with the transport port so the test can assert wire ordering.
+type commitOrderedEmitter struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (e *commitOrderedEmitter) add(event string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, event)
+}
+
+func (e *commitOrderedEmitter) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
+	lifecyclecommit.OnCommit(ctx, func() { e.add("fact:" + f.Lifecycle) })
+}
+
+func (e *commitOrderedEmitter) all() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.events...)
+}
+
+// TestPublisherReplayWaitsForAcceptFrameEffects reproduces the session.open
+// replay racing the bridge's first hello. A replay must not publish the new
+// prompt_ready fact before the frame's ACCEPT has reached the shell.
+func TestPublisherReplayWaitsForAcceptFrameEffects(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		k := lifecycle.New(lifecycle.Options{})
+		pub := lifecyclepub.New(k)
+		events := &commitOrderedEmitter{}
+		pub.SetEmitter(events)
+		port := &recordingPort{}
+		port.onSend = func(sent lifecycle.Envelope) {
+			if sent.Event.Kind == lifecycle.KindAccept {
+				events.add("accept")
+			}
+		}
+		if err := pub.BindTransport("T", port); err != nil {
+			t.Fatalf("BindTransport: %v", err)
+		}
+		h, err := pub.RequestDomain("L", nil, "T")
+		if err != nil {
+			t.Fatalf("RequestDomain: %v", err)
+		}
+		events.mu.Lock()
+		events.events = nil // ignore the native projection from RequestDomain
+		events.mu.Unlock()
+
+		ctx, frame := lifecyclecommit.Begin(context.Background())
+		if err := pub.Ingest(ctx, "T", env("L", h, 1, helloEvt())); err != nil {
+			t.Fatalf("Ingest hello: %v", err)
+		}
+
+		replayed := make(chan struct{})
+		go func() {
+			pub.ReplayLane("L")
+			close(replayed)
+		}()
+		synctest.Wait()
+		beforeCommit := events.all()
+		replayFinishedBeforeCommit := false
+		select {
+		case <-replayed:
+			replayFinishedBeforeCommit = true
+		default:
+		}
+
+		frame.End(true)
+		synctest.Wait()
+		if len(beforeCommit) != 0 || replayFinishedBeforeCommit {
+			t.Fatalf("replay published before ACCEPT and frame commit: events=%v finished=%t", beforeCommit, replayFinishedBeforeCommit)
+		}
+		if got, want := events.all(), []string{"accept", "fact:prompt_ready", "fact:prompt_ready"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("post-commit event order = %v, want %v", got, want)
+		}
+	})
 }

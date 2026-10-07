@@ -2319,6 +2319,24 @@ describe('session.effect notification', () => {
     ])
   })
 
+  it('dispatches and deduplicates an empty promptBoundary observation', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    expect(received).toEqual([
+      {
+        sessionId: SID,
+        generation: '4',
+        effectId: '7',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      },
+    ])
+  })
+
   it('does not turn a full frame into a non-visual side effect', async () => {
     const { session, ws } = await connectedSession()
     const received: SessionEffect[] = []

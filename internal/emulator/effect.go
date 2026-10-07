@@ -70,6 +70,8 @@ const (
 	// sighting with no interval in flight to locate anything in does
 	// nothing at all.
 	EffectOutputMark
+	// EffectPromptBoundary is OSC 133 B: an untrusted observation that a conventional shell emitted its prompt boundary. It carries no authority.
+	EffectPromptBoundary
 	// EffectClearBoundary is the program erasing the display AND its saved
 	// lines: ED3, `CSI 3 J`, written to the pty after `CSI H` and `CSI 2 J`
 	// — exactly what `clear(1)` emits (nocx-zg3k3.10.3's owner decision,

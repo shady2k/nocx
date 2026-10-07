@@ -468,6 +468,7 @@ const (
 	EffectTitle
 	// EffectCwdReport is OSC 7.
 	EffectCwdReport
+	EffectPromptBoundary
 )
 
 // EffectID identifies one effect for as long as its incarnation lives. The

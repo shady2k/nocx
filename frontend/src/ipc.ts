@@ -925,7 +925,8 @@ export class WSClient {
         kind !== 'notification' &&
         kind !== 'clipboard' &&
         kind !== 'title' &&
-        kind !== 'cwd'
+        kind !== 'cwd' &&
+        kind !== 'promptBoundary'
       ) {
         log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
         return

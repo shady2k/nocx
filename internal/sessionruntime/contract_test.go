@@ -360,6 +360,8 @@ func effectKindName(k EffectKind) string {
 		return "a title"
 	case EffectCwdReport:
 		return "a cwd report"
+	case EffectPromptBoundary:
+		return "a prompt-boundary observation"
 	default:
 		return fmt.Sprintf("EffectKind(%d)", int(k))
 	}
@@ -1868,15 +1870,15 @@ func scheduleEffectDeliveryPolicy(m Runtime) error {
 func driveEffectKinds(m Runtime) error {
 	c := m.Consumers().Attach()
 	stream := []byte("\x07\x1b]9;build finished\x07\x1b]777;notify;nocx;done\x07" +
-		"\x1b]52;c;aGVsbG8=\x07\x1b]0;a title\x07\x1b]7;file://host/tmp\x07")
+		"\x1b]52;c;aGVsbG8=\x07\x1b]0;a title\x07\x1b]7;file://host/tmp\x07\x1b]133;B\x07")
 	if err := m.Ingest(stream); err != nil {
 		return failed("effect/kind-stream", "ingesting one chunk carrying every effect kind: %v", err)
 	}
-	if got := len(c.Effects()); got != 6 {
+	if got := len(c.Effects()); got != 7 {
 		return failed("effect/every-kind-is-delivered",
-			"the consumer holds %d at-most-once payloads after a chunk carrying every kind, want 6 (six effects, five kinds)", got)
+			"the consumer holds %d at-most-once payloads after a chunk carrying every kind, want 7", got)
 	}
-	for _, k := range []EffectKind{EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport} {
+	for _, k := range []EffectKind{EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary} {
 		observe(kindEffect, int(k))
 		if !holdsKind(c, k) {
 			return failed("effect/every-kind-is-delivered",
@@ -2550,7 +2552,7 @@ func TestSchedule_HostileOversizedDCS_FailsWhenItsRuleIsRemoved(t *testing.T) {
 // delivery path, and fails here — which is what makes the sentence in
 // contract.go a check rather than a claim.
 func TestEveryEffectKindBelongsToTheAtMostOnceClass(t *testing.T) {
-	for k := EffectBell; k <= EffectCwdReport; k++ {
+	for k := EffectBell; k <= EffectPromptBoundary; k++ {
 		if got := classOfEffect(k); got != DeliveryAtMostOnce {
 			t.Errorf("%s classifies as %s, want at-most-once: every effect kind the vocabulary declares changes no cell and must not be applied twice",
 				effectKindName(k), deliveryClassName(got))

@@ -20,6 +20,17 @@ func TestEffectFrameRoundTripsIdentityTitleAndBody(t *testing.T) {
 	}
 }
 
+func TestPromptBoundaryEffectFrameRoundTripsEmptyPayload(t *testing.T) {
+	want := EffectFrame{Session: [16]byte{1}, Subscriber: [16]byte{2}, Generation: 4, EffectID: 8, Kind: EffectPromptBoundary}
+	got, err := DecodeEffectFrame(EncodeEffectFrame(want))
+	if err != nil {
+		t.Fatalf("DecodeEffectFrame: %v", err)
+	}
+	if got.Session != want.Session || got.Subscriber != want.Subscriber || got.Generation != want.Generation || got.EffectID != want.EffectID || got.Kind != EffectPromptBoundary || len(got.Title) != 0 || len(got.Body) != 0 {
+		t.Fatalf("prompt-boundary frame = %+v", got)
+	}
+}
+
 func TestEffectFrameRefusesUnknownKind(t *testing.T) {
 	wire := make([]byte, EffectFrameHeaderLen)
 	wire[48] = 255

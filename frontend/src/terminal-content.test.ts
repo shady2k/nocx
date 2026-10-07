@@ -2427,6 +2427,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // acted on alone, before any session.integrationChanged exists.
       expect(tab.pane.querySelector(WAITING)).not.toBeNull()
       expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      // Hostile OSC 133 B cannot forge authenticated integration.
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '99',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(content.shellState).not.toBe('integrated')
       session.send.mockClear()
       rendererOf(content)._fireData('x')
       expect(session.send).not.toHaveBeenCalled()
@@ -11780,8 +11791,19 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
      *  parse pass that carried it is the pass the prompt's redraw ends in —
      *  which is why the marker and the write-parsed fire together here, in
      *  that order, exactly as xterm's OSC handler and onWriteParsed do. */
-    function promptPainted(renderer: ReturnType<typeof rendererOf>): void {
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+    function promptPainted(
+      content: TerminalContent,
+      renderer: ReturnType<typeof rendererOf>,
+    ): void {
+      const session = sessionOf(content)
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      })
       renderer._fireWriteParsed()
     }
 
@@ -11846,7 +11868,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         const renderer = rendererOf(content)
         // The prompt came back and finished painting — the screen is nobody's
         // as of this pass.
-        promptPainted(renderer)
+        promptPainted(content, renderer)
         // …and then the background child repainted it. That write, parsed
         // after the handback, is what makes this screen worth attaching; the
         // finished-command case below has no such write and is refused.
@@ -11913,7 +11935,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         // the marker and this test goes green on a broken product, because a
         // bare write after the freeze is what the defect mistook for a live
         // screen.
-        promptPainted(renderer)
+        promptPainted(content, renderer)
         const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
         renderer.captureLiveFrame = captureLiveFrame
 
@@ -13413,7 +13435,15 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
    *  prompt are not unread output. The B marker is what a real prompt-end
    *  delivers, so the settle here is the one a user's session performs. */
   const settle = (content: TerminalContent): void => {
-    rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+    const session = sessionOf(content)
+    session.fireEffect({
+      sessionId: session.sessionId,
+      generation: '1',
+      effectId: '1',
+      kind: 'promptBoundary',
+      title: '',
+      body: '',
+    })
   }
 
   /** The notify.bell requests this pane sent, in order. */

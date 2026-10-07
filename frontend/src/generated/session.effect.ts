@@ -16,7 +16,7 @@ export interface SessionEffect {
   sessionId: string
   generation: string
   effectId: string
-  kind: 'bell' | 'notification' | 'clipboard' | 'title' | 'cwd'
+  kind: 'bell' | 'notification' | 'clipboard' | 'title' | 'cwd' | 'promptBoundary'
   title: string
   body: string
 }

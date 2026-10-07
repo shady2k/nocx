@@ -972,6 +972,8 @@ func protoEffectKind(kind sessionruntime.EffectKind) (proto.EffectKind, bool) {
 		return proto.EffectTitle, true
 	case sessionruntime.EffectCwdReport:
 		return proto.EffectCwdReport, true
+	case sessionruntime.EffectPromptBoundary:
+		return proto.EffectPromptBoundary, true
 	default:
 		return 0, false
 	}

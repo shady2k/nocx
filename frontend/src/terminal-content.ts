@@ -3385,23 +3385,6 @@ export class TerminalContent extends BasePaneContent {
           }
         }
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
-        // ONE thing is read off a marker here, and it is not a decision about
-        // the session: B is prompt-end, so the shell has finished starting
-        // and is waiting on a person. That is the moment this pane's output
-        // stops being its own start and becomes something a user can miss
-        // (PaneHost.contentSettled). It grants nothing, opens nothing and
-        // persists nothing, so ADR-0024 §1's severed list is untouched.
-        // AND the same B closes the interval in which this screen belongs to
-        // nobody (_screenHandbackGeneration): PS1 ends with this marker in
-        // every branch nocx.bash writes, so B is the last byte of the
-        // prompt's own redraw. Reading it here grants nothing and opens
-        // nothing — it moves a generation counter the automatic Ask
-        // attachment compares against, which is the same render-only
-        // partition A/B already exist for.
-        if (marker.kind === 'B') {
-          this._settle()
-          this._handbackPendingParse = true
-        }
       })
 
       // Optional on the renderer contract (types.ts): a renderer that does
@@ -4833,9 +4816,13 @@ export class TerminalContent extends BasePaneContent {
     this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
     session.onEffect((effect) => {
-      // Effects are delivered independently of full frames. The client IPC
-      // layer validates the closed kind set and deduplicates identity before
-      // this existing renderer policy path sees the event.
+      // OSC 133 B is an at-most-once observation from the backend's sole
+      // terminal parser. It settles conventional startup and closes Ask's
+      // prompt redraw interval; it never mutates authenticated lifecycle state.
+      if (effect.kind === 'promptBoundary') {
+        this._settle()
+        this._handbackPendingParse = true
+      }
       renderer.applySessionEffect?.(effect)
     })
     session.onData((data: string) => {

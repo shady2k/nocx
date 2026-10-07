@@ -28,6 +28,8 @@ func effectKindName(kind proto.EffectKind) (string, bool) {
 		return "title", true
 	case proto.EffectCwdReport:
 		return "cwd", true
+	case proto.EffectPromptBoundary:
+		return "promptBoundary", true
 	default:
 		return "", false
 	}

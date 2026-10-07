@@ -28,9 +28,10 @@ const (
 	EffectClipboard
 	EffectTitle
 	EffectCwdReport
+	EffectPromptBoundary
 )
 
-func (k EffectKind) valid() bool { return k >= EffectBell && k <= EffectCwdReport }
+func (k EffectKind) valid() bool { return k >= EffectBell && k <= EffectPromptBoundary }
 
 type EffectFrame struct {
 	Session    [16]byte

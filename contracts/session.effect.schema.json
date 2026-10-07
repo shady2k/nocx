@@ -10,7 +10,10 @@
     "sessionId": { "type": "string", "minLength": 1 },
     "generation": { "type": "string", "pattern": "^[1-9][0-9]*$" },
     "effectId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
-    "kind": { "type": "string", "enum": ["bell", "notification", "clipboard", "title", "cwd"] },
+    "kind": {
+      "type": "string",
+      "enum": ["bell", "notification", "clipboard", "title", "cwd", "promptBoundary"]
+    },
     "title": { "type": "string" },
     "body": { "type": "string" }
   }

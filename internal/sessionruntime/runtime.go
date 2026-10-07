@@ -1305,6 +1305,8 @@ func effectKindOf(k emulator.EffectKind) EffectKind {
 		return EffectTitle
 	case emulator.EffectCwdReport:
 		return EffectCwdReport
+	case emulator.EffectPromptBoundary:
+		return EffectPromptBoundary
 	default:
 		return EffectNone
 	}
@@ -1892,7 +1894,7 @@ func effectDelivery(e Effect) queued {
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
 func deliveryClassOf(k EffectKind) DeliveryClass {
 	switch k {
-	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport:
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary:
 		return DeliveryAtMostOnce
 	default:
 		return DeliveryUnclassified

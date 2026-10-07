@@ -81,6 +81,65 @@ func TestSessionEffect_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestPromptBoundaryDTOAndRealSocketHaveNoPayload(t *testing.T) {
+	ws, sid, _, _, sock := newScreenPublishFixture(t)
+	if !ws.PublishSessionEffect(sid, proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary}) {
+		t.Fatal("prompt boundary was not published")
+	}
+	frames := awaitCapturedFrames(t, sock, 1)
+	var msg struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(frames[0].Data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Method != "session.effect" {
+		t.Fatalf("method = %q", msg.Method)
+	}
+	validateJSON(t, loadSchema(t, "session.effect.schema.json"), msg.Params, "promptBoundary DTO params")
+	var params sessionEffectParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.Generation != "2" || params.EffectID != "9" {
+		t.Fatalf("params = %+v", params)
+	}
+}
+
+func TestPromptBoundary_OverTheWireConformsToContract(t *testing.T) {
+	ws, _ := newScreenBaselineServer(t)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSessionOnConn(t, ws, conn, 1)
+	if !ws.PublishSessionEffect(session.ID(sid), proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary}) {
+		t.Fatal("event not accepted")
+	}
+	raw, err := awaitFrame(conn, time.Now().Add(wantWithin), func(raw []byte) bool {
+		var msg struct {
+			Method string `json:"method"`
+		}
+		return json.Unmarshal(raw, &msg) == nil && msg.Method == "session.effect"
+	})
+	if err != nil {
+		t.Fatalf("session.effect not received: %v", err)
+	}
+	var msg struct {
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, loadSchema(t, "session.effect.schema.json"), msg.Params, "promptBoundary over-the-wire params")
+	var params sessionEffectParams
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.SessionID != sid || params.Generation != "2" || params.EffectID != "9" {
+		t.Fatalf("wire params = %+v", params)
+	}
+}
+
 func TestPublishSessionEffect_RefusesUnknownKind(t *testing.T) {
 	ws, sid, _, _, sock := newScreenPublishFixture(t)
 	if ws.PublishSessionEffect(sid, proto.EffectFrame{Generation: 1, EffectID: 1, Kind: proto.EffectKind(255)}) {

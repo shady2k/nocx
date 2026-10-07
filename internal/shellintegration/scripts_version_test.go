@@ -239,6 +239,9 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// digest as v56 on purpose, and the bump is what republishes the
 		// generation files.
 		"57": "2580479b36a733fd8091b1ec50b194508cbd63823a17695e6bb3d5885c84b76d",
+		// v58: local agent wrappers resolve a saved record through the lifecycle
+		// channel and execute its cached command, arguments and environment.
+		"58": "315010cd82fa6dc3d9bd4cda80293a548981d10a393fb5411d88c6d6cd9b8c11",
 	}
 
 	h := sha256.New()

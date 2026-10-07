@@ -593,6 +593,38 @@ the `nocx agent run` binary §7.1 describes. The binary's reason to exist is the
 to — and both belong to `nocx-dkawo`, which is about authority. A grid grants no
 authority: it asks nocx to watch a pane the caller is already sitting in.
 
+### 15.1.1 Launch configuration is resolved separately
+
+The shell sends `agent_launch_resolve` before `agent_enrol`. It names only the agent ID
+and a request ID. The response's `local` field means that local agent-record resolution
+applies to this invocation; it does not claim that the transport itself is local. The
+backend sets it from the authenticated transport and its own worker-pane enrollment state,
+never from a shell assertion. An ordinary local shell launch resolves the current
+`agentrecord.Store` entry and gets an opaque ticket plus a versioned payload. A remote
+launch or a server-classified `workers.spawn` pane gets `local:false`, no ticket and no
+payload; `workers.spawn` therefore keeps its literal command and arguments. The payload
+encodes the resolved executable followed by record arguments, then environment key/value
+pairs.
+Fields are hex data, not shell text. The publisher measures the fully JSON-encoded
+`agent_launch_resolved` frame against `MaxFrameBytes`; an oversized response is refused and
+its ticket is discarded.
+
+`agent_enrol` remains the consent-and-observation act. It never carries command, arguments
+or environment. A record-backed local request carries only the opaque ticket that binds it
+to the resolved snapshot. Published bundles carry agent names only and contain no resolver
+or payload decoder.
+
+A ticket binds `(TransportID, LaneID, DomainID, Epoch, AgentID)` and its random token.
+There is one live ticket per transport/lane/domain/epoch binding; a successful new resolve
+supersedes the prior ticket for that binding, even when the agent ID differs. Tickets are
+memory-only, have no wall-clock expiry while consent is pending, and are capped at 1024;
+capacity refuses a new binding rather than evicting a live ticket. The first enrolment that
+returns `pending` retains its ticket. Retries use that ticket with a fresh request ID. The
+first final result consumes it. `agent_launch_cancel` is best-effort and has no reply; it
+removes only a ticket matching the authenticated transport/lane/domain/epoch, agent ID and token.
+Withdraw, domain suspension/close/revocation, epoch replacement, transport loss and app
+shutdown also invalidate outstanding tickets.
+
 ### 15.2 The pair, and both ends of the interval
 
 `agent_enrol` names what is about to run and the geometry to start at. It does **not**
@@ -642,10 +674,12 @@ shape `AGENTS.md` names, where a feature that does not exist survives a release 
 warning nobody sees. Every refusal the backend can produce is therefore a sentence, not a
 code.
 
-And the agent **still runs**, unorchestrated. "Failure is closed" means no enrolment
-implies no orchestration; it does not mean a terminal declines to start the program its
-user asked for because a feature of its own is unavailable. A bare agent started outside a
-nocx panel session is the same case and reads the same way.
+After a valid local record snapshot, a consent refusal or another final enrolment refusal
+runs that invocation's cached executable, record arguments, environment and caller
+arguments **without the tool surface**. It does not run the agent ID as a fallback. A
+missing, disabled, unreadable or malformed local resolution has no valid launch snapshot,
+so the local wrapper prints the refusal and starts nothing. A published remote wrapper is
+different: it carries names only and runs the name conventionally on the remote host.
 
 **A question is not a refusal** (`nocx-cyhfw`). The first start of an agent nobody has
 answered for puts a question on screen — may this agent use nocx's tools — and that
@@ -662,15 +696,17 @@ started the agent before anybody had answered. So the answer is a third shape:
    so nothing read after waiting can be consent. Every pane waiting on the same agent gets
    one, and the question is asked once however many wait.
 3. If the closing frame has no `reason`, a person answered: the shell sends a fresh
-   `agent_enrol`, which the stored answer settles like any other — enrolled after a yes,
-   refused (the agent then runs without tools, and the pane says why) after a no. If it
-   has a `reason`, nobody could be asked or the answer could not be kept: the shell prints
-   it and runs the agent without tools, and does not ask again.
+   `agent_enrol` with the same launch ticket, which the stored answer settles like any
+   other — enrolled after a yes, refused after a no. A final refusal prints its reason and
+   runs the cached local record without tools; if the record itself was never resolved,
+   the local wrapper starts nothing. If the closing frame has a `reason`, nobody could be
+   asked or the answer could not be kept: the shell prints it and runs the cached local
+   record without tools, and does not ask again.
 
-Ctrl+C during the wait **cancels the launch**: the agent does not run and the command
-returns 130. The question stays on screen, and an answer given later is still kept for the
-next start; its closing frame reaches a shell no longer waiting for that request and is
-skipped like any other stale answer.
+Ctrl+C during the wait **cancels the launch**: the shell sends `agent_launch_cancel`, the
+agent does not run and the command returns 130. The question stays on screen, and an answer
+given later is still kept for the next start; its closing frame reaches a shell no longer
+waiting for that request and is skipped like any other stale answer.
 
 ### 15.5 What enrolment may never decide
 

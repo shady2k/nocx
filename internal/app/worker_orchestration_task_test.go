@@ -110,6 +110,7 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 		t.Fatalf("write idle capture: %v", err)
 	}
 	typedFile := filepath.Join(t.TempDir(), "typed.bin")
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
 
 	// The stub: raw mode so a keystroke lands as a byte rather than being
 	// echoed back onto the screen the driver is reading (which would corrupt
@@ -119,6 +120,7 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 	fakeDir := t.TempDir()
 	fakeClaude := filepath.Join(fakeDir, "claude")
 	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$#\" \"$@\" > \"$NOCX_TEST_ARGV_BYTES\"\n" +
 		"stty raw -echo 2>/dev/null || true\n" +
 		"cat \"$NOCX_TEST_IDLE_BYTES\"\n" +
 		"exec cat >> \"$NOCX_TEST_TYPED_BYTES\"\n"
@@ -128,6 +130,7 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("NOCX_TEST_IDLE_BYTES", idleFile)
 	t.Setenv("NOCX_TEST_TYPED_BYTES", typedFile)
+	t.Setenv("NOCX_TEST_ARGV_BYTES", argvFile)
 
 	var logs safeBuffer
 	stand := newHappyStand(t,
@@ -144,7 +147,7 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	params, err := json.Marshal(map[string]string{"command": "claude", "task": task})
+	params, err := json.Marshal(map[string]string{"command": "claude --model test 'two words'", "task": task})
 	if err != nil {
 		t.Fatalf("marshal spawn params: %v", err)
 	}
@@ -180,6 +183,18 @@ func TestACoordinatorSpawnsAWorkerAndTypesItsTask(t *testing.T) {
 		t.Fatalf("spawn result = %+v, want a live participant id\nlog:\n%s", response.Result, logs.String())
 	}
 	participant := response.Result.ID
+
+	// The same-named shell function enrols the worker, then its literal path
+	// must invoke the external executable with the exact argv from workers.spawn.
+	wantArgv := "3\n--model\ntest\ntwo words\n"
+	waittest.WaitForTimeout(t, "the worker executable to receive the literal command arguments", 5*time.Second, func() bool {
+		got, readErr := os.ReadFile(argvFile) //nolint:gosec // argvFile is this test's own tempdir path
+		return readErr == nil && string(got) == wantArgv
+	})
+	gotArgv, readErr := os.ReadFile(argvFile) //nolint:gosec // argvFile is this test's own tempdir path
+	if readErr != nil || string(gotArgv) != wantArgv {
+		t.Fatalf("worker executable argv = %q (err %v), want %q\nlog:\n%s", gotArgv, readErr, wantArgv, logs.String())
+	}
 
 	// #3: the agent enrolled — the record reached live for a real session,
 	// and the log names that same session's enrolment.

@@ -32,11 +32,13 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"io"
 	"reflect"
 	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 )
@@ -263,9 +265,10 @@ type Kernel interface {
 type Option func(*options)
 
 type options struct {
-	grantBuilder  GrantBuilder
-	agentEnroller AgentEnroller
-	log           nocxlog.Logger
+	grantBuilder        GrantBuilder
+	agentEnroller       AgentEnroller
+	agentLaunchResolver AgentLaunchResolver
+	log                 nocxlog.Logger
 }
 
 // WithLogger gives the publisher a voice (nocx-n14oo.8).
@@ -343,6 +346,44 @@ type AgentEnroller interface {
 	Withdraw(lane lifecycle.LaneID)
 }
 
+// AgentLaunchBinding is derived only from the authenticated envelope and the
+// transport selected by the adapter. The caller supplies no local/remote flag.
+type AgentLaunchBinding struct {
+	Transport lifecycle.TransportID
+	Lane      lifecycle.LaneID
+	Domain    lifecycle.DomainID
+	Epoch     uint64
+	Agent     string
+}
+
+// AgentLaunchResolution is the backend's result for one launch-record lookup.
+// Local says a local record applies to this invocation; false also covers
+// server-classified worker panes that keep their literal command. Payload is
+// already encoded as shell-safe data; it must never be logged.
+type AgentLaunchResolution struct {
+	Local   bool
+	Ticket  string
+	Payload string
+	Reason  string
+}
+
+// AgentLaunchResolver owns the agent-record lookup and ticket lifecycle.
+// Cancel is idempotent and best effort; it receives the authenticated binding.
+type AgentLaunchResolver interface {
+	Resolve(ctx context.Context, binding AgentLaunchBinding) (AgentLaunchResolution, error)
+	Cancel(binding AgentLaunchBinding, ticket string)
+	InvalidateBinding(binding AgentLaunchBinding)
+	InvalidateDomain(transport lifecycle.TransportID, lane lifecycle.LaneID, domain lifecycle.DomainID)
+	InvalidateTransport(transport lifecycle.TransportID)
+}
+
+// AgentLaunchEnroller consumes a launch ticket at the same server boundary
+// that handles consent. Implementations must reject a local enrolment without
+// a ticket and reject tickets from any other binding.
+type AgentLaunchEnroller interface {
+	EnrolResolved(ctx context.Context, binding AgentLaunchBinding, ticket string, cols, rows int) error
+}
+
 // EnrolmentPending is the verdict an enroller returns when the answer waits on
 // a person: nocx is asking whether the agent may use its tools (nocx-cyhfw).
 //
@@ -376,6 +417,11 @@ func (p *EnrolmentPending) Error() string { return p.Reason }
 // must not be able to look established while nothing is watching (D4).
 func WithAgentEnroller(e AgentEnroller) Option {
 	return func(o *options) { o.agentEnroller = e }
+}
+
+// WithAgentLaunchResolver wires the record lookup and opaque-ticket owner.
+func WithAgentLaunchResolver(r AgentLaunchResolver) Option {
+	return func(o *options) { o.agentLaunchResolver = r }
 }
 
 // Emitter is where published facts go: the WSServer at the composition root,
@@ -436,15 +482,16 @@ type AttemptTransitionEmitter interface {
 type Publisher struct {
 	kernel Kernel
 
-	mu            sync.Mutex
-	emitter       Emitter
-	last          map[lifecycle.LaneID]Fact
-	emitting      map[lifecycle.LaneID]chan struct{} // each lane's emission turn (laneEmission)
-	known         map[lifecycle.LaneID]struct{}
-	dest          map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
-	grantBuilder  GrantBuilder
-	agentEnroller AgentEnroller
-	log           nocxlog.Logger
+	mu                  sync.Mutex
+	emitter             Emitter
+	last                map[lifecycle.LaneID]Fact
+	emitting            map[lifecycle.LaneID]chan struct{} // each lane's emission turn (laneEmission)
+	known               map[lifecycle.LaneID]struct{}
+	dest                map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
+	grantBuilder        GrantBuilder
+	agentEnroller       AgentEnroller
+	agentLaunchResolver AgentLaunchResolver
+	log                 nocxlog.Logger
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
@@ -458,14 +505,15 @@ func New(k Kernel, opts ...Option) *Publisher {
 		o.log = nocxlog.NewSlogAdapter(nil)
 	}
 	return &Publisher{
-		kernel:        k,
-		last:          make(map[lifecycle.LaneID]Fact),
-		emitting:      make(map[lifecycle.LaneID]chan struct{}),
-		known:         make(map[lifecycle.LaneID]struct{}),
-		dest:          make(map[lifecycle.DomainID]Destination),
-		grantBuilder:  o.grantBuilder,
-		agentEnroller: o.agentEnroller,
-		log:           o.log,
+		kernel:              k,
+		last:                make(map[lifecycle.LaneID]Fact),
+		emitting:            make(map[lifecycle.LaneID]chan struct{}),
+		known:               make(map[lifecycle.LaneID]struct{}),
+		dest:                make(map[lifecycle.DomainID]Destination),
+		grantBuilder:        o.grantBuilder,
+		agentEnroller:       o.agentEnroller,
+		agentLaunchResolver: o.agentLaunchResolver,
+		log:                 o.log,
 	}
 }
 
@@ -594,7 +642,58 @@ func (p *Publisher) buildAndDeliverGrant(ctx context.Context, out lifecycle.Outb
 // answer, unlike the grant beside it: the geometry is the seam's business and
 // not the shell's, so putting it on the outbound would send the caller back a
 // number it told us in the previous frame.
-func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.Outbound) {
+func (p *Publisher) answerAgentLaunchResolve(ctx context.Context, transport lifecycle.TransportID, ask lifecycle.Envelope, out lifecycle.Outbound) {
+	ans := out.Envelope.Event.AgentLaunchResolved
+	if ans == nil {
+		_ = p.kernel.Deliver(out)
+		return
+	}
+	req := ask.Event.AgentLaunchResolve
+	binding := AgentLaunchBinding{
+		Transport: transport,
+		Lane:      ask.Lane,
+		Domain:    ask.Domain,
+		Epoch:     ask.Epoch,
+	}
+	if req == nil {
+		ans.Local = true
+		ans.Reason = "the launch request was incomplete"
+	} else {
+		binding.Agent = req.Agent
+		if p.agentLaunchResolver == nil {
+			// This event is sent only by the local delivery. Without an owner
+			// for records, fail closed rather than executing the record ID.
+			ans.Local = true
+			ans.Reason = "local agent launch resolution is not wired"
+		} else if resolved, err := p.agentLaunchResolver.Resolve(ctx, binding); err != nil {
+			ans.Local = true
+			ans.Reason = "the local agent record could not be resolved"
+		} else {
+			ans.Local = resolved.Local
+			ans.Ticket = resolved.Ticket
+			ans.Payload = resolved.Payload
+			ans.Reason = resolved.Reason
+			if !resolved.Local {
+				// A non-record classification (remote or worker-literal) carries
+				// names only, regardless of what an implementation returned.
+				ans.Ticket = ""
+				ans.Payload = ""
+			}
+		}
+	}
+	if _, err := lifecyclecodec.Encode(io.Discard, out.Envelope); err != nil {
+		if ans.Ticket != "" && p.agentLaunchResolver != nil {
+			p.agentLaunchResolver.Cancel(binding, ans.Ticket)
+		}
+		ans.Ticket = ""
+		ans.Payload = ""
+		ans.Local = true
+		ans.Reason = "the local agent launch configuration exceeds the lifecycle frame limit"
+	}
+	_ = p.kernel.Deliver(out)
+}
+
+func (p *Publisher) answerAgentEnrolment(ctx context.Context, transport lifecycle.TransportID, ask lifecycle.Envelope, out lifecycle.Outbound) {
 	lane := out.Envelope.Lane
 	switch out.Envelope.Event.Kind {
 	case lifecycle.KindAgentEnrolled:
@@ -610,7 +709,15 @@ func (p *Publisher) answerAgentEnrolment(ask lifecycle.Envelope, out lifecycle.O
 		case req == nil:
 			ans.Reason = "the enrolment carried no request"
 		default:
-			err := p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows)
+			binding := AgentLaunchBinding{Transport: transport, Lane: ask.Lane, Domain: ask.Domain, Epoch: ask.Epoch, Agent: ans.Agent}
+			var err error
+			if resolved, ok := p.agentEnroller.(AgentLaunchEnroller); ok {
+				err = resolved.EnrolResolved(ctx, binding, req.LaunchTicket, req.Cols, req.Rows)
+			} else if req.LaunchTicket != "" {
+				err = errors.New("this backend cannot validate local agent launch tickets")
+			} else {
+				err = p.agentEnroller.Enrol(lane, ans.Agent, req.Cols, req.Rows)
+			}
 			var pending *EnrolmentPending
 			switch {
 			case err == nil:
@@ -801,6 +908,22 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 		p.publishLane(ctx, env.Lane)
 		return err
 	}
+	if req := env.Event.AgentLaunchCancel; env.Event.Kind == lifecycle.KindAgentLaunchCancel && req != nil && p.agentLaunchResolver != nil {
+		binding := AgentLaunchBinding{Transport: t, Lane: env.Lane, Domain: env.Domain, Epoch: env.Epoch, Agent: req.Agent}
+		ticket := req.Ticket
+		lifecyclecommit.OnCommit(ctx, func() { p.agentLaunchResolver.Cancel(binding, ticket) })
+	}
+	if env.Event.Kind == lifecycle.KindAgentWithdraw && p.agentLaunchResolver != nil {
+		binding := AgentLaunchBinding{Transport: t, Lane: env.Lane, Domain: env.Domain, Epoch: env.Epoch}
+		lifecyclecommit.OnCommit(ctx, func() { p.agentLaunchResolver.InvalidateBinding(binding) })
+	}
+	switch env.Event.Kind {
+	case lifecycle.KindDomainActivated, lifecycle.KindDomainSuspended, lifecycle.KindDomainClosed:
+		if p.agentLaunchResolver != nil {
+			transport, lane, domain := t, env.Lane, env.Domain
+			lifecyclecommit.OnCommit(ctx, func() { p.agentLaunchResolver.InvalidateDomain(transport, lane, domain) })
+		}
+	}
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
 		case lifecycle.KindDomainGrant:
@@ -810,6 +933,8 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 			// the parent is blocked waiting for it before it can launch
 			// the child.
 			p.buildAndDeliverGrant(ctx, out)
+		case lifecycle.KindAgentLaunchResolved:
+			lifecyclecommit.OnCommit(ctx, func() { p.answerAgentLaunchResolve(ctx, t, env, out) })
 		case lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
 			// Same shape and the same reason: the caller is blocked waiting
 			// for the verdict before it launches the agent, and the answer
@@ -818,7 +943,7 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 			// "enrolled" and starts the agent in the next instruction cannot
 			// beat the watch it was promised. That is the byte-zero guarantee
 			// the whole grid rests on.
-			lifecyclecommit.OnCommit(ctx, func() { p.answerAgentEnrolment(env, out) })
+			lifecyclecommit.OnCommit(ctx, func() { p.answerAgentEnrolment(ctx, t, env, out) })
 		case lifecycle.KindAccept:
 			// The shell must receive ACCEPT before the lifecycle.changed
 			// prompt_ready publication. Otherwise a renderer can submit
@@ -834,7 +959,7 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 	p.publishLane(ctx, env.Lane)
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
-		case lifecycle.KindDomainGrant, lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn, lifecycle.KindAccept:
+		case lifecycle.KindDomainGrant, lifecycle.KindAgentLaunchResolved, lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn, lifecycle.KindAccept:
 			continue // already delivered above, with their answers
 		}
 		lifecyclecommit.OnCommit(ctx, func() {
@@ -955,6 +1080,9 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 	}
 	if err := p.kernel.TransportLost(t); err != nil {
 		return err
+	}
+	if p.agentLaunchResolver != nil {
+		p.agentLaunchResolver.InvalidateTransport(t)
 	}
 	for _, l := range lanes {
 		p.transitionsBelow(context.Background(), openBefore[l])

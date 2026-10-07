@@ -337,7 +337,6 @@ type wireEnvelope struct {
 	Opts        []string `json:"opts,omitempty"`
 	GrantDomain *string  `json:"grant_domain,omitempty"`
 	GrantEpoch  *uint64  `json:"grant_epoch,omitempty"`
-	Bootstrap   *string  `json:"bootstrap,omitempty"`
 	// Agent enrolment (protocol doc §15). Agent names what is about to run;
 	// Enrolled and Reason are the answer. Enrolled is a VALUE rather than a
 	// pointer on purpose: a missing field decodes to false, which is the
@@ -350,6 +349,14 @@ type wireEnvelope struct {
 	// only a frame that says so holds a shell on a question (nocx-cyhfw).
 	Pending bool    `json:"pending,omitempty"`
 	Reason  *string `json:"reason,omitempty"`
+	Ticket  *string `json:"ticket,omitempty"`
+	Payload *string `json:"payload,omitempty"`
+	// Local is a backend-generated classification, not a caller assertion.
+	Local bool `json:"local"`
+	// Bootstrap remains last in the wire struct because remote domain_grant
+	// shells extract it from a fixed trailing position. All fields above it
+	// are omitted on that event.
+	Bootstrap *string `json:"bootstrap,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -449,11 +456,28 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		}
 	case lifecycle.KindAgentEnrol:
 		env.Event.AgentEnrol = &lifecycle.AgentEnrol{
+			RequestID:    lifecycle.RequestID(str(w.Request)),
+			Agent:        str(w.Agent),
+			LaunchTicket: str(w.Ticket),
+			Cols:         derefInt(w.Cols),
+			Rows:         derefInt(w.Rows),
+		}
+	case lifecycle.KindAgentLaunchResolve:
+		env.Event.AgentLaunchResolve = &lifecycle.AgentLaunchResolve{
 			RequestID: lifecycle.RequestID(str(w.Request)),
 			Agent:     str(w.Agent),
-			Cols:      derefInt(w.Cols),
-			Rows:      derefInt(w.Rows),
 		}
+	case lifecycle.KindAgentLaunchResolved:
+		env.Event.AgentLaunchResolved = &lifecycle.AgentLaunchResolved{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Agent:     str(w.Agent),
+			Local:     w.Local,
+			Ticket:    str(w.Ticket),
+			Payload:   str(w.Payload),
+			Reason:    str(w.Reason),
+		}
+	case lifecycle.KindAgentLaunchCancel:
+		env.Event.AgentLaunchCancel = &lifecycle.AgentLaunchCancel{Agent: str(w.Agent), Ticket: str(w.Ticket)}
 	case lifecycle.KindAgentEnrolled:
 		env.Event.AgentEnrolled = &lifecycle.AgentEnrolled{
 			RequestID: lifecycle.RequestID(str(w.Request)),
@@ -580,8 +604,36 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 		if p := env.Event.AgentEnrol; p != nil {
 			we.Request = new(string(p.RequestID))
 			we.Agent = new(p.Agent)
+			if p.LaunchTicket != "" {
+				we.Ticket = new(p.LaunchTicket)
+			}
 			we.Cols = new(p.Cols)
 			we.Rows = new(p.Rows)
+		}
+	case lifecycle.KindAgentLaunchResolve:
+		if p := env.Event.AgentLaunchResolve; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+		}
+	case lifecycle.KindAgentLaunchResolved:
+		if p := env.Event.AgentLaunchResolved; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+			we.Local = p.Local
+			if p.Ticket != "" {
+				we.Ticket = new(p.Ticket)
+			}
+			if p.Payload != "" {
+				we.Payload = new(p.Payload)
+			}
+			if p.Reason != "" {
+				we.Reason = new(p.Reason)
+			}
+		}
+	case lifecycle.KindAgentLaunchCancel:
+		if p := env.Event.AgentLaunchCancel; p != nil {
+			we.Agent = new(p.Agent)
+			we.Ticket = new(p.Ticket)
 		}
 	case lifecycle.KindAgentEnrolled:
 		if p := env.Event.AgentEnrolled; p != nil {

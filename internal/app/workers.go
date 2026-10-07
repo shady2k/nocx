@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
@@ -1384,6 +1385,31 @@ func (e *workerEnrolments) enrolled(sid session.ID, lane string) {
 	}
 }
 
+// armedForSession is the server-owned bridge between a worker spawn's pane
+// registration and shell launch resolution. Before the first agent_enrol
+// arrives, the pane id is in byPane; afterwards, the participant is in bySess.
+// Both states identify the server-created worker pane and preserve
+// workers.spawn's literal command semantics without trusting a shell flag.
+func (e *workerEnrolments) armedForSession(sid session.ID) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.bySess[sid]; ok {
+		return true
+	}
+	if e.sessions == nil {
+		return false
+	}
+	sess, err := e.sessions.Get(sid)
+	if err != nil {
+		return false
+	}
+	_, ok := e.byPane[sess.PaneID()]
+	return ok
+}
+
 // participantFor answers which participant a session speaks for, or false for
 // a session that is not one. Most sessions are not: a person running an agent
 // in their own tab enrols and never reports, and asking this is how the
@@ -1517,6 +1543,10 @@ func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e 
 // lifecyclepub is given, and the worker is what it also tells.
 func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 	p.onEnrol = func(sessionID, lane string) { e.enrolled(session.ID(sessionID), lane) }
+	p.isWorkerLaunch = func(lane lifecycle.LaneID) bool {
+		sid, ok := p.sessions.lookup(lane)
+		return ok && e.armedForSession(session.ID(sid))
+	}
 	return p
 }
 

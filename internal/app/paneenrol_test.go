@@ -6,13 +6,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agentrecord"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/paneview/paneviewtest"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/workers"
 )
 
 type allowPaneApproval struct{}
@@ -255,5 +259,219 @@ func TestARefusedEnrolmentOpensNoObservation(t *testing.T) {
 	watch.Sweep()
 	if len(got) != 0 {
 		t.Fatalf("a refused enrolment produced %+v", got)
+	}
+}
+
+type resolvedApprovalSeam struct {
+	err        error
+	ordinary   int
+	resolved   int
+	executable agentapproval.Executable
+}
+
+func (a *resolvedApprovalSeam) Approve(context.Context, session.ID, string) error {
+	a.ordinary++
+	return nil
+}
+func (*resolvedApprovalSeam) Forget(session.ID) {}
+func (a *resolvedApprovalSeam) ApproveResolved(_ context.Context, _ session.ID, _ string, executable agentapproval.Executable) error {
+	a.resolved++
+	a.executable = executable
+	return a.err
+}
+
+func TestLocalResolvedEnrolmentRetainsTicketOnlyWhileConsentIsPending(t *testing.T) {
+	lg := log.NewSlogAdapter(nil)
+	views := paneviewtest.NewViews(lg)
+	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := paneobserve.New(lg, views.Store, drivers, paneobserve.Config{})
+	sessions := newSessionRegistry()
+	approval := &resolvedApprovalSeam{}
+	enroller, err := newPaneEnroller(lg, sessions, views.Store, watch, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	placeSession(sessions, views, "lane-1", "sess-1", 120, 40)
+	enroller.transports = newTransportRegistry()
+	enroller.transports.register("transport-1", transportKind{local: true})
+	enroller.launchTickets = newAgentLaunchTickets()
+	binding := testLaunchBinding("claude")
+	snapshot := testLaunchSnapshot()
+	ticket, err := enroller.launchTickets.Issue(binding, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := &lifecyclepub.EnrolmentPending{Reason: "waiting for consent", Settled: make(chan string)}
+	approval.err = pending
+	err = enroller.EnrolResolved(context.Background(), binding, ticket, 120, 40)
+	if !errors.Is(err, pending) {
+		var got *lifecyclepub.EnrolmentPending
+		if !errors.As(err, &got) {
+			t.Fatalf("first enrolment = %v, want pending", err)
+		}
+	}
+	if _, err := enroller.launchTickets.Begin(binding, ticket); err != nil {
+		t.Fatalf("pending consent consumed ticket: %v", err)
+	} else {
+		enroller.launchTickets.RetainPending(binding, ticket)
+	}
+	approval.err = nil
+	if err := enroller.EnrolResolved(context.Background(), binding, ticket, 120, 40); err != nil {
+		t.Fatalf("retry after consent: %v", err)
+	}
+	if approval.resolved != 2 || approval.ordinary != 0 || approval.executable != snapshot.executable {
+		t.Fatalf("approval calls = %+v, want the ticket executable twice and no ID lookup", approval)
+	}
+	if !views.Watched("sess-1") {
+		t.Fatal("approved local record did not open the pane watch")
+	}
+	if _, err := enroller.launchTickets.Begin(binding, ticket); err == nil {
+		t.Fatal("final approval left ticket replayable")
+	}
+}
+
+func TestLocalResolvedEnrolmentWithoutTicketDoesNotFallBackToAgentID(t *testing.T) {
+	lg := log.NewSlogAdapter(nil)
+	views := paneviewtest.NewViews(lg)
+	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := paneobserve.New(lg, views.Store, drivers, paneobserve.Config{})
+	sessions := newSessionRegistry()
+	approval := &resolvedApprovalSeam{}
+	enroller, err := newPaneEnroller(lg, sessions, views.Store, watch, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enroller.transports = newTransportRegistry()
+	enroller.transports.register("transport-1", transportKind{local: true})
+	enroller.launchTickets = newAgentLaunchTickets()
+	binding := testLaunchBinding("claude")
+	err = enroller.EnrolResolved(context.Background(), binding, "", 80, 24)
+	if err == nil || approval.ordinary != 0 || approval.resolved != 0 || views.Count() != 0 {
+		t.Fatalf("unresolved local launch was allowed: err=%v approval=%+v watches=%d", err, approval, views.Count())
+	}
+}
+
+func TestServerClassifiedWorkerEnrolmentAllowsLiteralNoTicket(t *testing.T) {
+	lg := log.NewSlogAdapter(nil)
+	views := paneviewtest.NewViews(lg)
+	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch := paneobserve.New(lg, views.Store, drivers, paneobserve.Config{})
+	sessions := newSessionRegistry()
+	approval := &resolvedApprovalSeam{}
+	enroller, err := newPaneEnroller(lg, sessions, views.Store, watch, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := testLaunchBinding("claude")
+	placeSession(sessions, views, binding.Lane, "worker-session", 120, 40)
+	enroller.transports = newTransportRegistry()
+	enroller.transports.register(binding.Transport, transportKind{local: true})
+	enroller.isWorkerLaunch = func(lane lifecycle.LaneID) bool { return lane == binding.Lane }
+	if err := enroller.EnrolResolved(context.Background(), binding, "", 120, 40); err != nil {
+		t.Fatalf("server-classified worker without a record ticket: %v", err)
+	}
+	if approval.ordinary != 1 || approval.resolved != 0 || !views.Watched("worker-session") {
+		t.Fatalf("worker enrolment approval=%+v watched=%v, want ordinary approval and an open watch", approval, views.Watched("worker-session"))
+	}
+}
+
+type workerPaneSession struct {
+	factorySession
+	paneID string
+}
+
+func (s workerPaneSession) PaneID() string { return s.paneID }
+
+type workerPaneSessionSet struct {
+	session.Session
+}
+
+func (s workerPaneSessionSet) Get(id session.ID) (session.Session, error) {
+	if s.Session.ID() != id {
+		return nil, errors.New("unknown session")
+	}
+	return s.Session, nil
+}
+func (workerPaneSessionSet) EndSession(session.ID) error { return nil }
+
+func TestWorkerLaunchPredicateResolvesPaneAndHandsOffEnrolment(t *testing.T) {
+	ctx := context.Background()
+	lg := log.NewSlogAdapter(nil)
+	views := paneviewtest.NewViews(lg)
+	drivers, driversErr := agentdriver.NewRegistry(agentdriver.Claude())
+	if driversErr != nil {
+		t.Fatal(driversErr)
+	}
+	watch := paneobserve.New(lg, views.Store, drivers, paneobserve.Config{})
+	laneSessions := newSessionRegistry()
+	workerSession := workerPaneSession{
+		factorySession: factorySession{kind: session.KindLocal},
+		paneID:         "worker-pane",
+	}
+	placeSession(laneSessions, views, "lane-1", string(workerSession.ID()), 120, 40)
+	transports := newTransportRegistry()
+	transports.register("transport-1", transportKind{local: true})
+	approval := &resolvedApprovalSeam{}
+	paneEnrol, paneEnrolErr := newPaneEnroller(lg, laneSessions, views.Store, watch, approval)
+	if paneEnrolErr != nil {
+		t.Fatal(paneEnrolErr)
+	}
+	paneEnrol.transports = transports
+	workerEnrol := newWorkerEnrolments(lg, workerPaneSessionSet{Session: workerSession})
+	const participant workers.ParticipantID = "worker-1"
+	workerEnrol.armFor(participant, workerSession.PaneID())
+	paneEnrol = workerEnrol.hookInto(paneEnrol)
+
+	records, storeErr := agentrecord.New(t.TempDir())
+	if storeErr != nil {
+		t.Fatal(storeErr)
+	}
+	if err := records.Save("claude", agentrecord.Document{
+		Command: "/bin/sh",
+		Args:    []string{"record-only"},
+		Env:     []string{"PRIVATE=record-only"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resolver := newAgentLaunchService(records, transports, newAgentLaunchTickets())
+	resolver.workerLane = paneEnrol.isWorkerLaunch
+	binding := testLaunchBinding("claude")
+	resolved, resolveErr := resolver.Resolve(ctx, binding)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	if resolved.Local || resolved.Ticket != "" || resolved.Payload != "" {
+		t.Fatalf("armed worker launch resolved a local record: %+v", resolved)
+	}
+	if err := paneEnrol.EnrolResolved(ctx, binding, resolved.Ticket, 120, 40); err != nil {
+		t.Fatalf("worker enrolment without a ticket: %v", err)
+	}
+	if approval.ordinary != 1 || approval.resolved != 0 || !views.Watched(string(workerSession.ID())) {
+		t.Fatalf("approval=%+v watched=%v, want ordinary consent and an open watch", approval, views.Watched(string(workerSession.ID())))
+	}
+	live, livenessErr := workerEnrol.Await(ctx, participant)
+	if livenessErr != nil {
+		t.Fatalf("worker liveness handoff: %v", livenessErr)
+	}
+	if live.SessionID != string(workerSession.ID()) || live.Lane != string(binding.Lane) {
+		t.Fatalf("worker liveness = %+v, want session %q on lane %q", live, workerSession.ID(), binding.Lane)
+	}
+	if got, ok := workerEnrol.participantFor(workerSession.ID()); !ok || got != participant {
+		t.Fatalf("byPane did not hand off to bySess: participant=%q present=%v", got, ok)
+	}
+	workerEnrol.mu.Lock()
+	_, stillArmed := workerEnrol.byPane[workerSession.PaneID()]
+	workerEnrol.mu.Unlock()
+	if stillArmed {
+		t.Fatal("enrollment left the pane armed instead of handing it to the session")
 	}
 }

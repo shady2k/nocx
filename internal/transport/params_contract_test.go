@@ -799,6 +799,18 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
 		},
+		// Settings reads and writes the existing single agentrecord.Store; each
+		// registered method has a schema-valid probe so the registry-wide
+		// contract check detects drift in this UI surface as well.
+		"agentRecords.list": {
+			[]byte(`{}`),
+		},
+		"agentRecords.save": {
+			[]byte(`{"id":"custom-agent","displayName":"Custom agent","command":"/usr/bin/env","args":["--flag"],"icon":"sparkles","colour":"#ffffff","disabled":false,"env":["MODE=dev"],"resume":{"sessionIdArgs":[],"resumeIdArgs":[],"resumeCwdArgs":[]}}`),
+		},
+		"agentRecords.remove": {
+			[]byte(`{"id":"custom-agent"}`),
+		},
 		// Listing asks nothing: a backend composes exactly one scope, so
 		// there is no workspace to select. `{}` is what the client sends and
 		// the only shape worth probing for a noParams() method.

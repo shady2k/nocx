@@ -432,7 +432,7 @@ func agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T, shell, scriptN
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		out := s.output()
-		if strings.Contains(out, "AGENT-RAN") && strings.Contains(out, "not orchestrated") {
+		if strings.Contains(out, "nocx: not orchestrated — this pane has no lifecycle channel") {
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -441,11 +441,8 @@ func agentWrapperSaysSoWhenLifecycleChannelIsAbsent(t *testing.T, shell, scriptN
 	if !strings.Contains(out, "nocx: not orchestrated — this pane has no lifecycle channel") {
 		t.Errorf("the absent channel was not reported in the pane; output=%q", out)
 	}
-	if !strings.Contains(out, "AGENT-RAN") {
-		t.Errorf("an absent lifecycle channel stopped the user's agent; output=%q", out)
-	}
-	if n := strings.Count(out, "AGENT-RAN"); n != 1 {
-		t.Errorf("the agent ran %d times, want exactly 1; output=%q", n, out)
+	if strings.Contains(out, "AGENT-RAN") {
+		t.Errorf("a local wrapper without a resolved record ran the typed agent ID; output=%q", out)
 	}
 	// With no descriptor there is nowhere a frame could be written, so the
 	// absence of a withdrawal is structural rather than observable here. The
@@ -464,4 +461,152 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestBashAgentWrapperRunsTheResolvedRecordArgsAndEnvironment(t *testing.T) {
+	agentWrapperRunsTheResolvedRecordArgsAndEnvironment(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperRunsTheResolvedRecordArgsAndEnvironment(t *testing.T) {
+	agentWrapperRunsTheResolvedRecordArgsAndEnvironment(t, startNestedZshParent)
+}
+
+func agentWrapperRunsTheResolvedRecordArgsAndEnvironment(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k := newNestedKernel(t)
+	body := "#!/bin/sh\nprintf 'LAUNCH:%s|%s|%s|%s|%s\\n' \"$NOCX_AGENT_ENV\" \"$1\" \"$2\" \"$3\" \"$4\"\n"
+	s := start(t, k, "claude", body)
+	k.launchArgs = []string{"record-one", "record two"}
+	k.launchEnv = []string{"NOCX_AGENT_ENV=record env"}
+	if _, err := s.ptmx.Write([]byte("claude user-one 'user two'\n")); err != nil {
+		t.Fatalf("type configured agent: %v", err)
+	}
+	resolve := waitForEvent(t, k, "agent_launch_resolve")
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && !hasEvent(k, "agent_enrol") {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !hasEvent(k, "agent_enrol") {
+		t.Fatalf("launch resolution did not reach enrolment; shell output=%q", s.output())
+	}
+	enrol := waitForEvent(t, k, "agent_enrol")
+	if resolve.Seq >= enrol.Seq {
+		t.Fatalf("enrolment preceded resolution: resolve=%d enrol=%d", resolve.Seq, enrol.Seq)
+	}
+	ticket, _ := enrol.Body["ticket"].(string)
+	if len(ticket) != 43 {
+		t.Fatalf("agent_enrol did not carry the resolved opaque ticket: %v", enrol.Body)
+	}
+	want := "LAUNCH:record env|record-one|record two|user-one|user two"
+	waitUntil(t, "configured command, args and environment", func() bool { return strings.Contains(s.output(), want) })
+	wdr := waitForEvent(t, k, "agent_withdraw")
+	if wdr.Seq <= enrol.Seq {
+		t.Fatalf("withdrawal preceded enrolment: withdraw=%d enrol=%d", wdr.Seq, enrol.Seq)
+	}
+}
+
+func TestBashAgentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t *testing.T) {
+	agentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t *testing.T) {
+	agentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t, startNestedZshParent)
+}
+
+func agentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k := newNestedKernel(t)
+	k.refuseEnrolment = true
+	body := "#!/bin/sh\nprintf 'REFUSED:%s|%s|%s|%s|%s|%s\\n' \"$NOCX_AGENT_ENV\" \"$#\" \"$1\" \"$2\" \"$3\" \"$4\"\n"
+	s := start(t, k, "claude", body)
+	k.launchArgs = []string{"record-one", "record two"}
+	k.launchEnv = []string{"NOCX_AGENT_ENV=record env"}
+	if _, err := s.ptmx.Write([]byte("claude user-one 'user two'\n")); err != nil {
+		t.Fatalf("type configured agent: %v", err)
+	}
+	enrol := waitForEvent(t, k, "agent_enrol")
+	if ticket, _ := enrol.Body["ticket"].(string); len(ticket) != 43 {
+		t.Fatalf("enrolment omitted launch ticket: %v", enrol.Body)
+	}
+	want := "REFUSED:record env|4|record-one|record two|user-one|user two"
+	waitUntil(t, "recorded launch without tools", func() bool { return strings.Contains(s.output(), want) })
+	if !hasEvent(k, "agent_launch_cancel") {
+		t.Fatal("the refused invocation left its local launch ticket live")
+	}
+	if hasEvent(k, "agent_withdraw") {
+		t.Fatal("a refused enrolment withdrew an interval it never opened")
+	}
+}
+
+func TestBashAgentWrapperWithdrawsAfterAgentFailure(t *testing.T) {
+	agentWrapperWithdrawsAfterAgentFailure(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperWithdrawsAfterAgentFailure(t *testing.T) {
+	agentWrapperWithdrawsAfterAgentFailure(t, startNestedZshParent)
+}
+
+func agentWrapperWithdrawsAfterAgentFailure(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k := newNestedKernel(t)
+	s := start(t, k, "claude", "#!/bin/sh\necho AGENT-FAILED\nexit 23\n")
+	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
+		t.Fatalf("type configured agent: %v", err)
+	}
+	enrol := waitForEvent(t, k, "agent_enrol")
+	waitUntil(t, "failed agent output", func() bool { return strings.Contains(s.output(), "AGENT-FAILED") })
+	withdraw := waitForEvent(t, k, "agent_withdraw")
+	if withdraw.Seq <= enrol.Seq {
+		t.Fatalf("failed agent's interval closed out of order: enrol=%d withdraw=%d", enrol.Seq, withdraw.Seq)
+	}
+}
+
+func TestBashAgentWrapperDoesNotRunTypedNameAfterMalformedLocalResolution(t *testing.T) {
+	agentWrapperDoesNotRunTypedNameAfterMalformedLocalResolution(t, startNestedBashParent)
+}
+
+func TestZshAgentWrapperDoesNotRunTypedNameAfterMalformedLocalResolution(t *testing.T) {
+	agentWrapperDoesNotRunTypedNameAfterMalformedLocalResolution(t, startNestedZshParent)
+}
+
+func agentWrapperDoesNotRunTypedNameAfterMalformedLocalResolution(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k := newNestedKernel(t)
+	k.launchMalformed = true
+	s := start(t, k, "claude", "#!/bin/sh\nprintf 'TYPED-ID-RAN\\n'\n")
+	if _, err := s.ptmx.Write([]byte("claude --user-arg\n")); err != nil {
+		t.Fatalf("type agent name: %v", err)
+	}
+	waitForEvent(t, k, "agent_launch_resolve")
+	waitUntil(t, "local resolution refusal", func() bool {
+		return strings.Contains(s.output(), "nocx: not started —")
+	})
+	if strings.Contains(s.output(), "TYPED-ID-RAN") || hasEvent(k, "agent_enrol") {
+		t.Fatalf("malformed local resolution fell back to the typed ID or enrolled: output=%q events=%v", s.output(), k.accepted)
+	}
+}
+
+func TestBashAgentWrapperKeepsServerClassifiedWorkerCommandLiteral(t *testing.T) {
+	k := newNestedKernel(t)
+	k.launchLiteral = true
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$@\" > " + ShellQuote(argvFile) + "\n"
+	s := startNestedBashParent(t, k, "claude", body)
+	if _, err := s.ptmx.Write([]byte("claude --model test 'two words'\n")); err != nil {
+		t.Fatalf("type worker command: %v", err)
+	}
+	waitForEvent(t, k, "agent_launch_resolve")
+	enrol := waitForEvent(t, k, "agent_enrol")
+	if _, hasTicket := enrol.Body["ticket"]; hasTicket {
+		t.Fatalf("server-classified worker launch received a record ticket: %v", enrol.Body)
+	}
+	want := "3\n--model\ntest\ntwo words\n"
+	waitUntil(t, "the literal external command and its arguments", func() bool {
+		got, err := os.ReadFile(argvFile) //nolint:gosec // argvFile is inside this test's temp directory
+		return err == nil && string(got) == want
+	})
+	got, err := os.ReadFile(argvFile) //nolint:gosec // argvFile is inside this test's temp directory
+	if err != nil || string(got) != want {
+		t.Fatalf("external argv = %q (err %v), want %q", got, err, want)
+	}
 }

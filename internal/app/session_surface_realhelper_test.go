@@ -393,9 +393,12 @@ func newS14RealStand(t *testing.T, mockDir, stateDir string, opts ...s14RealOpti
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
+	launchTransports := newTransportRegistry()
+	paneEnrol.transports = launchTransports
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
+		lifecyclepub.WithAgentLaunchResolver(literalAgentLaunchResolver{transports: launchTransports}),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	// The pty factory drove the channel against the publisher in the fake

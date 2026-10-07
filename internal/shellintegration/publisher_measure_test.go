@@ -200,13 +200,19 @@ import (
 // pair no longer carrying a per-agent argument. The CALL count is unchanged at
 // 63.
 //
+// AND THEY GREW again when the local wrapper learned to resolve a saved
+// record over the lifecycle channel and decode its argv/environment without
+// shell evaluation (nocx-h64wy): the worst path writes 86483 bytes, up from
+// 85659 — the new launch helpers are present in the published script bytes,
+// while the filesystem-call count remains 63.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 85659
+	measuredMaxPublishBytes = 86483
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

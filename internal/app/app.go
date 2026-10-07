@@ -1740,12 +1740,18 @@ func New(opts ...Option) (*App, error) {
 	// so the rule a person is shown a verdict about is the rule that reads
 	// their pane.
 	paneCalibration := agentcalib.New(logger, paneViews, calibrationStore, paneDrivers, paneReplay{local: localOpener})
+	launchTickets := newAgentLaunchTickets()
+	agentLaunchService := newAgentLaunchService(agentRecords, childTransports, launchTickets)
 	paneEnrol, paneEnrolErr := newPaneEnroller(
 		logger, childSessions, paneViews, paneWatch, agentApprovalService,
 	)
 	if paneEnrolErr != nil {
 		return nil, fmt.Errorf("pane enroller: %w", paneEnrolErr)
 	}
+	paneEnrol.launchTickets = launchTickets
+	paneEnrol.transports = childTransports
+	paneEnrol = workerEnrol.hookInto(paneEnrol)
+	agentLaunchService.workerLane = paneEnrol.isWorkerLaunch
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
 		// The gate that decides every handshake gets a voice (nocx-n14oo.8).
@@ -1777,7 +1783,8 @@ func New(opts ...Option) (*App, error) {
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the
 		// opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)))
+		lifecyclepub.WithAgentEnroller(paneEnrol),
+		lifecyclepub.WithAgentLaunchResolver(agentLaunchService))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.

@@ -4820,7 +4820,7 @@ export class TerminalContent extends BasePaneContent {
       // terminal parser. It settles conventional startup and closes Ask's
       // prompt redraw interval; it never mutates authenticated lifecycle state.
       if (effect.kind === 'promptBoundary') {
-        this._settle()
+        if (!this._awaitsIntegration) this._settle()
         this._handbackPendingParse = true
       }
       renderer.applySessionEffect?.(effect)

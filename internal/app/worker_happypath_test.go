@@ -397,6 +397,7 @@ func (f *happyRealPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty
 	lp, err := pty.NewLocal(f.log, pty.Config{
 		Command: shellPath,
 		Args:    []string{"--rcfile", rcPath, "-i"},
+		Cwd:     cfg.Cwd,
 		Cols:    cfg.Cols,
 		// Rows was missing here: every pane this stand ever opened got a
 		// real kernel window size of 0 rows regardless of cfg.Rows, silent

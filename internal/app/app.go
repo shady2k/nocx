@@ -2518,12 +2518,12 @@ func New(opts ...Option) (*App, error) {
 	// own position: a backend start IS an application start, so what the last
 	// one left behind is judged now or not at all.
 	//
-	// It classifies and forgets; it does not relaunch (nocx-xn63t.5.2 owns
-	// that, and the launch record it needs does not exist yet). What it does
-	// buy is the half that is true today: a worker whose pane was closed while
-	// nocx was down stops being a record nobody will ever resolve, and one that
-	// cannot be resumed is said so at startup instead of in a document.
-	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
+	// It classifies and forgets stale records, then relaunches the rest
+	// through the same session opener the restored layout adopts. A record
+	// whose saved agent or resume identity cannot be used gets a visible
+	// explanation in its existing pane rather than an empty shell.
+	restorations := restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
+	relaunchWorkerRecords(ctx, restorations, tp, tp)
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The

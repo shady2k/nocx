@@ -10,13 +10,9 @@ package app
 // classifies the rest — never live, always interrupted, either a launch it
 // could reconstruct or a failure that names itself.
 //
-// It does NOT relaunch anything. That is nocx-xn63t.5.2's job, and until the
-// launch record (nocx-dz9vj) exists there is no resume invocation to build:
-// what a restored tab must run is defined there, not here. What this pass
-// guarantees is the half that can be true today and is load-bearing for that
-// work — the record survives, it resolves, and a record that cannot be
-// restored says so at the moment a backend starts rather than sitting in a
-// document until somebody wonders why a tab came back empty.
+// It classifies each record; relaunchWorkerRecords consumes that result through
+// the existing session path. A record that cannot be restored is paired with
+// its pane, where the reason is rendered rather than hidden in a log.
 //
 // # WHY THE FORGET IS HERE AND NOT IN THE DOCUMENT
 //

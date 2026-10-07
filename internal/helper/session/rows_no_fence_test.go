@@ -31,10 +31,9 @@ func endNoFence(t *testing.T, payload []byte) bool {
 // The amendment moved only WHEN the settle is taken. The second completion
 // arrives on the authenticated channel, which the command's own bytes are not
 // ordered against, so it defers: the interval keeps its own rows until the byte
-// stream reaches its next boundary. That boundary is the later command's fence
-// sighted below, and that is where the marker this test reads is produced —
-// which is also why an interval whose rows are still unread is no longer frozen
-// at the count the fast channel had reached.
+// stream reaches its next boundary. The later command's fence then flushes the
+// parked interval as a no-fence end and closes the later interval with a fenced
+// end. Both markers must reach the bridge in that order.
 func TestTheBridgeSaysAnIntervalWasSettledWithoutItsFence(t *testing.T) {
 	_, rt, sink := rowsBridgeSession(t, 80, 24)
 
@@ -49,16 +48,21 @@ func TestTheBridgeSaysAnIntervalWasSettledWithoutItsFence(t *testing.T) {
 	if err := rt.SightFence(later, []byte("$ ")); err != nil {
 		t.Fatalf("sight the next interval's fence: %v", err)
 	}
-	sink.waitFor(1, 1, 0)
+	sink.waitFor(1, 2, 0)
 
 	ends := sink.endFrames()
-	if len(ends) != 1 {
-		t.Fatalf("the pump sent %d end markers, want 1", len(ends))
+	if len(ends) != 2 {
+		t.Fatalf("the pump sent %d end markers, want the parked and later intervals", len(ends))
 	}
 	if !endNoFence(t, ends[0].Payload) {
-		t.Fatal("the end marker of an interval settled without its fence says its fence arrived")
+		t.Fatal("the parked interval's end marker says its fence arrived")
 	}
-	validateRowSchema(t, loadRowSchema(t, "session.interval-end.schema.json"), ends[0].Payload)
+	if endNoFence(t, ends[1].Payload) {
+		t.Fatal("the later fenced interval's end marker says its fence never arrived")
+	}
+	schema := loadRowSchema(t, "session.interval-end.schema.json")
+	validateRowSchema(t, schema, ends[0].Payload)
+	validateRowSchema(t, schema, ends[1].Payload)
 }
 
 // Paired: an ordinary fenced boundary's marker claims no missing fence.

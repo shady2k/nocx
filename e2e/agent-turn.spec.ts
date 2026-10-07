@@ -63,6 +63,7 @@ import {
   bindEndpoint,
   createAiEndpoint,
   openControlPlane,
+  promptReady,
   readVaultState,
   setDefaultModel,
   settingsReady,
@@ -86,7 +87,6 @@ const test = base
 const nonce = Date.now().toString(36)
 
 const ENDPOINT_NAME = `E2E Turn ${nonce}`
-const AGENT_ENDPOINT_NAME = `E2E Agent ${nonce}`
 /** The command the run call executes — its own block's header. */
 const RUN_CMD = `echo ran-${nonce}`
 /** What the command prints — the marker the block's real output must show. */
@@ -336,7 +336,7 @@ async function configureAssistant(page: Page, endpointName = ENDPOINT_NAME): Pro
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
-  for (const effect of ['observe', 'mutate-destructive', 'delegate'] as const) {
+  for (const effect of ['observe', 'mutate-destructive'] as const) {
     await answerPermission(page, effect, 'Allowed')
   }
   await backToTerminal(page)
@@ -513,23 +513,21 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await expect(restoredTurn.locator(':scope > .cmd-children > .cmd-block')).toHaveCount(5)
   })
 
-  test('Settings edits reach the real worker process on the next spawn without a restart (nocx-h64wy)', async ({
+  test('Settings edits reach the real agent process on the next shell launch without a restart (nocx-h64wy)', async ({
     page,
   }) => {
     const runID = `custom-${nonce}`
     const launchMarker = `agent-record-launch-${nonce}`
-    const question = `Start the configured ${runID} agent, ${nonce}`
     const scriptDir = mkdtempSync(join(tmpdir(), `nocx-agent-record-${nonce}-`))
     const command = join(scriptDir, 'agent-probe')
     writeFileSync(
       command,
-      `#!/bin/sh\nprintf '${launchMarker} args=%s env=%s\\n' "$*" "$NOCX_AGENT_PROBE"\nwhile IFS= read -r line; do printf 'input=%s\\n' "$line"; done\n`,
+      `#!/bin/sh\nprintf '${launchMarker} args=%s env=%s\\n' "$*" "$NOCX_AGENT_PROBE"\n`,
     )
     chmodSync(command, 0o700)
 
     await openApp(page)
     await unsealVaultIfSealed(page)
-    await configureAssistant(page, AGENT_ENDPOINT_NAME)
     await openSettings(page, SETTINGS_AGENTS_NAV)
     await page.getByLabel('Agent ID').fill(runID)
     await page.getByLabel('Display name').last().fill(`Configured ${runID}`)
@@ -544,8 +542,8 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
       page.getByRole('status').filter({ hasText: 'Agent added. It is available in new shells.' }),
     ).toHaveText('Agent added. It is available in new shells.')
 
-    // Edit the durable record through Settings. The process is launched only
-    // after the edit; restarting nocx here would hide a stale in-memory read.
+    // Edit the durable record through Settings. The next shell is opened while
+    // nocx stays running, so neither the record nor the shell bundle is stale.
     const card = page.locator('.ui-section').filter({ hasText: `Agent ID: ${runID}` })
     await expect(card).toBeVisible()
     await card.getByLabel('Arguments (one per line)').fill('--fresh')
@@ -554,24 +552,25 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await expect(card.getByRole('status')).toContainText('next launch will use these settings')
 
     await backToTerminal(page)
-    fake.setScript({
-      chunks: ['Starting the configured worker.'],
-      toolCalls: [
-        {
-          name: 'workers.spawn',
-          id: `spawn_${nonce}`,
-          arguments: { command: runID, task: `print ${launchMarker}` },
-        },
-      ],
-    })
-    await askFromPrompt(page, question)
-    await completed(page, question)
+    const priorPaneID = await page
+      .locator('.nocx-tab[aria-selected="true"]')
+      .getAttribute('data-pane-id')
+    expect(priorPaneID).not.toBeNull()
+    await page.locator('[aria-label="New tab"]').click()
+    await expect
+      .poll(() => page.locator('.nocx-tab[aria-selected="true"]').getAttribute('data-pane-id'))
+      .not.toBe(priorPaneID)
+    await promptReady(page)
+    await page.keyboard.type(runID)
+    await page.keyboard.press('Enter')
 
-    // This is the process output carried back from its actual PTY, not a
-    // fixture of the record or a low-level spawn helper. Both updated values
-    // must be the argv/environment the next spawn launched.
-    await expect(page.locator('body')).toContainText(`${launchMarker} args=--fresh env=after`, {
-      timeout: 30_000,
-    })
+    // Type the saved ID as a person does. The assertion reads the output block
+    // from the process actually launched in the new PTY, not the record DTO.
+    const launchBlock = page.locator('.pane.active .cmd-block').filter({ hasText: runID }).last()
+    await expect(launchBlock).toBeVisible({ timeout: 30_000 })
+    await expect(launchBlock.locator('.cmd-output')).toContainText(
+      `${launchMarker} args=--fresh env=after`,
+      { timeout: 30_000 },
+    )
   })
 })

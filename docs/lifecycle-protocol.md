@@ -466,70 +466,30 @@ attempts `unknown`, and stops accepting events for the dead domain.
 
 ### 12.1 Restoration: the composite acknowledgement
 
-This section is the home of the mechanism ADR-0024 decision 8 deliberately left
-open (`nocx-u7uh.20`): the ADR fixes the property — restoration is acknowledged
-before a session is treated as a usable conventional terminal — and the composite
-acknowledgement below is how it is met. The ADR carries a pointer and the two
-rejected alternatives; the bytes stay here.
+This section is the home of the mechanism ADR-0024 decision 8 deliberately left open (`nocx-u7uh.20`). Its renderer-facing contract is amended by [ADR-0081](decisions/0081-recovery-and-prompt-boundaries-are-backend-owned-non-authoritative-effects.md): the backend retains the shell nonce, while the renderer sees a separate recovery episode ID and a typed sighting. ADR-0024's authority rules remain unchanged.
 
-Decision 8 distinguishes two losses, and the **session coordinator** (the
-transport, not the kernel) tells them apart by two independent signals:
+Decision 8 distinguishes two losses, and the **session coordinator** (the transport, not the kernel) tells them apart by two independent signals:
 
-- the lifecycle adapter dies while the session channel's `Done()` is still
-  open → **restoration is pending**; the sequence below runs;
-- the pty/SSH channel `Done()` closes → the session is dead: emit `exit`,
-  cancel any pending restoration, reject late acknowledgements, report a
-  disconnected terminal, and make **no restoration claim**. If the two race,
-  session death wins.
+- the lifecycle adapter dies while the session channel's `Done()` is still open → **restoration is pending**; the sequence below runs;
+- the pty/SSH channel `Done()` closes → the session is dead: emit `exit`, cancel any pending restoration, reject late acknowledgements, report a disconnected terminal, and make **no restoration claim**. If the two race, session death wins.
 
-The kernel never distinguishes the two and never tries: on either signal the
-domain is `Lost` and the lane falls to `Lost` — the atomic local transition
-of decision 8 — and a new establishment is a fresh epoch.
+The kernel never distinguishes the two and never tries: on either signal the domain is `Lost` and the lane falls to `Lost` — the atomic local transition of decision 8 — and a new establishment is a fresh epoch.
 
-**Restoring the user's visible prompt is a protocol action, and it can only
-be promised while the shell is reachable.** Over a dead connection the
-promise is not made. Over a live one the sequence is:
+**Restoring the user's visible prompt is a protocol action, and it can only be promised while the shell is reachable.** Over a dead connection the promise is not made. Over a live one the sequence is:
 
-1. The channel dies, the pty lives. The lane is `Lost` (authority revoked at
-   that instant) and the session enters **RecoveryPending**.
-2. The renderer applies the conventional presentation: native input, live
-   region released, block model off, editor withdrawn — and offers no
-   editor anywhere inside the span.
-3. At the next prompt boundary the shell notices its send failed, clears its
-   active latch, restores the native `PS1`, and writes a **one-shot recovery
-   fence** to the pty immediately after the prompt bytes.
-4. The renderer matches that explicit fence. It does not inspect the grid,
-   pattern-match a prompt, or infer from silence.
-5. Only after **both** the fence matched and the presentation is applied
-   does the renderer acknowledge — the narrow `lifecycle.recoverAck`
-   carrying only session identity and the recovery generation — and the
-   lane may fall `Lost → Native`.
-6. The domain stays permanently `Lost`; any future integration is a fresh
-   epoch, never a resumption.
+1. The channel dies, the pty lives. The lane is `Lost` (authority revoked at that instant) and the session enters **RecoveryPending**. The backend creates a new, non-secret `episodeId` for this exact live recovery episode.
+2. The renderer applies the conventional presentation: native input, live region released, block model off, editor withdrawn — and offers no editor anywhere inside the span.
+3. At the next prompt boundary the shell notices its send failed, clears its active latch, restores the native `PS1`, and writes the one-shot recovery marker to the pty immediately after the prompt. The recovery marker precedes the shell's separate OSC 133 B prompt-boundary marker in byte order.
+4. The backend's session emulator recognizes the recovery marker using the private nonce retained for this episode. It emits a distinct internal recovery-sighting effect — never `EffectFence` — and the backend records `sighted` for the matching current episode. A separate `session.effect` kind `recovery` carries only the non-secret `episodeId`, with the normal session generation and effect ID as delivery identities. It carries no nonce or marker bytes.
+5. `lifecycle.changed.recovery` publishes only `{episodeId, state}`; it never publishes the shell nonce as `fence` or `generation`. The episode state is the reconnect-safe record: a current-state resync returns the active episode and whether it is `sighted`, even if the at-most-once effect was dropped. The renderer does not inspect the grid or infer from silence.
+6. Only after the renderer has both the current episode's `sighted` state and the conventional presentation applied does it acknowledge. `lifecycle.recoverAck` carries only session identity and `episodeId`. The backend accepts it only for that exact live episode and only after the backend matched the marker; it permits only `Lost → Native`.
+7. The domain stays permanently `Lost`; any future integration is a fresh epoch, never a resumption.
 
-**The fence.** Each domain mints, alongside its capability, a distinct
-**recovery nonce** (32 random bytes): pre-provisioned, one-shot, handed to
-the shell in the authenticated bootstrap while the channel was alive — never
-the capability, never reused. The shell writes it to the pty only when the
-channel died mid-session. This is the decision-1 carve-out, the same
-rendezvous the completion fence rides: a stream sequence may _locate_ an
-already-authenticated lifecycle event in render order, and may never create,
-authenticate, complete or assign status. The recovery fence locates the
-restoration — it does not create one, and it is not a new stream-derived
-authority edge: a hostile program cannot forge what it never saw, and the
-worst a forged fence could do is force a safe transition to native mode,
-which decision 10's availability bound already accepts ("a descendant that
-can write to the lifecycle transport may force a safe transition to native
-mode. It can never produce a validated event without the epoch's
-authenticator").
+**The private nonce and public episode ID are different values.** Each domain mints a distinct one-shot recovery nonce (32 random bytes), provisioned to the shell through the authenticated bootstrap while the channel is alive. The backend retains the expected nonce privately and uses it only to match the marker to the active episode. The nonce is never serialized in `lifecycle.changed`, `session.effect`, `lifecycle.recoverAck`, generated renderer types or product logs. The public `episodeId` is independently minted, scoped to the session incarnation, not derived from the nonce, and is not an authenticator. The recovery effect's generation and effect ID identify delivery only; they are not the recovery episode or authority.
 
-**The acknowledgement** (`lifecycle.recoverAck`) is deliberately narrow:
-session identity and the recovery generation, nothing else. The backend
-accepts it only while that exact session is RecoveryPending and alive; it
-permits only `Lost → Native` (it can never revive a `DomainLost`, never
-grant ownership, never open or complete an attempt); it is idempotent; and
-it is invalidated by session exit — a late acknowledgement after the session
-died is rejected.
+The two effects are distinct. The recovery sighting locates the restoration; OSC 133 B is an untrusted prompt-boundary observation that may settle conventional-shell presentation and Ask screen handback. B does not prove shell identity, prompt ownership, lifecycle readiness, command completion or command status. The authenticated lifecycle channel remains the only lifecycle authority.
+
+The recovery effect is at-most-once and never enters a replayable frame or output ring. A dropped effect cannot erase the durable `sighted` state, and a duplicate delivery is deduplicated by session generation and effect ID. The acknowledgement remains narrow and idempotent for the exact live episode: it cannot revive a `DomainLost`, grant ownership, open or complete an attempt, or move any state other than `Lost → Native`. Session exit cancels the episode, wins over a queued acknowledgement, and makes every late or stale acknowledgement fail.
 
 ### 12.2 Adoption: the coordinator dies, the domain does not
 

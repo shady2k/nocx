@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -102,14 +103,25 @@ func TestRestartRelaunchesClaudeInItsPriorPaneAndEnrols(t *testing.T) {
 	if strings.TrimSpace(string(got)) != cwd+"\n--continue" {
 		t.Fatalf("CLI received cwd and args %q, want %q and configured resume arguments", got, cwd)
 	}
-	waittest.WaitForTimeout(t, "agent enrolment from restored pane", 10*time.Second, func() bool {
-		return strings.Contains(logs.String(), "agent enrolled")
+	waittest.WaitForTimeoutDetail(t, "agent enrolment from restored pane", 10*time.Second, func() string {
+		if len(opener.opened) == 0 {
+			return "no restored session was opened"
+		}
+		sid := string(opener.opened[0].Session.ID())
+		return fmt.Sprintf("restored session %s watched=%t; app logs:\n%s\npane transcript:\n%s",
+			sid, stand.grid.Watched(sid), logs.String(), stand.factory.transcript.dump())
+	}, func() bool {
+		return len(opener.opened) == 1 && stand.grid.Watched(string(opener.opened[0].Session.ID()))
 	})
 	if len(opener.specs) != 1 || opener.specs[0].PaneID != paneID {
 		t.Fatalf("relaunch open specs = %+v, want exactly the prior pane %q", opener.specs, paneID)
 	}
-	if len(opener.opened) != 1 || !strings.Contains(logs.String(), "session_id="+string(opener.opened[0].Session.ID())) {
-		t.Fatalf("the real resumed session was not the one enrolled:\n%s", logs.String())
+	if len(opener.opened) != 1 {
+		t.Fatalf("opened sessions = %d, want the single restored session", len(opener.opened))
+	}
+	sid := string(opener.opened[0].Session.ID())
+	if !stand.grid.Watched(sid) {
+		t.Fatalf("restored session %s is not enrolled:\n%s", sid, logs.String())
 	}
 }
 

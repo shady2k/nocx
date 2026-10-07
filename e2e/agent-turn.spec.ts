@@ -564,6 +564,12 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await page.keyboard.type(runID)
     await page.keyboard.press('Enter')
 
+    const approvalDialog = page.getByRole('dialog', {
+      name: "Allow this agent to use nocx's tools?",
+    })
+    await expect(approvalDialog).toBeVisible({ timeout: 30_000 })
+    await approvalDialog.getByRole('button', { name: 'Deny', exact: true }).click()
+
     // Type the saved ID as a person does. The assertion reads the output block
     // from the process actually launched in the new PTY, not the record DTO.
     const launchBlock = page.locator('.pane.active .cmd-block').filter({ hasText: runID }).last()

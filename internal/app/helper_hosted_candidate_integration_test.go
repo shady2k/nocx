@@ -49,7 +49,7 @@ func TestHostedCandidateRemainsPrivateUntilIdempotentPublish(t *testing.T) {
 	if err != nil {
 		t.Fatalf("publish candidate: %v", err)
 	}
-	open, err := opener.hostedOpenResult(cfg, generation, result)
+	open, err := opener.hostedOpenResult(generation, result)
 	if err != nil {
 		t.Fatalf("publish local projections: %v", err)
 	}

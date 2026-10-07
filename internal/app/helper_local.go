@@ -700,6 +700,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		publishScreen:        o.publishScreen,
 		publishSandboxAccess: o.publishSandboxAccess,
 		blockRows:            o.blockRows,
+		environmentEntries:   o.environmentEntries,
 		cursors:              o.lifecycleCursors,
 		stopping:             o.lifecycleStopping,
 		// The handshake bound, stated here rather than left to the adapter:
@@ -752,7 +753,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		o.dropIfLost(c)
 		return transport.HostedSessionOpen{}, true, fmt.Errorf("open a pane on this machine's helper: %w", err)
 	}
-	out, err := o.hostedOpenResult(cfg, generation, res)
+	out, err := o.hostedOpenResult(generation, res)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, err
 	}

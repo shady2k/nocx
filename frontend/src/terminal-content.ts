@@ -4626,11 +4626,9 @@ export class TerminalContent extends BasePaneContent {
     supplied?: SessionHandle,
   ): Promise<boolean> {
     const generation = ++this._bindGeneration
-    // Bumped for every bind, including this one: the recovery-ack claim
-    // further below (_recoveryAckClaim) reads this._bindGeneration directly
-    // to tell its own bind apart from a later one. Advancing it here has no
-    // local reader any more — the establishment-acknowledgement closures
-    // that used to capture it were removed with the mechanism (ADR-0062).
+    // Each subscription captures this bind's generation; late events from
+    // the retired session cannot mutate its replacement. Recovery-ack claims
+    // use the same generation to reject a superseded bind.
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()

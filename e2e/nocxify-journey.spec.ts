@@ -334,6 +334,23 @@ async function submitInEditor(page: Page, text: string): Promise<void> {
   await editor.press('Enter')
 }
 
+async function waitForSshPasswordPrompt(page: Page): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const rows = window.__nocxPaneScreen?.()?.rows ?? []
+          const last = rows
+            .map((row) => row.trimEnd())
+            .filter((row) => row !== '')
+            .at(-1)
+          return last?.endsWith('password:') ?? false
+        }),
+      { timeout: 30_000, message: 'the SSH password prompt never reached the live screen' },
+    )
+    .toBe(true)
+}
+
 const pane = (page: Page) => page.locator('.pane.active')
 
 // ── the journey ───────────────────────────────────────────────────────────
@@ -421,11 +438,12 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     // P7 stream-and-passport path ADR-0024 forbids, and `.nocx/run/` was its
     // staging directory. What this journey still proves is the part a user
     // can see — the blocks, the banner, the prompt and the exits below.
-    // Deterministic prompt readiness: the fixture prints CONN= when the
-    // client's first userauth attempt reaches it (KEX done, one response
-    // before the password prompt). The password is typed only after that —
-    // a timed wait would race the prompt.
+    // CONN proves the first userauth attempt reached the fixture, not that
+    // OpenSSH has installed its TTY password reader. Wait for the live prompt
+    // before sending input; checking the last non-empty row rejects an old
+    // password prompt retained above a later connection.
     await primary.waitConn(1, 30_000)
+    await waitForSshPasswordPrompt(page)
     // There is no "the run directory is empty" check here any more
     // (nocx-xn63t.6.7). `.nocx/run/` stopped being evidence of the removed
     // launcher the day it became the CURRENT local helper's endpoint
@@ -574,6 +592,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     // the fact having a writer again — the writer feeds the footprint
     // inventory, not a delivery choice.
     await primary.waitConn(2, 30_000)
+    await waitForSshPasswordPrompt(page)
     await page.keyboard.type(primaryPassword)
     await page.keyboard.press('Enter')
     // The second ssh entered: the LAST entered block carries the banner and
@@ -619,6 +638,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     })
     await expect(failRunning).toBeVisible({ timeout: 30_000 })
     await failHost.waitConn(1, 30_000)
+    await waitForSshPasswordPrompt(page)
     await page.keyboard.type(wrongPassword)
     await page.keyboard.press('Enter')
     // No passport: no environment entry, the block runs to the local D and

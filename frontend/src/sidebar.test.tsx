@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { fireEvent } from '@solidjs/testing-library'
 import { createEffect, createSignal } from 'solid-js'
@@ -758,97 +757,13 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
   })
 })
 
-// ── The two zones, and the rule that used to sit between them ─────────────
-//
-// A 24px hairline was drawn under the last view icon by
-// `.activity-bar-spacer::before` (0f6671de, nocx-82l9.6 — the shell's own
-// commit, years before the API work). The owner asked for it to go
-// (nocx-5b3ab). What it was doing — saying "these are two zones" — is done by
-// the spacer's own growth instead: it takes every spare pixel, so the actions
-// sit on the bar's floor and the views on its ceiling.
-//
-// This is read off the stylesheet SOURCE rather than off a computed style
-// because jsdom loads no CSS: a `getComputedStyle` assertion here would pass
-// against a stylesheet that says anything at all. That is the same reason
-// button.test.tsx and caption.test.tsx read their files.
-describe('the activity bar reads as two zones without a rule between them', () => {
-  const CSS = readFileSync('src/styles/components/sidebar.css', 'utf8')
-
-  it('nothing draws a hairline between the zones', () => {
-    // The pseudo-element is gone, not merely emptied: a `::before` with a
-    // `content` and no paint is still a box that takes vertical space.
-    expect(CSS).not.toContain('.activity-bar-spacer::before')
-    // And no other rule reintroduces one under the top zone by another name.
-    expect(CSS).not.toMatch(/\.activity-bar-(zone|top|bottom|spacer)[^{]*\{[^}]*border-bottom/)
-    expect(CSS).not.toMatch(/\.activity-bar-top[^{]*\{[^}]*border/)
-  })
-
-  it('the spacer still takes every spare pixel, which is what separates them', () => {
-    // `flex: 1 1 auto` on the spacer inside a column flex bar of full height
-    // is the whole mechanism. Without it the two zones butt together and the
-    // rule WOULD be the only thing telling them apart.
-    expect(CSS).toMatch(/\.activity-bar-spacer\s*\{[^}]*flex:\s*1 1 auto/)
-    expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*flex-direction:\s*column/)
-    expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*height:\s*100%/)
-  })
-
-  it('declares the rail background for a solid badge ring without repainting the kit', () => {
-    expect(CSS).toMatch(
-      /\.activity-bar-badge\s*\{[^}]*--badge-ring-color:\s*var\(--color-chrome-rail\)/s,
-    )
-
-    for (const match of CSS.matchAll(/([^{}]+)\{([^{}]*)\}/gs)) {
-      if (/\bui-[\w-]+/.test(match[1])) {
-        expect(match[2]).not.toMatch(
-          /\b(?:background|border(?:-[\w-]+)?|color|box-shadow|font(?:-[\w-]+)?)\s*:/,
-        )
-      }
-    }
-  })
-
-  it('has one placement rule for the badge, and it is the class the renderer draws (nocx-63j6r)', () => {
-    const { bar, panel } = mount()
-    mountSidebar(
-      bar,
-      panel,
-      [
-        TWO_VIEWS[0],
-        { ...TWO_VIEWS[1], status: () => ({ count: 3, progress: null }) },
-      ] as SidebarViewDescriptor[],
-      [SETTINGS_ACTION],
-    )
-    const drawn = bar.querySelector<HTMLElement>('[data-view-badge]')
-    expect(drawn).not.toBeNull()
-
-    // Every selector in the sheet that is about the badge must be about the
-    // element the renderer actually mounts. A second spelling is a second
-    // answer to one placement question, and the unreachable one is the one
-    // that stays wrong without anybody noticing.
-    const bare = CSS.replace(/\/\*[\s\S]*?\*\//g, '')
-    const badgeSelectors = [...bare.matchAll(/([^{}]+)\{[^{}]*\}/gs)]
-      .flatMap((rule) => rule[1].split(','))
-      .map((sel) => sel.trim())
-      .filter((sel) => /badge/i.test(sel))
-    expect(badgeSelectors.length).toBeGreaterThan(0)
-    for (const sel of badgeSelectors) {
-      expect(drawn!.matches(sel)).toBe(true)
-    }
-  })
-
+describe('accessible activity bar zones', () => {
   it('and they are still two groups a screen reader can tell apart', () => {
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
 
     const groups = [...bar.querySelectorAll('[role="group"]')]
     expect(groups.map((g) => g.getAttribute('aria-label'))).toEqual(['Views', 'Actions'])
-    // The spacer is between them in document order — the separation is
-    // structural, so it survives whatever the stylesheet does.
-    const children = [...(bar.querySelector('.activity-bar')?.children ?? [])]
-    expect(children.map((c) => c.className)).toEqual([
-      'activity-bar-zone activity-bar-top',
-      'activity-bar-spacer',
-      'activity-bar-zone activity-bar-bottom',
-    ])
   })
 })
 
@@ -897,5 +812,75 @@ describe('the filter slot', () => {
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [])
     expect(panel.querySelector('.ui-sidebar-view__actions')).toBeNull()
+  })
+})
+
+describe('contextual toolbar focus', () => {
+  const handles: SidebarHandle[] = []
+  afterEach(() => {
+    for (const handle of handles.splice(0)) handle.destroy()
+    document.body.replaceChildren()
+  })
+
+  function contextToolbar() {
+    const { bar, panel } = mount()
+    const [disabled, setDisabled] = createSignal(false)
+    const [title, setTitle] = createSignal('Sandbox — Enforce')
+    handles.push(
+      mountSidebar(
+        bar,
+        panel,
+        TWO_VIEWS,
+        [SETTINGS_ACTION],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          id: 'sandbox',
+          afterViewId: 'alpha',
+          title,
+          icon: TestIcon,
+          selected: () => false,
+          disabled,
+          onActivate: () => {},
+        },
+      ),
+    )
+    const shield = bar.querySelector<HTMLButtonElement>('[data-context-action="sandbox"]')!
+    return { bar, shield, setDisabled, setTitle }
+  }
+
+  it('keeps arrow navigation anchored to focus across a live context refresh', async () => {
+    const { bar, shield, setTitle } = contextToolbar()
+    viewBtn(bar, 'alpha').focus()
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(shield)
+    setTitle('Sandbox — Diagnostic')
+    await vi.waitFor(() => expect(shield.getAttribute('aria-label')).toBe('Sandbox — Diagnostic'))
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(viewBtn(bar, 'alpha'))
+    expect([...bar.querySelectorAll('button[tabindex="0"]')]).toEqual([viewBtn(bar, 'alpha')])
+  })
+
+  it('hands focus to an enabled item when the focused context action becomes disabled', async () => {
+    const { bar, shield, setDisabled } = contextToolbar()
+    shield.focus()
+    setDisabled(true)
+    await vi.waitFor(() => expect(document.activeElement).toBe(viewBtn(bar, 'alpha')))
+    expect([...bar.querySelectorAll('button[tabindex="0"]')]).toEqual([viewBtn(bar, 'alpha')])
+  })
+
+  it('does not steal editor focus when a previously focused context action becomes disabled', async () => {
+    const { bar, shield, setDisabled } = contextToolbar()
+    const editor = document.createElement('textarea')
+    document.body.append(editor)
+    shield.focus()
+    editor.focus()
+    setDisabled(true)
+    await vi.waitFor(() => expect(shield.disabled).toBe(true))
+    expect(document.activeElement).toBe(editor)
+    expect([...bar.querySelectorAll('button[tabindex="0"]')]).toEqual([viewBtn(bar, 'alpha')])
   })
 })

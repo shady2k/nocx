@@ -3,12 +3,11 @@ package app
 import (
 	"fmt"
 
-	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
 )
 
-func (o *localHelperOpener) hostedOpenResult(cfg session.Config, generation string, res hostedSpawnResult) (transport.HostedSessionOpen, error) {
+func (o *localHelperOpener) hostedOpenResult(generation string, res hostedSpawnResult) (transport.HostedSessionOpen, error) {
 	sid := res.Session.ID()
 	if o.registry == nil {
 		_ = res.Session.Close()

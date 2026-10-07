@@ -372,7 +372,9 @@ Typed top contextual shield action after Files, not navigation view. Off outline
 Enforce active, unknown/error distinct. Unsupported SSH/no registered pane disabled
 with reason. Click opens same Settings pinned context, never toggles rights. Live
 status/inspect/Remove remain visible when feature disabled. Keyboard/tooltips use
-existing sidebar navigation.
+existing sidebar navigation. The roving tab stop follows actual focus through
+live status refreshes. If the focused action becomes disabled, focus moves to an
+enabled toolbar item; a refresh must not steal focus already moved to the editor.
 
 CommandEditor hook pass/consumed/refused (sync/async) runs before secret planning,
 history/ledger/input; in-flight guard includes it and beforeSubmit. Only exact

@@ -93,7 +93,7 @@ func (o *localHelperOpener) SandboxOpenCandidate(ctx context.Context, cfg sessio
 					publishErr = err
 					return
 				}
-				published, publishErr = o.hostedOpenResult(cfg, generation, result)
+				published, publishErr = o.hostedOpenResult(generation, result)
 			})
 			return published, publishErr
 		},

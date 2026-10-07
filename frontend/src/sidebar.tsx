@@ -351,6 +351,55 @@ function SidebarSolid(props: SidebarSolidProps) {
     if (props.actions.length > 0) return props.actions[0].id
     return null
   })
+  // Keep the roving stop in reactive state. Imperatively changing tabindex
+  // loses to a later reactive prop update (for example, a sandbox shield
+  // refresh) and can leave focus on a different button from the tab stop.
+  const [rovingId, setRovingId] = createSignal<string | null>(null)
+  const buttonId = (button: HTMLElement): string | null =>
+    button.dataset.view ?? button.dataset.contextAction ?? button.dataset.action ?? null
+  let focusedToolbarButton: HTMLElement | null = null
+
+  const onToolbarFocus = (e: FocusEvent) => {
+    const button = (e.target as HTMLElement).closest<HTMLElement>('button')
+    focusedToolbarButton = button
+    const id = button && buttonId(button)
+    if (id) setRovingId(id)
+  }
+  const onToolbarBlur = (e: FocusEvent) => {
+    if (e.relatedTarget instanceof Node && props.bar.contains(e.relatedTarget)) return
+    // Disabling the focused button may blur it to the document before the
+    // reactive handoff runs. Retain ownership only for that browser transition.
+    if (
+      e.relatedTarget === null &&
+      focusedToolbarButton instanceof HTMLButtonElement &&
+      focusedToolbarButton.disabled
+    )
+      return
+    focusedToolbarButton = null
+  }
+
+  // A focused item can become disabled as live context facts refresh. Move
+  // focus to the first remaining enabled item rather than leaving the toolbar
+  // with a disabled roving target and browser-dropped focus.
+  createEffect(() => {
+    const action = props.contextAction
+    if (!action || !action.disabled() || rovingId() !== action.id) return
+    const toolbar = props.bar.querySelector('[role="toolbar"]')
+    const next = toolbar?.querySelector<HTMLElement>('button:not(:disabled)')
+    if (next) {
+      const moveFocus = focusedToolbarButton?.dataset.contextAction === action.id
+      const id = buttonId(next)
+      if (id) setRovingId(id)
+      if (moveFocus) next.focus()
+    }
+  })
+  // When the active view changes elsewhere, retain the established initial
+  // tab-stop contract; while focus is in the toolbar, keep the user's roving
+  // position instead.
+  createEffect(() => {
+    const next = tabbableId()
+    if (!props.bar.contains(document.activeElement) && next) setRovingId(next)
+  })
 
   // ── Keyboard shortcut: Ctrl/Cmd+B toggles sidebar ──────────────────────
   createEffect(() => {
@@ -450,14 +499,20 @@ function SidebarSolid(props: SidebarSolidProps) {
     const buttons = [...toolbar.querySelectorAll<HTMLElement>('button:not(:disabled)')]
     if (buttons.length === 0) return
 
-    const currentIdx = buttons.findIndex((b) => b.getAttribute('tabindex') === '0')
+    const active = document.activeElement
+    const activeButton =
+      active instanceof HTMLElement ? active.closest<HTMLElement>('button') : null
+    const activeId = activeButton && toolbar.contains(activeButton) ? buttonId(activeButton) : null
+    const currentId = activeId ?? rovingId()
+    const currentIdx = buttons.findIndex((button) => buttonId(button) === currentId)
     const idx = currentIdx >= 0 ? currentIdx : 0
 
     const moveTo = (next: number) => {
       e.preventDefault()
-      buttons[idx]?.setAttribute('tabindex', '-1')
-      buttons[next]?.setAttribute('tabindex', '0')
-      buttons[next]?.focus()
+      const target = buttons[next]
+      const id = buttonId(target)
+      if (id) setRovingId(id)
+      target.focus()
     }
 
     switch (e.key) {
@@ -504,7 +559,14 @@ function SidebarSolid(props: SidebarSolidProps) {
 
   // ── Render ─────────────────────────────────────────────────────────────
   return (
-    <div role="toolbar" aria-label="Activity bar" class="activity-bar" onKeyDown={handleKeyDown}>
+    <div
+      role="toolbar"
+      aria-label="Activity bar"
+      class="activity-bar"
+      onKeyDown={handleKeyDown}
+      onFocusIn={onToolbarFocus}
+      onFocusOut={onToolbarBlur}
+    >
       {/* Top zone: views */}
       <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
         <For each={props.views}>
@@ -527,7 +589,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                   data-view={view.id}
                   title={label()}
                   ariaLabel={label()}
-                  tabIndex={view.id === tabbableId() ? 0 : -1}
+                  tabIndex={view.id === rovingId() ? 0 : -1}
                   railIndicator={true}
                   onClick={() => handleViewClick(view)}
                 >
@@ -573,7 +635,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                       data-context-action={action.id}
                       title={action.title()}
                       ariaLabel={action.title()}
-                      tabIndex={!action.disabled() && action.id === tabbableId() ? 0 : -1}
+                      tabIndex={!action.disabled() && action.id === rovingId() ? 0 : -1}
                       onClick={action.onActivate}
                     >
                       <action.icon />
@@ -598,7 +660,7 @@ function SidebarSolid(props: SidebarSolidProps) {
               data-action={action.id}
               title={action.title}
               ariaLabel={action.title}
-              tabIndex={action.id === tabbableId() ? 0 : -1}
+              tabIndex={action.id === rovingId() ? 0 : -1}
               onClick={() => handleActionClick(action)}
             >
               <action.icon />

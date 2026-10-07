@@ -25,10 +25,8 @@ func TestWorkspaceProfileOverrideResetClockAndRenamePreservation(t *testing.T) {
 	if initial.Revision != 0 || initial.Override != nil {
 		t.Fatalf("initial workspace profile = %#v", initial)
 	}
-	standard := sandbox.StandardDocument{SchemaVersion: sandbox.ProfileSchemaVersion, ProfileRoots: sandbox.ProfileRoots{ReadOnlyDirs: []string{"/standard"}, ReadWriteDirs: []string{}}}
-	copyOnWrite := sandbox.CopyStandardToOverride(standard)
-	copyOnWrite.ReadOnlyDirs = append(copyOnWrite.ReadOnlyDirs, "/extra")
-	updated, err := store.UpdateWorkspaceProfile(ctx, "workspace-profile", 0, copyOnWrite)
+	override := &sandbox.ProfileRoots{ReadOnlyDirs: []string{"/standard", "/extra"}, ReadWriteDirs: []string{}}
+	updated, err := store.UpdateWorkspaceProfile(ctx, "workspace-profile", 0, override)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,13 +52,13 @@ func TestWorkspaceProfileOverrideResetClockAndRenamePreservation(t *testing.T) {
 	if reset.Revision != 2 || reset.Override != nil {
 		t.Fatalf("reset-to-inherit = %#v", reset)
 	}
-	if _, err := store.UpdateWorkspaceProfile(ctx, "workspace-profile", 1, copyOnWrite); !errors.Is(err, sandbox.ErrProfileConflict) {
+	if _, err := store.UpdateWorkspaceProfile(ctx, "workspace-profile", 1, override); !errors.Is(err, sandbox.ErrProfileConflict) {
 		t.Fatalf("stale workspace CAS = %v", err)
 	}
 	if _, err := store.GetWorkspaceProfile(ctx, content.DefaultWorkspaceID); err != nil {
 		t.Fatalf("default profile: %v", err)
 	}
-	if _, err := store.UpdateWorkspaceProfile(ctx, content.DefaultWorkspaceID, 0, copyOnWrite); !errors.Is(err, sandbox.ErrWorkspaceProfileUnsupported) {
+	if _, err := store.UpdateWorkspaceProfile(ctx, content.DefaultWorkspaceID, 0, override); !errors.Is(err, sandbox.ErrWorkspaceProfileUnsupported) {
 		t.Fatalf("default update = %v", err)
 	}
 }

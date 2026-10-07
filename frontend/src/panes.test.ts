@@ -23,6 +23,7 @@ import {
 import { isUuidv7 } from './layout/uuid7'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
+import { applyRestoreOnStartup } from './restore-setting'
 import { WSClient } from './ipc'
 import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
@@ -2875,6 +2876,40 @@ describe('the pane indicator reads the driver, and marks the weaker source', () 
 // two sources, and the strip draws the result. Every link tested alone is how
 // a connection manager shipped with no way to create a group.
 describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', () => {
+  beforeEach(() => applyRestoreOnStartup(true))
+  // Pane startup probes sandbox recovery before issuing ordinary `open`.
+  // These real-wire tests model a pane with no committed sandbox head.
+  const answerOrdinarySandboxStatus = async (
+    socket: MockWebSocket,
+    index: number,
+  ): Promise<void> => {
+    await vi.waitFor(() => {
+      const request = socket.requests().filter((entry) => entry.method === 'sandbox.status')[index]
+      if (request?.id === undefined) throw new Error(`waiting for sandbox.status request ${index}`)
+    })
+    const request = socket.requests().filter((entry) => entry.method === 'sandbox.status')[index]
+    if (request?.id === undefined) throw new Error(`missing sandbox.status request ${index}`)
+    const paneId = request.params?.paneId
+    if (typeof paneId !== 'string')
+      throw new Error('sandbox.status request is missing pane identity')
+    socket.deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      result: {
+        paneId,
+        workspaceId: 'default',
+        enabled: false,
+        standardRevision: 0,
+        workspaceRevision: 0,
+        profileSource: '',
+        availability: 'available',
+        reason: '',
+        source: null,
+        head: null,
+        preparingOperationId: '',
+      },
+    })
+  }
   it('lights the tab as waiting when the pane raises a permission dialog', async () => {
     const { client, manager, bar } = await mountPaneManager()
     manager.activateByIndex(0)
@@ -2971,6 +3006,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
     try {
       const mounted = mountPaneManager(realClient as unknown as ClientFake)
       await answerLiveSessions()
+      await answerOrdinarySandboxStatus(realSocket, 0)
       await vi.waitFor(() => expect(openRequests()).toHaveLength(1))
       answerOpen(0)
       const { manager, bar, panes } = await mounted
@@ -2982,6 +3018,8 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
 
       manager.newPane()
       manager.newPane()
+      await answerOrdinarySandboxStatus(realSocket, 1)
+      await answerOrdinarySandboxStatus(realSocket, 2)
       await vi.waitFor(() => expect(openRequests()).toHaveLength(3))
       answerOpen(1)
       answerOpen(2)
@@ -3051,6 +3089,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
       const live = realSocket.requests().find((r) => r.method === 'sessions.live')
       if (live?.id === undefined) throw new Error('missing sessions.live request')
       realSocket.deliverText({ jsonrpc: '2.0', id: live.id, result: { sessions: [] } })
+      await answerOrdinarySandboxStatus(realSocket, 0)
 
       await vi.waitFor(() => {
         expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(1)
@@ -3104,6 +3143,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
       // pane is opened and activated first, so the click has somewhere to
       // come FROM and the assertion cannot pass by accident.
       manager.newPane()
+      await answerOrdinarySandboxStatus(realSocket, 1)
       await vi.waitFor(() => {
         expect(realSocket.requests().filter((r) => r.method === 'open')).toHaveLength(2)
       })

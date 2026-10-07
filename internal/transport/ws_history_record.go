@@ -9,7 +9,7 @@ import (
 	"strconv"
 
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/masking"
 	"github.com/shady2k/nocx/internal/secrets"
 )
@@ -61,10 +61,10 @@ type preparedHistoryCommand struct {
 	maskedCount int
 	maskedKinds []string
 	redactions  []content.Redaction
-	credentials []credential.PendingCredential
+	credentials []credentialcapture.PendingCredential
 }
 
-func prepareHistoryCommand(command string, captures *credential.CaptureRegistry) (preparedHistoryCommand, error) {
+func prepareHistoryCommand(command string, captures *credentialcapture.CaptureRegistry) (preparedHistoryCommand, error) {
 	masked, err := maskLedgerCommand(command)
 	if err != nil {
 		return preparedHistoryCommand{}, err
@@ -88,7 +88,7 @@ func prepareHistoryCommand(command string, captures *credential.CaptureRegistry)
 	}
 
 	rowRedactions := make([]content.Redaction, 0, len(redactions))
-	credentials := make([]credential.PendingCredential, 0, len(redactions))
+	credentials := make([]credentialcapture.PendingCredential, 0, len(redactions))
 	delta := 0
 	for i, finding := range masked.findings {
 		r := redactions[i]
@@ -101,7 +101,7 @@ func prepareHistoryCommand(command string, captures *credential.CaptureRegistry)
 			Prefix: r.Prefix, Suffix: r.Suffix,
 		}
 		rowRedactions = append(rowRedactions, adjusted)
-		credentials = append(credentials, credential.PendingCredential{
+		credentials = append(credentials, credentialcapture.PendingCredential{
 			Value:         []byte(command[finding.ValueStart:finding.ValueEnd]),
 			SuggestedName: secrets.SuggestName(command, finding),
 			Redaction:     adjusted,

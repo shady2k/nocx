@@ -14,6 +14,7 @@ type inputGate struct {
 	mu      sync.Mutex
 	active  int
 	fencing bool
+	closed  bool
 	retired bool
 	drained chan struct{}
 }
@@ -23,7 +24,7 @@ func newInputGate() *inputGate { return &inputGate{} }
 func (g *inputGate) admit() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.fencing || g.retired {
+	if g.fencing || g.closed {
 		return false
 	}
 	g.active++
@@ -42,15 +43,25 @@ func (g *inputGate) finish() {
 func (g *inputGate) allowed() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return !g.fencing && !g.retired
+	return !g.fencing && !g.closed
 }
 
 func (g *inputGate) fence(ctx context.Context, commit func() error, retire func()) error {
+	return g.closeAdmission(ctx, commit, retire, true)
+}
+
+// seal closes an already-ended session's input without reclassifying its exit
+// as replacement retirement.
+func (g *inputGate) seal(ctx context.Context) error {
+	return g.closeAdmission(ctx, nil, nil, false)
+}
+
+func (g *inputGate) closeAdmission(ctx context.Context, commit func() error, retire func(), retired bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	g.mu.Lock()
-	if g.retired || g.fencing {
+	if g.closed || g.fencing {
 		g.mu.Unlock()
 		return ErrInputFenced
 	}
@@ -78,15 +89,18 @@ func (g *inputGate) fence(ctx context.Context, commit func() error, retire func(
 		g.mu.Unlock()
 		return err
 	}
-	if err := commit(); err != nil {
-		g.mu.Lock()
-		g.fencing = false
-		g.drained = nil
-		g.mu.Unlock()
-		return err
+	if commit != nil {
+		if err := commit(); err != nil {
+			g.mu.Lock()
+			g.fencing = false
+			g.drained = nil
+			g.mu.Unlock()
+			return err
+		}
 	}
 	g.mu.Lock()
-	g.retired = true
+	g.closed = true
+	g.retired = retired
 	g.mu.Unlock()
 	if retire != nil {
 		retire()

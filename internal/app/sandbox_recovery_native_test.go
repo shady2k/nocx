@@ -186,18 +186,35 @@ func testSandboxNativeCrashRecovery(t *testing.T, targetState content.LaunchStat
 		}
 		second := bootLocalAppOn(t, src)
 		if targetState == content.LaunchEnded {
-			status, statusErr := second.sandboxCoordinator.Status(ctx, transport.SandboxStatusRequest{PaneID: paneID})
-			if statusErr != nil || status.Head == nil || status.Head.LaunchID != launch.ID || status.Head.State != content.LaunchEnded || status.Head.Enforcement != "ended" || status.Source != nil {
-				binding, bindingErr := second.sandboxHelper.SandboxBinding(ctx, candidate.Identity)
-				t.Fatalf("cold exited launch is not definitively ended: status=%+v head=%+v error=%v binding=%+v bindingError=%v", status, status.Head, statusErr, binding, bindingErr)
-			}
+			// Status can persist an exit itself. Prove readoption saved the
+			// durable fact before making any such mutating observation.
 			head, headErr := second.launches.Head(ctx, paneID)
 			if headErr != nil || head.ID != launch.ID || head.State != content.LaunchEnded || head.Helper == nil || *head.Helper != candidate.Identity || head.GrantID == nil || *head.GrantID != *launch.GrantID {
-				t.Fatalf("cold exit changed selected launch identity or grant: %+v %v", head, headErr)
+				t.Fatalf("cold exit changed selected launch identity or grant before Status: %+v %v", head, headErr)
 			}
-			entries, inventoryErr := second.sandboxHelper.SandboxInventory(ctx, launch.TargetGeneration)
-			if inventoryErr != nil || nativeInventoryHasLive(t, entries, candidate.Identity.SessionID) {
-				t.Fatalf("cold exit was silently relaunched: %+v %v", entries, inventoryErr)
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				entries, inventoryErr := second.sandboxHelper.SandboxInventory(ctx, launch.TargetGeneration)
+				if inventoryErr != nil || nativeInventoryHasLive(t, entries, candidate.Identity.SessionID) {
+					t.Fatalf("cold exit was silently relaunched: %+v %v", entries, inventoryErr)
+				}
+				retained := false
+				for _, entry := range entries {
+					if entry.HostSessionID.Session == candidate.Identity.SessionID {
+						retained = true
+					}
+				}
+				if !retained {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("cold exited session inventory was not released: %+v", entries)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			status, statusErr := second.sandboxCoordinator.Status(ctx, transport.SandboxStatusRequest{PaneID: paneID})
+			if statusErr != nil || status.Head == nil || status.Head.LaunchID != launch.ID || status.Head.State != content.LaunchEnded || status.Head.Enforcement != "ended" || status.Source != nil {
+				t.Fatalf("cold exited launch lost durable ended after inventory release: status=%+v head=%+v error=%v", status, status.Head, statusErr)
 			}
 			t.Log("NATIVE_OFFLINE_EXIT_RESTORES_ENDED_WITHOUT_SPAWN_PROOF_COMPLETE")
 			return

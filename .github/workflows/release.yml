@@ -213,7 +213,7 @@ jobs:
       # Named rather than covered by a bare `-run 'Test'` so that a check
       # added to this package is a decision about THIS job.
       - name: Verify helper build output is stable, bounded and licensed
-        run: go test -v -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestMakeHelpersIsIdempotent|TestHelperArtifactsStayBelowSizeCeiling|TestHelperArtifactsCarryThePinnedThirdPartyNotices' -count=1
+        run: go test -v -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestHelperGenerationStableAcrossIdenticalBuilds|TestHelperArtifactsStayBelowSizeCeiling|TestHelperArtifactsCarryThePinnedThirdPartyNotices' -count=1
 
       # The COMPRESSED artefacts, exactly as `make helpers` leaves them:
       # //go:embed all:bin takes the .gz files, so these are what the

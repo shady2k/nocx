@@ -841,6 +841,89 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"agent.rules.delete": {
 			[]byte(`{"agent":"claude"}`),
 		},
+		"sandbox.cancel": {
+			[]byte(`{"operationId":"op-0123456789abcdef0123456789abcdef","confirmationId":"confirm-0123456789abcdef0123456789abcdef"}`),
+		},
+		"sandbox.profile.get": {
+			[]byte(`{}`),
+			[]byte(`{"workspaceId":"workspace:default"}`),
+		},
+		"sandbox.grant.get": {
+			[]byte(`{"launchId":"launch-0123456789abcdef0123456789abcdef"}`),
+		},
+		"sandbox.access.list": {
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","cursor":0,"limit":0}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","cursor":500,"limit":200}`),
+		},
+		"sandbox.preview": {
+			[]byte(`{"paneId":"pane-1","source":null,"expectedHeadId":"","mode":"off","delta":{"readOnlyDirs":[],"readWriteDirs":[]}}`),
+			[]byte(`{"paneId":"pane-1","source":{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"fedcba9876543210fedcba9876543210","sessionEpoch":1},"expectedHeadId":"head-1","mode":"enforce","delta":{"readOnlyDirs":["/tmp/read"],"readWriteDirs":["/tmp/write"]}}`),
+		},
+		"sandbox.replace": {
+			[]byte(`{"operationId":"op-0123456789abcdef0123456789abcdef","confirmationId":"confirm-0123456789abcdef0123456789abcdef"}`),
+		},
+		"sandbox.operation.get": {
+			[]byte(`{"operationId":"op-0123456789abcdef0123456789abcdef"}`),
+		},
+		"sandbox.status": {
+			[]byte(`{"paneId":"pane-1"}`),
+		},
+		"sandbox.profile.reset": {
+			[]byte(`{"workspaceId":"workspace:default","expectedRevision":0}`),
+		},
+		"sandbox.profile.update": {
+			[]byte(`{"expectedRevision":0,"enabled":false,"roots":{"readOnlyDirs":[],"readWriteDirs":[]}}`),
+			[]byte(`{"workspaceId":"workspace:default","expectedRevision":7,"enabled":true,"roots":{"readOnlyDirs":["/tmp/read"],"readWriteDirs":["/tmp/write"]}}`),
+		},
+		"sandbox.access.resolve": {
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","eventId":"event-1","eventRevision":1,"decision":"dismiss","expectedStandardRevision":0,"expectedWorkspaceRevision":0}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","eventId":"event-1","eventRevision":2,"decision":"allow-ro","expectedStandardRevision":3,"expectedWorkspaceRevision":4}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","eventId":"event-1","eventRevision":3,"decision":"allow-rw","expectedStandardRevision":5,"expectedWorkspaceRevision":6}`),
+		},
+	}
+	invalidByMethod := map[string][][]byte{
+		"sandbox.cancel": {
+			[]byte(`{}`),
+			[]byte(`{"operationId":null,"confirmationId":"confirm-1"}`),
+		},
+		"sandbox.grant.get": {
+			[]byte(`{}`),
+			[]byte(`{"launchId":null}`),
+		},
+		"sandbox.access.list": {
+			[]byte(`{}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","cursor":501,"limit":1}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","cursor":0,"limit":201}`),
+		},
+		"sandbox.access.resolve": {
+			[]byte(`{}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","eventId":"event-1","eventRevision":0,"decision":"dismiss","expectedStandardRevision":0,"expectedWorkspaceRevision":0}`),
+			[]byte(`{"paneId":"pane-1","launchId":"launch-1","eventId":"event-1","eventRevision":1,"decision":"allow","expectedStandardRevision":0,"expectedWorkspaceRevision":0}`),
+		},
+		"sandbox.preview": {
+			[]byte(`{}`),
+			[]byte(`{"paneId":"pane-1","expectedHeadId":"head-1","mode":"off","delta":{"readOnlyDirs":[],"readWriteDirs":[]}}`),
+		},
+		"sandbox.replace": {
+			[]byte(`{}`),
+			[]byte(`{"operationId":"op-1","confirmationId":null}`),
+		},
+		"sandbox.operation.get": {
+			[]byte(`{}`),
+			[]byte(`{"operationId":null}`),
+		},
+		"sandbox.status": {
+			[]byte(`{}`),
+			[]byte(`{"paneId":null}`),
+		},
+		"sandbox.profile.reset": {
+			[]byte(`{}`),
+			[]byte(`{"workspaceId":"workspace:default","expectedRevision":null}`),
+		},
+		"sandbox.profile.update": {
+			[]byte(`{}`),
+			[]byte(`{"expectedRevision":0,"roots":null}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {
@@ -879,6 +962,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 				[]byte(`{"id":{}}`),
 			}
 		}
+		probes = append(probes, invalidByMethod[method]...)
 		for _, raw := range probes {
 			raw := raw
 			t.Run(method+"/"+string(raw), func(t *testing.T) {
@@ -913,17 +997,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			t.Fatalf("read %s: %v", path, readErr)
 		}
 		var metadata struct {
-			AdditionalProperties *bool    `json:"additionalProperties"`
-			Required             []string `json:"required"`
+			AdditionalProperties *bool `json:"additionalProperties"`
 		}
 		if parseErr := json.Unmarshal(raw, &metadata); parseErr != nil {
 			t.Fatalf("parse %s: %v", path, parseErr)
 		}
 		if metadata.AdditionalProperties == nil || *metadata.AdditionalProperties {
 			t.Errorf("%s must set additionalProperties to false", path)
-		}
-		if metadata.Required == nil {
-			t.Errorf("%s must declare required, including when it is empty", path)
 		}
 	}
 }

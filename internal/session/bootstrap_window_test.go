@@ -216,6 +216,7 @@ func newWindowFixture(t *testing.T) (BootstrapWindow, func(string), func() strin
 		log:       log.NewSlogAdapter(nil),
 		writeCh:   make(chan writeJob, 8),
 		writeDone: make(chan struct{}),
+		inputGate: newInputGate(),
 	}
 	s.startWriteLoop()
 	t.Cleanup(func() { close(s.writeDone) })

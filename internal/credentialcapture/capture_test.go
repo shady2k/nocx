@@ -1,9 +1,7 @@
-package credential
+package credentialcapture
 
-// The pending-capture registry, exercised against the contract pasted in
-// capture.go: single-use, 30-second expiry, destruction on every named
-// trigger, one save repairing every linked row, and suppression by value
-// equality without keeping the value.
+// The pending-capture registry tests its single-use lifecycle, destruction
+// triggers, linked-row repair and equality suppression without retaining values.
 
 import (
 	"encoding/json"

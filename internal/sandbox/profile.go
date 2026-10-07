@@ -91,11 +91,6 @@ func NewProfileRepository(doc storage.DocumentStore, name string, workspaces Wor
 	return &ProfileRepository{doc: doc, name: name, workspaces: workspaces, lock: &ConfigLock{}}
 }
 
-// NewStandardProfileRepository creates a standard-only repository without ContentDB.
-func NewStandardProfileRepository(doc storage.DocumentStore) *ProfileRepository {
-	return NewProfileRepository(doc, StandardDocumentName, nil)
-}
-
 // GetStandard returns an independent snapshot. A missing document has the
 // canonical initial value; it is not persisted until a successful CAS write.
 func (r *ProfileRepository) GetStandard() (StandardDocument, error) {
@@ -394,9 +389,5 @@ func (r *ProfileRepository) GetWorkspaceProfileForPane(ctx context.Context, layo
 	return r.GetWorkspaceProfile(ctx, workspaceID)
 }
 
-func CopyStandardToOverride(standard StandardDocument) *ProfileRoots {
-	roots := cloneRoots(standard.ProfileRoots)
-	return &roots
-}
 func ValidateWorkspaceRoots(roots ProfileRoots) error               { return validateRoots(roots) }
 func WorkspaceProfileSnapshot(in WorkspaceProfile) WorkspaceProfile { return cloneWorkspaceProfile(in) }

@@ -35,7 +35,7 @@ func (*profileDocStore) List() ([]string, error) { return nil, nil }
 
 func TestStandardProfileInitialCASValidationAndSnapshots(t *testing.T) {
 	doc := &profileDocStore{}
-	repo := NewStandardProfileRepository(doc)
+	repo := NewProfileRepository(doc, StandardDocumentName, nil)
 	initial, err := repo.GetStandard()
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestStandardProfileInitialCASValidationAndSnapshots(t *testing.T) {
 func TestStandardProfileWriteFailureDoesNotAdvanceSnapshot(t *testing.T) {
 	boom := errors.New("write failed")
 	doc := &profileDocStore{writeErr: boom}
-	repo := NewStandardProfileRepository(doc)
+	repo := NewProfileRepository(doc, StandardDocumentName, nil)
 	if _, err := repo.UpdateStandard(0, true, ProfileRoots{ReadWriteDirs: []string{"/work"}}); !errors.Is(err, boom) {
 		t.Fatalf("write error = %v", err)
 	}
@@ -101,15 +101,10 @@ func TestWorkspaceProfileInheritanceUsesDetachedStandardSnapshot(t *testing.T) {
 	if standard.ReadOnlyDirs[0] != "/standard" {
 		t.Fatalf("effective roots alias standard: %#v", standard)
 	}
-	workspace.Override = CopyStandardToOverride(standard)
-	workspace.Override.ReadOnlyDirs[0] = "/override"
-	if standard.ReadOnlyDirs[0] != "/standard" {
-		t.Fatalf("copy-on-write override aliases standard: %#v", standard)
-	}
 	if EffectiveWorkspaceRoots(WorkspaceProfile{WorkspaceID: "workspace:default"}, standard).ReadOnlyDirs[0] != "/standard" {
 		t.Fatal("default workspace did not inherit standard")
 	}
-	if _, err := NewProfileRepository(&profileDocStore{}, "sandbox.json", nil).UpdateWorkspaceProfile(context.Background(), "workspace:default", 0, &ProfileRoots{}); !errors.Is(err, ErrWorkspaceProfileUnsupported) {
+	if _, err := NewProfileRepository(&profileDocStore{}, StandardDocumentName, nil).UpdateWorkspaceProfile(context.Background(), DefaultWorkspaceID, 0, &ProfileRoots{}); !errors.Is(err, ErrWorkspaceProfileUnsupported) {
 		t.Fatalf("default override error = %v", err)
 	}
 }
@@ -127,7 +122,7 @@ func TestStandardProfileRevisionCannotWrap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	repo := NewStandardProfileRepository(&profileDocStore{raw: raw})
+	repo := NewProfileRepository(&profileDocStore{raw: raw}, StandardDocumentName, nil)
 	if _, err := repo.UpdateStandard(^uint64(0), true, ProfileRoots{}); !errors.Is(err, ErrProfileRevisionExhausted) {
 		t.Fatalf("max revision update = %v", err)
 	}

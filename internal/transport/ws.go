@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
@@ -458,10 +459,10 @@ type WSServer struct {
 	commandNames CommandNamesResolver
 
 	// Pending-capture registry: the backend-side holder of submitted
-	// credentials awaiting a save decision (internal/credential). Created
+	// credentials awaiting a save decision (internal/credentialcapture). Created
 	// at construction; nil only when its fingerprint key could not be
 	// minted, in which case no offers are made and saves are refused.
-	captures *credential.CaptureRegistry
+	captures *credentialcapture.CaptureRegistry
 	// nextConnID assigns the per-connection (per-tab) identity captures
 	// are scoped to.
 	nextConnID atomic.Uint64
@@ -1423,7 +1424,7 @@ func WithBuildInfo(b version.BuildInfo) WSServerOption {
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
 // production constructs its own. The injected registry must not be shared
 // across servers.
-func WithCaptureRegistry(r *credential.CaptureRegistry) WSServerOption {
+func WithCaptureRegistry(r *credentialcapture.CaptureRegistry) WSServerOption {
 	return func(s *WSServer) {
 		s.captures = r
 	}
@@ -1727,7 +1728,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 	// over this socket. Constructed here so there is exactly one store per
 	// server and no window in which a mint site could reach a different one.
 	s.sources = NewSourceTicketStore(s)
-	if caps, err := credential.NewCaptureRegistry(); err != nil {
+	if caps, err := credentialcapture.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
 		// capture saves are refused. A predictable fingerprint key would be
 		// worse than none — the equality facts would be forgeable.

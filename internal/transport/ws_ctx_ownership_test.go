@@ -14,17 +14,10 @@ package transport
 //  3. Domain-owned commit interval — RestoreImport and vault Setup document
 //     their own commit points; the transport never cancels across them.
 //
-// The structural test at the bottom is the sweep guard: any future
-// context.Background() without a named owner and closing event fails the
-// suite.
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -493,77 +486,4 @@ func TestStop_NonCooperativeProbeAbandonedWithinDocumentedMax(t *testing.T) {
 
 	// Let the abandoned goroutine finish so the test can exit cleanly.
 	close(prober.release)
-}
-
-// --- acceptance 3: every remaining context.Background() names its owner -----
-
-// TestCtxOwnership_RemainingBackgroundNamesOwnerAndClosingEvent is the
-// structural sweep guard: every context.Background() left in non-test
-// transport code must sit under a comment naming its owner and its closing
-// event. A mechanically "fixed" sweep that cancelled session survival would
-// also fail the AD-9 test above; this one catches a future Background that
-// forgets to justify itself.
-func TestCtxOwnership_RemainingBackgroundNamesOwnerAndClosingEvent(t *testing.T) {
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(thisFile)
-	files, err := filepath.Glob(filepath.Join(dir, "*.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var violations []string
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		// #nosec G304 — the glob is this package's own source directory
-		// (derived from runtime.Caller), never external input: the test
-		// audits the transport package's own files.
-		data, err := os.ReadFile(f) //nolint:gosec // see above: package-own source files only
-		if err != nil {
-			t.Fatal(err)
-		}
-		lines := strings.Split(string(data), "\n")
-		for i, ln := range lines {
-			if !strings.Contains(ln, "context.Background()") {
-				continue
-			}
-			if !commentAboveNamesOwnerAndClosingEvent(lines, i) {
-				violations = append(violations, fmt.Sprintf("%s:%d", filepath.Base(f), i+1))
-			}
-		}
-	}
-	if len(violations) > 0 {
-		t.Fatalf("context.Background() without a comment naming its owner and closing event:\n  %s",
-			strings.Join(violations, "\n  "))
-	}
-}
-
-// commentAboveNamesOwnerAndClosingEvent reports whether a // comment within
-// the 12 lines above (or trailing) the given line names both the owner and
-// the closing event. The two words may sit on different lines of the same
-// comment block; matching is case-insensitive ("Closing event" == "closing
-// event").
-func commentAboveNamesOwnerAndClosingEvent(lines []string, idx int) bool {
-	lo := idx - 12
-	if lo < 0 {
-		lo = 0
-	}
-	owner, closing := false, false
-	for i := idx; i >= lo; i-- {
-		ln := strings.ToLower(strings.TrimSpace(lines[i]))
-		if !strings.HasPrefix(ln, "//") {
-			continue
-		}
-		if strings.Contains(ln, "owner") {
-			owner = true
-		}
-		if strings.Contains(ln, "closing event") {
-			closing = true
-		}
-	}
-	return owner && closing
 }

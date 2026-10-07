@@ -865,15 +865,15 @@ func (rp *readoptPass) readopt(
 		}
 		if entry.Exit != nil {
 			// A confirmed exited process is re-adopted only to drain its
-			// retained stream. Fence input and new tool admission before the
-			// transport receives the recovered session.
+			// retained stream. Seal input and new tool admission without
+			// misclassifying the host's exit as replacement retirement.
 			ref := session.Ref{ID: sess.ID(), Identity: sess.Identity()}
-			if fenceErr := rp.registry.registry.FenceInput(ctx, ref, func() error { return nil }, func() {}); fenceErr != nil {
+			if fenceErr := rp.registry.registry.SealInput(ctx, ref); fenceErr != nil {
 				stopBlockRows()
 				_ = attached.Close()
 				adoption.abort()
 				_ = rp.registry.registry.Close(sid)
-				return transport.HostedSessionOpen{}, fmt.Errorf("fence exited protected session input: %w", fenceErr)
+				return transport.HostedSessionOpen{}, fmt.Errorf("seal exited session input: %w", fenceErr)
 			}
 		}
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists

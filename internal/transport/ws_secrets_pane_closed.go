@@ -2,7 +2,7 @@ package transport
 
 // secrets.paneClosed — the renderer telling the backend that a pane closed,
 // so that pane's pending captures die with it (nocx-tsajw). The capture
-// contract (internal/credential/capture.go) names pane closure as a
+// contract (internal/credentialcapture) names pane closure as a
 // destruction trigger, but the transport had no way to fire it: the pending
 // captures were scoped to the connection, so a pane's offer sat in backend
 // memory until the connection dropped, the vault sealed, or the app quit.
@@ -40,7 +40,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -90,7 +90,7 @@ func validatePaneClosedRaw(raw json.RawMessage) string {
 // destruction key is (connection, pane), and the connection half is the
 // handler's own fact.
 type paneClosedHandlers struct {
-	captures *credential.CaptureRegistry
+	captures *credentialcapture.CaptureRegistry
 	log      log.Logger
 }
 

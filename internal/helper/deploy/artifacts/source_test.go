@@ -4,6 +4,7 @@ package artifacts
 
 import (
 	"compress/gzip"
+	"crypto/sha256"
 	"io"
 	"os"
 	"os/exec"
@@ -148,18 +149,14 @@ func sortedNames(m map[string]string) []string {
 // is linux/amd64; the release's helpers job builds and measures all three.
 const maxHelperBytes int64 = 20 * 1024 * 1024
 
-func TestMakeHelpersIsIdempotent(t *testing.T) {
-	first := artifactSizes(t)
+func TestHelperGenerationStableAcrossIdenticalBuilds(t *testing.T) {
+	first := artifactDigests(t)
 	runMakeHelpers(t)
-	second := artifactSizes(t)
-
+	second := artifactDigests(t)
 	for name, before := range first {
 		after, still := second[name]
-		if !still {
-			t.Fatalf("%s disappeared across a rebuild: the two targets a release runs must produce the same set of artifacts twice", name)
-		}
-		if before != after {
-			t.Fatalf("the helper build is not idempotent for %s: first decompressed size %d, second %d", name, before, after)
+		if !still || before != after {
+			t.Fatalf("helper generation changed across an identical build for %s: first %x, second %x, present %t", name, before, after, still)
 		}
 	}
 	if len(second) != len(first) {
@@ -254,6 +251,33 @@ func artifactSizes(t *testing.T) map[string]int64 {
 		sizes[name] = size
 	}
 	return sizes
+}
+
+func artifactDigests(t *testing.T) map[string][sha256.Size]byte {
+	t.Helper()
+	paths := helperArtifactPaths(t)
+	digests := make(map[string][sha256.Size]byte, len(paths))
+	for _, name := range sortedNames(paths) {
+		file, err := os.Open(paths[name])
+		if err != nil {
+			t.Fatalf("open helper artifact %s: %v", name, err)
+		}
+		zr, err := gzip.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			t.Fatalf("open gzip helper artifact %s: %v", name, err)
+		}
+		hash := sha256.New()
+		_, readErr := io.Copy(hash, zr)
+		closeErr, fileErr := zr.Close(), file.Close()
+		if readErr != nil || closeErr != nil || fileErr != nil {
+			t.Fatalf("hash helper artifact %s: read=%v gzip=%v file=%v", name, readErr, closeErr, fileErr)
+		}
+		var digest [sha256.Size]byte
+		hash.Sum(digest[:0])
+		digests[name] = digest
+	}
+	return digests
 }
 
 func moduleRoot(t *testing.T) string {

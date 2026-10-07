@@ -9,7 +9,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 )
 
 func sendPaneClosed(t *testing.T, conn *websocket.Conn, paneID string) {
@@ -35,20 +35,20 @@ func activeConn(t *testing.T, ws *WSServer) *wsConn {
 	return nil
 }
 
-func pendingCapture(t *testing.T, caps *credential.CaptureRegistry, scope credential.CaptureScope, value string) string {
+func pendingCapture(t *testing.T, caps *credentialcapture.CaptureRegistry, scope credentialcapture.CaptureScope, value string) string {
 	t.Helper()
-	results := caps.Submit(scope, []credential.PendingCredential{{
+	results := caps.Submit(scope, []credentialcapture.PendingCredential{{
 		Value:         []byte(value),
 		SuggestedName: "test-secret",
 		Redaction:     content.Redaction{Kind: "token", Start: 0, End: len(value), Prefix: "abcd", Suffix: "wxyz"},
 	}})
-	if len(results) != 1 || (results[0].Outcome != credential.OutcomeCaptured && results[0].Outcome != credential.OutcomeLinked) {
+	if len(results) != 1 || (results[0].Outcome != credentialcapture.OutcomeCaptured && results[0].Outcome != credentialcapture.OutcomeLinked) {
 		t.Fatalf("capture submit = %+v, want one pending capture", results)
 	}
 	return string(results[0].CaptureID)
 }
 
-func destroyPaneOverSocket(t *testing.T, conn *websocket.Conn, wc *wsConn, caps *credential.CaptureRegistry, paneID string) {
+func destroyPaneOverSocket(t *testing.T, conn *websocket.Conn, wc *wsConn, caps *credentialcapture.CaptureRegistry, paneID string) {
 	t.Helper()
 	sendPaneClosed(t, conn, paneID)
 	params, err := json.Marshal(paneClosedParams{PaneID: paneID})
@@ -62,7 +62,7 @@ func destroyPaneOverSocket(t *testing.T, conn *websocket.Conn, wc *wsConn, caps 
 }
 
 func TestPaneClose_DestroysOnlyThatPanesCapturesOverSocket(t *testing.T) {
-	caps, err := credential.NewCaptureRegistry()
+	caps, err := credentialcapture.NewCaptureRegistry()
 	if err != nil {
 		t.Fatalf("NewCaptureRegistry: %v", err)
 	}
@@ -73,20 +73,20 @@ func TestPaneClose_DestroysOnlyThatPanesCapturesOverSocket(t *testing.T) {
 	wc := activeConn(t, ws)
 	clientID := connectionID(wc)
 
-	captureA := pendingCapture(t, caps, credential.CaptureScope{Connection: clientID, Pane: "pane-a", EntryID: "entry-a"}, "token-a")
-	captureB := pendingCapture(t, caps, credential.CaptureScope{Connection: clientID, Pane: "pane-b", EntryID: "entry-b"}, "token-b")
+	captureA := pendingCapture(t, caps, credentialcapture.CaptureScope{Connection: clientID, Pane: "pane-a", EntryID: "entry-a"}, "token-a")
+	captureB := pendingCapture(t, caps, credentialcapture.CaptureScope{Connection: clientID, Pane: "pane-b", EntryID: "entry-b"}, "token-b")
 	destroyPaneOverSocket(t, conn, wc, caps, "pane-a")
 
-	if _, err := caps.Reserve(credential.CaptureID(captureA)); !errors.Is(err, credential.ErrCaptureUnknown) {
+	if _, err := caps.Reserve(credentialcapture.CaptureID(captureA)); !errors.Is(err, credentialcapture.ErrCaptureUnknown) {
 		t.Fatalf("pane-a capture after close = %v, want unknown", err)
 	}
-	if _, err := caps.Reserve(credential.CaptureID(captureB)); err != nil {
+	if _, err := caps.Reserve(credentialcapture.CaptureID(captureB)); err != nil {
 		t.Fatalf("pane-b capture after pane-a close = %v, want live", err)
 	}
 }
 
 func TestPaneClose_DoesNotCrossConnectionsAndRejectsMalformedFrames(t *testing.T) {
-	caps, err := credential.NewCaptureRegistry()
+	caps, err := credentialcapture.NewCaptureRegistry()
 	if err != nil {
 		t.Fatalf("NewCaptureRegistry: %v", err)
 	}
@@ -112,21 +112,21 @@ func TestPaneClose_DoesNotCrossConnectionsAndRejectsMalformedFrames(t *testing.T
 	}
 	idB := connectionID(wcB)
 
-	captureA := pendingCapture(t, caps, credential.CaptureScope{Connection: idA, Pane: "same-pane", EntryID: "entry-a"}, "token-c")
-	captureB := pendingCapture(t, caps, credential.CaptureScope{Connection: idB, Pane: "same-pane", EntryID: "entry-b"}, "token-d")
-	malformed := pendingCapture(t, caps, credential.CaptureScope{Connection: idA, Pane: "malformed", EntryID: "entry-m"}, "token-m")
+	captureA := pendingCapture(t, caps, credentialcapture.CaptureScope{Connection: idA, Pane: "same-pane", EntryID: "entry-a"}, "token-c")
+	captureB := pendingCapture(t, caps, credentialcapture.CaptureScope{Connection: idB, Pane: "same-pane", EntryID: "entry-b"}, "token-d")
+	malformed := pendingCapture(t, caps, credentialcapture.CaptureScope{Connection: idA, Pane: "malformed", EntryID: "entry-m"}, "token-m")
 	if err := connA.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"secrets.paneClosed","params":{}}`)); err != nil {
 		t.Fatalf("write malformed pane close: %v", err)
 	}
-	if _, err := caps.Reserve(credential.CaptureID(malformed)); err != nil {
+	if _, err := caps.Reserve(credentialcapture.CaptureID(malformed)); err != nil {
 		t.Fatalf("capture after malformed frame = %v, want live", err)
 	}
 
 	destroyPaneOverSocket(t, connA, wcA, caps, "same-pane")
-	if _, err := caps.Reserve(credential.CaptureID(captureA)); !errors.Is(err, credential.ErrCaptureUnknown) {
+	if _, err := caps.Reserve(credentialcapture.CaptureID(captureA)); !errors.Is(err, credentialcapture.ErrCaptureUnknown) {
 		t.Fatalf("connection A capture after close = %v, want unknown", err)
 	}
-	if _, err := caps.Reserve(credential.CaptureID(captureB)); err != nil {
+	if _, err := caps.Reserve(credentialcapture.CaptureID(captureB)); err != nil {
 		t.Fatalf("same pane on connection B after A close = %v, want live", err)
 	}
 }

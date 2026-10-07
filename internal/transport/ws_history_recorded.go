@@ -2,7 +2,7 @@ package transport
 
 import (
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -45,10 +45,10 @@ type historyRecordedData struct {
 	MaskedCount int
 	MaskedKinds []string
 	Redactions  []content.Redaction
-	Credentials []credential.PendingCredential
+	Credentials []credentialcapture.PendingCredential
 }
 
-func historyRecordedParamsFor(data historyRecordedData, connection string, sessionIDs []string, captures *credential.CaptureRegistry) historyRecordedParams {
+func historyRecordedParamsFor(data historyRecordedData, connection string, sessionIDs []string, captures *credentialcapture.CaptureRegistry) historyRecordedParams {
 	params := historyRecordedParams{
 		SessionID:     string(data.SessionID),
 		AttemptID:     data.AttemptID,
@@ -69,7 +69,7 @@ func historyRecordedParamsFor(data historyRecordedData, connection string, sessi
 	if captures == nil || len(data.Credentials) == 0 {
 		return params
 	}
-	results := captures.Submit(credential.CaptureScope{
+	results := captures.Submit(credentialcapture.CaptureScope{
 		Connection: connection,
 		Pane:       data.PaneID,
 		SessionIDs: sessionIDs,
@@ -77,7 +77,7 @@ func historyRecordedParamsFor(data historyRecordedData, connection string, sessi
 		Generation: data.Generation,
 	}, data.Credentials)
 	for i, result := range results {
-		if result.Outcome != credential.OutcomeCaptured && result.Outcome != credential.OutcomeLinked {
+		if result.Outcome != credentialcapture.OutcomeCaptured && result.Outcome != credentialcapture.OutcomeLinked {
 			continue
 		}
 		params.Captures = append(params.Captures, captureWire{

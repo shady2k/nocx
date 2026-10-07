@@ -12,6 +12,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -150,7 +151,7 @@ type vaultMachine interface {
 type vaultLifecycleHandlers struct {
 	op       capability.VaultOperation // nil → vault lifecycle not wired
 	r        Responder
-	captures *credential.CaptureRegistry
+	captures *credentialcapture.CaptureRegistry
 	machine  vaultMachine
 }
 

@@ -403,6 +403,19 @@ prerequisites apply. Final one ci-full set, gosec and frontend npm audit; critic
 findings block PR. No merge without separate user request. No destructive DB
 rollback: forward fix/refusal, backup recovery only on a copied database.
 
+Artifact acceptance keeps the existing decompressed helper ceiling, not a larger
+budget to accommodate accidental dependencies. The helper owns execution,
+transport and immutable policy, not coordinator-only history capture. Keep the
+typed `credential.Secret` owner unchanged; move the capture registry and its
+ContentDB redaction metadata consumers into `internal/credentialcapture`, migrate
+every caller and remove the old declarations without aliases. Linux helper
+packaging must also strip the external ELF linker's native archive debug sections;
+Go's `-s -w` alone does not remove them. Keep macOS linking/signing unchanged.
+The native runner archive must be deterministic (`gzip -n`) so identical payloads
+preserve helper generation. Closing an already-ended session's admission is
+distinct from replacement retirement and must retain its host-authoritative exit
+outcome.
+
 The Seatbelt re-exec copies its plan/profile descriptors above protocol slots
 3–7, including when closing the original plan frees FD5. Native descriptor
 inventory refuses leaked directory, regular-file or control-socket capabilities.

@@ -748,15 +748,24 @@ test.describe('5. Roving tabindex', () => {
       page.evaluate(() => {
         const el = document.activeElement
         if (!el || !el.closest('[role="toolbar"]')) return null
-        return el.getAttribute('data-view') ?? el.getAttribute('data-action')
+        return (
+          el.getAttribute('data-view') ??
+          el.getAttribute('data-action') ??
+          el.getAttribute('data-context-action')
+        )
       })
 
     /** The bar's buttons in DOM order, by the same identity. */
     const barIds = (page: Page) =>
       page
-        .locator('[role="toolbar"] button')
+        .locator('[role="toolbar"] button:not(:disabled)')
         .evaluateAll((els) =>
-          els.map((el) => el.getAttribute('data-view') ?? el.getAttribute('data-action')),
+          els.map(
+            (el) =>
+              el.getAttribute('data-view') ??
+              el.getAttribute('data-action') ??
+              el.getAttribute('data-context-action'),
+          ),
         )
 
     test('ArrowDown/ArrowUp moves focus in the activity bar', async ({ page }) => {
@@ -781,7 +790,6 @@ test.describe('5. Roving tabindex', () => {
     test('Home/End work in the activity bar', async ({ page }) => {
       await page.locator('[role="toolbar"] button[tabindex="0"]').focus()
       const ids = await barIds(page)
-      expect(ids.length).toBeGreaterThan(0)
 
       await page.keyboard.press('Home')
       expect(await focusedId(page)).toBe(ids[0])

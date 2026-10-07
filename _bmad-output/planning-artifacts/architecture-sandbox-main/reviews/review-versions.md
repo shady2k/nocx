@@ -1,6 +1,6 @@
 # Version and integration review
 
-**Scope:** primary-source check of the named Landlock/Seatbelt decisions and the current-main integration facts in the approved architecture/spec and ADR-0079. This is a source/design review, not a native runtime audit. No sandbox runtime, macOS host, build, or behavioral acceptance was exercised here.
+**Scope:** primary-source check of the named Landlock/Seatbelt decisions and the current-main integration facts in the approved architecture/spec and sandbox launch-authority ADR (numbered ADR-0079 during this review, renumbered ADR-0081 after fresh-main integration). This is a source/design review, not a native runtime audit. No sandbox runtime, macOS host, build, or behavioral acceptance was exercised here.
 
 ## Verdict
 

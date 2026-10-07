@@ -926,9 +926,9 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 		t.Fatalf("the finished session was not taken back: %v (%v)", err, adopter.failure())
 	}
 	cause, status := sess.ExitOutcome()
-	if cause == session.ExitInterrupted {
-		t.Fatal("a session the host has an exit status for reads as INTERRUPTED — that is the " +
-			"unknown outcome this epic set out to end")
+	if cause != session.ExitExited {
+		t.Fatalf("exit cause = %q, want %q: the helper's authoritative process exit must survive re-adoption",
+			cause, session.ExitExited)
 	}
 	if status != exitCode {
 		t.Fatalf("exit status = %d, want %d — the host's own number, not a substitute", status, exitCode)

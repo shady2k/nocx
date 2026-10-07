@@ -38,7 +38,7 @@ func (c *waitErrChannel) WaitErr() (error, bool) {
 // sessionWithChannel builds a realSession over the given channel — the same
 // construction Reg.Open uses for a local PTY.
 func sessionWithChannel(ch Channel) *realSession {
-	return &realSession{id: NewID(), ch: ch}
+	return &realSession{id: NewID(), ch: ch, inputGate: newInputGate()}
 }
 
 // realNonzeroExit runs a real shell that exits 42 and returns the
@@ -211,7 +211,6 @@ func TestExitOutcome_HelperExitWithNoCauseStaysExited(t *testing.T) {
 func TestExitOutcome_CommittedRetirementIsNotAShellExit(t *testing.T) {
 	ch := &waitErrChannel{done: make(chan struct{})}
 	s := sessionWithChannel(ch)
-	s.inputGate = newInputGate()
 	if err := s.inputGate.fence(context.Background(), func() error { return nil }, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +221,22 @@ func TestExitOutcome_CommittedRetirementIsNotAShellExit(t *testing.T) {
 	cause, status := s.ExitOutcome()
 	if cause != ExitInterrupted || status != 0 {
 		t.Fatalf("retired source outcome = (%q, %d), want interrupted without status", cause, status)
+	}
+}
+
+func TestExitOutcome_SealedInputPreservesHostExit(t *testing.T) {
+	s := sessionWithChannel(&waitErrChannel{
+		done: make(chan struct{}), waitErr: &fakeHelperExit{code: 7}, waitSet: true,
+	})
+	if err := s.inputGate.seal(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s.inputGate.admit() {
+		t.Fatal("an ended session admitted input")
+	}
+	cause, status := s.ExitOutcome()
+	if cause != ExitExited || status != 7 {
+		t.Fatalf("sealed host outcome = (%q, %d), want exited with status 7", cause, status)
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -227,9 +227,9 @@ func TestLedgerClose_DoesNotResurrectARewrittenReceipt(t *testing.T) {
 // newLedgerCaptureWSServer wires the REAL content store, a fake vault and an
 // injected capture registry: everything secrets.captureSave touches, with
 // only the vault faked.
-func newLedgerCaptureWSServer(t *testing.T, db content.ContentDB) (*WSServer, *credential.CaptureRegistry, func()) {
+func newLedgerCaptureWSServer(t *testing.T, db content.ContentDB) (*WSServer, *credentialcapture.CaptureRegistry, func()) {
 	t.Helper()
-	caps, err := credential.NewCaptureRegistry()
+	caps, err := credentialcapture.NewCaptureRegistry()
 	if err != nil {
 		t.Fatalf("NewCaptureRegistry: %v", err)
 	}
@@ -248,11 +248,11 @@ func newLedgerCaptureWSServer(t *testing.T, db content.ContentDB) (*WSServer, *c
 // the shape history.record's replacement will produce once command_history
 // is gone (nocx-rtg0.19). Nothing on the wire mints one yet, which is why
 // the registry is driven directly here.
-func linkCapture(t *testing.T, caps *credential.CaptureRegistry, entryID string, span content.Redaction) string {
+func linkCapture(t *testing.T, caps *credentialcapture.CaptureRegistry, entryID string, span content.Redaction) string {
 	t.Helper()
-	res := caps.Submit(credential.CaptureScope{
+	res := caps.Submit(credentialcapture.CaptureScope{
 		Connection: "1", Pane: "pane-1", EntryID: entryID, Generation: 1,
-	}, []credential.PendingCredential{{
+	}, []credentialcapture.PendingCredential{{
 		Value:         []byte(ledgerSecret),
 		SuggestedName: "openrouter.ai",
 		Redaction:     span,

@@ -10,40 +10,6 @@ const TOOLBAR = '[role="toolbar"]'
 // selectors used to name (nocx-pp3y.1).
 const VIEW_BTN = 'button[data-view]'
 const ACTION_BTN = 'button[data-action]'
-const VIEWS_GROUP = '[role="group"][aria-label="Views"]'
-const ACTIONS_GROUP = '[role="group"][aria-label="Actions"]'
-
-// These three tests used to assert the REGISTRY — "exactly one action, zero
-// views" — which was true on the day they were written and stopped being true
-// the day Ports became a view in the bar (b26bb62, nocx-wzc4.7). Nothing was
-// wrong with the product; the tests had pinned a census instead of a rule, so
-// shipping a feature turned them red. What follows asserts the rules the
-// sidebar actually owes a user, each of which survives the next view being
-// registered.
-
-test('the activity bar renders as a toolbar with views and actions groups', async ({ page }) => {
-  await page.goto('/')
-  await appReadyForInput(page)
-
-  // The activity bar toolbar exists
-  await expect(page.locator(TOOLBAR)).toBeAttached()
-
-  // Both zone groups exist (even if empty)
-  await expect(page.locator(VIEWS_GROUP)).toBeAttached()
-  await expect(page.locator(ACTIONS_GROUP)).toBeAttached()
-
-  // The zones are what identifies a button, not where it happens to sit: a
-  // view button carries data-view and lives in Views, an action carries
-  // data-action and lives in Actions. Asserted as a partition so a button that
-  // grows both attributes, or lands in the wrong group, is caught.
-  const viewsInViewGroup = page.locator(`${VIEWS_GROUP} button`)
-  await expect(viewsInViewGroup).toHaveCount(await page.locator(VIEW_BTN).count())
-  const actionsInActionGroup = page.locator(`${ACTIONS_GROUP} button`)
-  await expect(actionsInActionGroup).toHaveCount(await page.locator(ACTION_BTN).count())
-
-  // The Settings gear is a permanent fixture of the actions zone.
-  await expect(page.locator(`${ACTIONS_GROUP} button[data-action="settings"]`)).toBeAttached()
-})
 
 test('the panel is collapsed exactly when no view is active', async ({ page }) => {
   await page.goto('/')

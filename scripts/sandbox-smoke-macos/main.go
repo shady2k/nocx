@@ -33,7 +33,8 @@ import (
 	"github.com/shady2k/nocx/internal/version"
 )
 
-const pinnedMain = "7e60042546581fde39035dce29110cd3e6a684ac"
+// Pin an unmodified pre-sandbox main whose wire protocol matches this client.
+const pinnedMain = "3160c5c6cfcee34b166e13480f1f71de2ac9901c"
 
 func must(err error, operation string) {
 	if err != nil {

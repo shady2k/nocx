@@ -44,7 +44,7 @@
 // cache. What this registry provides is lifetime minimisation, not
 // zeroisation — every clause above is about when the plaintext stops being
 // reachable, never about whether the memory was overwritten.
-package credential
+package credentialcapture
 
 import (
 	"crypto/hmac"
@@ -56,6 +56,7 @@ import (
 	"sync"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/credential"
 )
 
 // ErrCaptureUnknown is returned when a save/dismiss addresses a capture
@@ -152,13 +153,13 @@ type RegisterResult struct {
 // run) — the caller re-runs only those.
 type SaveHandle struct {
 	CaptureID     CaptureID
-	Value         Secret
+	Value         credential.Secret
 	SuggestedName string
 	Links         []CaptureLink
 
 	Completed      bool
 	Name           string
-	SecretID       SecretID
+	SecretID       credential.SecretID
 	RewritePending bool
 }
 
@@ -177,7 +178,7 @@ const (
 type capture struct {
 	id            CaptureID
 	fingerprint   string
-	value         Secret
+	value         credential.Secret
 	suggestedName string
 	scope         CaptureScope
 	links         []CaptureLink
@@ -191,7 +192,7 @@ type capture struct {
 	// Outcome (stateSaved / stateFailed), recorded before done closes so a
 	// waiter reading them after the wait sees a settled value.
 	name           string
-	secretID       SecretID
+	secretID       credential.SecretID
 	rewritePending bool
 	saveErr        error
 }
@@ -319,7 +320,7 @@ func (r *CaptureRegistry) Submit(scope CaptureScope, creds []PendingCredential) 
 		c := &capture{
 			id:            id,
 			fingerprint:   fp,
-			value:         NewSecretBytes(cred.Value),
+			value:         credential.NewSecretBytes(cred.Value),
 			suggestedName: cred.SuggestedName,
 			scope:         scope,
 			links:         []CaptureLink{{EntryID: scope.EntryID, Redaction: cred.Redaction}},
@@ -343,8 +344,8 @@ func (r *CaptureRegistry) Submit(scope CaptureScope, creds []PendingCredential) 
 // every linked row. A save that already settled returns the recorded
 // outcome (idempotent retry — the caller re-runs only the owed rewrites);
 // a save in flight blocks until it settles, so two concurrent saves cannot
-// mint two secrets. A dismissed capture is consumed; an expired or
-// destroyed one is unknown.
+// mint two secrets. A dismissed capture is consumed; a destroyed one is
+// unknown.
 func (r *CaptureRegistry) Reserve(id CaptureID) (SaveHandle, error) {
 	for {
 		r.mu.Lock()
@@ -395,7 +396,7 @@ func (r *CaptureRegistry) Reserve(id CaptureID) (SaveHandle, error) {
 // exists, the row rewrite failed or was never run, and a retry must redo
 // only that) — or saveErr on failure. Either way the plaintext is released:
 // the capture never holds the value after the save settles.
-func (r *CaptureRegistry) Complete(id CaptureID, name string, secretID SecretID, rewritePending bool, saveErr error) {
+func (r *CaptureRegistry) Complete(id CaptureID, name string, secretID credential.SecretID, rewritePending bool, saveErr error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	c, ok := r.byID[id]
@@ -411,7 +412,7 @@ func (r *CaptureRegistry) Complete(id CaptureID, name string, secretID SecretID,
 		}
 		return
 	}
-	c.value = Secret{} // release the plaintext reference
+	c.value = credential.Secret{} // release the plaintext reference
 	if saveErr != nil {
 		c.state = stateFailed
 		c.saveErr = saveErr
@@ -445,7 +446,7 @@ func (r *CaptureRegistry) Dismiss(id CaptureID) error {
 		r.dismissed[c.fingerprint] = struct{}{}
 		c.state = stateDismissed
 		delete(r.byPending, c.fingerprint)
-		c.value = Secret{}
+		c.value = credential.Secret{}
 		close(c.done)
 		return nil
 	case stateDismissed:
@@ -510,7 +511,7 @@ func (r *CaptureRegistry) destroyLocked(c *capture) {
 	if r.byPending[c.fingerprint] == c {
 		delete(r.byPending, c.fingerprint)
 	}
-	c.value = Secret{}
+	c.value = credential.Secret{}
 	close(c.done)
 }
 

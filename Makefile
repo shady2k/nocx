@@ -255,12 +255,14 @@ for t in $(1); do \
     CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
       $(GO) build -trimpath -ldflags="-s -w" \
       -o "$$runner_dir/nocx-sandbox-runner" ./cmd/nocx-sandbox-runner || exit 1; \
-    gzip -9 -f "$$runner_dir/nocx-sandbox-runner" || exit 1 ;; \
+    gzip -n -9 -f "$$runner_dir/nocx-sandbox-runner" || exit 1 ;; \
   esac; \
   cc="$$($(GO) run ./cmd/vtfetch cc --target $$t --zig "$$zig" --manifest $(VT_MANIFEST))" || exit 1; \
   tagflag=""; [ -n "$$tags" ] && tagflag="-tags $$tags"; \
+  ldflags="-s -w -linkmode=external"; \
+  if [ "$$os" = linux ]; then ldflags="$$ldflags -extldflags=-Wl,--strip-all"; fi; \
   CGO_ENABLED=1 GOOS=$$os GOARCH=$$arch CC="$$cc" \
-    $(GO) build -trimpath -ldflags="-s -w -linkmode=external" $$tagflag \
+    $(GO) build -trimpath -ldflags="$$ldflags" $$tagflag \
     -o $(2)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
   case "$$os" in \
     linux) $(GO) run ./cmd/vtfetch inspect --require-static \

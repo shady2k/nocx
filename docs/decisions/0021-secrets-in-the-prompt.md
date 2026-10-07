@@ -172,3 +172,17 @@ of the application session, not forever"). Making saved-status durable
 would require a durable fingerprint key, and a key stored beside the
 fingerprints would be an offline password oracle; this round does not build
 a second key lifecycle for it.
+
+## Implementation ownership amendment — 2026-10-07
+
+The capture registry and its behavioral tests now live in
+`internal/credentialcapture`. Every transport consumer uses that owner directly;
+`internal/credential` retains `Secret`/`SecretID` and authentication primitives,
+without capture aliases or re-exports. Capture lifetime, single-use save/dismiss,
+session-scoped suppression, plaintext type boundaries and `content.Redaction`
+metadata are unchanged.
+
+The split removes a coordinator-only dependency from the execution host: importing
+the shared credential types must not root ContentDB's SQLite/WASM initialization
+inside every helper. This is required by the existing helper artifact size ceiling,
+not a new secret lifecycle or dependency upgrade.

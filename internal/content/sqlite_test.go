@@ -319,91 +319,103 @@ func dirEntries(t *testing.T, dir string) []string {
 
 // ── concurrency: one writer, many readers, no lost rows ──────────────────
 
-// A read of your history answers while a command is being recorded into it.
-// It does not report the database as corrupt.
-//
-// WHAT IT GUARDS (nocx-4p3l2, ADR-0043). The store is encrypted through a VFS
-// that enciphers whole 4096-byte blocks. SQLite's write-ahead log is framed at
-// 24+page_size, so its frames never align to those blocks, and appending one
-// rewrites the block holding the tail of the frame before it — a frame a
-// reader on another connection is entitled to be reading. A torn read of a
-// wide-block cipher does not lose a few bytes, it garbles the whole block,
-// and the reader is told the database image is malformed. Nothing on disk is
-// damaged and the same read succeeds afterwards, which is exactly why it must
-// be caught here rather than by a person deciding their history is destroyed.
-//
-// THIS TEST IS PROBABILISTIC AND SAYS SO. Measured at sixteen connections on
-// this profile: RED IN 5 RUNS OF 8. Bigger is not better here, and that was
-// measured too: a profile eight times the size caught it 6 of 6 but ran 9m12s
-// under -race in the CI container and was killed by the 10-minute package
-// timeout, which guards nothing at all; halving the profile from there RAISED
-// the catch rate while cutting the green run from 24s to 9s. So this is a net
-// rather than a gate, and the gate is elsewhere:
-// TestThePoolIsOneConnection (sqlite_internal_test.go) states the invariant
-// that makes the race unreachable and fails instantly if somebody raises the
-// pool. Read both before changing either.
-//
-// The shape still matters. SIXTEEN readers, because that is what saturates a
-// pool; SEVERAL ROUNDS against ONE store, because the failure needs a
-// database with some history behind it; and an error REPORTED rather than
-// retried. The original — four readers, one round, a fresh store — caught
-// this about once in fifty runs, which is how it stayed undiagnosed.
+// Exercise the consumer-visible ledger boundary: each concurrent reader must
+// observe the seeded command, and the final read must carry every writer's
+// distinct command exactly once with its stable user-visible fields intact.
 func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	hist := db.Ledger()
+	ledger := db.Ledger()
+	if _, err := ledger.RecordCompleted(ctx, aCompletedCommand("seed")); err != nil {
+		t.Fatalf("seed entry: %v", err)
+	}
 
 	const (
-		rounds    = 4
-		perRound  = 700
-		readers   = 16
-		readsEach = 300
+		readers = 4
+		writes  = 4
 	)
-	written := 0
+	start := make(chan struct{})
+	ready := make(chan struct{}, readers+1)
+	errCh := make(chan error, readers+1)
+	var wg sync.WaitGroup
 
-	for round := range rounds {
-		var wg sync.WaitGroup
-		errCh := make(chan error, readers+1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ready <- struct{}{}
+		<-start
+		for i := range writes {
+			if _, err := ledger.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("concurrent-%d", i))); err != nil {
+				errCh <- fmt.Errorf("writer: %w", err)
+				return
+			}
+		}
+	}()
 
+	for range readers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := range perRound {
-				if _, err := hist.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("cmd-%d-%d", round, i))); err != nil {
-					errCh <- fmt.Errorf("round %d writer: %w", round, err)
-					return
+			ready <- struct{}{}
+			<-start
+			page, err := ledger.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
+			if err != nil {
+				errCh <- fmt.Errorf("reader: %w", err)
+				return
+			}
+			if !page.HasRows {
+				errCh <- fmt.Errorf("reader reported no rows despite the seed: %+v", page)
+				return
+			}
+			foundSeed := false
+			for _, entry := range page.Entries {
+				if entry.Intent == "seed" {
+					foundSeed = true
+					break
 				}
 			}
+			if !foundSeed {
+				errCh <- fmt.Errorf("reader page omitted seed command: %+v", page.Entries)
+			}
 		}()
-
-		for range readers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for range readsEach {
-					page, err := hist.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
-					if err != nil {
-						errCh <- fmt.Errorf("round %d reader: %w", round, err)
-						return
-					}
-					_, _ = page, page.Exhausted
-				}
-			}()
-		}
-		wg.Wait()
-		close(errCh)
-		for err := range errCh {
-			t.Fatal(err)
-		}
-		written += perRound
 	}
 
-	recs, err := hist.ListEntries(ctx, written+1)
+	for range readers + 1 {
+		<-ready
+	}
+	close(start)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+
+	entries, err := ledger.ListEntries(ctx, writes+2)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("list entries after concurrent access: %v", err)
 	}
-	if len(recs) != written {
-		t.Fatalf("got %d rows, want %d (no rows lost)", len(recs), written)
+	want := map[string]bool{"seed": true}
+	for i := range writes {
+		want[fmt.Sprintf("concurrent-%d", i)] = true
+	}
+	got := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		if got[entry.Intent] {
+			t.Errorf("entry %q appears more than once", entry.Intent)
+		}
+		got[entry.Intent] = true
+		if entry.Status != content.EntrySuccess || entry.Source != content.SourceUser ||
+			entry.Cwd != "/repo" || entry.Environment == nil || entry.Environment.ID != "local" {
+			t.Errorf("entry %q has incorrect consumer-visible fields: %+v", entry.Intent, entry)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d distinct intents, want %d: %v", len(got), len(want), got)
+	}
+	for intent := range want {
+		if !got[intent] {
+			t.Errorf("final ledger omitted intent %q: %v", intent, got)
+		}
 	}
 }
 

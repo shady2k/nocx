@@ -821,6 +821,16 @@ func (r *Reg) FenceInput(ctx context.Context, ref Ref, commit func() error, reti
 	return s.inputGate.fence(ctx, commit, retire)
 }
 
+// SealInput drains and closes admission for an already-ended session while
+// preserving its channel's authoritative exit outcome.
+func (r *Reg) SealInput(ctx context.Context, ref Ref) error {
+	s, ok := r.exactSession(ref)
+	if !ok {
+		return ErrInputFenced
+	}
+	return s.inputGate.seal(ctx)
+}
+
 // InstanceID is this backend instance's identity: the value stamped on every
 // session this registry opens, minted once at construction and equal to no
 // other registry's.

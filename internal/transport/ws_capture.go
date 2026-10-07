@@ -1,7 +1,7 @@
 package transport
 
 // secrets.captureSave / secrets.captureDismiss — the settlement seam for
-// the pending-capture registry (internal/credential/capture.go holds the
+// the pending-capture registry (internal/credentialcapture holds the
 // contract; this file is where its triggers meet the wire).
 //
 // Saving is two stores, in one order: create the vault secret (atomically
@@ -25,7 +25,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/credentialcapture"
 	"github.com/shady2k/nocx/internal/secrets"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -65,7 +65,7 @@ type captureDismissParams struct {
 // "history store unavailable" rewrite failure).
 type captureSaveHandlers struct {
 	op           capability.CaptureSaveOperation
-	captures     *credential.CaptureRegistry
+	captures     *credentialcapture.CaptureRegistry
 	r            Responder
 	vaultWired   bool // vaultLifecycle != nil at construction
 	contentWired bool // contentDB != nil at construction
@@ -90,7 +90,7 @@ func (h captureSaveHandlers) handleCaptureSave(ctx context.Context, req jsonrpcR
 		return
 	}
 
-	handle, err := h.captures.Reserve(credential.CaptureID(p.CaptureID))
+	handle, err := h.captures.Reserve(credentialcapture.CaptureID(p.CaptureID))
 	if err != nil {
 		_ = h.r.TryError(req.ID, captureErrorFor(err))
 		return
@@ -167,7 +167,7 @@ func (h captureSaveHandlers) handleCaptureSave(ctx context.Context, req jsonrpcR
 // captureDismissHandlers answers secrets.captureDismiss: registry only, no
 // capability — destroying a pending capture touches no store.
 type captureDismissHandlers struct {
-	captures *credential.CaptureRegistry
+	captures *credentialcapture.CaptureRegistry
 	r        Responder
 }
 
@@ -187,7 +187,7 @@ func (h captureDismissHandlers) handleCaptureDismiss(ctx context.Context, req js
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
 		return
 	}
-	if err := h.captures.Dismiss(credential.CaptureID(p.CaptureID)); err != nil {
+	if err := h.captures.Dismiss(credentialcapture.CaptureID(p.CaptureID)); err != nil {
 		_ = h.r.TryError(req.ID, captureErrorFor(err))
 		return
 	}
@@ -207,7 +207,7 @@ func (h captureDismissHandlers) handleCaptureDismiss(ctx context.Context, req js
 // store is not wired the old dispatcher's "history store unavailable" failure
 // is reported, which settles the save as a partial result exactly like a real
 // rewrite failure.
-func (h captureSaveHandlers) rewriteLinks(ctx context.Context, svc capability.CaptureSaveService, links []credential.CaptureLink, reference string) error {
+func (h captureSaveHandlers) rewriteLinks(ctx context.Context, svc capability.CaptureSaveService, links []credentialcapture.CaptureLink, reference string) error {
 	if !h.contentWired {
 		return errors.New("history store unavailable")
 	}
@@ -244,11 +244,11 @@ func captureErrorFor(err error) RPCError {
 	reason := "capture-error"
 	code := -32603
 	switch {
-	case errors.Is(err, credential.ErrCaptureUnknown):
+	case errors.Is(err, credentialcapture.ErrCaptureUnknown):
 		code, reason = -32010, "capture-expired"
-	case errors.Is(err, credential.ErrCaptureConsumed):
+	case errors.Is(err, credentialcapture.ErrCaptureConsumed):
 		code, reason = -32011, "capture-consumed"
-	case errors.Is(err, credential.ErrCaptureSaveFailed):
+	case errors.Is(err, credentialcapture.ErrCaptureSaveFailed):
 		code, reason = -32012, "capture-save-failed"
 	}
 	rpcErr := RPCError{Code: code, Message: err.Error()}

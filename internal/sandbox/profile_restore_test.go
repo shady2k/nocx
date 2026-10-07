@@ -132,7 +132,7 @@ func TestConfigurationRestoreScopeFencesWritesButAllowsReads(t *testing.T) {
 
 func TestConfigurationRestoreCallbackErrorReleasesScope(t *testing.T) {
 	boom := errors.New("restore failed")
-	repo := NewStandardProfileRepository(&profileDocStore{})
+	repo := NewProfileRepository(&profileDocStore{}, StandardDocumentName, nil)
 	if err := repo.WithConfigurationRestore(func(ConfigurationRestorer) error { return boom }); !errors.Is(err, boom) {
 		t.Fatalf("restore callback error = %v", err)
 	}
@@ -142,7 +142,7 @@ func TestConfigurationRestoreCallbackErrorReleasesScope(t *testing.T) {
 }
 
 func TestConfigurationRestorePanicReleasesScope(t *testing.T) {
-	repo := NewStandardProfileRepository(&profileDocStore{})
+	repo := NewProfileRepository(&profileDocStore{}, StandardDocumentName, nil)
 	func() {
 		defer func() { _ = recover() }()
 		_ = repo.WithConfigurationRestore(func(ConfigurationRestorer) error { panic("restore panic") })

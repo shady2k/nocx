@@ -43,7 +43,7 @@ func TestPromoteDirectoryCapturesBothClocksBeforeCopyingInheritance(t *testing.T
 }
 
 func TestPromoteDirectoryUpgradesExactROWithoutConflictingRootClasses(t *testing.T) {
-	repo := NewStandardProfileRepository(&profileDocStore{})
+	repo := NewProfileRepository(&profileDocStore{}, StandardDocumentName, nil)
 	if _, err := repo.UpdateStandard(0, true, ProfileRoots{ReadOnlyDirs: []string{"/observed"}, ReadWriteDirs: []string{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestPromoteDirectoryUpgradesExactROWithoutConflictingRootClasses(t *testing
 }
 
 func TestPromoteDirectoryAtRootLimitRefusesWithoutAdvancingClock(t *testing.T) {
-	repo := NewStandardProfileRepository(&profileDocStore{})
+	repo := NewProfileRepository(&profileDocStore{}, StandardDocumentName, nil)
 	roots := ProfileRoots{ReadOnlyDirs: make([]string, MaxProfileRoots), ReadWriteDirs: []string{}}
 	for index := range roots.ReadOnlyDirs {
 		roots.ReadOnlyDirs[index] = "/root-" + strconv.Itoa(index)

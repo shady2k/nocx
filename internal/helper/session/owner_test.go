@@ -817,8 +817,13 @@ printf 'REPLY:%%s\n' "$answer"
 	// observable the watchdog loop above already uses, win.changed(), until
 	// isClosed() actually reports true.
 	closeDeadline := time.After(15 * time.Second)
-	for !win.isClosed() {
+	for {
+		// gate.wait requires taking the channel before rechecking the state:
+		// otherwise a close between the check and wait can be missed forever.
 		changed := win.changed()
+		if win.isClosed() {
+			break
+		}
 		select {
 		case <-changed:
 		case <-closeDeadline:

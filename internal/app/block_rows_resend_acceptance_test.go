@@ -532,26 +532,36 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	if itemStatus != "success" {
 		t.Fatalf("the block settled %q, want success: the command completed while the coordinator was away, and its completion never reached the one that came back", itemStatus)
 	}
-	got := callAppWS(t, conn2, "ledger.get", map[string]any{"id": itemID}, 8)
-	if got.Error != nil {
-		t.Fatalf("ledger.get: %+v", got.Error)
-	}
+	// The lifecycle status and the rows-plane close arrive on separate paths.
+	// Wait for the artifact's persisted state rather than assuming the single
+	// history response also orders that independent close event.
 	var entry struct {
 		Artifacts []struct {
 			MediaType string `json:"mediaType"`
 			State     string `json:"state"`
 		} `json:"artifacts"`
 	}
-	if unmarshalErr := json.Unmarshal(got.Result, &entry); unmarshalErr != nil {
-		t.Fatalf("decode ledger.get: %v (raw %s)", unmarshalErr, got.Result)
-	}
 	sealed := false
-	for _, art := range entry.Artifacts {
-		if art.MediaType == string(content.MediaBlockRows) && art.State == "sealed" {
-			sealed = true
+	for requestID := 8; !sealed; requestID++ {
+		got := callAppWS(t, conn2, "ledger.get", map[string]any{"id": itemID}, requestID)
+		if got.Error != nil {
+			t.Fatalf("ledger.get: %+v", got.Error)
 		}
-	}
-	if !sealed {
-		t.Fatalf("the block is settled (%q) but its rows artifact is not sealed: %+v", itemStatus, entry.Artifacts)
+		if unmarshalErr := json.Unmarshal(got.Result, &entry); unmarshalErr != nil {
+			t.Fatalf("decode ledger.get: %v (raw %s)", unmarshalErr, got.Result)
+		}
+		sealed = false
+		for _, art := range entry.Artifacts {
+			if art.MediaType == string(content.MediaBlockRows) && art.State == "sealed" {
+				sealed = true
+			}
+		}
+		if sealed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the block is settled (%q) but its rows artifact did not seal before the deadline: %+v", itemStatus, entry.Artifacts)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

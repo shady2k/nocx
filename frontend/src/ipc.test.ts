@@ -1907,6 +1907,11 @@ describe('reclaiming a live session', () => {
       gaps: over.gaps ?? [],
       produced: over.produced ?? 0,
     })
+    answerLast(ws, 'session.recoveryStatus', {
+      sessionId: SID,
+      produced: over.produced ?? 0,
+      gaps: over.gaps ?? [],
+    })
     await settle()
   }
 
@@ -1929,6 +1934,15 @@ describe('reclaiming a live session', () => {
       jsonrpc: '2.0',
       id: req?.id,
       error: { code: -32601, message: 'method not found: session output store not wired' },
+    })
+    const status = ws
+      .requests()
+      .filter((r) => r.method === 'session.recoveryStatus')
+      .pop()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: status?.id,
+      error: { code: -32601, message: 'session recovery status unavailable' },
     })
     await settle()
   }
@@ -2029,6 +2043,7 @@ describe('reclaiming a live session', () => {
     expect(seen.join('')).toBe('an hour of work and the next second')
     expect(session.recovered).toEqual({
       bytes: 15,
+      statusUnavailable: false,
       gaps: [],
       // The size the SESSION runs at, carried through so the surface renders
       // the recovered bytes at the geometry that produced them.
@@ -2081,6 +2096,7 @@ describe('reclaiming a live session', () => {
 
     expect(session.recovered).toEqual({
       bytes: 8,
+      statusUnavailable: false,
       gaps: [{ start: 4, end: 900, reason: 'cap' }],
       size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
     })
@@ -2178,6 +2194,7 @@ describe('reclaiming a live session', () => {
     expect(session.sessionId).toBe(SID)
     expect(session.recovered).toEqual({
       bytes: 0,
+      statusUnavailable: true,
       gaps: [{ start: 0, end: 7, reason: 'unrecorded' }],
       // The named default a session with no client holds: a read that could
       // not happen reports no geometry of its own, and 80x24 is what the

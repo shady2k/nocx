@@ -1,11 +1,11 @@
 /**
  * The reclaimed pane's missing-output notice (nocx-fz4qa).
  *
- * A reclaim already knows exactly what it could not give back. `session.output`
- * answers with the byte ranges the retention bound dropped, and `reclaimSession`
- * adds the stretch neither the recording nor the replay ring holds (ipc.ts's
- * UNRECORDED, derived from `produced` against `replayFrom`). Both land on
- * SessionHandle.recovered.gaps — and until this module nothing read them. A
+ * A reclaim's `session.recoveryStatus` answer is metadata only: it reports
+ * the produced offset and known gap ranges, never stream bytes. `reclaimSession`
+ * adds the stretch between that offset and the live ring's `replayFrom`
+ * (ipc.ts's UNRECORDED). Both land on SessionHandle.recovered.gaps — and
+ * until this module nothing read them. A
  * pane came back with a hole in the middle of its scrollback and said nothing,
  * which is the shape AGENTS.md forbids by name: a soft degrade must be visible
  * in the product, not only in a log. A scrollback that is silently short is
@@ -39,7 +39,7 @@ import { UNRECORDED, type SessionRecovery } from './ipc'
 import { CloseIcon } from './ui/icons'
 
 /** The retention bound's word, minted by the store (internal/content's
- *  TruncCap) and repeated on the wire by session.output's gap reason. Named
+ *  TruncCap) and repeated on the wire by session.recoveryStatus. Named
  *  here rather than inlined so the one place that translates it into English
  *  is greppable from the Go side. */
 const CAP = 'cap'
@@ -61,6 +61,7 @@ export interface RecoveryAccount {
    *  they arrived. Carried so the card can print them instead of inventing
    *  an explanation. */
   reasons: string[]
+  statusUnavailable: boolean
 }
 
 /**
@@ -83,6 +84,7 @@ export function recoveryAccount(recovery: SessionRecovery | null): RecoveryAccou
     unrecorded: 0,
     other: 0,
     reasons: [],
+    statusUnavailable: recovery.statusUnavailable ?? false,
   }
   for (const gap of recovery.gaps) {
     const bytes = gap.end - gap.start
@@ -99,7 +101,7 @@ export function recoveryAccount(recovery: SessionRecovery | null): RecoveryAccou
     account.other += bytes
     if (!account.reasons.includes(gap.reason)) account.reasons.push(gap.reason)
   }
-  return account.missing > 0 ? account : null
+  return account.missing > 0 || account.statusUnavailable ? account : null
 }
 
 /** The clauses, one per owner of a part of the hole, in the order a person
@@ -124,12 +126,16 @@ function clauses(account: RecoveryAccount): string[] {
 /** The card's headline: the whole hole, as a number a person can weigh
  *  against the run they were watching. */
 function title(account: RecoveryAccount): string {
+  if (account.statusUnavailable) return 'Could not check this session’s recovery status'
   return `${formatBytes(account.missing)} of this session's output is missing`
 }
 
 /** …and what took it. The sentence ends where the honesty does — nothing
  *  here offers to get the bytes back, because nothing can. */
 function description(account: RecoveryAccount): string {
+  if (account.statusUnavailable) {
+    return 'Recovery metadata could not be read. Some earlier session output may be missing.'
+  }
   return `This tab was taken back after those bytes were gone: ${clauses(account).join(', and ')}.`
 }
 

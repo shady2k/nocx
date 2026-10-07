@@ -12,6 +12,7 @@ import type {
   Run as WireRun,
   SessionOutput,
 } from './generated/session.output'
+import type { Gap as RecoveryGap, SessionRecoveryStatus } from './generated/session.recoveryStatus'
 
 // The one report shape — grid plus whole-text-area pixels — re-exported so
 // the surfaces that compute a report spell the same type the client sends
@@ -196,11 +197,13 @@ function decodeRun(run: WireRun): RecordedRun {
 export interface SessionRecovery {
   /** Bytes handed to the terminal ahead of the live stream. */
   bytes: number
-  gaps: SessionOutputGap[]
+  gaps: RecoveryGap[]
   /** The size the recovered bytes were produced at. A surface rendering them
    *  at anything else is drawing a different screen from the one the session
    *  printed. */
   size: SessionSize
+  /** True when metadata could not be checked during reclaim. */
+  statusUnavailable?: boolean
 }
 
 /** What a read that could not happen came back with. A named constant, not
@@ -1364,6 +1367,19 @@ export class WSClient {
       .then((result) => result.sessions)
   }
 
+  /** Read only the offset and gap metadata used for the reclaim notice. The
+   *  byte recording remains a separate session.output path and is still fed
+   *  through this session's decoder. */
+  private readSessionRecoveryStatus(
+    sessionId: string,
+    identity: { instanceId: string; sessionEpoch: number },
+  ): Promise<SessionRecoveryStatus> {
+    return this.dispatcher.call<SessionRecoveryStatus>('session.recoveryStatus', {
+      sessionId,
+      ...identity,
+    })
+  }
+
   // --- the recording -------------------------------------------------------
 
   /** Everything the backend recorded for one session, read back by OFFSET
@@ -1461,6 +1477,9 @@ export class WSClient {
     // pane worth looking at; taking the session back is the job, and a
     // backend with no content store wired answers this method "not found"
     // (registration.go) on an otherwise perfectly reclaimable session.
+    const recoveryStatus = this.readSessionRecoveryStatus(entry.sessionId, identity).catch(
+      () => null,
+    )
     return this.readSessionOutput(entry.sessionId, identity)
       .catch(() => EMPTY_RECORDING)
       .then((recording) => {
@@ -1500,8 +1519,8 @@ export class WSClient {
           // session.
           gaps.push({ start: recording.produced, end: entry.replayFrom, reason: UNRECORDED })
         }
-        return this._sendAttach(entry.sessionId, attachAt, identity)
-          .then((result) => {
+        return Promise.all([this._sendAttach(entry.sessionId, attachAt, identity), recoveryStatus])
+          .then(([result, metadata]) => {
             const attached = this.sessions.get(entry.sessionId)
             if (attached) attached.offset = result.from
             // No cwd, no mode, no parent, no workspace: every one of those is
@@ -1526,8 +1545,16 @@ export class WSClient {
               '',
               {
                 bytes: recovered.length,
-                gaps,
+                gaps: metadata
+                  ? [
+                      ...metadata.gaps,
+                      ...(metadata.produced < entry.replayFrom
+                        ? [{ start: metadata.produced, end: entry.replayFrom, reason: UNRECORDED }]
+                        : []),
+                    ]
+                  : gaps,
                 size: recording.size,
+                statusUnavailable: metadata === null,
               },
               result.awaitsIntegration,
               result.accessEpoch ?? null,

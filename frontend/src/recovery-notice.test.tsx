@@ -17,10 +17,14 @@ import { resolve } from 'node:path'
 import { mountRecoveryNotice, recoveryAccount } from './recovery-notice'
 import type { SessionRecovery } from './ipc'
 
-const SIZE = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
-
 function recovery(over: Partial<SessionRecovery> = {}): SessionRecovery {
-  return { bytes: 4096, gaps: [], size: SIZE, ...over }
+  return {
+    bytes: 0,
+    gaps: [],
+    size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+    statusUnavailable: false,
+    ...over,
+  }
 }
 
 let dispose: (() => void) | null = null
@@ -55,6 +59,16 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
     expect(dispose).toBeNull()
     expect(card()).toBeNull()
     expect(document.querySelector('.nocx-recovery-notice')).toBeNull()
+  })
+
+  it('shows when the recovery metadata could not be checked', () => {
+    const { pane } = mount(recovery({ statusUnavailable: true }))
+    expect(card()).not.toBeNull()
+    expect(title()).toBe('Could not check this session’s recovery status')
+    expect(desc()).toBe(
+      'Recovery metadata could not be read. Some earlier session output may be missing.',
+    )
+    expect(pane.querySelector('.nocx-recovery-notice')).not.toBeNull()
   })
 
   it('says nothing for a hole of no bytes', () => {
@@ -164,7 +178,14 @@ describe('recoveryAccount (nocx-fz4qa)', () => {
         ],
       }),
     )
-    expect(account).toEqual({ missing: 300, dropped: 300, unrecorded: 0, other: 0, reasons: [] })
+    expect(account).toEqual({
+      missing: 300,
+      dropped: 300,
+      unrecorded: 0,
+      other: 0,
+      reasons: [],
+      statusUnavailable: false,
+    })
   })
 
   it('ignores a range that runs backwards rather than subtracting it', () => {

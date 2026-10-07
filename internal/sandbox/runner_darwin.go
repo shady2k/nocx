@@ -36,13 +36,13 @@ func RunRunner() int {
 	if err != nil {
 		return runnerFailure("invalid-plan")
 	}
-	if err := validateDarwinRunner(plan, true); err != nil {
+	if err = validateDarwinRunner(plan, true); err != nil {
 		return runnerFailure("invalid-channels")
 	}
-	if _, err := unix.Seek(planCopy, 0, 0); err != nil {
+	if _, err = unix.Seek(planCopy, 0, 0); err != nil {
 		return runnerFailure("plan-copy")
 	}
-	if err := clearCloseOnExec(planCopy); err != nil {
+	if err = clearCloseOnExec(planCopy); err != nil {
 		return runnerFailure("plan-copy")
 	}
 	profileText, err := CompileSeatbeltProfile(plan.Policy, plan.ObserverNonce)
@@ -545,7 +545,7 @@ func closeDescriptorsFrom(first int) error {
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil || limit.Cur > 1<<20 {
 		return runnerErr("descriptor-limit")
 	}
-	for fd := first; uint64(fd) < limit.Cur; fd++ {
+	for fd := first; fd < int(limit.Cur); fd++ {
 		if err := unix.Close(fd); err != nil && err != unix.EBADF {
 			return runnerErr("descriptor-close")
 		}

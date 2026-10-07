@@ -213,14 +213,11 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: go test ./internal/app -run '^TestSandboxNative' -count=1 -timeout=180s -v
-  # Kernel-boundary smoke runs as a product gate on the explicit Ubuntu 26.04
-  # hosted image, whose published image manifest specifies Linux 7.0. The
-  # runner checks Landlock ABI9 itself and hard-fails if that kernel/runtime
-  # prerequisite is absent; the image version is not treated as proof.
+  # Linux ABI9 proofs execute on the pinned disposable VM guest, not the runner kernel.
   sandbox-smoke-linux:
     needs: changes
     if: ${{ (github.event_name == 'workflow_dispatch' && inputs.sandbox_native) || (needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)) }}
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -230,7 +227,13 @@ jobs:
         with:
           go-version: '1.26'
           cache: true
-      - name: Install the pinned Zig
+      - name: Install QEMU and grant this job's UID scoped KVM access
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 acl
+          sudo setfacl -m "u:$(id -u):rw" /dev/kvm
+      - name: Install the pinned Zig for the host-side helper build
         run: |
           set -euo pipefail
           version="$(jq -er '.toolchain.zig' third_party/libghostty-vt/MANIFEST.json)"
@@ -240,17 +243,8 @@ jobs:
           echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
           tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
-      - name: Require Landlock ABI9 on the native runner
-        run: |
-          set -euo pipefail
-          abi="$(python3 -c 'import ctypes, errno; libc=ctypes.CDLL(None, use_errno=True); r=libc.syscall(444, 0, 0, 1); e=ctypes.get_errno(); print(r if r >= 0 else -e)')"
-          if [ "$abi" -lt 9 ]; then
-            echo "::error::native Linux sandbox smoke requires Landlock ABI9; detected $abi"
-            exit 1
-          fi
-          printf 'Landlock ABI %s\n' "$abi"
-      - name: Build packaged helper and run mandatory ABI9 source and packaged proof
-        run: make sandbox-smoke-linux
+      - name: Build this machine's helper outside the VM and run isolated source proof
+        run: make sandbox-smoke-linux-vm
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

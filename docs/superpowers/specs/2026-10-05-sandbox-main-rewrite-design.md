@@ -395,6 +395,14 @@ exited-inventory dead and timeout unknown. Diagnostics listener-death/overflow/
 retarget/double resolve/revision behavior. Real browser Settings/shield/history/
 keyboard against native RPC with root e2e stand and coverage collection.
 
+Native diagnostic reservation evidence uses a dedicated denied path, separate from
+the filesystem probe's repeated parent/child accesses. A repeated observation can
+legitimately advance an unresolved record's revision; acceptance must not weaken
+the event-revision CAS to accommodate a stale fixture receipt. The transcript
+census waits for every frozen card's final numbered row to mount before comparing
+its exact row count with the canonical store. A closed card and its first painted
+row do not imply that its separate ledger artifact fetch has finished.
+
 Runner generation must be built/embedded/installed alongside local helper through
 existing artifact/checksum/package/signing chain; remote-only helpers do not
 advertise local sandbox. Make targets sandbox-smoke-linux, sandbox-smoke-macos and
@@ -404,6 +412,14 @@ mandatory criterion, never cross-platform completion. Existing Zig0.16/libghostt
 prerequisites apply. Final one ci-full set, gosec and frontend npm audit; critical
 findings block PR. No merge without separate user request. No destructive DB
 rollback: forward fix/refusal, backup recovery only on a copied database.
+
+Linux CI executes those same consumers in an isolated real-kernel QEMU/KVM guest
+when the hosted kernel does not provide ABI9. The guest has a private disk and
+offline build inputs, never host HOME/control sockets or a shared filesystem;
+source and exact one-origin packaged lanes share one launcher. Explicit terminal
+status separates successful consumer completion from QEMU startup/shutdown errors
+([ADR-0082](../../decisions/0082-native-ci-owns-its-guest-kernel-not-the-hosts.md)).
+The ABI floor, native assertions, helper ceiling and job deadlines do not change.
 
 Artifact acceptance keeps the existing decompressed helper ceiling, not a larger
 budget to accommodate accidental dependencies. The helper owns execution,

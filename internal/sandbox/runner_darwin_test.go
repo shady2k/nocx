@@ -37,7 +37,7 @@ func TestSeatbeltEscapingAndFilesystemRights(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := filepath.Join(readOnly, "input.txt")
-	if err := os.WriteFile(input, []byte("readable"), 0o600); err != nil {
+	if err = os.WriteFile(input, []byte("readable"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	policy := Policy{

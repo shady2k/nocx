@@ -139,6 +139,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0079 | [A worker's conversation resumes after the backend restarts, from a minimal durable restart record](0079-a-workers-conversation-resumes-after-the-backend-restarts.md)                        | Accepted (2026-10-05; the owner's herdr-parity scope decision; supersedes D5 of the 2026-08-15 orchestration spec in the half 'workers die with the backend')        |
 | 0080 | [An authenticated event defers a settle, it does not take it](0080-an-authenticated-event-defers-a-settle-it-does-not-take-it.md)                                                             | Accepted (2026-10-05; the owner's decision on nocx-n5ent; supersedes case 3 of ADR-0074 — a completion for another nonce defers the settle instead of taking it)     |
 | 0081 | [Filesystem authority belongs to one helper-owned launch](0081-filesystem-authority-belongs-to-one-helper-owned-launch.md)                                                                    | Accepted (2026-10-05; extends ADR-0020's grant subject; implementation acceptance pending)                                                                           |
+| 0082 | [Native CI owns its guest kernel, not the host's](0082-native-ci-owns-its-guest-kernel-not-the-hosts.md)                                                                                      | Accepted (2026-10-07; isolated Linux native CI execution; implementation acceptance pending)                                                                         |
 
 ## Adding one
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -50,7 +51,19 @@ func newTestApp(t *testing.T, opts ...Option) (*App, error) {
 		withoutLocalHelperInstall(),
 		WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")),
 	}
-	return New(append(defaults, opts...)...)
+	a, err := New(append(defaults, opts...)...)
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() {
+		select {
+		case <-a.sandboxRoot.Done():
+			return
+		default:
+			a.Shutdown(context.Background())
+		}
+	})
+	return a, nil
 }
 
 // withoutSystemKeystore builds the vault's system provider over a keyring

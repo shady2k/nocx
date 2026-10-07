@@ -112,6 +112,7 @@ func main() {
 	}
 	must(os.WriteFile(filepath.Join(readOnly, "readable"), []byte("read-only-fixture"), 0o600), "write read-only fixture")
 	must(os.WriteFile(filepath.Join(outside, "denied"), []byte("outside-fixture"), 0o600), "write outside fixture")
+	must(os.WriteFile(filepath.Join(outside, "diagnostic-receipt"), []byte("receipt-fixture"), 0o600), "write dedicated native diagnostic receipt fixture")
 	must(os.WriteFile(filepath.Join(hostHome, ".host-secret"), []byte("never project"), 0o600), "write projection sentinel")
 
 	probePath := filepath.Join(work, ".native-probe")
@@ -396,20 +397,21 @@ func main() {
 	must(err, "attach to restricted helper PTY")
 	defer func() { _ = attachment.Close() }()
 	deniedProbePath := filepath.Join(outside, "denied")
-	if !filepath.IsAbs(deniedProbePath) || strings.ContainsAny(deniedProbePath, " \t\r\n'\"()") {
+	diagnosticReceiptPath := filepath.Join(outside, "diagnostic-receipt")
+	if !filepath.IsAbs(diagnosticReceiptPath) || strings.ContainsAny(diagnosticReceiptPath, " \t\r\n'\"()") {
 		panic("dedicated native diagnostics path is not an unambiguous absolute path")
 	}
 	command := strings.Join([]string{
 		shellQuote(probePath), shellQuote(work), shellQuote(readOnly), shellQuote(outside), shellQuote(workspaceSocket),
 		shellQuote(currentSocket), shellQuote(oldSocket), shellQuote(coordinatorSocket), shellQuote(tcpListener.Addr().String()),
 		shellQuote(prepared.Policy.Runtime.Root), shellQuote(prepared.Policy.Runtime.Home), shellQuote(prepared.Policy.WorkspaceRoot),
-	}, " ") + "\n" + shellQuote("/bin/cat") + " " + shellQuote(deniedProbePath) + " >/dev/null 2>&1\n"
+	}, " ") + "\n" + shellQuote("/bin/cat") + " " + shellQuote(diagnosticReceiptPath) + " >/dev/null 2>&1\n"
 	_, err = attachment.Write([]byte(command))
 	must(err, "send native probe to protected PTY")
 	if err = waitForProof(ctx, attachment); err != nil {
 		panic("native Seatbelt probe failed")
 	}
-	diagnostic := waitForNativeDenial(ctx, currentClient, candidate.HostSessionID, prepared.LaunchID, deniedProbePath)
+	diagnostic := waitForNativeDenial(ctx, currentClient, candidate.HostSessionID, prepared.LaunchID, diagnosticReceiptPath)
 	reserved, err := currentClient.SandboxAccessReserve(ctx, proto.SandboxAccessReserveParams{
 		Session: proto.HostSessionID{Generation: proto.GenerationID(candidate.HostSessionID.Generation), Session: candidate.HostSessionID.Session},
 		EventID: diagnostic.ID, Revision: diagnostic.Revision, Decision: sandbox.DecisionAllowRO,

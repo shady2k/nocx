@@ -570,6 +570,32 @@ test.describe('long transcript scroll budget', () => {
     for (let index = 1; index <= BLOCKS; index += 1) await runBlock(page, index)
 
     await expect(page.locator(BLOCK)).toHaveCount(BLOCKS, { timeout: 60_000 })
+    // `runBlock` observes the frozen card and its first row, not completion of
+    // the separate ledger.artifact fetch that paints stored rows. block.closed
+    // starts that fetch before the card freezes, but the notification does not
+    // await it; the last card can therefore be visible with only a prefix
+    // painted. Before comparing the consumer DOM to the canonical store, wait
+    // for the final stored row of every block to mount. This is observable
+    // readiness, not a delay or a substitute for the exact count assertions
+    // below.
+    await page.waitForFunction(
+      ({ selector, count, rowsPerBlock }) => {
+        const blocks = document.querySelectorAll<HTMLElement>(selector)
+        if (blocks.length !== count) return false
+        return [...blocks].every((block, index) => {
+          const rows = block.querySelectorAll('.cmd-output .term-grid-row')
+          const marker =
+            `transcript-${String(index + 1).padStart(4, '0')}-` +
+            String(rowsPerBlock).padStart(3, '0')
+          return (
+            rows.length === rowsPerBlock &&
+            (rows[rows.length - 1]?.textContent ?? '').includes(marker)
+          )
+        })
+      },
+      { selector: BLOCK, count: BLOCKS, rowsPerBlock: ROWS_PER_BLOCK },
+      { timeout: 60_000 },
+    )
 
     // THE CRITERION: every block frozen, and every block holding exactly its own
     // command's hundred rows — in the STORE, and in what the DOM paints.

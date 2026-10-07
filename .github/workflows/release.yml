@@ -13,7 +13,7 @@
 #     is built: release.yml *calls* ci.yml (workflow_call) and every downstream
 #     job needs it. `needs:` alone would not do this — it does not reach across
 #     workflows — which is why ci.yml is a called workflow, not a sibling.
-#   - The signing key lives only in the publish job, which runs no build tooling.
+#   - The manifest signing key lives only in the sign job, which runs no build tooling.
 
 name: Release
 
@@ -241,15 +241,14 @@ jobs:
       - name: Stage the helper binaries for publication
         run: |
           set -euo pipefail
-          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` gzips, and
-          # gzip stamps the source file's mtime into its header, so the .gz
-          # bytes differ between two runs even when the binary inside is
-          # identical. The DECOMPRESSED bytes are what
+          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` uses gzip -n:
+          # archive headers and identical decompressed binaries are stable.
+          # The DECOMPRESSED bytes are what
           # internal/helper/deploy/install.go hashes to key the install
-          # directory, so publishing those makes "the same bytes the ssh
-          # path would have sent" a checkable claim: a hand-installed
-          # helper lands in the same directory name, and no
-          # reinstall-on-hash-mismatch follows.
+          # directory. Publishing those keeps "the same bytes the ssh
+          # path would have sent" directly checkable: a hand-installed
+          # helper lands in the same directory name, with no
+          # reinstall-on-hash-mismatch.
           #
           # The loop takes the platforms from the artifacts on disk rather
           # than from a list written here, so the matrix can grow (it goes
@@ -335,7 +334,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-26.04
+          - runner: ubuntu-24.04
             backend: linux
           - runner: macos-latest
             backend: macos
@@ -359,7 +358,18 @@ jobs:
           path: internal/helper/deploy/artifacts/bin/local
       - name: Fetch the pinned VT archives for the older-generation fixture
         run: make vt-archives
-      - name: Execute the actual packaged helper and embedded runner
+      - name: Install QEMU and grant this job's UID scoped KVM access
+        if: matrix.backend == 'linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 acl
+          sudo setfacl -m "u:$(id -u):rw" /dev/kvm
+      - name: Execute the exact packaged helper archives in the isolated Linux guest
+        if: matrix.backend == 'linux'
+        run: scripts/sandbox-linux-vm/run.sh packaged
+      - name: Execute the actual packaged helper and embedded runner natively on macOS
+        if: matrix.backend == 'macos'
         env:
           NOCX_SANDBOX_SMOKE_MANDATORY: '1'
           CGO_ENABLED: '1'

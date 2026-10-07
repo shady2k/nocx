@@ -1,6 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean connect ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
-        sandbox-smoke-macos sandbox-smoke-linux sandbox-smoke-artifacts \
+        sandbox-smoke-macos sandbox-smoke-linux sandbox-smoke-linux-vm sandbox-smoke-artifacts \
         helpers helper-local helpers-this-machine \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
@@ -307,6 +307,11 @@ sandbox-smoke-linux: helpers-this-machine
 	@test "$(HOST_GOOS)" = linux || { echo "sandbox-smoke-linux requires Linux" >&2; exit 1; }
 	@PATH="$(dir $(GO)):$$PATH" NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-linux source
 	@PATH="$(dir $(GO)):$$PATH" NOCX_SANDBOX_SMOKE_MANDATORY=1 $(GO) run ./scripts/sandbox-smoke-linux packaged
+
+# Same native consumers under a pinned guest kernel when the host ABI is older.
+# The existing host-native target remains useful on an ABI9+ development machine.
+sandbox-smoke-linux-vm: helpers-this-machine
+	@PATH="$(dir $(GO)):$$PATH" scripts/sandbox-linux-vm/run.sh source
 
 
 # THE BUILD-TIME GATE, and the reason a target that ships or runs the app

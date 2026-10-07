@@ -20,15 +20,15 @@ func backendAvailable() error {
 	paths := baseline("darwin")
 	roots := make([]Root, 0, len(paths))
 	for _, path := range paths {
-		info, err := os.Stat(path)
-		if errors.Is(err, os.ErrNotExist) {
+		rootInfo, rootErr := os.Stat(path)
+		if errors.Is(rootErr, os.ErrNotExist) {
 			continue
 		}
-		if err != nil || !info.IsDir() {
+		if rootErr != nil || !rootInfo.IsDir() {
 			return errors.New("Seatbelt baseline unavailable")
 		}
-		actual, err := canonicalDir(path)
-		if err != nil {
+		actual, canonicalErr := canonicalDir(path)
+		if canonicalErr != nil {
 			return errors.New("Seatbelt baseline unavailable")
 		}
 		roots = append(roots, Root{Path: actual, Access: ReadOnly, Kind: DirectoryRoot, Provenance: SystemRoot})

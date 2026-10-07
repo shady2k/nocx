@@ -205,8 +205,6 @@ export interface RendererMock extends TerminalRenderer {
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
   applySessionEffect(effect: SessionEffect): void
-  /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
-  _fireRecoveryFence(hex: string): void
   /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
   _fireData(data: string): void
 }
@@ -218,7 +216,6 @@ export interface RendererMock extends TerminalRenderer {
  */
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
-  const recoverySubs: Array<(hex: string) => void> = []
   let snippetChordCb: (() => void) | null = null
   let activeBuffer: 'normal' | 'alternate' = 'normal'
   const mock: Record<string, unknown> = {
@@ -253,9 +250,6 @@ export function createRendererMock(): RendererMock {
     // The current buffer kind, like the real renderer's (the report the
     // lane interactivity path reads at session open — ADR-0020 decision 3).
     activeBufferKind: vi.fn(() => activeBuffer),
-    onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
-      recoverySubs.push(cb)
-    }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
     }),
@@ -381,9 +375,6 @@ export function createRendererMock(): RendererMock {
       cbs.onClipboardWrite?.(text)
     },
     /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
-    _fireRecoveryFence(hex: string) {
-      for (const sub of recoverySubs) sub(hex)
-    },
     /** A keystroke reaching the grid in raw mode — what xterm's onData
      *  fires once stdin is enabled. The real renderer drops these while
      *  disableStdin is set; the mock does not model that, so a test that

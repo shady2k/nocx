@@ -113,6 +113,8 @@ const (
 	// like them. The sighting is what says they are gone. Like
 	// EffectClearBoundary it authorises nothing and reaches no consumer.
 	EffectEraseDisplay
+	// EffectRecoverySighting is the authenticated-shell recovery marker. Its nonce is private input to sessionruntime only; it is never a renderer effect.
+	EffectRecoverySighting
 )
 
 // Effect is one non-visual effect the program asked for: a thing that

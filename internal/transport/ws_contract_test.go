@@ -5032,15 +5032,10 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 		// A lane with no live domain: no domain, no epoch, no attempt.
 		"native lane": {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleNative},
 		"lost lane":   {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost},
-		// A lost lane opening a restoration episode (ADR-0024 decision 8):
-		// the recovery contract rides the fact, carrying both halves of the
-		// composite ack — the fence to match and the generation to echo.
+		// Recovery state carries only the public episode locator and state.
 		"lost with recovery": {
 			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost,
-			Recovery: &lifecyclepub.Recovery{
-				Fence:      strings.Repeat("51", 32),
-				Generation: strings.Repeat("51", 32),
-			},
+			Recovery: &lifecyclepub.Recovery{EpisodeID: "rec-" + strings.Repeat("51", 16), State: "pending"},
 		},
 	}
 	for name, params := range cases {
@@ -5148,6 +5143,18 @@ func (r *lifecycleRecordingPort) kinds() []lifecycle.EventKind {
 	return out
 }
 
+func TestLifecycleChangedRecoveryContractRejectsNonceFields(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.changed.schema.json")
+	base := `{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"0123456789abcdef0123456789abcdef","sessionEpoch":1,"lane":"lane","lifecycle":"lost","recovery":{"episodeId":"rec-0123456789abcdef0123456789abcdef","state":"sighted"}}`
+	validateJSON(t, schema, []byte(base), "sighted lifecycle.changed recovery")
+	for _, field := range []string{`"fence":"` + strings.Repeat("a", 64) + `"`, `"generation":"` + strings.Repeat("b", 64) + `"`, `"nonce":"` + strings.Repeat("c", 64) + `"`} {
+		bad := strings.Replace(base, `"state":"sighted"`, `"state":"sighted",`+field, 1)
+		if err := validateJSONErr(schema, []byte(bad)); err == nil {
+			t.Fatalf("lifecycle schema accepted nonce field %s", field[:strings.IndexByte(field, ':')])
+		}
+	}
+}
+
 // ── lifecycle.recoverAck (ADR-0024 decision 8) ───────────────────────────
 
 // The DTO's own conformance: the result is exactly {ok: true} — the schema
@@ -5187,8 +5194,8 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
 	readLifecycleWhere(t, e.conn, "the hello's prompt_ready fact",
 		lifecycleIs(lifecyclepub.LifecyclePromptReady))
-	if err := pub.TransportLost("T"); err != nil {
-		t.Fatalf("TransportLost: %v", err)
+	if lostErr := pub.TransportLost("T"); lostErr != nil {
+		t.Fatalf("TransportLost: %v", lostErr)
 	}
 	// The lost fact BY NAME, for the reason readLifecycleWhere gives: the
 	// open handler's replay can put a second prompt_ready exactly here.
@@ -5198,8 +5205,21 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatal("a live session's lost fact must carry the recovery contract")
 	}
 
+	if sightErr := pub.SightRecovery(lifecycle.LaneID(lost.Lane), lost.Recovery.EpisodeID); sightErr != nil {
+		t.Fatalf("SightRecovery: %v", sightErr)
+	}
+	ackParams := map[string]string{"sessionId": sid, "episodeId": lost.Recovery.EpisodeID}
+	ackParamsRaw, err := json.Marshal(ackParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, loadSchema(t, "lifecycle.recoverAck.params.schema.json"), ackParamsRaw, "lifecycle.recoverAck request params")
+	badAck := strings.TrimSuffix(string(ackParamsRaw), "}") + `,"generation":"` + strings.Repeat("a", 64) + `"}`
+	if err := validateJSONErr(loadSchema(t, "lifecycle.recoverAck.params.schema.json"), []byte(badAck)); err == nil {
+		t.Fatal("recoverAck schema accepted nonce-shaped generation")
+	}
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
-		"sessionId": sid, "generation": lost.Recovery.Generation,
+		"sessionId": sid, "episodeId": lost.Recovery.EpisodeID,
 	}, 2)
 	var env struct {
 		Result json.RawMessage  `json:"result"`

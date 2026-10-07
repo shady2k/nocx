@@ -43,8 +43,9 @@ type Domain struct {
 	// remote disk, and no decision that matters is taken on it.
 	BundleGeneration string
 
-	capability Capability
-	recovery   FenceNonce // the one-shot recovery fence, minted with the capability
+	capability        Capability
+	recovery          FenceNonce // the one-shot recovery fence, minted with the capability
+	recoveryEpisodeID string     // independent non-secret id for decision-8 state
 	// adopted marks a domain taken over from a previous coordinator
 	// (AdoptDomain): its shell's own attempt ids predate this kernel, so
 	// the retained window's completion-only replay of a command that ran
@@ -72,10 +73,11 @@ type Domain struct {
 // never saw; the worst a forged fence can do is force a safe transition to
 // native mode, which the ADR's availability bound already accepts.
 type DomainHandle struct {
-	Domain     DomainID
-	Epoch      uint64
-	Capability Capability
-	Recovery   FenceNonce
+	Domain            DomainID
+	Epoch             uint64
+	Capability        Capability
+	Recovery          FenceNonce
+	RecoveryEpisodeID string // non-secret runtime correlation id; never sent to shell
 }
 
 // DomainRegistry stores domains and their transport bindings. It is keyed by

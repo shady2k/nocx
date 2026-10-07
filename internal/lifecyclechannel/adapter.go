@@ -170,16 +170,17 @@ func WithLossReporter(r LossReporter) Option {
 // (the outbound half the kernel sends accept and refresh_request over) and
 // drives the inbound half through the kernel.
 type Adapter struct {
-	log        log.Logger
-	kernel     Kernel
-	id         lifecycle.TransportID
-	lane       lifecycle.LaneID
-	domain     lifecycle.DomainID
-	epoch      uint64
-	capability lifecycle.Capability
-	recovery   lifecycle.FenceNonce // one-shot recovery fence
-	conn       io.ReadWriteCloser   // parent end of the socketpair or a remote carrier
-	dec        *lifecyclecodec.Decoder
+	log               log.Logger
+	kernel            Kernel
+	id                lifecycle.TransportID
+	lane              lifecycle.LaneID
+	domain            lifecycle.DomainID
+	epoch             uint64
+	capability        lifecycle.Capability
+	recovery          lifecycle.FenceNonce // one-shot recovery fence
+	recoveryEpisodeID string
+	conn              io.ReadWriteCloser // parent end of the socketpair or a remote carrier
+	dec               *lifecyclecodec.Decoder
 
 	helloTimeout time.Duration
 	// openedAt is when this transport was constructed, so the established
@@ -254,7 +255,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 		return nil, fmt.Errorf("request lifecycle domain: %w", err)
 	}
 	a.domain, a.epoch = h.Domain, h.Epoch
-	a.capability, a.recovery = h.Capability, h.Recovery
+	a.capability, a.recovery, a.recoveryEpisodeID = h.Capability, h.Recovery, h.RecoveryEpisodeID
 	t := time.AfterFunc(a.helloTimeout, func() { a.lose(LossHelloTimeout) })
 	a.mu.Lock()
 	a.timer = t
@@ -323,7 +324,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		log: logger, kernel: k,
 		id:   lifecycle.TransportID("tpt-" + tptHex),
 		lane: adopt.Lane, domain: adopt.Domain, epoch: adopt.Epoch,
-		capability: capability, recovery: recovery,
+		capability: capability, recovery: recovery, recoveryEpisodeID: adopt.RecoveryEpisodeID,
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
 		scope: o.frameScope,
 	}
@@ -332,7 +333,16 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		_ = conn.Close()
 		return nil, fmt.Errorf("bind lifecycle transport: %w", bindErr)
 	}
-	if _, aerr := k.AdoptDomain(a.lane, a.domain, a.epoch, capability, recovery, a.id); aerr != nil {
+	var adopted lifecycle.DomainHandle
+	var aerr error
+	if withEpisode, ok := k.(interface {
+		AdoptDomainWithEpisode(lifecycle.LaneID, lifecycle.DomainID, uint64, lifecycle.Capability, lifecycle.FenceNonce, string, lifecycle.TransportID) (lifecycle.DomainHandle, error)
+	}); ok {
+		adopted, aerr = withEpisode.AdoptDomainWithEpisode(a.lane, a.domain, a.epoch, capability, recovery, adopt.RecoveryEpisodeID, a.id)
+	} else {
+		adopted, aerr = k.AdoptDomain(a.lane, a.domain, a.epoch, capability, recovery, a.id)
+	}
+	if aerr != nil {
 		if unbinder, ok := k.(interface {
 			UnbindTransport(lifecycle.TransportID) error
 		}); ok {
@@ -341,6 +351,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		_ = conn.Close()
 		return nil, fmt.Errorf("adopt lifecycle domain: %w", aerr)
 	}
+	a.recoveryEpisodeID = adopted.RecoveryEpisodeID
 	logger.Info("lifecycle channel adopted",
 		"transport", a.id, "lane", a.lane, "domain", a.domain, "epoch", a.epoch)
 	a.pumpDone = make(chan struct{})
@@ -393,11 +404,12 @@ func (a *Adapter) Lane() lifecycle.LaneID {
 // capability plus the one-shot recovery fence ride the rcfile TEXT — never
 // the environment (ADR-0024 decision 2; protocol §4).
 type Launch struct {
-	Lane       lifecycle.LaneID
-	Domain     lifecycle.DomainID
-	Epoch      uint64
-	Capability string // 64 lowercase hex chars
-	Recovery   string // 64 lowercase hex chars; the one-shot recovery fence
+	Lane              lifecycle.LaneID
+	Domain            lifecycle.DomainID
+	Epoch             uint64
+	Capability        string // 64 lowercase hex chars
+	Recovery          string // 64 lowercase hex chars; the one-shot recovery fence
+	RecoveryEpisodeID string // independently minted non-secret runtime correlation id
 }
 
 // Launch returns the adapter's own addressing tuple, for the session/app
@@ -406,11 +418,12 @@ type Launch struct {
 // may carry several domains, and this is the one this adapter established.
 func (a *Adapter) Launch() Launch {
 	return Launch{
-		Lane:       a.lane,
-		Domain:     a.domain,
-		Epoch:      a.epoch,
-		Capability: hex.EncodeToString(a.capability[:]),
-		Recovery:   hex.EncodeToString(a.recovery[:]),
+		Lane:              a.lane,
+		Domain:            a.domain,
+		Epoch:             a.epoch,
+		Capability:        hex.EncodeToString(a.capability[:]),
+		Recovery:          hex.EncodeToString(a.recovery[:]),
+		RecoveryEpisodeID: a.recoveryEpisodeID,
 	}
 }
 

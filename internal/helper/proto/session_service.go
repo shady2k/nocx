@@ -459,14 +459,16 @@ type SpawnParams struct {
 const MaxIdempotencyKey = 128
 
 // LifecycleLaunch carries the coordinator-minted authenticated channel
-// bootstrap to the helper. Addressing is public; Capability and Recovery are
-// bearer values and must be consumed only by the shell integration rcfile.
+// bootstrap to the helper. Addressing and RecoveryEpisodeID are public.
+// Capability and Recovery are private bearer values: the shell integration
+// consumes them, and the helper runtime matches Recovery internally.
 type LifecycleLaunch struct {
-	Lane       string `json:"lane"`
-	Domain     string `json:"domain"`
-	Epoch      uint64 `json:"epoch"`
-	Capability string `json:"capability"`
-	Recovery   string `json:"recovery"`
+	Lane              string `json:"lane"`
+	Domain            string `json:"domain"`
+	Epoch             uint64 `json:"epoch"`
+	Capability        string `json:"capability"`
+	Recovery          string `json:"recovery"`
+	RecoveryEpisodeID string `json:"recoveryEpisodeId"`
 }
 
 // SpawnResult is the new session's inventory entry — the same shape `sessions`

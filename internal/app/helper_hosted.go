@@ -231,7 +231,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		launch := adapter.Launch()
 		life = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
-			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery, RecoveryEpisodeID: launch.RecoveryEpisodeID,
 		}
 	}
 	// THE ROLLBACK ENDS THE DOWNLINK TOO: every arm below that aborts the

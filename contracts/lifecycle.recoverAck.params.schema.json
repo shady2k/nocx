@@ -2,18 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/lifecycle.recoverAck.params.schema.json",
   "title": "LifecycleRecoverackParams",
-  "description": "Params for lifecycle.recoverAck.",
+  "description": "Exact acknowledgement of a sighted recovery episode. Raw recovery nonce fields are forbidden; episodeId is an independent non-secret identifier.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "generation"],
+  "required": ["sessionId", "episodeId"],
   "properties": {
     "sessionId": {
       "type": "string",
       "pattern": "^[0-9a-f]{32}"
     },
-    "generation": {
+    "episodeId": {
       "type": "string",
-      "pattern": "^[0-9a-f]{64}"
+      "pattern": "^rec-[0-9a-f]{32}$"
     }
   }
 }

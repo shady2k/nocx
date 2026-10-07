@@ -929,16 +929,37 @@ export class WSClient {
         kind !== 'clipboard' &&
         kind !== 'title' &&
         kind !== 'cwd' &&
-        kind !== 'promptBoundary'
+        kind !== 'promptBoundary' &&
+        kind !== 'recovery'
       ) {
         log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
         return
       }
       if (typeof title !== 'string' || typeof body !== 'string') return
+      const episodeId = raw.episodeId
+      if (raw.fence !== undefined || raw.nonce !== undefined || raw.recoveryNonce !== undefined)
+        return
+      if (kind === 'recovery') {
+        if (
+          typeof episodeId !== 'string' ||
+          !/^rec-[0-9a-f]{32}$/.test(episodeId) ||
+          title !== '' ||
+          body !== ''
+        )
+          return
+      } else if (episodeId !== undefined) return
       const identity = `${generation}:${effectId}`
       if (state.seenEffects.has(identity)) return
       state.seenEffects.add(identity)
-      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, title, body }
+      const effect: SessionEffect = {
+        sessionId: sid,
+        generation,
+        effectId,
+        kind,
+        title,
+        body,
+        ...(typeof episodeId === 'string' ? { episodeId } : {}),
+      }
       if (state.effectCallback) state.effectCallback(effect)
       else state.pendingEffects.push(effect)
     })

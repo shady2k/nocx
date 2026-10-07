@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,5 +382,21 @@ func TestPublishSessionEffect_RefusesUnknownKind(t *testing.T) {
 	defer sock.mu.Unlock()
 	if len(sock.frames) != 0 {
 		t.Fatalf("unknown effect kind reached socket in %d frames", len(sock.frames))
+	}
+}
+
+func TestRecoverySessionEffectDTOIsNonceFree(t *testing.T) {
+	schema := loadSchema(t, "session.effect.schema.json")
+	params := sessionEffectParams{SessionID: "0123456789abcdef0123456789abcdef", Generation: "1", EffectID: "2", Kind: "recovery", EpisodeID: "rec-0123456789abcdef0123456789abcdef"}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, schema, raw, "recovery session.effect DTO")
+	for _, field := range []string{`"fence":"` + strings.Repeat("a", 64) + `"`, `"generation":"` + strings.Repeat("b", 64) + `"`} {
+		bad := strings.TrimSuffix(string(raw), "}") + "," + field + "}"
+		if err := validateJSONErr(schema, []byte(bad)); err == nil {
+			t.Fatalf("schema accepted raw nonce field %s", field[:strings.IndexByte(field, ':')])
+		}
 	}
 }

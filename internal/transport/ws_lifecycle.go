@@ -104,8 +104,8 @@ func validateLifecycleRecoverAckRaw(raw json.RawMessage) string {
 	if !isLowerHex(p.SessionID, 32) {
 		return "sessionId is required and must be the 32-hex id the backend minted"
 	}
-	if !isLowerHex(p.Generation, 64) {
-		return "generation must be the 64-hex recovery generation the backend minted"
+	if len(p.EpisodeID) != 36 || !strings.HasPrefix(p.EpisodeID, "rec-") || !isLowerHex(strings.TrimPrefix(p.EpisodeID, "rec-"), 32) {
+		return "episodeId must be the independent recovery episode id the backend minted"
 	}
 	return ""
 }

@@ -22,7 +22,7 @@
       "minimum": 1
     },
     "signalDelivery": {
-      "description": "What the Stops a person made for this fact's attempt came to, absent when no Stop was ever made for it (nocx-zas0d). It exists because a Stop's outcome has to be STATE and not only an event: session.signal answers `held` for a gesture that arrives before the shell's start, and the settlement that follows can be lost with a dropped frame — leaving a block claiming a stop that never happened, which is how a command that ran to its own nonzero end gets painted as one the person stopped. It is the ATTEMPT's outcome, not one Stop's: `delivered` once ANY Stop's interrupt reached the command, from any path, and it is final — a Stop that lands after an earlier one failed outranks the failure; `undelivered` once a Stop failed and none landed. On an OPEN attempt it is published as soon as it is known, and the backend re-emits the attempt's fact when it changes, so a block holds it without any notification; it is omitted while a delivery is still on its way. On a fact reporting the attempt CLOSING it is always decided: the backend waits for a delivery already on its way, and a Stop that has not landed by then never can, since every path writes only while the attempt is open. The renderer derives 'Stopped' from this, never from a notification.",
+      "description": "What the Stops a person made for this fact's attempt came to, absent when no Stop was ever made for it (nocx-zas0d). It exists because a Stop's outcome has to be STATE and not only an event: session.signal answers `held` for a gesture that arrives before the shell's start, and the settlement that follows can be lost with a dropped frame \u2014 leaving a block claiming a stop that never happened, which is how a command that ran to its own nonzero end gets painted as one the person stopped. It is the ATTEMPT's outcome, not one Stop's: `delivered` once ANY Stop's interrupt reached the command, from any path, and it is final \u2014 a Stop that lands after an earlier one failed outranks the failure; `undelivered` once a Stop failed and none landed. On an OPEN attempt it is published as soon as it is known, and the backend re-emits the attempt's fact when it changes, so a block holds it without any notification; it is omitted while a delivery is still on its way. On a fact reporting the attempt CLOSING it is always decided: the backend waits for a delivery already on its way, and a Stop that has not landed by then never can, since every path writes only while the attempt is open. The renderer derives 'Stopped' from this, never from a notification.",
       "type": "string",
       "enum": ["delivered", "undelivered"]
     },
@@ -119,20 +119,19 @@
       }
     },
     "recovery": {
-      "description": "The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable \u2014 channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode \u2014 an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.",
+      "description": "A reconnect-safe recovery episode. episodeId is a separately minted non-secret locator. state is pending until the backend matches the private shell nonce, then sighted durably; this object is never a nonce-bearing fence.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["fence", "generation"],
+      "required": ["episodeId", "state"],
       "properties": {
-        "fence": {
-          "description": "The 64-hex one-shot recovery fence the renderer matches in the render stream.",
+        "episodeId": {
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "minLength": 1,
+          "pattern": "^rec-[0-9a-f]{32}$"
         },
-        "generation": {
-          "description": "The recovery generation the renderer returns in lifecycle.recoverAck \u2014 the same minted nonce.",
+        "state": {
           "type": "string",
-          "pattern": "^[0-9a-f]{64}$"
+          "enum": ["pending", "sighted"]
         }
       }
     }

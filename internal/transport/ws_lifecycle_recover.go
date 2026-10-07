@@ -25,10 +25,12 @@ type recoveryState struct {
 	// landed before closeSession cancelled it and the lane falls to Native
 	// on a session that is already exiting, which the exit notification
 	// supersedes.
-	mu         sync.Mutex
-	generation string
-	lane       lifecycle.LaneID
-	resolved   bool
+	mu        sync.Mutex
+	episodeID string
+	lane      lifecycle.LaneID
+	sighted   bool
+	resolved  bool
+	dead      bool
 }
 
 // recoveryOf returns the session's recovery state, or nil.
@@ -50,12 +52,16 @@ func (s *WSServer) openRecovery(sid session.ID, f lifecyclepub.Fact) {
 		s.recoveries = make(map[session.ID]*recoveryState)
 	}
 	cur := s.recoveries[sid]
-	if cur != nil && cur.generation == f.Recovery.Generation {
-		return // same episode already recorded (replayed lost fact)
+	if cur != nil && cur.episodeID == f.Recovery.EpisodeID {
+		cur.mu.Lock()
+		cur.sighted = cur.sighted || f.Recovery.State == "sighted"
+		cur.mu.Unlock()
+		return // replay/resync updates durable state without reopening the episode
 	}
 	s.recoveries[sid] = &recoveryState{
-		generation: f.Recovery.Generation,
-		lane:       lifecycle.LaneID(f.Lane),
+		episodeID: f.Recovery.EpisodeID,
+		lane:      lifecycle.LaneID(f.Lane),
+		sighted:   f.Recovery.State == "sighted",
 	}
 }
 
@@ -64,17 +70,22 @@ func (s *WSServer) openRecovery(sid session.ID, f lifecyclepub.Fact) {
 // closeSession.
 func (s *WSServer) cancelRecovery(sid session.ID) {
 	s.recoveryMu.Lock()
-	defer s.recoveryMu.Unlock()
+	rec := s.recoveries[sid]
+	if rec != nil {
+		rec.mu.Lock()
+		rec.dead = true
+		rec.mu.Unlock()
+	}
 	delete(s.recoveries, sid)
+	s.recoveryMu.Unlock()
 }
 
-// lifecycleRecoverAckParams is the payload of the "lifecycle.recoverAck"
-// RPC: deliberately narrow (decision 8 acceptance) — session identity and
-// the recovery generation, and nothing else. No domain, no epoch, no
+// lifecycleRecoverAckParams is the payload of lifecycle.recoverAck: session
+// identity and the non-secret episode id, and nothing else. No domain, no epoch, no
 // attempt, no status, no prompt-readiness.
 type lifecycleRecoverAckParams struct {
-	SessionID  string `json:"sessionId"`
-	Generation string `json:"generation"`
+	SessionID string `json:"sessionId"`
+	EpisodeID string `json:"episodeId"`
 }
 
 // handleLifecycleRecoverAck is the restoration acknowledgement (ADR-0024
@@ -84,7 +95,7 @@ type lifecycleRecoverAckParams struct {
 // RecoverLane can never revive a DomainLost, never grant ownership, never
 // open or complete an attempt.
 //
-//	--> {"jsonrpc":"2.0","id":1,"method":"lifecycle.recoverAck","params":{"sessionId":"...","generation":"<64 hex>"}}
+//	--> {"jsonrpc":"2.0","id":1,"method":"lifecycle.recoverAck","params":{"sessionId":"...","episodeId":"..."}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"ok":true}}
 //
 // Rejections, one per decision-8 acceptance rule:
@@ -104,7 +115,7 @@ func (s *WSServer) handleLifecycleRecoverAck(r Responder, state *connState, req 
 		return
 	}
 	var params lifecycleRecoverAckParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.Generation == "" {
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.EpisodeID == "" {
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and generation required"})
 		return
 	}
@@ -115,22 +126,30 @@ func (s *WSServer) handleLifecycleRecoverAck(r Responder, state *connState, req 
 		return
 	}
 	rec := s.recoveryOf(sid)
-	if rec == nil || rec.generation != params.Generation {
+	if rec == nil || rec.episodeID != params.EpisodeID {
 		// (b) no pending episode for this generation — never promised, or
 		// superseded by a fresh domain's episode.
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "no pending recovery for this generation"})
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "no pending recovery for this episode"})
 		return
 	}
 	// The episode's own mutex serializes claim→recover→resolve (see
 	// recoveryState.mu).
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	if rec.dead {
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
+		return
+	}
 	if rec.resolved {
 		// (d) idempotent: the recovery already landed.
 		_ = r.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 		return
 	}
-	// (c) the kernel permits only Lost → Native.
+	if !rec.sighted {
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "recovery marker has not been sighted"})
+		return
+	}
+	// (c) the kernel permits only Lost → Native, after the exact sighting.
 	if err := s.lifecyclePub.RecoverLane(rec.lane); err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return

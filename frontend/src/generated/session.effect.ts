@@ -12,11 +12,14 @@
 /**
  * One identity-bearing non-visual effect emitted by the session runtime. A full session.frame never carries or replays effects; the client deduplicates this event across replay and reconnect by generation and effectId.
  */
-export interface SessionEffect {
+export type SessionEffect = {
+  [k: string]: unknown
+} & {
   sessionId: string
   generation: string
   effectId: string
-  kind: 'bell' | 'notification' | 'clipboard' | 'title' | 'cwd' | 'promptBoundary'
+  kind: 'bell' | 'notification' | 'clipboard' | 'title' | 'cwd' | 'promptBoundary' | 'recovery'
   title: string
   body: string
+  episodeId?: string
 }

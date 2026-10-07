@@ -3815,12 +3815,13 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		p.registerLane(cfg.Lane, scratch.SessionID)
 	}
 	return ssh.RemoteLifecycleLaunch{
-		Lane:       string(cfg.Lane),
-		Domain:     string(cfg.Domain),
-		Epoch:      cfg.Epoch,
-		Port:       cfg.Port,
-		Capability: cfg.Capability,
-		Recovery:   cfg.Recovery,
+		Lane:              string(cfg.Lane),
+		Domain:            string(cfg.Domain),
+		Epoch:             cfg.Epoch,
+		Port:              cfg.Port,
+		Capability:        cfg.Capability,
+		Recovery:          cfg.Recovery,
+		RecoveryEpisodeID: cfg.RecoveryEpisodeID,
 	}, adapter, nil
 }
 

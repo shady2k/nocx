@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -880,7 +881,7 @@ func recoverEnv(t *testing.T) (*lifecycleTestEnv, *lifecyclepub.Publisher, strin
 func recoverAckErr(t *testing.T, conn *websocket.Conn, sid, generation string, id int) *jsonrpcErrorObj {
 	t.Helper()
 	resp := jsonrpcCallWithID(t, conn, "lifecycle.recoverAck", map[string]any{
-		"sessionId": sid, "generation": generation,
+		"sessionId": sid, "episodeId": generation,
 	}, id)
 	var env struct {
 		Error *jsonrpcErrorObj `json:"error"`
@@ -900,12 +901,91 @@ func recoverAckErr(t *testing.T, conn *websocket.Conn, sid, generation string, i
 // shell's one-shot recovery fence and applying the conventional presentation
 // — moves it to Native. Until the ack lands, the lane is neither
 // authenticated nor a usable conventional terminal: it stays Lost.
+func TestRecoveryEffectRecordsSightedStateBeforeAtMostOnceDelivery(t *testing.T) {
+	e, _, sid, lost := recoverEnv(t)
+	if lost.Recovery == nil {
+		t.Fatal("missing recovery episode")
+	}
+	const generation uint64 = 1
+	episodeID := lost.Recovery.EpisodeID
+	wrongEpisode := proto.EffectFrame{Generation: generation, EffectID: 1, Kind: proto.EffectRecovery, EpisodeID: "rec-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	if e.ws.PublishSessionEffect(session.ID(sid), wrongEpisode) {
+		t.Fatal("stale recovery episode was accepted")
+	}
+	effect := proto.EffectFrame{Generation: generation, EffectID: 2, Kind: proto.EffectRecovery, EpisodeID: episodeID}
+	if !e.ws.PublishSessionEffect(session.ID(sid), effect) {
+		t.Fatal("matching recovery effect was refused")
+	}
+	_, sighted := readLifecycleWhere(t, e.conn, "durable sighted recovery state", func(f lifecyclepub.Fact) bool {
+		return f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil && f.Recovery.State == "sighted"
+	})
+	if sighted.Recovery.EpisodeID != episodeID {
+		t.Fatalf("sighted episode = %+v", sighted.Recovery)
+	}
+	_, raw, err := e.conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read session.effect: %v", err)
+	}
+	var msg struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		t.Fatal(err)
+	}
+	if msg.Method != "session.effect" {
+		t.Fatalf("method = %q", msg.Method)
+	}
+	validateJSON(t, loadSchema(t, "session.effect.schema.json"), msg.Params, "recovery session.effect on real socket")
+	var params map[string]json.RawMessage
+	if err := json.Unmarshal(msg.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"nonce", "fence", "recovery"} {
+		if _, ok := params[forbidden]; ok {
+			t.Fatalf("recovery effect carries secret-bearing key %q: %s", forbidden, raw)
+		}
+	}
+
+	// A reconnect must replay the durable sighting even though the at-most-once
+	// session.effect itself is not replayed. The new subscriber sees the exact
+	// same live episode, with no private shell nonce in the fact.
+	e.ws.getRx(session.ID(sid)).setSubscriber(nil, nil)
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	attach := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 3)
+	var attachEnvelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(attach, &attachEnvelope); err != nil {
+		t.Fatalf("attach after recovery sighting: %v", err)
+	}
+	if attachEnvelope.Error != nil {
+		t.Fatalf("attach after recovery sighting: %+v", attachEnvelope.Error)
+	}
+	replayRaw, replayed := readLifecycleWhere(t, connB, "sighted recovery projection after reattach", func(f lifecyclepub.Fact) bool {
+		return f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil
+	})
+	if replayed.Recovery.State != "sighted" || replayed.Recovery.EpisodeID != episodeID {
+		t.Fatalf("replayed recovery = %+v, want sighted episode %q", replayed.Recovery, episodeID)
+	}
+	replayedJSON := strings.ToLower(string(replayRaw))
+	if strings.Contains(replayedJSON, "nonce") || strings.Contains(replayedJSON, "fence") {
+		t.Fatalf("replayed recovery fact exposed a private recovery token: %s", replayRaw)
+	}
+}
+
 func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 	e, pub, sid, lost := recoverEnv(t)
 	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleLost {
 		t.Fatalf("lane before ack = %v, want Lost throughout the span", st.Lifecycle)
 	}
-	// The ack carries session identity and the generation — nothing else.
+	// The emulator/runtime has matched the private nonce; lifecycle state
+	// records that exact non-secret episode before the composite ack.
+	if err := pub.SightRecovery(lifecycle.LaneID(lost.Lane), lost.Recovery.EpisodeID); err != nil {
+		t.Fatalf("SightRecovery: %v", err)
+	}
+	// The ack carries session identity and the episode ID — nothing else.
 	// Both the response and the native transition are collected from one
 	// read loop, in WHICHEVER ORDER THEY ARRIVE.
 	//
@@ -925,7 +1005,7 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 	// Bounded by a whole-loop deadline rather than a per-read one: what is
 	// being waited for is two observable messages, not a duration.
 	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "lifecycle.recoverAck", "params": map[string]any{
-		"sessionId": sid, "generation": lost.Recovery.Generation,
+		"sessionId": sid, "episodeId": lost.Recovery.EpisodeID,
 	}})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -1002,7 +1082,7 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 //   - (d) a duplicate ack succeeds idempotently, and an ack after the
 //     session died is refused.
 func TestLifecycleRecoverAck_Rejections(t *testing.T) {
-	t.Run("(a) narrow params: missing generation", func(t *testing.T) {
+	t.Run("(a) narrow params: missing episode id", func(t *testing.T) {
 		e, _, sid, _ := recoverEnv(t)
 		resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
 			"sessionId": sid,
@@ -1014,7 +1094,7 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		if env.Error == nil || env.Error.Code != -32602 {
-			t.Fatalf("missing generation: want -32602, got %+v", env.Error)
+			t.Fatalf("missing episode id: want -32602, got %+v", env.Error)
 		}
 	})
 
@@ -1041,6 +1121,17 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 		}
 	})
 
+	t.Run("(b) sighting is required before ack", func(t *testing.T) {
+		e, pub, sid, lost := recoverEnv(t)
+		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.EpisodeID, 2)
+		if errObj.Code == 0 {
+			t.Fatal("ack before the exact episode was sighted must be refused")
+		}
+		if st, err := pub.State(lifecycle.LaneID(lost.Lane)); err != nil || st.Lifecycle != lifecycle.LifecycleLost {
+			t.Fatalf("premature ack changed lane state: %+v, err=%v", st, err)
+		}
+	})
+
 	t.Run("(c) lane no longer lost refuses the ack", func(t *testing.T) {
 		e, pub, sid, lost := recoverEnv(t)
 		// While the frontend was away, a NEW domain established on the lane
@@ -1055,7 +1146,7 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 		}
 		mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lifecycle.LaneID(lost.Lane), h2, 1, lifecycleHelloEvt()))
 		_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready (fresh domain)
-		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.Generation, 2)
+		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.EpisodeID, 2)
 		if errObj.Code == 0 {
 			t.Fatalf("an ack over a live lane must be refused, got %+v", errObj)
 		}
@@ -1063,9 +1154,12 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 
 	t.Run("(d) idempotent duplicate ack", func(t *testing.T) {
 		e, pub, sid, lost := recoverEnv(t)
+		if err := pub.SightRecovery(lifecycle.LaneID(lost.Lane), lost.Recovery.EpisodeID); err != nil {
+			t.Fatal(err)
+		}
 		ack := func(id int) *jsonrpcErrorObj {
 			resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
-				"sessionId": sid, "generation": lost.Recovery.Generation,
+				"sessionId": sid, "episodeId": lost.Recovery.EpisodeID,
 			}, id)
 			var env struct {
 				Error *jsonrpcErrorObj `json:"error"`
@@ -1097,7 +1191,7 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 		_ = e.ws.registry.Close(session.ID(sid))
 		e.ws.cancelRecovery(session.ID(sid))
 		_ = pub
-		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.Generation, 2)
+		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.EpisodeID, 2)
 		if errObj.Code == 0 {
 			t.Fatalf("a late ack after session death must be refused, got %+v", errObj)
 		}
@@ -1165,7 +1259,7 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 	// episode exists over a dead session, so no acknowledgement can land.
 	for _, id := range []int{2, 3} {
 		req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "lifecycle.recoverAck", "params": map[string]any{
-			"sessionId": sid, "generation": strings.Repeat("33", 32),
+			"sessionId": sid, "episodeId": strings.Repeat("33", 32),
 		}})
 		if err != nil {
 			t.Fatalf("marshal ack %d: %v", id, err)
@@ -1219,9 +1313,12 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 // the second ack observes the resolved episode and changes nothing.
 func TestLifecycleRecoverAck_DoubleAckLandsOnce(t *testing.T) {
 	e, pub, sid, lost := recoverEnv(t)
+	if err := pub.SightRecovery(lifecycle.LaneID(lost.Lane), lost.Recovery.EpisodeID); err != nil {
+		t.Fatal(err)
+	}
 	req := func(id int) []byte {
 		b, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "lifecycle.recoverAck", "params": map[string]any{
-			"sessionId": sid, "generation": lost.Recovery.Generation,
+			"sessionId": sid, "episodeId": lost.Recovery.EpisodeID,
 		}})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)

@@ -574,3 +574,65 @@ func TestTheRuntimeAndItsScreenEndWithTheSession(t *testing.T) {
 		t.Fatal("the session row outlived close-session")
 	}
 }
+
+func TestSpawnArmsPrivateRecoveryExpectationAndEmitsOnlyEpisodeID(t *testing.T) {
+	nonce := strings.Repeat("ab", 32)
+	episodeID := "rec-0123456789abcdef0123456789abcdef"
+	proc := newScriptedProcess("")
+	svc := newRuntimeService(t, proc)
+	res := callOp[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-1", Domain: "dom-1", Epoch: 1, Capability: strings.Repeat("cd", 32), Recovery: nonce, RecoveryEpisodeID: episodeID},
+	})
+	svc.mu.Lock()
+	hs := svc.sessions[res.Entry.Session.Session]
+	svc.mu.Unlock()
+	if hs == nil {
+		t.Fatal("spawn did not retain its runtime")
+	}
+	c := hs.runtime.Attach()
+	t.Cleanup(func() { hs.runtime.Detach(c) })
+	marker := []byte("\x1b]1337;NOCX_RECOVERY;" + nonce + "\x07")
+	cut := len(marker) / 2
+	if err := hs.runtime.Ingest(marker[:cut]); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 0 {
+		t.Fatalf("partial marker effects = %+v", got)
+	}
+	if err := hs.runtime.Ingest(marker[cut:]); err != nil {
+		t.Fatal(err)
+	}
+	effects := c.Effects()
+	if len(effects) != 1 || effects[0].Kind != sessionruntime.EffectRecovery || effects[0].EpisodeID != episodeID || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 {
+		t.Fatalf("runtime effects = %+v", effects)
+	}
+	if strings.Contains(string(effects[0].Body), nonce) {
+		t.Fatal("raw recovery nonce escaped the private runtime matcher")
+	}
+}
+
+func TestSpawnIgnoresWrongPrivateRecoveryNonce(t *testing.T) {
+	want := strings.Repeat("ab", 32)
+	wrong := strings.Repeat("cd", 32)
+	proc := newScriptedProcess("")
+	svc := newRuntimeService(t, proc)
+	res := callOp[proto.SpawnResult](t, svc, proto.OpSpawn, proto.SpawnParams{
+		Cols: 80, Rows: 24,
+		Lifecycle: &proto.LifecycleLaunch{Lane: "lane-1", Domain: "dom-1", Epoch: 1, Capability: strings.Repeat("ef", 32), Recovery: want, RecoveryEpisodeID: "rec-0123456789abcdef0123456789abcdef"},
+	})
+	svc.mu.Lock()
+	hs := svc.sessions[res.Entry.Session.Session]
+	svc.mu.Unlock()
+	if hs == nil {
+		t.Fatal("spawn did not retain its runtime")
+	}
+	c := hs.runtime.Attach()
+	t.Cleanup(func() { hs.runtime.Detach(c) })
+	if err := hs.runtime.Ingest([]byte("\x1b]1337;NOCX_RECOVERY;" + wrong + "\x07")); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 0 {
+		t.Fatalf("wrong private nonce emitted effects: %+v", got)
+	}
+}

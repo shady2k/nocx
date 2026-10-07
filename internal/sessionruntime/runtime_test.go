@@ -3,6 +3,7 @@ package sessionruntime
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -561,5 +562,81 @@ func TestADetachedConsumerReleasesHeldEffectsToo(t *testing.T) {
 	if len(got) != MaxPendingFrames || reader.Coalesced() != 1 || reader.EffectsLost() != 0 || last.Revision != s.Revision() {
 		t.Fatalf("a fresh reader after a mixed-queue detach took %d frames (coalesced=%d effectsLost=%d lastRev=%d wantRev=%d): the departed reader must release everything it held",
 			len(got), reader.Coalesced(), reader.EffectsLost(), last.Revision, s.Revision())
+	}
+}
+
+func TestRecoveryMarkerIsPrivateMatchedAndSplitSafe(t *testing.T) {
+	s := obsSession(t, Geometry{Cols: 80, Rows: 24})
+	wantNonce := strings.Repeat("ab", 32)
+	if err := s.SetRecoveryExpectation(wantNonce, "rec-0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	c := s.Consumers().Attach()
+	marker := "\x1b]1337;NOCX_RECOVERY;" + wantNonce + "\x07"
+	cut := len(marker) / 2
+	if err := s.Ingest([]byte(marker[:cut])); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 0 {
+		t.Fatalf("partial marker effects = %+v", got)
+	}
+	if err := s.Ingest([]byte(marker[cut:])); err != nil {
+		t.Fatal(err)
+	}
+	effects := c.Effects()
+	if len(effects) != 1 || effects[0].Kind != EffectRecovery || effects[0].EpisodeID != "rec-0123456789abcdef0123456789abcdef" || len(effects[0].Body) != 0 || len(effects[0].Title) != 0 {
+		t.Fatalf("recovery effects = %+v", effects)
+	}
+	if !s.RecoverySighted(effects[0].EpisodeID) {
+		t.Fatal("runtime did not retain sighting for resync")
+	}
+	if strings.Contains(fmt.Sprint(effects), wantNonce) {
+		t.Fatal("raw nonce reached renderer-facing effect")
+	}
+	if err := s.Ingest([]byte(marker)); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 1 || got[0].ID != effects[0].ID || got[0].EpisodeID != effects[0].EpisodeID {
+		t.Fatalf("duplicate marker changed the queued effect: %+v", got)
+	}
+}
+
+func TestRecoveryMarkerWrongNonceAndReplacedEpisodeAreIgnored(t *testing.T) {
+	s := obsSession(t, Geometry{Cols: 80, Rows: 24})
+	old := strings.Repeat("ab", 32)
+	if err := s.SetRecoveryExpectation(old, "rec-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
+		t.Fatal(err)
+	}
+	c := s.Consumers().Attach()
+	wrong := "\x1b]1337;NOCX_RECOVERY;" + strings.Repeat("cd", 32) + "\x07"
+	if err := s.Ingest([]byte(wrong)); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 0 {
+		t.Fatalf("wrong nonce effects = %+v", got)
+	}
+	if err := s.SetRecoveryExpectation(strings.Repeat("cd", 32), "rec-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Ingest([]byte("\x1b]1337;NOCX_RECOVERY;" + old + "\x07")); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Effects(); len(got) != 0 {
+		t.Fatalf("stale marker effects = %+v", got)
+	}
+}
+
+func TestRecoveryExpectationRejectsMissingOrNonceShapedIdentity(t *testing.T) {
+	s := obsSession(t, Geometry{Cols: 80, Rows: 24})
+	nonce := strings.Repeat("ab", 32)
+	for _, tc := range []struct{ nonce, episode string }{
+		{"", "rec-0123456789abcdef0123456789abcdef"},
+		{nonce, ""},
+		{nonce, strings.Repeat("c", 64)},
+		{strings.ToUpper(nonce), "rec-0123456789abcdef0123456789abcdef"},
+	} {
+		if err := s.SetRecoveryExpectation(tc.nonce, tc.episode); err == nil {
+			t.Fatalf("accepted invalid recovery expectation nonce=%q episode=%q", tc.nonce, tc.episode)
+		}
 	}
 }

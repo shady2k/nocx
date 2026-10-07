@@ -10,7 +10,7 @@
  */
 
 /**
- * The lifecycle.recoverAck JSON-RPC result: the restoration acknowledgement of ADR-0024 decision 8. The renderer calls it only after BOTH halves of the composite ack hold — it matched the shell's one-shot recovery fence in the render stream, and it applied the conventional presentation. The params are deliberately narrow: session identity and the recovery generation, and nothing else (no domain, no epoch, no attempt, no status, no prompt-readiness) — the backend acks only what it promised, and the transition permits only Lost → Native. The result is a single ok: true.
+ * The lifecycle.recoverAck result for the composite decision-8 acknowledgement. The request names only session identity and the non-secret recovery episodeId, after both marker sighting and conventional presentation. The backend accepts only the exact live episode after its durable state is sighted, and permits only Lost → Native. The result is a single ok: true.
  */
 export interface LifecycleRecoverAck {
   /**

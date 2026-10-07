@@ -597,8 +597,9 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system \
-               internal/peerpin internal/monoclock
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock)
+               internal/peerpin internal/monoclock internal/sandbox \
+               scripts/sandbox-smoke-linux scripts/sandbox-smoke-linux/probe
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock|internal/sandbox|scripts/sandbox-smoke-linux)
 
 # internal/claudeconformance cannot run in CI: no runner can carry an
 # authenticated vendor CLI, and a `t.Fatal` is the honest result when it is

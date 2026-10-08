@@ -3474,6 +3474,11 @@ export class TerminalContent extends BasePaneContent {
       })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         this._syncLifecycleOwnership()
+        // An integrated pane is settled by its authenticated lifecycle fact,
+        // not by the non-authoritative promptBoundary observation. Without
+        // this, a session that awaited integration never settles before the
+        // backstop and background activity is discarded.
+        if (this.lifecycle.state.kind === 'prompt_ready') this._settle()
         // A conventional terminal stays unstructured: the scrollback-block
         // model never takes over (ADR-0024 §4). Conventional means no live
         // authenticated domain — Native, Lost, and a Desynchronized domain

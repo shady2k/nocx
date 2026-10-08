@@ -1628,7 +1628,7 @@ describe('bracketed paste, read from the real parser', () => {
   })
 })
 
-describe('onBell through the real parser (nocx-n3nfg)', () => {
+describe('bell effect delivery (nocx-zg3k3.14.1)', () => {
   /** The same jsdom mount the OSC fan-out suite uses: xterm.js needs
    *  matchMedia and ResizeObserver during init, and neither exists here. */
   async function mountRenderer(): Promise<XtermRenderer> {
@@ -1641,54 +1641,34 @@ describe('onBell through the real parser (nocx-n3nfg)', () => {
     return r
   }
 
-  /** xterm parses writes asynchronously, so an assertion cannot follow the
-   *  write on the same turn. Wait on an observable state change rather than
-   *  a duration (AGENTS.md): onWriteParsed is the renderer's own "the bytes
-   *  have been parsed" signal, and the parser preserves order, so everything
-   *  written before it has been delivered by the time it fires — which is
-   *  what makes a NEGATIVE assertion sound too. */
+  /** xterm parses writes asynchronously; wait for its parsed signal before
+   *  asserting that the compatibility byte mirror did not dispatch an effect. */
   const parsed = (r: XtermRenderer, data: string) =>
     new Promise<void>((resolve) => {
       r.onWriteParsed(resolve)
       r.write(data)
     })
 
-  // The byte a shell actually prints, through the real VT parser rather than
-  // a fake calling the callback. This is the only half of the chain a unit
-  // test can get wrong invisibly: a renderer that never fires would leave
-  // every bell test downstream passing against a callback nothing invokes.
-  it('fires for a bare BEL byte', async () => {
+  it('dispatches one backend bell effect and ignores the mirrored BEL byte', async () => {
     const r = await mountRenderer()
     let rings = 0
     r.onBell(() => rings++)
+
     await parsed(r, 'ready\x07')
-    expect(rings).toBe(1)
-    r.dispose()
-  })
-
-  it('fires once per BEL, so a run of them is a run of reports', async () => {
-    const r = await mountRenderer()
-    let rings = 0
-    r.onBell(() => rings++)
-    await parsed(r, '\x07\x07\x07')
-    expect(rings).toBe(3)
-    r.dispose()
-  })
-
-  // The trap worth pinning: BEL is ALSO the string terminator of an OSC
-  // sequence, and nocx's own notification path (OSC 9 / OSC 777) ends every
-  // request with one. If the parser counted that terminator as a bell, one
-  // program notification would become two events — a programNotify and a
-  // bell — for a byte the program never meant as a bell. Whatever xterm.js
-  // does here, the wiring above inherits it, so it is asserted rather than
-  // assumed.
-  it('does not fire for the BEL that terminates an OSC sequence', async () => {
-    const r = await mountRenderer()
-    let rings = 0
-    r.onBell(() => rings++)
-    await parsed(r, '\x1b]9;build finished\x07')
-    await parsed(r, '\x1b]0;a title\x07')
     expect(rings).toBe(0)
+
+    r.applySessionEffect({
+      sessionId: 'session',
+      generation: '1',
+      effectId: '1',
+      kind: 'bell',
+      title: '',
+      body: '',
+    })
+    expect(rings).toBe(1)
+
+    await parsed(r, '\x07')
+    expect(rings).toBe(1)
     r.dispose()
   })
 })
@@ -2114,15 +2094,39 @@ describe('runtime effect dispatch', () => {
     send('bell')
     send('notification', 'build finished')
     send('notification', '2 failed', 'Tests failed')
-    send('clipboard', '52;c;aGVsbG8gZnJvbSBvc2M1Mg==')
+    send('clipboard', 'clipboard text from the runtime')
+    send('clipboard', '')
     send('title', 'shell title')
-    send('cwd', '/worktree')
+    send('cwd', 'file://test-host/worktree')
     expect(bell).toHaveBeenCalledTimes(1)
     expect(notification).toHaveBeenNthCalledWith(1, { title: '', body: 'build finished' })
     expect(notification).toHaveBeenNthCalledWith(2, { title: 'Tests failed', body: '2 failed' })
     expect(notification).toHaveBeenCalledTimes(2)
-    expect(clipboard).toHaveBeenCalledWith('hello from osc52')
+    expect(clipboard).toHaveBeenCalledOnce()
+    expect(clipboard).toHaveBeenCalledWith('clipboard text from the runtime')
     expect(title).toHaveBeenCalledWith('shell title')
-    expect(cwd).toHaveBeenCalledWith({ host: '', path: '/worktree' })
+    expect(cwd).toHaveBeenCalledWith({ host: 'test-host', path: '/worktree' })
+  })
+
+  it('restores title and cwd from replayed terminal bytes', async () => {
+    stubBrowser()
+    const renderer = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await renderer.mount(container)
+
+    const title = vi.fn()
+    const cwd = vi.fn()
+    renderer.onTitle(title)
+    renderer.onCwd(cwd)
+    await new Promise<void>((resolve) => {
+      renderer.onWriteParsed(resolve)
+      renderer.write('\x1b]0;restored shell title\x07\x1b]7;file://test-host/worktree\x07')
+    })
+
+    expect(title).toHaveBeenCalledWith('restored shell title')
+    expect(cwd).toHaveBeenCalledWith({ host: 'test-host', path: '/worktree' })
+    renderer.dispose()
   })
 })

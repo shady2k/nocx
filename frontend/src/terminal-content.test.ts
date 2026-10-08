@@ -13450,6 +13450,35 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
   const bellCalls = (client: ClientFake): unknown[][] =>
     client.dispatcher.call.mock.calls.filter((c: unknown[]) => c[0] === 'notify.bell')
 
+  it('settles integrated startup on authenticated prompt_ready before a background bell', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The backend's promptBoundary is an observation, not lifecycle authority.
+      settle(content)
+      rendererOf(content)._fireBell()
+      expect(tab.hasActivity).toBe(false)
+
+      lifecycleHandler(
+        client,
+        session.sessionId,
+      )({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      rendererOf(content)._fireBell()
+
+      expect(tab.hasActivity).toBe(true)
+      expect(bellCalls(client)).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('reports the bell AND marks the tab, addressing the live session', async () => {
     const client = makeClient()
     const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -17336,7 +17365,7 @@ describe('runtime clipboard effects keep the existing permission gate', () => {
         effectId: '1',
         kind: 'clipboard' as const,
         title: '',
-        body: '52;c;cnVudGltZSB0ZXh0',
+        body: 'runtime text',
       }
       session.fireEffect(effect)
       await Promise.resolve()

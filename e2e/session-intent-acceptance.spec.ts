@@ -86,6 +86,18 @@ async function recordAndReplayEffects(page: import('./harness').Page): Promise<v
       clipboardWrites: [],
     }
     window.__intentAcceptance = state
+    // This spec checks effect dispatch and replay deduplication, not browser
+    // permission UI or the OS clipboard. Stub the browser API at its seam so
+    // Chromium and WebKit observe the same write calls.
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        readText: async () => '',
+        writeText: async (text: string) => {
+          state.clipboardWrites.push(text)
+        },
+      },
+    })
 
     // Duplicate each arriving metadata screen frame after its first delivery,
     // and each identity-bearing effect notification. This models the replay
@@ -176,20 +188,8 @@ async function recordAndReplayEffects(page: import('./harness').Page): Promise<v
 test('browser input crosses the session transport once and replayed effects stay once', async ({
   page,
 }) => {
-  await page.context().grantPermissions(['clipboard-write'])
   await recordAndReplayEffects(page)
   await page.goto('/')
-  await page.evaluate(() => {
-    const clipboard = navigator.clipboard
-    const writeText = clipboard.writeText.bind(clipboard)
-    Object.defineProperty(clipboard, 'writeText', {
-      configurable: true,
-      value: async (text: string) => {
-        window.__intentAcceptance?.clipboardWrites.push(text)
-        return writeText(text)
-      },
-    })
-  })
   await promptReady(page)
 
   // The same physical Up key is encoded by the session runtime according to

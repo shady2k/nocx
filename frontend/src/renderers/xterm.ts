@@ -25,7 +25,6 @@ import type {
 } from './types'
 import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
-import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
 import {
   CaptureAbortedError,
@@ -961,7 +960,11 @@ export class XtermRenderer implements TerminalRenderer {
 
   onTitle(cb: TitleCallback): void {
     this.titleSubs.push(cb)
-    this.term?.onTitleChange(cb)
+    // Title is presentation metadata. Until xterm's cutover (.8), its parser
+    // also reconstructs this value from replayed session.output; the
+    // at-most-once session.effect route cannot restore an event from before
+    // this renderer attached.
+    this.term?.onTitleChange((title) => cb(title))
   }
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
@@ -981,6 +984,9 @@ export class XtermRenderer implements TerminalRenderer {
 
   onCwd(cb: CwdCallback): void {
     this.cwdSubs.push(cb)
+    // Like title, cwd must be reconstructed from replayed session.output
+    // while xterm remains this renderer's OSC parser. The session.effect path
+    // is at-most-once and cannot restore a report produced before attach.
     this.term?.parser.registerOscHandler(7, (data: string) => {
       const parsed = parseOsc7(data)
       if (parsed) cb({ host: parsed.host, path: parsed.path })
@@ -1028,7 +1034,6 @@ export class XtermRenderer implements TerminalRenderer {
 
   onBell(cb: BellCallback): void {
     this.bellSubs.push(cb)
-    this.term?.onBell(cb)
   }
 
   applySessionEffect(effect: SessionEffect): void {
@@ -1039,19 +1044,23 @@ export class XtermRenderer implements TerminalRenderer {
       case 'notification':
         for (const sub of this.notificationSubs) sub({ title: effect.title, body: effect.body })
         break
-      case 'clipboard': {
-        const text = decodeOsc52(effect.body)
-        if (text !== null) {
-          for (const sub of this.clipboardSubs) sub(text)
+      case 'clipboard':
+        // The runtime effect already carries decoded clipboard text, not the
+        // OSC 52 wire payload. Empty writes remain refused by policy.
+        if (effect.body !== '') {
+          for (const sub of this.clipboardSubs) sub(effect.body)
         }
         break
-      }
       case 'title':
         for (const sub of this.titleSubs) sub(effect.body)
         break
-      case 'cwd':
-        for (const sub of this.cwdSubs) sub({ host: '', path: effect.body })
+      case 'cwd': {
+        const cwd = parseOsc7(effect.body)
+        if (cwd) {
+          for (const sub of this.cwdSubs) sub(cwd)
+        }
         break
+      }
     }
   }
 
@@ -1063,16 +1072,6 @@ export class XtermRenderer implements TerminalRenderer {
 
   onClipboardWrite(cb: ClipboardWriteCallback): void {
     this.clipboardSubs.push(cb)
-    this.term?.parser.registerOscHandler(52, (data: string) => {
-      // decodeOsc52 is a pure parser imported from the clipboard module
-      // and does not touch the clipboard — the callback fires the decoded
-      // text upward, the policy layer writes it (AD-6).
-      const decoded = decodeOsc52(data)
-      if (decoded !== null) {
-        cb(decoded)
-      }
-      return false
-    })
   }
 
   paste(text: string): boolean {
@@ -1302,6 +1301,10 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
     this.notificationSubs = []
+    this.titleSubs = []
+    this.cwdSubs = []
+    this.bellSubs = []
+    this.clipboardSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)
       this._dprMedia = null

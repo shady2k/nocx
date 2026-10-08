@@ -110,11 +110,16 @@ type App struct {
 	ToolAuthorizer      toolendpoint.Authorizer
 	ToolSurfaceObserver toolendpoint.Observer
 	agentEnroller       *paneEnroller
-	ShellIntegration    shellintegration.ShellIntegration
-	Updater             update.Updater
-	Profiles            profile.ProfileRepository
-	Credentials         credential.SecretStore
-	skills              assistant.SkillLibrary
+	// workerRestorations are classified once while New owns the persisted
+	// restart document, then relaunched from Start after the local helper has
+	// been installed and before the transport accepts a client.
+	workerRestorations      []workers.Restoration
+	workerRestoreEnrolments workerRestoreEnroller
+	ShellIntegration        shellintegration.ShellIntegration
+	Updater                 update.Updater
+	Profiles                profile.ProfileRepository
+	Credentials             credential.SecretStore
+	skills                  assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -2520,17 +2525,11 @@ func New(opts ...Option) (*App, error) {
 	assistantWorkerRecord := &workerRecordWithCheckouts{Registrar: workerRecord, checkouts: checkouts}
 
 	// THE RESTART RECORD'S ONE READ (ADR-0079). It runs here, after the layout
-	// chain and the worker record both exist and before the transport can
-	// serve a question, for the reason clearWindowOnCleanStart gives for its
-	// own position: a backend start IS an application start, so what the last
-	// one left behind is judged now or not at all.
-	//
-	// It classifies and forgets; it does not relaunch (nocx-xn63t.5.2 owns
-	// that, and the launch record it needs does not exist yet). What it does
-	// buy is the half that is true today: a worker whose pane was closed while
-	// nocx was down stops being a record nobody will ever resolve, and one that
-	// cannot be resumed is said so at startup instead of in a document.
-	restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
+	// chain and the worker record both exist. The pass prunes closed panes and
+	// resolves each open worker against the agent record, but holds the result
+	// for Start: local helper installation happens there, and a pane opened
+	// before it would be refused as unavailable.
+	workerRestorations := restoreWorkerRecords(ctx, logger, workerRestarts, contentDB.Layout(), agentProbe{store: agentRecords})
 
 	// THE SWEEP (nocx-xn63t.1.6): the same service, asked on a schedule
 	// instead of by a coordinator, under the same removal refusals. The
@@ -2722,41 +2721,43 @@ func New(opts ...Option) (*App, error) {
 	sessionRoutes := hostRouteResolver(resolver)
 
 	app := &App{
-		lifecycleStopping:   lifecycleStopping,
-		Logger:              logger,
-		Session:             sess,
-		Transport:           tp,
-		ToolDispatcher:      toolDispatcher,
-		ToolAuthorizer:      toolAuthorizer,
-		ToolSurfaceObserver: toolSurface,
-		agentEnroller:       paneEnrol,
-		toolSurfaceCloser:   toolSurface,
-		UploadSources:       tp.UploadSources(),
-		ShellIntegration:    shint,
-		Credentials:         v,
-		skills:              skills,
-		vaultCloser:         v,
-		noteCloser:          noteCloser,
-		discoverySched:      discoverySched,
-		gitFactory:          gitFactory,
-		workerCheckouts:     checkouts,
-		checkoutSweeper:     checkoutSweeper,
-		helperRegistry:      helperReg,
-		helperArtifacts:     localHelperArtifacts(o),
-		localHelper:         localOpener,
-		sessionReconciler:   sessionReconciler,
-		sessionRoutes:       sessionRoutes,
-		paneViews:           paneViews,
-		logFilePath:         logFilePath,
-		logFile:             logFile,
-		procs:               procs,
-		attentionHost:       attentionHost,
-		notifyToast:         notifyToast,
-		notifyFeed:          notifyFeed,
-		notifyIngress:       notifyIngress,
-		notifyWindow:        notifyWindow,
-		UIState:             uiStateStore,
-		slogger:             slogger,
+		lifecycleStopping:       lifecycleStopping,
+		Logger:                  logger,
+		Session:                 sess,
+		Transport:               tp,
+		ToolDispatcher:          toolDispatcher,
+		ToolAuthorizer:          toolAuthorizer,
+		ToolSurfaceObserver:     toolSurface,
+		agentEnroller:           paneEnrol,
+		workerRestorations:      workerRestorations,
+		workerRestoreEnrolments: workerEnrol,
+		toolSurfaceCloser:       toolSurface,
+		UploadSources:           tp.UploadSources(),
+		ShellIntegration:        shint,
+		Credentials:             v,
+		skills:                  skills,
+		vaultCloser:             v,
+		noteCloser:              noteCloser,
+		discoverySched:          discoverySched,
+		gitFactory:              gitFactory,
+		workerCheckouts:         checkouts,
+		checkoutSweeper:         checkoutSweeper,
+		helperRegistry:          helperReg,
+		helperArtifacts:         localHelperArtifacts(o),
+		localHelper:             localOpener,
+		sessionReconciler:       sessionReconciler,
+		sessionRoutes:           sessionRoutes,
+		paneViews:               paneViews,
+		logFilePath:             logFilePath,
+		logFile:                 logFile,
+		procs:                   procs,
+		attentionHost:           attentionHost,
+		notifyToast:             notifyToast,
+		notifyFeed:              notifyFeed,
+		notifyIngress:           notifyIngress,
+		notifyWindow:            notifyWindow,
+		UIState:                 uiStateStore,
+		slogger:                 slogger,
 	}
 
 	// ── the client host (nocx-uo1k6, design D3) ────────────────────────
@@ -3126,6 +3127,13 @@ func (a *App) Start(ctx context.Context) error {
 			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, publishEffect: a.Transport.PublishSessionEffect, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
+
+	// A restored worker needs the same helper-backed session opener as a
+	// fresh pane. Resolve its durable identity in New, but launch only after
+	// Start has installed this machine's helper and reconciled carried-over
+	// sessions, before the transport can accept a renderer.
+	relaunchWorkerRecords(ctx, a.workerRestorations, a.Transport, a.Transport, a.workerRestoreEnrolments)
+	a.workerRestorations = nil
 
 	if err := a.Transport.Start(ctx); err != nil {
 		return err

@@ -14,14 +14,11 @@ import (
 	"github.com/shady2k/nocx/internal/git/spawn"
 )
 
-// branchCleanupTimeout bounds the one cleanup this file runs on a context the
-// caller's cancellation cannot reach: the removal of a branch git created for
-// an add that then failed (nocx-tlfoj). It is a bound on a HUNG git, not a
-// budget for the work — the work is three short reads and one guarded delete
-// against a repository the caller was already using — so it is generous, and
-// its only job is to stop a cleanup that will never finish from holding the
-// call that is already returning an error.
-const branchCleanupTimeout = 30 * time.Second
+// worktreeAddCleanupTimeout bounds cleanup after a worktree add fails. The partial
+// worktree, if Git registered one before failing, is removed before deleting
+// a branch created by this call. Cleanup does not inherit the cancelled add
+// context, and this bound keeps a hung Git from holding the failed call open.
+const worktreeAddCleanupTimeout = 30 * time.Second
 
 // The linked-worktree operations (brief nocx-xn63t.1.1). Everything about
 // spawning a child stays in this package (spec D16) and the argv comes from
@@ -57,8 +54,15 @@ func (r *Repo) AddWorktree(ctx context.Context, branch, base, path string) (git.
 	if branch == "" || path == "" {
 		return git.WorktreeAdded{}, errors.New("git: worktree add needs a branch and a path")
 	}
-	env := r.envSettled()
 	path = r.resolvePath(path)
+	if r.worktreeAdds != nil {
+		unlock, err := r.worktreeAdds.lock(ctx, r.commonGitDir, path)
+		if err != nil {
+			return git.WorktreeAdded{}, fmt.Errorf("wait for the worktree path reservation: %w", err)
+		}
+		defer unlock()
+	}
+	env := r.envSettled()
 
 	records, err := r.worktreeRecords(ctx, env)
 	if err != nil {
@@ -89,6 +93,12 @@ func (r *Repo) AddWorktree(ctx context.Context, branch, base, path string) (git.
 		// never have looked at would refuse a call git would have carried
 		// out. Created says so to the caller.
 		if checkoutErr := r.mutateArgv(ctx, env, spawn.WorktreeCheckoutArgs(path, branch)); checkoutErr != nil {
+			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), worktreeAddCleanupTimeout)
+			cleanupErr := r.removePartialWorktree(cleanupCtx, env, path, records)
+			cancelCleanup()
+			if cleanupErr != nil {
+				return git.WorktreeAdded{}, fmt.Errorf("%w; the partial checkout at %q could not be removed: %w", checkoutErr, path, cleanupErr)
+			}
 			return git.WorktreeAdded{}, checkoutErr
 		}
 		return git.WorktreeAdded{Created: false}, nil
@@ -109,26 +119,54 @@ func (r *Repo) AddWorktree(ctx context.Context, branch, base, path string) (git.
 		// and the call is returning an error.
 		//
 		// ON A CONTEXT THE CALLER'S CANCELLATION CANNOT REACH (nocx-tlfoj).
-		// The commonest reason the add above failed is that ctx ran out: the
-		// registrar gives a spawn and its enrolment ONE budget together
-		// (internal/workers/registrar.go, "covers spawn and enrolment"), so on
-		// a machine where `git worktree add` does not fit inside it, git makes
-		// the branch and is then killed. Every invocation discardBranch makes
-		// is refused by that same spent context, and the branch this call is
-		// returning an error ABOUT stays in the repository — which is a ref in
-		// a person's repo that only a dead call ever knew of. The same shape
-		// is already settled one layer up, where a spawn's undo runs on
-		// killContext (internal/app/workers.go, nocx-4gj5w): a cleanup may not
-		// be bounded by the clock whose expiry is what it cleans up after.
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), branchCleanupTimeout)
-		cleanupErr := r.discardBranch(cleanupCtx, env, branch, base, baseOID)
+		// Git may have registered and populated the worktree before a hook or
+		// cancellation makes the add fail. No undo value reaches the caller on
+		// this path, so remove that partial checkout here before attempting to
+		// delete the branch this call created. The cleanup context carries the
+		// caller's values without its cancellation and bounds both operations.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), worktreeAddCleanupTimeout)
+		worktreeErr := r.removePartialWorktree(cleanupCtx, env, path, records)
+		branchErr := r.discardBranch(cleanupCtx, env, branch, base, baseOID)
 		cancelCleanup()
-		if cleanupErr != nil {
-			return git.WorktreeAdded{}, fmt.Errorf("%w; and the branch %q it created could not be removed: %w", err, branch, cleanupErr)
+		var cleanupErrs []error
+		if worktreeErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove the partial checkout at %q: %w", path, worktreeErr))
+		}
+		if branchErr != nil {
+			cleanupErrs = append(cleanupErrs, fmt.Errorf("delete the branch %q this add created: %w", branch, branchErr))
+		}
+		if len(cleanupErrs) > 0 {
+			return git.WorktreeAdded{}, errors.Join(err, errors.Join(cleanupErrs...))
 		}
 		return git.WorktreeAdded{}, err
 	}
 	return git.WorktreeAdded{Created: true}, nil
+}
+
+// removePartialWorktree removes a linked worktree this AddWorktree call
+// registered before its Git mutation failed. It only removes a path absent
+// from the pre-add listing and confirmed in Git's current listing; an
+// unrelated or unregistered directory is never claimed by this cleanup.
+func (r *Repo) removePartialWorktree(ctx context.Context, env []string, path string, before []spawn.WorktreeRecord) error {
+	for _, rec := range before {
+		if samePath(rec.Path, path) {
+			return nil
+		}
+	}
+	after, err := r.worktreeRecords(ctx, env)
+	if err != nil {
+		return fmt.Errorf("list worktrees while cleaning the failed add: %w", err)
+	}
+	for _, rec := range after {
+		if !samePath(rec.Path, path) {
+			continue
+		}
+		if err := r.RemoveWorktree(ctx, path); err != nil {
+			return fmt.Errorf("remove partial worktree: %w", err)
+		}
+		return nil
+	}
+	return nil
 }
 
 // Worktrees lists every working tree of this repository with the state the
@@ -484,22 +522,31 @@ func (r *Repo) refuseOccupiedPath(path string) error {
 	return nil
 }
 
-// samePath reports whether two paths name the same directory. Symlinks are
-// resolved on both sides because git reports the path it RECORDED, which on
-// macOS is /private/var/... while a test (or a caller) may hold /var/... —
-// the same difference canonicalTempDir exists for. A path that cannot be
-// resolved (it is not there) falls back to the literal comparison, so a
-// worktree whose directory was deleted is still found by its own path.
+// samePath compares the resolved identity of both paths. Git may report a
+// physical path while a caller holds its symlink spelling; resolving the
+// longest existing ancestor also keeps aliases equal when the target leaf is
+// not yet present (as it is during worktree-add reservation).
 func samePath(a, b string) bool {
-	if filepath.Clean(a) == filepath.Clean(b) {
-		return true
+	return worktreePathIdentity(a) == worktreePathIdentity(b)
+}
+
+// worktreePathIdentity resolves existing symlink components and retains the
+// missing suffix. This is the path comparison owner for this Git seam; the app
+// separately supplies its canonical worktree root before calling this API.
+func worktreePathIdentity(path string) string {
+	clean := filepath.Clean(path)
+	absolute, err := filepath.Abs(clean)
+	if err != nil {
+		return clean
 	}
-	resolvedA, errA := filepath.EvalSymlinks(a)
-	resolvedB, errB := filepath.EvalSymlinks(b)
-	if errA != nil || errB != nil {
-		return false
+	if resolved, err := filepath.EvalSymlinks(absolute); err == nil {
+		return filepath.Clean(resolved)
 	}
-	return resolvedA == resolvedB
+	parent := filepath.Dir(absolute)
+	if parent == absolute {
+		return absolute
+	}
+	return filepath.Join(worktreePathIdentity(parent), filepath.Base(absolute))
 }
 
 // cancelled reports whether the caller's context is what stopped a read. It

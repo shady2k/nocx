@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/git"
@@ -60,10 +64,269 @@ func TestAddWorktreeCreatesTheBranchAtBase(t *testing.T) {
 	}
 }
 
+// TestAddWorktreeCleansARegisteredPartialCheckoutOnCancellation exercises a
+// Git add that has created its checkout and branch but has not returned. The
+// post-checkout hook signals this test only after Git registered and populated
+// the path, then stays alive until cancellation kills Git's process group.
+// This pins the AddWorktree error boundary: its caller has no undo value yet,
+// so the Git seam must roll back its own partial work. The worktree home is
+// under a TMPDIR symlink, matching the macOS /var -> /private/var path shape.
+func TestAddWorktreeCleansARegisteredPartialCheckoutOnCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		branch      string
+		preExisting bool
+	}{
+		{name: "new branch", branch: "feat/partial"},
+		{name: "pre-existing branch", branch: "keep", preExisting: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tempParent, err := os.MkdirTemp("", "nocx-partial-worktree-")
+			if err != nil {
+				t.Fatalf("make temp parent: %v", err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(tempParent) })
+			tempTarget := filepath.Join(tempParent, "real")
+			if err := os.Mkdir(tempTarget, 0o700); err != nil {
+				t.Fatalf("make temp target: %v", err)
+			}
+			tempAlias := filepath.Join(tempParent, "alias")
+			if err := os.Symlink(tempTarget, tempAlias); err != nil {
+				t.Fatalf("symlink temp target: %v", err)
+			}
+			t.Setenv("TMPDIR", tempAlias)
+
+			dir, home := worktreeRepo(t)
+			if !strings.HasPrefix(home, tempAlias+string(os.PathSeparator)) {
+				t.Fatalf("worktree home %q does not retain TMPDIR alias %q", home, tempAlias)
+			}
+			if tc.preExisting {
+				if err := commandIn(dir, "branch", tc.branch, "master").Run(); err != nil {
+					t.Fatalf("create pre-existing branch: %v", err)
+				}
+			}
+
+			env := append(gitEnv(t), "NOCX_TEST_CANCEL_PID="+strconv.Itoa(os.Getpid()))
+			hook := filepath.Join(dir, ".git", "hooks", "post-checkout")
+			hookBody := []byte("#!/bin/sh\nkill -USR1 \"$NOCX_TEST_CANCEL_PID\"\nexec tail -f /dev/null\n")
+			if err := os.WriteFile(hook, hookBody, 0o700); err != nil { //nolint:gosec // G306: Git must execute this controlled test hook.
+				t.Fatalf("install blocking post-checkout hook: %v", err)
+			}
+
+			signals := make(chan os.Signal, 1)
+			signal.Notify(signals, syscall.SIGUSR1)
+			defer signal.Stop(signals)
+
+			repo := openRepo(t, env, dir)
+			path := filepath.Join(home, "partial")
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			type addResult struct {
+				added git.WorktreeAdded
+				err   error
+			}
+			done := make(chan addResult, 1)
+			go func() {
+				added, addErr := repo.AddWorktree(ctx, tc.branch, "master", path)
+				done <- addResult{added: added, err: addErr}
+			}()
+
+			select {
+			case <-signals:
+				// The hook signals only after Git has populated and registered the
+				// checkout. Cancellation now exercises the partial-add rollback.
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("hook fired without the checkout at %q: %v", path, err)
+				}
+				cancel()
+			case result := <-done:
+				cancel()
+				t.Fatalf("AddWorktree returned before the post-checkout event: added=%+v err=%v", result.added, result.err)
+			}
+			result := <-done
+			if result.err == nil {
+				t.Fatal("AddWorktree succeeded after its context was cancelled in post-checkout")
+			}
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("partial checkout %q survived AddWorktree error %v: %v", path, result.err, err)
+			}
+			_, branchErr := commandIn(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+tc.branch).CombinedOutput()
+			if tc.preExisting && branchErr != nil {
+				t.Errorf("pre-existing branch %q was removed: %v", tc.branch, branchErr)
+			}
+			if !tc.preExisting && branchErr == nil {
+				t.Errorf("branch %q created by the failed add survived", tc.branch)
+			}
+		})
+	}
+}
+
 // TestAddWorktreeChecksOutAnExistingBranchWithoutApplyingBase is criterion 2's
 // first half: a branch that exists and is checked out nowhere is checked out
 // as it is — which the test can see because base is deliberately a commit the
 // branch is NOT at. If base were applied the tip would move; it does not.
+type observedDoneContext struct {
+	context.Context
+	doneCalled chan struct{}
+	once       sync.Once
+}
+
+func (c *observedDoneContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.doneCalled) })
+	return c.Context.Done()
+}
+
+// TestAddWorktreeWaiterCannotRemoveTheSuccessfulCheckout verifies ownership
+// when a second call targets the same physical path through a different
+// symlink spelling. The first add is held in its post-checkout hook after Git
+// registers the checkout. The second call must wait at the per-path gate, and
+// cancellation there must leave the first call's checkout and branch intact.
+func TestAddWorktreeWaiterCannotRemoveTheSuccessfulCheckout(t *testing.T) {
+	tempParent, tempParentErr := os.MkdirTemp("", "nocx-worktree-gate-")
+	if tempParentErr != nil {
+		t.Fatalf("make temp parent: %v", tempParentErr)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tempParent) })
+	tempTarget := filepath.Join(tempParent, "real")
+	if err := os.Mkdir(tempTarget, 0o700); err != nil {
+		t.Fatalf("make temp target: %v", err)
+	}
+	tempAlias := filepath.Join(tempParent, "alias")
+	if err := os.Symlink(tempTarget, tempAlias); err != nil {
+		t.Fatalf("symlink temp target: %v", err)
+	}
+	t.Setenv("TMPDIR", tempAlias)
+
+	dir, home := worktreeRepo(t)
+	linkedCwd := filepath.Join(home, "linked-caller")
+	if output, err := commandIn(dir, "worktree", "add", "--detach", "--", linkedCwd, "master").CombinedOutput(); err != nil {
+		t.Fatalf("create linked caller worktree: %v: %s", err, output)
+	}
+	pathAlias := filepath.Join(home, "winner")
+	if !strings.HasPrefix(pathAlias, tempAlias+string(os.PathSeparator)) {
+		t.Fatalf("worktree path %q does not retain TMPDIR alias %q", pathAlias, tempAlias)
+	}
+	pathReal := filepath.Join(tempTarget, strings.TrimPrefix(pathAlias, tempAlias+string(os.PathSeparator)))
+	fifo := filepath.Join(tempParent, "release")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("make release FIFO: %v", err)
+	}
+	hookStarted := filepath.Join(tempParent, "hook-started")
+	env := append(gitEnv(t),
+		"NOCX_TEST_CANCEL_PID="+strconv.Itoa(os.Getpid()),
+		"NOCX_HOOK_STARTED="+hookStarted,
+		"NOCX_RELEASE_FIFO="+fifo,
+	)
+	hook := filepath.Join(dir, ".git", "hooks", "post-checkout")
+	hookBody := []byte("#!/bin/sh\nif [ ! -e \"$NOCX_HOOK_STARTED\" ]; then\n  : > \"$NOCX_HOOK_STARTED\"\n  kill -USR1 \"$NOCX_TEST_CANCEL_PID\"\n  cat \"$NOCX_RELEASE_FIFO\" >/dev/null\nfi\n")
+	if err := os.WriteFile(hook, hookBody, 0o700); err != nil { //nolint:gosec // G306: Git must execute this controlled test hook.
+		t.Fatalf("install gated post-checkout hook: %v", err)
+	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGUSR1)
+	defer signal.Stop(signals)
+
+	winnerFactory := NewFactory(WithEnv(env))
+	waiterFactory := NewFactory(WithEnv(env))
+	t.Cleanup(winnerFactory.Stop)
+	t.Cleanup(waiterFactory.Stop)
+	open := func(factory *Factory, cwd string) *Repo {
+		t.Helper()
+		repo, outcome, err := factory.Open(context.Background(), cwd)
+		if err != nil {
+			t.Fatalf("open Repo from shared Factory: %v", err)
+		}
+		if outcome.State != git.OpenOK {
+			t.Fatalf("Factory.Open outcome = %s, want ok", outcome.State)
+		}
+		local, ok := repo.(*Repo)
+		if !ok {
+			t.Fatalf("Factory.Open returned %T, want *Repo", repo)
+		}
+		return local
+	}
+	winnerRepo := open(winnerFactory, dir)
+	waiterRepo := open(waiterFactory, linkedCwd)
+	if winnerRepo == waiterRepo || winnerRepo.gitDir == waiterRepo.gitDir {
+		t.Fatal("test setup did not open distinct Repo values from the main and linked worktrees")
+	}
+	if !samePath(winnerRepo.commonGitDir, waiterRepo.commonGitDir) {
+		t.Fatalf("common git directories differ: %q and %q", winnerRepo.commonGitDir, waiterRepo.commonGitDir)
+	}
+	if winnerRepo.worktreeAdds != waiterRepo.worktreeAdds {
+		t.Fatal("Repos from separate Factories do not share the worktree-add gate")
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	t.Cleanup(cancelFirst)
+	type addResult struct {
+		added git.WorktreeAdded
+		err   error
+	}
+	firstDone := make(chan addResult, 1)
+	go func() {
+		added, addErr := winnerRepo.AddWorktree(firstCtx, "feat/race", "master", pathAlias)
+		firstDone <- addResult{added: added, err: addErr}
+	}()
+	select {
+	case <-signals:
+		if _, err := os.Stat(pathAlias); err != nil {
+			t.Fatalf("hook fired without winner checkout %q: %v", pathAlias, err)
+		}
+	case result := <-firstDone:
+		t.Fatalf("first AddWorktree returned before its checkout hook: added=%+v err=%v", result.added, result.err)
+	}
+
+	secondBase, cancelSecond := context.WithCancel(context.Background())
+	t.Cleanup(cancelSecond)
+	secondCtx := &observedDoneContext{Context: secondBase, doneCalled: make(chan struct{})}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, secondErr := waiterRepo.AddWorktree(secondCtx, "feat/race", "master", pathReal)
+		secondDone <- secondErr
+	}()
+	// Done is first read by the gate after it has registered this same-path
+	// waiter. Cancellation therefore tests the gate, not a later Git command.
+	<-secondCtx.doneCalled
+	otherUnlock, unlockErr := winnerRepo.worktreeAdds.lock(context.Background(), winnerRepo.commonGitDir, filepath.Join(home, "independent"))
+	if unlockErr != nil {
+		t.Fatalf("different target path was serialized: %v", unlockErr)
+	}
+	otherUnlock()
+	cancelSecond()
+	secondErr := <-secondDone
+	if !errors.Is(secondErr, context.Canceled) || !strings.Contains(secondErr.Error(), "worktree path reservation") {
+		t.Fatalf("second AddWorktree error = %v, want cancellation while waiting for the path reservation", secondErr)
+	}
+	if _, err := os.Lstat(pathAlias); err != nil {
+		t.Fatalf("second call removed the first call's checkout: %v", err)
+	}
+	if err := commandIn(dir, "show-ref", "--verify", "--quiet", "refs/heads/feat/race").Run(); err != nil {
+		t.Fatalf("second call removed the first call's branch: %v", err)
+	}
+
+	// Release the winner's hook without cancelling its context; its add must
+	// return successfully and retain the checkout it owns.
+	writer, openErr := os.OpenFile(fifo, os.O_WRONLY, 0) //nolint:gosec // G304: FIFO is created under this test's temp directory.
+	if openErr != nil {
+		t.Fatalf("open hook release FIFO: %v", openErr)
+	}
+	_, writeErr := writer.Write([]byte("continue\n"))
+	closeErr := writer.Close()
+	if writeErr != nil {
+		t.Fatalf("release post-checkout hook: %v", writeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close hook release FIFO: %v", closeErr)
+	}
+	first := <-firstDone
+	if first.err != nil || !first.added.Created {
+		t.Fatalf("first AddWorktree = %+v, %v; want successful created checkout", first.added, first.err)
+	}
+	if _, err := os.Lstat(pathAlias); err != nil {
+		t.Fatalf("winner checkout did not survive both calls: %v", err)
+	}
+}
+
 func TestAddWorktreeChecksOutAnExistingBranchWithoutApplyingBase(t *testing.T) {
 	dir, home := worktreeRepo(t)
 	first := gitOut(t, dir, "rev-parse", "master")

@@ -34,6 +34,7 @@ import (
 	"github.com/shady2k/nocx/internal/git"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
@@ -873,11 +874,34 @@ func (noopSupervisor) Attach(context.Context, workers.Participant) error { retur
 // over a real registry), so the checkout existed from before the pane opened
 // — the interval's start — and `git branch` afterwards settles its end.
 func TestANeverEnrolledWorkerLeavesNeitherCheckoutNorBranchBehind(t *testing.T) {
+	tempParent, err := os.MkdirTemp("", "nocx-bf035-workspace-")
+	if err != nil {
+		t.Fatalf("make temp parent: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tempParent) })
+	workspaceTarget := filepath.Join(tempParent, "tmp-real")
+	if err := os.Mkdir(workspaceTarget, 0o700); err != nil {
+		t.Fatalf("make real temp root: %v", err)
+	}
+	workspaceAlias := filepath.Join(tempParent, "tmp-link")
+	if err := os.Symlink(workspaceTarget, workspaceAlias); err != nil {
+		t.Fatalf("symlink temp root %q: %v", workspaceTarget, err)
+	}
+	// Reproduce macOS's path shape on Linux: TempDir itself is reached via
+	// one symlinked ancestor, as when macOS returns /var/folders for the
+	// physical /private/var/folders tree.
+	t.Setenv("TMPDIR", workspaceAlias)
 	repoDir, _ := initRealRepo(t)
+	worktreeRoot := t.TempDir()
+	for _, tempPath := range []string{repoDir, worktreeRoot} {
+		if !strings.HasPrefix(tempPath, workspaceAlias+string(os.PathSeparator)) {
+			t.Fatalf("TempDir path %q does not retain TMPDIR alias %q", tempPath, workspaceAlias)
+		}
+	}
 	factory := gitlocal.NewFactory()
 	t.Cleanup(factory.Stop)
 
-	logger := log.NewSlogAdapter(nil)
+	_, logger := logtest.New(t)
 	ptys := &workerTestPTYFactory{log: logger}
 	reg := session.New(logger, ptys)
 	t.Cleanup(func() {
@@ -893,7 +917,7 @@ func TestANeverEnrolledWorkerLeavesNeitherCheckoutNorBranchBehind(t *testing.T) 
 	spawner := &workerSpawner{
 		layout: tabs, opener: &fakeAxisOpener{reg: reg}, sessions: reg,
 		integration: awaiter, enrolments: enrol,
-		workspace: "ws-test", repos: factory, worktreeRoot: t.TempDir(), log: logger,
+		workspace: "ws-test", repos: factory, worktreeRoot: worktreeRoot, log: logger,
 	}
 	registrar := workers.NewRegistrar(
 		workers.NewMemoryStore(), spawner, enrol, noopSupervisor{},
@@ -927,10 +951,10 @@ func TestANeverEnrolledWorkerLeavesNeitherCheckoutNorBranchBehind(t *testing.T) 
 			t.Fatal("a launcher that never enrols registered anyway")
 		}
 		if _, statErr := os.Lstat(wantPath); !errors.Is(statErr, os.ErrNotExist) {
-			t.Fatalf("the checkout at %q survived: %v", wantPath, statErr)
+			t.Errorf("the checkout at %q survived: %v; registration error: %v", wantPath, statErr, err)
 		}
 		if out, branchErr := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "feat/x").CombinedOutput(); branchErr == nil { //nolint:gosec // repoDir is this test's temp repository
-			t.Fatalf("the branch the spawn created survived: %s", strings.TrimSpace(string(out)))
+			t.Errorf("the branch the spawn created survived: %s; registration error: %v", strings.TrimSpace(string(out)), err)
 		}
 	})
 

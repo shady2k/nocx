@@ -117,14 +117,15 @@ func TestOpenCurrentGitAccepted(t *testing.T) {
 }
 
 // TestOpenRevParseMalformed: rev-parse's output is validated, not trusted —
-// one line, three lines, or a relative path is notARepository, never a path
-// we hand to a subprocess.
+// anything other than the three expected paths, or a relative worktree/git
+// path, is notARepository and never becomes a subprocess working directory.
 func TestOpenRevParseMalformed(t *testing.T) {
 	cases := map[string]string{
 		"one line":      "/only/one\n",
-		"three lines":   "/one\n/two\n/three\n",
-		"relative path": "relative\nrelative/.git\n",
-		"empty":         "\n\n",
+		"two lines":     "/one\n/two\n",
+		"four lines":    "/one\n/two\n/three\n/four\n",
+		"relative path": "relative\nrelative/.git\n/one/.git\n",
+		"empty":         "\n\n\n",
 	}
 	for name, answer := range cases {
 		t.Run(name, func(t *testing.T) {

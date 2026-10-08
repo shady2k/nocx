@@ -38,12 +38,12 @@ func StatusArgs() []string {
 	}
 }
 
-// RevParseArgs asks git for the two values that are the binding's identity:
-// the worktree root and the absolute git directory. git prints exactly two
-// lines (verified on git 2.55); the caller validates that rather than
-// trusting it.
+// RevParseArgs asks git for the worktree root, its absolute git directory,
+// and the common git directory shared by linked worktrees. The final path may
+// be relative to the command's working directory; the caller resolves and
+// validates all three values.
 func RevParseArgs() []string {
-	return []string{"rev-parse", "--show-toplevel", "--absolute-git-dir"}
+	return []string{"rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-common-dir"}
 }
 
 // AddArgs stages the pathspecs on stdin, NUL-separated (D8): paths never

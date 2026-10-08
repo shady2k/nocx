@@ -165,6 +165,7 @@ export interface RendererMock extends TerminalRenderer {
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
   awaitWriteBarrier: Mock<() => Promise<void>>
+  hasUnsettledWrite: Mock<() => boolean>
   /** The snippet-palette chord handler — stored, so a test can fire it the
    *  way xterm's custom key handler would. */
   onSnippetChord: Mock<(cb: (() => void) | null) => void>
@@ -300,6 +301,9 @@ export function createRendererMock(): RendererMock {
     // the ORDER (nocx-8rtr.1 — write() is fire-and-forget, so a synchronous
     // read can answer about the terminal before the bytes) overrides it.
     awaitWriteBarrier: vi.fn(async () => {}),
+    // A normal fixture has no parse work outstanding; ordering tests opt into
+    // it explicitly so a parse barrier has a meaningful target.
+    hasUnsettledWrite: vi.fn(() => false),
     onSnippetChord: vi.fn((cb: (() => void) | null) => {
       snippetChordCb = cb
     }),

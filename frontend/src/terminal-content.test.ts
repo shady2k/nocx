@@ -11786,16 +11786,16 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       return frozen!.el
     }
 
-    /** THE PROMPT FINISHED PAINTING. nocx.bash appends the OSC 133 B marker
-     *  to PS1 as its final action, so B rides the prompt's last byte and the
-     *  parse pass that carried it is the pass the prompt's redraw ends in —
-     *  which is why the marker and the write-parsed fire together here, in
-     *  that order, exactly as xterm's OSC handler and onWriteParsed do. */
-    function promptPainted(
+    /** THE PROMPT FINISHED PAINTING. The helper sends screen bytes before
+     *  their promptBoundary effect, but xterm may still be parsing those bytes
+     *  when the effect arrives. Model that ordering with a pending write and
+     *  the renderer's FIFO barrier. */
+    async function promptPainted(
       content: TerminalContent,
       renderer: ReturnType<typeof rendererOf>,
-    ): void {
+    ): Promise<void> {
       const session = sessionOf(content)
+      renderer.hasUnsettledWrite.mockReturnValue(true)
       session.fireEffect({
         sessionId: session.sessionId,
         generation: '1',
@@ -11805,6 +11805,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         body: '',
       })
       renderer._fireWriteParsed()
+      renderer.hasUnsettledWrite.mockReturnValue(false)
+      await Promise.resolve()
     }
 
     /** Give the automatic attachment the whole of its asynchronous path — the
@@ -11868,7 +11870,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         const renderer = rendererOf(content)
         // The prompt came back and finished painting — the screen is nobody's
         // as of this pass.
-        promptPainted(content, renderer)
+        await promptPainted(content, renderer)
         // …and then the background child repainted it. That write, parsed
         // after the handback, is what makes this screen worth attaching; the
         // finished-command case below has no such write and is refused.
@@ -11935,7 +11937,47 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         // the marker and this test goes green on a broken product, because a
         // bare write after the freeze is what the defect mistook for a live
         // screen.
-        promptPainted(content, renderer)
+        await promptPainted(content, renderer)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        await settleAttachment()
+
+        expect(targetNamed(ed)).toBe('agent')
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+
+    it('closes handback when promptBoundary arrives after its bytes parsed', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+
+        // The prompt bytes are already parsed when the helper's ordered
+        // control-plane notification reaches the renderer. There is no later
+        // write to rescue a handback that waits for the next parse event.
+        renderer._fireWriteParsed()
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '1',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
         const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
         renderer.captureLiveFrame = captureLiveFrame
 

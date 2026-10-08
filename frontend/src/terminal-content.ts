@@ -912,21 +912,16 @@ export class TerminalContent extends BasePaneContent {
    *  valid only while the live renderer has parsed bytes after that freeze. */
   private _lastFrozenBlock: BlockRecord | null = null
   private _screenWriteGeneration = 0
-  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. The
-   *  interval it closes has both ends named: it OPENS at a block's visual
-   *  freeze, which takes the command's rows out of the grid, and it CLOSES
-   *  when the prompt that follows has finished painting — the OSC 133 B
-   *  marker, which nocx.bash appends to PS1 as its final action in every
-   *  branch (__nocx_b_marker, :1227/:1243/:1245), so B is the prompt's last
-   *  byte. A write parsed AFTER that belongs to something else, and that is
-   *  the whole test for whether this screen is worth attaching. */
+  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. A block's
+   *  visual freeze opens the interval; the backend's promptBoundary closes it.
+   *  That notification follows the screen bytes on the session transport, but
+   *  xterm parses them asynchronously, so close at the renderer's FIFO write
+   *  barrier rather than at the next unrelated parse event. */
   private _screenHandbackGeneration = -1
-  /** B was parsed in the pass now running; stamp the handback at the END of
-   *  it. The OSC handler fires inside the parse, the generation counts the
-   *  pass when the parse finishes (xterm WriteBuffer fires onWriteParsed
-   *  after its chunk loop), so stamping on the marker itself would leave the
-   *  prompt's own pass counting as newer bytes — off by exactly one. */
-  private _handbackPendingParse = false
+  /** Do not offer a frozen screen while its promptBoundary write fence is open. */
+  private _screenHandbackPending = false
+  /** A clear invalidates a promptBoundary barrier still waiting on xterm. */
+  private _screenHandbackEpoch = 0
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -2498,8 +2493,9 @@ export class TerminalContent extends BasePaneContent {
         onClear: () => {
           this._lastFrozenBlock = null
           this._automaticFrameOwner = null
+          this._screenHandbackEpoch++
           this._screenHandbackGeneration = -1
-          this._handbackPendingParse = false
+          this._screenHandbackPending = false
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
@@ -4826,7 +4822,26 @@ export class TerminalContent extends BasePaneContent {
       // prompt redraw interval; it never mutates authenticated lifecycle state.
       if (effect.kind === 'promptBoundary') {
         if (!this._awaitsIntegration) this._settle()
-        this._handbackPendingParse = true
+        const epoch = this._screenHandbackEpoch
+        const closeHandback = () => {
+          if (this._disposed || epoch !== this._screenHandbackEpoch) return
+          this._screenHandbackGeneration = this._screenWriteGeneration
+          this._screenHandbackPending = false
+        }
+        if (renderer.hasUnsettledWrite()) {
+          // Until the barrier opens, a frozen screen is not a safe attachment:
+          // the prompt bytes may already be queued but not yet parsed.
+          this._screenHandbackPending = true
+          // session.effect follows the screen data, but xterm's parser is
+          // asynchronous. Its FIFO barrier includes exactly the writes that
+          // arrived before this effect, not later output from a live command.
+          void renderer.awaitWriteBarrier().then(closeHandback, () => {
+            // Keep automatic attachment closed if the renderer cannot prove
+            // where this boundary landed; a clear or disposal ends the fence.
+          })
+        } else {
+          closeHandback()
+        }
       }
       renderer.applySessionEffect?.(effect)
     })
@@ -4925,13 +4940,6 @@ export class TerminalContent extends BasePaneContent {
       this.scheduleLiveResize()
       // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
       this._screenWriteGeneration++
-      // The prompt finished painting in this pass: the screen is nobody's
-      // as of now, so anything parsed later belongs to something that is
-      // still writing it (_screenHandbackGeneration).
-      if (this._handbackPendingParse) {
-        this._handbackPendingParse = false
-        this._screenHandbackGeneration = this._screenWriteGeneration
-      }
       // carries the same "working, nothing written yet" indicator a turn
       // does, in the live region where its output will appear, and the
       // first parsed write is the moment that claim stops being true.
@@ -6875,6 +6883,7 @@ export class TerminalContent extends BasePaneContent {
     }
     const frozen = this._lastFrozenBlock
     if (
+      this._screenHandbackPending ||
       frozen === null ||
       this._screenWriteGeneration <= this._screenHandbackGeneration ||
       !manager.blocks.includes(frozen) ||

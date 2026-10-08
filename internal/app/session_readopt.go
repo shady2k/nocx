@@ -185,6 +185,7 @@ type readoptPass struct {
 	// snapshots, and without this registration they would land at a client
 	// that forwards them nowhere. Nil is a legitimate wiring.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half, the same seam
 	// the fresh-open path carries: a restored pane's runtime goes on streaming
 	// the rows that leave its screen (helper_block_rows.go). Nil wires nothing.
@@ -804,6 +805,9 @@ func (rp *readoptPass) readopt(
 				nocxlog.From(ctx).Warn("screen assembly lost on the carrier",
 					"session", string(sid), "reason", reason)
 			})
+		}
+		if rp.publishEffect != nil {
+			attached.OnEffect(func(effect proto.EffectFrame) { rp.publishEffect(sid, effect) })
 		}
 		if entry.Exit != nil {
 			// The window frontier travels WITH the exit status (nocx-isjh4):

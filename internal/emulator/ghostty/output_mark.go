@@ -24,7 +24,14 @@ import "github.com/shady2k/nocx/internal/emulator"
 // sixth, so one pass over the bytes keeps each candidate's own position
 // exactly as far as the caller actually committed to vt_write, which two
 // independent passes over the same slice could not (see scanMarkers).
-const outputMarkFixed = "\x1b]133;C\x07"
+const (
+	outputMarkFixed     = "\x1b]133;C\x07"
+	promptBoundaryFixed = "\x1b]133;B\x07"
+)
+
+func promptBoundaryMatches(idx int, b byte) bool {
+	return idx < len(promptBoundaryFixed) && b == promptBoundaryFixed[idx]
+}
 
 // outputMarkMatches reports whether b is the idx'th byte of the output mark.
 func outputMarkMatches(idx int, b byte) bool {

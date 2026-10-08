@@ -139,7 +139,7 @@ func (f *Factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 		return nil, outcome, nil
 	}
 
-	toplevel, gitDir, err := revParse(ctx, gitPath, env, cwd)
+	toplevel, gitDir, commonGitDir, err := revParse(ctx, gitPath, env, cwd)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, git.OpenOutcome{}, err
@@ -156,12 +156,14 @@ func (f *Factory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutco
 		resolver = f.env
 	}
 	repo := &Repo{
-		gitPath:   gitPath,
-		pinnedEnv: f.fixedEnv,
-		resolver:  resolver,
-		toplevel:  toplevel,
-		gitDir:    gitDir,
-		ceilings:  f.ceilings,
+		gitPath:      gitPath,
+		pinnedEnv:    f.fixedEnv,
+		resolver:     resolver,
+		toplevel:     toplevel,
+		gitDir:       gitDir,
+		commonGitDir: commonGitDir,
+		ceilings:     f.ceilings,
+		worktreeAdds: &processWorktreeAdds,
 		// Which worktree-list encoding this git can answer (2.36 added the
 		// NUL form; the floor is 2.25). Decided once, here, where the version
 		// is known — the same place the floor itself is decided.

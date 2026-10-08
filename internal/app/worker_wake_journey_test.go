@@ -627,7 +627,21 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// Set BEFORE the stand: the real daemon it starts inherits this process's
 	// environment at THAT moment, and every shell it forks afterwards — the
 	// coordinator's own pane and every worker's alike — inherits the daemon's.
-	t.Setenv("PATH", mockDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The test-only launcher keeps workers.spawn's command a literal argv.
+	// After the mocked agent exits, it ends the pane's shell so the supervisor
+	// observes a real session exit without passing shell syntax to workers.spawn.
+	workerLaunchDir := t.TempDir()
+	realClaude := filepath.Join(mockDir, "claude")
+	quotedClaude := "'" + strings.ReplaceAll(realClaude, "'", "'\\''") + "'"
+	launcher := "#!/bin/sh\n" + quotedClaude + " \"$@\"\nstatus=$?\n" +
+		"kill -KILL \"$PPID\" 2>/dev/null || true\nexit \"$status\"\n"
+	if err := os.WriteFile(filepath.Join(workerLaunchDir, "claude"), []byte(launcher), 0o700); err != nil { //nolint:gosec // this test launcher must be executable in its private temp directory
+		t.Fatalf("write worker exit launcher: %v", err)
+	}
+	// Set BEFORE the stand: the real daemon it starts inherits this process's
+	// environment at THAT moment, and every shell it forks afterwards — the
+	// coordinator's own pane and every worker's alike — inherits it.
+	t.Setenv("PATH", workerLaunchDir+string(os.PathListSeparator)+mockDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("S14_CAPTURES_DIR", capturesDir)
 	t.Setenv("S14_STATE_DIR", stateDir)
 
@@ -853,17 +867,11 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	stand.waitForState(t, blockedSession, agentdriver.StatePermissionChoice)
 	stand.waitForObservedStates(t, blockedSpawn.ID, workers.ObservedBlocked, 1)
 
-	// The worker whose PROCESS ends. The command runs the agent and then ENDS
-	// THE PANE, which is what a worker's process ending actually is here: the
-	// supervisor watches the SESSION (workers.go's Attach), so a pane whose
-	// shell is gone is the fact, and an agent that merely returns to its
-	// prompt leaves one behind. `exec` would be the other way to make the mock
-	// the session's process, and it is not usable: the shell integration wraps
-	// the agent's name in an enrolment function, and a pane that never
-	// enrolled is a pane the readiness axis never observed at all — measured,
-	// this journey's own first attempt, which failed with "nocx never observed
-	// this pane".
-	doomed := stand.cueCall(t, coordinator, "workers.spawn", map[string]any{"command": "claude; exit", "task": "you will not get far"})
+	// The worker whose PROCESS ends. Its command remains a literal executable;
+	// the test launcher above ends the shell after the mocked agent exits. The
+	// shell integration can therefore enrol the pane before the supervisor sees
+	// the session close, without shell metacharacters in workers.spawn.
+	doomed := stand.cueCall(t, coordinator, "workers.spawn", map[string]any{"command": "claude", "task": "you will not get far"})
 	var doomedSpawn struct {
 		ID string `json:"id"`
 	}

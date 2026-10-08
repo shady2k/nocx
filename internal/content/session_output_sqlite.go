@@ -581,6 +581,31 @@ func sessionOutputGaps(ctx context.Context, tx *sql.Tx, sessionID string, row se
 // Read returns everything kept for a session, adjacent chunks joined into
 // runs. An unknown session is an empty recording: nothing was produced, or
 // all of it was dropped, and neither is a fault a caller can act on.
+// RecoveryStatus reads only the row metadata that explains what a reclaim
+// cannot recover from the replay ring. In particular, it never selects from
+// session_output_chunks: the raw-byte reader is retired at the renderer cutover.
+func (s *sqliteContent) RecoveryStatus(ctx context.Context, sessionID string) (SessionOutputRecoveryStatus, error) {
+	out := SessionOutputRecoveryStatus{Gaps: []Gap{}}
+	var next int64
+	var gaps string
+	err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT next_offset, gaps FROM session_output WHERE session_id = ?`, sessionID).
+		Scan(&next, &gaps)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return SessionOutputRecoveryStatus{}, fmt.Errorf("content: session output: read recovery status: %w", err)
+	}
+	out.Produced = uint64(next) //nolint:gosec // byte offsets are non-negative by schema
+	if gaps != "" && gaps != "[]" {
+		if decodeErr := json.Unmarshal([]byte(gaps), &out.Gaps); decodeErr != nil {
+			return SessionOutputRecoveryStatus{}, fmt.Errorf("content: session output: decode recovery gaps: %w", decodeErr)
+		}
+	}
+	return out, nil
+}
+
 func (s *sqliteContent) Read(ctx context.Context, sessionID string) (SessionOutputRecording, error) {
 	out := SessionOutputRecording{SessionID: sessionID}
 	var first, next, byteLen int64

@@ -11,6 +11,7 @@ import {
 } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionEffect } from './generated/session.effect'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -1906,6 +1907,11 @@ describe('reclaiming a live session', () => {
       gaps: over.gaps ?? [],
       produced: over.produced ?? 0,
     })
+    answerLast(ws, 'session.recoveryStatus', {
+      sessionId: SID,
+      produced: over.produced ?? 0,
+      gaps: over.gaps ?? [],
+    })
     await settle()
   }
 
@@ -1928,6 +1934,15 @@ describe('reclaiming a live session', () => {
       jsonrpc: '2.0',
       id: req?.id,
       error: { code: -32601, message: 'method not found: session output store not wired' },
+    })
+    const status = ws
+      .requests()
+      .filter((r) => r.method === 'session.recoveryStatus')
+      .pop()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: status?.id,
+      error: { code: -32601, message: 'session recovery status unavailable' },
     })
     await settle()
   }
@@ -2028,6 +2043,7 @@ describe('reclaiming a live session', () => {
     expect(seen.join('')).toBe('an hour of work and the next second')
     expect(session.recovered).toEqual({
       bytes: 15,
+      statusUnavailable: false,
       gaps: [],
       // The size the SESSION runs at, carried through so the surface renders
       // the recovered bytes at the geometry that produced them.
@@ -2080,6 +2096,7 @@ describe('reclaiming a live session', () => {
 
     expect(session.recovered).toEqual({
       bytes: 8,
+      statusUnavailable: false,
       gaps: [{ start: 4, end: 900, reason: 'cap' }],
       size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
     })
@@ -2177,6 +2194,7 @@ describe('reclaiming a live session', () => {
     expect(session.sessionId).toBe(SID)
     expect(session.recovered).toEqual({
       bytes: 0,
+      statusUnavailable: true,
       gaps: [{ start: 0, end: 7, reason: 'unrecorded' }],
       // The named default a session with no client holds: a read that could
       // not happen reports no geometry of its own, and 80x24 is what the
@@ -2282,5 +2300,103 @@ describe('session.displaced notification', () => {
     const sent = ws.sent.length
     client.sendToSession(SID, 'x')
     expect(ws.sent.length).toBe(sent + 1)
+  })
+})
+
+describe('session.effect notification', () => {
+  const effect = (over: Record<string, unknown> = {}) => ({
+    jsonrpc: '2.0',
+    method: 'session.effect',
+    params: {
+      sessionId: SID,
+      generation: '4',
+      effectId: '7',
+      kind: 'clipboard',
+      title: '',
+      body: 'permitted text',
+      ...over,
+    },
+  })
+
+  it('dispatches the first effect and suppresses duplicate delivery by identity', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect())
+    ws.deliverText(effect())
+    expect(received).toEqual([
+      {
+        sessionId: SID,
+        generation: '4',
+        effectId: '7',
+        kind: 'clipboard',
+        title: '',
+        body: 'permitted text',
+      },
+    ])
+  })
+
+  it('dispatches and deduplicates an empty promptBoundary observation', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    expect(received).toEqual([
+      {
+        sessionId: SID,
+        generation: '4',
+        effectId: '7',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      },
+    ])
+  })
+
+  it('does not turn a full frame into a non-visual side effect', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":9}'), MSG_TYPE_METADATA),
+    )
+    expect(received).toEqual([])
+  })
+
+  it('delivers a notification once when its event is replayed', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'notification', title: 'Tests failed', body: 'finished' }))
+    ws.deliverText(effect({ kind: 'notification', title: 'Tests failed', body: 'finished' }))
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({
+      kind: 'notification',
+      title: 'Tests failed',
+      body: 'finished',
+    })
+  })
+
+  it('refuses unknown kinds and malformed identities', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'input' }))
+    ws.deliverText(effect({ effectId: '0' }))
+    expect(received).toEqual([])
+  })
+
+  it('buffers an event delivered before the pane registers its handler', async () => {
+    const { session, ws } = await connectedSession()
+    ws.deliverText(effect({ kind: 'notification', title: 'Build complete', body: 'done' }))
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({
+      kind: 'notification',
+      title: 'Build complete',
+      body: 'done',
+    })
   })
 })

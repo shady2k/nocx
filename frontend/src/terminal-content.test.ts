@@ -299,6 +299,7 @@ async function mountTerminal(
   view: EditorView
   ed: CommandEditor
   clipboard: ClipboardFake
+  gate: ClipboardGate
   content: TerminalContent
   tab: Pane
   teardown: () => void
@@ -306,11 +307,12 @@ async function mountTerminal(
   const clientFake = client ?? makeClient()
   // ClientFake is structurally a WSClient; the tab layer expects the real type.
   const wsClient = clientFake as unknown as WSClient
+  const gate = new ClipboardGate()
   const content = new TerminalContent(
     wsClient,
     opts.pane ?? anchoredPane(),
     clipboard,
-    new ClipboardGate(),
+    gate,
     makeBanner(),
     profileClient ?? null,
     () => {},
@@ -341,6 +343,7 @@ async function mountTerminal(
     view: viewOf(ed),
     ed,
     clipboard,
+    gate,
     content,
     tab,
     teardown: () => {
@@ -2424,6 +2427,17 @@ describe('the pane while shell integration is starting (nocx-ui8q6.1)', () => {
       // acted on alone, before any session.integrationChanged exists.
       expect(tab.pane.querySelector(WAITING)).not.toBeNull()
       expect(scrollbackFor(content).scrollbackLayout.style.display).toBe('none')
+      // Hostile OSC 133 B cannot forge authenticated integration.
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '99',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      })
+      expect(tab.pane.querySelector(WAITING)).not.toBeNull()
+      expect(content.shellState).not.toBe('integrated')
       session.send.mockClear()
       rendererOf(content)._fireData('x')
       expect(session.send).not.toHaveBeenCalled()
@@ -11772,14 +11786,26 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       return frozen!.el
     }
 
-    /** THE PROMPT FINISHED PAINTING. nocx.bash appends the OSC 133 B marker
-     *  to PS1 as its final action, so B rides the prompt's last byte and the
-     *  parse pass that carried it is the pass the prompt's redraw ends in —
-     *  which is why the marker and the write-parsed fire together here, in
-     *  that order, exactly as xterm's OSC handler and onWriteParsed do. */
-    function promptPainted(renderer: ReturnType<typeof rendererOf>): void {
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+    /** THE PROMPT FINISHED PAINTING. The helper delivers PTY bytes before
+     *  promptBoundary, but xterm may still be parsing those bytes when the
+     *  effect arrives. Model that ordering with a pending write and FIFO fence. */
+    async function promptPainted(
+      content: TerminalContent,
+      renderer: ReturnType<typeof rendererOf>,
+    ): Promise<void> {
+      const session = sessionOf(content)
+      renderer.hasUnsettledWrite.mockReturnValue(true)
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+      })
       renderer._fireWriteParsed()
+      renderer.hasUnsettledWrite.mockReturnValue(false)
+      await Promise.resolve()
     }
 
     /** Give the automatic attachment the whole of its asynchronous path — the
@@ -11843,7 +11869,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         const renderer = rendererOf(content)
         // The prompt came back and finished painting — the screen is nobody's
         // as of this pass.
-        promptPainted(renderer)
+        await promptPainted(content, renderer)
         // …and then the background child repainted it. That write, parsed
         // after the handback, is what makes this screen worth attaching; the
         // finished-command case below has no such write and is refused.
@@ -11863,6 +11889,92 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         teardown()
       }
     })
+    it('does not offer parsed prompt bytes when Ask is selected before promptBoundary arrives', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        // Screen bytes may parse before the corresponding control-plane
+        // boundary. Switching to Ask in that gap must not treat the prompt as
+        // background TUI output.
+        renderer._fireWriteParsed()
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        await settleAttachment()
+
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '2',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        await settleAttachment()
+
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('revalidates the live-screen owner when promptBoundary arrives during Ask capture', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'top', ['screen marker'])
+        const renderer = rendererOf(content)
+        await promptPainted(content, renderer)
+        // A background TUI paints after the prompt. Ask begins capturing that
+        // live screen, but the helper's boundary notification is still in
+        // flight and must revoke the candidate before capture commits.
+        renderer._fireWriteParsed()
+        let finishCapture!: (frame: CapturedFrame) => void
+        const captureLiveFrame = vi.fn(
+          () => new Promise<CapturedFrame>((resolve) => (finishCapture = resolve)),
+        )
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '2',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        finishCapture(defaultPinnedFrame())
+        await settleAttachment()
+
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+      } finally {
+        teardown()
+      }
+    })
+
     it('does not attach a historical block when no screen bytes follow its freeze', async () => {
       const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
         attachToDocument: true,
@@ -11895,6 +12007,51 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     // person who marked block A was handed block B as well, under a sentence
     // calling it the current screen of a full-screen program. The baseline
     // moves to the prompt's own last byte, which is what B is.
+    it('waits for every queued prompt write before opening the live-screen interval', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        let releaseBarrier!: () => void
+        renderer.hasUnsettledWrite.mockReturnValue(true)
+        renderer.awaitWriteBarrier.mockImplementation(
+          () => new Promise<void>((resolve) => (releaseBarrier = resolve)),
+        )
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '1',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        // Switch while the two prompt chunks are still behind xterm's fence.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+        renderer._fireWriteParsed()
+        renderer._fireWriteParsed()
+        renderer.hasUnsettledWrite.mockReturnValue(false)
+        releaseBarrier()
+        await Promise.resolve()
+
+        // The barrier resolves only after both chunks have parsed, so the
+        // prompt itself cannot reopen the interval.
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+
     it('does not attach a finished command whose prompt redrew and nothing else painted', async () => {
       const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
         attachToDocument: true,
@@ -11910,7 +12067,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         // the marker and this test goes green on a broken product, because a
         // bare write after the freeze is what the defect mistook for a live
         // screen.
-        promptPainted(renderer)
+        await promptPainted(content, renderer)
         const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
         renderer.captureLiveFrame = captureLiveFrame
 
@@ -11922,6 +12079,47 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+
+    it('keeps the next live repaint eligible when promptBoundary follows parsed prompt bytes', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+
+        // All prompt bytes have parsed before the ordered effect arrives.
+        renderer._fireWriteParsed()
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '1',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        // The very next parsed write is a background TUI repaint, not prompt
+        // tail. It must remain eligible after the boundary is closed.
+        renderer._fireWriteParsed()
+        chordOn(viewOf(ed).contentDOM)
+        await settleAttachment()
+
+        expect(targetNamed(ed)).toBe('agent')
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
       } finally {
         teardown()
       }
@@ -13410,12 +13608,49 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
    *  prompt are not unread output. The B marker is what a real prompt-end
    *  delivers, so the settle here is the one a user's session performs. */
   const settle = (content: TerminalContent): void => {
-    rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+    const session = sessionOf(content)
+    session.fireEffect({
+      sessionId: session.sessionId,
+      generation: '1',
+      effectId: '1',
+      kind: 'promptBoundary',
+      title: '',
+      body: '',
+    })
   }
 
   /** The notify.bell requests this pane sent, in order. */
   const bellCalls = (client: ClientFake): unknown[][] =>
     client.dispatcher.call.mock.calls.filter((c: unknown[]) => c[0] === 'notify.bell')
+
+  it('settles integrated startup on authenticated prompt_ready before a background bell', async () => {
+    const session = makeSession({ awaitsIntegration: true })
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The backend's promptBoundary is an observation, not lifecycle authority.
+      settle(content)
+      rendererOf(content)._fireBell()
+      expect(tab.hasActivity).toBe(false)
+
+      lifecycleHandler(
+        client,
+        session.sessionId,
+      )({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      rendererOf(content)._fireBell()
+
+      expect(tab.hasActivity).toBe(true)
+      expect(bellCalls(client)).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
 
   it('reports the bell AND marks the tab, addressing the live session', async () => {
     const client = makeClient()
@@ -17285,6 +17520,35 @@ describe('the prompt prediction measures at the real block width, once per frame
     } finally {
       frames.restore()
       h.restore()
+    }
+  })
+})
+
+describe('runtime clipboard effects keep the existing permission gate', () => {
+  it('denies a clipboard write until permission is granted, then writes once', async () => {
+    const clipboard = makeClipboard()
+    const client = makeClient()
+    const mounted = await mountTerminal(clipboard, {}, client)
+    try {
+      const session = client._sessions[0]
+      if (!session) throw new Error('session not opened')
+      const effect = {
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'clipboard' as const,
+        title: '',
+        body: 'runtime text',
+      }
+      session.fireEffect(effect)
+      await Promise.resolve()
+      expect(clipboard.writeText).not.toHaveBeenCalled()
+      mounted.gate.allow()
+      session.fireEffect({ ...effect, effectId: '2' })
+      expect(clipboard.writeText).toHaveBeenCalledTimes(1)
+      expect(clipboard.writeText).toHaveBeenCalledWith('runtime text')
+    } finally {
+      mounted.teardown()
     }
   })
 })

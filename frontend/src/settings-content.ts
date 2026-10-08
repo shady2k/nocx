@@ -85,6 +85,7 @@ export class SettingsContent extends SolidPaneContent {
      *  to the Worktrees section, which otherwise offers a period that
      *  governs nothing when the checkout record was never wired. */
     private readonly checkoutsStatus?: CheckoutsStatusStore,
+    private readonly agentRecordsClient?: import('./agent-records-client').AgentRecordsClient,
   ) {
     super()
   }
@@ -103,6 +104,7 @@ export class SettingsContent extends SolidPaneContent {
           policyClient: this.policyClient,
           emittingClient: this.emittingClient,
           agentAccessClient: this.agentAccessClient,
+          agentRecordsClient: this.agentRecordsClient,
           calibrationClient: this.calibrationClient,
           rulesClient: this.rulesClient,
           typingClient: this.typingClient,

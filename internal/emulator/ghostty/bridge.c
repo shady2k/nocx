@@ -170,16 +170,18 @@ static void cb_clipboard_write(GhosttyTerminal terminal, void *userdata,
 }
 
 /*
- * The body is the message. OSC 9 carries only its text, which the library
- * reports as the body with an empty title, and OSC 777 carries a title AND a
- * body; the port carries the body for both, which is the thing a notification
- * says.
+ * ADR-0047 §2.2 fixes the presentation request as title and body. Ghostty
+ * supplies an empty title for OSC 9 and the program's title for OSC 777.
+ * Copy both while the borrowed strings are valid in this callback.
  */
 static void cb_desktop_notification(
     GhosttyTerminal terminal, void *userdata,
     const GhosttyTerminalDesktopNotification *notification) {
   (void)terminal;
-  nocxGoNotification((uintptr_t)userdata, (uint8_t *)notification->body.ptr,
+  nocxGoNotification((uintptr_t)userdata,
+                     (uint8_t *)notification->title.ptr,
+                     notification->title.len,
+                     (uint8_t *)notification->body.ptr,
                      notification->body.len);
 }
 

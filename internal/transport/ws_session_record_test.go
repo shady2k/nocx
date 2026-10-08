@@ -140,6 +140,16 @@ func (r *fakeRecorder) Read(_ context.Context, _ string) (content.SessionOutputR
 	return out, nil
 }
 
+// RecoveryStatus reports only the stream cursor and known holes.
+func (r *fakeRecorder) RecoveryStatus(_ context.Context, _ string) (content.SessionOutputRecoveryStatus, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.readErr != nil {
+		return content.SessionOutputRecoveryStatus{}, r.readErr
+	}
+	return content.SessionOutputRecoveryStatus{Produced: r.firstAt + uint64(len(r.stream)), Gaps: []content.Gap{}}, nil
+}
+
 // Skip records a hole nobody offered and leaves the recording appendable —
 // which for this fake means it does not touch `stream` at all, so a test can
 // tell "recorded nothing after the hole" from "recorded the hole as bytes".

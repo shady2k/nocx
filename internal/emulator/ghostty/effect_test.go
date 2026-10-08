@@ -13,22 +13,21 @@ import (
 // effects are a contract with the session runtime, and the runtime will hold an
 // emulator.Terminal.
 //
-// Each effect is asserted with its KIND AND ITS BODY, because either one alone
-// is satisfiable by a wrong answer: a bell reported as a title change has the
-// right shape and the wrong meaning, and a title reported with an empty body is
-// a title the runtime cannot set.
+// Each effect is asserted with its KIND, TITLE and BODY, because shape without
+// meaning is satisfiable by a wrong answer. Notification title is empty for
+// OSC 9 and is preserved from OSC 777 under ADR-0047 §2.2.
 
 // TestEffectsAreTheProgramsNonVisualRequests is the whole effect path in one
 // chunk: a program rings, retitles, reports a directory, writes the clipboard
-// and asks for a notification, and the port reports those five things, in that
-// order, with those arguments.
+// and asks for OSC 9 and OSC 777 notifications. The port reports six effects
+// with exact title/body fields, in that order.
 //
 // The two sequences AFTER them are the negative half, and they are what keeps
 // this from being satisfied by "any escape sequence produces something": OSC
 // 9;4 is a progress report and OSC 133 is a shell-integration fence, neither is
 // an effect, and an implementation that installed a callback for every OSC
-// would report them. The count assertion is what makes that bind — the five
-// effects asked for arrived and nothing else did.
+// would report them. The count assertion makes that bind: the six requested
+// effects arrived and nothing else did.
 func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 	term := newTerminal(t, 20, 4)
 	// The replies are captured and asserted empty: an effect is REPORTED, not
@@ -41,6 +40,7 @@ func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 		"\x1b]7;file://host/tmp\x07"+
 		"\x1b]52;c;aGVsbG8=\x07"+ // base64 of "hello": the port carries the payload, not the encoding
 		"\x1b]9;build finished\x07"+
+		"\x1b]777;notify;Tests failed;2 failed\x07"+
 		"\x1b]9;4;1;50\x07"+ // progress: a hint, deliberately not an effect
 		"\x1b]133;D;0\x07") // a shell-integration fence: not an effect either
 	if len(replies) != 0 {
@@ -53,6 +53,7 @@ func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 		{Kind: emulator.EffectCwdReport, Body: []byte("file://host/tmp")},
 		{Kind: emulator.EffectClipboard, Body: []byte("hello")},
 		{Kind: emulator.EffectNotification, Body: []byte("build finished")},
+		{Kind: emulator.EffectNotification, Title: []byte("Tests failed"), Body: []byte("2 failed")},
 	}
 	got := term.Effects()
 	if len(got) != len(want) {
@@ -61,6 +62,9 @@ func TestEffectsAreTheProgramsNonVisualRequests(t *testing.T) {
 	for i := range want {
 		if got[i].Kind != want[i].Kind {
 			t.Errorf("effect %d is kind %s, want %s", i, effectKindName(got[i].Kind), effectKindName(want[i].Kind))
+		}
+		if string(got[i].Title) != string(want[i].Title) {
+			t.Errorf("effect %d title = %q, want %q", i, got[i].Title, want[i].Title)
 		}
 		if string(got[i].Body) != string(want[i].Body) {
 			t.Errorf("effect %d body = %q, want %q", i, got[i].Body, want[i].Body)

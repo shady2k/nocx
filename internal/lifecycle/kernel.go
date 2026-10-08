@@ -54,6 +54,10 @@ var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // word a person reads in a refusal, so [A-Za-z0-9._-] and nothing else.
 var agentNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,` + strconv.Itoa(maxAgentNameLen) + `}$`)
 
+// Tickets are 256 random bits in unpadded base64url form. The shape is checked
+// at the authenticated protocol boundary before the app consults its ticket map.
+var launchTicketRe = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
 // Bounds on a domain request's carried ssh options (nocx-c6z0). They are not
 // a shape — an ssh option argument is an arbitrary path, host list or config
 // string, and constraining its CHARACTERS would refuse lines OpenSSH accepts.
@@ -275,6 +279,10 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyDomainRequest(d, ls, env)
 	case KindAgentEnrol:
 		out, err = k.applyAgentEnrol(d, ls, env)
+	case KindAgentLaunchResolve:
+		out, err = k.applyAgentLaunchResolve(d, ls, env)
+	case KindAgentLaunchCancel:
+		out, err = k.applyAgentLaunchCancel(d, ls, env)
 	case KindAgentWithdraw:
 		out, err = k.applyAgentWithdraw(d, ls, env)
 	default:
@@ -977,6 +985,9 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 	if !agentNameRe.MatchString(req.Agent) {
 		return nil, ErrBadRequest
 	}
+	if req.LaunchTicket != "" && !launchTicketRe.MatchString(req.LaunchTicket) {
+		return nil, ErrBadRequest
+	}
 	if req.Cols <= 0 || req.Rows <= 0 || req.Cols > maxPaneDimension || req.Rows > maxPaneDimension {
 		return nil, ErrBadRequest
 	}
@@ -984,6 +995,43 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 		Kind:          KindAgentEnrolled,
 		AgentEnrolled: &AgentEnrolled{RequestID: req.RequestID, Agent: req.Agent},
 	})}, nil
+}
+
+// applyAgentLaunchResolve authenticates a request to resolve a launch name.
+// The kernel echoes only the request identity; the publisher supplies the
+// server-owned record-applicability classification, optional snapshot payload
+// and ticket afterward.
+func (k *Kernel) applyAgentLaunchResolve(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentLaunchResolve
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	if !agentNameRe.MatchString(req.Agent) {
+		return nil, ErrBadRequest
+	}
+	return []Outbound{k.outbound(d, Event{
+		Kind: KindAgentLaunchResolved,
+		AgentLaunchResolved: &AgentLaunchResolved{
+			RequestID: req.RequestID,
+			Agent:     req.Agent,
+		},
+	})}, nil
+}
+
+// applyAgentLaunchCancel is an authenticated best-effort ticket discard. It
+// moves no lifecycle state and needs no reply: any ticket that is already gone
+// is indistinguishable from one successfully cancelled.
+func (k *Kernel) applyAgentLaunchCancel(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	if !agentNameRe.MatchString(env.Event.AgentLaunchCancel.Agent) || !launchTicketRe.MatchString(env.Event.AgentLaunchCancel.Ticket) {
+		return nil, ErrBadRequest
+	}
+	return nil, nil
 }
 
 // applyAgentWithdraw closes the caller's end of the interval. It is answered

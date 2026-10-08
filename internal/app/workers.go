@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,10 +30,12 @@ import (
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -530,6 +533,11 @@ type spawnedParticipant struct {
 	// restore opens the pane and says nothing about what ran there.
 	paneID string
 	cwd    string
+	// resumeID is the explicit session id this spawn passed through the
+	// {UUID} argument placeholder. It is empty when the agent is expected
+	// to mint an id lazily, which makes a shared-checkout restart unavailable
+	// rather than a guess at a later session.
+	resumeID string
 	// agents answers the pane's agent at the moment the restart record is
 	// written, which is after the enrolment arrived. See workerSpawner.agents.
 	agents   agentOnPane
@@ -587,11 +595,15 @@ func (s spawnedParticipant) RestartIdentity() workers.RestartIdentity {
 			id.Agent = agent
 		}
 	}
-	// Resume is deliberately absent: which identity an agent continues its
-	// conversation under is the launch record's (nocx-dz9vj, nocx-2txuc), and
-	// this file has no business deriving one from a command line. Until that
-	// record exists, every persisted worker restores as "cannot resume", which
-	// is the honest answer rather than a guess at `--resume`.
+	// Location chooses the resume shape: a worktree's CWD is private to
+	// this task, while a shared checkout must use only the stable session id
+	// that the launch line explicitly received. No UUID placeholder means a
+	// lazy-id agent is recorded as non-resumable, not as "resume latest".
+	var worktree workers.Worktree
+	if s.worktree != nil {
+		worktree = s.worktree.location()
+	}
+	id.Resume = workers.ResumeIdentityFor(worktree, s.resumeID)
 	return id
 }
 
@@ -826,6 +838,14 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
+	launchID, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: minting a launch id: %w", err)
+	}
+	commandArgv, err := shellintegration.SplitAgentCommand(req.Command)
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: parsing participant command: %w", err)
+	}
 	coordPane := s.coordinatorPane(req.CoordinatorSession, lg)
 	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used three times
 	// (nocx-ty5ks, nocx-tdiqs): the pane's row records its directory, so a
@@ -864,6 +884,23 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			s.checkouts.recordCreated(ctx, lg, undo, req.Group, req.Task)
 		}
 	}
+	placeholderValues := map[string]string{
+		"UUID":           launchID.String(),
+		"WORKSPACE_ID":   s.workspace,
+		"WORKSPACE_PATH": paneCwd,
+	}
+	if undo != nil {
+		placeholderValues["BRANCH"] = undo.branch
+	}
+	resumeID := ""
+	for _, arg := range commandArgv {
+		if strings.Contains(strings.ToUpper(arg), "{UUID}") {
+			resumeID = launchID.String()
+			break
+		}
+	}
+	commandLine := shellintegration.QuoteAgentArgv(
+		shellintegration.ExpandAgentArgv(commandArgv, placeholderValues))
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
@@ -933,7 +970,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
 		tabID: tabID.String(), paneID: paneID.String(), cwd: paneCwd,
-		agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		resumeID: resumeID, agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
 		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 
@@ -987,7 +1024,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			outcome.Status, outcome.Reason)
 	}
 
-	if req.Command != "" && !opened.Session.EnqueueWrite([]byte(req.Command+"\n")) {
+	if commandLine != "" && !opened.Session.EnqueueWrite([]byte(commandLine+"\n")) {
 		// A queue that refused is a session that is already going away.
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
@@ -998,7 +1035,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
 	// launcher's own startup, over which this has no visibility at all, so the
 	// line says what was written rather than that anything ran.
-	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(req.Command)+1)
+	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(commandLine)+1)
 	lg.Info("worker participant spawned",
 		"participant", string(req.Participant), "worker", string(req.Group))
 
@@ -1348,6 +1385,31 @@ func (e *workerEnrolments) enrolled(sid session.ID, lane string) {
 	}
 }
 
+// armedForSession is the server-owned bridge between a worker spawn's pane
+// registration and shell launch resolution. Before the first agent_enrol
+// arrives, the pane id is in byPane; afterwards, the participant is in bySess.
+// Both states identify the server-created worker pane and preserve
+// workers.spawn's literal command semantics without trusting a shell flag.
+func (e *workerEnrolments) armedForSession(sid session.ID) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.bySess[sid]; ok {
+		return true
+	}
+	if e.sessions == nil {
+		return false
+	}
+	sess, err := e.sessions.Get(sid)
+	if err != nil {
+		return false
+	}
+	_, ok := e.byPane[sess.PaneID()]
+	return ok
+}
+
 // participantFor answers which participant a session speaks for, or false for
 // a session that is not one. Most sessions are not: a person running an agent
 // in their own tab enrols and never reports, and asking this is how the
@@ -1481,6 +1543,10 @@ func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e 
 // lifecyclepub is given, and the worker is what it also tells.
 func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 	p.onEnrol = func(sessionID, lane string) { e.enrolled(session.ID(sessionID), lane) }
+	p.isWorkerLaunch = func(lane lifecycle.LaneID) bool {
+		sid, ok := p.sessions.lookup(lane)
+		return ok && e.armedForSession(session.ID(sid))
+	}
 	return p
 }
 

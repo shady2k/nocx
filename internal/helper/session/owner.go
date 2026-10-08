@@ -1019,6 +1019,25 @@ func (o *sessionOwner) Reply(p []byte) error {
 	return nil
 }
 
+// PromptBoundary synchronously records OSC 133 B in the session output
+// window. Runtime.Ingest calls this before it returns to ingestOne, which
+// writes the raw PTY bytes; the subscriber pump can therefore split exactly
+// at B even if it is already active and the screen consumer is stalled.
+func (o *sessionOwner) PromptBoundary(effect sessionruntime.Effect) error {
+	if effect.Kind != sessionruntime.EffectPromptBoundary {
+		return errors.New("session owner: ordered boundary callback received another effect kind")
+	}
+	dropped, err := o.win.markPromptBoundary(effect)
+	if err != nil {
+		o.log.Warn("prompt boundary could not be ordered with session output", "stream_offset", effect.StreamOffset, "error", err)
+		return err
+	}
+	if dropped {
+		o.log.Warn("oldest retained prompt boundary was evicted from the bounded output window", "stream_offset", effect.StreamOffset)
+	}
+	return nil
+}
+
 // submit hands one item to the owner from any OTHER goroutine — hostSession's
 // write, resize and (later tasks') intent submission. It never blocks: a
 // full queue is errBusy, a closing owner is errOwnerClosing, and either way

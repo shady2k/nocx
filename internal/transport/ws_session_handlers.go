@@ -1153,6 +1153,12 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		}),
+		// Recovery metadata shares the session operation queue with attach and
+		// the live-session list; it is read as part of reclaiming one claim.
+		whenAvailable(regResponder(sessionSub, "session.recoveryStatus", params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
+			h := sessionRecoveryStatusHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r}
+			return h.handle
+		}), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
 		// sessions.live is the session plane's read, and it rides the same
 		// per-operation queue as attach: the two are one act for a fresh
 		// client — ask what is alive, take one — and a list answered under a

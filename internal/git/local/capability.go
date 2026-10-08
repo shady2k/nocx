@@ -166,12 +166,11 @@ func parseVersion(v string) (major, minor int, ok bool) {
 // repository" — non-zero exit, or output that fails validation.
 var errNotARepository = errors.New("git: not a repository")
 
-// revParse asks git for the two values that are the binding's identity: the
-// worktree root and the absolute git directory (spec §5.1, D4). git prints
-// exactly two lines for --show-toplevel --absolute-git-dir, so the output is
-// validated, not trusted: anything other than exactly two absolute,
-// non-empty lines is notARepository — never a path we hand to a subprocess.
-func revParse(ctx context.Context, gitPath string, env []string, cwd string) (string, string, error) {
+// revParse asks git for the worktree root, the absolute per-worktree git
+// directory, and the common git directory shared by linked worktrees (spec
+// §5.1, D4). The flags predate the 2.25 floor; the common path may be relative
+// to cwd, so the output is validated and that value resolved before use.
+func revParse(ctx context.Context, gitPath string, env []string, cwd string) (string, string, string, error) {
 	sink := &byteSink{max: 8 << 10}
 	res := run(ctx, spec{
 		argv: append([]string{gitPath}, spawn.RevParseArgs()...),
@@ -180,19 +179,27 @@ func revParse(ctx context.Context, gitPath string, env []string, cwd string) (st
 		sink: sink,
 	})
 	if res.cancelled {
-		return "", "", ctx.Err()
+		return "", "", "", ctx.Err()
 	}
 	if res.err != nil {
-		return "", "", res.err
+		return "", "", "", res.err
 	}
 	if res.exitCode != 0 {
-		return "", "", errNotARepository
+		return "", "", "", errNotARepository
 	}
 	out := strings.TrimSuffix(string(sink.buf), "\n")
 	lines := strings.Split(out, "\n")
-	if len(lines) != 2 || lines[0] == "" || lines[1] == "" ||
+	if len(lines) != 3 || lines[0] == "" || lines[1] == "" || lines[2] == "" ||
 		!filepath.IsAbs(lines[0]) || !filepath.IsAbs(lines[1]) {
-		return "", "", errNotARepository
+		return "", "", "", errNotARepository
 	}
-	return lines[0], lines[1], nil
+	commonDir := lines[2]
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(cwd, commonDir)
+	}
+	commonDir, err := filepath.Abs(commonDir)
+	if err != nil {
+		return "", "", "", errNotARepository
+	}
+	return lines[0], lines[1], commonDir, nil
 }

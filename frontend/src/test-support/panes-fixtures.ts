@@ -9,6 +9,7 @@
 import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
+import type { SessionEffect } from '../generated/session.effect'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -28,8 +29,7 @@ import type {
   Pane as LayoutPane,
   Workspace as LayoutWorkspace,
 } from '../generated/layout.read'
-import type { ClipboardAccess } from '../clipboard'
-import type { ClipboardGate } from '../clipboard'
+import { type ClipboardAccess, type ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
@@ -165,6 +165,7 @@ export interface RendererMock extends TerminalRenderer {
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
   awaitWriteBarrier: Mock<() => Promise<void>>
+  hasUnsettledWrite: Mock<() => boolean>
   /** The snippet-palette chord handler — stored, so a test can fire it the
    *  way xterm's custom key handler would. */
   onSnippetChord: Mock<(cb: (() => void) | null) => void>
@@ -203,6 +204,7 @@ export interface RendererMock extends TerminalRenderer {
   _fireSelectionChange(text: string): void
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
+  applySessionEffect(effect: SessionEffect): void
   /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
   _fireRecoveryFence(hex: string): void
   /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
@@ -260,6 +262,24 @@ export function createRendererMock(): RendererMock {
     onClipboardWrite: vi.fn((cb: (text: string) => void) => {
       cbs.onClipboardWrite = cb
     }),
+    applySessionEffect: vi.fn((effect: SessionEffect) => {
+      switch (effect.kind) {
+        case 'bell':
+          cbs.onBell?.()
+          break
+        case 'clipboard':
+          if (effect.body !== '') cbs.onClipboardWrite?.(effect.body)
+          break
+        case 'title':
+          cbs.onTitle?.(effect.body)
+          break
+        case 'cwd':
+          cbs.onCwd?.({ host: '', path: effect.body })
+          break
+        case 'notification':
+          break
+      }
+    }),
     // A paste IS input: xterm's term.paste() writes the payload (bracketed
     // when the program asked for it) through the same onData every keystroke
     // takes — which is how a submitted command reaches the pty at all. A mock
@@ -281,6 +301,9 @@ export function createRendererMock(): RendererMock {
     // the ORDER (nocx-8rtr.1 — write() is fire-and-forget, so a synchronous
     // read can answer about the terminal before the bytes) overrides it.
     awaitWriteBarrier: vi.fn(async () => {}),
+    // A normal fixture has no parse work outstanding; ordering tests opt into
+    // it explicitly so a parse barrier has a meaningful target.
+    hasUnsettledWrite: vi.fn(() => false),
     onSnippetChord: vi.fn((cb: (() => void) | null) => {
       snippetChordCb = cb
     }),
@@ -439,6 +462,9 @@ export interface SessionFake {
   /** The screen plane (nocx-zg3k3.2.8): one parsed session.frame document
    *  per metadata frame the backend publishes. */
   onScreenFrame: ReturnType<typeof vi.fn>
+  onEffect: ReturnType<typeof vi.fn>
+  /** Fire the registered runtime effect callback. */
+  fireEffect(effect: SessionEffect): void
   /** Fire the registered screen-frame callback with one document. */
   fireScreenFrame(frame: SessionFrame): void
   /** The live tier's page seam (nocx-zg3k3.10.4): rows documents arrive
@@ -482,6 +508,7 @@ export interface SessionFake {
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
   let screenCb: ((frame: SessionFrame) => void) | null = null
+  let effectCb: ((effect: SessionEffect) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
@@ -520,6 +547,10 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onScreenFrame: vi.fn((cb: (frame: SessionFrame) => void) => {
       screenCb = cb
     }),
+    onEffect: vi.fn((cb: (effect: SessionEffect) => void) => {
+      effectCb = cb
+    }),
+    fireEffect: (effect: SessionEffect) => effectCb?.(effect),
     // The live tier's page seam (nocx-zg3k3.10.4): the default answers the
     // head read with the empty page of an empty history, so a pane test
     // that never scrolls never pages.

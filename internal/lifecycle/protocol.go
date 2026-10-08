@@ -80,6 +80,16 @@ const (
 	// bootstrap and lets the parent run its command conventionally — right for
 	// an optional enhancement, wrong for something an invariant rests on.
 	KindAgentEnrolled EventKind = "agent_enrolled"
+	// KindAgentLaunchResolve asks the backend for a local agent record snapshot.
+	// It is a distinct event from agent_enrol: resolution carries no consent or
+	// observation authority, and the backend returns private launch data only to
+	// a server-classified local transport.
+	KindAgentLaunchResolve EventKind = "agent_launch_resolve"
+	// KindAgentLaunchResolved is the backend's answer to launch resolution.
+	KindAgentLaunchResolved EventKind = "agent_launch_resolved"
+	// KindAgentLaunchCancel discards a resolved launch ticket when the shell
+	// cancels before an agent enrolment reaches a final answer.
+	KindAgentLaunchCancel EventKind = "agent_launch_cancel"
 	// KindAgentWithdraw closes the interval an enrolment opened. The amendment
 	// wants an interval with BOTH ends, and this is the end the caller knows
 	// about: the agent it bracketed has returned. The backend closes the same
@@ -130,24 +140,27 @@ type Envelope struct {
 }
 
 type Event struct {
-	Kind              EventKind
-	Hello             *Hello
-	Accept            *Accept
-	Start             *Start
-	Complete          *Complete
-	PromptReady       *PromptReady
-	RefreshRequest    *RefreshRequest
-	Snapshot          *Snapshot
-	DomainEstablished *DomainEstablishedEvent
-	DomainActivated   *DomainActivatedEvent
-	DomainSuspended   *DomainSuspendedEvent
-	DomainClosed      *DomainClosedEvent
-	DomainRequest     *DomainRequest
-	DomainGrant       *DomainGrant
-	AgentEnrol        *AgentEnrol
-	AgentEnrolled     *AgentEnrolled
-	AgentWithdraw     *AgentWithdraw
-	AgentWithdrawn    *AgentWithdrawn
+	Kind                EventKind
+	Hello               *Hello
+	Accept              *Accept
+	Start               *Start
+	Complete            *Complete
+	PromptReady         *PromptReady
+	RefreshRequest      *RefreshRequest
+	Snapshot            *Snapshot
+	DomainEstablished   *DomainEstablishedEvent
+	DomainActivated     *DomainActivatedEvent
+	DomainSuspended     *DomainSuspendedEvent
+	DomainClosed        *DomainClosedEvent
+	DomainRequest       *DomainRequest
+	DomainGrant         *DomainGrant
+	AgentEnrol          *AgentEnrol
+	AgentEnrolled       *AgentEnrolled
+	AgentLaunchResolve  *AgentLaunchResolve
+	AgentLaunchResolved *AgentLaunchResolved
+	AgentLaunchCancel   *AgentLaunchCancel
+	AgentWithdraw       *AgentWithdraw
+	AgentWithdrawn      *AgentWithdrawn
 }
 
 // EventKind is the wire name of an event kind.
@@ -178,6 +191,10 @@ func (e Event) validInbound() bool {
 		return e.DomainRequest != nil
 	case KindAgentEnrol:
 		return e.AgentEnrol != nil
+	case KindAgentLaunchResolve:
+		return e.AgentLaunchResolve != nil
+	case KindAgentLaunchCancel:
+		return e.AgentLaunchCancel != nil
 	case KindAgentWithdraw:
 		return e.AgentWithdraw != nil
 	}
@@ -346,6 +363,10 @@ type (
 	AgentEnrol struct {
 		RequestID RequestID `json:"request"`
 		Agent     string    `json:"agent"`
+		// LaunchTicket binds this consent/observation request to the exact local
+		// record snapshot resolved for this invocation. Remote conventional
+		// enrolment has no local ticket or record data.
+		LaunchTicket string `json:"ticket,omitempty"`
 		// Cols and Rows are the geometry the caller is about to run the agent
 		// at. They come from the SHELL rather than from the pty because at
 		// this point in the backend nothing owns "how big is that pane" — the
@@ -379,6 +400,34 @@ type (
 		// pane — or, on a pending answer, what they are being asked. Empty on
 		// success, and on the frame closing a question a person answered.
 		Reason string `json:"reason,omitempty"`
+	}
+
+	// AgentLaunchResolve requests the current record for an agent ID. It carries
+	// no executable, args or environment; the record store is the sole source.
+	AgentLaunchResolve struct {
+		RequestID RequestID `json:"request"`
+		Agent     string    `json:"agent"`
+	}
+
+	// AgentLaunchResolved returns either a local record snapshot and an opaque
+	// ticket or a non-record classification. Local means local record lookup
+	// applies to this invocation; false also covers server-classified worker
+	// panes whose command stays literal. Local and Payload are backend-
+	// generated; they are never claims supplied by the shell.
+	AgentLaunchResolved struct {
+		RequestID RequestID `json:"request"`
+		Agent     string    `json:"agent"`
+		Local     bool      `json:"local"`
+		Ticket    string    `json:"ticket,omitempty"`
+		Payload   string    `json:"payload,omitempty"`
+		Reason    string    `json:"reason,omitempty"`
+	}
+
+	// AgentLaunchCancel releases an unresolved launch ticket. It is best effort
+	// and carries no config; lane/domain/epoch come from its envelope.
+	AgentLaunchCancel struct {
+		Agent  string `json:"agent"`
+		Ticket string `json:"ticket"`
 	}
 
 	// AgentWithdraw closes the interval the matching enrolment opened.

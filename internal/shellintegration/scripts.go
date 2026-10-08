@@ -292,7 +292,11 @@ var (
 // closes the block it belongs to, found by that id, rather than whatever the
 // session happens to hold open. A shell still sourcing 54 sends unnamed
 // completions, which a fresh coordinator can only resolve by that guess.
-const version = "57"
+// 58: local agent wrappers resolve a saved record over the authenticated
+// lifecycle channel and stage its command/arguments/environment as data; a
+// shell still sourcing 57 treats the agent ID as the executable and cannot
+// launch the saved configuration (nocx-h64wy).
+const version = "58"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

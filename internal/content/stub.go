@@ -130,6 +130,11 @@ func (s *sessionOutputStub) Skip(_ context.Context, sessionID string, resumeAt u
 	return SessionOutputResult{}, nil
 }
 
+func (s *sessionOutputStub) RecoveryStatus(_ context.Context, sessionID string) (SessionOutputRecoveryStatus, error) {
+	s.log.Info("content stub: SessionOutputRepository.RecoveryStatus", "session_id", sessionID)
+	return SessionOutputRecoveryStatus{Gaps: []Gap{}}, nil
+}
+
 func (s *sessionOutputStub) Read(_ context.Context, sessionID string) (SessionOutputRecording, error) {
 	s.log.Info("content stub: SessionOutputRepository.Read", "session_id", sessionID)
 	return SessionOutputRecording{SessionID: sessionID}, nil

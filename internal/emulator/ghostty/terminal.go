@@ -160,6 +160,9 @@ type terminal struct {
 	// same rule as replies — the goroutine holding mu is the only writer — and
 	// is drained whole by Effects.
 	effects []emulator.Effect
+	// streamOffset counts every PTY output byte ever ingested by this terminal.
+	// Prompt-boundary effects use it to name the exact byte position through B.
+	streamOffset uint64
 	// fenceIdx is the render fence scanner's position in the fence sequence:
 	// how many bytes of it the stream has matched (0 is between sequences,
 	// which is why the zero value needs no initialisation), and fenceNonce
@@ -176,6 +179,8 @@ type terminal struct {
 	// stay correct, regardless of which one (if either) a byte ends up
 	// completing.
 	outputMarkIdx int
+	// promptBoundaryIdx scans the untrusted OSC 133 B prompt observation.
+	promptBoundaryIdx int
 	// eraseIdx is the clear-boundary scanner's own position (erase.go): ED3,
 	// `ESC [ 3 J`. Its prefix (ESC `[`) does not overlap the fence's or the
 	// output mark's (ESC `]`), so it needs no shared divergence point with
@@ -639,6 +644,11 @@ func (t *terminal) ingestLocked(b []byte) {
 			t.sightFence()
 		case markKindOutputMark:
 			t.sightOutputMark()
+		case markKindPromptBoundary:
+			t.effects = append(t.effects, emulator.Effect{
+				Kind:         emulator.EffectPromptBoundary,
+				StreamOffset: t.streamOffset + uint64(start+n),
+			})
 		case markKindClearBoundary:
 			t.sightEraseSavedLines()
 		case markKindEraseDisplay:
@@ -646,6 +656,7 @@ func (t *terminal) ingestLocked(b []byte) {
 		}
 		start += n
 	}
+	t.streamOffset += uint64(len(b))
 }
 
 // markKind is which sighted marker scanMarkers found, if any.
@@ -655,6 +666,7 @@ const (
 	markKindNone markKind = iota
 	markKindFence
 	markKindOutputMark
+	markKindPromptBoundary
 	markKindClearBoundary
 	// markKindAltExit needs nothing sighted: the split itself is the point,
 	// since the chunk it ends is measured on its own (altscreen.go).
@@ -706,6 +718,18 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.outputMarkIdx = 1
 		} else {
 			t.outputMarkIdx = 0
+		}
+
+		if promptBoundaryMatches(t.promptBoundaryIdx, c) {
+			if t.promptBoundaryIdx == len(promptBoundaryFixed)-1 {
+				t.promptBoundaryIdx = 0
+				return i + 1, markKindPromptBoundary
+			}
+			t.promptBoundaryIdx++
+		} else if c == promptBoundaryFixed[0] {
+			t.promptBoundaryIdx = 1
+		} else {
+			t.promptBoundaryIdx = 0
 		}
 
 		if eraseSavedLinesMatches(t.eraseIdx, c) {

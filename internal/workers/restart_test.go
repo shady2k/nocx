@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,8 +30,8 @@ func restartDocs(t *testing.T) storage.DocumentStore {
 	return storage.NewDocumentStore(t.TempDir())
 }
 
-// A recorded worker, in the shape the spawn side writes: a pane, a worktree,
-// and a conversation it continues by id.
+// A recorded worker in a shared checkout: it resumes only by its explicit
+// conversation id, never by whichever session happens to be most recent.
 func recordedWorker(dir string) RestartRecord {
 	return RestartRecord{
 		Participant:        ParticipantID("p-restart"),
@@ -42,7 +43,6 @@ func recordedWorker(dir string) RestartRecord {
 		Command:            "claude",
 		Environment:        "env-local",
 		Cwd:                dir,
-		Worktree:           Worktree{Path: dir, Branch: "feat/one", Base: "4f2a1c9b"},
 		Resume:             ResumeIdentity{Mode: ResumeByID, ID: "conv-9f3a"},
 		RecordedAt:         time.Unix(1_700_000_000, 0).UTC(),
 	}
@@ -99,7 +99,7 @@ func TestAValidRecordReconstructsTheLaunchRequest(t *testing.T) {
 		t.Fatalf("a restorable record carried no launch request")
 	}
 	wantRequest := want.Request()
-	if *x.Request != wantRequest {
+	if !reflect.DeepEqual(*x.Request, wantRequest) {
 		t.Fatalf("launch request =\n%+v\nwant\n%+v", *x.Request, wantRequest)
 	}
 	// Every field of the tuple is IN the request, which is the point of the
@@ -404,4 +404,30 @@ type closedOnce struct{}
 
 func (closedOnce) Close(context.Context, Participant) (CloseResult, error) {
 	return CloseResult{}, nil
+}
+
+func TestResumeIdentityIsScopedByCheckoutAndRecordedSessionID(t *testing.T) {
+	shared := Worktree{}
+	first := ResumeIdentityFor(shared, "conversation-one")
+	second := ResumeIdentityFor(shared, "conversation-two")
+	if first != (ResumeIdentity{Mode: ResumeByID, ID: "conversation-one"}) {
+		t.Fatalf("first shared-checkout identity = %+v", first)
+	}
+	if second != (ResumeIdentity{Mode: ResumeByID, ID: "conversation-two"}) {
+		t.Fatalf("second shared-checkout identity = %+v", second)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("two tasks in one checkout share resume id %q", first.ID)
+	}
+
+	worktree := Worktree{Path: "/worktrees/task-one", Branch: "task-one"}
+	got := ResumeIdentityFor(worktree, "ignored-session-id")
+	if got != (ResumeIdentity{Mode: ResumeByCwd}) {
+		t.Fatalf("worktree identity = %+v, want resume-by-cwd without an id", got)
+	}
+
+	lazy := ResumeIdentityFor(shared, "")
+	if lazy != (ResumeIdentity{Mode: ResumeNone}) {
+		t.Fatalf("shared checkout with a lazy/unrecorded id = %+v, want explicit ResumeNone", lazy)
+	}
 }

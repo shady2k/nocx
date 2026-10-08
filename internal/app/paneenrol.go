@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/agentapproval"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
@@ -31,8 +32,13 @@ type paneEnroller struct {
 	// with the watch and never before or after it: a pane nocx reports a
 	// state for but declined to watch would be a claim with no evidence
 	// behind it, and one it watches without reporting is the silent degrade.
-	watch    paneWatcher
-	approval agentApproval
+	watch         paneWatcher
+	approval      agentApproval
+	launchTickets *agentLaunchTickets
+	transports    *transportRegistry
+	// isWorkerLaunch is derived from the authenticated lane's server session
+	// and the pending worker-pane registration; it is never a shell claim.
+	isWorkerLaunch func(lifecycle.LaneID) bool
 	// onEnrol is told when an enrolment actually opened a watch, so a worker
 	// registration blocked on that enrolment can proceed (nocx-dkawo.7). It
 	// is a NOTIFICATION and not a second enroller: it is called after the act
@@ -71,6 +77,10 @@ type agentApproval interface {
 	Forget(session.ID)
 }
 
+type resolvedAgentApproval interface {
+	ApproveResolved(context.Context, session.ID, string, agentapproval.Executable) error
+}
+
 func newPaneEnroller(
 	lg log.Logger,
 	sessions *sessionRegistry,
@@ -92,6 +102,12 @@ func newPaneEnroller(
 // person never sees — that is the silent-degrade shape AGENTS.md names, where
 // a feature that does not exist survives a release behind a slog.Warn.
 func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int) error {
+	return e.enrolWith(context.Background(), lane, agent, cols, rows,
+		func(ctx context.Context, sid session.ID) error { return e.approval.Approve(ctx, sid, agent) },
+		false, nil)
+}
+
+func (e *paneEnroller) enrolWith(ctx context.Context, lane lifecycle.LaneID, agent string, cols, rows int, approve func(context.Context, session.ID) error, redactApprovalError bool, beforeWatch func() error) error {
 	sid, ok := e.sessions.lookup(lane)
 	if !ok || sid == "" {
 		// The lane authenticated but nothing maps it to a session. That is a
@@ -102,7 +118,7 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 			"lane", string(lane), "agent", agent)
 		return errors.New("nocx does not know which pane this shell is")
 	}
-	if err := e.approval.Approve(context.Background(), session.ID(sid), agent); err != nil {
+	if err := approve(ctx, session.ID(sid)); err != nil {
 		var pending *lifecyclepub.EnrolmentPending
 		if errors.As(err, &pending) {
 			// Not a refusal: the shell waits for the answer and enrols again.
@@ -110,9 +126,19 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 				"lane", string(lane), "session_id", sid, "agent", agent, "question", pending.Reason)
 			return err
 		}
-		e.log.Warn("agent enrolment refused: human approval was not granted",
-			"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
+		if redactApprovalError {
+			e.log.Warn("agent enrolment refused: human approval was not granted",
+				"lane", string(lane), "session_id", sid, "agent", agent)
+		} else {
+			e.log.Warn("agent enrolment refused: human approval was not granted",
+				"lane", string(lane), "session_id", sid, "agent", agent, "error", err)
+		}
 		return err
+	}
+	if beforeWatch != nil {
+		if err := beforeWatch(); err != nil {
+			return err
+		}
 	}
 	// The size the shell reported is NOT passed on: the runtime beside the PTY
 	// already holds the geometry the program is running at, and a second number
@@ -155,6 +181,78 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 	}
 	e.log.Info("agent enrolled", "lane", string(lane), "session_id", sid,
 		"agent", agent, "cols", cols, "rows", rows)
+	return nil
+}
+
+// EnrolResolved is the ticket-aware path used by lifecyclepub. A local pane
+// must present the exact record snapshot resolved for this invocation; a
+// remote pane carries no local configuration and uses the conventional
+// approval path only.
+func (e *paneEnroller) EnrolResolved(ctx context.Context, binding lifecyclepub.AgentLaunchBinding, ticket string, cols, rows int) error {
+	if e == nil || e.transports == nil {
+		return errors.New("nocx cannot verify this agent launch route")
+	}
+	kind, ok := e.transports.lookup(binding.Transport)
+	if !ok {
+		return errors.New("nocx cannot verify this agent launch route")
+	}
+	if !kind.local {
+		if ticket != "" {
+			return errors.New("a remote agent cannot use a local launch ticket")
+		}
+		return e.enrolWith(ctx, binding.Lane, binding.Agent, cols, rows,
+			func(ctx context.Context, sid session.ID) error { return e.approval.Approve(ctx, sid, binding.Agent) },
+			false, nil)
+	}
+	if e.isWorkerLaunch != nil && e.isWorkerLaunch(binding.Lane) {
+		if ticket != "" {
+			return errors.New("a worker launch cannot use a local agent record")
+		}
+		return e.enrolWith(ctx, binding.Lane, binding.Agent, cols, rows,
+			func(ctx context.Context, sid session.ID) error { return e.approval.Approve(ctx, sid, binding.Agent) },
+			false, nil)
+	}
+	if ticket == "" || e.launchTickets == nil {
+		return errors.New("no local agent launch record was resolved")
+	}
+	snapshot, err := e.launchTickets.Begin(binding, ticket)
+	if err != nil {
+		return errors.New("the local agent launch ticket is no longer valid")
+	}
+	approval, ok := e.approval.(resolvedAgentApproval)
+	if !ok {
+		e.launchTickets.Complete(binding, ticket)
+		return errors.New("nocx cannot verify the configured agent executable")
+	}
+	consumed := false
+	beforeWatch := func() error {
+		if !e.launchTickets.Complete(binding, ticket) {
+			return errors.New("the local agent launch ticket is no longer valid")
+		}
+		consumed = true
+		return nil
+	}
+	err = e.enrolWith(ctx, binding.Lane, binding.Agent, cols, rows,
+		func(ctx context.Context, sid session.ID) error {
+			return approval.ApproveResolved(ctx, sid, binding.Agent, snapshot.executable)
+		},
+		true, beforeWatch)
+	var pending *lifecyclepub.EnrolmentPending
+	if errors.As(err, &pending) && pending.Settled != nil {
+		if !e.launchTickets.RetainPending(binding, ticket) {
+			return errors.New("the local agent launch ticket is no longer valid")
+		}
+		return err
+	}
+	if !consumed {
+		e.launchTickets.Complete(binding, ticket)
+	}
+	if err != nil {
+		// The command and environment are private configuration. A launch
+		// refusal is visible to the shell, but never carries them into logs or
+		// an error string that could be copied out of the session.
+		return errors.New("nocx could not approve this local agent launch")
+	}
 	return nil
 }
 

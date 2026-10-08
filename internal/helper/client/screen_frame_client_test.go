@@ -236,3 +236,77 @@ func TestASupersededAssemblyDropsWholeAndTellsTheReader(t *testing.T) {
 		t.Fatalf("after the collision the next clean frame assembled as (%d, %q), want revision 3 whole", got.revision, got.payload)
 	}
 }
+
+func TestAnEffectFrameReachesItsNamedAttachment(t *testing.T) {
+	session := proto.HostSessionID{Generation: "testhash", Session: exitTestSession}
+	sessionRaw, err := proto.SessionBytes(session.Session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := proto.SubscriberID(exitTestSubscriber)
+	subRaw, err := proto.SessionBytes(string(sub))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
+		attached := false
+		dec := proto.NewDecoder(func(ty proto.FrameType, _, _ uint32, payload []byte) {
+			switch ty {
+			case proto.TypeHello:
+				var h proto.Hello
+				_ = json.Unmarshal(payload, &h)
+				_, _ = fmt.Fprintf(out, "nocx-helper %s ready\n", proto.Version)
+				raw, _ := json.Marshal(proto.HelloOK{Version: proto.Version, Nonce: h.Nonce, ContentHash: "testhash", InstanceID: "instance-1"})
+				_, _ = out.Write(proto.EncodeFrame(proto.TypeHelloOK, 0, 0, raw))
+			case proto.TypeRequest:
+				var req proto.Request
+				_ = json.Unmarshal(payload, &req)
+				if !attached {
+					attached = true
+					result, _ := json.Marshal(proto.AttachResult{Attachment: "attachment-1", Resume: proto.Resume{Resumed: true}, LifecycleResume: proto.Resume{Resumed: true}})
+					resp, _ := json.Marshal(proto.Response{ID: req.ID, Result: result})
+					_, _ = out.Write(proto.EncodeFrame(proto.TypeResponse, 0, 0, resp))
+					return
+				}
+				effect := proto.EffectFrame{Session: sessionRaw, Subscriber: subRaw, Generation: 1, EffectID: 42, StreamOffset: 123, Kind: proto.EffectNotification, Title: []byte("Tests failed"), Body: []byte("2 failed")}
+				_, _ = out.Write(proto.EncodeFrame(proto.TypeSessionEffect, 0, 0, proto.EncodeEffectFrame(effect)))
+				resp, _ := json.Marshal(proto.Response{ID: req.ID})
+				_, _ = out.Write(proto.EncodeFrame(proto.TypeResponse, 0, 0, resp))
+			}
+		}, nil)
+		buf := make([]byte, 32*1024)
+		for {
+			n, e := in.Read(buf)
+			if n > 0 {
+				_ = dec.Feed(buf[:n])
+			}
+			if e != nil {
+				return 0
+			}
+		}
+	})
+	c, err := client.Dial(context.Background(), client.Config{Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	attached, err := c.Attach(context.Background(), proto.AttachParams{Subscriber: sub, Session: session, Fresh: true})
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	got := make(chan proto.EffectFrame, 1)
+	attached.OnEffect(func(e proto.EffectFrame) { got <- e })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := attached.Resize(ctx, 100, 30, 0, 0); err != nil {
+		t.Fatalf("Resize: %v", err)
+	}
+	select {
+	case effect := <-got:
+		if effect.EffectID != 42 || effect.Generation != 1 || effect.StreamOffset != 123 || effect.Kind != proto.EffectNotification || string(effect.Title) != "Tests failed" || string(effect.Body) != "2 failed" || effect.Session != sessionRaw || effect.Subscriber != subRaw {
+			t.Fatalf("effect = %+v", effect)
+		}
+	case <-ctx.Done():
+		t.Fatal("effect frame did not reach the matching attachment")
+	}
+}

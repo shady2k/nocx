@@ -69,6 +69,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/storage"
 )
@@ -246,6 +247,9 @@ func (d Document) validate() error {
 	if strings.TrimSpace(d.Command) == "" {
 		return fmt.Errorf("it names no command, so there is nothing to launch")
 	}
+	if !validLaunchText(d.Command) {
+		return fmt.Errorf("its command is not valid UTF-8 or contains NUL")
+	}
 	if strings.ContainsAny(d.Command, "\n\r") {
 		return fmt.Errorf("its command carries a line break, and a command is a program rather than a shell script")
 	}
@@ -253,13 +257,16 @@ func (d Document) validate() error {
 		return err
 	}
 	for i, a := range d.Args {
+		if !validLaunchText(a) {
+			return fmt.Errorf("argument %d is not valid UTF-8 or contains NUL", i+1)
+		}
 		if strings.ContainsAny(a, "\n\r") {
 			return fmt.Errorf("argument %d carries a line break", i+1)
 		}
 	}
 	for i, e := range d.Env {
 		if !isEnvLine(e) {
-			return fmt.Errorf("environment line %d is %q, and every line is KEY=VALUE with a non-empty key", i+1, e)
+			return fmt.Errorf("environment line %d is %q, and each line must be KEY=VALUE with a shell-safe key and no line break", i+1, e)
 		}
 	}
 	if err := d.Resume.validate(); err != nil {
@@ -268,13 +275,39 @@ func (d Document) validate() error {
 	return nil
 }
 
-// isEnvLine reports whether one entry is a KEY=VALUE line with a key in it. A
-// line with no `=` sets nothing and a line with an empty key is a name no
-// program can read, so both are refused rather than passed to a launcher that
-// would drop them.
+// validLaunchText refuses data that cannot be carried in a UTF-8 launch
+// payload or represented in argv/environment. Unix process arguments and
+// environment values cannot contain NUL, and the lifecycle payload promises
+// UTF-8 rather than an implementation-specific byte string.
+func validLaunchText(value string) bool {
+	return utf8.ValidString(value) && !strings.ContainsRune(value, '\x00')
+}
+
+// isEnvLine accepts one KEY=VALUE line whose key has the portable shell
+// identifier spelling. Values may be empty, but not a second line: launch
+// configuration is data, never shell syntax.
 func isEnvLine(line string) bool {
+	if !validLaunchText(line) || strings.ContainsAny(line, "\n\r") {
+		return false
+	}
 	key, _, ok := strings.Cut(line, "=")
-	return ok && key != ""
+	if !ok || len(key) == 0 || !isEnvNameStart(key[0]) {
+		return false
+	}
+	for i := 1; i < len(key); i++ {
+		if !isEnvNameContinue(key[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isEnvNameStart(c byte) bool {
+	return c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
+}
+
+func isEnvNameContinue(c byte) bool {
+	return isEnvNameStart(c) || c >= '0' && c <= '9'
 }
 
 // validate refuses a resume template that could never be expanded into an

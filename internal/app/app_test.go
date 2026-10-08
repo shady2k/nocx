@@ -305,6 +305,18 @@ func TestLocalPaneOpenerIsWiredAtTheCompositionRoot(t *testing.T) {
 }
 
 func TestNew_ComposesHumanApprovalIntoAgentEnroller(t *testing.T) {
+	// This composition check must not require the test host to install Claude.
+	// Approval needs a resolvable identity before it can return the expected refusal.
+	bin := t.TempDir()
+	fakeClaude := filepath.Join(bin, "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G302 — LookPath needs an executable bit; this temp file remains owner-only.
+	if err := os.Chmod(fakeClaude, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	storagetest.Isolate(t)
 	a, err := newTestApp(t)
 	if err != nil {

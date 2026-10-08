@@ -322,10 +322,18 @@ func TestTheToolSurfaceArgumentIsLocalOnly(t *testing.T) {
 	if !strings.Contains(local, `--mcp-config "$__nocx_agent_launch_dir/mcp.json"`) {
 		t.Fatalf("the local rcfile does not point its agent at the tool surface:\n%s", local)
 	}
+	recordArg := strings.Index(local, `"${__nocx_agent_launch_args[@]}"`)
+	userArgAndSurface := strings.Index(local, `"$@" --mcp-config`)
+	if recordArg < 0 || userArgAndSurface <= recordArg {
+		t.Fatalf("local launch does not preserve record argv, caller argv, then tool-surface argv:\n%s", local)
+	}
 
 	published := string(fileOf(t, launchBundle([]string{"claude"}), "nocx.bash"))
 	if strings.Contains(published, "--mcp-config") {
 		t.Fatalf("the published script carries a per-agent argument, and a host receives names and nothing else")
+	}
+	if strings.Contains(published, "__nocx_agent_launch_resolve()") || strings.Contains(published, agentLaunchHelpersStartMarker) {
+		t.Fatalf("the published bundle carries the local record resolver or payload decoder")
 	}
 	if !strings.Contains(published, `command "$__agent" "$@"`) {
 		t.Fatalf("the published script does not run the agent at all:\n%s", published)

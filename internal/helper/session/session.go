@@ -261,6 +261,9 @@ type Sink interface {
 	// (nocx-2v80t.3.17), on the same ordered carrier as the rows and the
 	// end markers, in the position it occurred.
 	SendClearBoundary(proto.ClearBoundaryFrame) error
+	// SendEffectFrame carries one identity-bearing non-visual runtime effect.
+	// It is separate from screen snapshots so re-sending cells cannot repeat it.
+	SendEffectFrame(proto.EffectFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -301,8 +304,9 @@ type subscriber struct {
 	// it was never sent, so it sent none, so nothing was acked, so the window
 	// stayed shut. internal/transport paid for that lesson in creditFloor and
 	// it is the same lesson here.
-	sent  proto.StreamOffset
-	acked proto.StreamOffset
+	sent               proto.StreamOffset
+	acked              proto.StreamOffset
+	lastBoundaryOffset proto.StreamOffset
 
 	// lifecycleSent/lifecycleAcked are the cursor pair for the independent
 	// lifecycle window. They never share PTY offsets.
@@ -819,10 +823,10 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		dataChanged := s.win.changed()
 		acked := sub.wake.wait()
 		sub.cursorMu.Lock()
-		sent, confirmed := sub.sent, sub.acked
+		sent, confirmed, lastBoundary := sub.sent, sub.acked, sub.lastBoundaryOffset
 		sub.cursorMu.Unlock()
 
-		data, resume := s.win.read(sent)
+		data, resume, boundary := s.win.readOrdered(sent, lastBoundary)
 		if resume.Reset {
 			// The live reset: stated, never only logged. The reader clears and
 			// resumes at the base, and its credit floor moves with it — a
@@ -839,6 +843,21 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 			sub.cursorMu.Lock()
 			sub.sent = resume.From
 			sub.acked = resume.From
+			sub.cursorMu.Unlock()
+			continue
+		}
+
+		if boundary != nil {
+			if err := sub.sink.SendEffectFrame(proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(boundary.At.Generation), EffectID: uint64(boundary.ID),
+				StreamOffset: boundary.StreamOffset, Kind: proto.EffectPromptBoundary,
+			}); err != nil {
+				nocxlog.From(ctx).Warn("ordered prompt boundary not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(boundary.ID), "err", err)
+				return
+			}
+			sub.cursorMu.Lock()
+			sub.lastBoundaryOffset = proto.StreamOffset(boundary.StreamOffset)
 			sub.cursorMu.Unlock()
 			continue
 		}
@@ -903,6 +922,7 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 	// one the connection bound, with module and trace already on it.
 	log := nocxlog.From(ctx)
 	defer close(sub.screenDone)
+	seenEffects := make(map[[2]uint64]struct{})
 	for {
 		select {
 		case <-cons.Ready():
@@ -929,6 +949,56 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 				}
 			}
 		}
+		for _, effect := range cons.Effects() {
+			// An ordered prompt boundary is carried by the output-window pump
+			// at its byte offset, not by this independently scheduled screen
+			// consumer. Re-emitting it here could let it overtake those bytes.
+			if effect.Kind == sessionruntime.EffectPromptBoundary && effect.Ordered {
+				continue
+			}
+			identity := [2]uint64{uint64(effect.At.Generation), uint64(effect.ID)}
+			if _, seen := seenEffects[identity]; seen {
+				continue
+			}
+			seenEffects[identity] = struct{}{}
+			kind, ok := protoEffectKind(effect.Kind)
+			if !ok {
+				log.Warn("session effect refused: unknown runtime effect kind", "session", s.id.Session, "kind", effect.Kind)
+				continue
+			}
+			frame := proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
+				StreamOffset: effect.StreamOffset,
+				Kind:         kind, Title: effect.Title, Body: effect.Body,
+			}
+			if err := sub.sink.SendEffectFrame(frame); err != nil {
+				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)
+				return
+			}
+		}
+	}
+}
+
+// protoEffectKind is the single explicit translation from the runtime's
+// closed vocabulary to the helper carrier's wire values. Unknown runtime
+// values are refused rather than narrowed into an unrelated wire kind.
+func protoEffectKind(kind sessionruntime.EffectKind) (proto.EffectKind, bool) {
+	switch kind {
+	case sessionruntime.EffectBell:
+		return proto.EffectBell, true
+	case sessionruntime.EffectNotification:
+		return proto.EffectNotification, true
+	case sessionruntime.EffectClipboard:
+		return proto.EffectClipboard, true
+	case sessionruntime.EffectTitle:
+		return proto.EffectTitle, true
+	case sessionruntime.EffectCwdReport:
+		return proto.EffectCwdReport, true
+	case sessionruntime.EffectPromptBoundary:
+		return proto.EffectPromptBoundary, true
+	default:
+		return 0, false
 	}
 }
 

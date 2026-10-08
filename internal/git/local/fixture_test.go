@@ -142,6 +142,7 @@ case "$1" in
     fi
     echo "${FAKE_TOPLEVEL:-/tmp/fake}"
     echo "${FAKE_GITDIR:-/tmp/fake/.git}"
+    echo "${FAKE_GIT_COMMON_DIR:-${FAKE_GITDIR:-/tmp/fake/.git}}"
     exit 0 ;;
   status)
     case "${FAKE_STATUS:-none}" in

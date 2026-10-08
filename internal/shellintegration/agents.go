@@ -99,12 +99,37 @@ func agentWrappers(names []string) string {
 // rule above allows, and a marker nobody replaced cannot survive unnoticed.
 func renderScript(raw string, names []string, delivery Delivery) string {
 	surface := toolSurfaceLocal
+	out := strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names))
 	if delivery == DeliveryPublished {
 		surface = toolSurfacePublished
+		out = stripAgentLaunchHelpers(out)
+		out = strings.ReplaceAll(out, agentUnorchestratedMarker, `command "$__agent" "$@"`+"\n        return $?")
+		out = strings.ReplaceAll(out, agentLaunchSetupMarker, `__nocx_agent_launch_local=0
+        __nocx_agent_launch_valid=1
+        __nocx_agent_launch_ticket=`)
+		out = strings.ReplaceAll(out, agentEnrolRefusalMarker, `command "$__agent" "$@"`+"\n        return $?")
+		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "")
+	} else {
+		out = strings.ReplaceAll(out, agentUnorchestratedMarker, "return 1")
+		out = strings.ReplaceAll(out, agentLaunchSetupMarker, agentLaunchSetupLocal)
+		out = strings.ReplaceAll(out, agentEnrolRefusalMarker, agentEnrolRefusalLocal)
+		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "__nocx_agent_launch_cancel")
 	}
-	out := strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names))
 	out = strings.ReplaceAll(out, toolSurfaceMarker, surface)
 	return stripShellComments(out)
+}
+
+func stripAgentLaunchHelpers(script string) string {
+	start := strings.Index(script, agentLaunchHelpersStartMarker)
+	end := strings.Index(script, agentLaunchHelpersEndMarker)
+	if start < 0 || end < start {
+		return script
+	}
+	end += len(agentLaunchHelpersEndMarker)
+	if end < len(script) && script[end] == '\n' {
+		end++
+	}
+	return script[:start] + script[end:]
 }
 
 // Delivery is WHICH of the two paths a script is rendered for, and the
@@ -131,6 +156,42 @@ const (
 // configuration are this machine's.
 const toolSurfaceMarker = "# @NOCX_TOOL_SURFACE@"
 
+const (
+	agentLaunchHelpersStartMarker = "# @NOCX_AGENT_LAUNCH_HELPERS_START@"
+	agentLaunchHelpersEndMarker   = "# @NOCX_AGENT_LAUNCH_HELPERS_END@"
+	agentUnorchestratedMarker     = "# @NOCX_AGENT_UNORCHESTRATED@"
+	agentLaunchSetupMarker        = "# @NOCX_AGENT_LAUNCH_SETUP@"
+	agentEnrolRefusalMarker       = "# @NOCX_AGENT_ENROL_REFUSAL@"
+	agentLaunchCancelMarker       = "# @NOCX_AGENT_LAUNCH_CANCEL@"
+)
+
+const agentLaunchSetupLocal = `if ! __nocx_agent_launch_resolve "$__agent"; then
+        builtin printf 'nocx: not started — %s\n' "${__nocx_agent_launch_reason:-local agent launch could not be resolved}" >&2
+        __nocx_agent_launch_cancel
+        __nocx_agent_launch_clear
+        return 1
+    fi
+    if (( __nocx_agent_launch_local && ! __nocx_agent_launch_valid )); then
+        builtin printf 'nocx: not started — %s\n' "${__nocx_agent_launch_reason:-local agent record has no usable launch configuration}" >&2
+        __nocx_agent_launch_clear
+        return 1
+    fi`
+
+const agentEnrolRefusalLocal = `if (( __nocx_agent_launch_local )); then
+            __nocx_agent_launch_cancel
+            if (( __nocx_agent_launch_valid )); then
+                unset __nocx_agent_token 2>/dev/null || true
+                if __nocx_agent_launch_exec 0 "$@"; then __rc=0; else __rc=$?; fi
+                __nocx_agent_launch_clear
+                return $__rc
+            fi
+            __nocx_agent_launch_clear
+            return 1
+        else
+            command "$__agent" "$@"
+            return $?
+        fi`
+
 // toolSurfaceLocal is what a LOCAL pane runs: nocx's tool surface reaches the
 // agent through an argument, and this is the only delivery that carries one.
 //
@@ -139,8 +200,12 @@ const toolSurfaceMarker = "# @NOCX_TOOL_SURFACE@"
 // future Claude subcommand rejects trailing flags, update this argv proof and
 // feed the prompt through stdin instead of moving the flag ahead of the user's
 // arguments.
-const toolSurfaceLocal = `if (( __staged )); then
-        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+const toolSurfaceLocal = `if (( __nocx_agent_launch_local )); then
+        if (( __staged )); then
+            __nocx_agent_launch_exec 1 "$@"
+        else
+            __nocx_agent_launch_exec 0 "$@"
+        fi
     else
         command "$__agent" "$@"
     fi`

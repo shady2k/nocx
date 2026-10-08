@@ -468,6 +468,7 @@ const (
 	EffectTitle
 	// EffectCwdReport is OSC 7.
 	EffectCwdReport
+	EffectPromptBoundary
 )
 
 // EffectID identifies one effect for as long as its incarnation lives. The
@@ -485,10 +486,26 @@ type Effect struct {
 	ID   EffectID
 	At   Incarnation
 	Kind EffectKind
+	// Title is the notification title, empty for OSC 9 and all other effect
+	// kinds. OSC 777 supplies it as a separate value under ADR-0047 §2.2.
+	Title []byte
 	// Body is the effect's argument: the notification text, the clipboard
-	// payload, the title, the reported directory. It is untrusted bytes from
-	// whatever the user ran, and nothing here interprets them.
+	// payload, the terminal title, or the reported directory. It is untrusted
+	// bytes from whatever the user ran, and nothing here interprets them.
 	Body []byte
+	// StreamOffset is the exact exclusive PTY byte offset for a prompt boundary.
+	StreamOffset uint64
+	// Ordered means the owner synchronously registered this boundary in the
+	// output stream before the bytes after it were published. Consumers that
+	// share that ordered stream must not emit a duplicate side-channel event.
+	Ordered bool
+}
+
+// PromptBoundarySink lets the session I/O owner publish OSC 133 B into its
+// ordered output stream while Ingest still precedes publication of the raw
+// bytes that follow the marker. It is optional for runtime-only consumers.
+type PromptBoundarySink interface {
+	PromptBoundary(Effect) error
 }
 
 // The bounds. Each is a NUMBER rather than a policy statement, so that

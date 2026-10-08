@@ -190,9 +190,9 @@ func (s *WSServer) recordedThrough(ctx context.Context, sid session.ID) uint64 {
 	if s.sessionRecorder == nil {
 		return 0
 	}
-	rec, err := s.sessionRecorder.Read(ctx, string(sid))
+	rec, err := s.sessionRecorder.RecoveryStatus(ctx, string(sid))
 	if err != nil {
-		s.log.Warn("a session's recording could not be read, so it resumes from the beginning; whatever is already recorded will be reported as a hole",
+		s.log.Warn("a session's recovery metadata could not be read, so it resumes from the beginning; whatever is already recorded will be reported as a hole",
 			"session_id", string(sid), "error", err)
 		return 0
 	}

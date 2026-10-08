@@ -53,7 +53,7 @@
  * state change — the turn's `completed` chip, a store row — never a sleep.
  */
 import { expect, type Page } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -62,6 +62,9 @@ import {
   appReadyForInput,
   bindEndpoint,
   createAiEndpoint,
+  openControlPlane,
+  promptReady,
+  readVaultState,
   setDefaultModel,
   settingsReady,
   VaultBackend,
@@ -76,6 +79,7 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
+const SETTINGS_AGENTS_NAV = '.ui-grouped-nav__item[data-item="agents"]'
 /* `run` is mutate-destructive and session.read observe (registry.go). */
 const APPROVAL_TITLE = 'This action needs your approval'
 
@@ -247,6 +251,18 @@ async function openApp(page: Page): Promise<void> {
   await appReadyForInput(page)
 }
 
+async function unsealVaultIfSealed(page: Page): Promise<void> {
+  if ((await readVaultState(endpoint)) !== 'sealed') return
+
+  const wire = await openControlPlane(endpoint.port, endpoint.token)
+  try {
+    await wire.call('vault.unseal', { means: 'passphrase', secret: `vault-pass-${nonce}` })
+  } finally {
+    wire.close()
+  }
+  await expect(page.getByRole('dialog', { name: 'Unlock the vault' })).toHaveCount(0)
+}
+
 async function openSettings(page: Page, navSelector: string): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
@@ -307,18 +323,18 @@ async function childTops(page: Page, question: string): Promise<number[]> {
 
 /** The assistant is usable end to end: endpoint, default model, and both
  *  rows Allowed so the proposed run and session.read execute rather than ask. */
-async function configureAssistant(page: Page): Promise<void> {
+async function configureAssistant(page: Page, endpointName = ENDPOINT_NAME): Promise<void> {
   await openSettings(page, SETTINGS_AI_NAV)
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
   await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
+    name: endpointName,
     baseUrl: fake.baseUrl(),
     models: ['e2e-model'],
     key: `e2e-key-${nonce}`,
     vaultPassphrase: `vault-pass-${nonce}`,
   })
   await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
+  await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
   for (const effect of ['observe', 'mutate-destructive'] as const) {
     await answerPermission(page, effect, 'Allowed')
@@ -451,8 +467,8 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
 
     // ── THE APPLICATION RESTARTS. The shell and the session die with it;
     //    only the encrypted store keeps the turn.
-    const second = await backend.restart()
-    await bindEndpoint(page, second)
+    endpoint = await backend.restart()
+    await bindEndpoint(page, endpoint)
     await page.reload()
     await appReadyForInput(page)
     await expect(page.locator('.pane.active .cmd-block[data-restored="true"]').first()).toBeVisible(
@@ -495,5 +511,72 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     await expect(restoredTurn).toHaveAttribute('data-restored', 'true')
     await expect(restoredTurn).toHaveAttribute('data-block-kind', 'ask')
     await expect(restoredTurn.locator(':scope > .cmd-children > .cmd-block')).toHaveCount(5)
+  })
+
+  test('Settings edits reach the real agent process on the next shell launch without a restart (nocx-h64wy)', async ({
+    page,
+  }) => {
+    const runID = `custom-${nonce}`
+    const launchMarker = `agent-record-launch-${nonce}`
+    const scriptDir = mkdtempSync(join(tmpdir(), `nocx-agent-record-${nonce}-`))
+    const command = join(scriptDir, 'agent-probe')
+    writeFileSync(
+      command,
+      `#!/bin/sh\nprintf '${launchMarker} args=%s env=%s\\n' "$*" "$NOCX_AGENT_PROBE"\n`,
+    )
+    chmodSync(command, 0o700)
+
+    await openApp(page)
+    await unsealVaultIfSealed(page)
+    await openSettings(page, SETTINGS_AGENTS_NAV)
+    await page.getByLabel('Agent ID').fill(runID)
+    await page.getByLabel('Display name').last().fill(`Configured ${runID}`)
+    await page.getByLabel('Command').last().fill(command)
+    await page.getByLabel('Arguments (one per line)').last().fill('--stale')
+    await page
+      .getByLabel('Environment (KEY=VALUE, one per line)')
+      .last()
+      .fill('NOCX_AGENT_PROBE=before')
+    await page.getByRole('button', { name: 'Add agent' }).click()
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Agent added. It is available in new shells.' }),
+    ).toHaveText('Agent added. It is available in new shells.')
+
+    // Edit the durable record through Settings. The next shell is opened while
+    // nocx stays running, so neither the record nor the shell bundle is stale.
+    const card = page.locator('.ui-section').filter({ hasText: `Agent ID: ${runID}` })
+    await expect(card).toBeVisible()
+    await card.getByLabel('Arguments (one per line)').fill('--fresh')
+    await card.getByLabel('Environment (KEY=VALUE, one per line)').fill('NOCX_AGENT_PROBE=after')
+    await card.getByRole('button', { name: 'Save agent' }).click()
+    await expect(card.getByRole('status')).toContainText('next launch will use these settings')
+
+    await backToTerminal(page)
+    const priorPaneID = await page
+      .locator('.nocx-tab[aria-selected="true"]')
+      .getAttribute('data-pane-id')
+    expect(priorPaneID).not.toBeNull()
+    await page.locator('[aria-label="New tab"]').click()
+    await expect
+      .poll(() => page.locator('.nocx-tab[aria-selected="true"]').getAttribute('data-pane-id'))
+      .not.toBe(priorPaneID)
+    await promptReady(page)
+    await page.keyboard.type(runID)
+    await page.keyboard.press('Enter')
+
+    const approvalDialog = page.getByRole('dialog', {
+      name: "Allow this agent to use nocx's tools?",
+    })
+    await expect(approvalDialog).toBeVisible({ timeout: 30_000 })
+    await approvalDialog.getByRole('button', { name: 'Deny', exact: true }).click()
+
+    // Type the saved ID as a person does. The assertion reads the output block
+    // from the process actually launched in the new PTY, not the record DTO.
+    const launchBlock = page.locator('.pane.active .cmd-block').filter({ hasText: runID }).last()
+    await expect(launchBlock).toBeVisible({ timeout: 30_000 })
+    await expect(launchBlock.locator('.cmd-output')).toContainText(
+      `${launchMarker} args=--fresh env=after`,
+      { timeout: 30_000 },
+    )
   })
 })

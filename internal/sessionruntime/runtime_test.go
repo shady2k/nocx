@@ -305,33 +305,53 @@ func TestTheRuntimeAnswersTheProgramsOwnQuestion(t *testing.T) {
 	}
 }
 
-// TestAnEffectBodyBelongsToTheRuntimeAndNotItsCaller is the aliasing half of
-// the delivery path: an effect's body is the runtime's memory, so neither the
-// producer that handed it over nor a consumer that reads it back can rewrite a
-// bell that has already been delivered. Without the copies, the identity the
-// duplicate policy is stated over would name different bytes at different
-// times.
-func TestAnEffectBodyBelongsToTheRuntimeAndNotItsCaller(t *testing.T) {
+func TestPromptBoundaryIsDeliveredAsAnEmptyAtMostOnceObservation(t *testing.T) {
+	s, _, _ := realRuntime(t)
+	c := s.Consumers().Attach()
+	if err := s.Ingest([]byte("before\x1b]133;")); err != nil {
+		t.Fatalf("ingest prompt boundary prefix: %v", err)
+	}
+	if err := s.Ingest([]byte("B\x07after")); err != nil {
+		t.Fatalf("ingest split prompt boundary tail: %v", err)
+	}
+	effects := c.Effects()
+	wantOffset := uint64(len("before\x1b]133;B\x07"))
+	if len(effects) != 1 || effects[0].Kind != EffectPromptBoundary || effects[0].ID == 0 || effects[0].At != s.Incarnation() || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 || effects[0].StreamOffset != wantOffset {
+		t.Fatalf("prompt boundary delivery = %#v", effects)
+	}
+	if again := c.Effects(); len(again) != 1 || again[0].ID != effects[0].ID {
+		t.Fatalf("consumer queue changed across passive reads: %#v", again)
+	}
+}
+
+// TestAnEffectTitleAndBodyBelongToTheRuntimeAndNotTheirCaller is the aliasing
+// half of the delivery path: an effect's title and body are the runtime's
+// memory, so neither producer nor consumer can rewrite a delivered notification.
+// Without the copies, the identity would name different bytes at different times.
+func TestAnEffectTitleAndBodyBelongToTheRuntimeAndNotTheirCaller(t *testing.T) {
 	s, _, _ := realRuntime(t)
 	c := s.Consumers().Attach()
 
-	body := []byte("build finished")
-	if err := s.Consumers().Offer(Effect{ID: 1, At: s.Incarnation(), Kind: EffectNotification, Body: body}); err != nil {
+	title := []byte("Tests failed")
+	body := []byte("2 failed")
+	if err := s.Consumers().Offer(Effect{ID: 1, At: s.Incarnation(), Kind: EffectNotification, Title: title, Body: body}); err != nil {
 		t.Fatalf("offer a notification: %v", err)
 	}
 
 	// The producer reuses its buffer, which is what a program's own read buffer
 	// is for.
+	title[0] = 'X'
 	body[0] = 'X'
-	if got := c.Effects(); len(got) != 1 || string(got[0].Body) != "build finished" {
-		t.Fatalf("the delivered effect reads %v after the producer reused its buffer, want %q", got, "build finished")
+	if got := c.Effects(); len(got) != 1 || string(got[0].Title) != "Tests failed" || string(got[0].Body) != "2 failed" {
+		t.Fatalf("the delivered effect reads %v after the producer reused its buffers, want title/body unchanged", got)
 	}
 
 	// And a consumer writes through what it was handed.
 	held := c.Effects()
+	held[0].Title[0] = 'Y'
 	held[0].Body[0] = 'Y'
-	if got := c.Effects(); len(got) != 1 || string(got[0].Body) != "build finished" {
-		t.Fatalf("the held effect reads %v after the reader wrote through it, want %q", got, "build finished")
+	if got := c.Effects(); len(got) != 1 || string(got[0].Title) != "Tests failed" || string(got[0].Body) != "2 failed" {
+		t.Fatalf("the held effect reads %v after the reader wrote through it, want title/body unchanged", got)
 	}
 }
 

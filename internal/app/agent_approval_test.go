@@ -735,3 +735,39 @@ func TestTheDomainIsDerivedFromTheRouteOrRefused(t *testing.T) {
 		t.Fatalf("refusal = %q, want a sentence naming what could not be told", err)
 	}
 }
+
+type consentGateRequester struct {
+	entered chan transport.HostAsk
+	answer  chan bool
+}
+
+func (r *consentGateRequester) RequestHost(_ context.Context, ask transport.HostAsk) (transport.HostAnswer, error) {
+	r.entered <- ask
+	return transport.HostAnswer{Approved: <-r.answer}, nil
+}
+
+func TestResolvedAgentApprovalRechecksExecutableAfterConsentWait(t *testing.T) {
+	path := fakeAgent(t, "configured-agent")
+	executable, err := agentapproval.IdentityForPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requester := &consentGateRequester{entered: make(chan transport.HostAsk, 1), answer: make(chan bool, 1)}
+	svc := approvalServiceForTest(t, requester)
+	verdict := svc.ApproveResolved(context.Background(), "pane-custom", "myagent", executable)
+	pending := pendingOf(t, verdict)
+	ask := <-requester.entered
+	if ask.Executable != executable.Path || ask.Digest != executable.SHA256 {
+		t.Fatalf("approval asked about %q/%q, want the resolved record executable %q/%q", ask.Executable, ask.Digest, executable.Path, executable.SHA256)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho replaced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requester.answer <- true
+	if reason := settledOf(t, pending); reason == "" {
+		t.Fatal("approval for an executable replaced while the person was deciding was persisted")
+	}
+	if _, found := svc.store.Lookup(executable, agentapproval.Domain{Kind: agentapproval.DomainLocal}, svc.scope); found {
+		t.Fatal("the old executable identity received a grant after its bytes changed")
+	}
+}

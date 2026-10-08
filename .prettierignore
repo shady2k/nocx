@@ -75,3 +75,5 @@ eslint-fixtures/
 # `prettier --check .` for every commit in this checkout, on files no human
 # wrote (measured 2026-09-18).
 output/
+
+.prime-report.md*

@@ -21,11 +21,9 @@ const (
 	// nothing to say: the effect IS the ring.
 	EffectBell
 	// EffectNotification is a desktop notification request (OSC 9 without a
-	// parameter, and OSC 777). Its body is the message text. The port
-	// deliberately carries the text and not a title/body pair: the protocols
-	// that have no title put the whole message in the body, and a program that
-	// supplies one is a formatting decision the surface can make from the text
-	// it has.
+	// parameter, and OSC 777). OSC 9 has an empty title; OSC 777 supplies both
+	// fields. The title and body are carried separately because presentation
+	// requests have the exact shape fixed by ADR-0047 §2.2.
 	EffectNotification
 	// EffectClipboard is a request to write the clipboard (OSC 52 and its
 	// Kitty descendant). Its body is the payload the program supplied, copied.
@@ -72,6 +70,8 @@ const (
 	// sighting with no interval in flight to locate anything in does
 	// nothing at all.
 	EffectOutputMark
+	// EffectPromptBoundary is OSC 133 B: an untrusted observation that a conventional shell emitted its prompt boundary. It carries no authority.
+	EffectPromptBoundary
 	// EffectClearBoundary is the program erasing the display AND its saved
 	// lines: ED3, `CSI 3 J`, written to the pty after `CSI H` and `CSI 2 J`
 	// — exactly what `clear(1)` emits (nocx-zg3k3.10.3's owner decision,
@@ -134,8 +134,13 @@ const (
 // implementation that kept the pointer would hand a caller a title that was
 // freed a moment ago — and the caller could not tell.
 type Effect struct {
-	Kind EffectKind
-	Body []byte
+	Kind  EffectKind
+	Title []byte
+	Body  []byte
+	// StreamOffset is the exclusive PTY byte offset of a scanned marker.
+	// It is populated for EffectPromptBoundary so downstream transports can
+	// order that fact after the exact bytes through OSC 133 B.
+	StreamOffset uint64
 	// Source is the content an EffectFence was drawn over: the text of the
 	// screen rows at the fence, captured when the fence completed. Nil for
 	// every other kind, and never read except through Kind — a consumer

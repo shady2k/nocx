@@ -1740,12 +1740,18 @@ func New(opts ...Option) (*App, error) {
 	// so the rule a person is shown a verdict about is the rule that reads
 	// their pane.
 	paneCalibration := agentcalib.New(logger, paneViews, calibrationStore, paneDrivers, paneReplay{local: localOpener})
+	launchTickets := newAgentLaunchTickets()
+	agentLaunchService := newAgentLaunchService(agentRecords, childTransports, launchTickets)
 	paneEnrol, paneEnrolErr := newPaneEnroller(
 		logger, childSessions, paneViews, paneWatch, agentApprovalService,
 	)
 	if paneEnrolErr != nil {
 		return nil, fmt.Errorf("pane enroller: %w", paneEnrolErr)
 	}
+	paneEnrol.launchTickets = launchTickets
+	paneEnrol.transports = childTransports
+	paneEnrol = workerEnrol.hookInto(paneEnrol)
+	agentLaunchService.workerLane = paneEnrol.isWorkerLaunch
 	var lifecyclePub *lifecyclepub.Publisher
 	lifecyclePub = lifecyclepub.New(lifecycleKernel,
 		// The gate that decides every handshake gets a voice (nocx-n14oo.8).
@@ -1777,7 +1783,8 @@ func New(opts ...Option) (*App, error) {
 		// bundle asks over this same authenticated channel, and this is what
 		// an unwired enroller refuses: the fail-closed half of D4, and the
 		// opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(workerEnrol.hookInto(paneEnrol)))
+		lifecyclepub.WithAgentEnroller(paneEnrol),
+		lifecyclepub.WithAgentLaunchResolver(agentLaunchService))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1814,6 +1821,7 @@ func New(opts ...Option) (*App, error) {
 	// rather than in the literal above because the service is built with the
 	// session registry, which does not exist that early (nocx-6jbad).
 	tpOpts = append(tpOpts, transport.WithAgentAccess(agentApprovalService))
+	tpOpts = append(tpOpts, transport.WithAgentRecords(agentRecords))
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
@@ -2154,6 +2162,7 @@ func New(opts ...Option) (*App, error) {
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
 	localOpener.publishScreen = tp.PublishScreenFrame
+	localOpener.publishEffect = tp.PublishSessionEffect
 	localOpener.blockRows = tp
 	// The two row buffers are the person's settings (nocx-2v80t.3.36): the
 	// helper's rides each spawn, the coordinator's is the transport's for
@@ -3114,7 +3123,7 @@ func (a *App) Start(ctx context.Context) error {
 	reconcileSessions(ctx, a.sessionReconciler, a.helperRegistry.inventories(),
 		&readoptPass{
 			registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
-			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, blockRows: a.Transport,
+			local: a.localHelper, publishScreen: a.Transport.PublishScreenFrame, publishEffect: a.Transport.PublishSessionEffect, blockRows: a.Transport,
 		},
 		content.DefaultUnreconciledRetention, a.slogger)
 
@@ -3213,6 +3222,7 @@ func (a *App) retryVaultSealedSessions(ctx context.Context, ids map[string]struc
 				registry: a.helperRegistry, routes: a.sessionRoutes, adopter: a.Transport,
 				local: a.localHelper, timeout: vaultSealedRetryAttempt,
 				publishScreen: a.Transport.PublishScreenFrame,
+				publishEffect: a.Transport.PublishSessionEffect,
 				blockRows:     a.Transport,
 			},
 			content.DefaultUnreconciledRetention, a.slogger)

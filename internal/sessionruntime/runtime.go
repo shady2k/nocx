@@ -1269,10 +1269,21 @@ func (s *Session) Ingest(b []byte) error {
 			}
 			s.nextEffect++
 			effect := Effect{
-				ID:   s.nextEffect,
-				At:   s.inc,
-				Kind: effectKindOf(e.Kind),
-				Body: e.Body,
+				ID:           s.nextEffect,
+				At:           s.inc,
+				Kind:         effectKindOf(e.Kind),
+				Title:        e.Title,
+				Body:         e.Body,
+				StreamOffset: e.StreamOffset,
+			}
+			if effect.Kind == EffectPromptBoundary {
+				if sink, ok := s.replies.(PromptBoundarySink); ok {
+					if err := sink.PromptBoundary(effect); err != nil {
+						replyErr = err
+						continue
+					}
+					effect.Ordered = true
+				}
 			}
 			if err := s.deliverLocked(effectDelivery(effect)); err != nil {
 				return err
@@ -1304,6 +1315,8 @@ func effectKindOf(k emulator.EffectKind) EffectKind {
 		return EffectTitle
 	case emulator.EffectCwdReport:
 		return EffectCwdReport
+	case emulator.EffectPromptBoundary:
+		return EffectPromptBoundary
 	default:
 		return EffectNone
 	}
@@ -1881,6 +1894,7 @@ type queued struct {
 // delivered, and the identity the duplicate policy is stated over would name
 // different bytes at different times.
 func effectDelivery(e Effect) queued {
+	e.Title = bytes.Clone(e.Title)
 	e.Body = bytes.Clone(e.Body)
 	return queued{class: deliveryClassOf(e.Kind), effect: e}
 }
@@ -1890,7 +1904,7 @@ func effectDelivery(e Effect) queued {
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
 func deliveryClassOf(k EffectKind) DeliveryClass {
 	switch k {
-	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport:
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary:
 		return DeliveryAtMostOnce
 	default:
 		return DeliveryUnclassified
@@ -1954,7 +1968,7 @@ func (c *subscriber) HeldBytes() int {
 func (c *subscriber) heldBytesLocked() int {
 	held := 0
 	for _, p := range c.queue {
-		held += len(p.bytes) + len(p.effect.Body)
+		held += len(p.bytes) + len(p.effect.Title) + len(p.effect.Body)
 	}
 	return held
 }
@@ -1983,10 +1997,11 @@ func (c *subscriber) Effects() []Effect {
 	held := make([]Effect, 0, len(c.queue))
 	for _, p := range c.queue {
 		if p.class == DeliveryAtMostOnce {
-			// The body is COPIED out: a caller that wrote through it would be
-			// editing what the runtime holds, and the lock is released the
+			// Both fields are COPIED out: a caller that wrote through either
+			// would edit what the runtime holds, and the lock is released the
 			// moment this returns.
 			e := p.effect
+			e.Title = bytes.Clone(e.Title)
 			e.Body = bytes.Clone(e.Body)
 			held = append(held, e)
 		}

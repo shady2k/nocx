@@ -71,6 +71,14 @@ type nestedKernel struct {
 	// answer carrying no `enrolled` field at all. The wrapper must read that
 	// as "not orchestrated", say so in the pane, and still run the agent.
 	refuseEnrolment bool
+	// launchCommand and its data stand in for a local record resolved by the
+	// backend. The shell still consumes it only through the authenticated
+	// launch-resolution event.
+	launchCommand   string
+	launchArgs      []string
+	launchEnv       []string
+	launchLiteral   bool
+	launchMalformed bool
 	// agentMalformed sends a malformed lifecycle frame, so the wrapper must
 	// treat an answer it cannot parse as a refusal.
 	agentMalformed bool
@@ -180,6 +188,39 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 		k.sendAcceptLocked(f.Dom, f.Epoch)
 	case "domain_request":
 		k.grantLocked()
+	case "agent_launch_resolve":
+		if k.launchLiteral {
+			k.encodeAgentAnswerLocked(f, lifecycle.Event{
+				Kind: lifecycle.KindAgentLaunchResolved,
+				AgentLaunchResolved: &lifecycle.AgentLaunchResolved{
+					RequestID: lifecycle.RequestID(f.Request),
+					Agent:     f.Agent,
+					Local:     false,
+				},
+			})
+			return
+		}
+		if k.launchMalformed {
+			k.sendMalformedAgentLaunchAnswerLocked()
+			return
+		}
+		argv := append([]string{k.launchCommand}, k.launchArgs...)
+		payload, err := EncodeAgentLaunchPayload(argv, k.launchEnv)
+		if err != nil {
+			k.t.Fatalf("encode fake launch payload: %v", err)
+		}
+		k.encodeAgentAnswerLocked(f, lifecycle.Event{
+			Kind: lifecycle.KindAgentLaunchResolved,
+			AgentLaunchResolved: &lifecycle.AgentLaunchResolved{
+				RequestID: lifecycle.RequestID(f.Request),
+				Agent:     f.Agent,
+				Local:     true,
+				Ticket:    strings.Repeat("a", 43),
+				Payload:   payload,
+			},
+		})
+	case "agent_launch_cancel":
+		// Cancellation is best effort and has no response.
 	case "agent_enrol":
 		if k.agentTimeout {
 			return
@@ -346,6 +387,18 @@ func (k *nestedKernel) encodeAgentAnswerLocked(f frame, evt lifecycle.Event) {
 	}
 	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
 		k.t.Fatalf("encode %s: %v", kind, err)
+	}
+}
+
+func (k *nestedKernel) sendMalformedAgentLaunchAnswerLocked() {
+	body := []byte(`{"evt":`)
+	var hdr [4]byte
+	if uint64(len(body)) > uint64(^uint32(0)) {
+		k.t.Fatal("malformed frame body exceeds the 32-bit length bound")
+	}
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body))) // #nosec G115 -- body length is checked above
+	if _, err := k.conn.Write(append(hdr[:], body...)); err != nil {
+		k.t.Fatalf("write malformed launch answer: %v", err)
 	}
 }
 
@@ -582,6 +635,7 @@ func startNestedBashParentBinTMPDIR(t *testing.T, bash string, k *nestedKernel, 
 	if werr := os.WriteFile(filepath.Join(binDir, binName), []byte(fakeBody), 0o755); werr != nil {
 		t.Fatalf("write fake %s: %v", binName, werr)
 	}
+	k.launchCommand = filepath.Join(binDir, binName)
 
 	// #nosec G204 — bash is requireShell- or requireBash32-resolved, never
 	// input; an interactive shell with an inherited descriptor is the only
@@ -766,6 +820,7 @@ func startNestedZshParent(t *testing.T, k *nestedKernel, binName, fakeBody strin
 	if werr := os.WriteFile(filepath.Join(binDir, binName), []byte(fakeBody), 0o755); werr != nil {
 		t.Fatalf("write fake %s: %v", binName, werr)
 	}
+	k.launchCommand = filepath.Join(binDir, binName)
 	// #nosec G204 — zsh is the requireShell-resolved path, not input; an
 	// interactive shell with an inherited descriptor is the only way to
 	// exercise the local transport shape.

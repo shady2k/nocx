@@ -12,6 +12,7 @@ import type {
   Run as WireRun,
   SessionOutput,
 } from './generated/session.output'
+import type { Gap as RecoveryGap, SessionRecoveryStatus } from './generated/session.recoveryStatus'
 
 // The one report shape — grid plus whole-text-area pixels — re-exported so
 // the surfaces that compute a report spell the same type the client sends
@@ -20,6 +21,7 @@ export type { SessionSize }
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
+import type { SessionEffect } from './generated/session.effect'
 import type { SessionHistoryPage } from './generated/session.historyPage'
 import type { SessionHistoryPageRows } from './generated/session.historyPageRows'
 import type { SessionIntentResult } from './generated/session.intent'
@@ -195,11 +197,13 @@ function decodeRun(run: WireRun): RecordedRun {
 export interface SessionRecovery {
   /** Bytes handed to the terminal ahead of the live stream. */
   bytes: number
-  gaps: SessionOutputGap[]
+  gaps: RecoveryGap[]
   /** The size the recovered bytes were produced at. A surface rendering them
    *  at anything else is drawing a different screen from the one the session
    *  printed. */
   size: SessionSize
+  /** True when metadata could not be checked during reclaim. */
+  statusUnavailable?: boolean
 }
 
 /** What a read that could not happen came back with. A named constant, not
@@ -398,6 +402,9 @@ interface SessionState {
   // equivalent on purpose: buffering would only move the same superseded
   // snapshot one hop.
   screenFrameCallback: ((frame: SessionFrame) => void) | null
+  effectCallback: ((effect: SessionEffect) => void) | null
+  seenEffects: Set<string>
+  pendingEffects: SessionEffect[]
   // historyPageCallback receives one parsed session.historyPageRows
   // document (nocx-zg3k3.10.3) — the rows of one live-history page, riding
   // the same metadata frame the screen plane shares, keyed by the pageId
@@ -593,6 +600,10 @@ export class SessionHandle {
    *  side refuses what it cannot install, and nothing here counts or acks. */
   onScreenFrame(cb: (frame: SessionFrame) => void): void {
     this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
+
+  onEffect(cb: (effect: SessionEffect) => void): void {
+    this.client.onSessionEffect(this.sessionId, cb)
   }
 
   /** Asks for one page of this session's live history, as the emulator
@@ -896,6 +907,40 @@ export class WSClient {
         progress,
         ...(children === null ? {} : { children }),
       })
+    })
+
+    this.dispatcher.subscribe('session.effect', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      const generation = raw.generation
+      const effectId = raw.effectId
+      const kind = raw.kind
+      const title = raw.title
+      const body = raw.body
+      if (typeof generation !== 'string' || !/^[1-9][0-9]*$/.test(generation)) return
+      if (typeof effectId !== 'string' || !/^[1-9][0-9]*$/.test(effectId)) return
+      if (
+        kind !== 'bell' &&
+        kind !== 'notification' &&
+        kind !== 'clipboard' &&
+        kind !== 'title' &&
+        kind !== 'cwd' &&
+        kind !== 'promptBoundary'
+      ) {
+        log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
+        return
+      }
+      if (typeof title !== 'string' || typeof body !== 'string') return
+      const identity = `${generation}:${effectId}`
+      if (state.seenEffects.has(identity)) return
+      state.seenEffects.add(identity)
+      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, title, body }
+      if (state.effectCallback) state.effectCallback(effect)
+      else state.pendingEffects.push(effect)
     })
 
     this.dispatcher.subscribe('session.liveness', (params: unknown) => {
@@ -1251,6 +1296,9 @@ export class WSClient {
       reported,
       dataCallback: null,
       screenFrameCallback: null,
+      effectCallback: null,
+      seenEffects: new Set(),
+      pendingEffects: [],
       historyPageCallback: null,
       pendingData: '',
       exitCallback: null,
@@ -1317,6 +1365,19 @@ export class WSClient {
     return this.dispatcher
       .call<SessionsInventoryResult>('sessions.inventory', {})
       .then((result) => result.sessions)
+  }
+
+  /** Read only the offset and gap metadata used for the reclaim notice. The
+   *  byte recording remains a separate session.output path and is still fed
+   *  through this session's decoder. */
+  private readSessionRecoveryStatus(
+    sessionId: string,
+    identity: { instanceId: string; sessionEpoch: number },
+  ): Promise<SessionRecoveryStatus> {
+    return this.dispatcher.call<SessionRecoveryStatus>('session.recoveryStatus', {
+      sessionId,
+      ...identity,
+    })
   }
 
   // --- the recording -------------------------------------------------------
@@ -1416,6 +1477,9 @@ export class WSClient {
     // pane worth looking at; taking the session back is the job, and a
     // backend with no content store wired answers this method "not found"
     // (registration.go) on an otherwise perfectly reclaimable session.
+    const recoveryStatus = this.readSessionRecoveryStatus(entry.sessionId, identity).catch(
+      () => null,
+    )
     return this.readSessionOutput(entry.sessionId, identity)
       .catch(() => EMPTY_RECORDING)
       .then((recording) => {
@@ -1455,8 +1519,8 @@ export class WSClient {
           // session.
           gaps.push({ start: recording.produced, end: entry.replayFrom, reason: UNRECORDED })
         }
-        return this._sendAttach(entry.sessionId, attachAt, identity)
-          .then((result) => {
+        return Promise.all([this._sendAttach(entry.sessionId, attachAt, identity), recoveryStatus])
+          .then(([result, metadata]) => {
             const attached = this.sessions.get(entry.sessionId)
             if (attached) attached.offset = result.from
             // No cwd, no mode, no parent, no workspace: every one of those is
@@ -1481,8 +1545,16 @@ export class WSClient {
               '',
               {
                 bytes: recovered.length,
-                gaps,
+                gaps: metadata
+                  ? [
+                      ...metadata.gaps,
+                      ...(metadata.produced < entry.replayFrom
+                        ? [{ start: metadata.produced, end: entry.replayFrom, reason: UNRECORDED }]
+                        : []),
+                    ]
+                  : gaps,
                 size: recording.size,
+                statusUnavailable: metadata === null,
               },
               result.awaitsIntegration,
               result.accessEpoch ?? null,
@@ -1712,6 +1784,14 @@ export class WSClient {
     if (state) {
       state.screenFrameCallback = cb
     }
+  }
+
+  onSessionEffect(sessionId: string, cb: (effect: SessionEffect) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.effectCallback = cb
+    const pending = state.pendingEffects.splice(0)
+    for (const effect of pending) cb(effect)
   }
 
   onSessionObservation(

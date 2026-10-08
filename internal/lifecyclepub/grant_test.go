@@ -1,6 +1,8 @@
 package lifecyclepub_test
 
 import (
+	"context"
+	"sync"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -215,5 +217,88 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		if f.Domain == string(parent.Domain) && f.Destination != nil {
 			t.Fatalf("the local parent must carry no destination, got %+v", f.Destination)
 		}
+	}
+}
+
+type pausingLifecycleKernel struct {
+	lifecyclepub.Kernel
+	child   lifecycle.DomainID
+	applied chan struct{}
+	resume  <-chan struct{}
+}
+
+func (k *pausingLifecycleKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) ([]lifecycle.Outbound, error) {
+	outs, err := k.Kernel.Ingest(t, env)
+	if env.Domain == k.child {
+		close(k.applied)
+		<-k.resume
+	}
+	return outs, err
+}
+
+// TestKernelEstablishmentCanPrecedeItsPublishedFact proves that the kernel's
+// read model may show Established before the publisher has derived and emitted
+// the corresponding fact. Callers that need frontend-visible state must wait
+// for the fact, not poll Kernel.Domain and assume publication has happened.
+func TestKernelEstablishmentCanPrecedeItsPublishedFact(t *testing.T) {
+	base := lifecycle.New(lifecycle.Options{})
+	resume := make(chan struct{})
+	var resumeOnce sync.Once
+	openKernel := func() { resumeOnce.Do(func() { close(resume) }) }
+	t.Cleanup(openKernel)
+	k := &pausingLifecycleKernel{Kernel: base, applied: make(chan struct{}), resume: resume}
+	var pub *lifecyclepub.Publisher
+	var child lifecycle.DomainHandle
+	pub = lifecyclepub.New(k, lifecyclepub.WithGrantBuilder(func(req lifecyclepub.GrantRequest) (lifecyclepub.GrantBootstrap, error) {
+		h, err := pub.RequestDomain(req.Lane, &req.Parent, "T")
+		if err != nil {
+			return lifecyclepub.GrantBootstrap{}, err
+		}
+		child = h
+		k.child = h.Domain
+		return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: "opaque-ssh-launch"}, nil
+	}))
+	recorded := &recorder{}
+	pub.SetEmitter(recorded)
+	port := &recordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := pub.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustIngest(t, pub, "T", env("L", parent, 1, helloEvt()))
+	mustIngest(t, pub, "T", env("L", parent, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "host", "user", 22)))
+	mustIngest(t, pub, "T", env("L", parent, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+
+	completed := make(chan error, 1)
+	go func() {
+		completed <- pub.Ingest(context.Background(), "T", env("L", child, 1, helloEvt()))
+	}()
+	<-k.applied // kernel mutation finished; Publisher.Ingest has not resumed.
+	domain, ok := base.Domain(child.Domain)
+	if !ok || domain.State != lifecycle.DomainEstablished {
+		t.Fatalf("kernel domain = %+v, exists=%v; want Established before projection", domain, ok)
+	}
+	for _, f := range recorded.all() {
+		if f.Domain == string(child.Domain) {
+			t.Fatalf("child fact was published before Publisher resumed: %+v", f)
+		}
+	}
+	openKernel()
+	if err := <-completed; err != nil {
+		t.Fatalf("child hello: %v", err)
+	}
+	var destinationPublished bool
+	for _, f := range recorded.all() {
+		if f.Domain == string(child.Domain) && f.Destination != nil {
+			destinationPublished = true
+		}
+	}
+	if !destinationPublished {
+		t.Fatal("publisher returned without publishing the child's destination")
 	}
 }

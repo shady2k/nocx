@@ -761,9 +761,12 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
+	launchTransports := newTransportRegistry()
+	paneEnrol.transports = launchTransports
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
+		lifecyclepub.WithAgentLaunchResolver(literalAgentLaunchResolver{transports: launchTransports}),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub

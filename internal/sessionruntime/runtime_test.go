@@ -308,11 +308,15 @@ func TestTheRuntimeAnswersTheProgramsOwnQuestion(t *testing.T) {
 func TestPromptBoundaryIsDeliveredAsAnEmptyAtMostOnceObservation(t *testing.T) {
 	s, _, _ := realRuntime(t)
 	c := s.Consumers().Attach()
-	if err := s.Ingest([]byte("before\x1b]133;B\x07after")); err != nil {
-		t.Fatalf("ingest prompt boundary: %v", err)
+	if err := s.Ingest([]byte("before\x1b]133;")); err != nil {
+		t.Fatalf("ingest prompt boundary prefix: %v", err)
+	}
+	if err := s.Ingest([]byte("B\x07after")); err != nil {
+		t.Fatalf("ingest split prompt boundary tail: %v", err)
 	}
 	effects := c.Effects()
-	if len(effects) != 1 || effects[0].Kind != EffectPromptBoundary || effects[0].ID == 0 || effects[0].At != s.Incarnation() || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 {
+	wantOffset := uint64(len("before\x1b]133;B\x07"))
+	if len(effects) != 1 || effects[0].Kind != EffectPromptBoundary || effects[0].ID == 0 || effects[0].At != s.Incarnation() || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 || effects[0].StreamOffset != wantOffset {
 		t.Fatalf("prompt boundary delivery = %#v", effects)
 	}
 	if again := c.Effects(); len(again) != 1 || again[0].ID != effects[0].ID {

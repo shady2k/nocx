@@ -1,9 +1,11 @@
 package session
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // The bounded output window: D1's promise and its bound in one object.
@@ -46,6 +48,14 @@ import (
 // page is dropped from the slice and collected, and a read never crosses a
 // page boundary.
 
+const maxPromptBoundaries = 64
+
+var errPromptBoundaryWindowClosed = errors.New("session: prompt-boundary window is closed")
+
+type orderedPromptBoundary struct {
+	effect sessionruntime.Effect
+}
+
 // pageSize is one page of the window, and also the largest number of bytes one
 // read can return. 32 KiB is the PTY pump's own read size, so the common case
 // is one page per read with no partial-page arithmetic, and it is well under
@@ -76,6 +86,10 @@ type window struct {
 	// wait the same way; see gate.go.
 	*gate
 	closed bool
+	// promptBoundaries are installed synchronously by the runtime's owner
+	// before it writes the bytes after OSC 133 B. Readers split their byte
+	// stream at these offsets and emit the typed effect between the parts.
+	promptBoundaries []orderedPromptBoundary
 }
 
 // newWindow builds a window bounded to about bound bytes. The bound is
@@ -122,8 +136,94 @@ func (w *window) write(p []byte) {
 			w.pages = w.pages[1:]
 			w.base += pageSize
 		}
+		w.prunePromptBoundariesLocked()
 	}
 	w.signal()
+}
+
+// markPromptBoundary installs a typed OSC 133 B event before the owner's
+// subsequent window.write publishes any bytes after that marker.
+func (w *window) markPromptBoundary(effect sessionruntime.Effect) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false, errPromptBoundaryWindowClosed
+	}
+	w.prunePromptBoundariesLocked()
+	dropped := false
+	if len(w.promptBoundaries) >= maxPromptBoundaries {
+		copy(w.promptBoundaries, w.promptBoundaries[1:])
+		w.promptBoundaries = w.promptBoundaries[:len(w.promptBoundaries)-1]
+		dropped = true
+	}
+	copyEffect := effect
+	copyEffect.Title = append([]byte(nil), effect.Title...)
+	copyEffect.Body = append([]byte(nil), effect.Body...)
+	w.promptBoundaries = append(w.promptBoundaries, orderedPromptBoundary{effect: copyEffect})
+	w.signal()
+	return dropped, nil
+}
+
+func (w *window) prunePromptBoundariesLocked() {
+	firstLive := 0
+	for firstLive < len(w.promptBoundaries) && proto.StreamOffset(w.promptBoundaries[firstLive].effect.StreamOffset) < w.base {
+		firstLive++
+	}
+	if firstLive > 0 {
+		copy(w.promptBoundaries, w.promptBoundaries[firstLive:])
+		w.promptBoundaries = w.promptBoundaries[:len(w.promptBoundaries)-firstLive]
+	}
+}
+
+// readOrdered serves bytes only up to the next prompt boundary. At the exact
+// offset it returns the boundary as a separate typed item; lastBoundary keeps
+// a subscriber from receiving that item twice while its byte cursor is fixed.
+func (w *window) readOrdered(offset, lastBoundary proto.StreamOffset) ([]byte, proto.Resume, *sessionruntime.Effect) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	r := proto.ResumeAt(w.base, w.written, offset)
+	if r.Reset {
+		return nil, r, nil
+	}
+	limit := proto.StreamOffset(0)
+	for i := range w.promptBoundaries {
+		effect := &w.promptBoundaries[i].effect
+		effectOffset := proto.StreamOffset(effect.StreamOffset)
+		if effectOffset <= lastBoundary || effectOffset < r.From {
+			continue
+		}
+		if effectOffset == r.From {
+			copyEffect := *effect
+			copyEffect.Title = append([]byte(nil), effect.Title...)
+			copyEffect.Body = append([]byte(nil), effect.Body...)
+			return nil, r, &copyEffect
+		}
+		limit = effectOffset - r.From
+		break
+	}
+	if r.From >= w.written {
+		return nil, r, nil
+	}
+
+	rel := int(r.From - w.base) //nolint:gosec
+	page := rel / pageSize
+	within := rel % pageSize
+	avail := pageSize - within
+	if page == len(w.pages)-1 {
+		avail = w.tail - within
+	}
+	// avail is positive and bounded by pageSize; only narrow limit after
+	// proving it is smaller than that platform-sized page slice.
+	if limit > 0 && uint64(avail) > uint64(limit) { //nolint:gosec
+		avail = int(limit) //nolint:gosec
+	}
+	if avail <= 0 {
+		return nil, r, nil
+	}
+	out := make([]byte, avail)
+	copy(out, w.pages[page][within:within+avail])
+	return out, r, nil
 }
 
 // read serves one reader standing at offset. It returns at most one page, and

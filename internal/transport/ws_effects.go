@@ -51,9 +51,22 @@ func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame
 		return false
 	}
 	params := sessionEffectParams{SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10), EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind, Title: string(effect.Title), Body: string(effect.Body)}
-	if err := wconn.TryNotify("session.effect", mustMarshal(params)); err != nil {
-		s.log.Debug("session.effect dropped", "session", string(sid), "effect_id", effect.EffectID, "error", err)
+	waitForBytes := effect.Kind == proto.EffectPromptBoundary && effect.StreamOffset > 0
+	offset := effect.StreamOffset
+	accepted, coalesced := rx.queueEffect(wconn, offset, waitForBytes, "session.effect", mustMarshal(params))
+	if !accepted {
+		s.log.Debug("session.effect dropped: pending delivery budget full or subscriber changed", "session", string(sid), "effect_id", effect.EffectID)
 		return false
+	}
+	if coalesced {
+		s.log.Debug("coalesced an older pending prompt boundary", "session", string(sid), "effect_id", effect.EffectID)
+	}
+	if cursor, ok := rx.deliveryCursor(wconn); ok {
+		if !rx.enqueueDueEffects(wconn, cursor) {
+			// The item remains at the head of the bounded queue. ringToConn
+			// retries it through its cancellable outbound-room wait.
+			s.log.Debug("session.effect queued behind outbound backpressure", "session", string(sid), "effect_id", effect.EffectID)
+		}
 	}
 	return true
 }

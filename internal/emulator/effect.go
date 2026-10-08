@@ -137,6 +137,10 @@ type Effect struct {
 	Kind  EffectKind
 	Title []byte
 	Body  []byte
+	// StreamOffset is the exclusive PTY byte offset of a scanned marker.
+	// It is populated for EffectPromptBoundary so downstream transports can
+	// order that fact after the exact bytes through OSC 133 B.
+	StreamOffset uint64
 	// Source is the content an EffectFence was drawn over: the text of the
 	// screen rows at the fence, captured when the fence completed. Nil for
 	// every other kind, and never read except through Kind — a consumer

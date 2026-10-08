@@ -304,8 +304,9 @@ type subscriber struct {
 	// it was never sent, so it sent none, so nothing was acked, so the window
 	// stayed shut. internal/transport paid for that lesson in creditFloor and
 	// it is the same lesson here.
-	sent  proto.StreamOffset
-	acked proto.StreamOffset
+	sent               proto.StreamOffset
+	acked              proto.StreamOffset
+	lastBoundaryOffset proto.StreamOffset
 
 	// lifecycleSent/lifecycleAcked are the cursor pair for the independent
 	// lifecycle window. They never share PTY offsets.
@@ -822,10 +823,10 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		dataChanged := s.win.changed()
 		acked := sub.wake.wait()
 		sub.cursorMu.Lock()
-		sent, confirmed := sub.sent, sub.acked
+		sent, confirmed, lastBoundary := sub.sent, sub.acked, sub.lastBoundaryOffset
 		sub.cursorMu.Unlock()
 
-		data, resume := s.win.read(sent)
+		data, resume, boundary := s.win.readOrdered(sent, lastBoundary)
 		if resume.Reset {
 			// The live reset: stated, never only logged. The reader clears and
 			// resumes at the base, and its credit floor moves with it — a
@@ -842,6 +843,21 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 			sub.cursorMu.Lock()
 			sub.sent = resume.From
 			sub.acked = resume.From
+			sub.cursorMu.Unlock()
+			continue
+		}
+
+		if boundary != nil {
+			if err := sub.sink.SendEffectFrame(proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(boundary.At.Generation), EffectID: uint64(boundary.ID),
+				StreamOffset: boundary.StreamOffset, Kind: proto.EffectPromptBoundary,
+			}); err != nil {
+				nocxlog.From(ctx).Warn("ordered prompt boundary not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(boundary.ID), "err", err)
+				return
+			}
+			sub.cursorMu.Lock()
+			sub.lastBoundaryOffset = proto.StreamOffset(boundary.StreamOffset)
 			sub.cursorMu.Unlock()
 			continue
 		}
@@ -934,6 +950,12 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 			}
 		}
 		for _, effect := range cons.Effects() {
+			// An ordered prompt boundary is carried by the output-window pump
+			// at its byte offset, not by this independently scheduled screen
+			// consumer. Re-emitting it here could let it overtake those bytes.
+			if effect.Kind == sessionruntime.EffectPromptBoundary && effect.Ordered {
+				continue
+			}
 			identity := [2]uint64{uint64(effect.At.Generation), uint64(effect.ID)}
 			if _, seen := seenEffects[identity]; seen {
 				continue
@@ -947,7 +969,8 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 			frame := proto.EffectFrame{
 				Session: s.raw, Subscriber: sub.raw,
 				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
-				Kind: kind, Title: effect.Title, Body: effect.Body,
+				StreamOffset: effect.StreamOffset,
+				Kind:         kind, Title: effect.Title, Body: effect.Body,
 			}
 			if err := sub.sink.SendEffectFrame(frame); err != nil {
 				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)

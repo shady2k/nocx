@@ -64,12 +64,29 @@ type sessionRx struct {
 	subscriber  *wsConn    // current attached connection (nil if none)
 	subState    *connState // subscriber's connection-scoped state
 	monitorOnce sync.Once
+	// deliveryMu linearizes binary PTY frames and effects before they enter
+	// the shared outbound queue. Effects wait in this bounded list until the
+	// per-pump cursor reaches their exact stream offset.
+	deliveryMu     sync.Mutex
+	deliveryConn   *wsConn
+	deliveryOffset uint64
+	pendingEffects []pendingSessionEffect
 	// inputStalled is true from the moment this session's write queue
 	// refuses a frame until it accepts one again. It exists to make the
 	// notification fire once per stall rather than once per keystroke:
 	// a person holding a key against a stuck channel would otherwise
 	// raise a hundred of them.
 	inputStalled atomic.Bool
+}
+
+const maxPendingSessionEffects = 64
+
+type pendingSessionEffect struct {
+	conn         *wsConn
+	offset       uint64
+	waitForBytes bool
+	method       string
+	params       json.RawMessage
 }
 
 // setSubscriber installs wconn as the session's one subscriber and RETURNS
@@ -86,10 +103,15 @@ type sessionRx struct {
 // caller compares before announcing anything.
 func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *connState) {
 	rx.mu.Lock()
-	defer rx.mu.Unlock()
 	prevConn, prevState := rx.subscriber, rx.subState
 	rx.subscriber = wconn
 	rx.subState = state
+	rx.deliveryMu.Lock()
+	rx.deliveryConn = wconn
+	rx.deliveryOffset = 0
+	rx.pendingEffects = nil
+	rx.deliveryMu.Unlock()
+	rx.mu.Unlock()
 	// The ring is told, because it has two consumers now and only one of
 	// them is allowed to free it on nobody's behalf (nocx-22k1c.1). This
 	// mutator and clearSubscriber are the flag's only writers, which is what
@@ -122,10 +144,15 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 // tell them apart.
 func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 	rx.mu.Lock()
-	defer rx.mu.Unlock()
 	if rx.subscriber == wconn {
 		rx.subscriber = nil
 		rx.subState = nil
+		rx.deliveryMu.Lock()
+		rx.deliveryConn = nil
+		rx.deliveryOffset = 0
+		rx.pendingEffects = nil
+		rx.deliveryMu.Unlock()
+		rx.mu.Unlock()
 		// THE MOMENT THE INTERVAL OPENS. From here until a subscriber is
 		// installed again, the ring's consumer is the recorder, and a writer
 		// already parked against a client that will never ack is released by
@@ -133,7 +160,111 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 		rx.ring.setAttached(false)
 		return true
 	}
+	rx.mu.Unlock()
 	return false
+}
+
+func (rx *sessionRx) beginDelivery(wconn *wsConn, offset uint64) {
+	rx.deliveryMu.Lock()
+	if rx.deliveryConn == wconn {
+		rx.deliveryOffset = offset
+	}
+	rx.deliveryMu.Unlock()
+}
+
+func (rx *sessionRx) deliveryCursor(wconn *wsConn) (uint64, bool) {
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	return rx.deliveryOffset, rx.deliveryConn == wconn
+}
+
+func (rx *sessionRx) deliveryLimitLocked(wconn *wsConn, offset uint64, max int) int {
+	for _, effect := range rx.pendingEffects {
+		if effect.conn == wconn && effect.waitForBytes && effect.offset > offset {
+			distance := effect.offset - offset
+			// max is a positive byte-slice length; only narrow after proving
+			// the stream distance is smaller than that platform-sized value.
+			if distance < uint64(max) { //nolint:gosec
+				return int(distance) //nolint:gosec
+			}
+		}
+	}
+	return max
+}
+
+func (rx *sessionRx) enqueueDueEffectsLocked(wconn *wsConn, offset uint64) bool {
+	if rx.deliveryConn != wconn {
+		return true
+	}
+	for len(rx.pendingEffects) > 0 {
+		effect := rx.pendingEffects[0]
+		if effect.conn != wconn {
+			rx.pendingEffects = rx.pendingEffects[1:]
+			continue
+		}
+		if effect.waitForBytes && effect.offset > offset {
+			return true
+		}
+		if err := wconn.TryNotify(effect.method, effect.params); err != nil {
+			return false
+		}
+		rx.pendingEffects = rx.pendingEffects[1:]
+	}
+	return true
+}
+
+func (rx *sessionRx) enqueueDueEffects(wconn *wsConn, offset uint64) bool {
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	return rx.enqueueDueEffectsLocked(wconn, offset)
+}
+
+func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool, method string, params json.RawMessage) (accepted, coalesced bool) {
+	rx.deliveryMu.Lock()
+	if rx.deliveryConn != wconn {
+		rx.deliveryMu.Unlock()
+		return false, false
+	}
+	if waitForBytes && len(rx.pendingEffects) >= maxPendingSessionEffects {
+		// A newer prompt boundary supersedes an older boundary that has not
+		// reached the client yet. Remove the oldest one, but keep intervening
+		// effects in their original order and reserve the slot for this latest
+		// boundary. This keeps the current B fence bounded and deliverable under
+		// backpressure instead of letting its suffix escape without a fence.
+		for i := range rx.pendingEffects {
+			if rx.pendingEffects[i].conn == wconn && rx.pendingEffects[i].waitForBytes {
+				copy(rx.pendingEffects[i:], rx.pendingEffects[i+1:])
+				rx.pendingEffects = rx.pendingEffects[:len(rx.pendingEffects)-1]
+				coalesced = true
+				break
+			}
+		}
+	}
+	if len(rx.pendingEffects) >= maxPendingSessionEffects {
+		rx.deliveryMu.Unlock()
+		return false, coalesced
+	}
+	if !waitForBytes && len(rx.pendingEffects) >= maxPendingSessionEffects-1 {
+		hasBoundary := false
+		for _, pending := range rx.pendingEffects {
+			if pending.conn == wconn && pending.waitForBytes {
+				hasBoundary = true
+				break
+			}
+		}
+		if !hasBoundary {
+			rx.deliveryMu.Unlock()
+			return false, coalesced
+		}
+	}
+	rx.pendingEffects = append(rx.pendingEffects, pendingSessionEffect{
+		conn: wconn, offset: offset, waitForBytes: waitForBytes, method: method, params: params,
+	})
+	rx.deliveryMu.Unlock()
+	// Wake a ring pump parked on an empty stream so it can flush an effect
+	// whose marker bytes were already queued before this event arrived.
+	rx.ring.wake()
+	return true, coalesced
 }
 
 type WSServer struct {
@@ -3483,12 +3614,22 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 	ring := rx.ring
 	var pending []byte
 	pos := startOffset
+	rx.beginDelivery(wconn, pos)
 
 	for {
 		// The displacement check comes FIRST, before any wait: a pump that
 		// has lost the session must not send the byte it is already holding.
 		if cur, _ := rx.getSubscriber(); cur != wconn {
 			return
+		}
+		// Control effects are small and share the outbound queue with data.
+		// Flush an eligible one before the next byte; if the queue is full,
+		// wait cancellably for room rather than letting later PTY bytes pass it.
+		if !rx.enqueueDueEffects(wconn, pos) {
+			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
+				return
+			}
+			continue
 		}
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
@@ -3519,6 +3660,11 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 				s.log.Warn("session output pump stepped over a hole the execution host's window left",
 					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
 				pos = from
+				rx.deliveryMu.Lock()
+				if rx.deliveryConn == wconn {
+					rx.deliveryOffset = pos
+				}
+				rx.deliveryMu.Unlock()
 				continue
 			}
 			if needsReset {
@@ -3558,13 +3704,26 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		// Cap each frame at FairChunk for cross-session fairness (AD-10).
-		// Splitting one PTY read (~32 KB) into ≤4 frames keeps one
-		// flooding session from occupying the shared outbound queue.
+		// A pending promptBoundary also splits the frame at its exact byte
+		// offset, so bytes after OSC 133 B cannot overtake the effect.
 		chunk := pending
 		if len(chunk) > FairChunk {
 			chunk = chunk[:FairChunk]
 		}
 
+		rx.deliveryMu.Lock()
+		if rx.deliveryConn != wconn {
+			rx.deliveryMu.Unlock()
+			return
+		}
+		if !rx.enqueueDueEffectsLocked(wconn, pos) {
+			rx.deliveryMu.Unlock()
+			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
+				return
+			}
+			continue
+		}
+		chunk = chunk[:rx.deliveryLimitLocked(wconn, pos, len(chunk))]
 		f := Frame{
 			Version:   FrameVersion,
 			MsgType:   MsgTypeData,
@@ -3577,16 +3736,21 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		// source of truth and pos advances only once the frame is queued,
 		// so a reconnect at the renderer's ack offset replays anything
 		// that never made it (AD-9).
-		for {
-			if err := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode()); err == nil {
-				break
-			}
+		err := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode())
+		if err == nil {
+			pos += uint64(len(chunk))
+			pending = pending[len(chunk):]
+			rx.deliveryOffset = pos
+		}
+		dueOK := err == nil && rx.enqueueDueEffectsLocked(wconn, pos)
+		rx.deliveryMu.Unlock()
+		if err != nil || !dueOK {
 			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
 				return
 			}
+			continue
 		}
-		pos += uint64(len(chunk))
-		pending = pending[len(chunk):]
+
 	}
 }
 

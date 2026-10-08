@@ -11786,10 +11786,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       return frozen!.el
     }
 
-    /** THE PROMPT FINISHED PAINTING. The helper sends screen bytes before
-     *  their promptBoundary effect, but xterm may still be parsing those bytes
-     *  when the effect arrives. Model that ordering with a pending write and
-     *  the renderer's FIFO barrier. */
+    /** THE PROMPT FINISHED PAINTING. The helper delivers PTY bytes before
+     *  promptBoundary, but xterm may still be parsing those bytes when the
+     *  effect arrives. Model that ordering with a pending write and FIFO fence. */
     async function promptPainted(
       content: TerminalContent,
       renderer: ReturnType<typeof rendererOf>,
@@ -11890,6 +11889,92 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         teardown()
       }
     })
+    it('does not offer parsed prompt bytes when Ask is selected before promptBoundary arrives', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        // Screen bytes may parse before the corresponding control-plane
+        // boundary. Switching to Ask in that gap must not treat the prompt as
+        // background TUI output.
+        renderer._fireWriteParsed()
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        await settleAttachment()
+
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '2',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        await settleAttachment()
+
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('revalidates the live-screen owner when promptBoundary arrives during Ask capture', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'top', ['screen marker'])
+        const renderer = rendererOf(content)
+        await promptPainted(content, renderer)
+        // A background TUI paints after the prompt. Ask begins capturing that
+        // live screen, but the helper's boundary notification is still in
+        // flight and must revoke the candidate before capture commits.
+        renderer._fireWriteParsed()
+        let finishCapture!: (frame: CapturedFrame) => void
+        const captureLiveFrame = vi.fn(
+          () => new Promise<CapturedFrame>((resolve) => (finishCapture = resolve)),
+        )
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '2',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        finishCapture(defaultPinnedFrame())
+        await settleAttachment()
+
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+      } finally {
+        teardown()
+      }
+    })
+
     it('does not attach a historical block when no screen bytes follow its freeze', async () => {
       const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
         attachToDocument: true,
@@ -11922,6 +12007,51 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     // person who marked block A was handed block B as well, under a sentence
     // calling it the current screen of a full-screen program. The baseline
     // moves to the prompt's own last byte, which is what B is.
+    it('waits for every queued prompt write before opening the live-screen interval', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'echo beta', ['beta'])
+        const renderer = rendererOf(content)
+        let releaseBarrier!: () => void
+        renderer.hasUnsettledWrite.mockReturnValue(true)
+        renderer.awaitWriteBarrier.mockImplementation(
+          () => new Promise<void>((resolve) => (releaseBarrier = resolve)),
+        )
+        const session = sessionOf(content)
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '1',
+          kind: 'promptBoundary',
+          title: '',
+          body: '',
+        })
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        // Switch while the two prompt chunks are still behind xterm's fence.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+        renderer._fireWriteParsed()
+        renderer._fireWriteParsed()
+        renderer.hasUnsettledWrite.mockReturnValue(false)
+        releaseBarrier()
+        await Promise.resolve()
+
+        // The barrier resolves only after both chunks have parsed, so the
+        // prompt itself cannot reopen the interval.
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+      } finally {
+        teardown()
+      }
+    })
+
     it('does not attach a finished command whose prompt redrew and nothing else painted', async () => {
       const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
         attachToDocument: true,
@@ -11954,7 +12084,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       }
     })
 
-    it('closes handback when promptBoundary arrives after its bytes parsed', async () => {
+    it('keeps the next live repaint eligible when promptBoundary follows parsed prompt bytes', async () => {
       const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
         attachToDocument: true,
       })
@@ -11965,9 +12095,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         frozenBlock(content, 'echo beta', ['beta'])
         const renderer = rendererOf(content)
 
-        // The prompt bytes are already parsed when the helper's ordered
-        // control-plane notification reaches the renderer. There is no later
-        // write to rescue a handback that waits for the next parse event.
+        // All prompt bytes have parsed before the ordered effect arrives.
         renderer._fireWriteParsed()
         const session = sessionOf(content)
         session.fireEffect({
@@ -11981,14 +12109,17 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
         renderer.captureLiveFrame = captureLiveFrame
 
+        // The very next parsed write is a background TUI repaint, not prompt
+        // tail. It must remain eligible after the boundary is closed.
+        renderer._fireWriteParsed()
         chordOn(viewOf(ed).contentDOM)
         await settleAttachment()
 
         expect(targetNamed(ed)).toBe('agent')
         expect(
           ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
-        ).not.toContain('frozen screen attached automatically')
-        expect(captureLiveFrame).not.toHaveBeenCalled()
+        ).toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
       } finally {
         teardown()
       }

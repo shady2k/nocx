@@ -1269,11 +1269,21 @@ func (s *Session) Ingest(b []byte) error {
 			}
 			s.nextEffect++
 			effect := Effect{
-				ID:    s.nextEffect,
-				At:    s.inc,
-				Kind:  effectKindOf(e.Kind),
-				Title: e.Title,
-				Body:  e.Body,
+				ID:           s.nextEffect,
+				At:           s.inc,
+				Kind:         effectKindOf(e.Kind),
+				Title:        e.Title,
+				Body:         e.Body,
+				StreamOffset: e.StreamOffset,
+			}
+			if effect.Kind == EffectPromptBoundary {
+				if sink, ok := s.replies.(PromptBoundarySink); ok {
+					if err := sink.PromptBoundary(effect); err != nil {
+						replyErr = err
+						continue
+					}
+					effect.Ordered = true
+				}
 			}
 			if err := s.deliverLocked(effectDelivery(effect)); err != nil {
 				return err

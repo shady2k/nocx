@@ -182,6 +182,156 @@ func TestASubscriberReceivesAnIdentityBearingEffect(t *testing.T) {
 	}
 }
 
+type orderedOutputItem struct {
+	kind   string
+	data   []byte
+	effect proto.EffectFrame
+}
+
+type delayedScreenSink struct {
+	*drainSink
+	items         chan orderedOutputItem
+	screenEntered chan struct{}
+	releaseScreen chan struct{}
+	releaseOnce   sync.Once
+}
+
+func newDelayedScreenSink() *delayedScreenSink {
+	return &delayedScreenSink{
+		drainSink:     newDrainSink(),
+		items:         make(chan orderedOutputItem, 8),
+		screenEntered: make(chan struct{}, 1),
+		releaseScreen: make(chan struct{}),
+	}
+}
+
+func (s *delayedScreenSink) SendSessionData(frame proto.SessionFrame) error {
+	s.items <- orderedOutputItem{kind: "data", data: append([]byte(nil), frame.Payload...)}
+	return nil
+}
+
+func (s *delayedScreenSink) SendEffectFrame(frame proto.EffectFrame) error {
+	s.items <- orderedOutputItem{kind: "effect", effect: frame}
+	return nil
+}
+
+func (s *delayedScreenSink) SendScreenFrame(frame proto.ScreenDataFrame) error {
+	select {
+	case s.screenEntered <- struct{}{}:
+	default:
+	}
+	<-s.releaseScreen
+	return nil
+}
+
+func (s *delayedScreenSink) release() { s.releaseOnce.Do(func() { close(s.releaseScreen) }) }
+
+func TestPromptBoundaryOrdersOutputWhileScreenEffectConsumerIsDelayed(t *testing.T) {
+	proc := newScriptedProcess("")
+	svc, hs := spawnScripted(t, proc, 0)
+	// Seed a screen frame and its matching output bytes. The attach's
+	// independent screen consumer will block on that frame, so it cannot
+	// consume the prompt effect before the output pump reaches it.
+	seed := []byte("screen seed\r\n")
+	hs.owner.ingestOne(seed)
+	sink := newDelayedScreenSink()
+	defer sink.release()
+	release := svc.Bind(sink)
+	t.Cleanup(release)
+	sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+	params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
+	if err != nil {
+		t.Fatalf("attach params: %v", err)
+	}
+	if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	select {
+	case <-sink.screenEntered:
+	case <-time.After(hangLimit):
+		t.Fatal("screen consumer did not reach its deliberate stall")
+	}
+	select {
+	case seedFrame := <-sink.items:
+		if seedFrame.kind != "data" || string(seedFrame.data) != string(seed) {
+			t.Fatalf("seed output = %+v, want data %q", seedFrame, seed)
+		}
+	case <-time.After(hangLimit):
+		t.Fatal("output pump did not send the seed before the prompt")
+	}
+
+	before := []byte("prompt-prefix\x1b]133;B\x07")
+	after := []byte("immediate-live-suffix")
+	hs.owner.ingestOne(append(append([]byte(nil), before...), after...))
+	hs.win.mu.Lock()
+	boundaryCount := len(hs.win.promptBoundaries)
+	hs.win.mu.Unlock()
+	if boundaryCount != 1 {
+		t.Fatalf("synchronous output-window boundaries = %d, want 1", boundaryCount)
+	}
+	hs.win.mu.Lock()
+	boundaryOffset := hs.win.promptBoundaries[0].effect.StreamOffset
+	writtenOffset := hs.win.written
+	hs.win.mu.Unlock()
+	got := make([]orderedOutputItem, 3)
+	for i := range got {
+		select {
+		case got[i] = <-sink.items:
+		case <-time.After(hangLimit):
+			t.Fatalf("ordered output stalled at item %d", i)
+		}
+	}
+	if got[0].kind != "data" || string(got[0].data) != string(before) {
+		t.Fatalf("prefix item = %+v, want data %q (boundary=%d, written=%d)", got[0], before, boundaryOffset, writtenOffset)
+	}
+	const wantBoundaryOffset = uint64(len("screen seed\r\nprompt-prefix\x1b]133;B\x07"))
+	if got[1].kind != "effect" || got[1].effect.Kind != proto.EffectPromptBoundary || got[1].effect.StreamOffset != wantBoundaryOffset {
+		t.Fatalf("middle item = %+v, want promptBoundary at %d", got[1], wantBoundaryOffset)
+	}
+	if got[2].kind != "data" || string(got[2].data) != string(after) {
+		t.Fatalf("suffix item = %+v, want data %q", got[2], after)
+	}
+}
+
+func TestPromptBoundaryCarriesExactOffsetThroughHelperCarrier(t *testing.T) {
+	sink := newDrainSink()
+	proc := newScriptedProcess("")
+	svc, hs := spawnScripted(t, proc, 0)
+	release := svc.Bind(sink)
+	t.Cleanup(release)
+	sub := proto.SubscriberID("0123456789abcdef0123456789abcdef")
+	params, err := json.Marshal(proto.AttachParams{Session: hs.id, Subscriber: sub})
+	if err != nil {
+		t.Fatalf("attach params: %v", err)
+	}
+	if _, err := svc.Call(host.WithConnection(context.Background(), sink), proto.OpAttach, params); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	hs.owner.ingestOne([]byte("prompt\x1b]133;"))
+	hs.owner.ingestOne([]byte("B\x07tail"))
+
+	deadline := time.Now().Add(hangLimit)
+	for {
+		next := sink.waiter()
+		if effects := sink.effectFrames(); len(effects) > 0 {
+			got := effects[0]
+			want := uint64(len("prompt\x1b]133;B\x07"))
+			if got.Kind != proto.EffectPromptBoundary || got.StreamOffset != want {
+				t.Fatalf("prompt boundary = %+v, want exclusive stream offset %d", got, want)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("prompt boundary never reached helper carrier")
+		}
+		select {
+		case <-next:
+		case <-time.After(hangLimit):
+			t.Fatal("prompt boundary never reached helper carrier")
+		}
+	}
+}
+
 func mustSubscriberBytes(t *testing.T, id proto.SubscriberID) [16]byte {
 	t.Helper()
 	b, err := proto.SessionBytes(string(id))

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // The window is D1's bound made a mechanism: output produced while no
@@ -222,5 +223,65 @@ func TestAClosedWindowStopsServingAndWakesItsReaders(t *testing.T) {
 	// an exit must still be able to read the last thing the shell printed.
 	if data, r := w.read(0); r.Reset || string(data) != "tail" {
 		t.Fatalf("a closed window lost its bytes: data=%q reset=%v", data, r.Reset)
+	}
+}
+
+func TestWindowSplitsOutputAroundOrderedPromptBoundary(t *testing.T) {
+	w := newWindow(pageSize * 2)
+	before := []byte("prompt bytes through OSC 133 B")
+	after := []byte("live repaint")
+	effect := sessionruntime.Effect{
+		ID: 1, Kind: sessionruntime.EffectPromptBoundary,
+		StreamOffset: uint64(len(before)),
+	}
+	if dropped, err := w.markPromptBoundary(effect); err != nil || dropped {
+		t.Fatalf("mark prompt boundary: dropped=%v err=%v", dropped, err)
+	}
+	w.write(append(append([]byte(nil), before...), after...))
+
+	prefix, resume, boundary := w.readOrdered(0, 0)
+	if resume.Reset || boundary != nil || !bytes.Equal(prefix, before) {
+		t.Fatalf("prefix read = %q, resume=%+v, boundary=%+v; want only %q", prefix, resume, boundary, before)
+	}
+	data, _, boundary := w.readOrdered(proto.StreamOffset(len(before)), 0)
+	if len(data) != 0 || boundary == nil || boundary.ID != effect.ID || boundary.StreamOffset != effect.StreamOffset {
+		t.Fatalf("boundary read = data %q, boundary %+v; want effect at %d", data, boundary, len(before))
+	}
+	suffix, _, boundary := w.readOrdered(proto.StreamOffset(len(before)), proto.StreamOffset(len(before)))
+	if boundary != nil || !bytes.Equal(suffix, after) {
+		t.Fatalf("suffix read = %q, boundary %+v; want only %q", suffix, boundary, after)
+	}
+}
+
+func TestWindowPromptBoundaryQueueIsBoundedAndClosedRejectsMarks(t *testing.T) {
+	w := newWindow(pageSize)
+	for i := uint64(0); i < maxPromptBoundaries; i++ {
+		effect := sessionruntime.Effect{
+			ID: sessionruntime.EffectID(i + 1), Kind: sessionruntime.EffectPromptBoundary,
+			StreamOffset: i + 1,
+		}
+		if dropped, err := w.markPromptBoundary(effect); err != nil || dropped {
+			t.Fatalf("mark boundary %d: dropped=%v err=%v", i, dropped, err)
+		}
+	}
+	if got := len(w.promptBoundaries); got != maxPromptBoundaries {
+		t.Fatalf("retained boundaries = %d, want bound %d", got, maxPromptBoundaries)
+	}
+	dropped, err := w.markPromptBoundary(sessionruntime.Effect{
+		ID: maxPromptBoundaries + 1, Kind: sessionruntime.EffectPromptBoundary,
+		StreamOffset: maxPromptBoundaries + 1,
+	})
+	if err != nil || !dropped {
+		t.Fatalf("overflow mark = dropped %v, err %v; want oldest-event eviction", dropped, err)
+	}
+	if got := w.promptBoundaries[len(w.promptBoundaries)-1].effect.ID; got != maxPromptBoundaries+1 {
+		t.Fatalf("newest retained boundary = %d, want %d", got, maxPromptBoundaries+1)
+	}
+	w.close()
+	if dropped, err := w.markPromptBoundary(sessionruntime.Effect{
+		ID: maxPromptBoundaries + 2, Kind: sessionruntime.EffectPromptBoundary,
+		StreamOffset: maxPromptBoundaries + 2,
+	}); err != errPromptBoundaryWindowClosed || dropped {
+		t.Fatalf("closed-window mark = dropped %v, err %v; want closed-window refusal", dropped, err)
 	}
 }

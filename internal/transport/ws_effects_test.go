@@ -1,10 +1,12 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -32,6 +34,236 @@ func TestPublishSessionEffect_ReachesSubscriberAsIdentityBearingNotification(t *
 	}
 	if params.SessionID != string(sid) || params.Generation != "4" || params.EffectID != "7" || params.Kind != "notification" || params.Title != "Tests failed" || params.Body != "2 failed" {
 		t.Fatalf("params = %+v", params)
+	}
+}
+
+func TestPromptBoundaryIsQueuedBetweenBytesBeforeAndAfterItsOffset(t *testing.T) {
+	ws, sid, sidBytes, wconn, sock := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	before := []byte("prompt-prefix\x1b]133;B\x07")
+	after := []byte("live-suffix")
+	if err := rx.ring.write(before); err != nil {
+		t.Fatalf("write bytes through OSC 133 B: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		ws.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	}()
+	// The pump is already active and has queued the complete prefix through B
+	// before the independent effect arrives. The suffix is made available only
+	// after that effect has been accepted into the same outbound queue.
+	prefixFrame := awaitCapturedFrames(t, sock, 1)[0]
+	if !ws.PublishSessionEffect(sid, proto.EffectFrame{
+		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary,
+		StreamOffset: uint64(len(before)),
+	}) {
+		t.Fatal("prompt boundary was not accepted")
+	}
+	if err := rx.ring.write(after); err != nil {
+		t.Fatalf("write live suffix: %v", err)
+	}
+	frames := awaitCapturedFrames(t, sock, 3)
+	if string(prefixFrame.Data) != string(frames[0].Data) {
+		t.Fatal("first queued prefix frame changed while collecting the complete order")
+	}
+	cancel()
+	<-pumpDone
+
+	if frames[0].MsgType != websocket.BinaryMessage || frames[1].MsgType != websocket.TextMessage || frames[2].MsgType != websocket.BinaryMessage {
+		t.Fatalf("outbound frame types = [%d %d %d], want data/effect/data", frames[0].MsgType, frames[1].MsgType, frames[2].MsgType)
+	}
+	beforeFrame, err := DecodeFrame(frames[0].Data)
+	if err != nil {
+		t.Fatalf("decode prefix frame: %v", err)
+	}
+	afterFrame, err := DecodeFrame(frames[2].Data)
+	if err != nil {
+		t.Fatalf("decode suffix frame: %v", err)
+	}
+	if string(beforeFrame.Payload) != string(before) || string(afterFrame.Payload) != string(after) {
+		t.Fatalf("data around prompt boundary = %q / %q, want %q / %q", beforeFrame.Payload, afterFrame.Payload, before, after)
+	}
+	var msg struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(frames[1].Data, &msg); err != nil || msg.Method != "session.effect" {
+		t.Fatalf("middle frame = %s, decode err=%v, want session.effect", frames[1].Data, err)
+	}
+}
+
+func TestPromptBoundaryPendingForClosedSubscriberIsDiscarded(t *testing.T) {
+	ws, sid, sidBytes, wconn, sock := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	if err := rx.ring.write([]byte("prefix and suffix")); err != nil {
+		t.Fatalf("write session ring: %v", err)
+	}
+	if !ws.PublishSessionEffect(sid, proto.EffectFrame{
+		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary, StreamOffset: 6,
+	}) {
+		t.Fatal("prompt boundary was not accepted")
+	}
+	if !rx.clearSubscriber(wconn) {
+		t.Fatal("subscriber did not clear")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		ws.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	}()
+	<-pumpDone
+	sock.mu.Lock()
+	defer sock.mu.Unlock()
+	if len(sock.frames) != 0 {
+		t.Fatalf("closed subscriber received %d frames, want none", len(sock.frames))
+	}
+}
+
+func TestPromptBoundaryHasReservedSlotWhenQueueIsFullOfOrdinaryEffects(t *testing.T) {
+	ws, sid, _, wconn, _ := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	params := json.RawMessage(`{}`)
+	for i := 0; i < maxPendingSessionEffects-1; i++ {
+		accepted, coalesced := rx.queueEffect(wconn, 0, false, "test.effect", params)
+		if !accepted || coalesced {
+			t.Fatalf("ordinary effect %d: accepted=%v coalesced=%v", i, accepted, coalesced)
+		}
+	}
+	accepted, coalesced := rx.queueEffect(wconn, 100, true, "session.effect", params)
+	if !accepted || coalesced {
+		t.Fatalf("reserved prompt boundary slot: accepted=%v coalesced=%v", accepted, coalesced)
+	}
+	if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", params); accepted {
+		t.Fatal("ordinary effect consumed the boundary's reserved slot")
+	}
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	if len(rx.pendingEffects) != maxPendingSessionEffects || !rx.pendingEffects[len(rx.pendingEffects)-1].waitForBytes {
+		t.Fatalf("pending queue = %d entries, last fence=%v; want full bounded queue ending in reserved prompt boundary", len(rx.pendingEffects), rx.pendingEffects[len(rx.pendingEffects)-1].waitForBytes)
+	}
+}
+
+func TestPromptBoundaryCoalescingPreservesOrdinaryOrderAndHoldsSuffix(t *testing.T) {
+	ws, sid, sidBytes, wconn, sock := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	firstThroughB := []byte("prompt-one\x1b]133;B\x07")
+	middleThroughB2 := []byte("between-prompts\x1b]133;B\x07")
+	prefix := append(append([]byte(nil), firstThroughB...), middleThroughB2...)
+	suffix := []byte("live-suffix-after-second-B")
+	if err := rx.ring.write(append(append([]byte(nil), prefix...), suffix...)); err != nil {
+		t.Fatalf("write output including suffix: %v", err)
+	}
+	ordinary := func(order int) json.RawMessage {
+		raw, err := json.Marshal(struct {
+			Order int `json:"order"`
+		}{Order: order})
+		if err != nil {
+			t.Fatalf("marshal ordinary effect order: %v", err)
+		}
+		return raw
+	}
+	for i := 0; i < maxPendingSessionEffects/2; i++ {
+		if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", ordinary(i)); !accepted {
+			t.Fatalf("ordinary effect %d before old boundary was refused", i)
+		}
+	}
+	oldOffset := uint64(len(firstThroughB))
+	if accepted, coalesced := rx.queueEffect(wconn, oldOffset, true, "session.effect", json.RawMessage(`{"kind":"promptBoundary","effectId":"old"}`)); !accepted || coalesced {
+		t.Fatalf("old boundary: accepted=%v coalesced=%v", accepted, coalesced)
+	}
+	for i := maxPendingSessionEffects / 2; i < maxPendingSessionEffects-1; i++ {
+		if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", ordinary(i)); !accepted {
+			t.Fatalf("ordinary effect %d after old boundary was refused", i)
+		}
+	}
+	if len(rx.pendingEffects) != maxPendingSessionEffects {
+		t.Fatalf("mixed queue length = %d, want full bound %d", len(rx.pendingEffects), maxPendingSessionEffects)
+	}
+	latestParams, err := json.Marshal(sessionEffectParams{
+		SessionID: string(sid), Generation: "2", EffectID: "new", Kind: "promptBoundary",
+	})
+	if err != nil {
+		t.Fatalf("marshal latest boundary: %v", err)
+	}
+	accepted, coalesced := rx.queueEffect(wconn, uint64(len(prefix)), true, "session.effect", latestParams)
+	if !accepted || !coalesced {
+		t.Fatalf("newer boundary: accepted=%v coalesced=%v, want oldest-boundary replacement", accepted, coalesced)
+	}
+	rx.deliveryMu.Lock()
+	if len(rx.pendingEffects) != maxPendingSessionEffects {
+		rx.deliveryMu.Unlock()
+		t.Fatalf("coalesced queue length = %d, want bound %d", len(rx.pendingEffects), maxPendingSessionEffects)
+	}
+	gotOrders := make([]int, 0, maxPendingSessionEffects-1)
+	for _, pending := range rx.pendingEffects {
+		if pending.waitForBytes {
+			if pending.offset != uint64(len(prefix)) {
+				rx.deliveryMu.Unlock()
+				t.Fatalf("retained boundary offset = %d, want %d", pending.offset, len(prefix))
+			}
+			continue
+		}
+		var params struct {
+			Order int `json:"order"`
+		}
+		if decodeErr := json.Unmarshal(pending.params, &params); decodeErr != nil {
+			rx.deliveryMu.Unlock()
+			t.Fatalf("decode ordinary effect params: %v", decodeErr)
+		}
+		gotOrders = append(gotOrders, params.Order)
+	}
+	rx.deliveryMu.Unlock()
+	if len(gotOrders) != maxPendingSessionEffects-1 {
+		t.Fatalf("ordinary effects retained = %d, want %d", len(gotOrders), maxPendingSessionEffects-1)
+	}
+	for i, order := range gotOrders {
+		if order != i {
+			t.Fatalf("ordinary effect order[%d] = %d, want %d", i, order, i)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		ws.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	}()
+	frames := awaitCapturedFrames(t, sock, maxPendingSessionEffects+2)
+	cancel()
+	<-pumpDone
+	for i := 0; i < maxPendingSessionEffects-1; i++ {
+		if frames[i].MsgType != websocket.TextMessage {
+			t.Fatalf("ordinary effect %d frame type = %d, want text", i, frames[i].MsgType)
+		}
+		var msg struct {
+			Method string `json:"method"`
+			Params struct {
+				Order int `json:"order"`
+			} `json:"params"`
+		}
+		if decodeErr := json.Unmarshal(frames[i].Data, &msg); decodeErr != nil || msg.Method != "test.effect" || msg.Params.Order != i {
+			t.Fatalf("ordinary frame %d = %s, err=%v", i, frames[i].Data, decodeErr)
+		}
+	}
+	prefixFrame, err := DecodeFrame(frames[maxPendingSessionEffects-1].Data)
+	if err != nil || frames[maxPendingSessionEffects-1].MsgType != websocket.BinaryMessage || string(prefixFrame.Payload) != string(prefix) {
+		t.Fatalf("queued prefix frame = %+v, decode err=%v", prefixFrame, err)
+	}
+	var boundary struct {
+		Method string              `json:"method"`
+		Params sessionEffectParams `json:"params"`
+	}
+	if frames[maxPendingSessionEffects].MsgType != websocket.TextMessage || json.Unmarshal(frames[maxPendingSessionEffects].Data, &boundary) != nil || boundary.Method != "session.effect" || boundary.Params.Kind != "promptBoundary" || boundary.Params.EffectID != "new" {
+		t.Fatalf("queued fence frame = %s, want latest promptBoundary", frames[maxPendingSessionEffects].Data)
+	}
+	suffixFrame, err := DecodeFrame(frames[maxPendingSessionEffects+1].Data)
+	if err != nil || frames[maxPendingSessionEffects+1].MsgType != websocket.BinaryMessage || string(suffixFrame.Payload) != string(suffix) {
+		t.Fatalf("suffix escaped before the queued fence: %+v, decode err=%v", suffixFrame, err)
 	}
 }
 

@@ -914,10 +914,13 @@ export class TerminalContent extends BasePaneContent {
   private _screenWriteGeneration = 0
   /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. A block's
    *  visual freeze opens the interval; the backend's promptBoundary closes it.
-   *  That notification follows the screen bytes on the session transport, but
-   *  xterm parses them asynchronously, so close at the renderer's FIFO write
-   *  barrier rather than at the next unrelated parse event. */
+   *  The transport orders PTY data before its effect, but xterm parses that
+   *  data asynchronously, so close at its FIFO write barrier. */
   private _screenHandbackGeneration = -1
+  /** A finished block is not a live screen until the following promptBoundary
+   *  has been observed. This closes the gap where the shell prompt bytes parse
+   *  before their control-plane boundary arrives. */
+  private _screenHandbackAwaitingBoundary = false
   /** Do not offer a frozen screen while its promptBoundary write fence is open. */
   private _screenHandbackPending = false
   /** A clear invalidates a promptBoundary barrier still waiting on xterm. */
@@ -2495,6 +2498,7 @@ export class TerminalContent extends BasePaneContent {
           this._automaticFrameOwner = null
           this._screenHandbackEpoch++
           this._screenHandbackGeneration = -1
+          this._screenHandbackAwaitingBoundary = false
           this._screenHandbackPending = false
           this.clearGrants()
         },
@@ -3469,6 +3473,9 @@ export class TerminalContent extends BasePaneContent {
         if (this._recovery && hex === this._recovery.fence) void this._ackRecovery()
       })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
+        if (this.lifecycle.state.kind === 'running') {
+          this._screenHandbackAwaitingBoundary = true
+        }
         this._syncLifecycleOwnership()
         // An integrated pane is settled by its authenticated lifecycle fact,
         // not by the non-authoritative promptBoundary observation. Without
@@ -4823,23 +4830,28 @@ export class TerminalContent extends BasePaneContent {
       if (effect.kind === 'promptBoundary') {
         if (!this._awaitsIntegration) this._settle()
         const epoch = this._screenHandbackEpoch
+        this._screenHandbackAwaitingBoundary = true
+        this._screenHandbackPending = true
         const closeHandback = () => {
           if (this._disposed || epoch !== this._screenHandbackEpoch) return
           this._screenHandbackGeneration = this._screenWriteGeneration
+          this._screenHandbackAwaitingBoundary = false
           this._screenHandbackPending = false
         }
         if (renderer.hasUnsettledWrite()) {
           // Until the barrier opens, a frozen screen is not a safe attachment:
           // the prompt bytes may already be queued but not yet parsed.
           this._screenHandbackPending = true
-          // session.effect follows the screen data, but xterm's parser is
-          // asynchronous. Its FIFO barrier includes exactly the writes that
-          // arrived before this effect, not later output from a live command.
+          // The FIFO barrier includes writes already handed to xterm when the
+          // effect arrives; the next parsed write below covers data that the
+          // control-plane event overtook.
           void renderer.awaitWriteBarrier().then(closeHandback, () => {
             // Keep automatic attachment closed if the renderer cannot prove
             // where this boundary landed; a clear or disposal ends the fence.
           })
         } else {
+          // PTY bytes precede their effect on the ordered subscription. With
+          // no writes outstanding, the current generation is the boundary.
           closeHandback()
         }
       }
@@ -6884,6 +6896,7 @@ export class TerminalContent extends BasePaneContent {
     const frozen = this._lastFrozenBlock
     if (
       this._screenHandbackPending ||
+      this._screenHandbackAwaitingBoundary ||
       frozen === null ||
       this._screenWriteGeneration <= this._screenHandbackGeneration ||
       !manager.blocks.includes(frozen) ||
@@ -6913,7 +6926,11 @@ export class TerminalContent extends BasePaneContent {
         this.editor !== editor ||
         !editor.isVisible ||
         targets.active().id !== agentId ||
-        !this.scrollback?.blockManager.blocks.includes(owner)
+        !this.scrollback?.blockManager.blocks.includes(owner) ||
+        // The boundary can arrive while the frame capture is awaiting xterm.
+        // Re-evaluate the shared owner predicate at commit time so bytes that
+        // were only the finished command's prompt cannot win that race.
+        this.automaticAttachmentOwner(true) !== owner
       )
         return
       this._automaticFrameOwner = owner
@@ -8956,6 +8973,9 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    if (this.lifecycle.state.kind !== 'prompt_ready') {
+      this._screenHandbackAwaitingBoundary = true
+    }
     // The freeze REPLACED rec.el with a freshly built element that knows
     // nothing about home or branch (createCommandBlock takes neither) —
     // restate them from what this block recorded at submit (nocx-9bpeq.16,
@@ -8963,12 +8983,9 @@ export class TerminalContent extends BasePaneContent {
     // have moved the branch (`git checkout`) without moving the cwd.
     setBlockWhere(rec.el, { home: this.currentHome(), branch: this._blockBranch.get(rec.id) })
     this._requestBranchAfterSettle()
-    // The screen is handed back HERE and stays handed back until the prompt
-    // that follows has finished painting; the marker handler closes the
-    // interval by re-stamping this on B. Both ends move the generation
-    // forward only — the freeze reads the counter now, B reads it at a later
-    // parse — so the later of the two always stands.
-    this._screenHandbackGeneration = this._screenWriteGeneration
+    // A completed command's prompt bytes are not live screen output. The
+    // running lifecycle (or this fallback for an unintegrated pane) holds the
+    // attachment closed until promptBoundary's ordered write barrier lands.
     this.refreshGrant(rec.el)
 
     const waiter = this.agentRuns.get(rec)

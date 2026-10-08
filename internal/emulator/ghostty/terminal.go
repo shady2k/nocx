@@ -160,6 +160,9 @@ type terminal struct {
 	// same rule as replies — the goroutine holding mu is the only writer — and
 	// is drained whole by Effects.
 	effects []emulator.Effect
+	// streamOffset counts every PTY output byte ever ingested by this terminal.
+	// Prompt-boundary effects use it to name the exact byte position through B.
+	streamOffset uint64
 	// fenceIdx is the render fence scanner's position in the fence sequence:
 	// how many bytes of it the stream has matched (0 is between sequences,
 	// which is why the zero value needs no initialisation), and fenceNonce
@@ -642,7 +645,10 @@ func (t *terminal) ingestLocked(b []byte) {
 		case markKindOutputMark:
 			t.sightOutputMark()
 		case markKindPromptBoundary:
-			t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectPromptBoundary})
+			t.effects = append(t.effects, emulator.Effect{
+				Kind:         emulator.EffectPromptBoundary,
+				StreamOffset: t.streamOffset + uint64(start+n),
+			})
 		case markKindClearBoundary:
 			t.sightEraseSavedLines()
 		case markKindEraseDisplay:
@@ -650,6 +656,7 @@ func (t *terminal) ingestLocked(b []byte) {
 		}
 		start += n
 	}
+	t.streamOffset += uint64(len(b))
 }
 
 // markKind is which sighted marker scanMarkers found, if any.

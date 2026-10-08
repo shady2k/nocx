@@ -18,13 +18,13 @@
 // the replay ring). Dropping a refreshable frame is safe: the renderer
 // re-syncs from the next one.
 //
-// A JSON-RPC response is not refreshable — it is the other half of a
-// promise, correlated by request id, and dropping it strands the caller
-// forever. Responses therefore get reserved capacity (respQueue) that the
-// data plane cannot consume, the pump drains them ahead of the data queue,
-// and a response that cannot be queued even there closes the connection
-// rather than disappearing (see TryEnqueueResponse). The one outcome that
-// must not survive is silence.
+// A JSON-RPC response or broker request is not refreshable — it is one half
+// of a protocol exchange, and dropping it strands the caller or fails an
+// effect before execution. Critical control frames therefore get reserved
+// capacity (criticalQueue) that refreshable data cannot consume, and the pump
+// drains them ahead of the data queue. A critical frame that cannot be
+// queued even there closes the connection rather than disappearing. Silence
+// is the one outcome that must not survive.
 package outbound
 
 import (
@@ -52,23 +52,19 @@ const (
 // at most 8 data frames in flight per attached session. 256 frames holds a
 // handful of sessions' credit bursts plus a control burst of a few dozen
 // notifications, while still tripping the stall policy within roughly a
-// second of burst traffic on a genuinely stuck renderer. JSON-RPC responses
-// do not ride this queue — they have reserved capacity of their own
-// (DefaultResponseQueueDepth), so data traffic cannot drop a response.
+// second of burst traffic on a genuinely stuck renderer. Broker requests,
+// JSON-RPC responses and data-plane carriers use reserved critical capacity
+// (DefaultCriticalQueueDepth), so data traffic cannot drop them.
 const DefaultQueueDepth = 256
 
-// DefaultResponseQueueDepth is the per-connection reserved capacity for
-// JSON-RPC responses, in frames. A response is the other half of a promise:
-// the caller correlates by request id and waits forever if it is dropped,
-// so responses get a queue the refreshable data plane cannot consume, and
-// the pump drains it ahead of the data queue. Sized against the control
-// plane's own admission bounds (the ordinary lane holds at most 8
-// concurrent tasks, each of which enqueues at most one response; the read
-// loop enqueues one more for its error paths), 64 is roughly four times
-// the worst legitimate burst while still being a hard bound — a response
-// that cannot be queued even here closes the connection instead of
-// disappearing.
-const DefaultResponseQueueDepth = 64
+// DefaultCriticalQueueDepth is the per-connection reserved capacity for
+// non-refreshable control frames, in frames. A lane admits at most 8
+// concurrent tasks. Their broker request notifications and eventual JSON-RPC
+// responses can coincide with history-page carriers and one read-loop error
+// response; 64 is roughly four times that legitimate burst. The bound keeps
+// memory finite, while critical overflow closes the connection rather than
+// silently dropping a request or stranding a response.
+const DefaultCriticalQueueDepth = 64
 
 // DefaultWriteDeadline bounds each pump write. This preserves the
 // 10-second bound the transport's wsWriteDeadline gave every WebSocket
@@ -79,9 +75,9 @@ const DefaultWriteDeadline = 10 * time.Second
 // carries when the refreshable queue overflows. The renderer treats it as
 // a cue to reconnect: a connection whose outbound data plane is saturated
 // cannot deliver everything it owes, and the reconnect surface (with the
-// session replay ring) is how the product makes that visible. Responses
-// never take this path — an undeliverable response closes the connection
-// (see TryEnqueueResponse) rather than announcing a stall and going quiet.
+// session replay ring) is how the product makes that visible. Critical
+// frames never take this path — an undeliverable critical frame closes the
+// connection rather than announcing a stall and going quiet.
 const StallNoticeMethod = "outbound.stalled"
 
 // stallNotice is the pre-marshaled stall notification. It is queued through
@@ -196,16 +192,16 @@ type Config struct {
 }
 
 // Conn is one connection's outbound side: a bounded refreshable-frame queue,
-// a bounded reserved response queue, and the pump goroutine that drains
+// a bounded reserved critical-frame queue, and the pump goroutine that drains
 // them. All methods are safe for concurrent use. Exactly one goroutine
 // (pump) ever writes to the socket.
 type Conn struct {
 	sock Socket
 
-	queue     chan Frame // refreshable: PTY output, notifications
-	respQueue chan Frame // reserved: JSON-RPC responses (never dropped)
-	overload  chan Frame // capacity 1: the reserved control-overload slot
-	room      chan struct{}
+	queue         chan Frame // refreshable: PTY output, notifications
+	criticalQueue chan Frame // reserved: requests, responses, and carriers
+	overload      chan Frame // capacity 1: the reserved control-overload slot
+	room          chan struct{}
 
 	stalled    atomic.Bool
 	stallCount atomic.Uint64
@@ -224,15 +220,15 @@ func New(sock Socket, cfg Config) *Conn {
 		depth = DefaultQueueDepth
 	}
 	c := &Conn{
-		sock:      sock,
-		queue:     make(chan Frame, depth),
-		respQueue: make(chan Frame, DefaultResponseQueueDepth),
-		overload:  make(chan Frame, 1),
-		room:      make(chan struct{}, 1),
-		budget:    cfg.Budget,
-		onStall:   cfg.OnStall,
-		closed:    make(chan struct{}),
-		done:      make(chan struct{}),
+		sock:          sock,
+		queue:         make(chan Frame, depth),
+		criticalQueue: make(chan Frame, DefaultCriticalQueueDepth),
+		overload:      make(chan Frame, 1),
+		room:          make(chan struct{}, 1),
+		budget:        cfg.Budget,
+		onStall:       cfg.OnStall,
+		closed:        make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	go c.pump(cfg.WriteDeadline)
 	return c
@@ -244,8 +240,9 @@ func New(sock Socket, cfg Config) *Conn {
 // budget) it applies the overflow policy and returns ErrStalled; the frame
 // is dropped, which is safe because a notification is refreshable state the
 // renderer re-syncs from the next one. After Close it returns ErrConnClosed.
-// JSON-RPC responses must NOT use this path: use TryEnqueueResponse, which
-// has reserved capacity and is never silently dropped.
+// Non-refreshable broker requests and JSON-RPC responses must NOT use this
+// path: use TryEnqueueCriticalFrame or TryEnqueueResponse, which use reserved
+// capacity and are never silently dropped.
 func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 	select {
 	case <-c.closed:
@@ -275,12 +272,13 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 // TryEnqueueResponse queues a JSON-RPC response without blocking. It is the
 // only way a response may reach the socket: a response is the other half of
 // a promise — the caller correlates by request id and waits forever if it
-// is dropped — so it gets reserved capacity (respQueue) that the refreshable
-// data plane cannot consume, and the pump drains responses ahead of data.
+// is dropped — so it gets reserved capacity (criticalQueue) that
+// refreshable data cannot consume, and the pump drains critical frames ahead
+// of data.
 // Accepting a response does not clear the stall flag: that flag reports the
 // refreshable queue, which may still be full.
 //
-// A response that cannot be queued even in the reserved capacity (respQueue
+// A response that cannot be queued even in the reserved capacity (criticalQueue
 // full, or the process-wide budget exhausted) is never silently dropped:
 // the connection closes and returns ErrStalled. The renderer's
 // disconnect/reconnect surface then rejects the caller's pending promise —
@@ -291,10 +289,19 @@ func (c *Conn) TryEnqueueResponse(data []byte) error {
 }
 
 // TryEnqueueResponseFrame queues one non-refreshable WebSocket frame on the
-// reserved response FIFO. It is for a data-plane carrier that must be written
+// reserved critical FIFO. It is for a data-plane carrier that must be written
 // before a JSON-RPC response naming it; ordinary refreshable frames must use
 // TryEnqueue so their stall policy remains unchanged.
 func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
+	return c.TryEnqueueCriticalFrame(msgType, data)
+}
+
+// TryEnqueueCriticalFrame queues a non-refreshable frame on reserved capacity
+// shared with responses and data-plane carriers. Broker request notifications
+// belong here: dropping one makes the backend fail before the renderer can
+// perform the requested effect. Refreshable state and PTY output must continue
+// to use TryEnqueue.
+func (c *Conn) TryEnqueueCriticalFrame(msgType int, data []byte) error {
 	select {
 	case <-c.closed:
 		return ErrConnClosed
@@ -302,17 +309,17 @@ func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
 	}
 
 	if c.budget != nil && !c.budget.tryReserve(int64(len(data))) {
-		c.overflowResponse()
+		c.overflowCritical()
 		return ErrStalled
 	}
 	select {
-	case c.respQueue <- Frame{MsgType: msgType, Data: data}:
+	case c.criticalQueue <- Frame{MsgType: msgType, Data: data}:
 		return nil
 	default:
 		if c.budget != nil {
 			c.budget.release(int64(len(data)))
 		}
-		c.overflowResponse()
+		c.overflowCritical()
 		return ErrStalled
 	}
 }
@@ -332,7 +339,7 @@ func (c *Conn) TryEnqueueResponseFrame(msgType int, data []byte) error {
 //
 // The busy frame itself is dropped: there is nowhere to put it, and the
 // stall notice is the renderer's cue to reconnect and resync. Responses
-// never come through here — see overflowResponse.
+// never come through here — see overflowCritical.
 func (c *Conn) overflow(msgType int, data []byte) error {
 	if !c.stalled.Swap(true) {
 		c.setStall(true)
@@ -347,14 +354,13 @@ func (c *Conn) overflow(msgType int, data []byte) error {
 	}
 }
 
-// overflowResponse is the terminal policy for a response that cannot be
-// queued: the reserved response queue is full or the process-wide budget is
-// exhausted. The stall notice is not an option — it announces a saturated
-// connection but delivers no answer, which is the same silence — so the
-// connection closes: the renderer's disconnect/reconnect surface makes the
-// failure visible and every in-flight promise rejects on disconnect. The
-// stall transition is still reported so the episode is observable.
-func (c *Conn) overflowResponse() {
+// overflowCritical is the terminal policy for a critical frame that cannot
+// be queued: the reserved critical queue is full or the process-wide budget
+// is exhausted. The stall notice is not an option — it announces saturation
+// but delivers no request or answer, which is the same silence — so the
+// connection closes and the renderer's disconnect/reconnect surface makes
+// the failure visible. The stall transition is still reported.
+func (c *Conn) overflowCritical() {
 	if !c.stalled.Swap(true) {
 		c.setStall(true)
 	}
@@ -429,7 +435,7 @@ func (c *Conn) Close() {
 				select {
 				case f := <-c.queue:
 					c.budget.release(int64(len(f.Data)))
-				case f := <-c.respQueue:
+				case f := <-c.criticalQueue:
 					c.budget.release(int64(len(f.Data)))
 				default:
 					goto drained
@@ -446,10 +452,9 @@ func (c *Conn) Close() {
 func (c *Conn) Done() <-chan struct{} { return c.done }
 
 // pump is the single writer to the socket. It drains the reserved overload
-// slot first, then responses, then the refreshable queue: the stall notice
-// is never stuck behind the frames it is reporting, and a response — the
-// other half of a promise — is never stuck behind a burst of data the
-// caller is not waiting on.
+// slot first, then critical frames, then the refreshable queue: the stall
+// notice is never stuck behind the frames it is reporting, and a critical
+// request or response is never stuck behind refreshable data.
 func (c *Conn) pump(writeDeadline time.Duration) {
 	defer close(c.done)
 	deadline := writeDeadline
@@ -466,9 +471,9 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			continue
 		default:
 		}
-		// Responses next: reserved capacity, drained ahead of data.
+		// Critical frames next: reserved capacity, drained ahead of data.
 		select {
-		case f := <-c.respQueue:
+		case f := <-c.criticalQueue:
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}
@@ -485,7 +490,7 @@ func (c *Conn) pump(writeDeadline time.Duration) {
 			if c.write(deadline, f) != nil {
 				return
 			}
-		case f := <-c.respQueue:
+		case f := <-c.criticalQueue:
 			if c.budget != nil {
 				c.budget.release(int64(len(f.Data)))
 			}

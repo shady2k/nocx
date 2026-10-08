@@ -912,8 +912,8 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 	// This used to stop reading at the response, on the reasoning that
 	// RecoverLane publishes before the response is written. That is true of
 	// the calling order and false of the wire: outbound.Conn holds
-	// notifications and JSON-RPC responses in SEPARATE channels, and its
-	// pump drains respQueue ahead of the refreshable queue on purpose — "a
+	// refreshable notifications and critical frames in SEPARATE queues, and its
+	// pump drains the critical queue ahead of the refreshable queue on purpose — "a
 	// response is never stuck behind a burst of data the caller is not
 	// waiting on". So the response overtaking the notification is the
 	// designed behaviour, not a race to be tolerated, and the old loop
@@ -1155,8 +1155,8 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 	// decision is already made: a lifecycle.changed for this lane either sits
 	// in the outbound queue or was never enqueued. Two round-trips fence the
 	// difference WITHOUT waiting out a duration — outbound.Conn's pump drains
-	// respQueue ahead of the refreshable queue, but it drains the refreshable
-	// one whenever respQueue is empty, and respQueue is necessarily empty at
+	// critical queue ahead of the refreshable queue, but it drains the refreshable
+	// one whenever the critical queue is empty, and the critical queue is necessarily empty at
 	// some point between two sequential responses. So anything enqueued
 	// before the first request has been written by the time the second
 	// response arrives.

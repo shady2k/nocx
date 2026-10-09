@@ -35,15 +35,19 @@ finding and milestone labels and counts the finding budget; a bare `br create` d
 of that. Every `br` command later in this file is how the tracker works, not a licence to
 go around the skill that decides where the work belongs.
 
-This repository works through the shady2k-skills plugin. Install it once:
+This repository works through the shady2k-skills plugin. Install it once, from the main
+checkout, then run setup in a new session of that agent:
 
-- **omp:** if this marketplace is not registered, first run
-  `omp plugin marketplace add shady2k/skills`; then
-  `omp plugin install shady2k-skills@shady2k --scope user` covers every
-  checkout and worktree. Invoke skills by their unqualified name, such as `/take-task`.
-- **Claude Code:** `/plugin marketplace add shady2k/skills`, then
-  `/plugin install shady2k-skills@shady2k`. Invoke skills with its namespace,
-  such as `/shady2k-skills:take-task`.
+- **Claude Code:** `claude plugin marketplace add shady2k/skills`, then
+  `claude plugin install shady2k-skills@shady2k --scope project`. Invoke skills with its
+  namespace, such as `/shady2k-skills:take-task`.
+- **omp:** `omp plugin marketplace add shady2k/skills`, then
+  `omp plugin install shady2k-skills@shady2k` (user scope, omp's default, covers every
+  checkout and worktree). Invoke skills by their unqualified name, such as `/take-task`.
+- **Codex:** `codex plugin marketplace add shady2k/skills`, then
+  `codex plugin add shady2k-skills@shady2k`.
+- **Pi:** `pi install git:github.com/shady2k/skills`.
+- **Prime Agent:** `prime-agent package install git:github.com/shady2k/skills`.
 
 ## Language
 

@@ -46,7 +46,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.40.0';
+export const RULES_VERSION = '0.42.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class Misuse extends Error {}

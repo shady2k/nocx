@@ -60,7 +60,7 @@ import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathMatcher } from './document-format.mjs';
 
-export const RULES_VERSION = '0.40.0';
+export const RULES_VERSION = '0.42.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class Misuse extends Error {}

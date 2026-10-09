@@ -1,9 +1,10 @@
 # Backlog integration
 
 Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.40.0 after this update lands. Its task, "The project setup matches the current
+0.42.0 after this update lands. Its task, "The project setup matches the current
 skills and every real entry point is proved" (nocx-q8yjf.22), keeps the proof
-evidence and any unperformed checks. A branch alone is not an installed update.
+evidence and any unperformed checks; the step from 0.40.0 to 0.42.0 is "The setup
+pull request installs shady2k-skills 0.42.0 before it merges" (nocx-hld9x). A branch alone is not an installed update.
 The protocol ships with the skills and is not restated here. This file holds
 project facts and commands; changing choices live only in the config. Each
 person's plugin, runtime and connected hooks are checked directly, never
@@ -14,6 +15,11 @@ bug.
 
 ## Project
 
+- **Product repository:** none. `product.mjs where` answers `none` here: nocx is an
+  ordinary project, not a product repository and not a code repository under one.
+- **Task ids of this repository's commits resolve against:** this repository's own
+  tracker, read through the export `br where` names (the main checkout's
+  `.beads/issues.jsonl`).
 - **Config:** [`.githooks/backlog-gate/config.json`](../../.githooks/backlog-gate/config.json).
   Read `currentMilestone`, `findingBudget`, `scope` and `execution` there, never here.
 - **Scope: team** (owner, 2026-09-19). The rules bind everyone who works here: `make connect`
@@ -164,7 +170,7 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs` and
   `document-format.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies from the shady2k-skills plugin's
-  `skills/backlog/setup-shady2k-skills/`, setup protocol 0.40.0, never edited
+  `skills/backlog/setup-shady2k-skills/`, setup protocol 0.42.0, never edited
   here. Compare each copy with that source. Run all five `--selftest` commands
   from the plugin directory, where their fixtures live; `check.mjs` additionally
   takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
@@ -336,10 +342,14 @@ files>` in `frontend/`. **The worker runs them for what it touched** — the own
   actual reported model, not only the agent's name. The 2026-10-09 reconciliation
   used `openai-codex/gpt-6-astra` for correctness independently of
   `openai-codex/gpt-6.1-sol`; its additional security review used the implementer's
-  model independently and is disclosed as same-model. The standalone `codex`
-  executable is absent here and Claude CLI is not authenticated: neither is
-  advertised as working. A host without the preferred model uses the config's
-  disclosed independent fallback or escalates.
+  model independently and is disclosed as same-model. From Claude Code the way is
+  the external `codex` CLI: proved 2026-10-09 on the VM (`vm-agents`) with one real
+  call, `codex exec --skip-git-repo-check -s read-only "<prompt>"`, which answered
+  on `gpt-5.6-sol` as recorded in its session transcript (the model's own answer
+  about itself is not the evidence). A machine without the `codex` executable, or
+  with Claude CLI unauthenticated, does not advertise that way as working. A host
+  without the preferred model uses the config's disclosed independent fallback or
+  escalates.
 - **Parallel execution:** separate git worktrees, one per worker. The coordinator assigns
   leaves one at a time, with at most `execution.maxWorkers` workers and disjoint file sets.
   Generated files and lockfiles (`package-lock.json`, `go.sum`, `contracts/` generated

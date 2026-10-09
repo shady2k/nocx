@@ -1,14 +1,13 @@
 # Backlog integration
 
-Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.37.0 on 2026-09-28 by its setup task, "The backlog tooling here matches shady2k-skills
-0.37.0, with Jev and push-range enumeration, and is proved from main" (nocx-q8yjf.18). The
-protocol itself ships with the skills
-and is not restated here. This file holds the project's facts and the commands that were
-run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
-settings — live only in the config. No installation state is recorded anywhere: the
-`--version` of the four installed checks on `main` is the repository's installation, and
-each person's plugin and hooks are their own.
+Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
+0.40.0 after this update lands. Its task, "The project setup matches the current
+skills and every real entry point is proved" (nocx-q8yjf.22), keeps the proof
+evidence and any unperformed checks. A branch alone is not an installed update.
+The protocol ships with the skills and is not restated here. This file holds
+project facts and commands; changing choices live only in the config. Each
+person's plugin, runtime and connected hooks are checked directly, never
+represented as shared installation-state settings.
 
 AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
 bug.
@@ -88,6 +87,16 @@ plainly and stays `in_progress` until it closes. Proved 2026-09-29 on a scratch 
 with this repository's policy file: a transition without the comment and an undeclared
 status are both refused, and open → submitted → implemented → in_progress → close runs.
 
+The adapter includes the native `acceptance_criteria` field under an Acceptance
+Criteria heading in `body`, alongside the description. Criteria stored there are
+not missing merely because the description contains no heading.
+
+Stage acceptance, while the stage is still open, is stored as a comment:
+`accepted: <revision> -- <criterion and acceptance evidence>`. It is not a close,
+and the revision must be present in the consuming checkout. Contextual ready
+selection and claims below read this record; a submitted prerequisite still
+releases nothing.
+
 `br` reads the policy from the MAIN checkout's `.beads`, whichever worktree runs it, so a
 change to it acts only once the main checkout has it.
 
@@ -110,13 +119,14 @@ decompositions, and that work now gets its own task.
   children have all closed is a leaf again and may carry an edge, because what remains is
   in the issue itself. Neither was relaxed towards the other; they answer different
   questions.
-- **Merge:** a merge naming nothing is linked by the commits it brings in (between its
-  first parent and itself). Each of those is checked on its own too. GitHub's
-  "Merge pull request #N" passes this way, not as an exemption. A merge that brings in
-  nothing and names nothing fails.
-- **Before the rule:** commits committed before `commitLinksFrom` (config) are listed as
-  such and fail nothing. So are merges bringing in only such commits. The committer date is
-  the author's to set, so this is honesty, not enforcement.
+- **Merge:** a merge naming nothing borrows links from incoming commits made under
+  the rule. Each is checked on its own too. A newly written merge of old history
+  still needs its own leaf task when there is no link to borrow; set its merge
+  message when landing it.
+- **Before the rule:** commits committed before `commitLinksFrom` (config) are
+  listed and fail nothing. A new merge is not old merely because its incoming
+  history is old. The committer date is the author's to set, so this is honesty,
+  not enforcement.
 
 ### Cleanup recovery
 
@@ -139,41 +149,48 @@ keeps every later change.
 ## Checks and execution
 
 - **Backlog adapter:** [`adapter.mjs`](../../.githooks/backlog-gate/adapter.mjs) reads the
-  tracked export, never the database. `--at <rev>` reads any revision (`:0` is the staged
-  copy), `--export <path>` reads any file, and with neither it reads the working tree. It
-  maps statuses, emits `holder` (assignee) and `createdAt`, drops tombstones, and reads the
-  submitted and implemented records above. Provenance edges are dropped; only `blocks` gates. Its own test:
+  tracked export for historical and gate exports. `--at <rev>` reads any revision
+  (`:0` is staged), `--export <path>` reads a file; with neither flag it reads the working tree.
+  Contextual ready and claims resolve br's main export with `br where --json`,
+  refresh it through native `sync --flush-only`, then read its complete edges and
+  comments. No stale worktree export is imported and no task or assignment changes
+  during readiness. The generated main export is refreshed, not staged or committed.
+  `list` omits edges/comments; full `show` over the historical queue was too slow. It
+  maps statuses, emits `holder` (assignee), `createdAt` and stored acceptance criteria,
+  drops tombstones, and reads the submitted, implemented and accepted-stage records
+  above. Provenance edges are dropped; only `blocks` gates. Its own test:
   `node --test .githooks/backlog-gate/adapter.test.mjs`.
-- **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs) with
-  [`time-format.mjs`](../../.githooks/backlog-gate/time-format.mjs) beside it, which it reads
-  work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs),
-  [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) and
-  [`check-present.mjs`](../../.githooks/backlog-gate/check-present.mjs) with
-  [`document-format.mjs`](../../.githooks/backlog-gate/document-format.mjs) beside it are
-  byte-for-byte copies of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/`
-  at 0.37.0, never edited here. Proving it: `cmp` each against the plugin copy, `--version`
-  prints `0.37.0`, and the selftests run from the plugin directory because the fixtures live
-  there: `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
-  `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`,
-  `node check-present.mjs --selftest`.
+- **Rules:** `check.mjs`, `check-commits.mjs`, `check-docs.mjs`,
+  `check-present.mjs` and `check-product.mjs`, with `time-format.mjs` and
+  `document-format.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
+  These are byte-for-byte copies from the shady2k-skills plugin's
+  `skills/backlog/setup-shady2k-skills/`, setup protocol 0.40.0, never edited
+  here. Compare each copy with that source. Run all five `--selftest` commands
+  from the plugin directory, where their fixtures live; `check.mjs` additionally
+  takes `--config <repo>/.githooks/backlog-gate/config.json` for portability.
 - **Present documents:** the config's `presentDocuments` lists what describes the present
   here — AGENTS.md, README.md, `docs/architecture.md`, `docs/agents/`, the frontend state
   ownership and lifecycle protocol documents, `contracts/README.md` and the UI kit's README.
   `presentIgnores` holds what those documents name that is not a path of this tree (Go's
   `log/slog`, deja's `internal/policy`, the plugin's own paths, the `docs/adr` this repository
-  forbids). The check runs in CI's `ci-backlog` on every pull request that is not a draft,
-  from the merge base to the PR's head, and by hand before a pull request is opened:
+  forbids). The check runs in CI's `ci-backlog` on every pull request, including
+  drafts, from the merge base to the PR's head, and by hand before a pull request is opened:
   `node .githooks/backlog-gate/check-present.mjs --config .githooks/backlog-gate/config.json --base "$(git merge-base origin/main HEAD)"`.
   A dead reference the change made refuses it; older drift is printed and fails nothing. The
   first run, on 2026-09-28 at `0ad291c6d`, found three, filed as one debt item (nocx-q8yjf.16).
   No local hook runs it.
+- **Product documents:** the real pre-commit hook runs
+  `node .githooks/backlog-gate/check-product.mjs --staged`; CI runs it with
+  `--rev <actual PR head or pushed revision>`. It needs no project setting.
+  Existing product documents keep their paths; no catalogue migration occurs
+  during this setup. No product documents means there is nothing to judge.
 - **Work records:** a claim, a receipt of the time a session spent, and the other
   `[shady2k-time v1] …` records are comments on the item, printed by the set's run script
   (`runs.mjs` in the plugin's `take-task`, `close-out` and `ask-shady2k`). The adapter exports
   every comment whose text starts with `[shady2k-time`, raw and whole, damaged or not, as
   `comments: [{ id, at, author, body }]` from beads' comment `id`, `created_at`, `author`
   and `text`; other comments are left out. The run script reads that export as `--backlog`:
-  `node .githooks/backlog-gate/adapter.mjs --export "$(br where | sed -n 's/^  database: \(.*\)\/beads.db$/\1/p')/issues.jsonl"`
+  `node .githooks/backlog-gate/adapter.mjs --export "$(br where --json | jq -r .jsonl_path)"`
   — the main checkout's export, which `br` keeps current — and a record is posted unchanged
   with `br comments add <id> -f <file holding the printed body> --actor <agent>`; `-m` with a
   shell-quoted multi-line string is where a record gets reflowed. Proved 2026-09-26 on the
@@ -192,6 +209,13 @@ keeps every later change.
   A worker's own span, where one is written, adds only its effort by phase; subagent
   workers write none (the run script counts a subagent inside its coordinator's session),
   and the run script reads omp transcripts as well as Claude Code and Codex ones.
+- **Launch a run from its Git checkout.** In omp, use `omp --cwd <checkout>` rather than
+  launching in a non-Git parent and changing only tool working directories. The run
+  script attributes sessions by their recorded working copy. During this setup it
+  refused recovery for a local transcript whose recorded cwd was the existing non-Git
+  parent, not this repository. That transcript is present, not missing;
+  this setup's elapsed time is unmeasured. Do not fabricate a claim, mark a present
+  transcript missing, edit its metadata or add a new time-record exemption.
 - **Tracker layout:** the store is the SQLite database of the main checkout, outside git;
   `br` resolves it from every worktree. Its export `.beads/issues.jsonl` is a tracked file,
   and each publish commits the WHOLE export on whichever branch commits it — a code branch
@@ -252,35 +276,40 @@ keeps every later change.
   message; tasks come from the export `br where` names, which is the database's own view,
   so a bead created a minute ago resolves. `--range <base>..<head>` checks every commit the
   range introduces, with tasks from the export at `<head>`. An empty range is exit 2, never
-  a pass. `--introduced <tip> --by <ref> [--before <sha>]` checks what a push of `<ref>`
-  introduces: the commits of `<tip>` that no other ref the remote holds reaches (its
-  remote-tracking branches and tags, the pushed ref itself excepted, and its old tip when
-  there is one). None is a pass that says `<ref> introduces no commits: nothing to check`;
-  a tip or `--before` git cannot read is exit 2. Its test, on a scratch remote:
+  a pass. `--introduced <tip> --by <ref> [--before <sha>] --remote <remote>` checks
+  commits not reached by the target remote's other actual refs or the pushed ref's
+  old tip. CI already sees the published ref, so that ref itself is excluded.
+  Local-only tags and other remotes cannot hide a commit. A tag is peeled to a commit.
+  None says `<ref> introduces no commits: nothing to check`; unreadable input is exit 2.
   `node --test .githooks/backlog-gate/commit-links.test.mjs`.
 - **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
   and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
   the adapter, `check-commits.mjs` or the config, `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
-  config (exit 2). The one pass is a tree that never had the installation (no
-  `commit-links.mjs`), and it says so.
+  config (exit 2). A tree that never had the integration passes visibly; a configured
+  tree missing `commit-links.mjs` does not.
 - **Connecting a clone:** `make connect` (`scripts/connect-clone.sh`), which `make init`
-  runs first. It checks every local input a hook reads — `git`, `node`, `br`, the four
-  hooks, the gate's `adapter.mjs`, `check.mjs`, `time-format.mjs`, `check-commits.mjs`, `commit-links.mjs`
-  and a readable `config.json`, and `.beads/issues.jsonl` — reports everything missing in
-  one run and connects nothing until nothing is missing; then it sets
-  `core.hooksPath .githooks`, clears the retired beads merge driver and runs
-  `br sync --import-only`. Safe to rerun.
-- **CI:** `ci-backlog` in `.github/workflows/ci.yml`. The backlog baseline is the PR's merge
-  base, or the push's `before`, or else `HEAD^`. The commit range is merge base..PR head
-  (not GitHub's synthetic merge), and an empty PR range is an error. On a push — a
-  `release/**` branch, release.yml's tag, a manual run — it is `commit-links.mjs
---introduced HEAD --by $GITHUB_REF`, with `--before` when the push has one: never a merge
-  base with `main`, so a tag or a new branch on a commit the remote already holds says
-  "introduces no commits: nothing to check" and passes.
-  **The pre-push hook reads no range**, deliberately (AGENTS.md: it warns about the backlog
-  and never blocks). Locally every commit is checked as it is made, by `commit-msg`; what a
-  push introduces is read in CI.
+  runs first. It checks all four hooks, all five shipped checks, both format helpers,
+  adapter and project wrappers, readable config, tracker policy/config and the export,
+  plus Git, Bash, Node, npm, br and the root tool configs. Bash is the pre-commit
+  runtime: both scope classification and formatter arguments preserve NUL-delimited paths.
+  Missing root formatter/linter binaries
+  are installed from the locked root dependencies without install scripts; no Go,
+  frontend or product build is started. It reports missing files together and imports
+  the tracker successfully before connecting git hooks or clearing the retired driver.
+  Failure does not leave a half-connected clone. Safe to rerun.
+- **CI:** `ci-backlog` in `.github/workflows/ci.yml`. Pull requests use the merge
+  base and actual PR head, not GitHub's synthetic merge. An unexpectedly empty
+  range refuses. Pushes use the same introduced-commit enumeration as the local
+  pre-push hook, against the remote's actual refs and the old tip where it exists;
+  a new ref carrying no new commits passes visibly. Backlog comparisons use the
+  preceding published state of those introduced commits, never the branch's own
+  merge base with itself. Product-document checks read the actual incoming revision.
+  The incoming backlog and its configuration both come from that actual revision;
+  the historical baseline is judged by its own configuration. An unfetched advertised
+  remote object is fetched by its exact ID without moving branches, tags or FETCH_HEAD.
+  **Pre-push** reads every stdin ref tuple and runs those range checks, preserving
+  warnings about unpublished tracker changes. It runs no product suite.
   **CI does not run on a push to `main`** (the triggers are PRs, `release/**`, dispatch and
   release.yml's call). A direct push to `main` — the owner's, deliberately ungated — is
   checked by the local hooks only.
@@ -302,13 +331,27 @@ files>` in `frontend/`. **The worker runs them for what it touched** — the own
   alternative is in the config (`execution.mutationFallback`): the coordinator plants 2–3
   mutations by hand in the changed logic at stage acceptance and records which tests went
   red. A skipped check is recorded as skipped, never as passed.
-- **Reviewer:** `codex` (another model), one round at stage acceptance. It is available
-  when `codex exec --skip-git-repo-check "<prompt>"` answers (checked 2026-09-19, codex-cli 0.154.0). The fallback is a
-  fresh Claude agent, disclosed as the same model.
+- **Reviewer:** prefer an independent Codex model different from the implementer,
+  one round at stage acceptance. In omp use its reviewer agent and retain the
+  actual reported model, not only the agent's name. The 2026-10-09 reconciliation
+  used `openai-codex/gpt-6-astra` for correctness independently of
+  `openai-codex/gpt-6.1-sol`; its additional security review used the implementer's
+  model independently and is disclosed as same-model. The standalone `codex`
+  executable is absent here and Claude CLI is not authenticated: neither is
+  advertised as working. A host without the preferred model uses the config's
+  disclosed independent fallback or escalates.
 - **Parallel execution:** separate git worktrees, one per worker. The coordinator assigns
   leaves one at a time, with at most `execution.maxWorkers` workers and disjoint file sets.
   Generated files and lockfiles (`package-lock.json`, `go.sum`, `contracts/` generated
   types) count as collisions. The stage's coordinator integrates.
+  The same coordinator serializes all readiness-affecting writes with assignments,
+  including dependency edits, container/prerequisite status changes and stage acceptance.
+  Workers submit their own results but never self-assign or change another prerequisite.
+  Native `claim_exclusive` protects the holder atomically; readiness is checked
+  before that native write, not in its transaction. A forced claim is safe only
+  under this single-coordinator rule. This is the owner's operating policy
+  (confirmed 2026-10-09), not an interprocess or distributed lock. Stop assigning
+  if another coordinator or writer is changing readiness-affecting state.
 
 ## Tracker operations
 
@@ -316,34 +359,38 @@ files>` in `frontend/`. **The worker runs them for what it touched** — the own
 resolves the MAIN checkout's database even from a worktree. Its own docs: `br robot-docs
 guide`, `br <command> --help`.
 
-| operation                        | here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| create                           | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [-p 0-3]`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| link / unlink                    | `br dep add <consumer leaf> <producer leaf>` (type `blocks`), with the reason and what releases it in a comment · `br dep remove …` · parent: `-t parent-child` · provenance: `-t discovered-from`, which gates nothing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| claim                            | `br update <id> --claim --actor <agent>`, always with `--actor`: without it `br` records `$USER`, the person. The holder is the agent doing the work, under its full name `<harness>-<role>:<person>@<machine>:<branch>#<session>` — a bare role names nobody, because several run at once on different machines and branches — and the person only for their own decisions, checks and approvals. Epics stay owned by the person (AGENTS.md). `claim_exclusive` refuses a claim while another actor holds the bead. A same-stage dependant of an `implemented` prerequisite is still blocked to br, which refuses the claim (`cannot claim blocked issue`); it is claimed with `br update <id> --claim --force --actor <agent>`, which stays atomic and exclusive (a second actor gets `already assigned`) and keeps the `blocks` edge — proved 2026-09-25 on a scratch tracker. Setting only `--assignee` would leave it `open` and the claim not exclusive. The claim is also a record on the item: post the one `runs.mjs claim` prints (Work records) |
-| release                          | `br update <id> --status open --assignee ""`: an unfinished hold only, in the minute it stops                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| submitted                        | `br update <id> --status submitted --transition-comment "submitted: <rev> -- <evidence>"`, then the coordinator takes the assignee                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| implemented                      | coordinator only: `br update <id> --status implemented --transition-comment "implemented: <merge rev> -- <related-check evidence>"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| reopen                           | `br update <id> --status in_progress` with a comment saying why, and recheck every issue blocked by it; a closed one: `br reopen <id>` first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| close                            | `br close <id> -r "<accepted at <rev>: evidence a stranger can check>"`, only after stage acceptance, or with an explicit duplicate/cancellation reason naming the survivor                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| comment / edit                   | `br comments add <id> "…"` · a work record: `br comments add <id> -f <file> --actor <agent>` with the body exactly as the run script printed it, never reflowed or edited · `br update <id> --title … --description-file <f>` · move: `br dep remove <id> <old>` then `br dep add <id> <new> -t parent-child`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| defer / undefer                  | `br defer <id> --until <date>` · `br undefer <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| milestone / label                | `br label add <root> <milestone>` (read the value from config); `br label add\|remove <id> <label>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ready                            | `br ready -t task -t bug` · in one stage: `br ready --epic <stage>`. br releases a dependant only when its prerequisite CLOSES, so an `implemented` prerequisite in the same stage is released by the coordinator by hand, in a checkout at or after its merge revision, and the dependant is claimed as the claim row says                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| holds                            | `br list --status in_progress` (assignee on each row)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| pending integration / acceptance | `br list --status submitted` / `br list --status implemented`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| operation                        | here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| create                           | `br create "<title>" -t epic\|task\|bug\|chore -l <area> -d "<body with DONE WHEN for an epic>" [--parent <id>] [-p 0-3]`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| link / unlink                    | `br dep add <consumer leaf> <producer leaf>` (type `blocks`), with the reason and what releases it in a comment · `br dep remove …` · parent: `-t parent-child` · provenance: `-t discovered-from`, which gates nothing                                                                                                                                                                                                                                                                                                                                                                                      |
+| claim                            | `node .githooks/backlog-gate/adapter.mjs --claim <leaf> --stage <stage> --checkout <path> --actor <harness>-<role>:<person>@<machine>:<branch>#<session>` validates readiness and checkout ancestry, then invokes br's atomic exclusive claim. Edges stay intact. Native `--force` is used only for verified implemented prerequisites, never to override another holder or an unfinished prerequisite. Post the record `runs.mjs claim` prints. Container ownership remains separate.                                                                                                                       |
+| release                          | `br update <id> --status open --assignee ""`: an unfinished hold only, in the minute it stops                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| submitted                        | `br update <id> --status submitted --transition-comment "submitted: <rev> -- <evidence>"`, then the coordinator takes the assignee                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| implemented                      | coordinator only: `br update <id> --status implemented --transition-comment "implemented: <merge rev> -- <related-check evidence>"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| reopen                           | `br update <id> --status in_progress` with a comment saying why, and recheck every issue blocked by it; a closed one: `br reopen <id>` first                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| close                            | `br close <id> -r "<accepted at <rev>: evidence a stranger can check>"`, only after stage acceptance, or with an explicit duplicate/cancellation reason naming the survivor                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| comment / edit                   | `br comments add <id> -f <file> --actor <agent>` posts a work record byte-for-byte. A wrong record is retired with the `runs.mjs void` record, not edited or deleted. Ordinary notes and field edits use `br comments add` and `br update`; reparenting preserves real dependency edges.                                                                                                                                                                                                                                                                                                                     |
+| defer / undefer                  | `br defer <id> --until <date>` · `br undefer <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| milestone / label                | `br label add <root> <milestone>` (read the value from config); `br label add\|remove <id> <label>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ready                            | `node .githooks/backlog-gate/adapter.mjs --ready --stage <stage> --checkout <path>` reads the active br store and returns unheld open leaves whose prerequisites are satisfied there. Same-stage implemented prerequisites need evidence and their revision in the checkout. A prerequisite in another stage of the same feature needs a stored accepted revision that includes its integration and is present in the checkout. Real dependency edges, not generated id ordering, establish precedence. Other features require closure. Submitted and implemented work are never offered to implement again. |
+| holds                            | `br list --status in_progress` (assignee on each row)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| pending integration / acceptance | `br list --status submitted` / `br list --status implemented`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                                                                                                                                                                                                                                                                                                                                                         |
 
-**Where the model and `br ready` differ.** Measured 2026-09-18 and still true: `br ready`
-also hides a leaf whose ANCESTOR is blocked or deferred, which the normalized model does
-not derive. Nothing `br ready` lists is missing from the model. It lists one thing the
-model calls a container, though: an open parent whose type is not `epic` — measured
-2026-09-23, `nocx-q8yjf` is a `chore` with two live children and `br ready` offers it as
-takeable work. `-t epic` cannot filter it out and `-t task -t bug` only hides it by
-accident, so a container of any other type has to be read before it is taken. The model keeps status and
-edges as stored; a queue is `br ready`'s job.
+For setup and other leaves outside a feature stage, the coordinator uses native
+`br --no-auto-import --no-auto-flush update <leaf> --claim --actor <full-agent-name>`
+after inspecting its real prerequisites. Do not invent a stage to claim it.
+
+**Where contextual ready and native `br ready` differ.** Both exclude deferred or
+blocked ancestors; the adapter also checks intermediate groups, not only the
+stage. Native ready may offer a non-epic parent as work, so the adapter removes
+containers of every type. Native ready does not recognize the integrated and
+accepted-stage evidence above; the adapter can offer those dependants only after
+the evidence and checkout ancestry checks. Closed prerequisites behave the same.
+Compare scoped ready leaves and explain these differences, not raw counts that
+include containers.
 
 ## Open
 

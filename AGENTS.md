@@ -25,18 +25,25 @@ The backlog lives in **beads** (`br`), not in prose.
 ## Work goes through the skills
 
 All retained work and commits belong to tracked tasks. File discoveries through
-`/shady2k-skills:to-backlog`; implement through `/shady2k-skills:take-task`; close only
-after stage acceptance through `/shady2k-skills:close-out`. Read Backlog integration in
-[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. When a skill reports the
-installation is out of date, run `/shady2k-skills:setup-shady2k-skills`.
+`to-backlog`; implement through `take-task`; close only after stage acceptance
+through `close-out`. Read Backlog integration in
+[`docs/agents/backlog.md`](docs/agents/backlog.md) before writes. When a skill reports
+the installation is out of date, run `setup-shady2k-skills`.
 
 **Filing is the skill, not the tracker command.** `to-backlog` picks the lane, sets the
 finding and milestone labels and counts the finding budget; a bare `br create` does none
 of that. Every `br` command later in this file is how the tracker works, not a licence to
 go around the skill that decides where the work belongs.
 
-This repository works through the shady2k-skills plugin. Without it, install it once:
-`/plugin marketplace add shady2k/skills`, then `/plugin install shady2k-skills@shady2k`.
+This repository works through the shady2k-skills plugin. Install it once:
+
+- **omp:** if this marketplace is not registered, first run
+  `omp plugin marketplace add shady2k/skills`; then
+  `omp plugin install shady2k-skills@shady2k --scope user` covers every
+  checkout and worktree. Invoke skills by their unqualified name, such as `/take-task`.
+- **Claude Code:** `/plugin marketplace add shady2k/skills`, then
+  `/plugin install shady2k-skills@shady2k`. Invoke skills with its namespace,
+  such as `/shady2k-skills:take-task`.
 
 ## Language
 
@@ -71,9 +78,10 @@ br sync --flush-only          # db -> .beads/issues.jsonl
 git add .beads/issues.jsonl   # and commit it with the code
 ```
 
-`.githooks/pre-push` warns when you are about to push code and leave the backlog behind. It
-warns and never blocks, for the same reason the gates elsewhere in this file are kept worth
-passing: a gate people learn to skip with `--no-verify` protects nothing.
+`.githooks/pre-push` checks the commits a push actually introduces: each names a
+tracked leaf task and adds no new backlog problems. A tag or branch on commits the
+remote already holds passes without rechecking them. Unpublished tracker changes
+still produce a warning; no product test suite runs in this hook.
 
 `br` resolves the database of the **main checkout** even when run from a worktree that has
 its own `.beads/` in the tree. So a feature branch cannot touch the JSONL, and two branches
@@ -103,10 +111,10 @@ the tombstone rows and free the ids, then `br sync --import-only`, which recreat
 issue with its own id, labels and dependency edges. Verify with `br ready` rather than with
 the exporter: an id that reads `open` in `br show` is not yet proof its edges came back.
 
-**Publish every backlog write immediately** — a create, an edit, an edge, a close — not at
-session close. An unpushed bead does not exist for anybody else, and the afternoon it costs
-is somebody else's. Batch your writes if you like (`br update` and `br close` take several
-ids), then commit at the end of the batch.
+**Publish only the task's tracker changes**, through its skill and the integration's
+publish procedure. A claim stays local until published; coordinate across machines.
+Batch only your own field changes, know which checks the push starts, and do not
+include another agent's pending work in that batch.
 
 **A claim is refused while somebody else holds the bead** — `claim_exclusive` in the
 tracked `.beads/config.yaml`, under `br`'s write lock, measured 2026-09-19: a second
@@ -411,17 +419,15 @@ Linux run fails too.**
 
 ## How we work
 
-1. Take the next task from `br ready` — see [What to work on next](#what-to-work-on-next).
+1. Run `take-task` for the next admitted task — see [What to work on next](#what-to-work-on-next).
 2. Read the relevant `AD`(s) before touching a boundary.
 3. **TDD**: red → green → refactor. The failing test comes first.
 4. Keep it green, and let the gate cost what it is worth. `pre-commit` is static and takes
    seconds — formatting, linting, the ratchets, the wire contracts, the type checkers — so
-   committing in small steps stays cheap. `pre-push` runs no test at all: it publishes the
-   issue tracker and gets out of the way. It used to run the containerized suites "scoped to
-   what the push actually changes", and that scoping could never fire, because git hands a
-   pre-push hook the remote's sha and a branch the remote has not seen has none. So every
-   push ran everything, on every worktree. The suites are one command away by hand
-   (`.githooks/containerized-tests.sh`); what catches a break is CI and the merged-tree gate.
+   committing in small steps stays cheap. `pre-push` runs no product tests: it checks
+   task links and the backlog of genuinely introduced commits, then warns about
+   unpublished tracker changes. The suites remain one command away by hand
+   (`.githooks/containerized-tests.sh`); CI and the merged-tree gate check product behavior.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
 
 ## Session completion
@@ -429,29 +435,23 @@ Linux run fails too.**
 Subordinate to whatever the user actually asked for. `br` will not do any of the git
 steps for you.
 
-1. **File beads for remaining work** — anything that needs follow-up, before you forget it.
+1. **File retained discoveries through `to-backlog`**, which decides their lane and budget.
 2. **Run the quality gates** if code changed. Which ones, and whose job they are, is under
    [Git authority](#git-authority): a worker runs the unit tests for what it touched, the
    coordinator runs `make ci-full` on the merged tree — unless nothing in it can touch
    product code, which owes review and its own tooling's tests instead.
-3. **Update issue status** — close what is finished, and set anything you stopped holding
-   back to `open` in the same minute. An unheld bead in `in_progress` is invisible to
-   `br ready` and to every colleague looking for work.
-4. **Send the backlog out with the code:**
-
-   ```bash
-   br sync --flush-only
-   git add .beads/issues.jsonl
-   git commit          # same commit as the code it describes, or one right beside it
-   git push
-   ```
+3. **Accept and close through `close-out`**, never merely because implementation ended.
+   Preserve `submitted` and `implemented` results waiting for integration or acceptance.
+   Release unfinished work when its holder stops; an external wait needs a durable record.
+4. **Publish only your tracker delta with your code**, using the integration's publish
+   procedure. The shared database and export can contain another agent's unpublished work:
+   a blind `git add .beads/issues.jsonl` is not ownership.
 
 5. **Write down anything that was bought.** If something in this session cost a
    measurement or a wrong turn and is not derivable from the repository, it goes in this
    file, which has the three tests. Nothing does this for you: the transcript `deja`
    indexes is a record of what you did, not a rule anybody will review.
-6. **Hand off** — changed files, what you validated, bead status, and anything you left
-   blocked, in those words.
+6. **Hand off through `handoff`** — evidence, tracker status, branch and actionable blockers.
 
 ## Testing: five rules, each bought by a green suite over a broken product
 
@@ -747,53 +747,33 @@ ancestor that did it.
 
 ## What to work on next
 
-Asked to "keep going" with no further instruction, this is the whole answer:
+Asked to "keep going", use `take-task`. It reads the installation and current slice
+before choosing work. Commands and the exclusive claim protocol live in
+[`docs/agents/backlog.md`](docs/agents/backlog.md), not a competing workflow here.
 
-```bash
-br ready
-```
-
-**If it returns nothing, that is an answer, not a bug** — every open epic's front is
-occupied. Finish something in flight or take a free epic; never widen the query.
-
-**The rules below are yours to apply, and no wrapper's to enforce.** Narrow with the
-binary's own flags — `--parent`, `--epic` (sugar for `--parent <id> --recursive`), a
-repeatable `-t/--type`, `-r/--recursive`, `-l/--label` — and never with a script around
-them. Custom machinery wrapped around a tracker is a second answer to the tracker's own
-question, and it goes stale the quarter the tracker catches up.
-
-- **You may not take a task out of an epic nobody has taken.** If the epic is free, take
-  the epic (`br update <epic> --assignee "$(git config user.email)" --status in_progress`),
-  then come back for its children with `br ready --epic <epic>`.
-- **Never take work out of a blocked epic** — it is blocked because the same files are
-  moving. Nothing computes this for you: read the epic before you take its child. Going
-  around the queue via `br list`, `br search` or an id in a document is the failure mode.
-  If a bead is not in `br ready`, do not start it.
-- **An epic is assigned, its children are claimed.** Owning an epic means seeing it to its
-  DONE WHEN. Never `--claim` an epic bead as though it were a task.
-- **`br ready -t epic --unassigned`** lists epics nobody owns and nothing blocks — what you
-  can hand to a colleague. Do not flip an epic to `in_progress` to hide it from a task
-  listing; `br ready -t task -t bug` is how you leave epics out of one.
-- **A standalone bug legitimately has no epic.** `br ready -t bug` is where those surface,
-  and taking one needs no epic to be taken first.
+- The feature must have an owner. Owning its outcome is separate from claiming a leaf;
+  never `--claim` a container as though it were a worker task.
+- Do not bypass a real blocker or hold. Contextual readiness includes the stage and the
+  consuming checkout: `br ready` alone cannot release integrated, accepted prerequisites
+  that remain open in the tracker.
+- When no admitted leaf is available, preserve results already handed in, resolve their
+  acceptance or use `handoff`; do not widen the slice.
+- A standalone bug may legitimately have no epic. `to-backlog` chooses its lane and
+  `take-task` runs it without inventing a parent.
 
 ### Backlog invariants
 
-- **An epic blocks another only when they touch the same code** — not "this is more
-  important" and not "this comes later". `br dep add <blocked-epic> <blocker-epic>`.
-  Priority, not blocking, is where importance goes. Several epics available at once is
-  normal and wanted. Most edges that ever had to be removed encoded "not yet"; before that,
-  a bare `br ready` was unusable.
+- **Only real prerequisites or file conflicts block work.** Record them on the consuming
+  leaf, not a feature root or stage. Priority is not a dependency, and independent changes
+  may run together within the agreed capacity.
 - **`blocked` is computed, never stored.** You cannot set it; you can only add the edge. A
   blocked epic still prints as `○` — read its `DEPENDS ON` list.
-- **An epic is a DAG, not a bag.** Sequence children with `blocks` so only a few are ready
-  at once. `br show <epic> --json` carries a `rollup` of its descendants by status, which is
-  the cheapest read of the same thing.
-- **Where a bug goes.** Inside a live deliverable, a child of that epic. Arriving from
-  nowhere, **no parent at all** — a standalone bug is legitimate. Filing it under the
-  nearest plausible epic is what grew the area epics that had to be split. If triage shows
-  it is a symptom of something structural, it _becomes_ an epic and carries a
-  `discovered-from` edge back to the bug.
+- **A feature is a DAG, not a bag or an artificial chain.** Keep real leaf dependencies.
+  A stage's accepted result can release the next dependent stage before its tasks close;
+  use the contextual readiness and claim operations in the integration.
+- **Where a bug goes is decided by `to-backlog`.** Unplanned findings stay beside the
+  setup or feature that found them, not underneath its planned leaf. A structural change
+  to a feature's outcome needs the owner's scope decision, not the nearest plausible parent.
 
 ### One area label, and a status that is true
 
@@ -827,11 +807,10 @@ stop that loop.
   and `phase-1/2/3` they are orthogonal to area, so the one-area-label rule is unchanged —
   a triaged bead carries its area label _and_ a triage label. These five, the area list and
   the roadmap list are the whole permitted vocabulary; anything else is still refused.
-  `wontfix` is a label **and** a close (`br close <id> --reason "wontfix: <why>"`), because
-  a label alone leaves the bead open in everybody's listing. And `ready-for-agent` /
-  `ready-for-human` are for work arriving from OUTSIDE the queue: for a bead already inside
-  an epic, `br ready` is the authority on whether it is takeable, since it computes blockers
-  and holds that a hand-applied label cannot. Mapping in
+  `wontfix` includes an explicit cancellation through `close-out`, because a label alone
+  leaves the bead open. `ready-for-agent` / `ready-for-human` are for work arriving from
+  outside the queue; inside a stage the integration's contextual readiness determines
+  whether a leaf can be claimed. A hand-applied label proves neither blockers nor holds.
   [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md).
 
 - **`in_progress` means a worker is holding it now** — not "started once", not "nearly
@@ -904,9 +883,9 @@ far away it was, because the question had no object.
 
 ## Git authority
 
-Agents have **standing authority to commit and push**. Allowed without asking: `git commit`,
-`git push`, `br close`, `br sync --flush-only`, running the gates. Branch first if you are
-on `main`.
+Agents have **standing authority to commit and push** for tracked work. Those operations,
+`close-out`, explicit tracker export and quality gates require no extra approval. Use the
+integration's workflow and commit only what this agent wrote. Branch first on `main`.
 
 **Merging a pull request always requires explicit approval** — in that session, for that PR.
 Authority to commit and push is not authority to merge.
@@ -1009,7 +988,8 @@ Co-Authored-By: ...
   before the commit, not after it. **Trivial?** It
   still had a reason, and it is the one nobody can explain in six months.
 
-**Enforced since 2026-09-19** by `.githooks/commit-msg` and CI's `ci-backlog`, through
+**Enforced since 2026-09-19** by `.githooks/commit-msg` and CI's `ci-backlog`, and
+also before publishing by `.githooks/pre-push`, through
 `.githooks/backlog-gate/commit-links.mjs`: every id in parentheses in the header paragraph
 must be an existing **leaf** — a stage or an epic is refused, so a commit that decomposes a
 stage names a task for that work. A merge naming nothing is linked by what it brings in. In

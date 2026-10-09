@@ -255,6 +255,8 @@ only — nothing below is executed, only read (`nocx-hzsiv`):
 - `eslint` — frontend lint, plus the fixture and dead-export ratchets
 - `contracts:check` — the generated wire types match the schemas
 - `tsc --noEmit` — the frontend and the e2e suite
+- backlog rules and commit task links — through the project integration
+- product-document form and references — staged content only
 
 **No test runs on commit**, and no container is started: the hook needs no
 docker daemon. Tests live at three addresses instead — `make test` on demand,
@@ -263,20 +265,21 @@ every pull request. The trade is deliberate: a commit can be made whose tests
 do not pass, in exchange for a gate that takes seconds and cannot be starved
 into misreporting which check failed (`nocx-y6d9j`).
 
-The pre-push hook does not push the tracker, because there is nothing separate to
-push: the backlog **is** `.beads/issues.jsonl`, an ordinary tracked file that
-travels in the commit you are pushing. What the hook does is warn — when `br` has
-changes that never reached the file, or when the file is modified and not
-committed. It warns and never blocks. A push that leaves the backlog behind costs
-a colleague a stale `br ready`; a hook that refuses the push costs the developer
-their afternoon and teaches them `--no-verify`, after which it guards nothing.
+The pre-push hook checks the commits that the target remote does not already hold.
+Every introduced commit must name an existing leaf task; its published backlog
+must add no new problems. A new tag or branch on commits already held by that
+remote passes visibly without rechecking history. Empty hook input or unreadable
+gate inputs refuse the push and name `make connect`; no product suite runs here.
 
-There are no post-merge or post-rewrite hooks any more either. `git pull` brings a
-colleague's backlog in as a file change, and `br` imports it before the next
-command on its own (`sync.auto_import`). If both your database and the pulled file
-changed, `br sync --merge` does the three-way against `.beads/beads.base.jsonl`,
-and `--force-db` / `--force-jsonl` / `--force` are the three explicit policies for
-an issue that changed on both sides.
+The tracker still travels as the tracked `.beads/issues.jsonl` export, not a
+separate push. Unflushed database changes or an uncommitted export produce a
+warning so the publisher can send their tracker changes with their code.
+
+There are no post-merge or post-rewrite hooks. `git pull` brings a colleague's
+export in as a file change; the database can also hold newer local work.
+Reconcile them through [Backlog integration](docs/agents/backlog.md) before
+tracker writes or publication. Never use `br sync --merge` merely because the
+database is ahead: it can remove tasks that have not reached the export.
 
 **The tracker was `bd` (Go beads, embedded Dolt) until 2026-09-05.** It moved to
 `br` because Dolt's failures compounded: a pull that could not recover a clone
@@ -288,7 +291,8 @@ every worktree on the machine queued behind it (`nocx-v48vl`). The store went fr
 did it — `scripts/bd-to-br-transform.py` and `scripts/bd-to-br-verify.py` — are
 kept so a second machine can repeat and re-check it.
 
-If `br` is missing, the pre-push hook steps aside silently.
+If `br` or a required gate input is missing in a configured tree, the push is refused;
+`make connect` reports what must be supplied.
 
 Claiming a task is the one moment where a stale backlog actually costs something;
 `AGENTS.md` has the claim protocol.

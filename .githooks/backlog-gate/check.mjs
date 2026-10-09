@@ -416,31 +416,38 @@ const CHECKS = [
     id: 'time-record-damaged',
     severity: 'error',
     why: 'A record of how the work went that does not parse, or whose table does not add up, is not counted by anyone, so the time it held is lost while the item looks recorded.',
-    fix: 'Post the record again exactly as the run script printed it, and delete the damaged one. The numbers come from the script; a hand-edited table is what this catches.',
+    fix: 'Void it with the run script\'s `void`, naming its comment, and post what it prints. Where the record still matters, write it again with the run script, never by hand, and post it exactly as printed: a check that then names a missing claim or receipt says how. The numbers come from the script; a hand-edited table is what this catches.',
     run: (m) => spansOf(m).damaged.map((r) => ({ id: r.item, ref: `comment:${r.comment}`, note: r.problems.slice(0, 2).join('; ') })),
+  },
+  {
+    id: 'time-void-idle',
+    severity: 'warn',
+    why: 'A void that is damaged or names no record of the set on its item retires nothing, so the record it was meant for still counts. It does no harm by itself, so it does not block.',
+    fix: 'Where a record still needs voiding, void it again with the run script\'s `void`, naming its comment. The idle void can stay.',
+    run: (m) => spansOf(m).idle.map((r) => ({ id: r.item, ref: `comment:${r.comment}`, note: r.why })),
   },
   {
     id: 'time-span-conflict',
     severity: 'error',
     why: 'One span has one claim and one receipt. Two different ones mean the same minutes are recorded twice, or a receipt was written for someone else\'s span, and no total built on them can be trusted.',
-    fix: 'Keep the record the script printed for this span and delete the other. The same record posted twice by a retry is not a conflict and needs nothing.',
+    fix: 'Keep the record the script printed for this span and void the other with the run script\'s `void`, naming its comment. Where the one to keep is wrong too, void both and write it again with the run script. The same record posted twice by a retry is not a conflict and needs nothing.',
     run: (m) => spansOf(m).spans.filter((s) => s.conflict.length || (s.claim && s.receipt && Date.parse(s.receipt.fields.from) !== s.start))
-      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: s.conflict.length ? `span ${s.id}: ${s.conflict.join('; ')}` : `span ${s.id}: its receipt starts at ${s.receipt.fields.from}, its claim at ${s.claim.fields.at}` })),
+      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: s.conflict.length ? `span ${s.id}: ${s.conflict.join('; ')} (comments ${s.conflicting.join(', ')})` : `span ${s.id}: its receipt (comment ${s.receipt.comment}) starts at ${s.receipt.fields.from}, its claim (comment ${s.claim.comment}) at ${s.claim.fields.at}` })),
   },
   {
     id: 'time-span-unclaimed',
     severity: 'error',
     why: 'A receipt or event whose span was never claimed belongs to no session and no item start, so nothing can say whose time it is or whether it overlaps other work.',
-    fix: 'Post the span\'s claim where it was taken, or remove a record written against a span id that does not exist.',
-    run: (m) => spansOf(m).spans.filter((s) => !s.claim && !s.conflict.length).map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} has records but no claim` })),
+    fix: 'Post the span\'s claim where it was taken, or void a record written against a span id that does not exist with the run script\'s `void`, naming its comment.',
+    run: (m) => spansOf(m).spans.filter((s) => !s.claim && !s.conflict.length).map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} has records but no claim (comments ${[...s.receipts, ...s.events].map((r) => r.comment).join(', ')})` })),
   },
   {
     id: 'time-span-overlap',
     severity: 'error',
     why: 'A session works on one item at a time: taking the next ends the one before. A receipt reaching past the session\'s next claim counts the same minutes on two items.',
-    fix: 'Write the receipt again with the run script, which ends the span where the session\'s next claim begins, and delete the one that overlaps.',
+    fix: 'Void the receipt that overlaps with the run script\'s `void`, naming its comment, then write it again with the run script, which ends the span where the session\'s next claim begins.',
     run: (m) => spansOf(m).spans.filter((s) => s.receipt && s.next && s.end > s.next.start + 60e3)
-      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} ends ${s.receipt.fields.to}, after the same session claimed ${s.next.item} at ${s.next.claim.fields.at}` })),
+      .map((s) => ({ id: s.item, ref: `span:${s.id}`, note: `span ${s.id} ends ${s.receipt.fields.to} (comment ${s.receipt.comment}), after the same session claimed ${s.next.item} at ${s.next.claim.fields.at}` })),
   },
   {
     id: 'time-span-unreceipted',
@@ -475,7 +482,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.37.0';
+const RULES_VERSION = '0.40.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 

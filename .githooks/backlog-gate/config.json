@@ -129,7 +129,7 @@
     "landing": "pull-request",
     "maxWorkers": 3,
     "workersRunTests": true,
-    "claims": "coordinator-assigns-serially; the holder is the agent under its full actor name <harness>-<role>:<person>@<machine>:<branch>#<session>, never the person, and a bare role names nobody; br claim_exclusive refuses a second actor",
+    "claims": "one coordinator serializes all readiness-affecting writes with assignments, including dependency edits, container/prerequisite status changes and stage acceptance; workers never self-assign; the holder is the agent under its full actor name <harness>-<role>:<person>@<machine>:<branch>#<session>; br claim_exclusive atomically protects the holder, not the adapter's whole prerequisite snapshot",
     "mutationBudgetMinutes": 10,
     "mutationFallback": "no mutation tool: at stage acceptance the coordinator hand-plants 2-3 mutations in the changed logic and records whether a test went red; a survivor becomes a test or a question to the owner, never a pass",
     "reviewPreference": "different-model",

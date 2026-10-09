@@ -1,16 +1,12 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -eu
 
 # THE FAST GATE. Everything here is static and reads the tree: formatting,
 # linting, the ratchets, the wire contracts, the type checkers. Seconds.
 #
-# THE TEST SUITES ARE NOT HERE, and that is deliberate. They ran in containers
-# on every commit that touched a .go or a frontend/ file — the whole Go module
-# under -race and the whole vitest suite — which is minutes per commit, paid
-# again on every amend and every small step of a refactor. They now run in
-# pre-push, once per push, which is the last moment before work leaves this
-# machine and the moment where being wrong actually costs somebody else
-# something. CI remains the source of truth either way.
+# Product test suites run through the coordinator's explicit commands and CI.
+# Pre-push checks introduced task links and backlog policy; it starts no suite
+# or container. CI remains the source of truth for required product checks.
 
 warn() { printf "FAIL: %s\n" "$1"; }
 ok()   { printf "OK:   %s\n" "$1"; }
@@ -21,10 +17,9 @@ ok()   { printf "OK:   %s\n" "$1"; }
 command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
 
 # --- 0. what does this commit touch? ----------------------------------------
-# Scope the expensive per-language gates to the language the commit changes. The
-# rule is conservative in one direction only: anything we cannot classify runs
-# everything. A commit that cannot be classified is cheap; a commit that skips a
-# gate it needed is a broken commit in a history AGENTS.md expects to bisect.
+# Scope per-language gates to staged Go, frontend and e2e inputs; shared
+# ratchets invalidate every language scope. Root formatting and linting always
+# run. Preserve paths losslessly: Git's quoted newline output is not a filename.
 #
 # Deletions are NOT filtered out — removing a file breaks a build as readily as
 # editing one. An empty staged set (an --amend that changes only the message)
@@ -32,24 +27,35 @@ command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
 RUN_GO=1
 RUN_FE=1
 RUN_E2E=1
-CHANGED=$(git diff --cached --name-only 2>/dev/null || true)
-if [ -n "$CHANGED" ]; then
+CHANGED_LIST=$(mktemp) || exit 1
+if ! git diff --cached --name-only -z >"$CHANGED_LIST"; then
+    rm -f "$CHANGED_LIST"
+    printf 'pre-commit: staged paths cannot be read; run make connect\n' >&2
+    exit 1
+fi
+CHANGED=()
+while IFS= read -r -d '' f; do
+    CHANGED+=("$f")
+done <"$CHANGED_LIST"
+rm -f "$CHANGED_LIST"
+if [ "${#CHANGED[@]}" -gt 0 ]; then
     RUN_GO=0
     RUN_FE=0
     RUN_E2E=0
-    while IFS= read -r f; do
-        [ -n "$f" ] || continue
+    for f in "${CHANGED[@]}"; do
         case "$f" in
-            # The hook and the build system decide how everything else is
-            # checked, so a change to either invalidates the scoping itself.
-            .githooks/*|Makefile|.golangci.yml) RUN_GO=1; RUN_FE=1; RUN_E2E=1 ;;
+            # Hook plumbing and the document/backlog gates check themselves;
+            # they do not change product behavior. Ratchets still invalidate
+            # product scoping because they decide what product code is checked.
+            .githooks/backlog-gate/*|.githooks/pre-commit|.githooks/commit-msg|.githooks/pre-merge-commit|.githooks/pre-push|scripts/connect-clone.sh) ;;
+            .githooks/check-deadcode*|.githooks/check-log-context*|.githooks/check-control-goroutines*|.githooks/images/*|Makefile|.golangci.yml)
+                RUN_GO=1; RUN_FE=1; RUN_E2E=1 ;;
+            .githooks/*) ;;
             *.go|go.mod|go.sum)                 RUN_GO=1 ;;
             frontend/*)                         RUN_FE=1 ;;
             e2e/*|playwright.config.ts)         RUN_E2E=1 ;;
         esac
-    done <<CHANGED_EOF
-$CHANGED
-CHANGED_EOF
+    done
 fi
 
 # --- check the binaries the ENABLED gates need, report all missing together --
@@ -109,13 +115,24 @@ host_gate() {
     fi
     ok "$_label"
 }
+gate=.githooks/backlog-gate
+if [ ! -r "$gate/check-product.mjs" ]; then
+    if [ -e "$gate/config.json" ] ||
+        git cat-file -e "HEAD:$gate/config.json" 2>/dev/null; then
+        printf 'check-product.mjs is missing or unreadable; run make connect\n' >&2
+        exit 1
+    fi
+    printf 'product-document check is not configured in this tree\n' >&2
+else
+    host_gate "product documents (staged)" node "$gate/check-product.mjs" --staged
+fi
 
 # --- 1. NO TESTS RUN HERE, and that is the decision, not an omission --------
 # This hook used to start two containers on every commit — `go test -race` in
 # .githooks/images/go-tests and vitest in a node image — which its own comment
 # measured at 72% of the hook's wall time. They are gone from THIS hook
-# (nocx-hzsiv); they run in `pre-push` instead, once per push rather than once
-# per commit.
+# (nocx-hzsiv). They run in CI and through the explicit containerized test command,
+# not in pre-push, which checks introduced commits and backlog policy only.
 #
 # The reason is not speed alone. A test runner is the most expensive thing this
 # machine does, and several agent worktrees commit at once: on 2026-08-27 three
@@ -130,7 +147,7 @@ host_gate() {
 # a commit can now be made whose tests do not pass. The suites keep their teeth
 # at four addresses:
 #
-#   .githooks/pre-push   the two containerized suites, once per push
+#   .githooks/containerized-tests.sh   on demand, in the CI containers
 #   make test            on demand, on this host
 #   make ci-full         the integrator, once, on the merged tree (AGENTS.md)
 #   ci.yml               every pull request, in the environment each job owns
@@ -260,10 +277,19 @@ fi
 # checked. --ignore-unknown lets the list carry files prettier has no parser
 # for; the deletion filter is `--diff-filter=d`, because a deleted file
 # cannot be formatted and its absence is not a failure.
-PRETTIER_FILES=$(git diff --cached --name-only --diff-filter=d 2>/dev/null || true)
-if [ -n "$PRETTIER_FILES" ]; then
-    # shellcheck disable=SC2086
-    host_gate "prettier --check (staged)" npx prettier --check --ignore-unknown $PRETTIER_FILES
+PRETTIER_LIST=$(mktemp) || exit 1
+if ! git diff --cached --name-only --diff-filter=d -z >"$PRETTIER_LIST"; then
+    rm -f "$PRETTIER_LIST"
+    printf 'pre-commit: staged paths cannot be read; run make connect\n' >&2
+    exit 1
+fi
+PRETTIER_FILES=()
+while IFS= read -r -d '' file; do
+    PRETTIER_FILES+=("$file")
+done <"$PRETTIER_LIST"
+rm -f "$PRETTIER_LIST"
+if [ "${#PRETTIER_FILES[@]}" -gt 0 ]; then
+    host_gate "prettier --check (staged)" npx prettier --check --ignore-unknown -- "${PRETTIER_FILES[@]}"
 else
     host_gate "prettier --check" npm run format:check
 fi
@@ -308,8 +334,15 @@ fi
 # Cheap (no toolchain, no container), so it runs whenever it could have anything
 # to say. It is also run by the deploy workflow: a page that fails it must not
 # reach the public URL because someone skipped a local hook.
-if printf '%s
-' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
+RUN_SITE=0
+if [ "${#CHANGED[@]}" -gt 0 ]; then
+    for f in "${CHANGED[@]}"; do
+        case "$f" in
+            site/*|scripts/check-site.sh|scripts/site-forbidden-phrases.txt) RUN_SITE=1 ;;
+        esac
+    done
+fi
+if [ "$RUN_SITE" = 1 ]; then
     if ! ./scripts/check-site.sh; then
         warn "check-site"
         printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
@@ -338,11 +371,13 @@ fi
 # almost every command, so a working-tree read would judge backlog writes the
 # commit is not making.
 RUN_BACKLOG=1
-if [ -n "$CHANGED" ]; then
+if [ "${#CHANGED[@]}" -gt 0 ]; then
     RUN_BACKLOG=0
-    case "$CHANGED" in
-        *.beads/issues.jsonl*|*.githooks/backlog-gate/*) RUN_BACKLOG=1 ;;
-    esac
+    for f in "${CHANGED[@]}"; do
+        case "$f" in
+            .beads/issues.jsonl|.githooks/backlog-gate/*) RUN_BACKLOG=1 ;;
+        esac
+    done
 fi
 
 # The other parent of the merge being committed, or failure when this is not a
@@ -433,12 +468,8 @@ fi
 printf "\nAll static checks passed.\n"
 
 # What "all checks passed" does NOT mean. This hook is STATIC: it reads the
-# tree and never runs a test. The suites moved to pre-push (the Go module under
-# -race, vitest), and even there the warning below still holds — those run in
-# Debian with Go from the golang image, no Secret Service, every core this host
-# has and the test cache intact, where CI runs Ubuntu, setup-go, two keyring
-# variants, 4 cores and -count=1. A release attempt and its follow-up PR both
-# came back red from a job the old hook had just called green (nocx-cn86).
+# tree and never runs a test. Run suites explicitly or let the scoped CI jobs run:
+# neither this hook nor pre-push claims to reproduce product or platform behavior.
 printf "  NOT covered here: the test suites themselves  — CI, or \`make ci\` (NOT pre-push)\n"
 printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"

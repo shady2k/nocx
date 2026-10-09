@@ -140,6 +140,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0079 | [A worker's conversation resumes after the backend restarts, from a minimal durable restart record](0079-a-workers-conversation-resumes-after-the-backend-restarts.md) | Accepted (2026-10-05; the owner's herdr-parity scope decision; supersedes D5 of the 2026-08-15 orchestration spec in the half 'workers die with the backend') |
 | 0080 | [An authenticated event defers a settle, it does not take it](0080-an-authenticated-event-defers-a-settle-it-does-not-take-it.md) | Accepted (2026-10-05; the owner's decision on nocx-n5ent; supersedes case 3 of ADR-0074 — a completion for another nonce defers the settle instead of taking it) |
 | 0081 | [Recovery and prompt boundaries are backend-owned, non-authoritative effects](0081-recovery-and-prompt-boundaries-are-backend-owned-non-authoritative-effects.md) | Accepted (2026-10-07; the owner's decision on nocx-zg3k3.17/.18; supplements ADR-0066 and supersedes only ADR-0024 decision 8's renderer-visible nonce mechanism) |
+| 0082 | [The work tracker has one assignment coordinator](0082-the-work-tracker-has-one-assignment-coordinator.md) | Accepted (2026-10-09; owner's workflow decision on nocx-q8yjf.22; no application invariants changed) |
 
 ## Adding one
 

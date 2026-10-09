@@ -66,6 +66,7 @@ eslint-fixtures/
 .githooks/backlog-gate/check-docs.mjs
 .githooks/backlog-gate/time-format.mjs
 .githooks/backlog-gate/check-present.mjs
+.githooks/backlog-gate/check-product.mjs
 .githooks/backlog-gate/document-format.mjs
 
 # Image-generation scratch: prompts and renders written by an agent session, in

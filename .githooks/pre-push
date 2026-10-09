@@ -24,12 +24,12 @@ done
 if br --no-auto-import --no-auto-flush where >/dev/null 2>&1; then
     if ! br --no-auto-import --no-auto-flush sync --status 2>/dev/null | grep -q "Dirty issues: 0"; then
         printf '\nWARN: br has changes that never reached .beads/issues.jsonl.\n' >&2
-        printf '      br sync --flush-only && git add .beads/issues.jsonl\n' >&2
+        printf '      Publish only changes owned by your tracked work; read docs/agents/backlog.md before writing the shared export.\n' >&2
     fi
 fi
 if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
     printf '\nWARN: .beads/issues.jsonl is modified and uncommitted — the backlog stays here.\n' >&2
-    printf '      git add .beads/issues.jsonl && git commit\n' >&2
+    printf '      Keep unrelated tracker changes out of this commit; follow docs/agents/backlog.md to publish your own delta.\n' >&2
 fi
 
 remote=${1:-}

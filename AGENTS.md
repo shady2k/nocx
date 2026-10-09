@@ -43,7 +43,7 @@ checkout, then run setup in a new session of that agent:
   namespace, such as `/shady2k-skills:take-task`.
 - **omp:** `omp plugin marketplace add shady2k/skills`, then
   `omp plugin install shady2k-skills@shady2k` (user scope, omp's default, covers every
-  checkout and worktree). Invoke skills by their unqualified name, such as `/take-task`.
+  checkout and worktree). Invoke skills with omp's syntax, such as `/skill:take-task`.
 - **Codex:** `codex plugin marketplace add shady2k/skills`, then
   `codex plugin add shady2k-skills@shady2k`.
 - **Pi:** `pi install git:github.com/shady2k/skills`.

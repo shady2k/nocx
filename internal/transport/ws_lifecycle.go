@@ -191,7 +191,7 @@ func (s *WSServer) RegisterLifecycleLane(lane lifecycle.LaneID, sid session.ID) 
 	delete(s.pendingLifecycleLoss, lane)
 	s.lifecycleMu.Unlock()
 	if cause != "" {
-		s.applyOrQueueIntegrationLoss(sid, cause)
+		s.applyOrQueueIntegrationLoss(lane, sid, cause)
 	}
 }
 

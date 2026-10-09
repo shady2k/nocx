@@ -343,17 +343,19 @@ func (s *WSServer) NoteIntegrationLoss(lane lifecycle.LaneID, cause string) {
 		return
 	}
 	s.lifecycleMu.Unlock()
-	s.applyOrQueueIntegrationLoss(sid, cause)
+	s.applyOrQueueIntegrationLoss(lane, sid, cause)
 }
 
 // applyOrQueueIntegrationLoss keeps a loss received during open until the
-// session enters the integration axis. lifecycleMu is held while checking the
-// axis and queueing, so RegisterIntegration cannot race between those steps.
-func (s *WSServer) applyOrQueueIntegrationLoss(sid session.ID, cause string) {
-	// The lifecycle channel carries the replay window a hold waits for. A
-	// loss releases it even when the integration axis has already answered.
-	s.releaseSessionEndHolds(sid)
+// session enters the integration axis. It revalidates the lane under
+// lifecycleMu because the caller may have been descheduled after its initial
+// lane lookup while teardown removed that mapping.
+func (s *WSServer) applyOrQueueIntegrationLoss(lane lifecycle.LaneID, sid session.ID, cause string) {
 	s.lifecycleMu.Lock()
+	if current, ok := s.lifecycleLanes[lane]; !ok || current != sid {
+		s.lifecycleMu.Unlock()
+		return
+	}
 	status, reason, changed := s.applyIntegrationLoss(sid, cause)
 	if !changed && cause != LossCauseClosed {
 		s.integrationMu.Lock()
@@ -369,6 +371,9 @@ func (s *WSServer) applyOrQueueIntegrationLoss(sid session.ID, cause string) {
 		}
 	}
 	s.lifecycleMu.Unlock()
+	// The lifecycle channel carries the replay window a hold waits for. A
+	// loss releases it even when the integration axis has already answered.
+	s.releaseSessionEndHolds(sid)
 	if !changed {
 		return
 	}

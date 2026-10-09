@@ -336,6 +336,38 @@ func TestIntegration_HelloTimeoutDuringOpenSurvivesLaneRegistration(t *testing.T
 	}
 }
 
+func TestIntegration_LossResumingAfterTeardownDoesNotRequeueForDeadSession(t *testing.T) {
+	e := newIntegrationEnv(t)
+	sid := session.ID(e.sid)
+
+	// Capture exactly the lookup result NoteIntegrationLoss holds while it is
+	// descheduled. Teardown then removes both the lane and status before the
+	// reporter resumes at the guarded apply step.
+	e.ws.lifecycleMu.Lock()
+	resolvedSID, ok := e.ws.lifecycleLanes[e.lane]
+	e.ws.lifecycleMu.Unlock()
+	if !ok || resolvedSID != sid {
+		t.Fatalf("lane lookup = %q, %t; want %q", resolvedSID, ok, sid)
+	}
+	e.ws.unregisterLifecycleLanes(sid)
+	e.ws.unregisterIntegration(sid)
+	e.ws.applyOrQueueIntegrationLoss(e.lane, resolvedSID, LossCauseHelloTimeout)
+
+	e.ws.lifecycleMu.Lock()
+	_, orphaned := e.ws.pendingSessionLoss[sid]
+	_, stillMapped := e.ws.lifecycleLanes[e.lane]
+	e.ws.lifecycleMu.Unlock()
+	if orphaned || stillMapped {
+		t.Fatalf("teardown left stale loss state: pending=%t mapped=%t", orphaned, stillMapped)
+	}
+	e.ws.integrationMu.Lock()
+	_, stillRegistered := e.ws.integrations[sid]
+	e.ws.integrationMu.Unlock()
+	if stillRegistered {
+		t.Fatal("teardown left the dead session on the integration axis")
+	}
+}
+
 func TestIntegration_AbandoningAnOpenDiscardsItsPendingTimeout(t *testing.T) {
 	e := newIntegrationEnv(t)
 	e.ws.unregisterLifecycleLanes(session.ID(e.sid))

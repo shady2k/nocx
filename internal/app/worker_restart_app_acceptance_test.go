@@ -38,7 +38,19 @@ func TestAppRestartRelaunchesConfiguredWorkerAndEnrolsItsPriorPane(t *testing.T)
 	t.Setenv("NOCX_RESTART_INVOCATION", invocation)
 
 	ctx := context.Background()
-	cwd := t.TempDir()
+	cwdTarget := t.TempDir()
+	cwd := filepath.Join(t.TempDir(), "cwd-link")
+	if err := os.Symlink(cwdTarget, cwd); err != nil {
+		t.Fatalf("symlink worker cwd: %v", err)
+	}
+	// A shell reports the resolved spelling of PWD for a symlinked CWD. Keep
+	// this directory behind a link so Linux covers macOS's /var -> /private/var
+	// path spelling too, while the restart record retains the logical spelling.
+	resolvedCwd, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		t.Fatalf("resolve symlink worker cwd: %v", err)
+	}
+	wantInvocation := resolvedCwd + "\n--continue"
 	const workspaceID = "00000000-0000-7000-8000-00000000f301"
 	const tabID = "00000000-0000-7000-8000-00000000f302"
 	const paneID = "00000000-0000-7000-8000-00000000f303"
@@ -134,14 +146,14 @@ func TestAppRestartRelaunchesConfiguredWorkerAndEnrolsItsPriorPane(t *testing.T)
 
 	waittest.WaitForTimeout(t, "configured Claude resume invocation", 10*time.Second, func() bool {
 		actual, readErr := os.ReadFile(invocation) //nolint:gosec // test-owned temporary path
-		return readErr == nil && strings.TrimSpace(string(actual)) == cwd+"\n--continue"
+		return readErr == nil && strings.TrimSpace(string(actual)) == wantInvocation
 	})
 	actual, err := os.ReadFile(invocation) //nolint:gosec // test-owned temporary path
 	if err != nil {
 		t.Fatalf("read actual Claude invocation: %v", err)
 	}
-	if got, want := strings.TrimSpace(string(actual)), cwd+"\n--continue"; got != want {
-		t.Fatalf("configured CLI received %q, want cwd and agent-record resume argv %q", got, want)
+	if got := strings.TrimSpace(string(actual)); got != wantInvocation {
+		t.Fatalf("configured CLI received %q, want cwd and agent-record resume argv %q", got, wantInvocation)
 	}
 
 	var resumedSessionID string

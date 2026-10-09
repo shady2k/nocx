@@ -151,17 +151,48 @@ func WithLifecyclePublisher(pub *lifecyclepub.Publisher) WSServerOption {
 	return func(s *WSServer) { s.lifecyclePub = pub }
 }
 
-// RegisterLifecycleLane records that a lane belongs to a session, so facts
-// about it route to that session's current subscriber. Called by the shell
-// spawn path when it creates a lifecycle adapter; the lane is the one the
-// adapter minted. Re-registering a lane moves it to the new session.
-func (s *WSServer) RegisterLifecycleLane(lane lifecycle.LaneID, sid session.ID) {
+// BeginLifecycleLane reserves a helper-hosted lane while its spawn is in
+// flight. The helper owns session-id minting, so the adapter can time out
+// before the open path has an id with which to register the lane.
+func (s *WSServer) BeginLifecycleLane(lane lifecycle.LaneID) {
+	if lane == "" {
+		return
+	}
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
+	if s.pendingLifecycleLanes == nil {
+		s.pendingLifecycleLanes = make(map[lifecycle.LaneID]struct{})
+	}
+	s.pendingLifecycleLanes[lane] = struct{}{}
+}
+
+// AbandonLifecycleLane closes the reservation when a helper open fails before
+// it can bind the lane to a session. A failed open must not leave a pending
+// timeout for a lane no user can reach.
+func (s *WSServer) AbandonLifecycleLane(lane lifecycle.LaneID) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	delete(s.pendingLifecycleLanes, lane)
+	delete(s.pendingLifecycleLoss, lane)
+}
+
+// RegisterLifecycleLane records that a lane belongs to a session, so facts
+// about it route to that session's current subscriber. Called by the shell
+// spawn path after the helper returns its session id. Re-registering a lane
+// moves it to the new session and applies any loss reported during the open.
+func (s *WSServer) RegisterLifecycleLane(lane lifecycle.LaneID, sid session.ID) {
+	s.lifecycleMu.Lock()
 	if s.lifecycleLanes == nil {
 		s.lifecycleLanes = make(map[lifecycle.LaneID]session.ID)
 	}
 	s.lifecycleLanes[lane] = sid
+	delete(s.pendingLifecycleLanes, lane)
+	cause := s.pendingLifecycleLoss[lane]
+	delete(s.pendingLifecycleLoss, lane)
+	s.lifecycleMu.Unlock()
+	if cause != "" {
+		s.applyOrQueueIntegrationLoss(sid, cause)
+	}
 }
 
 // unregisterLifecycleLanes drops every lane bound to a session, called from
@@ -174,6 +205,7 @@ func (s *WSServer) unregisterLifecycleLanes(sid session.ID) {
 			delete(s.lifecycleLanes, lane)
 		}
 	}
+	delete(s.pendingSessionLoss, sid)
 }
 
 // signalDeliveryFor is what the lifecycle fact publishes about this attempt's

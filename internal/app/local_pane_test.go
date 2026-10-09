@@ -41,11 +41,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── the harness ─────────────────────────────────────────────────────────────
@@ -126,6 +128,40 @@ func newLocalPaneApp(t *testing.T, opts ...Option) *App {
 		t.Fatalf("Start: %v", err)
 	}
 	return a
+}
+
+func TestAUserOpenedHelperPaneReachesPromptReady(t *testing.T) {
+	a := newLocalPaneApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), lifecycle.HelloTimeout)
+	defer cancel()
+
+	opened, err := a.Transport.OpenSession(ctx, transport.OpenSpec{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("opening a local pane through the shipped opener: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := opened.Session.Close(); closeErr != nil {
+			t.Errorf("closing the helper-hosted pane: %v", closeErr)
+		}
+	})
+	if opened.Hosted == nil || opened.Hosted.LifecycleLane == "" {
+		t.Fatal("a normal helper-hosted open returned no lifecycle lane")
+	}
+	kernel, ok := a.localHelper.kernel.(interface {
+		State(lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
+	})
+	if !ok {
+		t.Fatal("the shipped lifecycle kernel does not expose its lane state")
+	}
+
+	waittest.WaitForTimeout(t, "the user-opened shell to reach prompt_ready", lifecycle.HelloTimeout, func() bool {
+		snapshot, stateErr := kernel.State(opened.Hosted.LifecycleLane)
+		return stateErr == nil && snapshot.Lifecycle == lifecycle.LifecyclePromptReady
+	})
+	state, err := kernel.State(opened.Hosted.LifecycleLane)
+	if err != nil || state.Lifecycle != lifecycle.LifecyclePromptReady {
+		t.Fatalf("helper lifecycle state = %+v, err = %v; want prompt_ready", state, err)
+	}
 }
 
 func TestLocalPaneRecordsOwnedLaunchPID(t *testing.T) {

@@ -314,6 +314,46 @@ func TestIntegration_LossOnAnUnknownLaneIsDropped(t *testing.T) {
 	}
 }
 
+func TestIntegration_HelloTimeoutDuringOpenSurvivesLaneRegistration(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.unregisterLifecycleLanes(session.ID(e.sid))
+	e.ws.integrationMu.Lock()
+	delete(e.ws.integrations, session.ID(e.sid))
+	e.ws.integrationMu.Unlock()
+	e.ws.BeginLifecycleLane(e.lane)
+
+	// The adapter can report a timeout before Open has returned the helper's
+	// session id. The lane is not mapped, and the session is not yet on the
+	// integration axis; the result must be applied when the open is adopted.
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	e.ws.RegisterLifecycleLane(e.lane, session.ID(e.sid))
+	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.emitIntegration(session.ID(e.sid))
+
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
+	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Fatalf("startup failure reason = %q, want %q", got.Reason, ssh.ReasonHandshakeTimeout)
+	}
+}
+
+func TestIntegration_AbandoningAnOpenDiscardsItsPendingTimeout(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.unregisterLifecycleLanes(session.ID(e.sid))
+	e.ws.BeginLifecycleLane(e.lane)
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	e.ws.AbandonLifecycleLane(e.lane)
+
+	// This lane was never adopted by a session. Even if a later fixture uses
+	// the same identifier, the abandoned open's timeout must not leak into it.
+	e.ws.RegisterLifecycleLane(e.lane, session.ID(e.sid))
+	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.emitIntegration(session.ID(e.sid))
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationStarting)
+	if got.Reason != "" {
+		t.Fatalf("abandoned open left reason %q on a later session", got.Reason)
+	}
+}
+
 // ── the process observation (nocx-cgzc, nocx-viil.3) ──────────────────────
 
 // The bead's own sentence: a takeover is reported in well under a second,

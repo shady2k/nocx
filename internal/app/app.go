@@ -2318,6 +2318,8 @@ func New(opts ...Option) (*App, error) {
 	localOpener.lifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
+	localOpener.reserveLifecycleLane = tp.BeginLifecycleLane
+	localOpener.abandonLifecycleLane = tp.AbandonLifecycleLane
 	// The same seam for a HELPER-hosted session's channel, opened or taken
 	// back (nocx-k6p18.31). One sink and not two: the axis does not care
 	// which transport carried the lane, and the loss cause spelling has one

@@ -58,6 +58,11 @@ type hostedSpawn struct {
 	// loss carries the adapter's loss cause to the session integration axis.
 	// Nil reports nowhere and the adapter still logs it.
 	loss func(lifecycle.LaneID, lifecyclechannel.LossCause)
+	// reserveLifecycleLane and abandonLifecycleLane bracket the helper spawn
+	// interval before its session id is known, so an early timeout can be
+	// attached to the session once the open result arrives.
+	reserveLifecycleLane func(lifecycle.LaneID)
+	abandonLifecycleLane func(lifecycle.LaneID)
 	// helloTimeout bounds how long a shell may take to prove itself before
 	// the session falls back to conventional. It is passed rather than left
 	// to the adapter's default because it is a PRODUCT decision and the
@@ -158,6 +163,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 
 	var lifecycleAdapter *lifecyclechannel.Adapter
 	var lifecyclePeer net.Conn
+	var reservedLifecycleLane lifecycle.LaneID
 	// life is the launch the adapter mints, held here rather than written onto
 	// a params struct this function no longer owns: which struct carries it is
 	// the caller's business (see spawnFunc).
@@ -229,6 +235,10 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		}
 		lifecycleAdapter, lifecyclePeer = adapter, peerConn
 		launch := adapter.Launch()
+		reservedLifecycleLane = launch.Lane
+		if h.reserveLifecycleLane != nil {
+			h.reserveLifecycleLane(launch.Lane)
+		}
 		life = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
 			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery, RecoveryEpisodeID: launch.RecoveryEpisodeID,
@@ -241,6 +251,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		if lifecycleAdapter != nil {
 			_ = lifecycleAdapter.Close()
 			_ = lifecyclePeer.Close()
+		}
+		if h.abandonLifecycleLane != nil {
+			h.abandonLifecycleLane(reservedLifecycleLane)
 		}
 		if stopDownlink != nil {
 			stopDownlink()

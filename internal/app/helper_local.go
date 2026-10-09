@@ -321,8 +321,10 @@ type localHelperOpener struct {
 	// kernel and lifecycleLoss are the authenticated-channel seams, the same
 	// two the remote hosted route uses. Nil is a legitimate wiring and makes
 	// a conventional session, never a failure.
-	kernel        lifecyclechannel.Kernel
-	lifecycleLoss func(lifecycle.LaneID, lifecyclechannel.LossCause)
+	kernel               lifecyclechannel.Kernel
+	lifecycleLoss        func(lifecycle.LaneID, lifecyclechannel.LossCause)
+	reserveLifecycleLane func(lifecycle.LaneID)
+	abandonLifecycleLane func(lifecycle.LaneID)
 	// procs and reportShellReplaced are the shell-replacement observation
 	// (nocx-cgzc) at its new address. The observation survived the move
 	// because it is made from OUTSIDE the process: the daemon forks the
@@ -697,6 +699,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	spawn := hostedSpawn{
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
+		reserveLifecycleLane: o.reserveLifecycleLane, abandonLifecycleLane: o.abandonLifecycleLane,
 		publishScreen:      o.publishScreen,
 		publishEffect:      o.publishEffect,
 		blockRows:          o.blockRows,
@@ -755,6 +758,9 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	}
 	sid := res.Session.ID()
 	if o.registry == nil {
+		if res.AbortLifecycle != nil {
+			res.AbortLifecycle()
+		}
 		_ = res.Session.Close()
 		return transport.HostedSessionOpen{}, true, errors.New("local helper opener has no session registry")
 	}
@@ -786,12 +792,18 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		// recorded as a pid of 0.
 		launch := res.Entry.Launch
 		if launch == nil {
+			if res.AbortLifecycle != nil {
+				res.AbortLifecycle()
+			}
 			_ = res.Session.Close()
 			return transport.HostedSessionOpen{}, true, fmt.Errorf(
 				"this machine's helper reported no launch record for session %s", sid)
 		}
 		shell = launch.Shell
 		if err := o.registry.RecordOwnedProcessPID(sid, launch.Pid); err != nil {
+			if res.AbortLifecycle != nil {
+				res.AbortLifecycle()
+			}
 			_ = res.Session.Close()
 			return transport.HostedSessionOpen{}, true, fmt.Errorf("recording local helper launch pid: %w", err)
 		}

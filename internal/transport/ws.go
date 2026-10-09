@@ -961,6 +961,11 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// pendingLifecycleLanes reserve lanes whose helper spawn has not yet
+	// returned a session id. A hello timeout can arrive during that interval.
+	pendingLifecycleLanes map[lifecycle.LaneID]struct{}
+	pendingLifecycleLoss  map[lifecycle.LaneID]string
+	pendingSessionLoss    map[session.ID]string
 	// The per-session end hold (ws_end_hold.go): the replay window a
 	// re-adopted session owes before its shell's exit may tear the lane
 	// down. endHoldMu guards endHolds; nothing else takes it, and it takes

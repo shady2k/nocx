@@ -17,10 +17,9 @@
  *   to the same tasks with no rule of its own.
  *   A MERGE with no id of its own is linked by the commits it brings in —
  *   those between its first parent and itself — and each of those is checked
- *   on its own anyway. A merge that brings in nothing and names nothing is
- *   unlinked, and fails like any other commit; one that brings in only commits
- *   from before the rule is reported with them. Not an exemption: GitHub writes
- *   "Merge pull request #N" and a person cannot add a line to it.
+ *   on its own anyway. A merge that brings in no linked work must name its
+ *   own task, even when the imported history predates the rule. Its new
+ *   merge commit is not historical. Set the merge message when landing it.
  *
  * WHICH COMMITS: those committed at or after `commitLinksFrom` in config.json,
  * the moment this check was switched on. Older ones were made under no rule;
@@ -69,47 +68,105 @@ export function linkedIds(message) {
   return ids
 }
 
-// What a merge with no id of its own links to: the links of the commits it
-// brings in (`base..tip`, the merge itself excluded), counting only those made
-// under the rule. null when it brings some in and every one predates it — such a merge is
-// history arriving, and it is reported with the other old commits.
+// A merge without its own link borrows links from incoming work under the rule.
+// Imported old history is exempt; its newly written merge commit is not.
 function incoming(base, tip, from, self) {
   const ids = []
-  let underRule = 0
   const list = git('rev-list', '--format=%H%x00%ct', `${base}..${tip}`)
     .split('\n')
     .filter((l) => l && !l.startsWith('commit '))
-  let brought = 0
   for (const line of list) {
     const [c, ct] = line.split('\0')
     if (c === self) continue
-    brought++
     if (Number(ct) * 1000 < from) continue
-    underRule++
     for (const id of linkedIds(git('log', '-1', '--format=%B', c)))
       if (!ids.includes(id)) ids.push(id)
   }
-  // A merge that brings in nothing has nothing to borrow a link from.
-  return underRule || !brought ? ids : null
+  return ids
 }
 
-// What a push of `ref` at `tip` introduces: the commits of `tip` that no ref
-// the remote already held reaches — its branches and tags, the pushed ref
-// itself excepted, and that ref's old tip when the push has one. Never a merge
-// base with main: a branch cut from another branch, or a tag on a commit some
-// branch holds, would re-check commits checked when they arrived, and a new
-// ref on a commit the remote holds would look like new work.
-function introducedBy(tip, ref, before) {
-  const branch = ref.match(/^refs\/heads\/(.+)$/)
-  const pushed = new Set([ref, ...(branch ? [`refs/remotes/origin/${branch[1]}`] : [])])
-  const held = git('for-each-ref', '--format=%(refname)', 'refs/remotes', 'refs/tags')
+// Reconstruct what a push introduces. CI sees the target ref AFTER publication,
+// so exclude that ref and add its advertised old tip explicitly. Every other
+// advertised remote ref counts; local tags and other remotes never count.
+function introducedBy(tip, ref, before, remote) {
+  const advertised = execFileSync('git', ['ls-remote', '--refs', remote], {
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+  const held = advertised
     .split('\n')
-    .filter((r) => r && !pushed.has(r))
-  const input = [tip, ...(before ? [before] : []).concat(held).map((r) => `^${r}`)].join('\n')
+    .filter(Boolean)
+    .flatMap((line) => {
+      const fields = line.split('\t')
+      if (
+        fields.length !== 2 ||
+        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(fields[0]) ||
+        !fields[1].startsWith('refs/')
+      )
+        throw new Error(`git ls-remote returned an unreadable ref for ${remote}`)
+      return fields[1] === ref ? [] : [fields[0]]
+    })
+  if (before) held.push(before)
+  const checked = held.length
+    ? execFileSync('git', ['cat-file', '--batch-check'], {
+        input: `${held.join('\n')}\n`,
+        encoding: 'utf8',
+        maxBuffer: 1 << 28,
+      })
+    : ''
+  const missing = checked
+    .split('\n')
+    .filter((line) => line.endsWith(' missing'))
+    .map((line) => line.split(' ')[0])
+  if (missing.length) {
+    // Fetch exact advertised objects, never move a branch, tag or FETCH_HEAD.
+    execFileSync(
+      'git',
+      [
+        'fetch',
+        '--no-tags',
+        '--no-write-fetch-head',
+        '--no-recurse-submodules',
+        '--no-auto-maintenance',
+        remote,
+        ...missing,
+      ],
+      {
+        encoding: 'utf8',
+        maxBuffer: 1 << 28,
+      },
+    )
+  }
+  if (
+    before &&
+    spawnSync('git', ['rev-parse', '-q', '--verify', `${before}^{commit}`]).status !== 0
+  )
+    throw new Error(`the old tip ${before} is not a commit the remote can provide`)
+  const input = [tip, ...held.map((sha) => `^${sha}`)].join('\n')
   return execFileSync('git', ['rev-list', '--reverse', '--format=%H %P%x00%ct', '--stdin'], {
     input: `${input}\n`,
     encoding: 'utf8',
     maxBuffer: 1 << 28,
+  })
+}
+
+export function parsePrePush(input) {
+  if (typeof input !== 'string' || !input.trim()) throw new Error('pre-push input is empty')
+  const lines = input.trimEnd().split('\n')
+  return lines.map((line) => {
+    const fields = line.trim().split(/\s+/)
+    const object = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
+    if (
+      fields.length !== 4 ||
+      !fields[0] ||
+      !object.test(fields[1]) ||
+      !object.test(fields[3]) ||
+      spawnSync('git', ['check-ref-format', fields[2]]).status !== 0 ||
+      (fields[0] === '(delete)' && !/^0+$/.test(fields[1]))
+    )
+      throw new Error(`malformed pre-push ref line: ${line}`)
+    // Git also supplies HEAD, a raw object id, and (delete), not only refs/heads.
+    return { localRef: fields[0], localSha: fields[1], remoteRef: fields[2], remoteSha: fields[3] }
   })
 }
 
@@ -141,11 +198,58 @@ function tasks(exportAt) {
 function main() {
   const argv = process.argv.slice(2)
   const opt = {}
+  if (argv[0] === '--list-introduced') {
+    const args = argv.slice(1)
+    const listOpt = {}
+    for (let i = 0; i < args.length; i++) {
+      const key = args[i]
+      if (!['--introduced', '--by', '--remote', '--before'].includes(key) || !args[i + 1]) {
+        console.error(`commit-links.mjs: unknown or incomplete argument ${key}`)
+        return 2
+      }
+      listOpt[key.slice(2)] = args[++i]
+    }
+    if (!listOpt.introduced || !listOpt.by) return 2
+    try {
+      const listed = introducedBy(
+        listOpt.introduced,
+        listOpt.by,
+        listOpt.before,
+        listOpt.remote || 'origin',
+      )
+      for (const line of listed.split('\n').filter((l) => l && !l.startsWith('commit '))) {
+        const [shas] = line.split('\0')
+        console.log(shas.trim())
+      }
+      return 0
+    } catch (e) {
+      console.error(`commit-links.mjs: cannot enumerate introduced commits: ${e.message}`)
+      return 2
+    }
+  }
+  if (argv.length === 1 && argv[0] === '--parse-pre-push') {
+    try {
+      for (const ref of parsePrePush(readFileSync(0, 'utf8')))
+        console.log([ref.localRef, ref.localSha, ref.remoteRef, ref.remoteSha].join('\t'))
+      return 0
+    } catch (e) {
+      console.error(`commit-links.mjs: ${e.message}`)
+      return 2
+    }
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--json') opt.json = true
     else if (
-      ['--message', '--range', '--introduced', '--by', '--before', '--export-at'].includes(a) &&
+      [
+        '--message',
+        '--range',
+        '--introduced',
+        '--by',
+        '--before',
+        '--export-at',
+        '--remote',
+      ].includes(a) &&
       argv[i + 1]
     )
       opt[a.slice(2)] = argv[++i]
@@ -160,12 +264,17 @@ function main() {
     )
     return 2
   }
-  if (!!opt.introduced !== !!opt.by || (opt.before && !opt.introduced)) {
+  if (
+    !!opt.introduced !== !!opt.by ||
+    (opt.before && !opt.introduced) ||
+    (opt.remote && !opt.introduced)
+  ) {
     console.error(
-      'commit-links.mjs: --introduced <tip> takes --by <ref> and at most --before <sha>',
+      'commit-links.mjs: --introduced <tip> takes --by <ref>, optional --before <sha> and --remote <name>',
     )
     return 2
   }
+  if (opt.introduced && !opt.remote) opt.remote = 'origin'
 
   let config
   try {
@@ -188,16 +297,12 @@ function main() {
     const message = readFileSync(opt.message, 'utf8')
     const mergeHead = git('rev-parse', '--git-path', 'MERGE_HEAD').trim()
     let taskIds = linkedIds(message)
-    let old = false
     if (!taskIds.length && existsSync(mergeHead)) {
       // The merge is not a commit yet, so what it brings in is HEAD..MERGE_HEAD.
       const head = readFileSync(mergeHead, 'utf8').split('\n')[0].trim()
-      const ids = incoming('HEAD', head, from, null)
-      if (ids === null) old = true
-      else taskIds = ids
+      taskIds = incoming('HEAD', head, from, null)
     }
-    if (old) before.push('pending merge')
-    else commits.push({ id: 'pending message', taskIds })
+    commits.push({ id: 'pending message', taskIds })
   } else {
     let listed
     if (opt.range) {
@@ -207,14 +312,23 @@ function main() {
       }
       listed = git('rev-list', '--reverse', '--format=%H %P%x00%ct', opt.range)
     } else {
-      // A tip or a --before git cannot read is a broken input, not an empty push.
-      for (const rev of [opt.introduced, opt.before].filter(Boolean)) {
+      // The pushed tip must be local; an advertised old tip may need fetching.
+      if (opt.before && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(opt.before)) {
+        console.error('commit-links.mjs: --before requires the full advertised old object ID')
+        return 2
+      }
+      for (const rev of [opt.introduced]) {
         if (spawnSync('git', ['rev-parse', '-q', '--verify', `${rev}^{commit}`]).status !== 0) {
           console.error(`commit-links.mjs: ${rev} is not a commit git can read`)
           return 2
         }
       }
-      listed = introducedBy(opt.introduced, opt.by, opt.before)
+      try {
+        listed = introducedBy(opt.introduced, opt.by, opt.before, opt.remote)
+      } catch (e) {
+        console.error(`commit-links.mjs: cannot enumerate refs held by ${opt.remote}: ${e.message}`)
+        return 2
+      }
     }
     const list = listed.split('\n').filter((l) => l && !l.startsWith('commit '))
     if (!list.length && opt.introduced) {
@@ -236,12 +350,7 @@ function main() {
       }
       let taskIds = linkedIds(git('log', '-1', '--format=%B', sha))
       if (!taskIds.length && parents.length > 1) {
-        const ids = incoming(parents[0], sha, from, sha)
-        if (ids === null) {
-          before.push(sha)
-          continue
-        }
-        taskIds = ids
+        taskIds = incoming(parents[0], sha, from, sha)
       }
       commits.push({ id: sha, taskIds })
     }

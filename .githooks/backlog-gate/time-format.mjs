@@ -33,6 +33,14 @@
  *             how long the work occupied, parallel sessions counted once.
  *   verdict   the owner's judgement of a run.
  *   recovery  how well a session picked up work another left.
+ *   void      retires another record on the same item, named by its comment.
+ *             A tracker may only append, so a record that is damaged, wrong
+ *             or not to count is never removed: it is voided, and every
+ *             reader acts as if it were not there. A correction is a void
+ *             and then the right record. A void is not voided in turn: one
+ *             that is damaged or names nothing retires nothing, and is only
+ *             said. Voiding by mistake is undone by posting the record again,
+ *             which is a new comment.
  */
 
 export const MARK = 'shady2k-time';
@@ -88,6 +96,10 @@ export const SCHEMA = {
   recovery: {
     need: { at: TIME, grade: oneOf(GRADES) },
     may: { from: TEXT, to: TEXT, note: TEXT },
+  },
+  void: {
+    need: { comment: TEXT, at: TIME, note: TEXT },
+    may: {},
   },
 };
 
@@ -289,11 +301,14 @@ export function spansOf(backlog) {
   const spans = new Map();
   const damaged = [];
   const get = (id) => {
-    if (!spans.has(id)) spans.set(id, { id, claims: [], receipts: [], events: [], conflict: [] });
+    if (!spans.has(id)) spans.set(id, { id, claims: [], receipts: [], events: [], conflict: [], conflicting: [] });
     return spans.get(id);
   };
   const other = { summaries: [], verdicts: [], recoveries: [] };
-  for (const r of recordsOf(backlog)) {
+  const records = recordsOf(backlog);
+  const { voided, idle } = voidsOf(records);
+  for (const r of records) {
+    if (r.kind === 'void' || voided.has(r.comment)) continue;
     if (r.problems.length) { damaged.push(r); continue; }
     if (r.kind === 'claim') get(r.fields.span).claims.push(r);
     else if (r.kind === 'receipt') get(r.fields.span).receipts.push(r);
@@ -313,11 +328,16 @@ export function spansOf(backlog) {
       if (distinct.size > 1) s.conflict.push(key === 'claims' ? 'two different claims' : 'two different receipts');
       const items = new Set(s[key].map((r) => r.item));
       if (items.size > 1) s.conflict.push(`${key} on ${[...items].join(' and ')}`);
+      if (distinct.size > 1 || items.size > 1) s.conflicting.push(...s[key].map((r) => r.comment));
       s[key] = [...distinct.values()];
     }
     s.events = once(s.events);
     const where = new Set([...s.claims, ...s.receipts, ...s.events].map((r) => r.item));
-    if (where.size > 1) s.conflict.push(`records of one span on ${[...where].join(' and ')}`);
+    if (where.size > 1) {
+      s.conflict.push(`records of one span on ${[...where].join(' and ')}`);
+      s.conflicting.push(...[...s.claims, ...s.receipts, ...s.events].map((r) => r.comment));
+    }
+    s.conflicting = [...new Set(s.conflicting)];
     s.claim = s.claims[0] || null;
     s.receipt = s.receipts[0] || null;
     s.item = s.claim?.item ?? s.receipt?.item ?? s.events[0]?.item ?? null;
@@ -335,7 +355,29 @@ export function spansOf(backlog) {
     list.sort((a, b) => a.start - b.start);
     list.forEach((s, i) => { s.next = list[i + 1] || null; });
   }
-  return { spans: [...spans.values()], damaged, ...other };
+  return { spans: [...spans.values()], damaged, voided, idle, ...other };
+}
+
+/**
+ * Which records the voids retire, by comment id, and the voids that retire
+ * nothing, each with why.
+ */
+function voidsOf(records) {
+  const byComment = new Map(records.filter((r) => r.comment !== null).map((r) => [r.comment, r]));
+  const voided = new Set();
+  const idle = [];
+  for (const r of records) {
+    if (r.kind !== 'void') continue;
+    const target = byComment.get(r.fields.comment);
+    const why = r.problems.length ? r.problems.slice(0, 2).join('; ')
+      : !target ? `no record of the set is the comment ${r.fields.comment}`
+      : target.item !== r.item ? `the comment ${r.fields.comment} is on ${target.item}, not here`
+      : target.kind === 'void' ? 'a void is not voided: post the record again instead'
+      : null;
+    if (why) idle.push({ ...r, why });
+    else voided.add(target.comment);
+  }
+  return { voided, idle };
 }
 
 export const newSpanId = () => Array.from({ length: 8 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join('');

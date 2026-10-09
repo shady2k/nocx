@@ -43,6 +43,7 @@ export default tseslint.config(
       '.githooks/backlog-gate/check-commits.mjs',
       '.githooks/backlog-gate/check-docs.mjs',
       '.githooks/backlog-gate/check-present.mjs',
+      '.githooks/backlog-gate/check-product.mjs',
       '.githooks/backlog-gate/document-format.mjs',
       '.githooks/backlog-gate/time-format.mjs',
     ],

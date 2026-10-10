@@ -82,7 +82,7 @@ func TestTheHelperGivesBackTheLifecycleLaunchItSpawnedTheShellWith(t *testing.T)
 	const recovery = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	launch := &proto.LifecycleLaunch{
 		Lane: "lane-1", Domain: "dom-1", Epoch: 7,
-		Capability: capability, Recovery: recovery,
+		Capability: capability, Recovery: recovery, RecoveryEpisodeID: "rec-0123456789abcdef0123456789abcdef",
 	}
 	svc := New(Options{
 		Generation: "gen",
@@ -254,3 +254,18 @@ type nopCarrier struct{}
 func (nopCarrier) Read([]byte) (int, error)    { return 0, io.EOF }
 func (nopCarrier) Write(b []byte) (int, error) { return len(b), nil }
 func (nopCarrier) Close() error                { return nil }
+
+func TestSpawnRejectsIncompleteRecoveryExpectation(t *testing.T) {
+	const capability = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const recovery = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	svc := New(Options{
+		Generation: "gen",
+		Spawner:    &captureSpawner{proc: &fakeProcess{shell: "/bin/bash"}},
+		Limits:     Limits{DefaultWindowBytes: 128 * 1024, MinWindowBytes: 128 * 1024, MaxWindowBytes: 128 * 1024, BudgetBytes: 512 * 1024, MinRowBufferBytes: 64 * 1024, DefaultRowBufferBytes: 64 * 1024},
+		NewID:      func() ([16]byte, error) { return [16]byte{1}, nil },
+	})
+	_, err := svc.Call(context.Background(), proto.OpSpawn, mustJSON(t, proto.SpawnParams{Cols: 80, Rows: 24, Lifecycle: &proto.LifecycleLaunch{Lane: "lane-1", Domain: "dom-1", Epoch: 7, Capability: capability, Recovery: recovery}}))
+	if err == nil || !strings.Contains(err.Error(), "incomplete recovery expectation") {
+		t.Fatalf("incomplete private recovery expectation error = %v", err)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -68,6 +69,76 @@ func (i helperOpenTestInventory) Host() string        { return i.host }
 func (i helperOpenTestInventory) Account() string     { return i.account }
 func (i helperOpenTestInventory) LiveSessions(context.Context) (map[string]struct{}, error) {
 	return map[string]struct{}{i.sessionID: {}}, nil
+}
+
+type earlyLossHelperOpenTestOpener struct {
+	reg  *session.Reg
+	ws   *WSServer
+	id   session.ID
+	lane lifecycle.LaneID
+}
+
+func (o *earlyLossHelperOpenTestOpener) OpenHosted(ctx context.Context, cfg session.Config, _ string) (HostedSessionOpen, bool, error) {
+	// The helper's adapter can report timeout before the spawn result has
+	// supplied a session id. This is the same reservation/loss seam used by
+	// hostedSpawn; handleOpen must carry it through its actual open path.
+	o.ws.BeginLifecycleLane(o.lane)
+	o.ws.NoteIntegrationLoss(o.lane, LossCauseHelloTimeout)
+	sess, err := o.reg.Adopt(ctx, cfg, o.id, &helperOpenTestChannel{done: make(chan struct{})})
+	if err != nil {
+		return HostedSessionOpen{}, true, err
+	}
+	return HostedSessionOpen{
+		Session: sess, LifecycleLane: o.lane,
+		IntegrationShell: "/bin/bash", IntegrationStatus: IntegrationStarting,
+		StartLifecycle: func() {},
+	}, true, nil
+}
+
+func TestEarlyHelperHelloTimeoutIsNotifiedByTheShippedOpenPath(t *testing.T) {
+	reg := newRegWithStub(log.NewSlogAdapter(nil))
+	helperID := session.ID("0123456789abcdef0123456789abcdee")
+	opener := &earlyLossHelperOpenTestOpener{
+		reg: reg, id: helperID, lane: lifecycle.LaneID("lane-early-hello-timeout"),
+	}
+	ws := NewWSServer(log.NewSlogAdapter(nil), reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "remote.example", &ssh.ConnectConfig{User: "alice"}, nil
+			},
+		}),
+		WithHelperSessionOpener(opener),
+	)
+	opener.ws = ws
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "p", "cols": 80, "rows": 24, "paneId": helperOpenPane,
+	})
+	var opened struct {
+		SessionID         string `json:"sessionId"`
+		AwaitsIntegration bool   `json:"awaitsIntegration"`
+	}
+	decodeJSONRPCResult(t, resp, &opened)
+	if opened.SessionID != string(helperID) {
+		t.Fatalf("open sessionId = %q, want helper-minted %q", opened.SessionID, helperID)
+	}
+	if opened.AwaitsIntegration {
+		t.Fatal("open ack says integration is still pending after the early hello timeout")
+	}
+	awaitSubscriber(t, ws, helperID)
+	_, got := readIntegrationWhere(t, conn, string(helperID), "the early hello-timeout failure notice", func(f integrationChangedParams) bool {
+		return f.Status == IntegrationConventional
+	})
+	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Fatalf("integration reason = %q, want %q", got.Reason, ssh.ReasonHandshakeTimeout)
+	}
 }
 
 func TestShippedOpenUsesHelperMintedSessionID(t *testing.T) {

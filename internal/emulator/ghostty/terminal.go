@@ -170,8 +170,10 @@ type terminal struct {
 	// never holds a byte back from the library, and nothing is fed twice; see
 	// fence.go for the shape it matches and why the match lives in this
 	// adapter at all.
-	fenceIdx   int
-	fenceNonce [64]byte
+	fenceIdx      int
+	fenceNonce    [64]byte
+	recoveryIdx   int
+	recoveryNonce [64]byte
 	// outputMarkIdx is the output-start mark scanner's own position
 	// (output_mark.go), tracked alongside fenceIdx in the same pass over
 	// the bytes (scanMarkers): the two sequences share a five-byte prefix
@@ -642,6 +644,8 @@ func (t *terminal) ingestLocked(b []byte) {
 		switch kind {
 		case markKindFence:
 			t.sightFence()
+		case markKindRecovery:
+			t.sightRecovery()
 		case markKindOutputMark:
 			t.sightOutputMark()
 		case markKindPromptBoundary:
@@ -659,12 +663,20 @@ func (t *terminal) ingestLocked(b []byte) {
 	t.streamOffset += uint64(len(b))
 }
 
+// sightRecovery appends a private recovery-marker sighting. The raw nonce is
+// consumed only by sessionruntime's private matcher and is never a renderer effect.
+func (t *terminal) sightRecovery() {
+	nonce := append([]byte(nil), t.recoveryNonce[:]...)
+	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectRecoverySighting, Body: nonce})
+}
+
 // markKind is which sighted marker scanMarkers found, if any.
 type markKind int
 
 const (
 	markKindNone markKind = iota
 	markKindFence
+	markKindRecovery
 	markKindOutputMark
 	markKindPromptBoundary
 	markKindClearBoundary
@@ -691,6 +703,20 @@ const (
 // each one's position exactly as far as this scan actually returns.
 func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 	for i, c := range b {
+		if recoveryMatches(t.recoveryIdx, c) {
+			if t.recoveryIdx == recoveryLen-1 {
+				t.recoveryIdx = 0
+				return i + 1, markKindRecovery
+			}
+			if t.recoveryIdx >= len(recoveryFixed) {
+				t.recoveryNonce[t.recoveryIdx-len(recoveryFixed)] = c
+			}
+			t.recoveryIdx++
+		} else if c == recoveryFixed[0] {
+			t.recoveryIdx = 1
+		} else {
+			t.recoveryIdx = 0
+		}
 		if fenceMatches(t.fenceIdx, c) {
 			if t.fenceIdx == fenceLen-1 {
 				t.fenceIdx = 0

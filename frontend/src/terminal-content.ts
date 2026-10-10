@@ -1220,7 +1220,7 @@ export class TerminalContent extends BasePaneContent {
    *  dead until the acknowledgement lands — the span in which this tab is
    *  neither an authenticated terminal nor advertised as a usable
    *  conventional one. */
-  private _recovery: { fence: string; generation: string } | null = null
+  private _recovery: { episodeId: string; sighted: boolean } | null = null
   /** True while the acknowledgement is in flight: the one-shot fence can
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
@@ -1228,8 +1228,7 @@ export class TerminalContent extends BasePaneContent {
   private _recoveryAckClaim: {
     bindGeneration: number
     sessionId: string
-    fence: string
-    generation: string
+    episodeId: string
   } | null = null
   /** Monotonic identity for the pane's current session bind. Async
    *  acknowledgements from an old shell may settle after reconnect, but they
@@ -3464,14 +3463,6 @@ export class TerminalContent extends BasePaneContent {
         this._syncPaneContext()
       })
 
-      // Match the shell's one-shot recovery fence in the render stream — an
-      // explicit rendezvous, never a grid inspection or a pattern-matched
-      // prompt (decision 1 carve-out). Only after BOTH the fence matched
-      // and the conventional presentation is applied (the lost fact already
-      // revoked authority and routed input raw) does the tab acknowledge.
-      renderer.onRecoveryFence((hex) => {
-        if (this._recovery && hex === this._recovery.fence) void this._ackRecovery()
-      })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         if (this.lifecycle.state.kind === 'running') {
           this._screenHandbackAwaitingBoundary = true
@@ -4528,12 +4519,11 @@ export class TerminalContent extends BasePaneContent {
       // editor holds no authority and offers none). A native fact ends
       // the episode.
       if (fact.lifecycle === 'lost' && fact.recovery) {
-        const nextRecovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
-        if (
-          this._recovery !== null &&
-          (this._recovery.fence !== nextRecovery.fence ||
-            this._recovery.generation !== nextRecovery.generation)
-        ) {
+        const nextRecovery = {
+          episodeId: fact.recovery.episodeId,
+          sighted: fact.recovery.state === 'sighted',
+        }
+        if (this._recovery !== null && this._recovery.episodeId !== nextRecovery.episodeId) {
           this._recoveryAcking = false
           this._recoveryAckClaim = null
         }
@@ -4560,6 +4550,10 @@ export class TerminalContent extends BasePaneContent {
       // yet ready — is now closed on the renderer's own side instead.
       const before = this.lifecycle.state
       this.lifecycle.applyFact(fact)
+      // A sighted lifecycle state is the reconnect-safe proof that the
+      // backend runtime matched this exact episode's private nonce. Apply
+      // conventional presentation synchronously before acknowledging.
+      if (fact.lifecycle === 'lost' && fact.recovery?.state === 'sighted') void this._ackRecovery()
       // Said out loud, because the kernel refuses a fact in silence and the
       // only other trace is an editor that never appears: a pane whose
       // prompt_ready was dropped and one whose prompt_ready never arrived
@@ -6520,7 +6514,14 @@ export class TerminalContent extends BasePaneContent {
    *  success; a refusal keeps the episode pending but releases this
    *  acknowledgement claim so a later fence replay may retry. */
   private async _ackRecovery(): Promise<void> {
-    if (!this._recovery || this._recoveryAcking || !this.session || this._sessionExited) return
+    if (
+      !this._recovery ||
+      !this._recovery.sighted ||
+      this._recoveryAcking ||
+      !this.session ||
+      this._sessionExited
+    )
+      return
     const rec = this._recovery
     const bindGeneration = this._bindGeneration
     const sessionId = this.session.sessionId
@@ -6528,22 +6529,19 @@ export class TerminalContent extends BasePaneContent {
     this._recoveryAckClaim = {
       bindGeneration,
       sessionId,
-      fence: rec.fence,
-      generation: rec.generation,
+      episodeId: rec.episodeId,
     }
     try {
-      await new LifecycleClient(this.client.dispatcher).recoverAck(sessionId, rec.generation)
+      await new LifecycleClient(this.client.dispatcher).recoverAck(sessionId, rec.episodeId)
       const claim = this._recoveryAckClaim
       if (
         claim === null ||
         claim.bindGeneration !== bindGeneration ||
         claim.sessionId !== sessionId ||
-        claim.fence !== rec.fence ||
-        claim.generation !== rec.generation ||
+        claim.episodeId !== rec.episodeId ||
         this._bindGeneration !== bindGeneration ||
         this.session?.sessionId !== sessionId ||
-        this._recovery?.fence !== rec.fence ||
-        this._recovery?.generation !== rec.generation
+        this._recovery?.episodeId !== rec.episodeId
       ) {
         return
       }
@@ -6556,12 +6554,10 @@ export class TerminalContent extends BasePaneContent {
         claim === null ||
         claim.bindGeneration !== bindGeneration ||
         claim.sessionId !== sessionId ||
-        claim.fence !== rec.fence ||
-        claim.generation !== rec.generation ||
+        claim.episodeId !== rec.episodeId ||
         this._bindGeneration !== bindGeneration ||
         this.session?.sessionId !== sessionId ||
-        this._recovery?.fence !== rec.fence ||
-        this._recovery?.generation !== rec.generation
+        this._recovery?.episodeId !== rec.episodeId
       ) {
         return
       }
@@ -6572,7 +6568,7 @@ export class TerminalContent extends BasePaneContent {
       // case that matters, so releasing is the safe direction.
       log.warn('nocx: recovery acknowledgement refused', {
         reason: e instanceof Error ? e.message : String(e),
-        generation: rec.generation,
+        episodeId: rec.episodeId,
       })
       this._recoveryAckClaim = null
       this._recoveryAcking = false

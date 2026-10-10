@@ -584,6 +584,18 @@ func (k *CompletionObservingAdoptingKernel) AdoptDomain(lane lifecycle.LaneID, d
 	return k.adopting.AdoptDomain(lane, domain, epoch, capability, recovery, t)
 }
 
+func (k *CompletionObservingAdoptingKernel) AdoptDomainWithEpisode(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, episodeID string, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
+	if adopting, ok := k.adopting.(interface {
+		AdoptDomainWithEpisode(lifecycle.LaneID, lifecycle.DomainID, uint64, lifecycle.Capability, lifecycle.FenceNonce, string, lifecycle.TransportID) (lifecycle.DomainHandle, error)
+	}); ok {
+		return adopting.AdoptDomainWithEpisode(lane, domain, epoch, capability, recovery, episodeID, t)
+	}
+	if episodeID != "" {
+		return lifecycle.DomainHandle{}, lifecycle.ErrInvalidArgument
+	}
+	return k.adopting.AdoptDomain(lane, domain, epoch, capability, recovery, t)
+}
+
 // NewCompletionObservingKernel wraps k. The wrapper satisfies the same
 // lifecyclechannel.Kernel seam, so the adapter cannot tell it apart.
 func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d CompletionObserver) *CompletionObservingKernel {

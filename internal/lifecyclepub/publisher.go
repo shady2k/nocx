@@ -64,13 +64,7 @@ type Fact struct {
 	// and epoch remain the only authority the renderer is given, and the
 	// capability and raw frames still never cross (decision 7).
 	Destination *Destination `json:"destination,omitempty"`
-	// Recovery is present exactly when this lost fact opens a restoration
-	// episode (ADR-0024 decision 8): the one-shot fence the shell will
-	// write to the pty at its next prompt boundary, and the generation the
-	// renderer echoes back in the recovery ack. Both are the same minted
-	// nonce — one value, two uses. Absent on every other lifecycle, and
-	// stripped by the transport when the session is dead (no restoration
-	// claim over a dead connection).
+	// Recovery publishes only the non-secret episode id and durable sighting state.
 	Recovery *Recovery `json:"recovery,omitempty"`
 }
 
@@ -90,8 +84,8 @@ type Destination struct {
 // one could do is force a safe transition to native mode — an availability
 // loss the ADR already accepts.
 type Recovery struct {
-	Fence      string `json:"fence"`
-	Generation string `json:"generation"`
+	EpisodeID string `json:"episodeId"`
+	State     string `json:"state"`
 }
 
 // Attempt is the projection of one ExecutionAttempt. Completion fields
@@ -168,9 +162,12 @@ func (p *Publisher) derive(lane lifecycle.LaneID) (Fact, bool) {
 	// acknowledge it. The transport decides whether the episode is real —
 	// it strips the promise over a dead session (decision 8: no restoration
 	// claim when the shell is unreachable).
-	if f.Lifecycle == LifecycleLost && st.RecoveryNonce != (lifecycle.FenceNonce{}) {
-		nonce := hex.EncodeToString(st.RecoveryNonce[:])
-		f.Recovery = &Recovery{Fence: nonce, Generation: nonce}
+	if f.Lifecycle == LifecycleLost && st.RecoveryEpisodeID != "" {
+		state := "pending"
+		if st.RecoverySighted {
+			state = "sighted"
+		}
+		f.Recovery = &Recovery{EpisodeID: st.RecoveryEpisodeID, State: state}
 	}
 	return f, true
 }
@@ -252,6 +249,7 @@ type Kernel interface {
 	Deliver(out lifecycle.Outbound) error
 	TransportLost(t lifecycle.TransportID) error
 	RecoverLane(lane lifecycle.LaneID) error
+	SightRecovery(lane lifecycle.LaneID, episodeID string) error
 	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host, submitID string) (lifecycle.ExecutionAttempt, error)
 	AbandonAttempt(id lifecycle.AttemptID) error
 	State(lane lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
@@ -570,6 +568,26 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 // hold a live authenticated domain and go on rendering as a plain terminal.
 func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
 	h, err := p.kernel.AdoptDomain(lane, domain, epoch, capability, recovery, t)
+	if err != nil {
+		return h, err
+	}
+	p.mu.Lock()
+	p.known[lane] = struct{}{}
+	p.mu.Unlock()
+	p.publishLane(context.Background(), lane)
+	return h, nil
+}
+
+// AdoptDomainWithEpisode preserves the recovery correlation id already held
+// by the helper runtime when a coordinator adopts its live session.
+func (p *Publisher) AdoptDomainWithEpisode(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, capability lifecycle.Capability, recovery lifecycle.FenceNonce, episodeID string, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
+	k, ok := p.kernel.(interface {
+		AdoptDomainWithEpisode(lifecycle.LaneID, lifecycle.DomainID, uint64, lifecycle.Capability, lifecycle.FenceNonce, string, lifecycle.TransportID) (lifecycle.DomainHandle, error)
+	})
+	if !ok {
+		return lifecycle.DomainHandle{}, lifecycle.ErrInvalidArgument
+	}
+	h, err := k.AdoptDomainWithEpisode(lane, domain, epoch, capability, recovery, episodeID, t)
 	if err != nil {
 		return h, err
 	}
@@ -1121,6 +1139,16 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
 	err := p.kernel.RecoverLane(lane)
 	if err != nil {
+		return err
+	}
+	p.publishLane(context.Background(), lane)
+	return nil
+}
+
+// SightRecovery records one exact episode's marker sighting and republishes
+// the durable state. It does not move lifecycle authority.
+func (p *Publisher) SightRecovery(lane lifecycle.LaneID, episodeID string) error {
+	if err := p.kernel.SightRecovery(lane, episodeID); err != nil {
 		return err
 	}
 	p.publishLane(context.Background(), lane)

@@ -970,7 +970,10 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 				Session: s.raw, Subscriber: sub.raw,
 				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
 				StreamOffset: effect.StreamOffset,
-				Kind:         kind, Title: effect.Title, Body: effect.Body,
+				Kind:         kind,
+				Title:        effect.Title,
+				Body:         effect.Body,
+				EpisodeID:    effect.EpisodeID,
 			}
 			if err := sub.sink.SendEffectFrame(frame); err != nil {
 				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)
@@ -997,6 +1000,9 @@ func protoEffectKind(kind sessionruntime.EffectKind) (proto.EffectKind, bool) {
 		return proto.EffectCwdReport, true
 	case sessionruntime.EffectPromptBoundary:
 		return proto.EffectPromptBoundary, true
+	case sessionruntime.EffectRecovery:
+		return proto.EffectRecovery, true
+
 	default:
 		return 0, false
 	}

@@ -346,3 +346,33 @@ func TestAnUnnamedCompletionOnlyReplayReconstructsTheAdoptedAttempt(t *testing.T
 		t.Fatalf("reconstructed attempt = %+v, want completed with the replay's exit and fence", got)
 	}
 }
+
+func TestAdoptDomainWithEpisodePreservesRecoveryIdentity(t *testing.T) {
+	const lane LaneID = "lane-preserve"
+	k1 := New(Options{})
+	if err := k1.BindTransport("T1", &fakePort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := k1.RequestDomain(lane, nil, "T1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2 := New(Options{})
+	if bindErr := k2.BindTransport("T2", &fakePort{}); bindErr != nil {
+		t.Fatal(bindErr)
+	}
+	got, err := k2.AdoptDomainWithEpisode(lane, h.Domain, h.Epoch, h.Capability, h.Recovery, h.RecoveryEpisodeID, "T2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RecoveryEpisodeID != h.RecoveryEpisodeID {
+		t.Fatalf("adopted episode = %q, want %q", got.RecoveryEpisodeID, h.RecoveryEpisodeID)
+	}
+	if unbindErr := k2.UnbindTransport("T2"); unbindErr != nil {
+		t.Fatal(unbindErr)
+	}
+	st, err := k2.State(lane)
+	if err != nil || st.RecoveryEpisodeID != h.RecoveryEpisodeID {
+		t.Fatalf("adopted lane = %+v, err=%v", st, err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"strconv"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -14,6 +15,7 @@ type sessionEffectParams struct {
 	Kind       string `json:"kind"`
 	Title      string `json:"title"`
 	Body       string `json:"body"`
+	EpisodeID  string `json:"episodeId,omitempty"`
 }
 
 func effectKindName(kind proto.EffectKind) (string, bool) {
@@ -30,9 +32,42 @@ func effectKindName(kind proto.EffectKind) (string, bool) {
 		return "cwd", true
 	case proto.EffectPromptBoundary:
 		return "promptBoundary", true
+	case proto.EffectRecovery:
+		return "recovery", true
 	default:
 		return "", false
 	}
+}
+
+// recordRecoverySighting records only the exact current lost episode. The
+// runtime has already matched the private nonce; the lifecycle kernel stores
+// only the public episode ID and sighted state. This runs before notification
+// delivery so reconnect resync survives a dropped effect.
+func (s *WSServer) recordRecoverySighting(sid session.ID, episodeID string) bool {
+	if s.lifecyclePub == nil {
+		return false
+	}
+	s.lifecycleMu.Lock()
+	var lanes []lifecycle.LaneID
+	for lane, owner := range s.lifecycleLanes {
+		if owner == sid {
+			lanes = append(lanes, lane)
+		}
+	}
+	s.lifecycleMu.Unlock()
+	for _, lane := range lanes {
+		if err := s.lifecyclePub.SightRecovery(lane, episodeID); err == nil {
+			s.recoveryMu.Lock()
+			if rec := s.recoveries[sid]; rec != nil && rec.episodeID == episodeID {
+				rec.mu.Lock()
+				rec.sighted = true
+				rec.mu.Unlock()
+			}
+			s.recoveryMu.Unlock()
+			return true
+		}
+	}
+	return false
 }
 
 // PublishSessionEffect sends one runtime effect to the current session owner.
@@ -40,6 +75,13 @@ func effectKindName(kind proto.EffectKind) (string, bool) {
 func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame) bool {
 	kind, ok := effectKindName(effect.Kind)
 	if !ok || effect.EffectID == 0 || effect.Generation == 0 {
+		return false
+	}
+	if effect.Kind == proto.EffectRecovery {
+		if len(effect.Title) != 0 || len(effect.Body) != 0 || effect.EpisodeID == "" || !s.recordRecoverySighting(sid, effect.EpisodeID) {
+			return false
+		}
+	} else if effect.EpisodeID != "" {
 		return false
 	}
 	rx := s.getRx(sid)
@@ -50,7 +92,11 @@ func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame
 	if wconn == nil {
 		return false
 	}
-	params := sessionEffectParams{SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10), EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind, Title: string(effect.Title), Body: string(effect.Body)}
+	params := sessionEffectParams{
+		SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10),
+		EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind,
+		Title: string(effect.Title), Body: string(effect.Body), EpisodeID: effect.EpisodeID,
+	}
 	waitForBytes := effect.Kind == proto.EffectPromptBoundary && effect.StreamOffset > 0
 	offset := effect.StreamOffset
 	accepted, coalesced := rx.queueEffect(wconn, offset, waitForBytes, "session.effect", mustMarshal(params))

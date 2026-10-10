@@ -346,6 +346,38 @@ func TestBudgetReleasedOnClose(t *testing.T) {
 	}
 }
 
+func TestCriticalBudgetReleasedOnClose(t *testing.T) {
+	budget := NewBudget(10)
+	f := newFakeSocket(true)
+	c := New(f, Config{QueueDepth: 1, Budget: budget})
+	t.Cleanup(c.Close)
+	// The first frame is held in the pump; critical frames remain queued and
+	// retain their shared-budget reservations until Close drains them.
+	if err := c.TryEnqueue(TextMessage, []byte("held")); err != nil {
+		t.Fatalf("enqueue held frame: %v", err)
+	}
+	select {
+	case <-f.writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pump never started")
+	}
+	if err := c.TryEnqueueCriticalFrame(TextMessage, []byte("123456")); err != nil {
+		t.Fatalf("enqueue first critical frame: %v", err)
+	}
+	if err := c.TryEnqueueCriticalFrame(TextMessage, []byte("7890")); err != nil {
+		t.Fatalf("enqueue second critical frame: %v", err)
+	}
+	c.Close()
+
+	// Closing the old connection drains the entire critical queue, so a new
+	// connection sharing the budget can reserve its full capacity.
+	other := New(newFakeSocket(false), Config{Budget: budget})
+	defer other.Close()
+	if err := other.TryEnqueue(TextMessage, []byte("0123456789")); err != nil {
+		t.Fatalf("critical queue budget not released on close: %v", err)
+	}
+}
+
 func TestCloseStopsPumpAndRejectsFrames(t *testing.T) {
 	f := newFakeSocket(false)
 	c := New(f, Config{})
@@ -426,6 +458,33 @@ func TestResponseSurvivesSaturatedDataQueue(t *testing.T) {
 	}
 }
 
+// Broker requests share the reserved critical capacity with responses and
+// carriers. They must not be silently dropped when that bounded lane is full.
+func TestCriticalRequestOverflowClosesConnection(t *testing.T) {
+	f := newFakeSocket(true)
+	c := New(f, Config{})
+	defer c.Close()
+	if err := c.TryEnqueue(TextMessage, []byte("first")); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	select {
+	case <-f.writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pump never started its first write")
+	}
+	for i := range DefaultCriticalQueueDepth {
+		if err := c.TryEnqueueCriticalFrame(TextMessage, []byte("critical")); err != nil {
+			t.Fatalf("fill critical queue %d: %v", i, err)
+		}
+	}
+	if err := c.TryEnqueueCriticalFrame(TextMessage, []byte("overflow")); !errors.Is(err, ErrStalled) {
+		t.Fatalf("critical overflow err = %v, want ErrStalled", err)
+	}
+	if !f.closed.Load() {
+		t.Fatal("connection not closed on critical overflow")
+	}
+}
+
 // If even the reserved response capacity is exhausted, the connection must
 // close — never drop the response: the renderer's disconnect/reconnect
 // surface then rejects the caller's pending promise. Silence is the one
@@ -443,7 +502,7 @@ func TestResponseOverflowClosesConnection(t *testing.T) {
 		t.Fatal("pump never started its first write")
 	}
 	// The pump is stuck, so the response queue cannot drain. Fill it.
-	for i := range DefaultResponseQueueDepth {
+	for i := range DefaultCriticalQueueDepth {
 		if err := c.TryEnqueueResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
 			t.Fatalf("fill response %d: %v", i, err)
 		}

@@ -104,16 +104,10 @@ export interface LifecycleChanged {
     port?: number
   }
   /**
-   * The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable — channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode — an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.
+   * A reconnect-safe recovery episode. episodeId is a separately minted non-secret locator. state is pending until the backend matches the private shell nonce, then sighted durably; this object is never a nonce-bearing fence.
    */
   recovery?: {
-    /**
-     * The 64-hex one-shot recovery fence the renderer matches in the render stream.
-     */
-    fence: string
-    /**
-     * The recovery generation the renderer returns in lifecycle.recoverAck — the same minted nonce.
-     */
-    generation: string
+    episodeId: string
+    state: 'pending' | 'sighted'
   }
 }

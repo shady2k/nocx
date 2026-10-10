@@ -998,7 +998,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		launch := lifecycleAdapter.Launch()
 		lifecycleLaunch = &proto.LifecycleLaunch{
 			Lane: string(launch.Lane), Domain: string(launch.Domain),
-			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery,
+			Epoch: launch.Epoch, Capability: launch.Capability, Recovery: launch.Recovery, RecoveryEpisodeID: launch.RecoveryEpisodeID,
 		}
 		if r.environmentEntries != nil {
 			r.environmentEntries.register(sessionCtx, launch.Lane, downlink)

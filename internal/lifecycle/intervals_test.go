@@ -126,6 +126,10 @@ func TestRecoveryFenceAuthority_ClosesOnItsOwnEvents(t *testing.T) {
 			t.Fatal("the expected fence was dropped when the fence was sent; nothing would validate the answer")
 		}
 		// The acknowledgement lands. Authority closes.
+		st, _ = k.State(lane)
+		if err := k.SightRecovery(lane, st.RecoveryEpisodeID); err != nil {
+			t.Fatalf("SightRecovery: %v", err)
+		}
 		if err := k.RecoverLane(lane); err != nil {
 			t.Fatalf("RecoverLane: %v", err)
 		}
@@ -184,10 +188,14 @@ func TestRecoveryFenceAuthority_ClosingItDoesNotDestroyEveryCopy(t *testing.T) {
 	if err := k.TransportLost(tid); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
+	st, _ := k.State(lane)
+	if err := k.SightRecovery(lane, st.RecoveryEpisodeID); err != nil {
+		t.Fatalf("SightRecovery: %v", err)
+	}
 	if err := k.RecoverLane(lane); err != nil {
 		t.Fatalf("RecoverLane: %v", err)
 	}
-	st, _ := k.State(lane)
+	st, _ = k.State(lane)
 	if st.RecoveryNonce != (FenceNonce{}) {
 		t.Fatal("authority did not close, so this test asserts nothing")
 	}

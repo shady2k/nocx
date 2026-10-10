@@ -241,28 +241,11 @@ export function parseOsc133(payload: string): CommandMarker | null {
   return marker
 }
 
-// OSC 1337 is a private namespace other software also uses (iTerm2 file
-// transfer), so only an exact nocx prefix with exactly 64 lowercase hex
-// chars parses; everything else is nothing. The command fence the shell
-// also writes here (NOCX_FENCE) is not the renderer's business any more:
-// the backend meets it with the completion and says block.closed
-// (nocx-2v80t.3.27, ADR-0066).
-const FENCE_HEX_RE = /^[0-9a-f]{64}$/
-
-/** Parses an OSC 1337 payload into the recovery fence nonce (ADR-0024
- *  decision 8). Returns null unless the payload is exactly
- *  `NOCX_RECOVERY;<64 lowercase hex>`. The shell writes this to the pty at
- *  the first prompt boundary after the lifecycle channel died, restoring a
- *  visible native prompt; the consumer matches it against the pre-provisioned
- *  nonce the backend published in the lost fact. Parse-and-report only: the
- *  renderer never inspects the grid and never pattern-matches a prompt — it
- *  matches this explicit fence, exactly as the completion fence. */
-export function parseRecoveryFence(payload: string): { hex: string } | null {
-  if (!payload.startsWith('NOCX_RECOVERY;')) return null
-  const hex = payload.slice('NOCX_RECOVERY;'.length)
-  if (!FENCE_HEX_RE.test(hex)) return null
-  return { hex }
-}
+// Recovery markers are matched in the helper, where the private nonce stays
+// backend-side. The renderer receives only a nonce-free episode effect and
+// lifecycle state. The command fence the shell writes here (NOCX_FENCE) is
+// not the renderer's business: the backend meets it with the completion and
+// says block.closed (nocx-2v80t.3.27, ADR-0066).
 
 /**
  * The accelerated renderer addon, named by the two events this module needs
@@ -326,8 +309,6 @@ export class XtermRenderer implements TerminalRenderer {
   private clipboardSubs: ClipboardWriteCallback[] = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
-  private recoverySubs: Array<(hex: string) => void> = []
-  private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
   /** The parser handlers that refuse the program's own queries, so the one
    *  terminal that answers it is the session runtime. Registered at mount and
@@ -566,10 +547,6 @@ export class XtermRenderer implements TerminalRenderer {
       return false
     })
 
-    // OSC 1337 — the recovery fence (ADR-0024 decision 8). Registered here
-    // (like OSC 636) and lazily in onRecoveryFence, so a subscriber that
-    // mounts first or last always lands on a live handler.
-    this._ensureFenceOsc()
     this.applyTheme(getCurrentTheme())
 
     // A resolution query reports only transitions across ITS OWN value. Re-arm
@@ -644,19 +621,6 @@ export class XtermRenderer implements TerminalRenderer {
     media.addEventListener('change', changed)
   }
 
-  /** Register the OSC 1337 recovery-fence handler exactly once, when the
-   *  terminal exists. One handler owns OSC 1337 (AD-8): a second handler
-   *  for the same ident would fight for the sequence. */
-  private _ensureFenceOsc(): void {
-    if (this.fenceOscDisposable || !this.term) return
-    this.fenceOscDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
-      const recovery = parseRecoveryFence(data)
-      if (recovery) {
-        for (const sub of this.recoverySubs) sub(recovery.hex)
-      }
-      return false
-    })
-  }
   /**
    * Fit the terminal grid to an explicit viewport from the presentation layer
    * (B.5). Computes cols/rows from real cell metrics and the given CSS-pixel
@@ -1024,13 +988,9 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
-   *  NOCX_RECOVERY OSC after restoring a visible native prompt (ADR-0024
+   *  recovery state after restoring a visible native prompt (ADR-0024
    *  decision 8). The consumer matches the hex against the nonce the lost
    *  fact published and acknowledges the restoration. */
-  onRecoveryFence(cb: (hex: string) => void): void {
-    this.recoverySubs.push(cb)
-    this._ensureFenceOsc()
-  }
 
   onBell(cb: BellCallback): void {
     this.bellSubs.push(cb)
@@ -1061,6 +1021,10 @@ export class XtermRenderer implements TerminalRenderer {
         }
         break
       }
+      case 'recovery':
+        // Recovery completion is decided by lifecycle.changed's durable
+        // episode state, never by rendering or by a terminal-byte parser.
+        break
     }
   }
 

@@ -162,7 +162,6 @@ func TestForeignAndMalformedFencesYieldNothing(t *testing.T) {
 		name  string
 		chunk string
 	}{
-		{"recovery key", "\x1b]1337;NOCX_RECOVERY;" + fenceNonce + "\x07"},
 		{"other 1337 key", "\x1b]1337;SomethingElse;" + fenceNonce + "\x07"},
 		{"short nonce", "\x1b]1337;NOCX_FENCE;" + fenceNonce[:63] + "\x07"},
 		{"long nonce", "\x1b]1337;NOCX_FENCE;" + fenceNonce + "ff\x07"},
@@ -262,5 +261,23 @@ func TestEachFenceKeepsItsOwnNonceWhenAnotherFollows(t *testing.T) {
 	ingest(t, across, fenceSeq(fenceNonceSecond))
 	if string(held.Body) != fenceNonce {
 		t.Errorf("the drained fence's nonce became %q after a later fence, want %q", held.Body, fenceNonce)
+	}
+}
+
+func TestRecoverySightingAcrossIngestChunksIsDistinctFromCompletionFence(t *testing.T) {
+	term := newTerminal(t, 20, 4)
+	marker := "\x1b]1337;NOCX_RECOVERY;" + fenceNonce + "\x07"
+	cut := len(marker) / 2
+	ingest(t, term, marker[:cut])
+	if got := term.Effects(); len(got) != 0 {
+		t.Fatalf("partial recovery marker produced effects: %s", describeEffects(got))
+	}
+	ingest(t, term, marker[cut:])
+	got := term.Effects()
+	if len(got) != 1 || got[0].Kind != emulator.EffectRecoverySighting || string(got[0].Body) != fenceNonce {
+		t.Fatalf("recovery effects = %+v, want one private recovery sighting", got)
+	}
+	if got[0].Kind == emulator.EffectFence {
+		t.Fatal("recovery marker was conflated with completion fence")
 	}
 }

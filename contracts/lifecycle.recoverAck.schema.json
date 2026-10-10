@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/lifecycle.recoverAck.schema.json",
   "title": "LifecycleRecoverAck",
-  "description": "The lifecycle.recoverAck JSON-RPC result: the restoration acknowledgement of ADR-0024 decision 8. The renderer calls it only after BOTH halves of the composite ack hold — it matched the shell's one-shot recovery fence in the render stream, and it applied the conventional presentation. The params are deliberately narrow: session identity and the recovery generation, and nothing else (no domain, no epoch, no attempt, no status, no prompt-readiness) — the backend acks only what it promised, and the transition permits only Lost → Native. The result is a single ok: true.",
+  "description": "The lifecycle.recoverAck result for the composite decision-8 acknowledgement. The request names only session identity and the non-secret recovery episodeId, after both marker sighting and conventional presentation. The backend accepts only the exact live episode after its durable state is sighted, and permits only Lost \u2192 Native. The result is a single ok: true.",
   "type": "object",
   "additionalProperties": false,
   "required": ["ok"],
   "properties": {
     "ok": {
-      "description": "true when the acknowledgement was accepted (the lane fell Lost → Native) or was idempotently already accepted. Rejections arrive as JSON-RPC errors: an unknown or closed session, a generation with no pending episode, or a lane that is no longer Lost.",
+      "description": "true when the acknowledgement was accepted (the lane fell Lost \u2192 Native) or was idempotently already accepted. Rejections arrive as JSON-RPC errors: an unknown or closed session, a generation with no pending episode, or a lane that is no longer Lost.",
       "type": "boolean",
       "enum": [true]
     }

@@ -9,16 +9,17 @@
  * backend's preserved log landing under its own test) is in harness.ts's
  * VaultBackend.preserveLog.
  *
- * Five sources, each bounded so a chatty test cannot bury the one line that
- * mattered:
+ * Sources are bounded so a chatty test cannot bury the one line that mattered:
  *
  *   - The shared stand's backend log, filtered to this test's own trace_id
  *     (e2e/trace-context.ts) — the stand outlives every test, so nothing but
  *     the filter tells one test's lines from the next test's.
  *   - Any backend a spec started for ITSELF (VaultBackend), registered here
- *     by registerBackendForTest and printed in full: unlike the shared
- *     stand, one of these belongs to exactly one test for its whole life, so
- *     there is nothing to filter.
+ *     by registerBackendForTest: unlike the shared stand, one of these belongs
+ *     to exactly one test for its whole life, so there is nothing to filter.
+ *   - A Go runtime dump when a timeout probe captures it with SIGQUIT before
+ *     teardown. The report prints a bounded excerpt; the full dump remains in
+ *     that backend's preserved log artifact.
  *   - The browser's console messages and uncaught page errors — of the
  *     fixture's page, and of every page a spec built itself and put on the
  *     report with watchPageForTest.
@@ -66,6 +67,7 @@ export interface RegisterableBackend {
   logFile: string
   logTail(maxBytes?: number): string
   goroutineDump?: string
+  preservedLogFile?: string
 }
 
 const backendsByTestId = new Map<string, RegisterableBackend[]>()
@@ -118,6 +120,7 @@ export function registerBackendForTest(testId: string, backend: RegisterableBack
 const MAX_CONSOLE_LINES = 50
 const MAX_FRAMES = 50
 const MAX_BACKEND_LINES = 200
+export const MAX_GOROUTINE_DUMP_LINES = 200
 
 /** A fixed-capacity FIFO that counts what it dropped, so a report can say
  *  "N earlier dropped" instead of silently truncating with no sign anything
@@ -327,7 +330,13 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
       const lines = backend.logTail(40_000).split('\n')
       sections.push(linesSection(`this test's own backend (${backend.logFile})`, lines))
       if (backend.goroutineDump) {
-        sections.push(`-- backend goroutine dump (${backend.logFile}) --\n${backend.goroutineDump}`)
+        sections.push(
+          formatGoroutineDumpSection(
+            backend.logFile,
+            backend.goroutineDump,
+            backend.preservedLogFile,
+          ),
+        )
       }
     }
 
@@ -397,6 +406,21 @@ function linesSection(label: string, lines: string[], extraDropped = 0): string 
   const header = `-- ${label} (${shown.length} shown${totalDropped > 0 ? `, ${totalDropped} dropped` : ''}) --`
   if (shown.length === 0) return `${header}\n(none)`
   return `${header}\n${shown.join('\n')}`
+}
+
+/** Keep the failure report readable while preserveLog retains the complete dump in the test artifact. */
+export function formatGoroutineDumpSection(
+  logFile: string,
+  dump: string,
+  preservedLogFile?: string,
+): string {
+  const lines = dump.split('\n')
+  const shown = lines.slice(0, MAX_GOROUTINE_DUMP_LINES)
+  const dropped = lines.length - shown.length
+  const section = linesSection(`backend goroutine dump (${logFile})`, shown, dropped)
+  if (dropped === 0 || !dump.startsWith('SIGQUIT: quit')) return section
+  const artifact = preservedLogFile ? `: ${preservedLogFile}` : ''
+  return `${section}\n(full dump is retained in the preserved backend log artifact${artifact})`
 }
 
 /** How long the block-DOM probe may take before the report moves on without

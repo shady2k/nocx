@@ -1167,6 +1167,8 @@ export class VaultBackend {
   private preservedLogPath = ''
   /** SIGQUIT's Go runtime dump, captured before the failing test tears down this process. */
   goroutineDump = ''
+  /** Character offset where the Go runtime dump begins in the full backend log. */
+  goroutineDumpOffset: number | undefined
   /** How many times start() has run — names each incarnation's preserved log. */
   private starts = 0
 
@@ -1175,6 +1177,11 @@ export class VaultBackend {
   get logFile(): string {
     if (!this.logPath) throw new Error('backend has not been started yet')
     return this.logPath
+  }
+
+  /** Where preserveLog copied the complete backend log for this test. */
+  get preservedLogFile(): string {
+    return this.preservedLogPath
   }
 
   /** The canonical home this backend was given, once it has been started. */
@@ -1222,6 +1229,8 @@ export class VaultBackend {
   async start(): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
     this.starts++
+    this.goroutineDump = ''
+    this.goroutineDumpOffset = undefined
     this.logPath = resolve(this.disposable.root, 'nocx-server.log')
     const logFd = openSync(this.logPath, 'w')
 
@@ -1325,7 +1334,11 @@ export class VaultBackend {
       // only ever say the log was unreadable.
       const path =
         existsSync(this.logPath) || !this.preservedLogPath ? this.logPath : this.preservedLogPath
-      const all = readFileSync(path, 'utf8')
+      const fileText = readFileSync(path, 'utf8')
+      const all =
+        this.goroutineDumpOffset === undefined
+          ? fileText
+          : fileText.slice(0, this.goroutineDumpOffset)
       return all.length <= maxBytes ? all : `…${all.slice(-maxBytes)}`
     } catch (err) {
       return `(backend log unreadable: ${String(err)})`
@@ -1344,6 +1357,7 @@ export class VaultBackend {
       return
     }
 
+    this.goroutineDumpOffset = undefined
     let exitTimer: NodeJS.Timeout | undefined
     const exited = new Promise<boolean>((resolveExit) => {
       if (proc.exitCode !== null) {
@@ -1358,6 +1372,7 @@ export class VaultBackend {
       exitTimer = setTimeout(() => resolveExit(false), 5_000)
     })
     try {
+      const dumpSearchFrom = readFileSync(this.logPath, 'utf8').length
       if (!proc.kill('SIGQUIT')) {
         if (exitTimer) clearTimeout(exitTimer)
         this.goroutineDump = 'not captured: SIGQUIT could not be sent to the backend'
@@ -1369,11 +1384,14 @@ export class VaultBackend {
       }
       const log = readFileSync(this.logPath, 'utf8')
       const marker = 'SIGQUIT: quit'
-      const start = log.indexOf(marker)
-      this.goroutineDump =
-        start < 0
-          ? 'not captured: backend exited after SIGQUIT without a Go goroutine dump marker'
-          : log.slice(start).trimEnd()
+      const start = log.indexOf(marker, dumpSearchFrom)
+      if (start < 0) {
+        this.goroutineDump =
+          'not captured: backend exited after SIGQUIT without a Go goroutine dump marker'
+        return
+      }
+      this.goroutineDumpOffset = start
+      this.goroutineDump = log.slice(start).trimEnd()
     } catch (error) {
       if (exitTimer) clearTimeout(exitTimer)
       this.goroutineDump = `not captured: ${String(error)}`

@@ -14,7 +14,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { mountRecoveryNotice, recoveryAccount } from './recovery-notice'
+import { mountRecoveryNotice, mountLiveOutputGapNotice, recoveryAccount } from './recovery-notice'
+import type { SessionOutputGap } from './generated/session.outputGap'
 import type { SessionRecovery } from './ipc'
 
 function recovery(over: Partial<SessionRecovery> = {}): SessionRecovery {
@@ -192,5 +193,45 @@ describe('recoveryAccount (nocx-fz4qa)', () => {
     expect(
       recoveryAccount(recovery({ gaps: [{ start: 900, end: 100, reason: 'cap' }] })),
     ).toBeNull()
+  })
+})
+
+describe('a live pane says where its output stream has a hole', () => {
+  it('shows the exact missing byte count, preserves the terminal, and can be dismissed', () => {
+    pane = document.createElement('div')
+    const terminal = document.createElement('div')
+    terminal.className = 'scrollback-layout'
+    pane.appendChild(terminal)
+    document.body.appendChild(pane)
+    const onDismiss = vi.fn()
+    const gap: SessionOutputGap = {
+      sessionId: '0123456789abcdef0123456789abcdef',
+      start: 11,
+      end: 4107,
+      reason: 'hostWindow',
+    }
+    dispose = mountLiveOutputGapNotice(pane, gap, onDismiss)
+    expect(title()).toBe('4096 bytes of live output are missing')
+    expect(desc()).toContain("execution host's output window moved past this tab")
+    expect(pane.firstElementChild?.classList.contains('nocx-recovery-notice')).toBe(true)
+    expect(pane.contains(terminal)).toBe(true)
+    pane.querySelector('button')?.click()
+    expect(onDismiss).toHaveBeenCalledOnce()
+    dispose?.()
+    dispose = null
+    expect(pane.contains(terminal)).toBe(true)
+  })
+
+  it('uses generic wording for an unknown gap reason', () => {
+    pane = document.createElement('div')
+    document.body.appendChild(pane)
+    dispose = mountLiveOutputGapNotice(
+      pane,
+      { sessionId: '0123456789abcdef0123456789abcdef', start: 2, end: 9, reason: 'future-cause' },
+      vi.fn(),
+    )
+    expect(title()).toBe('7 bytes of live output are missing')
+    expect(desc()).toContain('This output gap has an unknown cause.')
+    expect(desc()).not.toContain('execution host')
   })
 })

@@ -36,6 +36,7 @@ import { IconButton } from './ui/icon-button'
 import { StatusCard } from './ui/status-card'
 import { formatBytes } from './ui/format-bytes'
 import { UNRECORDED, type SessionRecovery } from './ipc'
+import type { SessionOutputGap } from './generated/session.outputGap'
 import { CloseIcon } from './ui/icons'
 
 /** The retention bound's word, minted by the store (internal/content's
@@ -190,6 +191,43 @@ export function mountRecoveryNotice(
   target.insertBefore(host, target.firstChild)
   const dispose = render(
     () => <RecoveryNotice account={account} onDismiss={props.onDismiss} />,
+    host,
+  )
+  return () => {
+    dispose()
+    host.remove()
+  }
+}
+
+/** Mount the same per-pane warning-card surface for a gap crossed while the
+ * tab remains live. This is a transport fact, distinct from a reclaim card;
+ * offsets remain exact byte counts and the terminal surface is left in place. */
+export function mountLiveOutputGapNotice(
+  target: HTMLElement,
+  gap: SessionOutputGap,
+  onDismiss: () => void,
+): () => void {
+  const host = document.createElement('div')
+  host.className = 'nocx-recovery-notice'
+  target.insertBefore(host, target.firstChild)
+  const bytes = gap.end - gap.start
+  const description =
+    gap.reason === 'hostWindow'
+      ? "The execution host's output window moved past this tab."
+      : 'This output gap has an unknown cause.'
+  const dispose = render(
+    () => (
+      <StatusCard
+        tone="warning"
+        title={`${bytes} bytes of live output are missing`}
+        description={description}
+        action={
+          <IconButton ariaLabel="Dismiss" size="sm" onClick={() => onDismiss()}>
+            <CloseIcon />
+          </IconButton>
+        }
+      />
+    ),
     host,
   )
   return () => {

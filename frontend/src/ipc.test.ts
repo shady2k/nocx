@@ -677,6 +677,36 @@ describe('inbound data', () => {
     expect(client.connected).toBe(true)
   })
 
+  it('resets only the stream decoder and jumps the live cursor across an ordered gap', async () => {
+    const { session, ws, client } = await connectedSession()
+    const seen: string[] = []
+    const gaps: { start: number; end: number; reason: string }[] = []
+    session.onData((data) => seen.push(data))
+    session.onOutputGap((gap) => gaps.push(gap))
+
+    const euro = new TextEncoder().encode('€')
+    ws.deliverBinary(encodeFrame(SID, euro.slice(0, 1)))
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 1, end: 7, reason: 'host-window' },
+    })
+    expect(gaps).toEqual([{ sessionId: SID, start: 1, end: 7, reason: 'host-window' }])
+    const acks = ws.requests().filter((request) => request.method === 'ack')
+    expect(acks[acks.length - 1]?.params).toEqual({
+      sessionId: SID,
+      offset: 7,
+    })
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
+
+    expect(seen.join('')).toBe('later')
+    expect(seen.join('')).not.toContain('�')
+    expect(
+      (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(SID)
+        ?.offset,
+    ).toBe(12)
+  })
+
   it('reassembles a UTF-8 rune split across two frames', async () => {
     const { session, ws } = await connectedSession()
     const seen: string[] = []

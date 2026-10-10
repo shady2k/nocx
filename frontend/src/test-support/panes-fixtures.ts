@@ -443,6 +443,7 @@ export interface SessionFake {
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
   onReset: ReturnType<typeof vi.fn>
+  onOutputGap: ReturnType<typeof vi.fn>
   onInputStalled: ReturnType<typeof vi.fn>
   /** The reachability axis (nocx-iarf9): the backend's revised belief about
    *  reaching this session. */
@@ -528,6 +529,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     }),
     onExit: vi.fn(),
     onReset: vi.fn(),
+    onOutputGap: vi.fn(),
     onInputStalled: vi.fn(),
     onLiveness: vi.fn((cb: (l: SessionLiveness) => void) => {
       livenessCb = cb

@@ -13,6 +13,7 @@ import type {
   SessionOutput,
 } from './generated/session.output'
 import type { Gap as RecoveryGap, SessionRecoveryStatus } from './generated/session.recoveryStatus'
+import type { SessionOutputGap as SessionOutputGapNotification } from './generated/session.outputGap'
 
 // The one report shape — grid plus whole-text-area pixels — re-exported so
 // the surfaces that compute a report spell the same type the client sends
@@ -418,6 +419,9 @@ interface SessionState {
   // like a tab whose channel died — marked, never destroyed (nocx-ictcq).
   exitCallback: ((exit: Exit) => void) | null
   resetCallback: (() => void) | null
+  outputGapCallback: ((gap: SessionOutputGapNotification) => void) | null
+  pendingOutputGaps: SessionOutputGapNotification[]
+  lastOutputGap: SessionOutputGapNotification | null
 
   // Fires when the backend reports that this session's write queue refused
   // a frame — the channel has stopped accepting bytes and the keystrokes
@@ -574,6 +578,11 @@ export class SessionHandle {
   // renderer must clear its display before new data arrives.
   onReset(cb: () => void): void {
     this.client.onSessionReset(this.sessionId, cb)
+  }
+
+  /** Registers the visible live-stream notice for an ordered output gap. */
+  onOutputGap(cb: (gap: SessionOutputGapNotification) => void): void {
+    this.client.onSessionOutputGap(this.sessionId, cb)
   }
 
   // onInputStalled registers a callback for the backend's report that this
@@ -815,6 +824,63 @@ export class WSClient {
     // loss, deliberately: a wrongly-marked tab is recoverable, a wrongly
     // destroyed tab is lost work, so the safe direction is to never close
     // on ambiguous data.
+    this.dispatcher.subscribe('session.outputGap', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      if (
+        typeof raw.sessionId !== 'string' ||
+        typeof raw.start !== 'number' ||
+        typeof raw.end !== 'number' ||
+        typeof raw.reason !== 'string'
+      )
+        return
+      const { sessionId, start, end, reason } = {
+        sessionId: raw.sessionId,
+        start: raw.start,
+        end: raw.end,
+        reason: raw.reason,
+      }
+      const maxSafe = Number.MAX_SAFE_INTEGER
+      if (
+        !Number.isSafeInteger(start) ||
+        !Number.isSafeInteger(end) ||
+        start < 0 ||
+        end < start ||
+        end > maxSafe
+      ) {
+        log.error('nocx: refused malformed session output-gap offsets', { sessionId, start, end })
+        return
+      }
+      const state = this.sessions.get(sessionId)
+      if (!state) return
+      const gap: SessionOutputGapNotification = { sessionId, start, end, reason }
+      const previous = state.lastOutputGap
+      if (
+        previous &&
+        previous.start === start &&
+        previous.end === end &&
+        previous.reason === reason &&
+        state.offset === end
+      )
+        return
+      if (state.offset !== start) {
+        log.error('nocx: refused out-of-order session output gap', {
+          sessionId,
+          expected: state.offset,
+          start,
+          end,
+        })
+        return
+      }
+      state.decoder.reset()
+      state.offset = end
+      state.lastOutputGap = gap
+      this._flushAck(sessionId)
+      this._sendAck(sessionId, end)
+      if (state.outputGapCallback) state.outputGapCallback(gap)
+      else state.pendingOutputGaps.push(gap)
+    })
+
     this.dispatcher.subscribe('exit', (params: unknown) => {
       if (!params || typeof params !== 'object') return
       const raw = params as Record<string, unknown>
@@ -1324,6 +1390,9 @@ export class WSClient {
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
+      outputGapCallback: null,
+      pendingOutputGaps: [],
+      lastOutputGap: null,
       inputStalledCallback: null,
       livenessCallback: null,
       observationCallback: null,
@@ -1791,6 +1860,14 @@ export class WSClient {
     if (state) {
       state.resetCallback = cb
     }
+  }
+
+  onSessionOutputGap(sessionId: string, cb: (gap: SessionOutputGapNotification) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.outputGapCallback = cb
+    const pending = state.pendingOutputGaps.splice(0)
+    for (const gap of pending) cb(gap)
   }
 
   onSessionInputStalled(sessionId: string, cb: () => void): void {

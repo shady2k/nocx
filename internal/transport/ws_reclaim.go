@@ -178,6 +178,7 @@ type sessionsLiveHandlers struct {
 // the available answers — it says "that pane has no session" about a shell that
 // is running.
 func (h sessionsLiveHandlers) handleSessionsLive(ctx context.Context, req jsonrpcRequest) {
+	var boundaryErr string
 	err := h.op.Run(ctx, func(_ context.Context, svc capability.SessionService) error {
 		live := svc.List()
 		result := sessionsLiveResult{Sessions: make([]liveSessionResult, 0, len(live))}
@@ -193,6 +194,10 @@ func (h sessionsLiveHandlers) handleSessionsLive(ctx context.Context, req jsonrp
 			}
 			if rx := h.rings.getRx(sess.ID()); rx != nil {
 				entry.ReplayFrom = rx.ring.oldestLocked()
+				if msg := unsafeSessionOffset("replayFrom", entry.ReplayFrom); msg != "" {
+					boundaryErr = msg
+					return nil
+				}
 				wconn, _ := rx.getSubscriber()
 				entry.Attached = wconn != nil
 			}
@@ -203,6 +208,8 @@ func (h sessionsLiveHandlers) handleSessionsLive(ctx context.Context, req jsonrp
 	})
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
+	} else if boundaryErr != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: boundaryErr})
 	}
 }
 

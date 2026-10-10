@@ -73,7 +73,8 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { mountIntegrationWaiting } from './integration/waiting'
 import { mountToolSurfaceNotice } from './tool-surface-notice'
-import { mountRecoveryNotice } from './recovery-notice'
+import type { SessionOutputGap } from './generated/session.outputGap'
+import { mountRecoveryNotice, mountLiveOutputGapNotice } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
@@ -4679,6 +4680,7 @@ export class TerminalContent extends BasePaneContent {
     // like a session that printed less. Mounted here, with the session,
     // because that is where the fact arrives and where the pane is known.
     this._showRecoveryNotice(session, target)
+    session.onOutputGap((gap) => this._showLiveOutputGapNotice(gap, target))
     historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
@@ -6317,6 +6319,15 @@ export class TerminalContent extends BasePaneContent {
    *  Any card from a PREVIOUS session goes first. A rebind is a new session
    *  with its own past, and a card left over from the old one would be
    *  describing bytes that have nothing to do with what is on screen now. */
+  private _showLiveOutputGapNotice(gap: SessionOutputGap, target: HTMLElement): void {
+    this._dropRecoveryNotice()
+    this._recoveryNoticeDispose = mountLiveOutputGapNotice(target, gap, () => {
+      this._dropRecoveryNotice()
+      this.scheduleLiveResize()
+    })
+    this.scheduleLiveResize()
+  }
+
   private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
     this._dropRecoveryNotice()
     this._recoveryNoticeDispose = session.recovered

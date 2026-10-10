@@ -17,7 +17,13 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -257,4 +263,142 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// The live socket has to name the hole between the byte runs it separates.
+// This observes the shipped ring pump and the real WebSocket, not a
+// notification fabricated by the test. The sequence is the contract: bytes,
+// the typed gap fact, then bytes beyond the gap.
+func TestLiveHostWindowHoleIsOrderedOnTheRealSocket(t *testing.T) {
+	const lost = uint64(4096)
+	before, after := []byte("before-hole"), []byte("after-hole")
+	term := newFeedablePTY()
+	ws, stop := newRecordingWSServer(t, term)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openSessionOnConn(t, ws, conn, 1)
+
+	awaitPush(t, "the bytes before the hole", pushOutput(term, before))
+	firstType, firstRaw, readErr := conn.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("read pre-gap frame: %v", readErr)
+	}
+	if firstType != websocket.BinaryMessage {
+		t.Fatalf("pre-gap frame type = %d, want binary", firstType)
+	}
+	first, err := DecodeFrame(firstRaw)
+	if err != nil || !bytesEqual(first.Payload, before) {
+		t.Fatalf("pre-gap payload = %q, err %v; want %q", first.Payload, err, before)
+	}
+
+	rx := ws.getRx(session.ID(sid))
+	rx.ring.hole(lost, content.GapReasonHostWindow)
+	awaitPush(t, "the bytes after the hole", pushOutput(term, after))
+
+	read := func(what string) (int, []byte) {
+		t.Helper()
+		if deadlineErr := conn.SetReadDeadline(time.Now().Add(wantWithin)); deadlineErr != nil {
+			t.Fatalf("set read deadline: %v", deadlineErr)
+		}
+		kind, raw, messageErr := conn.ReadMessage()
+		if messageErr != nil {
+			t.Fatalf("read %s: %v", what, messageErr)
+		}
+		return kind, raw
+	}
+	gapType, gapRaw := read("output-gap notification")
+	if gapType != websocket.TextMessage {
+		t.Fatalf("gap frame type = %d, want text notification; later bytes must not pass the hole", gapType)
+	}
+	var gap struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if decodeErr := json.Unmarshal(gapRaw, &gap); decodeErr != nil {
+		t.Fatalf("decode output-gap notification: %v (%s)", decodeErr, gapRaw)
+	}
+	if gap.JSONRPC != "2.0" || gap.Method != "session.outputGap" {
+		t.Fatalf("gap envelope = %+v; want session.outputGap", gap)
+	}
+	var params sessionOutputGapNotification
+	if decodeErr := json.Unmarshal(gap.Params, &params); decodeErr != nil {
+		t.Fatalf("decode gap params: %v", decodeErr)
+	}
+	if params.SessionID != sid || params.Start != uint64(len(before)) || params.End != uint64(len(before))+lost || params.Reason != content.GapReasonHostWindow {
+		t.Fatalf("gap = %+v, want session %s range [%d,%d) reason %s", params, sid, len(before), uint64(len(before))+lost, content.GapReasonHostWindow)
+	}
+	validateJSON(t, loadSchema(t, "session.outputGap.schema.json"), gap.Params, "session.outputGap params off the real socket")
+
+	lastType, lastRaw := read("post-gap output")
+	if lastType != websocket.BinaryMessage {
+		t.Fatalf("post-gap frame type = %d, want binary", lastType)
+	}
+	last, err := DecodeFrame(lastRaw)
+	if err != nil || !bytesEqual(last.Payload, after) {
+		t.Fatalf("post-gap payload = %q, err %v; want %q", last.Payload, err, after)
+	}
+}
+
+func TestSessionByteOffsetJSONBoundaryIsInclusiveAndRejectsUnsafeValues(t *testing.T) {
+	const ceiling = uint64(9007199254740991)
+	for _, tc := range []struct {
+		name      string
+		value     uint64
+		wantError bool
+	}{
+		{name: "ceiling accepted", value: ceiling},
+		{name: "above ceiling rejected", value: ceiling + 1, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := json.RawMessage(fmt.Sprintf(`{"sessionId":"0123456789abcdef0123456789abcdef","offset":%d}`, tc.value))
+			got := validateAckRaw(raw)
+			if tc.wantError && got == "" {
+				t.Fatalf("ack accepted unsafe offset %d", tc.value)
+			}
+			if !tc.wantError && got != "" {
+				t.Fatalf("ack rejected maximum safe offset: %s", got)
+			}
+			attach := json.RawMessage(fmt.Sprintf(`{"sessionId":"0123456789abcdef0123456789abcdef","offset":%d}`, tc.value))
+			got = validateAttachRaw(attach)
+			if tc.wantError && got == "" {
+				t.Fatalf("attach accepted unsafe offset %d", tc.value)
+			}
+			if !tc.wantError && got != "" {
+				t.Fatalf("attach rejected maximum safe offset: %s", got)
+			}
+			output := json.RawMessage(fmt.Sprintf(`{"sessionId":"0123456789abcdef0123456789abcdef","from":%d}`, tc.value))
+			got = validateSessionOutputRaw(output)
+			if tc.wantError && got == "" {
+				t.Fatalf("session.output accepted unsafe offset %d", tc.value)
+			}
+			if !tc.wantError && got != "" {
+				t.Fatalf("session.output rejected maximum safe offset: %s", got)
+			}
+		})
+	}
+}
+
+func TestSessionOutputGapDTOConformsAtSafeBoundary(t *testing.T) {
+	const ceiling = uint64(9007199254740991)
+	raw, err := json.Marshal(sessionOutputGapNotification{
+		SessionID: "0123456789abcdef0123456789abcdef", Start: ceiling - 1, End: ceiling, Reason: content.GapReasonHostWindow,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, loadSchema(t, "session.outputGap.schema.json"), raw, "session.outputGap DTO at safe boundary")
+}
+
+func TestSessionOutputOffsetEmissionRejectsUnsafeValueExplicitly(t *testing.T) {
+	const ceiling = uint64(9007199254740991)
+	if err := validateSessionOutputOffsets(ceiling, content.SessionOutputRecording{Produced: ceiling}); err != nil {
+		t.Fatalf("maximum safe offset rejected: %v", err)
+	}
+	for _, value := range []uint64{ceiling + 1} {
+		err := validateSessionOutputOffsets(value, content.SessionOutputRecording{Produced: value})
+		if err == nil || !strings.Contains(err.Error(), "JSON-safe") {
+			t.Fatalf("unsafe output boundary error = %v, want explicit JSON-safe boundary error", err)
+		}
+	}
 }

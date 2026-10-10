@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.outputGap.schema.json",
+  "title": "SessionOutputGap",
+  "description": "Params for the session.outputGap notification. It states a missing half-open range in the session output byte coordinate; it does not carry terminal bytes or reset terminal state.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "start", "end", "reason"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{32}$",
+      "description": "The server-minted session id whose live output stream crossed a gap."
+    },
+    "start": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "The first missing byte offset."
+    },
+    "end": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "The first byte offset after the missing range."
+    },
+    "reason": {
+      "type": "string",
+      "description": "The reason recorded for the gap. Unknown values must be reported without guessing."
+    }
+  }
+}

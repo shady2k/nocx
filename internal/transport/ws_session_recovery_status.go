@@ -74,6 +74,26 @@ func (h sessionRecoveryStatusHandlers) handle(ctx context.Context, req jsonrpcRe
 	if status.Gaps == nil {
 		status.Gaps = []content.Gap{}
 	}
+	if msg := unsafeSessionOffset("produced", status.Produced); msg != "" {
+		log.From(ctx).Error("session recovery status exceeds the JSON-safe byte-offset boundary", "session_id", string(sid), "error", msg)
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+		return
+	}
+	for i, gap := range status.Gaps {
+		if gap.Start < 0 || gap.End < 0 {
+			msg := fmt.Sprintf("gaps[%d] has a negative byte offset", i)
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return
+		}
+		if msg := unsafeSessionOffset(fmt.Sprintf("gaps[%d].start", i), uint64(gap.Start)); msg != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return
+		}
+		if msg := unsafeSessionOffset(fmt.Sprintf("gaps[%d].end", i), uint64(gap.End)); msg != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return
+		}
+	}
 	_ = h.r.TryResult(req.ID, mustMarshal(sessionRecoveryStatusResult{
 		SessionID: string(sid), Produced: status.Produced, Gaps: status.Gaps,
 	}))

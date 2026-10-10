@@ -14,7 +14,8 @@
     "produced": {
       "type": "integer",
       "minimum": 0,
-      "description": "End offset recorded for this session; combined with replayFrom to determine whether reclaim left an unrecorded interval."
+      "description": "End offset recorded for this session; combined with replayFrom to determine whether reclaim left an unrecorded interval.",
+      "maximum": 9007199254740991
     },
     "gaps": {
       "type": "array",

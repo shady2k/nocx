@@ -915,6 +915,10 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// itself is the recording's to state (session.output's gaps), not
 		// this answer's.
 		_, from, needsReset, _ := rx.ring.snapshot(params.Offset)
+		if msg := unsafeSessionOffset("attach.from", from); msg != "" {
+			_ = r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return nil
+		}
 
 		state.add(sess)
 		prev, prevState := rx.setSubscriber(wconn, state)
@@ -1372,6 +1376,9 @@ func validateAttachRaw(raw json.RawMessage) string {
 	if p.SessionEpoch != nil && *p.SessionEpoch == 0 {
 		return "sessionEpoch starts at 1"
 	}
+	if msg := unsafeSessionOffset("offset", p.Offset); msg != "" {
+		return msg
+	}
 	return ""
 }
 
@@ -1389,6 +1396,9 @@ func validateAckRaw(raw json.RawMessage) string {
 	}
 	if msg := validateSessionIDShape(p.SessionID); msg != "" {
 		return "sessionId " + msg
+	}
+	if msg := unsafeSessionOffset("offset", p.Offset); msg != "" {
+		return msg
 	}
 	return ""
 }

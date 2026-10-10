@@ -531,3 +531,59 @@ func TestResponseBudgetExhaustionClosesConnection(t *testing.T) {
 		t.Fatal("connection not closed when the budget cannot hold a response")
 	}
 }
+
+func TestEnqueueOrderedWaitsForSharedBudgetRelease(t *testing.T) {
+	budget := NewBudget(5)
+	firstSocket := newFakeSocket(true)
+	first := New(firstSocket, Config{QueueDepth: 1, Budget: budget})
+	defer first.Close()
+	if err := first.TryEnqueue(TextMessage, []byte("12345")); err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	<-firstSocket.writeStarted
+
+	secondSocket := newFakeSocket(false)
+	second := New(secondSocket, Config{QueueDepth: 1, Budget: budget})
+	defer second.Close()
+	done := make(chan error, 1)
+	go func() { done <- second.EnqueueOrdered(context.Background(), TextMessage, []byte("gap")) }()
+	select {
+	case err := <-done:
+		t.Fatalf("ordered enqueue returned before shared budget room: %v", err)
+	default:
+	}
+
+	close(firstSocket.release)
+	if err := <-done; err != nil {
+		t.Fatalf("ordered enqueue after budget release: %v", err)
+	}
+	writes := waitWrites(t, secondSocket, 1)
+	if string(writes[0].Data) != "gap" {
+		t.Fatalf("writes = %q, want gap", writes[0].Data)
+	}
+}
+
+func TestEnqueueOrderedWaitsWithoutDroppingOrJumpingQueue(t *testing.T) {
+	c, f := fillQueue(t, 1)
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.EnqueueOrdered(ctx, TextMessage, []byte("gap")) }()
+	select {
+	case err := <-done:
+		t.Fatalf("ordered enqueue returned before queue capacity: %v", err)
+	default:
+	}
+	if c.Stalled() || c.StallCount() != 0 {
+		t.Fatalf("ordered enqueue used lossy overflow path: stalled=%v count=%d", c.Stalled(), c.StallCount())
+	}
+	close(f.release)
+	if err := <-done; err != nil {
+		t.Fatalf("ordered enqueue: %v", err)
+	}
+	writes := waitWrites(t, f, 3)
+	if string(writes[0].Data) != "first" || string(writes[1].Data) != "fill" || string(writes[2].Data) != "gap" {
+		t.Fatalf("writes = %q, %q, %q; want existing frames then gap", writes[0].Data, writes[1].Data, writes[2].Data)
+	}
+}

@@ -141,13 +141,23 @@ func (w WebSocket) Close() error { return w.Conn.Close() }
 // an in-flight pump write are not counted — the bound is on queued frames,
 // which is the memory this budget exists to cap.
 type Budget struct {
-	queued atomic.Int64
-	max    int64
+	queued  atomic.Int64
+	max     int64
+	mu      sync.Mutex
+	changed chan struct{}
 }
 
 // NewBudget returns a Budget that allows at most maxBytes of queued outbound
 // frames across all its connections.
-func NewBudget(maxBytes int64) *Budget { return &Budget{max: maxBytes} }
+func NewBudget(maxBytes int64) *Budget {
+	return &Budget{max: maxBytes, changed: make(chan struct{})}
+}
+
+func (b *Budget) changedSignal() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.changed
+}
 
 func (b *Budget) tryReserve(n int64) bool {
 	for {
@@ -161,7 +171,13 @@ func (b *Budget) tryReserve(n int64) bool {
 	}
 }
 
-func (b *Budget) release(n int64) { b.queued.Add(-n) }
+func (b *Budget) release(n int64) {
+	b.queued.Add(-n)
+	b.mu.Lock()
+	close(b.changed)
+	b.changed = make(chan struct{})
+	b.mu.Unlock()
+}
 
 // ErrStalled is returned by TryEnqueue when the frame had to be dropped:
 // the connection's outbound queue is full (or the process-wide budget is
@@ -266,6 +282,52 @@ func (c *Conn) TryEnqueue(msgType int, data []byte) error {
 			c.budget.release(int64(len(data)))
 		}
 		return c.overflow(msgType, data)
+	}
+}
+
+// EnqueueOrdered admits a non-droppable frame to the same FIFO as refreshable
+// output and notifications. It waits for both the per-connection queue and
+// process-wide byte budget, preserving its position relative to binary data.
+// Unlike TryEnqueue it never emits an out-of-band stall notice: that notice
+// could overtake bytes already queued ahead of this frame. Cancellation or a
+// closed connection is terminal for the caller.
+func (c *Conn) EnqueueOrdered(ctx context.Context, msgType int, data []byte) error {
+	for {
+		select {
+		case <-c.closed:
+			return ErrConnClosed
+		default:
+		}
+		var budgetChanged <-chan struct{}
+		if c.budget != nil {
+			budgetChanged = c.budget.changedSignal()
+			if !c.budget.tryReserve(int64(len(data))) {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-c.closed:
+					return ErrConnClosed
+				case <-c.room:
+					continue
+				case <-budgetChanged:
+					continue
+				}
+			}
+		}
+		select {
+		case c.queue <- Frame{MsgType: msgType, Data: data}:
+			return nil
+		case <-ctx.Done():
+			if c.budget != nil {
+				c.budget.release(int64(len(data)))
+			}
+			return ctx.Err()
+		case <-c.closed:
+			if c.budget != nil {
+				c.budget.release(int64(len(data)))
+			}
+			return ErrConnClosed
+		}
 	}
 }
 

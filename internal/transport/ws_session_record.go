@@ -27,6 +27,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -558,7 +559,41 @@ func (h sessionOutputHandlers) handleSessionOutput(ctx context.Context, req json
 		return
 	}
 
+	if err := validateSessionOutputOffsets(params.From, rec); err != nil {
+		h.log.Error("session output contains an offset outside the JSON-safe boundary", "session_id", string(sid), "error", err)
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
 	_ = h.r.TryResult(req.ID, mustMarshal(projectSessionOutput(string(sid), size, params.From, rec)))
+}
+
+func validateSessionOutputOffsets(from uint64, rec content.SessionOutputRecording) error {
+	if msg := unsafeSessionOffset("from", from); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	if msg := unsafeSessionOffset("produced", rec.Produced); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+	for i, run := range rec.Runs {
+		if msg := unsafeSessionOffset(fmt.Sprintf("runs[%d].offset", i), run.Offset); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		if uint64(len(run.Body)) > maxSafeSessionOffset-run.Offset {
+			return fmt.Errorf("runs[%d] end exceeds the JSON-safe session byte-offset maximum %d", i, maxSafeSessionOffset)
+		}
+	}
+	for i, gap := range rec.Gaps {
+		if gap.Start < 0 || gap.End < 0 {
+			return fmt.Errorf("gaps[%d] has a negative byte offset", i)
+		}
+		if msg := unsafeSessionOffset(fmt.Sprintf("gaps[%d].start", i), uint64(gap.Start)); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		if msg := unsafeSessionOffset(fmt.Sprintf("gaps[%d].end", i), uint64(gap.End)); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+	}
+	return nil
 }
 
 // projectSessionOutput renders a recording onto the wire for one requested
@@ -694,6 +729,9 @@ func validateSessionOutputRaw(raw json.RawMessage) string {
 	}
 	if p.SessionEpoch != nil && *p.SessionEpoch == 0 {
 		return "sessionEpoch starts at 1"
+	}
+	if msg := unsafeSessionOffset("from", p.From); msg != "" {
+		return msg
 	}
 	return ""
 }

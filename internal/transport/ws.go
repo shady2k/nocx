@@ -2474,6 +2474,22 @@ type RPCError struct {
 //
 // id is the per-connection (per-tab) identity: backend-assigned, monotonic,
 // and never reused.
+const maxSafeSessionOffset uint64 = 1<<53 - 1
+
+func unsafeSessionOffset(field string, value uint64) string {
+	if value > maxSafeSessionOffset {
+		return fmt.Sprintf("%s exceeds the JSON-safe session byte-offset maximum %d", field, maxSafeSessionOffset)
+	}
+	return ""
+}
+
+type sessionOutputGapNotification struct {
+	SessionID string `json:"sessionId"`
+	Start     uint64 `json:"start"`
+	End       uint64 `json:"end"`
+	Reason    string `json:"reason"`
+}
+
 type wsConn struct {
 	out            *outbound.Conn
 	log            log.Logger
@@ -2527,6 +2543,18 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 
 func (w *wsConn) TryNotify(method string, params json.RawMessage) error {
 	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}))
+}
+
+// EnqueueOrderedNotify puts a non-droppable control notification in the same
+// FIFO as session data. The ring pump uses it at a stream discontinuity: a
+// critical-priority frame could overtake earlier binary output, while a
+// refreshable notification could be dropped and followed by later bytes.
+func (w *wsConn) EnqueueOrderedNotify(ctx context.Context, method string, params json.RawMessage) error {
+	return w.out.EnqueueOrdered(ctx, websocket.TextMessage, mustMarshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
 		"params":  params,
@@ -3655,25 +3683,27 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		if len(pending) == 0 {
 			data, from, needsReset, hole := ring.snapshot(pos)
 			if hole != nil {
-				// A stretch that never reached this machine: the execution
-				// host's window took it before the coordinator could carry
-				// it across (nocx-k6p18.25). There is nothing to send, so
-				// the pump steps over it and goes on — the bytes on the far
-				// side are real and withholding them would cost the tab its
-				// live output as well as the hole.
-				//
-				// THE STATEMENT OF THE HOLE IS NOT MADE HERE, and that is a
-				// stated limit rather than an oversight: this carrier has no
-				// mid-stream reset shape (the renderer's only reset is
-				// answered at attach), so what a live tab sees is a splice.
-				// What the person gets instead is the recording — the hole
-				// is durable, with its bounds and its reason, and
-				// session.output reports it to any client that reads it
-				// back. Giving this path its own notification is
-				// nocx-k6p18.29.
-				s.log.Warn("session output pump stepped over a hole the execution host's window left",
-					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
-				pos = from
+				end := from
+				if pos > maxSafeSessionOffset || end > maxSafeSessionOffset || end < pos {
+					s.log.Error("session output gap exceeds the JSON-safe byte-offset boundary; stopping stream",
+						"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end)
+					return
+				}
+				notice, err := json.Marshal(sessionOutputGapNotification{
+					SessionID: string(session.IDFromBytes(sidBytes)), Start: pos, End: end, Reason: hole.reason,
+				})
+				if err != nil {
+					s.log.Error("session output gap could not be marshalled", "session_id", session.IDFromBytes(sidBytes), "error", err)
+					return
+				}
+				if err := wconn.EnqueueOrderedNotify(ctx, "session.outputGap", notice); err != nil {
+					s.log.Warn("session output gap could not be delivered; stopping later output",
+						"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end, "error", err)
+					return
+				}
+				s.log.Warn("session output pump crossed an execution-host output-window gap",
+					"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end, "reason", hole.reason)
+				pos = end
 				rx.deliveryMu.Lock()
 				if rx.deliveryConn == wconn {
 					rx.deliveryOffset = pos

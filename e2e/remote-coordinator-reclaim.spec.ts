@@ -360,7 +360,7 @@ function longRemoteCommand(gates: RemoteGates, fillerBytes: number): string {
     `while [ ! -e ${finish} ]; do printf '${MARKER_PREFIX}-%03d\\n' "$i" >> ${marker}`,
     `printf '${MARKER_PREFIX}-%03d\\n' "$i"`,
     `if [ "$i" -eq 0 ]; then while [ ! -e ${detached} ]; do sleep 1; done`,
-    `head -c ${fillerBytes} /dev/zero | tr '\\0' x; printf '\\r'; : > ${fillerDone}; fi`,
+    `head -c ${fillerBytes} /dev/zero; printf '\\r'; : > ${fillerDone}; fi`,
     'i=$((i+1)); sleep 1; done',
     `exit ${EXIT_CODE}`,
   ].join('; ')
@@ -838,6 +838,199 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     await snapshotWatchedClients()
     backend.stop()
     fixture?.proc.kill('SIGKILL')
+    rmSync(remoteRoot, { recursive: true, force: true })
+    rmSync(backendRoot.root, { recursive: true, force: true })
+  }
+})
+
+test('a live helper-hosted pane names an output gap and continues after the helper window resets', async ({
+  browser,
+}) => {
+  const backendRoot: DisposableRoot = {
+    root: mkdtempSync(join(tmpdir(), 'nocx-live-gap-backend-')),
+  }
+  const remoteRoot = mkdtempSync(join(tmpdir(), 'nocx-live-gap-host-'))
+  const remoteHome = join(remoteRoot, 'home')
+  const remoteCwd = join(remoteRoot, 'repo')
+  const gates: RemoteGates = {
+    markerFile: join(remoteHome, 'markers.txt'),
+    detached: join(remoteHome, 'release-filler'),
+    fillerDone: join(remoteHome, 'filler-done'),
+    finish: join(remoteHome, 'finish'),
+  }
+  mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
+  mkdirSync(remoteCwd, { recursive: true, mode: 0o700 })
+  const backend = new VaultBackend(readStand().server, backendRoot)
+  let fixture: SshdFixture | null = null
+  let setupPage: Page | null = null
+  let livePage: Page | null = null
+  let liveContext: Awaited<ReturnType<Browser['newContext']>> | null = null
+  let releaseGate: (() => void) | null = null
+
+  try {
+    fixture = await startSshd({ home: remoteHome, cwd: remoteCwd, args: ['-repo', remoteCwd] })
+    const endpoint = await backend.start()
+    seedKnownHost(backend, fixture)
+    setupPage = await freshClient(browser, endpoint, 'live output gap helper setup')
+    await promptReady(setupPage)
+    const profileName = await installHelperThroughProduct(setupPage, endpoint, fixture, remoteCwd)
+    await setupPage.context().close()
+    setupPage = null
+
+    // Route the real WebSocket before the pane attaches. The proxy forwards
+    // client traffic and all control traffic, but holds server output frames
+    // and the gap event until the helper's reported output window has moved.
+    // This is a test-side backpressure gate, not a product pause endpoint.
+    liveContext = await browser.newContext({ baseURL: BASE_URL })
+    livePage = await liveContext.newPage()
+    watchClient(livePage, 'live output gap acceptance')
+    let holding = false
+    const held: (string | Buffer)[] = []
+    const observed: ('data' | 'gap' | 'other')[] = []
+    let outputGap: { sessionId: string; start: number; end: number; reason: string } | null = null
+    const release = () => {
+      holding = false
+      for (const message of held.splice(0)) forwardFromServer(message)
+    }
+    releaseGate = release
+    let server: ReturnType<import('@playwright/test').WebSocketRoute['connectToServer']>
+    const forwardFromServer = (message: string | Buffer) => {
+      if (Buffer.isBuffer(message) && message.length > 18 && message[0] === 1 && message[1] === 1) {
+        observed.push('data')
+      } else if (typeof message === 'string') {
+        try {
+          const envelope = JSON.parse(message) as {
+            method?: string
+            params?: { sessionId?: string; start?: number; end?: number; reason?: string }
+          }
+          if (
+            envelope.method === 'session.outputGap' &&
+            envelope.params &&
+            typeof envelope.params.sessionId === 'string' &&
+            typeof envelope.params.start === 'number' &&
+            typeof envelope.params.end === 'number' &&
+            typeof envelope.params.reason === 'string'
+          ) {
+            outputGap = envelope.params as {
+              sessionId: string
+              start: number
+              end: number
+              reason: string
+            }
+            observed.push('gap')
+          } else observed.push('other')
+        } catch {
+          observed.push('other')
+        }
+      } else observed.push('other')
+      liveRoute.send(message)
+    }
+    let liveRoute: import('@playwright/test').WebSocketRoute
+    await liveContext.routeWebSocket(
+      (url) => url.port === String(endpoint.port),
+      (route) => {
+        liveRoute = route
+        server = route.connectToServer()
+        route.onMessage((message) => server.send(message))
+        server.onMessage((message) => {
+          const isOutputGap =
+            typeof message === 'string' && message.includes('"method":"session.outputGap"')
+          const isBinary =
+            Buffer.isBuffer(message) && message.length > 18 && message[0] === 1 && message[1] === 1
+          if (holding && (isBinary || isOutputGap)) held.push(message)
+          else forwardFromServer(message)
+        })
+      },
+    )
+    await bindEndpoint(livePage, endpoint)
+    await livePage.goto('/')
+    await promptReady(livePage)
+    await openSavedProfile(livePage, profileName)
+    await expect(livePage.locator(TAB)).toHaveCount(3)
+    const pane = livePage.locator('.pane.active')
+    await expect(pane).toHaveAttribute('data-session-id', /.+/)
+    const sessionId = (await pane.getAttribute('data-session-id'))!
+    let host: InventorySession | undefined
+    await expect
+      .poll(
+        async () => {
+          host = helperSession(await inventory(endpoint), sessionId)
+          return host !== undefined
+        },
+        { message: 'the live pane is not backed by the installed helper' },
+      )
+      .toBe(true)
+    const windowBytes = host!.launch.windowBytes
+    const baseBefore = host!.window.base
+    const markersBefore = markerCountOnFixtureHost(gates.markerFile)
+    observed.length = 0
+    holding = true
+
+    const command = longRemoteCommand(gates, windowBytes + (256 << 10) + (64 << 10))
+    await clickIntoEditor(livePage)
+    await livePage.keyboard.type(command)
+    await livePage.keyboard.press('Enter')
+    await expect
+      .poll(() => markerCountOnFixtureHost(gates.markerFile), {
+        message: 'the helper-hosted command did not start',
+      })
+      .toBeGreaterThan(markersBefore)
+    writeFileSync(gates.detached, 'release\n')
+    await waitForRemoteFile(gates.fillerDone, 'the gated remote filler did not finish')
+
+    // Observe the ACTUAL host window advancing beyond the position at attach.
+    // Only then release the queued frames, preserving their original order.
+    await expect
+      .poll(
+        async () => {
+          const current = helperSession(await inventory(endpoint), sessionId)
+          return current !== undefined && current.window.base > baseBefore
+        },
+        { message: 'the helper window did not reclaim output while the tab was backpressured' },
+      )
+      .toBe(true)
+    release()
+
+    const notice = pane.locator('.nocx-recovery-notice')
+    await expect(notice).toBeVisible()
+    await expect
+      .poll(() => outputGap !== null, { message: 'the live gap notification was not forwarded' })
+      .toBe(true)
+    expect(outputGap!.sessionId).toBe(sessionId)
+    expect(outputGap!.end).toBeGreaterThan(outputGap!.start)
+    await expect(notice).toContainText(
+      `${outputGap!.end - outputGap!.start} bytes of live output are missing`,
+    )
+
+    await expect
+      .poll(() => markerCountOnFixtureHost(gates.markerFile), {
+        message: 'the command did not continue after the gap',
+      })
+      .toBeGreaterThan(markersBefore + 1)
+    await expect(
+      pane.locator('.xterm-live-container .term-grid-row', { hasText: `${MARKER_PREFIX}-001` }),
+    ).toHaveCount(1)
+    await expect
+      .poll(
+        () =>
+          observed.includes('gap') &&
+          observed.indexOf('gap') > 0 &&
+          observed.slice(observed.indexOf('gap') + 1).includes('data'),
+        {
+          message: 'the real WebSocket did not preserve pre-gap, gap, post-gap order',
+        },
+      )
+      .toBe(true)
+  } finally {
+    releaseGate?.()
+    await snapshotWatchedClients()
+    backend.stop()
+    fixture?.proc.kill('SIGKILL')
+    await setupPage
+      ?.context()
+      .close()
+      .catch(() => {})
+    await liveContext?.close().catch(() => {})
     rmSync(remoteRoot, { recursive: true, force: true })
     rmSync(backendRoot.root, { recursive: true, force: true })
   }

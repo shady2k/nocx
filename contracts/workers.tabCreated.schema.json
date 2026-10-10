@@ -41,7 +41,8 @@
     "replayFrom": {
       "description": "The oldest byte offset the session's replay ring still holds, exactly as sessions.live reports it. A renderer attaching to this session for the first time attaches here.",
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "attached": {
       "description": "Whether a client already holds this session, exactly as sessions.live reports it. False at the moment of creation in the ordinary case — nobody has attached to a tab that has just appeared — but stated rather than assumed, on the same terms sessions.live states it.",

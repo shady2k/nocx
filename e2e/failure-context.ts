@@ -65,6 +65,7 @@ import { linesForTrace } from './trace-context.mts'
 export interface RegisterableBackend {
   logFile: string
   logTail(maxBytes?: number): string
+  goroutineDump?: string
 }
 
 const backendsByTestId = new Map<string, RegisterableBackend[]>()
@@ -325,6 +326,9 @@ export async function reportFailureContext(info: TestInfo, traceId: string): Pro
     for (const backend of backends) {
       const lines = backend.logTail(40_000).split('\n')
       sections.push(linesSection(`this test's own backend (${backend.logFile})`, lines))
+      if (backend.goroutineDump) {
+        sections.push(`-- backend goroutine dump (${backend.logFile}) --\n${backend.goroutineDump}`)
+      }
     }
 
     for (const watched of pages) {

@@ -1165,6 +1165,8 @@ export class VaultBackend {
   /** Where preserveLog last copied the log — what logTail reads once the
    *  disposable root is gone. */
   private preservedLogPath = ''
+  /** SIGQUIT's Go runtime dump, captured before the failing test tears down this process. */
+  goroutineDump = ''
   /** How many times start() has run — names each incarnation's preserved log. */
   private starts = 0
 
@@ -1327,6 +1329,54 @@ export class VaultBackend {
       return all.length <= maxBytes ? all : `…${all.slice(-maxBytes)}`
     } catch (err) {
       return `(backend log unreadable: ${String(err)})`
+    }
+  }
+
+  /**
+   * Ask the Go runtime to print every goroutine before test teardown stops this backend.
+   * SIGQUIT is handled by the runtime: it writes stacks to stderr and exits, so this
+   * test-only probe needs no production debug endpoint or additional server surface.
+   */
+  async captureGoroutineDump(): Promise<void> {
+    const proc = this.proc
+    if (!proc || proc.exitCode !== null) {
+      this.goroutineDump = 'not captured: backend was already stopped'
+      return
+    }
+
+    let exitTimer: NodeJS.Timeout | undefined
+    const exited = new Promise<boolean>((resolveExit) => {
+      if (proc.exitCode !== null) {
+        resolveExit(true)
+        return
+      }
+      proc.once('close', () => {
+        if (exitTimer) clearTimeout(exitTimer)
+        resolveExit(true)
+      })
+      // Do not let a failed diagnostic hang the test after its assertion failed.
+      exitTimer = setTimeout(() => resolveExit(false), 5_000)
+    })
+    try {
+      if (!proc.kill('SIGQUIT')) {
+        if (exitTimer) clearTimeout(exitTimer)
+        this.goroutineDump = 'not captured: SIGQUIT could not be sent to the backend'
+        return
+      }
+      if (!(await exited)) {
+        this.goroutineDump = 'not captured: backend did not exit after SIGQUIT within 5 s'
+        return
+      }
+      const log = readFileSync(this.logPath, 'utf8')
+      const marker = 'SIGQUIT: quit'
+      const start = log.indexOf(marker)
+      this.goroutineDump =
+        start < 0
+          ? 'not captured: backend exited after SIGQUIT without a Go goroutine dump marker'
+          : log.slice(start).trimEnd()
+    } catch (error) {
+      if (exitTimer) clearTimeout(exitTimer)
+      this.goroutineDump = `not captured: ${String(error)}`
     }
   }
 

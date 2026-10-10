@@ -297,7 +297,10 @@ test.describe('long transcript scroll budget', () => {
         { frozen: BLOCK, running: RUNNING_BLOCK, n: index, first: `${marker}-001` },
         { timeout: 60_000 },
       )
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        // Capture the Go stacks at the failed wait, while afterEach has not yet
+        // stopped this backend. The assertion remains the original 60 s failure.
+        await backend.captureGoroutineDump()
         throw new Error(`the command ${marker} never froze as block ${index}: ${String(error)}`)
       })
   }
@@ -557,6 +560,12 @@ test.describe('long transcript scroll budget', () => {
       painted: rows.length,
     }
   }
+
+  test('captures backend goroutine stacks before teardown', async () => {
+    await backend.start()
+    await backend.captureGoroutineDump()
+    expect(backend.goroutineDump).toContain('goroutine ')
+  })
 
   // Active stage acceptance for nocx-zg3k3.5: durable capture must retain
   // every row independently of the default live scrollback budget.

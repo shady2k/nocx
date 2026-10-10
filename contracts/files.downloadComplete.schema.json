@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.downloadComplete.schema.json",
+  "title": "FilesDownloadCompleteResult",
+  "description": "Acknowledges a native download completion outcome.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

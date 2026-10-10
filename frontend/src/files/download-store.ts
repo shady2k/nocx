@@ -23,16 +23,13 @@
 //
 // ## Why this is a second store and not the upload store parameterised
 //
-// The two hold different records because the two directions ACCOUNT
-// differently, and the differences are exactly the fields a shared record
-// would have to make optional. An upload's terminal frame carries
-// `finalName` (keepBoth may have renamed the file) and `stranded` (it can
-// leave a file behind); a download can do neither, because nothing on the
-// far host is written. What a download's frame carries instead is `bytes`,
-// and on a failure that is the WHOLE account: an upload can be undone and a
-// download cannot, so "how much did they actually get" is the only honest
-// thing left to say. A `destDir` here would be a lie in the same shape —
-// the browser chose where the file went and never told us.
+// The two directions account differently. An upload's terminal frame carries
+// `finalName` (keepBoth may have renamed the file) and `stranded` (a failed
+// promotion can leave a remote temp file). A download's terminal frame
+// carries `bytes`; on failure that is the whole account of what the far end
+// received. Native saves keep their local destination private: the host
+// reports only the commit outcome, never its path. A browser-chosen path is
+// likewise not reported.
 //
 // What the two DO share is `OperationPhase`, `isTerminalPhase` and the
 // retention bound, all of which live outside both stores already.
@@ -121,6 +118,7 @@ export interface DownloadStore {
     sourcePath: string
     machine: string
     size: number
+    localCancel?: () => void
   }): void
   /**
    * Record a failure only the renderer can know about, and that is the
@@ -171,6 +169,7 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
    *  arithmetic bookkeeping, and a surface that could read it would start
    *  rendering it. */
   const samples = new Map<string, { at: number; bytes: number }>()
+  const localCancels = new Map<string, () => void>()
   let disposed = false
 
   /** The public lookup: a TRACKED read, so a surface that asks for one
@@ -220,8 +219,10 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
     sourcePath: string
     machine: string
     size: number
+    localCancel?: () => void
   }): void {
     if (disposed) return
+    const alreadyTracked = currentOf(t.transferId) !== undefined
     const startedAt = now()
     setTransfers((list) => {
       // A transfer the retained done frame already adopted, now being
@@ -245,6 +246,8 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
         },
       ]
     })
+    if (!alreadyTracked && t.localCancel !== undefined)
+      localCancels.set(t.transferId, t.localCancel)
   }
 
   function applyProgress(p: FilesDownloadProgress): void {
@@ -275,6 +278,11 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
 
   function applyDone(p: FilesDownloadDone): void {
     if (disposed) return
+    const localCancel = localCancels.get(p.transferId)
+    localCancels.delete(p.transferId)
+    if (localCancel !== undefined && (p.outcome === 'failed' || p.outcome === 'cancelled')) {
+      localCancel()
+    }
     const phase: OperationPhase = p.outcome
     const endedAt = now()
     samples.delete(p.transferId)
@@ -349,9 +357,7 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
   }
 
   function cancel(transferId: string): void {
-    // Fire and forget, and quiet: cancelling a transfer that has already
-    // finished, or one that never existed, is not an error. What happened
-    // arrives as downloadDone either way.
+    localCancels.get(transferId)?.()
     void services.cancel(transferId).catch(() => {})
   }
 
@@ -362,6 +368,8 @@ export function createDownloadStore(deps: DownloadStoreDeps): DownloadStore {
     disposed = true
     unsubProgress()
     unsubDone()
+    for (const cancel of localCancels.values()) cancel()
+    localCancels.clear()
     samples.clear()
     setTransfers([])
   }

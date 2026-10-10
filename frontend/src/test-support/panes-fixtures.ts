@@ -41,6 +41,7 @@ import type { DriverState } from '../pane-observation'
 import type { WorkersTabCreated } from '../generated/workers.tabCreated'
 import type { WorkersTabClosed } from '../generated/workers.tabClosed'
 import type { Open } from '../generated/open'
+import type { SessionHandle, WSClient } from '../ipc'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -433,7 +434,7 @@ export interface SessionFake {
    *  the wire carries — never as bytes. Resolves `executed` by default: the
    *  case a test that is not about a refusal wants, and the same default
    *  `signal` uses. */
-  intent: ReturnType<typeof vi.fn>
+  intent: Mock<SessionHandle['intent']>
   /** Address a signal to the command running in this session (nocx-23rph).
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
@@ -511,7 +512,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     awaitsIntegration: false,
     send: vi.fn(),
     sendResize: vi.fn(),
-    intent: vi.fn(() => Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })),
+    intent: vi.fn<SessionHandle['intent']>(() =>
+      Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),
+    ),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.
@@ -630,12 +633,12 @@ const FIXTURE_INSTANCE_ID = 'fedcba9876543210fedcba9876543210'
  *  shape of ClientFake, never named by consumers. */
 interface DispatcherFake {
   subscribe: ReturnType<typeof vi.fn>
-  call: ReturnType<typeof vi.fn>
+  call: Mock<(...args: Parameters<Dispatcher['call']>) => Promise<unknown>>
 }
 
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
-  openSession: ReturnType<typeof vi.fn>
+  openSession: Mock<(...args: Parameters<WSClient['openSession']>) => Promise<SessionFake>>
   openSSHSession: ReturnType<typeof vi.fn>
   openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -649,7 +652,7 @@ export interface ClientFake {
   /** Control-plane calls (history.record, history.query, …). Rejects by
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
-  call: ReturnType<typeof vi.fn>
+  call: Mock<(...args: Parameters<WSClient['call']>) => Promise<unknown>>
   /** The pane.close notification (nocx-tsajw): records the wire identity of
    *  the closed pane so tests can assert the backend was told. */
   notifyPaneClosed: ReturnType<typeof vi.fn>
@@ -690,7 +693,7 @@ export interface ClientFake {
   listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
    *  that adopts one still has a handle to drive. */
-  reclaimSession: ReturnType<typeof vi.fn>
+  reclaimSession: Mock<(...args: Parameters<WSClient['reclaimSession']>) => Promise<SessionFake>>
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
   /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
@@ -795,11 +798,15 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   }
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
-    openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSession: vi.fn<(...args: Parameters<WSClient['openSession']>) => Promise<SessionFake>>(() =>
+      Promise.resolve(newSession()),
+    ),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     listLiveSessions: vi.fn(() => Promise.resolve([])),
-    reclaimSession: vi.fn(() => Promise.resolve(newSession())),
+    reclaimSession: vi.fn<
+      (...args: Parameters<WSClient['reclaimSession']>) => Promise<SessionFake>
+    >(() => Promise.resolve(newSession())),
     listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
@@ -848,22 +855,26 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default
       // resolves so the write always proceeds (fail-open).
-      call: vi.fn().mockResolvedValue({
-        id: 'att-0',
-        domain: 'd1',
-        state: 'open',
-        command: '',
-        cwd: '',
-        host: '',
-        origin: 'app',
-        startedAt: '2026-08-08T12:00:00Z',
-      }),
+      call: vi
+        .fn<(...args: Parameters<Dispatcher['call']>) => Promise<unknown>>()
+        .mockResolvedValue({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        }),
     },
     // What the backend answers when no content store is wired: a JSON-RPC
     // -32601, not a transport failure — a reader that tells "the store
     // keeps nothing" from "the read failed" (restore-client's
     // blockRowsForEntry, nocx-2v80t.3.27) must see the same refusal here.
-    call: vi.fn().mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
+    call: vi
+      .fn<(...args: Parameters<WSClient['call']>) => Promise<unknown>>()
+      .mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
     get connected() {
       return true
     },
@@ -878,8 +889,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface ClipboardFake extends ClipboardAccess {
-  readText: ReturnType<typeof vi.fn>
-  writeText: ReturnType<typeof vi.fn>
+  readText: Mock<ClipboardAccess['readText']>
+  writeText: Mock<ClipboardAccess['writeText']>
 }
 
 /**
@@ -900,7 +911,7 @@ export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake
 
 export interface BannerFake extends ClipboardBanner {
   shown: boolean
-  show: ReturnType<typeof vi.fn>
+  show: Mock<ClipboardBanner['show']>
 }
 
 /**

@@ -5,7 +5,7 @@
 // silently, space closes, only Enter/Tab inserts. Keyboard-behavior tests
 // drive handleKey directly (the editor's arbiter chain is terminal-content's
 // wiring, tested there); rendering is asserted through the panel's DOM.
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, type Mock } from 'vitest'
 import {
   SecretPicker,
   storeSecretLabel,
@@ -38,13 +38,13 @@ const UNSEALED: VaultStatus = {
 interface Harness {
   picker: SecretPicker
   source: {
-    status: ReturnType<typeof vi.fn>
-    list: ReturnType<typeof vi.fn>
-    requestUnseal: ReturnType<typeof vi.fn>
-    requestCreate: ReturnType<typeof vi.fn>
-    requestSetup: ReturnType<typeof vi.fn>
+    status: Mock<SecretPickerSource['status']>
+    list: Mock<SecretPickerSource['list']>
+    requestUnseal: Mock<SecretPickerSource['requestUnseal']>
+    requestCreate: Mock<SecretPickerSource['requestCreate']>
+    requestSetup: Mock<SecretPickerSource['requestSetup']>
   }
-  onInsert: ReturnType<typeof vi.fn>
+  onInsert: Mock<SecretPickerCallbacks['onInsert']>
   onError: (message: string, error: unknown) => unknown
   container: HTMLElement
 }
@@ -54,10 +54,10 @@ function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): 
     status: vi.fn(() => Promise.resolve(status)),
     list: vi.fn(() => Promise.resolve(entries)),
     requestUnseal: vi.fn(() => Promise.resolve()),
-    requestCreate: vi.fn(),
+    requestCreate: vi.fn<SecretPickerSource['requestCreate']>(),
     requestSetup: vi.fn(() => Promise.resolve(false)),
   } satisfies SecretPickerSource
-  const onInsert = vi.fn()
+  const onInsert = vi.fn<SecretPickerCallbacks['onInsert']>()
   const onError = vi.fn()
   const callbacks: SecretPickerCallbacks = { onInsert, onError }
   const picker = new SecretPicker(source, callbacks)

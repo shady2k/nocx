@@ -100,8 +100,8 @@ async function twoSessions(): Promise<{
   return { client, sessionA, sessionB, ws: socket() }
 }
 
-let consoleLog: ReturnType<typeof vi.spyOn>
-let consoleWarn: ReturnType<typeof vi.spyOn>
+let consoleLog: MockInstance<typeof console.log>
+let consoleWarn: MockInstance<typeof console.warn>
 
 beforeEach(() => {
   MockWebSocket.last = null

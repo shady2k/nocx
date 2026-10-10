@@ -2624,10 +2624,11 @@ func (c *connState) Owns(id session.ID) bool { return c.has(id) }
 
 // jsonrpcRequest is a JSON-RPC 2.0 request.
 type jsonrpcRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Params  json.RawMessage `json:"params,omitempty"`
+	JSONRPC        string          `json:"jsonrpc"`
+	ID             json.RawMessage `json:"id,omitempty"`
+	Method         string          `json:"method,omitempty"`
+	Params         json.RawMessage `json:"params,omitempty"`
+	preparedParams any             `json:"-"`
 }
 
 type jsonrpcResponse struct {

@@ -529,6 +529,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"files.download": {
 			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt"}`),
 		},
+		"files.downloadComplete": {
+			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"saved"}`),
+			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"source-failed"}`),
+		},
 		"files.downloadCancel": {
 			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef"}`),
 		},

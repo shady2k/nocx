@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.downloadComplete.params.schema.json",
+  "title": "FilesDownloadCompleteParams",
+  "description": "Confirms the outcome of a native local download save without exposing its destination path.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["transferId", "outcome"],
+  "properties": {
+    "transferId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "outcome": {
+      "type": "string",
+      "enum": ["saved", "cancelled", "source-failed", "destination-failed"]
+    }
+  }
+}

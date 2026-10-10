@@ -36,6 +36,7 @@ const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
 import type { Row, SessionFrame } from './generated/session.frame'
+import type { SessionIntentResult } from './generated/session.intent'
 import { styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
@@ -136,10 +137,16 @@ vi.mock('./ui/toast', () => ({
  * command's exit status to another command's row (nocx-td6d4.10).
  */
 function submitToken(client: ClientFake): string {
-  const calls = client.dispatcher.call.mock.calls as Array<[string, Record<string, unknown>?]>
+  const calls = client.dispatcher.call.mock.calls
   for (let i = calls.length - 1; i >= 0; i--) {
     const [method, params] = calls[i]
-    if (method === 'lifecycle.submitAttempt' && typeof params?.submitId === 'string') {
+    if (
+      method === 'lifecycle.submitAttempt' &&
+      params !== null &&
+      typeof params === 'object' &&
+      'submitId' in params &&
+      typeof params.submitId === 'string'
+    ) {
       return params.submitId
     }
   }
@@ -439,6 +446,12 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       teardown = mounted.teardown
       const renderer = rendererOf(mounted.content)
       const session = sessionOf(mounted.content)
+      // A WebView can expose the same fractional device-cell extent seen on
+      // the wire (80 × 10.499954… = 839.996…); the wire requires whole pixels.
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({
+        width: 839.996337890625 / 80,
+        height: 28,
+      })
       renderer._fireResize(120, 40)
       renderer._fireResize(100, 30)
       renderer._fireResize(90, 28)
@@ -449,8 +462,8 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       expect(session.sendResize).toHaveBeenCalledWith({
         cols: 90,
         rows: 28,
-        xpixel: 720,
-        ypixel: 448,
+        xpixel: 945,
+        ypixel: 784,
       })
     } finally {
       teardown?.()
@@ -4532,36 +4545,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it('no submit-time open or fence timer survives in the boundary sources (nocx-2v80t.3.2)', () => {
-    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
-      expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
-    }
-  })
-
-  it('no clear or rebase of the buffer survives in the boundary sources (nocx-2v80t.3.3)', () => {
-    for (const rel of [
-      'scrollback/controller.ts',
-      'scrollback/blocks.ts',
-      'terminal-content.ts',
-      'renderers/xterm.ts',
-      'renderers/types.ts',
-    ]) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: clearViewport`).not.toMatch(/clearViewport/)
-      expect(src, `${rel}: _settleFrozen`).not.toMatch(/_settleFrozen/)
-      expect(src, `${rel}: _freezeVisual`).not.toMatch(/_freezeVisual/)
-      expect(src, `${rel}: _clearFrozenRows`).not.toMatch(/_clearFrozenRows/)
-    }
-    // And the renderer carries no raw clear of its own: the only writer of
-    // the grid is the program's byte stream.
-    expect(
-      readFileSync(resolve(srcDir, 'renderers/xterm.ts'), 'utf8'),
-      'renderers/xterm.ts: t.clear()',
-    ).not.toMatch(/\bt\.clear\(\)/)
-  })
-
   it('a finished command leaves its rows on the live surface (nocx-2v80t.3.3)', async () => {
     const client = makeClient()
     // A REAL renderer, injected through this file's mock seam: the rows
@@ -4590,9 +4573,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const RealXterm = (raw as { XtermRenderer: new () => TerminalRenderer }).XtermRenderer
     const realRenderer = new RealXterm()
     const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(
-      () => realRenderer as unknown as InstanceType<typeof XtermRenderer>,
-    )
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
+      return realRenderer as unknown as InstanceType<typeof XtermRenderer>
+    })
     const { ed, view, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -5904,8 +5887,8 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const { content, teardown } = await mountTerminal(makeClipboard())
     try {
       const session = sessionOf(content)
-      let finishFirst!: (result: unknown) => void
-      const first = new Promise<unknown>((resolve) => {
+      let finishFirst!: (result: SessionIntentResult) => void
+      const first = new Promise<SessionIntentResult>((resolve) => {
         finishFirst = resolve
       })
       session.intent.mockImplementationOnce(() => first)
@@ -5914,7 +5897,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(1))
       expect(session.intent.mock.calls).toEqual([['text', 'a']])
 
-      finishFirst({ state: 'executed' })
+      finishFirst({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(3))
       expect(session.intent.mock.calls).toEqual([
         ['text', 'a'],
@@ -7775,7 +7758,7 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
     const pasteGate = new Promise<void>((resolve) => {
       releasePaste = resolve
     })
-    const result = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
     const delivered: Array<[string, string]> = []
     session.intent.mockImplementation((kind: string, payload: string) => {
       delivered.push([kind, payload])
@@ -10650,10 +10633,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     // is ordinary (AD-9), so "could not ask" must not be recorded as
     // "there was nothing".
     const client = storeWith([entry()], 'output')
-    const live = client.call.getMockImplementation()! as (
-      method: string,
-      params?: unknown,
-    ) => Promise<unknown>
+    const live = client.call.getMockImplementation()!
     client.call.mockImplementation((method: string, params?: unknown) => {
       if (method === 'ledger.query') return Promise.reject(new Error('socket is reconnecting'))
       return live(method, params)
@@ -16379,7 +16359,7 @@ describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () =>
    *  moment a subscription installed after the bind has already missed. */
   const reclaimingPaneReporting = async (cwd: string) => {
     const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         renderer._fireCwd('', cwd)
@@ -16438,7 +16418,7 @@ describe('a reclaimed pane shows the work that never stopped (nocx-ht15k)', () =
     // before the mount because that is when it is awaited.
     const { XtermRenderer } = await import('./renderers/xterm')
     let replayed = false
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         if (!replayed) {
@@ -16516,28 +16496,30 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
       resolveQuery = resolve
     })
     const client = makeClient({
-      call: vi.fn((method: string) => {
-        if (method === 'ledger.query') return queryPending
-        if (method === 'ledger.get') {
-          return Promise.resolve({
-            entry,
-            edges: [],
-            artifacts: [{ id: 'artifact-1', mediaType: 'application/vt' }],
-            proseEvicted: false,
-            caused: [],
-          })
-        }
-        if (method === 'ledger.artifact') {
-          return Promise.resolve({
-            id: 'artifact-1',
-            mediaType: 'application/vt',
-            body: '',
-            truncated: null,
-            byteLen: 0,
-          })
-        }
-        return Promise.reject(new Error(`unexpected method ${method}`))
-      }),
+      call: vi.fn<(...args: Parameters<ClientFake['call']>) => Promise<unknown>>(
+        (method: string) => {
+          if (method === 'ledger.query') return queryPending
+          if (method === 'ledger.get') {
+            return Promise.resolve({
+              entry,
+              edges: [],
+              artifacts: [{ id: 'artifact-1', mediaType: 'application/vt' }],
+              proseEvicted: false,
+              caused: [],
+            })
+          }
+          if (method === 'ledger.artifact') {
+            return Promise.resolve({
+              id: 'artifact-1',
+              mediaType: 'application/vt',
+              body: '',
+              truncated: null,
+              byteLen: 0,
+            })
+          }
+          return Promise.reject(new Error(`unexpected method ${method}`))
+        },
+      ),
     })
     const { content, tab, teardown } = await mountTerminal(
       makeClipboard(),

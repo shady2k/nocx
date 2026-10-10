@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -586,5 +587,298 @@ func TestServerStop_CancelsRunningDownloads(t *testing.T) {
 	close(src.release)
 	if err := <-stopped; err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+type sameLaneReadFS struct{ file *sameLaneReadFile }
+
+func (f sameLaneReadFS) Open(string) (transfer.RemoteReader, int64, error) {
+	return f.file, 5, nil
+}
+
+type sameLaneReadFile struct {
+	mu              sync.Mutex
+	entered         chan struct{}
+	release         chan struct{}
+	closeAttempt    chan struct{}
+	active          bool
+	closeCount      int
+	concurrentClose bool
+	once            sync.Once
+}
+
+func (f *sameLaneReadFile) Read(p []byte) (int, error) {
+	f.mu.Lock()
+	f.active = true
+	f.once.Do(func() { close(f.entered) })
+	<-f.release
+	n := copy(p, "hello")
+	f.active = false
+	f.mu.Unlock()
+	return n, io.EOF
+}
+
+func (f *sameLaneReadFile) Close() error {
+	select {
+	case f.closeAttempt <- struct{}{}:
+	default:
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.active {
+		f.concurrentClose = true
+	}
+	f.closeCount++
+	return nil
+}
+
+func TestNativeDownloadStopDoesNotClosePinnedSourceDuringRead(t *testing.T) {
+	reader := &sameLaneReadFile{
+		entered: make(chan struct{}), release: make(chan struct{}),
+		closeAttempt: make(chan struct{}, 1),
+	}
+	src := transfer.NewSource(sameLaneReadFS{file: reader}, transfer.DefaultChunk)
+	e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "remote.bin", "hello")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+
+	type fetchResult struct {
+		resp *http.Response
+		err  error
+	}
+	fetched := make(chan fetchResult, 1)
+	go func() {
+		resp, err := uploadHTTPClient.Get(downloadURLFor(e.ws, started.Ticket))
+		fetched <- fetchResult{resp: resp, err: err}
+	}()
+	<-reader.entered
+	cancelled := make(chan []byte, 1)
+	go func() {
+		cancelled <- jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{
+			"transferId": started.TransferID,
+		}, 4)
+	}()
+	var raw []byte
+	select {
+	case raw = <-cancelled:
+	case <-reader.closeAttempt:
+		close(reader.release)
+		t.Fatal("stop attempted to close the pinned SFTP handle while Read held its lane")
+	case <-time.After(5 * time.Second):
+		close(reader.release)
+		t.Fatal("cancel handler waited for the blocked SFTP lane")
+	}
+	var cancelReply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &cancelReply); err != nil || cancelReply.Error != nil {
+		t.Fatalf("cancel reply %s (decode %v)", raw, err)
+	}
+	select {
+	case <-reader.closeAttempt:
+		close(reader.release)
+		t.Fatal("stop attempted to close the pinned SFTP handle while Read held its lane")
+	default:
+	}
+
+	close(reader.release)
+	var result fetchResult
+	select {
+	case result = <-fetched:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native HTTP stage did not unwind after releasing the remote read")
+	}
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	_, _ = io.Copy(io.Discard, result.resp.Body)
+	_ = result.resp.Body.Close()
+	if status := result.resp.Trailer.Get("X-Nocx-Download-Status"); status != "cancelled" {
+		t.Fatalf("cancelled native stream trailer %q, want cancelled", status)
+	}
+	raw = jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "cancelled",
+	}, 5)
+	if err := json.Unmarshal(raw, &cancelReply); err != nil || cancelReply.Error != nil {
+		t.Fatalf("completion reply %s (decode %v)", raw, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("state %q, want cancelled", state)
+	}
+	reader.mu.Lock()
+	concurrent, closes := reader.concurrentClose, reader.closeCount
+	reader.mu.Unlock()
+	if concurrent || closes != 1 {
+		t.Fatalf("remote close concurrency=%t calls=%d, want false and exactly one", concurrent, closes)
+	}
+}
+
+func TestFilesDownloadNativeDestinationAndCompletionParamsAreClosed(t *testing.T) {
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	for _, raw := range []string{
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a"}`,
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a","destination":"native"}`,
+	} {
+		if msg := ws.methods["files.download"].validate(json.RawMessage(raw)); msg != "" {
+			t.Errorf("valid download params rejected: %s: %s", raw, msg)
+		}
+	}
+	for _, raw := range []string{
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a","destination":"browser"}`,
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a","destination":""}`,
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a","destination":null}`,
+		`{"bindingId":"00000000000000000000000000000000","path":"/tmp/a","destination":"native","localPath":"/secret"}`,
+	} {
+		if msg := ws.methods["files.download"].validate(json.RawMessage(raw)); msg == "" {
+			t.Errorf("invalid download params accepted: %s", raw)
+		}
+	}
+	complete := ws.methods["files.downloadComplete"].validate
+	for _, raw := range []string{
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"saved"}`,
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"cancelled"}`,
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"source-failed"}`,
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"destination-failed"}`,
+	} {
+		if msg := complete(json.RawMessage(raw)); msg != "" {
+			t.Errorf("valid completion params rejected: %s: %s", raw, msg)
+		}
+	}
+	for _, raw := range []string{
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"unknown"}`,
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"saved","path":"/secret"}`,
+		`{"transferId":"0123456789abcdef0123456789abcdef","outcome":"saved","error":"private path"}`,
+	} {
+		if msg := complete(json.RawMessage(raw)); msg == "" {
+			t.Errorf("invalid completion params accepted: %s", raw)
+		}
+	}
+}
+
+func TestFilesDownloadCompleteRejectsUnknownAndUploadTransferIDs(t *testing.T) {
+	e := newUploadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	unknown := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "outcome": "cancelled",
+	}, 3)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(unknown, &reply); err != nil || reply.Error == nil || reply.Error.Code != -32602 {
+		t.Fatalf("unknown completion id was not rejected: %s (decode %v)", unknown, err)
+	}
+
+	upload := callUpload(t, e.conn, uploadParams(bid, dir, "upload.bin", 1), 4).mustResult(t)
+	foreignDirection := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": upload.TransferID, "outcome": "cancelled",
+	}, 5)
+	if err := json.Unmarshal(foreignDirection, &reply); err != nil || reply.Error == nil || reply.Error.Code != -32602 {
+		t.Fatalf("upload transfer id was not rejected: %s (decode %v)", foreignDirection, err)
+	}
+	_ = jsonrpcCallWithID(t, e.conn, "files.uploadCancel", map[string]any{"transferId": upload.TransferID}, 6)
+}
+
+type gatedOpenDownloadSource struct {
+	base        transfer.Source
+	path        string
+	entered     chan struct{}
+	release     chan struct{}
+	enteredOnce sync.Once
+	releaseOnce sync.Once
+}
+
+func (s *gatedOpenDownloadSource) Open(path string) (*transfer.Download, error) {
+	if path == s.path {
+		s.enteredOnce.Do(func() { close(s.entered) })
+		<-s.release
+	}
+	return s.base.Open(path)
+}
+
+func (s *gatedOpenDownloadSource) Get(ctx context.Context, d *transfer.Download, w io.Writer, progress func(int64)) (int64, error) {
+	return s.base.Get(ctx, d, w, progress)
+}
+
+func (s *gatedOpenDownloadSource) releaseOpen() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func TestDownloadCompleteRefusesPromptlyWhenFilesSubmissionIsSaturated(t *testing.T) {
+	dir := t.TempDir()
+	nativePath := fixture(t, dir, "native.bin", "one")
+	blockedPath := fixture(t, dir, "blocked.bin", "two")
+	src := &gatedOpenDownloadSource{
+		base: transfer.NewSource(pinnedFS{body: "bytes"}, transfer.DefaultChunk),
+		path: blockedPath, entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	e := newDownloadTestEnvWith(t, downloadFactoryWithSource(src), func(s *WSServer) {
+		s.domainQueueDepth = 1
+	})
+	defer src.releaseOpen()
+	sid := e.openSession(t, 1)
+	bid := e.openBinding(t, sid, dir, 2)
+	nativeParams := downloadParams(bid, nativePath)
+	nativeParams["destination"] = "native"
+	native := callDownload(t, e.conn, nativeParams, 3).mustResult(t)
+
+	blockedRequest, marshalErr := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      4,
+		"method":  "files.download",
+		"params":  downloadParams(bid, blockedPath),
+	})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if err := e.conn.WriteMessage(websocket.TextMessage, blockedRequest); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-src.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second files.download did not occupy the bounded files submission")
+	}
+
+	refused := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": native.TransferID, "outcome": "cancelled",
+	}, 5)
+	var refusal struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(refused, &refusal); err != nil || refusal.Error == nil || refusal.Error.Code != SaturationErrorCode {
+		t.Fatalf("completion saturation reply %s (decode %v), want bounded refusal %d", refused, err, SaturationErrorCode)
+	}
+
+	src.releaseOpen()
+	blocked, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isResponseTo(4))
+	if err != nil {
+		t.Fatalf("read blocked files.download response: %v", err)
+	}
+	var blockedEnvelope downloadEnvelope
+	if err := json.Unmarshal(blocked, &blockedEnvelope); err != nil || blockedEnvelope.Error != nil {
+		t.Fatalf("blocked download response %s (decode %v)", blocked, err)
+	}
+	second := blockedEnvelope.mustResult(t)
+
+	accepted := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": native.TransferID, "outcome": "cancelled",
+	}, 6)
+	refusal = struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}{}
+
+	if err := json.Unmarshal(accepted, &refusal); err != nil || refusal.Error != nil {
+		t.Fatalf("completion after admission freed: %s (decode %v)", accepted, err)
+	}
+	_ = jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{"transferId": second.TransferID}, 7)
+	if state := awaitTransferState(t, e.ws, native.TransferID); state != downloadStateCancelled {
+		t.Fatalf("native state %q, want cancelled", state)
 	}
 }

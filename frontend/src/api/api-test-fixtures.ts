@@ -5,13 +5,10 @@
 //
 // The values are the design's own worked example (§9.2, §11): an acme-api
 // collection with a POST that answers 201 in 184ms.
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type { ApiWorkbenchServices, CollectionWatchPort, NativeDropPort } from './api-client'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesDropped } from '../generated/files.dropped'
-import type { FilesOpenResult } from '../generated/files.open'
-import type { FilesWatchResult } from '../generated/files.watch'
-import type { FilesCloseResult } from '../generated/files.close'
 import type {
   ApiCollection,
   ApiEnvironmentRef,
@@ -317,9 +314,9 @@ export const WATCH_BINDING = 'bind-1'
  *  subscription the product uses rather than a method of its own. */
 export interface WatchFixture {
   port: CollectionWatchPort
-  open: ReturnType<typeof vi.fn>
-  watch: ReturnType<typeof vi.fn>
-  close: ReturnType<typeof vi.fn>
+  open: Mock<CollectionWatchPort['open']>
+  watch: Mock<CollectionWatchPort['watch']>
+  close: Mock<CollectionWatchPort['close']>
   /** The backend says one watched directory is dirty. */
   changed(path: string, bindingId?: string): void
   /** The transport re-attached (AD-9). */
@@ -336,36 +333,33 @@ export interface WatchFixture {
 export function watchFixture(
   over: {
     localSession?: string | null
-    open?: ReturnType<typeof vi.fn>
-    watch?: ReturnType<typeof vi.fn>
-    close?: ReturnType<typeof vi.fn>
+    open?: WatchFixture['open']
+    watch?: WatchFixture['watch']
+    close?: WatchFixture['close']
   } = {},
 ): WatchFixture {
   let onChanged: ((p: FilesChanged) => void) | null = null
   let onConnect: (() => void) | null = null
   const open =
     over.open ??
-    vi.fn().mockResolvedValue({
+    vi.fn<CollectionWatchPort['open']>().mockResolvedValue({
       bindingId: WATCH_BINDING,
       endpointId: null,
+      revealAvailable: false,
       root: { path: '/', display: '/', inferred: false, inferredReason: '' },
     })
   // 'polling' with NO reason is what a healthy LOCAL binding answers today —
   // internal/transport says so in as many words, because a reason there would
   // light the degrade badge for every user forever. The default fixture is
   // therefore the case that must NOT warn.
-  const watch = over.watch ?? vi.fn().mockResolvedValue({ mode: 'polling' })
-  const close = over.close ?? vi.fn().mockResolvedValue({})
+  const watch =
+    over.watch ?? vi.fn<CollectionWatchPort['watch']>().mockResolvedValue({ mode: 'polling' })
+  const close = over.close ?? vi.fn<CollectionWatchPort['close']>().mockResolvedValue({})
   const port: CollectionWatchPort = {
     localSession: () => (over.localSession === undefined ? WATCH_SESSION : over.localSession),
-    // The casts are the seam between a `vi.fn()` (which answers `any`) and
-    // the port's declared shape. They are HERE, once, rather than at every
-    // call site in every test — and they are what makes a fixture that
-    // answers the wrong shape a type error in this file instead of a
-    // mysterious undefined in a test three files away.
-    open: (sessionId, rootPath) => open(sessionId, rootPath) as Promise<FilesOpenResult>,
-    watch: (bindingId, paths) => watch(bindingId, paths) as Promise<FilesWatchResult>,
-    close: (bindingId) => close(bindingId) as Promise<FilesCloseResult>,
+    open,
+    watch,
+    close,
     subscribeChanged: (handler) => {
       onChanged = handler
       return () => {

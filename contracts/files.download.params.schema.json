@@ -2,12 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/files.download.params.schema.json",
   "title": "FilesDownloadParams",
-  "description": "Params for files.download.",
+  "description": "Params for files.download. destination is omitted for the browser receiver or is native for an explicitly selected desktop save receiver.",
   "type": "object",
   "additionalProperties": false,
   "required": ["bindingId", "path"],
   "properties": {
     "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-    "path": { "type": "string", "pattern": "^/", "maxLength": 4096 }
+    "path": { "type": "string", "pattern": "^/", "maxLength": 4096 },
+    "destination": { "type": "string", "enum": ["native"] }
   }
 }

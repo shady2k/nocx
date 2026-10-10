@@ -152,16 +152,18 @@ func TestPut_CreateRefused_LeavesTheDestinationUntouched(t *testing.T) {
 func TestPut_WriteFailsMidStream_RemovesTheTempAndLeavesTheDestination(t *testing.T) {
 	fs := newFakeFS()
 	fs.put("/home/u/a.txt", "old")
-	fs.failWriteAfter(4, errors.New("disk full"))
+	diskFull := errors.New("disk full")
+	fs.failWriteAfter(4, diskFull)
 
 	out, err := transfer.NewSink(fs, 4).Put(context.Background(),
 		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 12, OnExists: transfer.Overwrite},
 		strings.NewReader("0123456789ab"), func(int64) {})
-	if err == nil {
-		t.Fatal("a failed write must be an error")
+	var writeErr *transfer.WriteError
+	if !errors.As(err, &writeErr) || !errors.Is(err, diskFull) {
+		t.Fatalf("Put error = %v; want WriteError wrapping disk full", err)
 	}
-	if !strings.Contains(err.Error(), "disk full") {
-		t.Fatalf("the reason must be reported; got %v", err)
+	if !strings.Contains(err.Error(), "transfer: write: disk full") {
+		t.Fatalf("error text %q lost the established write diagnosis", err)
 	}
 	if len(out.Stranded) != 0 {
 		t.Fatalf("the temp was removable, so nothing is stranded; got %v", out.Stranded)
@@ -274,6 +276,30 @@ func TestPut_CloseFailsAndTheReservationCannotBeRemoved_StrandsBothAndSaysWhy(t 
 	}
 	if findStranded(out.Stranded, "a (1).txt") == "" {
 		t.Fatalf("the reservation that could not be removed must be named; got %v", out.Stranded)
+	}
+}
+
+func TestPut_ClosedFileErrorRemovesTheTemp(t *testing.T) {
+	fs := newFakeFS()
+	fs.put("/home/u/a.txt", "old")
+	syncErr := errors.New("sync failed")
+	fs.closeErr = &transfer.ClosedFileError{Err: syncErr}
+
+	out, err := transfer.NewSink(fs, transfer.DefaultChunk).Put(context.Background(),
+		transfer.Upload{DestDir: "/home/u", Name: "a.txt", Size: 3, OnExists: transfer.Overwrite},
+		strings.NewReader("new"), nil)
+	var closed *transfer.ClosedFileError
+	if !errors.As(err, &closed) || !errors.Is(err, syncErr) {
+		t.Fatalf("Put error = %v; want ClosedFileError wrapping sync failure", err)
+	}
+	if got := fs.content("/home/u/a.txt"); got != "old" {
+		t.Fatalf("destination holds %q, want it untouched", got)
+	}
+	if left := fs.matching("*.nocx-upload-*"); len(left) != 0 || len(out.Stranded) != 0 {
+		t.Fatalf("confirmed-closed temp should be removed: files=%v stranded=%v", left, out.Stranded)
+	}
+	if len(fs.removed) != 1 {
+		t.Fatalf("Remove calls = %v, want one temp cleanup", fs.removed)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -29,6 +30,7 @@ import (
 // A table over the shells, because "the tab closed" is one property and a
 // shell that keeps running is the same defect whichever shell it is.
 func TestClose_EndsAnInteractiveShell(t *testing.T) {
+	storagetest.IsolateWithHome(t)
 	for _, name := range []string{"bash", "zsh"} {
 		t.Run(name, func(t *testing.T) {
 			path, err := exec.LookPath(name)
@@ -46,6 +48,7 @@ func TestClose_EndsAnInteractiveShell(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewLocal: %v", err)
 			}
+			t.Cleanup(func() { _ = lp.Close() })
 
 			// ONE reader, draining continuously: the shell must be idle at its
 			// prompt rather than blocked writing into a full master, because a

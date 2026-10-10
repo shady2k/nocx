@@ -398,12 +398,19 @@ type runningTransfer struct {
 	// whose target moved — and the size the fetch declares as its
 	// Content-Length would then describe different bytes from the ones it
 	// sends. An open handle cannot be raced at all.
-	download *transfer.Download
+	download       *transfer.Download
+	nativeDownload bool
 	// dest carries the claimed response writer from the GET handler to the
-	// goroutine running the source — the mirror of body. Buffered by one,
-	// for body's reason: the claim happens once, so nothing can queue
-	// behind it.
-	dest chan io.Writer
+	// source goroutine. The source-stage and final-stage lifetimes differ
+	// for native downloads.
+	dest              chan io.Writer
+	streamDone        chan struct{}
+	streamSet         bool
+	completion        chan string
+	completionSet     bool
+	completionOutcome string
+	sourceErr         error
+	sourceBytes       int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -415,8 +422,6 @@ type runningTransfer struct {
 	// named, opened on the backend's own disk (design D1). It is set
 	// before the goroutine starts and is the reason such a transfer waits
 	// for nothing: the bytes are already reachable, so there is no ticket,
-	// no POST and no body channel. Exactly one of source and ticket is
-	// ever set, and runUpload closes whichever reader it ends up with.
 	source io.ReadCloser
 	done   chan struct{}
 	// progressWake is the transfer's progress mailbox: one slot, written
@@ -426,13 +431,14 @@ type runningTransfer struct {
 	// chunk. See progress and emitTransferProgress.
 	progressWake chan struct{}
 
-	mu      sync.Mutex
-	closer  io.Closer // the claimed body, so cancellation can unblock a stalled Read
-	bytes   int64
-	state   string
-	outcome transfer.Outcome
-	err     error
-	endedAt time.Time
+	mu        sync.Mutex
+	closer    io.Closer // the claimed body, so cancellation can unblock a stalled Read
+	bytes     int64
+	state     string
+	outcome   transfer.Outcome
+	err       error
+	endedAt   time.Time
+	finalized bool
 }
 
 // transferDir is which way a transfer's bytes travel.
@@ -523,6 +529,7 @@ func (rt *runningTransfer) finish(state string, out transfer.Outcome, err error,
 	rt.outcome = out
 	rt.err = err
 	rt.endedAt = now
+	rt.finalized = true
 	rt.mu.Unlock()
 }
 
@@ -589,14 +596,14 @@ type transferRegistry struct {
 	// listener is built.
 	header time.Duration
 
-	// unwind is how long teardown waits for a cancelled transfer; zero
-	// means the default. A test shortens it in place (ws_upload_test.go),
-	// the way filesPollInterval is shortened: an exported option would be
-	// a knob production has no reason to turn.
+	// unwind is how long teardown waits for a cancelled transfer; zero uses
+	// the production bound.
 	unwind time.Duration
 
-	// now is the clock, injectable for the eviction tests.
-	now func() time.Time
+	// now is the clock, injectable for eviction tests.
+	now               func() time.Time
+	completionTimeout time.Duration
+	after             func(time.Duration) <-chan time.Time
 }
 
 func (u *transferRegistry) stallTimeout() time.Duration {
@@ -618,6 +625,20 @@ func (u *transferRegistry) unwindTimeout() time.Duration {
 		return u.unwind
 	}
 	return uploadUnwindTimeout
+}
+
+func (u *transferRegistry) nativeCompletionTimeout() time.Duration {
+	if u.completionTimeout > 0 {
+		return u.completionTimeout
+	}
+	return nativeDownloadCompletionTimeout
+}
+
+func (u *transferRegistry) afterTimeout(d time.Duration) <-chan time.Time {
+	if u.after != nil {
+		return u.after(d)
+	}
+	return time.After(d)
 }
 
 func (u *transferRegistry) clock() time.Time {

@@ -10,7 +10,7 @@
 // screen; cwdFollow:false never re-binding; and D4's answer-decides binding.
 // The store is exercised directly with a fake services seam (the files
 // pattern, files-store.test.ts).
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { RpcError } from '../dispatcher'
 import type { ActiveOrigin } from '../pane-content'
 import type { Status, GitStatusResult } from '../generated/git.status'
@@ -162,8 +162,8 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
 function mockHandle<K extends keyof GitPanelServices>(
   services: GitPanelServices,
   key: K,
-): ReturnType<typeof vi.fn> {
-  return services[key] as unknown as ReturnType<typeof vi.fn>
+): Mock<GitPanelServices[K]> {
+  return services[key] as Mock<GitPanelServices[K]>
 }
 
 /** Drain the microtask queue until the store's promise chains settle. */
@@ -410,10 +410,10 @@ describe('race 1 — two opens racing on a tab switch', () => {
 describe('race 2 — a poll issued before a mutation lands after it (the epoch)', () => {
   it('the pre-mutation poll cannot repaint the post-mutation state', async () => {
     const { store, services } = await openStore()
-    const poll = deferred<{ status: Status }>()
-    const mutation = deferred<{ status: Status }>()
-    ;(services.status as ReturnType<typeof vi.fn>).mockImplementationOnce(() => poll.promise)
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => mutation.promise)
+    const poll = deferred<GitStatusResult>()
+    const mutation = deferred<GitStatusResult>()
+    mockHandle(services, 'status').mockImplementationOnce(() => poll.promise)
+    mockHandle(services, 'stage').mockImplementationOnce(() => mutation.promise)
 
     store.refresh() // the poll — epoch N
     store.stage(['a.txt']) // the mutation — epoch N+1
@@ -439,8 +439,8 @@ describe('race 2 — a poll issued before a mutation lands after it (the epoch)'
 describe('race 3 — the mutation lane (D18)', () => {
   it('refuses a second concurrent mutation: stage while a stage is in flight is a no-op', async () => {
     const { store, services } = await openStore()
-    const first = deferred<{ status: Status }>()
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => first.promise)
+    const first = deferred<GitStatusResult>()
+    mockHandle(services, 'stage').mockImplementationOnce(() => first.promise)
 
     store.stage(['a.txt'])
     expect(store.mutationInFlight()).toBe(true)
@@ -665,7 +665,7 @@ describe('polling is coalesced by repository identity (D23)', () => {
     const status = mockHandle(services, 'status')
     const slow = deferred<GitStatusResult>()
     status.mockClear()
-    ;(services.status as ReturnType<typeof vi.fn>).mockImplementationOnce(() => slow.promise)
+    mockHandle(services, 'status').mockImplementationOnce(() => slow.promise)
 
     store.rescope(SSH_ORIGIN)
     await settle()
@@ -843,8 +843,8 @@ describe('polling', () => {
     vi.useFakeTimers()
     const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
     const status = mockHandle(services, 'status')
-    const mutation = deferred<{ status: Status }>()
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => mutation.promise)
+    const mutation = deferred<GitStatusResult>()
+    mockHandle(services, 'stage').mockImplementationOnce(() => mutation.promise)
 
     store.setVisible(true)
     status.mockClear()

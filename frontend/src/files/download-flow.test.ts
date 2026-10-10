@@ -6,7 +6,7 @@
 // mint leaves NO row, because a row for a transfer the backend never
 // created can never receive a done frame and would sit unfinished for the
 // life of the session.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { createDownloadFlow } from './download-flow'
 import { downloadResultFixture, fakeDownloadServices, fakeSaver } from './download-fixtures'
@@ -30,7 +30,12 @@ describe('fetching one file', () => {
   it('names the file and nothing else — no destination crosses the seam', async () => {
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture())
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
     // The MACHINE is not on the wire and must not be: it is a label
     // `machine-name.ts` produced for a person, and the backend already
     // knows which host a binding names.
@@ -43,7 +48,12 @@ describe('fetching one file', () => {
     // renderer's second opinion about it.
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture({ name: 'measured.iso', size: 4096 }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
     expect(f.store.transfers()).toHaveLength(1)
     expect(f.store.transfers()[0]).toMatchObject({
       name: 'measured.iso',
@@ -61,7 +71,12 @@ describe('fetching one file', () => {
     const f = fixture()
     const ticket = 'b'.repeat(64)
     f.services.nextResult.push(downloadResultFixture({ url: `/download/${ticket}` }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
     expect(f.saver.saved).toEqual([`http://127.0.0.1:7331/download/${ticket}`])
   })
 
@@ -70,7 +85,12 @@ describe('fetching one file', () => {
     // as an uploaded file appearing in the destination is.
     const f = fixture()
     f.services.nextResult.push(downloadResultFixture())
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
     expect(f.said).toEqual([])
   })
 })
@@ -81,7 +101,12 @@ describe('when it cannot start', () => {
     // send one — so it would sit "running" until the session ended.
     const f = fixture()
     f.services.download = () => Promise.reject(new Error('binding is closed'))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
     expect(f.store.transfers()).toEqual([])
     expect(f.said).toEqual([
       {
@@ -96,7 +121,7 @@ describe('when it cannot start', () => {
     const f = fixture()
     f.services.download = () => Promise.reject(new Error('boom'))
     await expect(
-      f.flow.fetch({ bindingId: 'b1', path: '/x', machine: 'alice@srv-01' }),
+      f.flow.fetch({ bindingId: 'b1', path: '/x', name: 'x', machine: 'alice@srv-01' }),
     ).resolves.toBeUndefined()
   })
 
@@ -107,8 +132,13 @@ describe('when it cannot start', () => {
     const f = fixture()
     f.services.origin = null
     f.services.nextResult.push(downloadResultFixture({ name: 'big.iso' }))
-    await f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' })
-    expect(f.saver.saved).toEqual([])
+    await f.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/big.iso',
+      name: 'big.iso',
+      machine: 'alice@srv-01',
+    })
+    expect(f.services.cancels).toEqual(['0'.repeat(32)])
     expect(f.store.transfers()[0]).toMatchObject({ phase: 'failed' })
     expect(f.store.transfers()[0].error).toContain('no connection')
     expect(f.said).toEqual([
@@ -117,5 +147,144 @@ describe('when it cannot start', () => {
         level: 'danger',
       },
     ])
+  })
+})
+describe('native receiving', () => {
+  it('a cancelled prepare does not mint a transfer', async () => {
+    const f = fixture()
+    f.saver.prepare = () => Promise.resolve(null)
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+    expect(f.services.downloads).toEqual([])
+    expect(f.store.transfers()).toEqual([])
+  })
+
+  it('completes with the receiver outcome and selects the native destination', async () => {
+    const f = fixture()
+    let disposed = false
+    f.saver.prepare = () =>
+      Promise.resolve({
+        destination: 'native',
+        save(_result, url) {
+          expect(url).toContain('/download/')
+          return Promise.resolve('saved')
+        },
+        cancel() {},
+        dispose() {
+          disposed = true
+        },
+      })
+    f.services.nextResult.push(downloadResultFixture())
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'suggested', machine: 'srv' })
+    expect(f.services.downloads).toEqual([
+      { bindingId: 'b1', path: '/srv/a', destination: 'native' },
+    ])
+    expect(f.services.completions).toEqual([{ transferId: '0'.repeat(32), outcome: 'saved' }])
+    expect(disposed).toBe(true)
+  })
+  for (const outcome of ['saved', 'cancelled', 'source-failed', 'destination-failed'] as const) {
+    it(`sends the native ${outcome} outcome to the backend`, async () => {
+      const f = fixture()
+      f.saver.prepare = () =>
+        Promise.resolve({
+          destination: 'native',
+          save() {
+            return Promise.resolve(outcome)
+          },
+          cancel() {},
+          dispose() {},
+        })
+      f.services.nextResult.push(downloadResultFixture())
+      await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+      expect(f.services.completions).toEqual([{ transferId: '0'.repeat(32), outcome }])
+    })
+  }
+
+  it('disposes a prepared destination on mint refusal', async () => {
+    const f = fixture()
+    let disposed = false
+    f.saver.prepare = () =>
+      Promise.resolve({
+        destination: 'native',
+        save() {
+          return Promise.resolve('saved')
+        },
+        cancel() {},
+        dispose() {
+          disposed = true
+        },
+      })
+    f.services.download = () => Promise.reject(new Error('refused'))
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+    expect(disposed).toBe(true)
+    expect(f.store.transfers()).toEqual([])
+    expect(f.said[0].message).toContain('refused')
+  })
+
+  it('does not duplicate a done row that arrives before completion responds', async () => {
+    const f = fixture()
+    f.saver.prepare = () =>
+      Promise.resolve({
+        destination: 'native',
+        save() {
+          return Promise.resolve('saved')
+        },
+        cancel() {},
+        dispose() {},
+      })
+    f.services.complete = (transferId) => {
+      f.services.emitDone({ transferId, outcome: 'sent', name: 'big.iso', bytes: 400, total: 400 })
+      return Promise.resolve({})
+    }
+    f.services.nextResult.push(downloadResultFixture())
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+    expect(f.store.transfers()).toHaveLength(1)
+    expect(f.store.transfers()[0].phase).toBe('sent')
+  })
+  it('registers native cancellation before save and reaches both endpoints', async () => {
+    const f = fixture()
+    let releaseSave!: (outcome: 'cancelled') => void
+    let markStarted!: () => void
+    const saveStarted = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    const localCancel = vi.fn()
+    f.saver.prepare = () =>
+      Promise.resolve({
+        destination: 'native',
+        save() {
+          markStarted()
+          return new Promise<'cancelled'>((resolve) => {
+            releaseSave = resolve
+          })
+        },
+        cancel: localCancel,
+        dispose() {},
+      })
+    f.services.nextResult.push(downloadResultFixture())
+    const running = f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+    await saveStarted
+    f.store.cancel('0'.repeat(32))
+    expect(localCancel).toHaveBeenCalledTimes(1)
+    expect(f.services.cancels).toEqual(['0'.repeat(32)])
+    releaseSave('cancelled')
+    await running
+    expect(f.services.completions).toEqual([{ transferId: '0'.repeat(32), outcome: 'cancelled' }])
+  })
+
+  it('unsettles a still-active row when completion is not confirmed', async () => {
+    const f = fixture()
+    f.saver.prepare = () =>
+      Promise.resolve({
+        destination: 'native',
+        save() {
+          return Promise.resolve('source-failed')
+        },
+        cancel() {},
+        dispose() {},
+      })
+    f.services.complete = () => Promise.reject(new Error('offline'))
+    f.services.nextResult.push(downloadResultFixture())
+    await f.flow.fetch({ bindingId: 'b1', path: '/srv/a', name: 'a', machine: 'srv' })
+    expect(f.store.transfers()[0].phase).toBe('unsettled')
   })
 })

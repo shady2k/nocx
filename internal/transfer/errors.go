@@ -24,6 +24,26 @@ var ErrInvalidUpload = errors.New("transfer: invalid upload")
 // Download that names no open handle because it was never opened here.
 var ErrInvalidDownload = errors.New("transfer: invalid download")
 
+// ClosedFileError marks a close failure whose file descriptor is known to be
+// closed. A sink may remove the temporary file when this marker is present.
+type ClosedFileError struct {
+	Err error
+}
+
+func (e *ClosedFileError) Error() string { return e.Err.Error() }
+
+func (e *ClosedFileError) Unwrap() error { return e.Err }
+
+// WriteError marks a destination write failure, including a short write.
+// Its surrounding copy error retains the direction-specific message.
+type WriteError struct {
+	Err error
+}
+
+func (e *WriteError) Error() string { return e.Err.Error() }
+
+func (e *WriteError) Unwrap() error { return e.Err }
+
 // SizeMismatchError is a reader that did not deliver what the caller
 // declared, in either direction. Both are failures: the declared size is
 // what the person and the progress bar were told, and a file of a different

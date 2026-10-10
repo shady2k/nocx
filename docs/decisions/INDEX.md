@@ -142,6 +142,9 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0081 | [Recovery and prompt boundaries are backend-owned, non-authoritative effects](0081-recovery-and-prompt-boundaries-are-backend-owned-non-authoritative-effects.md) | Accepted (2026-10-07; the owner's decision on nocx-zg3k3.17/.18; supplements ADR-0066 and supersedes only ADR-0024 decision 8's renderer-visible nonce mechanism) |
 | 0082 | [The work tracker has one assignment coordinator](0082-the-work-tracker-has-one-assignment-coordinator.md) | Accepted (2026-10-09; owner's workflow decision on nocx-q8yjf.22; no application invariants changed) |
 
+| 0083 | [A native download is complete only after the client promotes it](0083-native-download-commit-is-confirmed-after-the-client-promotes.md) | Accepted (2026-09-28; clarifies ADR-0037 for native receipt) |
+| 0084 | [Native saves pin the destination and join cleanup](0084-native-saves-pin-the-destination-and-join-cleanup.md) | Accepted (2026-10-09; PR #259 hardening; supplements ADR-0083) |
+
 ## Adding one
 
 Take the next free number, name the file after the decision rather than the area, and

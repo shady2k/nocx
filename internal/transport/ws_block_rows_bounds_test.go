@@ -188,10 +188,11 @@ type boundsRecorder struct {
 	sid session.ID
 	ws  *WSServer
 
-	confirmations chan uint64
-	confirmDone   chan struct{}
-	confirmErrors chan error
-	stopConfirm   sync.Once
+	confirmations  chan uint64
+	confirmDone    chan struct{}
+	confirmErrors  chan error
+	stopConfirm    sync.Once
+	confirmStopped bool
 }
 
 func (r *boundsRecorder) onRows(o client.OutputRows) {
@@ -230,7 +231,11 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 	// the helper's retained resend copy only after the store accepts these
 	// rows, and cannot run synchronously on the client's read loop.
 	if upTo, confirm := r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, ""); confirm {
-		r.confirmations <- upTo
+		r.mu.Lock()
+		if !r.confirmStopped {
+			r.confirmations <- upTo
+		}
+		r.mu.Unlock()
 	}
 }
 
@@ -255,7 +260,12 @@ func (r *boundsRecorder) startConfirmations(attached *client.AttachedSession) {
 }
 
 func (r *boundsRecorder) stopConfirmations() {
-	r.stopConfirm.Do(func() { close(r.confirmations) })
+	r.stopConfirm.Do(func() {
+		r.mu.Lock()
+		r.confirmStopped = true
+		close(r.confirmations)
+		r.mu.Unlock()
+	})
 	<-r.confirmDone
 }
 

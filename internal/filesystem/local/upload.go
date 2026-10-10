@@ -31,6 +31,7 @@ package local
 // validated. The renderer still cannot name a SOURCE on this disk (R2).
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -84,20 +85,31 @@ type osFS struct{}
 
 func (osFS) Create(path string) (transfer.RemoteFile, error) {
 	// #nosec G304 — a caller-supplied destination is the feature, not the
-	// oversight. `path` is the sink's join of an Upload the transport
-	// already validated (§5.3: destDir absolute, clean and bounded; name
-	// exactly one path component), reached only through a binding whose
-	// session the connection owns (D15). The write lands wherever that name
-	// resolved at commit time, which §5.3 states as the guarantee and is
-	// the one scp gives.
+	// oversight. The shared sink validates its Upload before joining paths.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, newFileMode) //nolint:gosec // see above
 	if err != nil {
-		// The concrete type must not be returned as a nil interface: a
-		// non-nil transfer.RemoteFile holding a nil *os.File would pass
-		// the sink's error check and then panic on the first Write.
+		// Do not return a non-nil RemoteFile containing a nil *os.File.
 		return nil, err
 	}
-	return f, nil
+	return &syncingFile{file: f}, nil
+}
+
+type syncingFile struct {
+	file interface {
+		transfer.RemoteFile
+		Sync() error
+	}
+}
+
+func (f *syncingFile) Write(p []byte) (int, error) { return f.file.Write(p) }
+
+func (f *syncingFile) Close() error {
+	syncErr := f.file.Sync()
+	closeErr := f.file.Close()
+	if syncErr == nil && closeErr == nil {
+		return nil
+	}
+	return &transfer.ClosedFileError{Err: errors.Join(syncErr, closeErr)}
 }
 
 // PosixRename replaces the destination atomically. os.Rename IS

@@ -20,6 +20,7 @@
 // the operations panel and concludes a failure goes unreported.
 import { afterEach, describe, expect, it } from 'vitest'
 
+import { downloadResultFixture } from './download-fixtures'
 import { downloadSurfaceFor } from './download-surface'
 import { clearToasts, toasts } from '../ui/toast'
 import type { Dispatcher } from '../dispatcher'
@@ -33,7 +34,9 @@ function fakeDispatcher(): {
   const handlers = new Map<string, Set<(p: unknown) => void>>()
   const dispatcher = {
     socket: null,
-    call: () => Promise.resolve({}),
+
+    call: (method: string) =>
+      Promise.resolve(method === 'files.download' ? downloadResultFixture() : {}),
     subscribe(method: string, h: (p: unknown) => void) {
       const set = handlers.get(method) ?? new Set()
       set.add(h)
@@ -87,5 +90,62 @@ describe('one surface per dispatcher', () => {
     expect(downloadSurfaceFor(fakeDispatcher().dispatcher)).not.toBe(
       downloadSurfaceFor(fakeDispatcher().dispatcher),
     )
+  })
+  it('uses the injected native predicate to choose the native saver', async () => {
+    const d = fakeDispatcher()
+    let prepared = 0
+    const nativeSaver = {
+      prepare() {
+        prepared++
+        return Promise.resolve({
+          destination: 'native' as const,
+          save() {
+            return Promise.resolve('saved' as const)
+          },
+          cancel() {},
+          dispose() {},
+        })
+      },
+    }
+    const surface = downloadSurfaceFor(d.dispatcher, {
+      native: () => true,
+      nativeSaver,
+    })
+    await surface.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/a',
+      name: 'a',
+      machine: 'srv',
+    })
+    expect(prepared).toBe(1)
+  })
+
+  it('uses the browser saver when the injected predicate is false', async () => {
+    const d = fakeDispatcher()
+    let prepared = 0
+    const browserSaver = {
+      prepare() {
+        prepared++
+        return Promise.resolve({
+          destination: 'browser' as const,
+          save() {
+            return Promise.resolve('handed-off' as const)
+          },
+          cancel() {},
+          dispose() {},
+        })
+      },
+    }
+    const surface = downloadSurfaceFor(d.dispatcher, {
+      native: () => false,
+      browserSaver,
+    })
+    await surface.flow.fetch({
+      bindingId: 'b1',
+      path: '/srv/a',
+      name: 'a',
+      machine: 'srv',
+    })
+    expect(prepared).toBe(1)
   })
 })

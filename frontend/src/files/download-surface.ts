@@ -25,10 +25,20 @@
 // states in which no backend transfer exists to settle at all.
 
 import type { Dispatcher } from '../dispatcher'
+import {
+  HostDiscardDownload,
+  HostPrepareDownload,
+  HostSaveDownload,
+} from '../../bindings/github.com/shady2k/nocx/wailsapp'
+import { hasWailsWebview } from '../wails-runtime'
 import { showToast } from '../ui/toast'
 import { createDownloadServices, type DownloadServices } from './download-client'
 import { createDownloadFlow, type DownloadFlow } from './download-flow'
-import { createBrowserDownloadSaver } from './download-save'
+import {
+  createBrowserDownloadSaver,
+  createNativeDownloadSaver,
+  type DownloadSaver,
+} from './download-save'
 import { createDownloadStore, type DownloadStore } from './download-store'
 
 export interface DownloadSurface {
@@ -40,13 +50,31 @@ export interface DownloadSurface {
 /** Not exported: `downloadSurfaceFor` is the only way in, because a second
  *  surface for the same dispatcher is the two-stores defect this module
  *  exists to prevent. */
-function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
+export interface DownloadSurfaceOptions {
+  native?: () => boolean
+  browserSaver?: DownloadSaver
+  nativeSaver?: DownloadSaver
+}
+
+function createDownloadSurface(
+  dispatcher: Dispatcher,
+  options: DownloadSurfaceOptions,
+): DownloadSurface {
   const services = createDownloadServices(dispatcher)
   const store = createDownloadStore({ services })
+  const native = options.native ?? hasWailsWebview
+  const saver = native()
+    ? (options.nativeSaver ??
+      createNativeDownloadSaver({
+        prepare: HostPrepareDownload,
+        save: HostSaveDownload,
+        discard: HostDiscardDownload,
+      }))
+    : (options.browserSaver ?? createBrowserDownloadSaver())
   const flow = createDownloadFlow({
     services,
     store,
-    saver: createBrowserDownloadSaver(),
+    saver,
     report: (message, level) => showToast({ message, level }),
   })
   return { services, store, flow }
@@ -57,10 +85,13 @@ function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
  *  surface, while a test that makes its own gets its own. */
 const surfaces = new WeakMap<Dispatcher, DownloadSurface>()
 
-export function downloadSurfaceFor(dispatcher: Dispatcher): DownloadSurface {
+export function downloadSurfaceFor(
+  dispatcher: Dispatcher,
+  options: DownloadSurfaceOptions = {},
+): DownloadSurface {
   const existing = surfaces.get(dispatcher)
   if (existing !== undefined) return existing
-  const created = createDownloadSurface(dispatcher)
+  const created = createDownloadSurface(dispatcher, options)
   surfaces.set(dispatcher, created)
   return created
 }

@@ -5340,8 +5340,11 @@ export class TerminalContent extends BasePaneContent {
     const report = {
       cols: this.cols,
       rows: this.rows,
-      xpixel: dims !== null ? this.cols * dims.width : 0,
-      ypixel: dims !== null ? this.rows * dims.height : 0,
+      // The wire and PTY pixel extents are integers. Round the total extent,
+      // not each cell, so a fractional device-cell metric accumulates no
+      // per-cell rounding drift.
+      xpixel: dims !== null ? Math.round(this.cols * dims.width) : 0,
+      ypixel: dims !== null ? Math.round(this.rows * dims.height) : 0,
     }
     this._lastReport = report
     return report

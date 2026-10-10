@@ -19,6 +19,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise, Create as $Cr
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as downloadsave$0 from "./internal/downloadsave/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as update$0 from "./internal/update/models.js";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -80,6 +83,13 @@ export function HostBounce(): $CancellablePromise<void> {
 }
 
 /**
+ * HostDiscardDownload releases or cancels one opaque prepared destination.
+ */
+export function HostDiscardDownload(handle: string): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostDiscardDownload", handle);
+}
+
+/**
  * HostFocusWindow brings this window to the front. The coordinator asks for
  * it when it has decided a click should land here; the shell only raises.
  */
@@ -98,14 +108,9 @@ export function HostOpenDirectory(): $CancellablePromise<string> {
 }
 
 /**
- * HostOpenFile opens the platform file picker and returns the chosen ABSOLUTE
- * path, or "" when the person cancelled.
- * 
- * It cannot be dismissed from here — the v3 open dialog has no cancel handle
- * once shown — so the call returns only when the person acts. That is the
- * contract transport.DialogService has always documented for a
- * non-cooperative adapter, and the coordinator's capacity-one waiting gate is
- * what keeps a second picker from stacking meanwhile.
+ * HostOpenFile opens the platform file picker and returns the chosen path or
+ * an empty string when the person cancels. It shares bounded admission with
+ * directory and download save prompts.
  */
 export function HostOpenFile(): $CancellablePromise<string> {
     return $Call.ByName("main.WailsApp.HostOpenFile");
@@ -119,6 +124,22 @@ export function HostOpenFile(): $CancellablePromise<string> {
  */
 export function HostOpenUrl(url: string): $CancellablePromise<void> {
     return $Call.ByName("main.WailsApp.HostOpenUrl", url);
+}
+
+/**
+ * HostPrepareDownload presents the native destination picker before a backend transfer exists.
+ */
+export function HostPrepareDownload(suggestedName: string): $CancellablePromise<string> {
+    return $Call.ByName("main.WailsApp.HostPrepareDownload", suggestedName);
+}
+
+/**
+ * HostSaveDownload consumes a prepared destination and reports only its outcome.
+ */
+export function HostSaveDownload(handle: string, ticket: string, size: number): $CancellablePromise<downloadsave$0.Result> {
+    return $Call.ByName("main.WailsApp.HostSaveDownload", handle, ticket, size).then(($result: any) => {
+        return $$createType2($result);
+    });
 }
 
 /**
@@ -163,11 +184,12 @@ export function ReportHealthy(): $CancellablePromise<void> {
  */
 export function ResolveBackend(): $CancellablePromise<$models.BackendResolution> {
     return $Call.ByName("main.WailsApp.ResolveBackend").then(($result: any) => {
-        return $$createType2($result);
+        return $$createType3($result);
     });
 }
 
 // Private type creation functions
 const $$createType0 = update$0.UpdateInfo.createFrom;
 const $$createType1 = $Create.Nullable($$createType0);
-const $$createType2 = $models.BackendResolution.createFrom;
+const $$createType2 = downloadsave$0.Result.createFrom;
+const $$createType3 = $models.BackendResolution.createFrom;

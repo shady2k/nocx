@@ -357,12 +357,12 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await expect(authToken).toHaveValue(/^\{\{secret:secrow:[^}]+\}\}$/)
     await expect(fieldChip(authToken)).toHaveText(proposedAuthName)
 
-    // The chip is renderer state; wait for the persisted request to carry its
-    // handle before sending. The backend sends the file, not the editor draft.
+    // The chip is renderer state; wait for the persisted request to carry both
+    // handles before sending. The backend sends the file, not the editor draft.
     await assertRequestFileContainsOnlyHandles(
       collectionRoot,
-      [SECRET_VALUE, proposedHeaderName],
-      1,
+      [SECRET_VALUE, proposedHeaderName, AUTH_SECRET_VALUE, proposedAuthName],
+      2,
     )
 
     // The second send needs its OWN run as the subject, and until this waited

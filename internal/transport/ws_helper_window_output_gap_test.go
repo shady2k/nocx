@@ -443,7 +443,15 @@ func TestAReadoptResetIsReportedToTheFirstWebSocketAfterTheRingHasPassedIt(t *te
 		t.Fatalf("attach to start the helper command: %v", err)
 	}
 	commandDone := filepath.Join(t.TempDir(), "overflow-done")
-	command := fmt.Sprintf("head -c %d /dev/zero; printf done > %s\n", overflowBytes, shellQuoteForOutputGapTest(commandDone))
+	const drainMarker = "NOCX_OUTPUT_GAP_DRAINED"
+	// Keep the interactive shell alive after the large output finishes. The
+	// test releases this read only after the late WebSocket has attached, so
+	// the marker below is new output from the same live session, not an attempt
+	// to write into a shell that exited while the coordinator was absent.
+	command := fmt.Sprintf(
+		"head -c %d /dev/zero; printf '%s'; printf done > %s; read -r _\n",
+		overflowBytes, drainMarker, shellQuoteForOutputGapTest(commandDone),
+	)
 	if n, writeErr := writer.Write([]byte(command)); writeErr != nil || n != len(command) {
 		t.Fatalf("start detached helper output: wrote %d/%d, err %v", n, len(command), writeErr)
 	}
@@ -456,7 +464,8 @@ func TestAReadoptResetIsReportedToTheFirstWebSocketAfterTheRingHasPassedIt(t *te
 	})
 
 	var beforeReadopt helperclient.SessionEntry
-	waittest.WaitFor(t, "the helper window to reclaim the requested cursor", func() bool {
+	wantWritten := entry.Window.Written + uint64(overflowBytes+len(drainMarker))
+	waittest.WaitFor(t, "the helper window to receive the complete overflow through its sentinel", func() bool {
 		entries, listErr := helper.Sessions(ctx)
 		if listErr != nil {
 			return false
@@ -464,7 +473,7 @@ func TestAReadoptResetIsReportedToTheFirstWebSocketAfterTheRingHasPassedIt(t *te
 		for _, candidate := range entries {
 			if candidate.HostSessionID.Session == entry.HostSessionID.Session {
 				beforeReadopt = candidate
-				return candidate.Window.Base > entry.Window.Base
+				return candidate.Window.Base > entry.Window.Base && candidate.Window.Written >= wantWritten
 			}
 		}
 		return false
@@ -550,6 +559,9 @@ func TestAReadoptResetIsReportedToTheFirstWebSocketAfterTheRingHasPassedIt(t *te
 		}
 		return false
 	})
+	if hostAfter.Exit != nil {
+		t.Fatalf("helper session exited before the late client attached: %+v", hostAfter.Exit)
+	}
 	if hostAfter.Window.Written <= gap.lost {
 		t.Fatalf("host output ended at %d, not after gap width %d", hostAfter.Window.Written, gap.lost)
 	}
@@ -660,6 +672,9 @@ func TestAReadoptResetIsReportedToTheFirstWebSocketAfterTheRingHasPassedIt(t *te
 	// The retained gaps are delivered before any later stream bytes. Cause
 	// the same helper session to emit a fresh marker after the first attach.
 	const afterGapMarker = "NOCX_AFTER_READOPT_GAP_0123456789"
+	if n, writeErr := attached.Write([]byte("\n")); writeErr != nil || n != 1 {
+		t.Fatalf("release the live shell after the deferred gap: wrote %d/1, err %v", n, writeErr)
+	}
 	cmd := fmt.Sprintf("printf '%s\\n'\n", shellPrintfOctalForOutputGapTest(afterGapMarker))
 	if n, writeErr := attached.Write([]byte(cmd)); writeErr != nil || n != len(cmd) {
 		t.Fatalf("write post-gap marker to the helper: wrote %d/%d, err %v", n, len(cmd), writeErr)

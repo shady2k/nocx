@@ -576,7 +576,11 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // The filler is sized from the HOST's own window, read out of its
     // inventory a moment ago — never from the coordinator's replay ring,
     // which is a different bound on a different machine.
-    const markerCommand = longRemoteCommand(gates, hostBefore.launch.windowBytes + 64 * 1024)
+    const markerCommand = longRemoteCommand(
+      gates,
+      hostBefore.launch.windowBytes + 64 * 1024,
+      256 * 1024,
+    )
     await clickIntoEditor(first)
     await first.keyboard.type(markerCommand)
     await first.keyboard.press('Enter')

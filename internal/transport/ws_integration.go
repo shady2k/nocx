@@ -122,12 +122,22 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 	if sid == "" || shell == "" {
 		return
 	}
+	// A lifecycle loss may arrive after the helper has spawned the shell but
+	// before this open has registered its session state. Take the same lock
+	// order as NoteIntegrationLoss so that either the registration consumes
+	// the pending cause or the reporter observes the state and applies it.
+	s.lifecycleMu.Lock()
 	s.integrationMu.Lock()
-	defer s.integrationMu.Unlock()
 	if s.integrations == nil {
 		s.integrations = make(map[session.ID]*integrationStatus)
 	}
 	s.integrations[sid] = &integrationStatus{shell: shell, status: status, reason: reason}
+	s.integrationMu.Unlock()
+	if cause := s.pendingSessionLoss[sid]; cause != "" {
+		delete(s.pendingSessionLoss, sid)
+		_, _, _ = s.applyIntegrationLoss(sid, cause)
+	}
+	s.lifecycleMu.Unlock()
 }
 
 // registerOpenedIntegration enters a session this open has just produced into
@@ -318,20 +328,59 @@ func (s *WSServer) AwaitIntegration(ctx context.Context, sid session.ID) (Integr
 func (s *WSServer) NoteIntegrationLoss(lane lifecycle.LaneID, cause string) {
 	s.lifecycleMu.Lock()
 	sid, ok := s.lifecycleLanes[lane]
-	s.lifecycleMu.Unlock()
 	if !ok {
+		// Only a lane explicitly reserved by a helper open can be pending.
+		// Unrelated or already-abandoned lanes remain ignored.
+		if _, pending := s.pendingLifecycleLanes[lane]; pending && cause != LossCauseClosed {
+			if s.pendingLifecycleLoss == nil {
+				s.pendingLifecycleLoss = make(map[lifecycle.LaneID]string)
+			}
+			if s.pendingLifecycleLoss[lane] == "" {
+				s.pendingLifecycleLoss[lane] = cause
+			}
+		}
+		s.lifecycleMu.Unlock()
 		return
 	}
-	// THE END HOLD'S BOUND (nocx-zg3k3.5.11 Round 4): the lifecycle channel
-	// is what carries the replayed window a hold waits for, so its loss is
-	// the one event that can leave a hold waiting forever. Release every
-	// hold for the session — the exit proceeds, and the boundary settle
-	// consults whatever the kernel managed to record before the loss.
-	s.releaseSessionEndHolds(sid)
+	s.lifecycleMu.Unlock()
+	s.applyOrQueueIntegrationLoss(lane, sid, cause)
+}
+
+// applyOrQueueIntegrationLoss keeps a loss received during open until the
+// session enters the integration axis. It revalidates the lane under
+// lifecycleMu because the caller may have been descheduled after its initial
+// lane lookup while teardown removed that mapping.
+func (s *WSServer) applyOrQueueIntegrationLoss(lane lifecycle.LaneID, sid session.ID, cause string) {
+	s.lifecycleMu.Lock()
+	if current, ok := s.lifecycleLanes[lane]; !ok || current != sid {
+		s.lifecycleMu.Unlock()
+		return
+	}
 	status, reason, changed := s.applyIntegrationLoss(sid, cause)
+	if !changed && cause != LossCauseClosed {
+		s.integrationMu.Lock()
+		_, registered := s.integrations[sid]
+		s.integrationMu.Unlock()
+		if !registered {
+			if s.pendingSessionLoss == nil {
+				s.pendingSessionLoss = make(map[session.ID]string)
+			}
+			if s.pendingSessionLoss[sid] == "" {
+				s.pendingSessionLoss[sid] = cause
+			}
+		}
+	}
+	s.lifecycleMu.Unlock()
+	// The lifecycle channel carries the replay window a hold waits for. A
+	// loss releases it even when the integration axis has already answered.
+	s.releaseSessionEndHolds(sid)
 	if !changed {
 		return
 	}
+	s.publishIntegrationLoss(sid, cause, status, reason)
+}
+
+func (s *WSServer) publishIntegrationLoss(sid session.ID, cause, status string, reason ssh.RefusalReason) {
 	s.log.Info("session integration degraded",
 		"session", sid, "status", status, "reason", string(reason), "cause", cause)
 	s.emitIntegration(sid)

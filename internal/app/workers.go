@@ -1309,21 +1309,26 @@ type workerEnrolments struct {
 	// byPane arms the rendezvous by pane id, before a session (and its id)
 	// exist. An entry is consumed (deleted) the first time enrolled resolves
 	// through it, exactly once, because a pane is opened for one participant.
-	byPane   map[string]workers.ParticipantID
-	waiters  map[workers.ParticipantID]chan workers.Liveness
-	arrived  map[workers.ParticipantID]workers.Liveness
-	sessions sessionCloser
-	log      log.Logger
+	byPane map[string]workers.ParticipantID
+	// recordLaunchPanes marks restored workers whose first command must go
+	// through agentLaunchService's configured record rather than workers.spawn's
+	// literal-command exception.
+	recordLaunchPanes map[string]struct{}
+	waiters           map[workers.ParticipantID]chan workers.Liveness
+	arrived           map[workers.ParticipantID]workers.Liveness
+	sessions          sessionCloser
+	log               log.Logger
 }
 
 func newWorkerEnrolments(lg log.Logger, sessions sessionCloser) *workerEnrolments {
 	return &workerEnrolments{
-		bySess:   make(map[session.ID]workers.ParticipantID),
-		byPane:   make(map[string]workers.ParticipantID),
-		waiters:  make(map[workers.ParticipantID]chan workers.Liveness),
-		arrived:  make(map[workers.ParticipantID]workers.Liveness),
-		sessions: sessions,
-		log:      lg,
+		bySess:            make(map[session.ID]workers.ParticipantID),
+		byPane:            make(map[string]workers.ParticipantID),
+		recordLaunchPanes: make(map[string]struct{}),
+		waiters:           make(map[workers.ParticipantID]chan workers.Liveness),
+		arrived:           make(map[workers.ParticipantID]workers.Liveness),
+		sessions:          sessions,
+		log:               lg,
 	}
 }
 
@@ -1333,9 +1338,26 @@ func newWorkerEnrolments(lg log.Logger, sessions sessionCloser) *workerEnrolment
 // on the pane rather than the session is what removes the window instead of
 // narrowing it.
 func (e *workerEnrolments) armFor(p workers.ParticipantID, paneID string) {
+	e.armForMode(p, paneID, false)
+}
+
+// armForResume preserves the worker rendezvous but tells the launch resolver
+// that this pane's first agent must use the configured agent record. Unlike a
+// fresh workers.spawn, a restart must not bypass the stored executable and
+// environment while applying its recorded resume arguments.
+func (e *workerEnrolments) armForResume(p workers.ParticipantID, paneID string) {
+	e.armForMode(p, paneID, true)
+}
+
+func (e *workerEnrolments) armForMode(p workers.ParticipantID, paneID string, configuredLaunch bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.byPane[paneID] = p
+	if configuredLaunch {
+		e.recordLaunchPanes[paneID] = struct{}{}
+	} else {
+		delete(e.recordLaunchPanes, paneID)
+	}
 	e.waiters[p] = make(chan workers.Liveness, 1)
 }
 
@@ -1357,6 +1379,7 @@ func (e *workerEnrolments) enrolled(sid session.ID, lane string) {
 					p, ok = pp, true
 					e.bySess[sid] = p
 					delete(e.byPane, pane)
+					delete(e.recordLaunchPanes, pane)
 				}
 			}
 		}
@@ -1408,6 +1431,35 @@ func (e *workerEnrolments) armedForSession(sid session.ID) bool {
 	}
 	_, ok := e.byPane[sess.PaneID()]
 	return ok
+}
+
+// isLiteralWorkerLaunch distinguishes the fresh-spawn exception from a
+// resumed worker's first launch. Both are worker enrolments, but only a
+// fresh spawn owns a literal command; a restart's initial command must resolve
+// through the agent record. Once either launch enrols, the next command is the
+// normal worker-literal case.
+func (e *workerEnrolments) isLiteralWorkerLaunch(sid session.ID) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, enrolled := e.bySess[sid]; enrolled {
+		return true
+	}
+	if e.sessions == nil {
+		return false
+	}
+	sess, err := e.sessions.Get(sid)
+	if err != nil {
+		return false
+	}
+	pane := sess.PaneID()
+	if _, armed := e.byPane[pane]; !armed {
+		return false
+	}
+	_, configured := e.recordLaunchPanes[pane]
+	return !configured
 }
 
 // participantFor answers which participant a session speaks for, or false for
@@ -1471,6 +1523,7 @@ func (e *workerEnrolments) Withdraw(_ context.Context, p workers.ParticipantID) 
 	for pane, have := range e.byPane {
 		if have == p {
 			delete(e.byPane, pane)
+			delete(e.recordLaunchPanes, pane)
 		}
 	}
 	delete(e.waiters, p)
@@ -1545,7 +1598,10 @@ func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 	p.onEnrol = func(sessionID, lane string) { e.enrolled(session.ID(sessionID), lane) }
 	p.isWorkerLaunch = func(lane lifecycle.LaneID) bool {
 		sid, ok := p.sessions.lookup(lane)
-		return ok && e.armedForSession(session.ID(sid))
+		if !ok {
+			return false
+		}
+		return e.armedForSession(session.ID(sid)) && e.isLiteralWorkerLaunch(session.ID(sid))
 	}
 	return p
 }

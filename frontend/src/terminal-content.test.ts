@@ -2701,9 +2701,8 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
   const LOST_WITH_RECOVERY = {
     lane: 'lane-1',
     lifecycle: 'lost',
-    recovery: { fence: 'ab'.repeat(32), generation: 'ab'.repeat(32) },
+    recovery: { episodeId: 'rec-' + 'ab'.repeat(16), state: 'pending' as const },
   } as const
-  const WRONG_FENCE = 'cd'.repeat(32)
 
   it('a lost fact with a recovery contract suppresses the restore-editor action across the whole span', async () => {
     const client = makeClient()
@@ -2730,30 +2729,26 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     }
   })
 
-  it('only the exact pre-provisioned fence is acknowledged, once, with the session id and generation', async () => {
+  it('acknowledges only after the current episode is sighted, by episodeId', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      const renderer = rendererOf(content)
       const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
       handler(LOST_WITH_RECOVERY)
-
-      // A wrong fence — a hostile byte, a different episode — changes
-      // nothing: the renderer never pattern-matches, it matches the nonce.
-      renderer._fireRecoveryFence(WRONG_FENCE)
       expect(call).not.toHaveBeenCalledWith('lifecycle.recoverAck', expect.anything())
-
-      // The shell's one-shot fence (the exact pre-provisioned nonce)
-      // triggers exactly one acknowledgement, carrying only the session id
-      // and the generation — nothing else.
-      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
-      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence) // a repeat sighting must not double-ack
+      const sighted = {
+        ...LOST_WITH_RECOVERY,
+        recovery: { ...LOST_WITH_RECOVERY.recovery, state: 'sighted' as const },
+      }
+      handler(sighted)
+      await Promise.resolve()
+      await Promise.resolve()
       const sid = client._sessions[0].sessionId
       expect(call).toHaveBeenCalledTimes(1)
       expect(call).toHaveBeenCalledWith('lifecycle.recoverAck', {
         sessionId: sid,
-        generation: LOST_WITH_RECOVERY.recovery.generation,
+        episodeId: LOST_WITH_RECOVERY.recovery.episodeId,
       })
     } finally {
       teardown()
@@ -2769,7 +2764,10 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       const handler = lifecycleHandler(client)
       const setAction = vi.spyOn(ed, 'setRecoveryAction')
       handler(LOST_WITH_RECOVERY)
-      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      handler({
+        ...LOST_WITH_RECOVERY,
+        recovery: { ...LOST_WITH_RECOVERY.recovery, state: 'sighted' },
+      })
       await Promise.resolve()
       await Promise.resolve()
       // The refusal left the episode pending: the action stays suppressed.
@@ -2806,7 +2804,11 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       const first = client._sessions[0]
       const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
       firstHandler({ ...LOST_WITH_RECOVERY, sessionId: first.sessionId })
-      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      firstHandler({
+        ...LOST_WITH_RECOVERY,
+        sessionId: first.sessionId,
+        recovery: { ...LOST_WITH_RECOVERY.recovery, state: 'sighted' },
+      })
       expect(pending).toHaveLength(1)
 
       const onExit = first.onExit.mock.calls[0]?.[0] as
@@ -2819,7 +2821,11 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       const second = client._sessions[1]
       const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
       secondHandler({ ...LOST_WITH_RECOVERY, sessionId: second.sessionId })
-      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      secondHandler({
+        ...LOST_WITH_RECOVERY,
+        sessionId: second.sessionId,
+        recovery: { ...LOST_WITH_RECOVERY.recovery, state: 'sighted' },
+      })
       expect(
         pending,
         'a fresh bind must claim its recovery acknowledgement without inheriting the old bind',
@@ -2843,8 +2849,8 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       await Promise.resolve()
       expect(recoveryChip?.style.display).toBe('none')
       const freshRecovery = {
-        fence: '12'.repeat(32),
-        generation: 'ef'.repeat(32),
+        episodeId: 'rec-' + 'ef'.repeat(16),
+        state: 'pending' as const,
       }
       secondHandler({
         sessionId: second.sessionId,
@@ -2852,7 +2858,11 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
         lifecycle: 'lost',
         recovery: freshRecovery,
       })
-      rendererOf(content)._fireRecoveryFence(freshRecovery.fence)
+      secondHandler({
+        ...LOST_WITH_RECOVERY,
+        sessionId: second.sessionId,
+        recovery: { ...freshRecovery, state: 'sighted' },
+      })
       expect(pending).toHaveLength(3)
     } finally {
       teardown()

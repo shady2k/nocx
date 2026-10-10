@@ -1343,7 +1343,7 @@ func effectPayload(e Effect) payload {
 // DeliveryUnclassified and is REFUSED rather than delivered under a guess.
 func classOfEffect(k EffectKind) DeliveryClass {
 	switch k {
-	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary:
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary, EffectRecovery:
 		return DeliveryAtMostOnce
 	default:
 		return DeliveryUnclassified

@@ -155,11 +155,12 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	adapter, err := lifecyclechannel.NewAdoptedStream(
 		log.NewSlogAdapter(rp.registry.log), driveKernel, coordinatorConn,
 		lifecyclechannel.Launch{
-			Lane:       lifecycle.LaneID(launch.Lane),
-			Domain:     lifecycle.DomainID(launch.Domain),
-			Epoch:      launch.Epoch,
-			Capability: launch.Capability,
-			Recovery:   launch.Recovery,
+			Lane:              lifecycle.LaneID(launch.Lane),
+			Domain:            lifecycle.DomainID(launch.Domain),
+			Epoch:             launch.Epoch,
+			Capability:        launch.Capability,
+			Recovery:          launch.Recovery,
+			RecoveryEpisodeID: launch.RecoveryEpisodeID,
 		},
 		lifecyclechannel.WithLossReporter(rp.registry.reportLifecycleLoss),
 		lifecyclechannel.WithFrameScope(cursor.applyFrame))

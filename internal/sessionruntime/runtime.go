@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -217,6 +218,11 @@ type Session struct {
 	// nextEffect mints the identity an effect's duplicate policy is stated
 	// over. The runtime mints it, never the consumer.
 	nextEffect EffectID
+	// Recovery expectation is private session state. The nonce is the exact
+	// authenticated bootstrap value and is never copied into a delivered effect.
+	recoveryNonce     []byte
+	recoveryEpisodeID string
+	recoverySighted   bool
 
 	// ingestWork is the work the runtime's OWN ingest path has spent, one unit
 	// per byte it examined, and ingestLost is what it discarded. Both are
@@ -1225,6 +1231,17 @@ func (s *Session) Ingest(b []byte) error {
 		// fence emits, exactly as they would have for one combined feed.
 		s.drainObservationLocked()
 		for _, e := range s.emulator.Effects() {
+			if e.Kind == emulator.EffectRecoverySighting {
+				if len(s.recoveryNonce) == len(e.Body) && len(e.Body) > 0 && bytes.Equal(s.recoveryNonce, e.Body) && !s.recoverySighted && s.recoveryEpisodeID != "" {
+					s.recoverySighted = true
+					s.nextEffect++
+					effect := Effect{ID: s.nextEffect, At: s.inc, Kind: EffectRecovery, EpisodeID: s.recoveryEpisodeID}
+					if err := s.deliverLocked(effectDelivery(effect)); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if e.Kind == emulator.EffectFence {
 				// The join: a fence the emulator drained LOCATES the
 				// authenticated half of the rendezvous (ADR-0024 decision 1)
@@ -1904,7 +1921,7 @@ func effectDelivery(e Effect) queued {
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
 func deliveryClassOf(k EffectKind) DeliveryClass {
 	switch k {
-	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary:
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary, EffectRecovery:
 		return DeliveryAtMostOnce
 	default:
 		return DeliveryUnclassified
@@ -2273,4 +2290,40 @@ func (s *Session) reportLoss(c *subscriber, p queued) {
 		c.coalesced++
 	}
 	c.stale = true
+}
+
+func validRecoveryEpisodeID(id string) bool {
+	if len(id) != 36 || !strings.HasPrefix(id, "rec-") {
+		return false
+	}
+	for _, c := range id[4:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// SetRecoveryExpectation arms one live recovery episode. nonce is the private
+// 64-byte lowercase-hex bootstrap value; only a matching emulator sighting is
+// converted to a public episodeId effect. Re-arming a new episode replaces the
+// old one, so stale markers cannot match it.
+func (s *Session) SetRecoveryExpectation(nonce, episodeID string) error {
+	decoded, err := hex.DecodeString(nonce)
+	if err != nil || len(nonce) != 64 || len(decoded) != 32 || hex.EncodeToString(decoded) != nonce || !validRecoveryEpisodeID(episodeID) {
+		return errors.New("sessionruntime: invalid recovery expectation")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryNonce = []byte(nonce)
+	s.recoveryEpisodeID = episodeID
+	s.recoverySighted = false
+	return nil
+}
+
+// RecoverySighted reports the durable runtime record for the exact episode.
+func (s *Session) RecoverySighted(episodeID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return episodeID != "" && s.recoveryEpisodeID == episodeID && s.recoverySighted
 }

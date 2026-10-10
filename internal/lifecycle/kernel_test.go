@@ -1388,11 +1388,26 @@ func TestRecoverLaneLostToNativeOnly(t *testing.T) {
 	if err := k.TransportLost("T"); err != nil {
 		t.Fatal(err)
 	}
+	// Wrong or stale evidence cannot alter durable recovery state.
+	st, _ := k.State("L")
+	if err := k.SightRecovery("L", "rec-ffffffffffffffffffffffffffffffff"); !errors.Is(err, ErrNotLost) {
+		t.Fatalf("wrong episode sighting = %v, want ErrNotLost", err)
+	}
+	if got, _ := k.State("L"); got.RecoverySighted {
+		t.Fatal("wrong episode changed sighted state")
+	}
+	if err := k.RecoverLane("L"); !errors.Is(err, ErrNotLost) {
+		t.Fatalf("ack before sighting = %v, want ErrNotLost", err)
+	}
+	// A matching backend sighting is recorded without changing authority.
+	if err := k.SightRecovery("L", st.RecoveryEpisodeID); err != nil {
+		t.Fatalf("SightRecovery: %v", err)
+	}
 	// The ack lands: Lost → Native.
 	if err := k.RecoverLane("L"); err != nil {
 		t.Fatalf("RecoverLane: %v", err)
 	}
-	st := mustState(t, k, "L")
+	st = mustState(t, k, "L")
 	if st.Lifecycle != LifecycleNative {
 		t.Fatalf("lane after recover = %v, want Native", st.Lifecycle)
 	}

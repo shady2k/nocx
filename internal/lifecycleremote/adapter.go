@@ -132,12 +132,13 @@ type TunnelConn interface {
 // The bearer travels INBOUND only. Frames this adapter sends carry none
 // (nocx-aqz7o) — see lifecyclecodec.Encode.
 type Config struct {
-	Lane       lifecycle.LaneID
-	Domain     lifecycle.DomainID
-	Epoch      uint64
-	Port       int
-	Capability string // 64 lowercase hex chars
-	Recovery   string // 64 lowercase hex chars; the one-shot recovery fence
+	Lane              lifecycle.LaneID
+	Domain            lifecycle.DomainID
+	Epoch             uint64
+	Port              int
+	Capability        string // 64 lowercase hex chars
+	Recovery          string // 64 lowercase hex chars; the one-shot recovery fence
+	RecoveryEpisodeID string // independent non-secret runtime correlation id
 }
 
 // LossCause names which of the adapter's loss paths fired, and it is the
@@ -243,17 +244,18 @@ func WithMaxCandidates(n int) Option {
 // lifecycle.Port (the outbound half the kernel sends accept and
 // refresh_request over) and drives the inbound half through the kernel.
 type Adapter struct {
-	log        log.Logger
-	kernel     Kernel
-	id         lifecycle.TransportID
-	lane       lifecycle.LaneID
-	domain     lifecycle.DomainID
-	epoch      uint64
-	capability lifecycle.Capability
-	recovery   lifecycle.FenceNonce
-	tc         TunnelConn
-	ln         net.Listener
-	port       int
+	log               log.Logger
+	kernel            Kernel
+	id                lifecycle.TransportID
+	lane              lifecycle.LaneID
+	domain            lifecycle.DomainID
+	epoch             uint64
+	capability        lifecycle.Capability
+	recovery          lifecycle.FenceNonce
+	recoveryEpisodeID string
+	tc                TunnelConn
+	ln                net.Listener
+	port              int
 
 	helloTimeout  time.Duration
 	maxCandidates int
@@ -356,6 +358,7 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	a.epoch = h.Epoch
 	a.capability = h.Capability
 	a.recovery = h.Recovery
+	a.recoveryEpisodeID = h.RecoveryEpisodeID
 	log.Info("lifecycle remote channel established",
 		"transport", a.id, "lane", a.lane, "domain", h.Domain, "epoch", h.Epoch, "port", port)
 
@@ -370,12 +373,13 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	go a.acceptLoop()
 	go a.watchLoss()
 	return a, Config{
-		Lane:       a.lane,
-		Domain:     a.domain,
-		Epoch:      a.epoch,
-		Port:       port,
-		Capability: hex.EncodeToString(a.capability[:]),
-		Recovery:   hex.EncodeToString(a.recovery[:]),
+		Lane:              a.lane,
+		Domain:            a.domain,
+		Epoch:             a.epoch,
+		Port:              port,
+		Capability:        hex.EncodeToString(a.capability[:]),
+		Recovery:          hex.EncodeToString(a.recovery[:]),
+		RecoveryEpisodeID: a.recoveryEpisodeID,
 	}, nil
 }
 

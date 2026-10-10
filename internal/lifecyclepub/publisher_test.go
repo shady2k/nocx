@@ -2,7 +2,6 @@ package lifecyclepub_test
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"reflect"
 	"sync"
@@ -589,9 +588,16 @@ func TestPublisherRecoveryProjection(t *testing.T) {
 	if lost.Lifecycle != lifecyclepub.LifecycleLost {
 		t.Fatalf("fact = %+v, want lost", lost)
 	}
-	wantNonce := hex.EncodeToString(h.Recovery[:])
-	if lost.Recovery == nil || lost.Recovery.Fence != wantNonce || lost.Recovery.Generation != wantNonce {
-		t.Fatalf("lost fact recovery = %+v, want fence+generation %s", lost.Recovery, wantNonce)
+	if lost.Recovery == nil || lost.Recovery.EpisodeID != h.RecoveryEpisodeID || lost.Recovery.State != "pending" {
+		t.Fatalf("lost fact recovery = %+v, want pending non-secret episode %s", lost.Recovery, h.RecoveryEpisodeID)
+	}
+	if err := pub.SightRecovery("L", h.RecoveryEpisodeID); err != nil {
+		t.Fatalf("SightRecovery: %v", err)
+	}
+	facts = r.all()
+	sighted := facts[len(facts)-1]
+	if sighted.Recovery == nil || sighted.Recovery.State != "sighted" || sighted.Recovery.EpisodeID != h.RecoveryEpisodeID {
+		t.Fatalf("sighting fact = %+v", sighted)
 	}
 
 	if err := pub.RecoverLane("L"); err != nil {

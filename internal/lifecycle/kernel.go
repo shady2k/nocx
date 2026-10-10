@@ -169,15 +169,21 @@ func (k *Kernel) RequestDomain(lane LaneID, parent *DomainID, t TransportID) (Do
 	if err != nil {
 		return DomainHandle{}, err
 	}
+	recoveryEpisodeRandom, err := k.randomHex(16)
+	if err != nil {
+		return DomainHandle{}, err
+	}
+	recoveryEpisodeID := "rec-" + recoveryEpisodeRandom
 	d := &Domain{
-		ID:         DomainID("dom-" + domHex),
-		Epoch:      k.registry.nextEpoch(),
-		Parent:     parentID,
-		Lane:       lane,
-		Transport:  t,
-		State:      DomainPending,
-		capability: capability,
-		recovery:   recovery,
+		ID:                DomainID("dom-" + domHex),
+		Epoch:             k.registry.nextEpoch(),
+		Parent:            parentID,
+		Lane:              lane,
+		Transport:         t,
+		State:             DomainPending,
+		capability:        capability,
+		recovery:          recovery,
+		recoveryEpisodeID: recoveryEpisodeID,
 	}
 	k.registry.Register(d)
 	// The lane mirrors the domain's recovery fence: the domain dies on
@@ -186,7 +192,9 @@ func (k *Kernel) RequestDomain(lane LaneID, parent *DomainID, t TransportID) (Do
 	// establishment overwrites it — a new epoch, a new nonce, and a late
 	// ack from the old episode can no longer match.
 	ls.recoveryNonce = d.recovery
-	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery}, nil
+	ls.recoveryEpisodeID = d.recoveryEpisodeID
+	ls.recoverySighted = false
+	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery, RecoveryEpisodeID: d.recoveryEpisodeID}, nil
 }
 
 // Ingest delivers one authenticated envelope from a transport. Validation
@@ -424,6 +432,22 @@ func (k *Kernel) EstablishmentTimeout(domain DomainID) error {
 	return nil
 }
 
+// SightRecovery records the marker sighting for the exact current Lost episode.
+// It changes no lifecycle authority and is idempotent for the same episode.
+func (k *Kernel) SightRecovery(lane LaneID, episodeID string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ls, ok := k.lanes[lane]
+	if !ok {
+		return ErrUnknownLane
+	}
+	if ls.lifecycle != LifecycleLost || episodeID == "" || ls.recoveryEpisodeID != episodeID {
+		return ErrNotLost
+	}
+	ls.recoverySighted = true
+	return nil
+}
+
 // RecoverLane completes a restoration acknowledgement — decision 8's
 // composite ACK, once the renderer has both matched the shell's one-shot
 // recovery fence on the pty and applied the conventional presentation. A
@@ -441,6 +465,9 @@ func (k *Kernel) RecoverLane(lane LaneID) error {
 	}
 	switch ls.lifecycle {
 	case LifecycleLost:
+		if !ls.recoverySighted {
+			return ErrNotLost
+		}
 		k.setLifecycle(ls, LifecycleNative, "", "")
 		return nil
 	case LifecycleNative:
@@ -516,12 +543,14 @@ func (k *Kernel) State(lane LaneID) (LaneSnapshot, error) {
 		return LaneSnapshot{}, ErrUnknownLane
 	}
 	snap := LaneSnapshot{
-		Lane:          lane,
-		Lifecycle:     ls.lifecycle,
-		Domain:        ls.lifecycleDomain,
-		Attempt:       ls.lifecycleAttempt,
-		Stack:         append([]DomainID(nil), ls.stack...),
-		RecoveryNonce: ls.recoveryNonce,
+		Lane:              lane,
+		Lifecycle:         ls.lifecycle,
+		Domain:            ls.lifecycleDomain,
+		Attempt:           ls.lifecycleAttempt,
+		Stack:             append([]DomainID(nil), ls.stack...),
+		RecoveryNonce:     ls.recoveryNonce,
+		RecoveryEpisodeID: ls.recoveryEpisodeID,
+		RecoverySighted:   ls.recoverySighted,
 	}
 	for _, att := range k.attempts {
 		if att.State != AttemptOpen {
@@ -1377,6 +1406,8 @@ func (k *Kernel) setLifecycle(ls *laneState, st LifecycleState, d DomainID, att 
 		// This clears one backend copy — the one whose PURPOSE has ended —
 		// and claims nothing about the others.
 		ls.recoveryNonce = FenceNonce{}
+		ls.recoveryEpisodeID = ""
+		ls.recoverySighted = false
 	}
 }
 
@@ -1510,6 +1541,12 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // adopted with it: it belonged to the dead kernel, and its outcome comes back
 // from the bytes (nocx-k6p18.6), which is the existing answer to that half.
 func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability Capability, recovery FenceNonce, t TransportID) (DomainHandle, error) {
+	return k.AdoptDomainWithEpisode(lane, id, epoch, capability, recovery, "", t)
+}
+
+// AdoptDomainWithEpisode preserves the helper runtime's private recovery
+// expectation across coordinator replacement.
+func (k *Kernel) AdoptDomainWithEpisode(lane LaneID, id DomainID, epoch uint64, capability Capability, recovery FenceNonce, episodeID string, t TransportID) (DomainHandle, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if _, ok := k.ports[t]; !ok {
@@ -1528,15 +1565,25 @@ func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability 
 	if ls.top() != "" {
 		return DomainHandle{}, ErrLaneBusy
 	}
+	if episodeID == "" {
+		episodeRandom, err := k.randomHex(16)
+		if err != nil {
+			return DomainHandle{}, err
+		}
+		episodeID = "rec-" + episodeRandom
+	} else if !recoveryEpisodeIDValid(episodeID) {
+		return DomainHandle{}, ErrInvalidArgument
+	}
 	d := &Domain{
-		ID:         id,
-		Epoch:      epoch,
-		Lane:       lane,
-		Transport:  t,
-		State:      DomainEstablished,
-		capability: capability,
-		recovery:   recovery,
-		adopted:    true,
+		ID:                id,
+		Epoch:             epoch,
+		Lane:              lane,
+		Transport:         t,
+		State:             DomainEstablished,
+		capability:        capability,
+		recovery:          recovery,
+		recoveryEpisodeID: episodeID,
+		adopted:           true,
 	}
 	k.registry.Register(d)
 	// The adopted epoch came from another process's counter. Lifting ours
@@ -1544,7 +1591,21 @@ func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability 
 	// asks for across the two processes, not merely within this one.
 	k.registry.adoptEpoch(epoch)
 	ls.recoveryNonce = recovery
+	ls.recoveryEpisodeID = episodeID
+	ls.recoverySighted = false
 	ls.stack = append(ls.stack, d.ID)
 	k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
-	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery}, nil
+	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery, RecoveryEpisodeID: d.recoveryEpisodeID}, nil
+}
+
+func recoveryEpisodeIDValid(id string) bool {
+	if len(id) != 36 || id[:4] != "rec-" {
+		return false
+	}
+	for _, c := range id[4:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

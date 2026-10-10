@@ -1,7 +1,7 @@
 # Native download hardening
 
 Date: 2026-10-09. Change: PR #259, `nocx-9le.8.4`.
-Status: implementation design for the owner-requested review fixes; not acceptance evidence.
+Status: implemented owner-requested review fixes; the checks below are implementation evidence, not stage acceptance.
 
 ## Requirements — Mary / John roles
 
@@ -50,7 +50,7 @@ Keep deterministic consumer-visible regressions, run affected Go tests with race
 
 ## Documentation — Paige role
 
-Append ADR-0084 without rewriting accepted decisions; fix the native ADR's numbering collision and its index/architecture references. Describe pinned destinations, private native files, joined shutdown, cancellation and ACK/timeout precedence. Keep wire schemas unchanged unless a real contract change is found. Publish only this work's tracker rows; leave user changes and unrelated tracker debt alone. Update PR #259 without merge. Tracker acceptance/closure waits for the owner's merge.
+Append ADR-0084 without rewriting accepted decisions; fix the native ADR's numbering collision and its index/architecture references. Describe pinned destinations, private native files, joined shutdown, cancellation and ACK/timeout precedence. Keep wire schemas unchanged unless a real contract change is found. Reconcile incoming main through the documented lossless tracker sync, preserving database-only work, comments and audit history; publish the WHOLE canonical export as required by `docs/agents/backlog.md`, never splice per-issue rows from different comment-ID namespaces. Leave unrelated tasks and user files unchanged. Update PR #259 without merge. Tracker acceptance/closure waits for the owner's merge.
 
 ## Out
 
@@ -63,3 +63,15 @@ The owner chose to remove the critical frontend dependency findings in this MR. 
 Raise SolidJS's supported 1.x minimum to 1.9.17 and resolve a patched seroval. Move Vitest only to the minimum fixed 4.1.11 line, not the unrelated latest major 5. Node 24 and existing Vite 7 meet the documented requirements. Preserve environments, mock semantics where required by consumer-visible tests, suite selection and timeouts. Do not apply a blanket audit fix, add overrides/shims, or change unrelated direct dependencies. Verify the full frontend/type/lint/build suites, authenticated audit with zero critical findings, and the actual runtime surface after the update.
 
 Vitest 4 requires mocked constructors to use ordinary functions or classes, not arrow implementations. Keep the existing command-output and reclaim/write-barrier behavior checks while migrating those constructor callbacks. Typed mocks use their owning port/session contracts and named result types; no concrete function's inferred `ReturnType` becomes a published contract.
+
+## Owner-held integration prerequisite
+
+The owner chose to keep the existing output-bounds repair `nocx-xn63t.6.21` (submitted in PR #267) separate, rather than importing its helper row-accounting changes into this download MR. A missing end marker at 200×50 still blocks the full CI gate; a narrower native/frontend pass is not stage acceptance. Merge readiness requires that prerequisite on main and green assembled checks, including the unresolved full-package app/content timeout evidence.
+
+The gate also exposed two bounded test-fixture defects repaired here: serialize the output-bounds recorder's confirmation send and shutdown so teardown cannot race channel closure, and isolate the interactive-shell close test's HOME through `storagetest.IsolateWithHome`, registering cleanup before waiting for the prompt. Keep the original geometry, shell-exit assertions, deadlines and test selection. No helper-output, SQLite pool/VFS or timeout policy change is part of these repairs.
+
+## Receipt prerequisite and fresh-main integration
+
+The owner approved a separate upstream receipt-locator repair (`nocx-q8yjf.23`), now proposed in `shady2k/skills#28`. The canonical source CLI measures the real local OMP transcript from this project's dedicated non-Git workspace, established through its actual checkout. It refuses arbitrary children, foreign Git roots and historical missing-clone hints; unreadable identity is not absence. Neither `--unknown`, `--basis`, transcript edits, cache forks nor gate exemptions were used. Node 24's complete helper suite passed (147 tests plus 5 pi tests and selftests); an actual EACCES smoke and independent security follow-up cover the fail-closed boundary. Upstream acceptance/release remains pending.
+
+The download branch integrates main `ee8137841`, preserving its critical outbound FIFO and lifecycle/recovery vocabulary. After integration, frontend typecheck, 7,214 tests plus 76 lint-fixture tests, schema drift checks and production build passed. The receiver race suite passed (1.406s), rooted local filesystem race suite passed (1.822s), and selected native/download, critical-capacity, saturated-outbound and lifecycle replay transport regressions passed under race (50.159s). An actual receiver/HTTP/rooted-filesystem smoke saved 2,258,480 matching bytes at 0600 after parent substitution, left the symlink victim unchanged, cancelled a discarded handle without another GET, and joined cleanup with no temporary files. The full transport package still failed output-bounds and reached its 10-minute deadline; selected passes do not replace that red result. Earlier GTK/browser smoke and three killed mutations apply to the implemented download repair, not a claimed all-platform or full-CI acceptance of fresh main. The automated document acceptance gate is not installed. Full CI, the separate helper prerequisite, unresolved full-package timeout evidence and native macOS proof remain explicit acceptance limits.

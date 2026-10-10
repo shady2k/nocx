@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { parseOsc7, parseOsc133, parseRecoveryFence, XtermRenderer } from './xterm'
+import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import type { SessionEffect } from '../generated/session.effect'
@@ -516,95 +516,6 @@ describe('OSC 636 command-existence snapshot', () => {
   })
 })
 
-describe('parseRecoveryFence (OSC 1337 NOCX_RECOVERY — ADR-0024 decision 8)', () => {
-  const NONCE = 'ab'.repeat(32)
-
-  it('parses a well-formed recovery fence payload', () => {
-    expect(parseRecoveryFence(`NOCX_RECOVERY;${NONCE}`)).toEqual({ hex: NONCE })
-  })
-
-  it('rejects foreign OSC 1337 payloads and non-conforming nonces', () => {
-    expect(parseRecoveryFence(`File=name;size=42`)).toBeNull()
-    expect(parseRecoveryFence(`NOCX_FENCE;${NONCE}`)).toBeNull() // the completion fence is not a recovery
-    expect(parseRecoveryFence(`NOCX_RECOVERY;deadbeef`)).toBeNull()
-    expect(parseRecoveryFence(`NOCX_RECOVERY;${'g'.repeat(64)}`)).toBeNull()
-    expect(parseRecoveryFence(`NOCX_RECOVERY;${'A'.repeat(64)}`)).toBeNull()
-    expect(parseRecoveryFence('')).toBeNull()
-  })
-})
-
-describe('XtermRenderer recovery-fence delivery through the real parser', () => {
-  const stubBrowser = () => {
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })
-    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-  }
-
-  async function mountRenderer(): Promise<XtermRenderer> {
-    stubBrowser()
-    const r = new XtermRenderer()
-    const container = document.createElement('div')
-    Object.defineProperty(container, 'clientWidth', { value: 800 })
-    Object.defineProperty(container, 'clientHeight', { value: 600 })
-    await r.mount(container)
-    return r
-  }
-
-  it('delivers a recovery fence through the OSC path (nocx-u7uh.24)', async () => {
-    const r = await mountRenderer()
-    const NONCE = 'ef'.repeat(32)
-    const seen: string[] = []
-    r.onRecoveryFence((hex) => seen.push(hex))
-
-    let markerDone: () => void
-    const marker = new Promise<void>((resolve) => {
-      markerDone = resolve
-    })
-    r.onCommandMarker(() => markerDone())
-
-    r.write(`\x1b]1337;NOCX_RECOVERY;${NONCE}\x07`)
-    r.write('\x1b]133;A\x07')
-    await marker
-
-    // The shell's one-shot recovery nonce reached the subscribers — the
-    // production path that previously parsed NOCX_RECOVERY nowhere.
-    expect(seen).toEqual([NONCE])
-
-    // The completion fence is a different payload kind on the same ident:
-    // it must NOT fan out to recovery subscribers.
-    seen.length = 0
-    let fenceMarkerDone: () => void
-    const fenceMarker = new Promise<void>((resolve) => {
-      fenceMarkerDone = resolve
-    })
-    r.onCommandMarker(() => fenceMarkerDone())
-    r.write(`\x1b]1337;NOCX_FENCE;${'ab'.repeat(32)}\x07`)
-    r.write('\x1b]133;A\x07')
-    await fenceMarker
-    expect(seen).toEqual([])
-    r.dispose()
-  })
-})
-
-// ── Shift+Enter as its own chord (nocx-nt70) ──────────────────────────────
-// A program that owns the keyboard receives Enter as a bare CR and cannot
-// tell Shift+Enter apart — xterm drops the modifier. The renderer re-encodes
-// the plain chord as ESC CR (the decision and the named alternative live at
-// SHIFT_ENTER_SEQUENCE in xterm.ts). These tests pin the exact bytes that
-// leave the renderer for each chord, driven through xterm's real keydown
-// path — the same DOM events a user's keystrokes produce.
 describe('Shift+Enter as its own chord (nocx-nt70)', () => {
   async function mountKeyRenderer(): Promise<{ r: XtermRenderer; received: string[] }> {
     stubBrowser()

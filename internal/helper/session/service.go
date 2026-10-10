@@ -1383,6 +1383,22 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		lg.Error("helper: the session's terminal could not be created", "error", err)
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
+	if shape.lifecycle != nil {
+		if (shape.lifecycle.Recovery == "") != (shape.lifecycle.RecoveryEpisodeID == "") {
+			screen.Close()
+			release()
+			lg.Error("helper: incomplete private recovery expectation")
+			return proto.SpawnResult{}, fmt.Errorf("%w: incomplete recovery expectation", ErrSpawn)
+		}
+		if shape.lifecycle.Recovery != "" {
+			if err := rt.SetRecoveryExpectation(shape.lifecycle.Recovery, shape.lifecycle.RecoveryEpisodeID); err != nil {
+				screen.Close()
+				release()
+				lg.Error("helper: invalid private recovery expectation")
+				return proto.SpawnResult{}, fmt.Errorf("%w: invalid recovery expectation", ErrSpawn)
+			}
+		}
+	}
 	win := newWindow(shape.bound)
 	// The one I/O owner (nocx-6q1uh.3, spec §5), built over the runtime and
 	// bound to it as its ReplySink BEFORE anything ever reads from proc — no

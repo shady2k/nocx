@@ -116,7 +116,7 @@ export class LifecycleClient {
    *  lost fact carried; nothing else. The backend accepts only while the
    *  session is recovery-pending and alive, and the transition permits only
    *  Lost → Native. */
-  recoverAck(sessionId: string, generation: string): Promise<LifecycleRecoverAck> {
-    return this.dispatcher.call('lifecycle.recoverAck', { sessionId, generation })
+  recoverAck(sessionId: string, episodeId: string): Promise<LifecycleRecoverAck> {
+    return this.dispatcher.call('lifecycle.recoverAck', { sessionId, episodeId })
   }
 }

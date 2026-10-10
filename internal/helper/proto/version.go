@@ -305,4 +305,8 @@ package proto
 // This is 18 rather than 17 because TypeSessionEffect now carries the exact
 // PTY byte offset of OSC 133 B. A 17-helper would read the offset bytes as the
 // kind and title length, so the peers must be fenced before either sends data.
-const Version = "18"
+// This is 19 rather than 18 because TypeSessionEffect now carries the public
+// episode ID for a nonce-free recovery sighting alongside that byte offset
+// (nocx-zg3k3.14.3). An 18-helper would misread the changed header, so the
+// peers must be fenced.
+const Version = "19"

@@ -251,6 +251,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, resolved *resolvedC
 		opts.LifecyclePort = lc.launch.Port
 		opts.Capability = lc.launch.Capability
 		opts.Recovery = lc.launch.Recovery
+		opts.RecoveryEpisodeID = lc.launch.RecoveryEpisodeID
 	}
 	// The bootstrap is prepared first: the carrier commits to the
 	// digest of the stage-1 frame, so the frame exists before the

@@ -961,6 +961,11 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// pendingLifecycleLanes reserve lanes whose helper spawn has not yet
+	// returned a session id. A hello timeout can arrive during that interval.
+	pendingLifecycleLanes map[lifecycle.LaneID]struct{}
+	pendingLifecycleLoss  map[lifecycle.LaneID]string
+	pendingSessionLoss    map[session.ID]string
 	// The per-session end hold (ws_end_hold.go): the replay window a
 	// re-adopted session owes before its shell's exit may tear the lane
 	// down. endHoldMu guards endHolds; nothing else takes it, and it takes
@@ -2426,13 +2431,12 @@ func (s *WSServer) takeCloseRequested(id session.ID) bool {
 // socket is the defect this whole package boundary exists to remove
 // (nocx-o2le): the read loop must never wait behind a renderer.
 //
-// Responses and notifications are different classes of frame. TryResult and
-// TryError (the other half of a promise) go through the connection's
-// reserved response queue, which the refreshable data plane cannot consume;
-// if even that capacity is exhausted the connection closes rather than drop
-// the response, so a caller's promise always settles — result, error, or
-// disconnect. TryNotify is refreshable state: on a saturated queue it is
-// dropped and the stall policy applies (mark stalled, reserve one
+// Critical control frames and refreshable notifications are different classes.
+// TryResult and TryError (the other half of a promise) use reserved critical
+// capacity the refreshable data plane cannot consume; critical overflow closes
+// the connection rather than dropping a response. TryNotify is refreshable
+// state: on a saturated queue it is dropped and the stall policy applies
+// (mark stalled, reserve one
 // control-overload notice, close as a last resort), which is safe because
 // the renderer re-syncs from the next notification.
 //
@@ -2442,8 +2446,8 @@ func (s *WSServer) takeCloseRequested(id session.ID) bool {
 // key), handleOpen/handleAttach/setSubscriber (register the connection as
 // the session's subscriber), and the infrastructure (readLoop, the
 // handleControlFrame dispatcher, ringToConn, closeSession). None of them
-// can write to the socket: the only write path on *wsConn is the
-// Responder trio below.
+// can write to the socket: Responder methods and rendererDeliver only enqueue
+// through outbound.Conn.
 type Responder interface {
 	TryResult(id json.RawMessage, result json.RawMessage) error
 	TryError(id json.RawMessage, rpcErr RPCError) error
@@ -2523,6 +2527,16 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 
 func (w *wsConn) TryNotify(method string, params json.RawMessage) error {
 	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}))
+}
+
+// TryCriticalNotify delivers a non-refreshable broker request on reserved
+// control capacity. If admission fails, the caller observes the real error.
+func (w *wsConn) TryCriticalNotify(method string, params json.RawMessage) error {
+	return w.out.TryEnqueueCriticalFrame(websocket.TextMessage, mustMarshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
 		"params":  params,
@@ -4429,18 +4443,17 @@ func (s *WSServer) rendererConns() []Conn {
 	return out
 }
 
-// rendererDeliver is the broker's Deliver seam: one request notification to
-// one connection, through the connection's outbound enqueue — the pump is
-// the sole writer (Responder's rule), so the broker never writes the socket
-// directly. The returned error is the enqueue's real error (a full or
-// closed outbound), which is what lets an undelivered request terminalize
-// rather than wait for a timeout that may not come.
+// rendererDeliver is the broker's Deliver seam: one non-refreshable request
+// notification to one connection, through reserved outbound capacity — the
+// pump is the sole writer, so the broker never writes the socket directly.
+// The returned enqueue error lets an undelivered request terminalize instead
+// of waiting for a timeout that may not come.
 func (s *WSServer) rendererDeliver(conn Conn, method string, params json.RawMessage) error {
 	wc, ok := conn.(*wsConn)
 	if !ok {
 		return fmt.Errorf("renderer deliver: connection %T is not a *wsConn", conn)
 	}
-	return wc.TryNotify(method, params)
+	return wc.TryCriticalNotify(method, params)
 }
 
 // requestTag names one wire frame: the connection it arrived on, the method

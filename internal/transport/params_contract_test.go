@@ -243,7 +243,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"scope":"everywhere"}`),
 		},
 		"lifecycle.recoverAck": {
-			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","generation":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","episodeId":"rec-0123456789abcdef0123456789abcdef"}`),
 		},
 		"lifecycle.submitAttempt": {
 			[]byte(`{"domain":"domain-1","command":"echo hi","source":"user"}`),

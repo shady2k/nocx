@@ -30,7 +30,9 @@ type laneState struct {
 	// the domain's loss so the lost lane can still publish the expected
 	// recovery fence to the renderer. A new establishment mints a new
 	// nonce, which is what makes a late ack from an old episode reject.
-	recoveryNonce FenceNonce
+	recoveryNonce     FenceNonce
+	recoveryEpisodeID string
+	recoverySighted   bool
 }
 
 // top returns the top of the stack, or "" if empty.
@@ -55,5 +57,7 @@ type LaneSnapshot struct {
 	// zero when no domain was ever minted on the lane. The publisher
 	// attaches it to a lost fact so the renderer can match the shell's
 	// one-shot restoration fence (decision 8).
-	RecoveryNonce FenceNonce
+	RecoveryNonce     FenceNonce
+	RecoveryEpisodeID string
+	RecoverySighted   bool
 }

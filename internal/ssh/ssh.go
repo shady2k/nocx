@@ -382,11 +382,12 @@ type LaunchOptions struct {
 	Capability string
 	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
 	// travels in the same frame as the capability and by the same route.
-	Recovery      string
-	Lane          string
-	Domain        string
-	Epoch         uint64
-	LifecyclePort int
+	Recovery          string
+	RecoveryEpisodeID string
+	Lane              string
+	Domain            string
+	Epoch             uint64
+	LifecyclePort     int
 	// StageDigest is the lowercase hex SHA-256 of the stage-1 frame the
 	// sender is about to write. It is an addressing value, not a secret,
 	// and the far-side loader refuses any frame that does not hash to it.
@@ -410,7 +411,8 @@ type RemoteLifecycleLaunch struct {
 	Capability string // 64 lowercase hex chars
 	// Recovery is the one-shot recovery fence (ADR-0024 decision 8). It
 	// travels in the same frame as the capability, never exported.
-	Recovery string // 64 lowercase hex chars
+	Recovery          string // 64 lowercase hex chars
+	RecoveryEpisodeID string // non-secret runtime correlation id
 }
 
 // RemoteLifecycle establishes the authenticated lifecycle channel for a

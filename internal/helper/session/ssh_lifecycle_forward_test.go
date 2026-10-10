@@ -86,11 +86,12 @@ func (c *coordinatorPaneLifecycle) spawnParamsFor(t *testing.T, stand *sshStand,
 	t.Helper()
 	params := stand.spawnParams(t, mode)
 	params.Lifecycle = &proto.LifecycleLaunch{
-		Lane:       string(c.launch.Lane),
-		Domain:     string(c.launch.Domain),
-		Epoch:      c.launch.Epoch,
-		Capability: c.launch.Capability,
-		Recovery:   c.launch.Recovery,
+		Lane:              string(c.launch.Lane),
+		Domain:            string(c.launch.Domain),
+		Epoch:             c.launch.Epoch,
+		Capability:        c.launch.Capability,
+		Recovery:          c.launch.Recovery,
+		RecoveryEpisodeID: c.launch.RecoveryEpisodeID,
 	}
 	return params
 }
@@ -261,7 +262,11 @@ func TestAnSSHPaneCompletesTheLifecycleHelloOverAHelperForward(t *testing.T) {
 	})
 	pane := newCoordinatorPaneLifecycle(t)
 
-	entry := stand.mustSpawn(t, pane.spawnParamsFor(t, stand, proto.SSHModeAuto))
+	spawnParams := pane.spawnParamsFor(t, stand, proto.SSHModeAuto)
+	if got, want := spawnParams.Lifecycle.RecoveryEpisodeID, pane.launch.RecoveryEpisodeID; got == "" || got != want {
+		t.Fatalf("spawn-ssh lifecycle launch recovery episode id = %q, want %q", got, want)
+	}
+	entry := stand.mustSpawn(t, spawnParams)
 	attached := stand.mustAttach(t, entry)
 	pane.bridge(attached)
 

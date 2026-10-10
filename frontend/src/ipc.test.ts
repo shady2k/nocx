@@ -2354,6 +2354,28 @@ describe('session.effect notification', () => {
     ])
   })
 
+  it('delivers a nonce-free recovery effect by episode id and refuses nonce fields', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    const episodeId = 'rec-' + 'ab'.repeat(16)
+    ws.deliverText(effect({ kind: 'recovery', title: '', body: '', episodeId }))
+    ws.deliverText(
+      effect({ kind: 'recovery', title: '', body: '', episodeId, fence: 'ab'.repeat(32) }),
+    )
+    expect(received).toEqual([
+      {
+        sessionId: SID,
+        generation: '4',
+        effectId: '7',
+        kind: 'recovery',
+        title: '',
+        body: '',
+        episodeId,
+      },
+    ])
+  })
+
   it('does not turn a full frame into a non-visual side effect', async () => {
     const { session, ws } = await connectedSession()
     const received: SessionEffect[] = []

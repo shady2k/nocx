@@ -469,6 +469,7 @@ const (
 	// EffectCwdReport is OSC 7.
 	EffectCwdReport
 	EffectPromptBoundary
+	EffectRecovery
 )
 
 // EffectID identifies one effect for as long as its incarnation lives. The
@@ -499,6 +500,8 @@ type Effect struct {
 	// output stream before the bytes after it were published. Consumers that
 	// share that ordered stream must not emit a duplicate side-channel event.
 	Ordered bool
+	// EpisodeID is present only for EffectRecovery and is non-secret.
+	EpisodeID string
 }
 
 // PromptBoundarySink lets the session I/O owner publish OSC 133 B into its

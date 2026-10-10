@@ -7,14 +7,60 @@
   "additionalProperties": false,
   "required": ["sessionId", "generation", "effectId", "kind", "title", "body"],
   "properties": {
-    "sessionId": { "type": "string", "minLength": 1 },
-    "generation": { "type": "string", "pattern": "^[1-9][0-9]*$" },
-    "effectId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "effectId": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
     "kind": {
       "type": "string",
-      "enum": ["bell", "notification", "clipboard", "title", "cwd", "promptBoundary"]
+      "enum": ["bell", "notification", "clipboard", "title", "cwd", "promptBoundary", "recovery"]
     },
-    "title": { "type": "string" },
-    "body": { "type": "string" }
-  }
+    "title": {
+      "type": "string"
+    },
+    "body": {
+      "type": "string"
+    },
+    "episodeId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^rec-[0-9a-f]{32}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "recovery"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["episodeId"],
+        "properties": {
+          "title": {
+            "const": ""
+          },
+          "body": {
+            "const": ""
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "required": ["episodeId"]
+        }
+      }
+    }
+  ]
 }

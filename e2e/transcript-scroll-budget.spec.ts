@@ -17,7 +17,7 @@
  */
 import { expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -30,7 +30,11 @@ import {
 } from './harness'
 import { readStand } from './stand'
 import { judgeFrames, type FrameVerdict } from './frame-budget.mts'
-import { recordRowsCensusForTest } from './failure-context'
+import {
+  MAX_GOROUTINE_DUMP_LINES,
+  formatGoroutineDumpSection,
+  recordRowsCensusForTest,
+} from './failure-context'
 
 const serverBin = () => readStand().server
 
@@ -297,7 +301,10 @@ test.describe('long transcript scroll budget', () => {
         { frozen: BLOCK, running: RUNNING_BLOCK, n: index, first: `${marker}-001` },
         { timeout: 60_000 },
       )
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        // Capture the Go stacks at the failed wait, while afterEach has not yet
+        // stopped this backend. The assertion remains the original 60 s failure.
+        await backend.captureGoroutineDump()
         throw new Error(`the command ${marker} never froze as block ${index}: ${String(error)}`)
       })
   }
@@ -557,6 +564,36 @@ test.describe('long transcript scroll budget', () => {
       painted: rows.length,
     }
   }
+
+  test('captures backend goroutine stacks before teardown', async () => {
+    await backend.start()
+    const readyLogLine = 'msg="nocx-server ready"'
+    const preSignalLog = backend.logTail(40_000)
+    expect(preSignalLog).toContain(readyLogLine)
+
+    await backend.captureGoroutineDump()
+    expect(backend.goroutineDump).toContain('goroutine ')
+    expect(backend.logTail(40_000)).toContain(readyLogLine)
+    expect(backend.logTail()).not.toContain('SIGQUIT: quit')
+
+    const dump = [
+      'SIGQUIT: quit',
+      ...Array.from({ length: MAX_GOROUTINE_DUMP_LINES }, (_, index) => `frame-${index}`),
+    ].join('\n')
+    backend.stop()
+    const preservedLogFile = backend.preservedLogFile
+    expect(preservedLogFile).not.toBe('')
+    const preservedLog = readFileSync(preservedLogFile, 'utf8')
+    expect(preservedLog).toContain(backend.goroutineDump)
+
+    const section = formatGoroutineDumpSection(backend.logFile, dump, preservedLogFile)
+    expect(section).toContain(`${MAX_GOROUTINE_DUMP_LINES} shown, 1 dropped`)
+    expect(section).toContain(`frame-${MAX_GOROUTINE_DUMP_LINES - 2}`)
+    expect(section).not.toContain(`frame-${MAX_GOROUTINE_DUMP_LINES - 1}`)
+    expect(section).toContain(
+      `full dump is retained in the preserved backend log artifact: ${preservedLogFile}`,
+    )
+  })
 
   // Active stage acceptance for nocx-zg3k3.5: durable capture must retain
   // every row independently of the default live scrollback budget.

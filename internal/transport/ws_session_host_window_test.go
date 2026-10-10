@@ -470,6 +470,219 @@ func TestAttachInsideHostWindowHoleEmitsOrderedGapOnTheRealSocket(t *testing.T) 
 	}
 }
 
+func TestLateAttachReplaysMultipleOutputGapsInKnownOrderAfterDisconnect(t *testing.T) {
+	const firstLost = uint64(7)
+	const secondLost = uint64(11)
+	between := []byte("between")
+	tail := []byte("tail")
+	term := newFeedablePTY()
+	ws, stop := newRecordingWSServer(t, term)
+	defer stop()
+
+	first := connectWS(t, ws)
+	openRaw := jsonrpcCallWithID(t, first, "open", map[string]uint16{"cols": 80, "rows": 24}, 1)
+	var opened struct {
+		Result struct {
+			SessionID    string `json:"sessionId"`
+			InstanceID   string `json:"instanceId"`
+			SessionEpoch uint64 `json:"sessionEpoch"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openRaw, &opened); err != nil {
+		t.Fatalf("decode open result: %v (%s)", err, openRaw)
+	}
+	if opened.Error != nil {
+		t.Fatalf("open: %+v", opened.Error)
+	}
+	sid := session.ID(opened.Result.SessionID)
+	awaitSubscriber(t, ws, sid)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close original client: %v", err)
+	}
+	awaitDetached(t, ws, sid)
+
+	rx := ws.getRx(sid)
+	if rx == nil {
+		t.Fatal("opened session has no output ring")
+	}
+	rx.recordOutputHole(firstLost, content.GapReasonHostWindow)
+	if err := rx.ring.write(between); err != nil {
+		t.Fatalf("write bytes between known gaps: %v", err)
+	}
+	secondStart := firstLost + uint64(len(between))
+	secondEnd := secondStart + secondLost
+	rx.recordOutputHole(secondLost, content.GapReasonHostWindow)
+	if err := rx.ring.write(tail); err != nil {
+		t.Fatalf("write bytes after known gaps: %v", err)
+	}
+	offset := secondEnd + uint64(len(tail))
+	if got := rx.ring.writtenLocked(); got != offset {
+		t.Fatalf("ring cursor = %d, want independently computed end %d", got, offset)
+	}
+
+	// The first attachment queues the informational events and then drops.
+	// Queue admission is not a receipt, so a later attachment must replay both.
+	firstAttach := connectWS(t, ws)
+	jsonrpcCallWithID(t, firstAttach, "attach", map[string]any{
+		"sessionId": string(sid), "instanceId": opened.Result.InstanceID,
+		"sessionEpoch": opened.Result.SessionEpoch, "offset": offset,
+	}, 2)
+	if err := firstAttach.Close(); err != nil {
+		t.Fatalf("close before reading the queued gaps: %v", err)
+	}
+	awaitDetached(t, ws, sid)
+
+	second := connectWS(t, ws)
+	t.Cleanup(func() { _ = second.Close() })
+	attachRaw := jsonrpcCallWithID(t, second, "attach", map[string]any{
+		"sessionId": string(sid), "instanceId": opened.Result.InstanceID,
+		"sessionEpoch": opened.Result.SessionEpoch, "offset": offset,
+	}, 3)
+	var attach struct {
+		Result attachResult     `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(attachRaw, &attach); err != nil {
+		t.Fatalf("decode second attach: %v (%s)", err, attachRaw)
+	}
+	if attach.Error != nil || attach.Result.From != offset || !attach.Result.Resumed || attach.Result.Reset {
+		t.Fatalf("second attach = %+v, want resume at known stream end %d", attach, offset)
+	}
+
+	read := func(what string) (int, []byte) {
+		t.Helper()
+		if err := second.SetReadDeadline(time.Now().Add(wantWithin)); err != nil {
+			t.Fatalf("set deadline for %s: %v", what, err)
+		}
+		kind, raw, err := second.ReadMessage()
+		if err != nil {
+			t.Fatalf("read %s: %v", what, err)
+		}
+		return kind, raw
+	}
+	expected := []struct {
+		start uint64
+		end   uint64
+	}{
+		{start: 0, end: firstLost},
+		{start: secondStart, end: secondEnd},
+	}
+	for i, want := range expected {
+		kind, raw := read("replayed output gap")
+		if kind != websocket.TextMessage {
+			t.Fatalf("replayed gap %d frame type = %d, want text before binary output", i, kind)
+		}
+		var envelope struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			t.Fatalf("decode replayed gap %d: %v (%s)", i, err, raw)
+		}
+		if envelope.Method != "session.outputGap" {
+			t.Fatalf("replayed frame %d method = %q, want session.outputGap", i, envelope.Method)
+		}
+		var got sessionOutputGapNotification
+		if err := json.Unmarshal(envelope.Params, &got); err != nil {
+			t.Fatalf("decode replayed gap %d params: %v", i, err)
+		}
+		if got.SessionID != string(sid) || got.Start != want.start || got.End != want.end || got.Reason != content.GapReasonHostWindow {
+			t.Fatalf("replayed gap %d = %+v, want [%d,%d) hostWindow", i, got, want.start, want.end)
+		}
+	}
+	rx.deliveryMu.Lock()
+	retained := len(rx.outputGaps)
+	rx.deliveryMu.Unlock()
+	if retained != len(expected) {
+		t.Fatalf("retained gap count after replay = %d, want %d until session close", retained, len(expected))
+	}
+
+	post := []byte("after-multiple-gaps")
+	awaitPush(t, "post-gap bytes", pushOutput(term, post))
+	var output []byte
+	for !strings.Contains(string(output), string(post)) {
+		kind, raw := read("post-gap output")
+		if kind != websocket.BinaryMessage {
+			var notification struct {
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(raw, &notification)
+			if notification.Method == "session.outputGap" {
+				t.Fatalf("duplicate output-gap notification before post-gap bytes: %s", raw)
+			}
+			continue
+		}
+		frame, err := DecodeFrame(raw)
+		if err != nil {
+			t.Fatalf("decode post-gap frame: %v", err)
+		}
+		if session.IDFromBytes(frame.SessionID) != sid {
+			t.Fatalf("post-gap frame belongs to %s, want %s", session.IDFromBytes(frame.SessionID), sid)
+		}
+		output = append(output, frame.Payload...)
+	}
+}
+
+func TestAttachRefusesWhenOutputGapReplayHistoryOverflows(t *testing.T) {
+	term := newFeedablePTY()
+	ws, stop := newRecordingWSServer(t, term)
+	defer stop()
+
+	first := connectWS(t, ws)
+	openRaw := jsonrpcCallWithID(t, first, "open", map[string]uint16{"cols": 80, "rows": 24}, 1)
+	var opened struct {
+		Result struct {
+			SessionID    string `json:"sessionId"`
+			InstanceID   string `json:"instanceId"`
+			SessionEpoch uint64 `json:"sessionEpoch"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openRaw, &opened); err != nil {
+		t.Fatalf("decode open result: %v (%s)", err, openRaw)
+	}
+	if opened.Error != nil {
+		t.Fatalf("open: %+v", opened.Error)
+	}
+	sid := session.ID(opened.Result.SessionID)
+	awaitSubscriber(t, ws, sid)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close original client: %v", err)
+	}
+	awaitDetached(t, ws, sid)
+
+	rx := ws.getRx(sid)
+	for i := 0; i <= maxSessionOutputGapRecords; i++ {
+		rx.recordOutputHole(1, content.GapReasonHostWindow)
+	}
+	rx.deliveryMu.Lock()
+	retained, overflow := len(rx.outputGaps), rx.outputGapHistoryOverflow
+	rx.deliveryMu.Unlock()
+	if retained != maxSessionOutputGapRecords || !overflow {
+		t.Fatalf("gap archive state = %d retained, overflow %v; want limit %d and explicit overflow", retained, overflow, maxSessionOutputGapRecords)
+	}
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	raw := jsonrpcCallWithID(t, conn, "attach", map[string]any{
+		"sessionId": string(sid), "instanceId": opened.Result.InstanceID,
+		"sessionEpoch": opened.Result.SessionEpoch, "offset": rx.ring.writtenLocked(),
+	}, 2)
+	var refusal struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &refusal); err != nil {
+		t.Fatalf("decode overflow attach response: %v (%s)", err, raw)
+	}
+	if refusal.Error == nil || !strings.Contains(refusal.Error.Message, "cannot safely attach") {
+		t.Fatalf("overflow attach error = %+v, want explicit visible refusal", refusal.Error)
+	}
+	if subscriber, _ := rx.getSubscriber(); subscriber != nil {
+		t.Fatal("overflow refusal replaced the existing subscriber slot")
+	}
+}
+
 func TestSessionByteOffsetJSONBoundaryIsInclusiveAndRejectsUnsafeValues(t *testing.T) {
 	const ceiling = uint64(9007199254740991)
 	for _, tc := range []struct {

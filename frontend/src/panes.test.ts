@@ -27,6 +27,7 @@ import { WSClient } from './ipc'
 import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
+import { showToast } from './ui/toast'
 import type { TerminalContent } from './terminal-content'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
 import type { WorkersTabClosed } from './generated/workers.tabClosed'
@@ -48,6 +49,7 @@ import {
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
 }))
+vi.mock('./ui/toast', () => ({ showToast: vi.fn() }))
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -3281,6 +3283,7 @@ describe('a restored pane and the session the backend still holds', () => {
   })
 
   it('falls back to a fresh session when the claim is refused', async () => {
+    vi.mocked(showToast).mockClear()
     const chain = makeLayoutStore()
     await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
     const paneId = chain.backend.rows().panes[0].id
@@ -3301,6 +3304,9 @@ describe('a restored pane and the session the backend still holds', () => {
 
     expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
     expect(returning.openSession).toHaveBeenCalledTimes(1)
+    const warning = vi.mocked(showToast).mock.calls[0]?.[0]
+    expect(warning?.level).toBe('warning')
+    expect(warning?.message).toContain('session is gone')
   })
 
   it('does not ask the backend twice for one pane', async () => {

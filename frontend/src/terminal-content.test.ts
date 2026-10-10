@@ -16141,6 +16141,157 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
     }
   })
 
+  it('keeps distinct historical cap loss beside a live host-window notice without double-counting', async () => {
+    const hostWindow = { start: 2722, end: 98_304, reason: 'hostWindow' }
+    const cap = { start: 131_072, end: 4_046_848, reason: 'cap' }
+    const { session, hooks } = reclaiming({
+      bytes: 0,
+      gaps: [hostWindow, cap],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      session.fireOutputGap({
+        sessionId: session.sessionId,
+        ...hostWindow,
+      })
+
+      const notices = [...tab.pane.querySelectorAll('.nocx-recovery-notice')]
+      expect(notices).toHaveLength(2)
+      const cards = notices.map((notice) => ({
+        title: notice.querySelector('.ui-status-card__title')?.textContent ?? '',
+        description: notice.querySelector('.ui-status-card__desc')?.textContent ?? '',
+      }))
+      expect(cards.map((card) => card.title)).toContain('95582 bytes of live output are missing')
+      expect(cards.map((card) => card.title)).toContain(
+        "3.9 MB of this session's output is missing",
+      )
+      const historical = cards.find((card) => card.title.includes("of this session's output"))!
+      expect(historical.description).toContain("3.9 MB the recording's size limit dropped")
+      expect(historical.description).not.toContain('hostWindow')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps both overlapping live losses distinct, and dismissing one leaves the other and history intact', async () => {
+    const { session, hooks } = reclaiming({
+      bytes: 0,
+      gaps: [
+        { start: 10, end: 30, reason: 'hostWindow' },
+        { start: 50, end: 60, reason: 'cap' },
+      ],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      session.fireOutputGap({
+        sessionId: session.sessionId,
+        start: 10,
+        end: 20,
+        reason: 'hostWindow',
+      })
+      session.fireOutputGap({
+        sessionId: session.sessionId,
+        start: 15,
+        end: 25,
+        reason: 'hostWindow',
+      })
+
+      let notices = [...tab.pane.querySelectorAll('.nocx-recovery-notice')]
+      expect(notices).toHaveLength(3)
+      const titleOf = (notice: Element) =>
+        notice.querySelector('.ui-status-card__title')?.textContent ?? ''
+      expect(notices.map(titleOf)).toContain('10 bytes of live output are missing')
+      expect(notices.map(titleOf)).toContain('5 bytes of live output are missing')
+      expect(notices.map(titleOf)).toContain("15 B of this session's output is missing")
+      const historical = notices.find((notice) =>
+        titleOf(notice).includes("of this session's output"),
+      )!
+      expect(historical.querySelector('.ui-status-card__desc')?.textContent).toContain(
+        '5 B missing as "hostWindow"',
+      )
+      expect(historical.querySelector('.ui-status-card__desc')?.textContent).toContain(
+        "10 B the recording's size limit dropped",
+      )
+
+      const firstLive = notices.find(
+        (notice) => titleOf(notice) === '10 bytes of live output are missing',
+      )!
+      firstLive.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
+      await vi.waitFor(() =>
+        expect(tab.pane.querySelectorAll('.nocx-recovery-notice')).toHaveLength(2),
+      )
+      notices = [...tab.pane.querySelectorAll('.nocx-recovery-notice')]
+      expect(notices.map(titleOf)).toContain('5 bytes of live output are missing')
+      expect(notices.map(titleOf)).toContain("15 B of this session's output is missing")
+      expect(notices.map(titleOf)).not.toContain('10 bytes of live output are missing')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not resurrect a dismissed historical card when another live gap arrives', async () => {
+    const { session, hooks } = reclaiming({
+      bytes: 0,
+      gaps: [{ start: 10, end: 20, reason: 'cap' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      const historical = () =>
+        [...tab.pane.querySelectorAll('.nocx-recovery-notice')].find((notice) =>
+          notice
+            .querySelector('.ui-status-card__title')
+            ?.textContent?.includes("of this session's output"),
+        )
+      await vi.waitFor(() => expect(historical()).toBeDefined())
+      historical()!.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!.click()
+      await vi.waitFor(() => expect(historical()).toBeUndefined())
+
+      session.fireOutputGap({
+        sessionId: session.sessionId,
+        start: 30,
+        end: 35,
+        reason: 'hostWindow',
+      })
+      await vi.waitFor(() =>
+        expect(
+          [...tab.pane.querySelectorAll('.nocx-recovery-notice')].some((notice) =>
+            notice
+              .querySelector('.ui-status-card__title')
+              ?.textContent?.includes('live output are missing'),
+          ),
+        ).toBe(true),
+      )
+      expect(historical()).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps historical host-window loss visible when no live gap notification arrives', async () => {
+    const { hooks } = reclaiming({
+      bytes: 0,
+      gaps: [{ start: 100, end: 200, reason: 'hostWindow' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardTitle(tab)).toBe("100 B of this session's output is missing")
+      expect(cardDesc(tab)).toContain('missing as "hostWindow"')
+    } finally {
+      teardown()
+    }
+  })
+
   it('names the unrecorded stretch, which is a different fact from the bound', async () => {
     const { hooks } = reclaiming({
       bytes: 0,
@@ -16177,6 +16328,27 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
     try {
       await expect(content.ready).resolves.toBe(true)
       expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('shows an inconsistent output-gap protocol error through the sticky danger toast', async () => {
+    const { session, hooks } = reclaiming(null)
+    const { teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      vi.mocked(showToast).mockClear()
+      session.fireProtocolError(
+        'Session output protocol error: gap [4, 5) does not match current offset 3. Output is paused.',
+      )
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'danger',
+        message:
+          'Session output protocol error: gap [4, 5) does not match current offset 3. Output is paused.',
+      })
     } finally {
       teardown()
     }

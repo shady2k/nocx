@@ -99,6 +99,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import { formatBytes } from '../frontend/src/ui/format-bytes'
 import { BASE_URL } from './base-url'
 import {
   standalone as base,
@@ -183,11 +184,22 @@ async function freshClient(
   browser: Browser,
   endpoint: BackendEndpoint,
   label: string,
+  onServerFrame?: (frame: string) => void,
 ): Promise<Page> {
   // baseURL explicitly: a context made by hand inherits nothing from the
   // config's `use`, so `goto('/')` would have no origin to resolve against.
   const context = await browser.newContext({ baseURL: BASE_URL })
   const page = await context.newPage()
+  if (onServerFrame) {
+    page.on('websocket', (socket) => {
+      if (new URL(socket.url()).port !== String(endpoint.port)) return
+      socket.on('framereceived', (data) => {
+        const frame =
+          typeof data.payload === 'string' ? data.payload : data.payload.toString('utf8')
+        onServerFrame(frame)
+      })
+    })
+  }
   // On the failure report from its first byte, and the harness's to close.
   watchClient(page, label)
   await bindEndpoint(page, endpoint)
@@ -340,27 +352,43 @@ interface RemoteGates {
  *
  * POSIX sh, because the pane runs the host's real login shell.
  *
- * WHY THE FILLER IS OVERWRITTEN RATHER THAN PRINTED. It is one burst of `x`
- * ending in a carriage return, so it costs the megabytes the helper's window
- * is measured in without putting tens of thousands of rows into the browser.
- * The bytes are what the window counts, and they are real.
+ * The filler is NUL bytes, which count toward the helper window without
+ * flooding the terminal grid. The live-gap case inserts its visible marker
+ * after a 256 KiB NUL prefix so the browser can prove later output before it
+ * consumes the remaining filler.
  *
  * WHY `exit` AND NOT A SUBSHELL. The status this bead cares about is the
  * SESSION's — the one the helper reports and `ExitOutcome` maps — so the shell
  * itself has to end. A subshell would exercise shell integration instead,
  * which is a different owner answering a different question.
  */
-function longRemoteCommand(gates: RemoteGates, fillerBytes: number): string {
+function longRemoteCommand(
+  gates: RemoteGates,
+  fillerBytes: number,
+  markerAfterPrefixBytes?: number,
+): string {
   const marker = shellQuote(gates.markerFile)
   const detached = shellQuote(gates.detached)
   const fillerDone = shellQuote(gates.fillerDone)
   const finish = shellQuote(gates.finish)
+  const markerMidFiller =
+    markerAfterPrefixBytes === undefined
+      ? ''
+      : [
+          `head -c ${markerAfterPrefixBytes} /dev/zero`,
+          `printf '${MARKER_PREFIX}-%03d\\n' 1 >> ${marker}`,
+          `printf '${MARKER_PREFIX}-%03d\\n' 1`,
+          `head -c ${fillerBytes - markerAfterPrefixBytes} /dev/zero`,
+          'i=1',
+        ].join('; ')
+  const filler =
+    markerAfterPrefixBytes === undefined ? `head -c ${fillerBytes} /dev/zero` : markerMidFiller
   return [
     'i=0',
     `while [ ! -e ${finish} ]; do printf '${MARKER_PREFIX}-%03d\\n' "$i" >> ${marker}`,
     `printf '${MARKER_PREFIX}-%03d\\n' "$i"`,
     `if [ "$i" -eq 0 ]; then while [ ! -e ${detached} ]; do sleep 1; done`,
-    `head -c ${fillerBytes} /dev/zero; printf '\\r'; : > ${fillerDone}; fi`,
+    `${filler}; printf '\\r'; : > ${fillerDone}; fi`,
     'i=$((i+1)); sleep 1; done',
     `exit ${EXIT_CODE}`,
   ].join('; ')
@@ -653,9 +681,36 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .toContain(liveBefore.sessionId)
 
     // A genuinely new browser context on a genuinely new coordinator: an
-    // empty renderer session map, and a token neither of them has seen. The
-    // only route back to this pane is server-side live-session discovery.
-    returned = await freshClient(browser, endpoint, 'returned client')
+    // empty renderer session map, and a token neither of them has seen. Capture
+    // control frames before navigation so the browser's actual session.outputGap
+    // notification cannot race the assertions below.
+    let liveOutputGap: { sessionId: string; start: number; end: number; reason: string } | null =
+      null
+    returned = await freshClient(browser, endpoint, 'returned client', (frame) => {
+      if (typeof frame !== 'string') return
+      let envelope: { method?: unknown; params?: Record<string, unknown> }
+      try {
+        envelope = JSON.parse(frame) as { method?: unknown; params?: Record<string, unknown> }
+      } catch {
+        return
+      }
+      const params = envelope.params
+      if (
+        envelope.method === 'session.outputGap' &&
+        params &&
+        params.sessionId === liveBefore.sessionId &&
+        typeof params.start === 'number' &&
+        typeof params.end === 'number' &&
+        typeof params.reason === 'string'
+      ) {
+        liveOutputGap = {
+          sessionId: params.sessionId as string,
+          start: params.start,
+          end: params.end,
+          reason: params.reason,
+        }
+      }
+    })
     const returnedPane = paneForSession(returned, liveBefore.sessionId)
     await expect(returnedPane).toBeVisible({ timeout: 120_000 })
 
@@ -726,47 +781,71 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .first()
     await expect(returnedBlock).toBeVisible({ timeout: 60_000 })
 
-    // ── what was lost is NAMED, and named correctly ───────────────────────
-    //
-    // The card the reclaim raises (recovery-notice.tsx). A pane that came
-    // back short and said nothing is the soft degrade AGENTS.md forbids.
-    const notice = returnedPane.locator('.nocx-recovery-notice')
+    // ── the actual live event and its distinct notice ──────────────────────
+    // The new client must receive the control-plane event, not merely recover
+    // historical gap metadata. Its live title is deliberately distinct from
+    // the reclaim card below.
+    await expect
+      .poll(() => liveOutputGap, {
+        timeout: 60_000,
+        message: 'the returned browser did not receive session.outputGap for the reclaimed session',
+      })
+      .not.toBeNull()
+    expect(liveOutputGap!.sessionId).toBe(liveBefore.sessionId)
+    expect(liveOutputGap!.reason).toBe('hostWindow')
+    expect(liveOutputGap!.end).toBeGreaterThan(liveOutputGap!.start)
+
+    const liveNotice = returnedPane
+      .locator('.nocx-recovery-notice')
+      .filter({ hasText: /bytes of live output are missing/i })
+    await expect(liveNotice).toBeVisible({ timeout: 60_000 })
+    await expect(liveNotice.locator('.ui-status-card__title')).toHaveText(
+      `${liveOutputGap!.end - liveOutputGap!.start} bytes of live output are missing`,
+    )
+    await expect(liveNotice.locator('.ui-status-card__desc')).toHaveText(
+      "The execution host's output window moved past this tab.",
+    )
+
+    // ── what remains missing is named without repeating the live range ─────
+    // The historical card keeps the distinct recording loss beside the live
+    // hostWindow notice. Derive its exact byte count from the coordinator's
+    // output ledger, then require the cap clause and exclude the already-named
+    // hostWindow range.
+    const finalOutput = await recordedText(endpoint, liveAfter!)
+    const capLossBytes = finalOutput.gaps
+      .filter((gap) => gap.reason === 'cap')
+      .reduce((total, gap) => total + gap.end - gap.start, 0)
+    expect(capLossBytes).toBeGreaterThan(0)
+
+    const notice = returnedPane
+      .locator('.nocx-recovery-notice')
+      .filter({ hasText: /of this session's output is missing/i })
     await expect(notice).toBeVisible({ timeout: 60_000 })
-    await expect(notice).toContainText(/of this session's output is missing/i)
-    // And the REASON, in the product's own words and IN ITS OWN CLAUSE. The
-    // card accounts for the hole one clause per owner (recovery-notice.tsx
-    // `clauses`), so the word appearing somewhere in the sentence is not the
-    // same fact as the reason being named: `cap` bytes are reported as "the
-    // recording's size limit dropped", and only a reason this build has no
-    // sentence for reaches the reader as the wire's own word. Asserting the
-    // CLAUSE is what makes a host-window hole filed under some other reason
-    // fail here, which is the whole point — a sentence that sent a person to
-    // a retention knob would be sending them to one that did nothing about
-    // the execution host's window.
-    //
-    // MEASURED (2026-09-02): recording the hole as `unrecorded` in
-    // ws_session_record.go's sessionOutputHoleReason turns this clause into
-    // "…that was never recorded" and this line goes red.
-    //
-    // A BARE `not.toContainText('size limit')` STOOD HERE AND WAS WRONG, and
-    // the run that would have failed on it is the run where everything works.
-    // This scenario produces TWO holes and both are correctly named: the
-    // host's window reclaimed ~96 kB that no coordinator could ever have
-    // received, and the fresh coordinator's OWN retention then dropped ~3.9 MB
-    // of the 4 MiB replay it did receive — measured as
-    // `[{1797..98304 hostWindow}, {131072..4046848 cap}]`. A card that says
-    // both is the card being honest about two different owners, so a blanket
-    // negative could only ever fail the product for telling the truth.
-    await expect(notice).toContainText(/missing as "hostWindow"/)
+    await expect(notice.locator('.ui-status-card__title')).toHaveText(
+      `${formatBytes(capLossBytes)} of this session's output is missing`,
+    )
+    await expect(notice.locator('.ui-status-card__desc')).toContainText(
+      "the recording's size limit dropped",
+    )
+    await expect(notice.locator('.ui-status-card__desc')).not.toContainText('hostWindow')
 
     // The same fact off the coordinator's own method, where the reason is a
     // field rather than a sentence.
-    const finalOutput = await recordedText(endpoint, liveAfter!)
     expect(finalOutput.gaps.length).toBeGreaterThan(0)
     const hostWindowGaps = finalOutput.gaps.filter((gap) => gap.reason === 'hostWindow')
     expect(hostWindowGaps.length).toBeGreaterThan(0)
+    expect(
+      hostWindowGaps.some(
+        (gap) => gap.start === liveOutputGap!.start && gap.end === liveOutputGap!.end,
+      ),
+    ).toBe(true)
     expect(hostWindowGaps.some((gap) => gap.end - gap.start > 0)).toBe(true)
     expect(finalOutput.produced).toBeGreaterThan(producedAtDetach)
+    await expect(
+      returnedPane.locator('.xterm-live-container .term-grid-row', {
+        hasText: `${MARKER_PREFIX}-001`,
+      }),
+    ).toHaveCount(1)
 
     // The markers the recording DOES hold are one process's output in stream
     // order — not two runs spliced together at the reclaim.
@@ -838,199 +917,6 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     await snapshotWatchedClients()
     backend.stop()
     fixture?.proc.kill('SIGKILL')
-    rmSync(remoteRoot, { recursive: true, force: true })
-    rmSync(backendRoot.root, { recursive: true, force: true })
-  }
-})
-
-test('a live helper-hosted pane names an output gap and continues after the helper window resets', async ({
-  browser,
-}) => {
-  const backendRoot: DisposableRoot = {
-    root: mkdtempSync(join(tmpdir(), 'nocx-live-gap-backend-')),
-  }
-  const remoteRoot = mkdtempSync(join(tmpdir(), 'nocx-live-gap-host-'))
-  const remoteHome = join(remoteRoot, 'home')
-  const remoteCwd = join(remoteRoot, 'repo')
-  const gates: RemoteGates = {
-    markerFile: join(remoteHome, 'markers.txt'),
-    detached: join(remoteHome, 'release-filler'),
-    fillerDone: join(remoteHome, 'filler-done'),
-    finish: join(remoteHome, 'finish'),
-  }
-  mkdirSync(remoteHome, { recursive: true, mode: 0o700 })
-  mkdirSync(remoteCwd, { recursive: true, mode: 0o700 })
-  const backend = new VaultBackend(readStand().server, backendRoot)
-  let fixture: SshdFixture | null = null
-  let setupPage: Page | null = null
-  let livePage: Page | null = null
-  let liveContext: Awaited<ReturnType<Browser['newContext']>> | null = null
-  let releaseGate: (() => void) | null = null
-
-  try {
-    fixture = await startSshd({ home: remoteHome, cwd: remoteCwd, args: ['-repo', remoteCwd] })
-    const endpoint = await backend.start()
-    seedKnownHost(backend, fixture)
-    setupPage = await freshClient(browser, endpoint, 'live output gap helper setup')
-    await promptReady(setupPage)
-    const profileName = await installHelperThroughProduct(setupPage, endpoint, fixture, remoteCwd)
-    await setupPage.context().close()
-    setupPage = null
-
-    // Route the real WebSocket before the pane attaches. The proxy forwards
-    // client traffic and all control traffic, but holds server output frames
-    // and the gap event until the helper's reported output window has moved.
-    // This is a test-side backpressure gate, not a product pause endpoint.
-    liveContext = await browser.newContext({ baseURL: BASE_URL })
-    livePage = await liveContext.newPage()
-    watchClient(livePage, 'live output gap acceptance')
-    let holding = false
-    const held: (string | Buffer)[] = []
-    const observed: ('data' | 'gap' | 'other')[] = []
-    let outputGap: { sessionId: string; start: number; end: number; reason: string } | null = null
-    const release = () => {
-      holding = false
-      for (const message of held.splice(0)) forwardFromServer(message)
-    }
-    releaseGate = release
-    let server: ReturnType<import('@playwright/test').WebSocketRoute['connectToServer']>
-    const forwardFromServer = (message: string | Buffer) => {
-      if (Buffer.isBuffer(message) && message.length > 18 && message[0] === 1 && message[1] === 1) {
-        observed.push('data')
-      } else if (typeof message === 'string') {
-        try {
-          const envelope = JSON.parse(message) as {
-            method?: string
-            params?: { sessionId?: string; start?: number; end?: number; reason?: string }
-          }
-          if (
-            envelope.method === 'session.outputGap' &&
-            envelope.params &&
-            typeof envelope.params.sessionId === 'string' &&
-            typeof envelope.params.start === 'number' &&
-            typeof envelope.params.end === 'number' &&
-            typeof envelope.params.reason === 'string'
-          ) {
-            outputGap = envelope.params as {
-              sessionId: string
-              start: number
-              end: number
-              reason: string
-            }
-            observed.push('gap')
-          } else observed.push('other')
-        } catch {
-          observed.push('other')
-        }
-      } else observed.push('other')
-      liveRoute.send(message)
-    }
-    let liveRoute: import('@playwright/test').WebSocketRoute
-    await liveContext.routeWebSocket(
-      (url) => url.port === String(endpoint.port),
-      (route) => {
-        liveRoute = route
-        server = route.connectToServer()
-        route.onMessage((message) => server.send(message))
-        server.onMessage((message) => {
-          const isOutputGap =
-            typeof message === 'string' && message.includes('"method":"session.outputGap"')
-          const isBinary =
-            Buffer.isBuffer(message) && message.length > 18 && message[0] === 1 && message[1] === 1
-          if (holding && (isBinary || isOutputGap)) held.push(message)
-          else forwardFromServer(message)
-        })
-      },
-    )
-    await bindEndpoint(livePage, endpoint)
-    await livePage.goto('/')
-    await promptReady(livePage)
-    await openSavedProfile(livePage, profileName)
-    await expect(livePage.locator(TAB)).toHaveCount(3)
-    const pane = livePage.locator('.pane.active')
-    await expect(pane).toHaveAttribute('data-session-id', /.+/)
-    const sessionId = (await pane.getAttribute('data-session-id'))!
-    let host: InventorySession | undefined
-    await expect
-      .poll(
-        async () => {
-          host = helperSession(await inventory(endpoint), sessionId)
-          return host !== undefined
-        },
-        { message: 'the live pane is not backed by the installed helper' },
-      )
-      .toBe(true)
-    const windowBytes = host!.launch.windowBytes
-    const baseBefore = host!.window.base
-    const markersBefore = markerCountOnFixtureHost(gates.markerFile)
-    observed.length = 0
-    holding = true
-
-    const command = longRemoteCommand(gates, windowBytes + (256 << 10) + (64 << 10))
-    await clickIntoEditor(livePage)
-    await livePage.keyboard.type(command)
-    await livePage.keyboard.press('Enter')
-    await expect
-      .poll(() => markerCountOnFixtureHost(gates.markerFile), {
-        message: 'the helper-hosted command did not start',
-      })
-      .toBeGreaterThan(markersBefore)
-    writeFileSync(gates.detached, 'release\n')
-    await waitForRemoteFile(gates.fillerDone, 'the gated remote filler did not finish')
-
-    // Observe the ACTUAL host window advancing beyond the position at attach.
-    // Only then release the queued frames, preserving their original order.
-    await expect
-      .poll(
-        async () => {
-          const current = helperSession(await inventory(endpoint), sessionId)
-          return current !== undefined && current.window.base > baseBefore
-        },
-        { message: 'the helper window did not reclaim output while the tab was backpressured' },
-      )
-      .toBe(true)
-    release()
-
-    const notice = pane.locator('.nocx-recovery-notice')
-    await expect(notice).toBeVisible()
-    await expect
-      .poll(() => outputGap !== null, { message: 'the live gap notification was not forwarded' })
-      .toBe(true)
-    expect(outputGap!.sessionId).toBe(sessionId)
-    expect(outputGap!.end).toBeGreaterThan(outputGap!.start)
-    await expect(notice).toContainText(
-      `${outputGap!.end - outputGap!.start} bytes of live output are missing`,
-    )
-
-    await expect
-      .poll(() => markerCountOnFixtureHost(gates.markerFile), {
-        message: 'the command did not continue after the gap',
-      })
-      .toBeGreaterThan(markersBefore + 1)
-    await expect(
-      pane.locator('.xterm-live-container .term-grid-row', { hasText: `${MARKER_PREFIX}-001` }),
-    ).toHaveCount(1)
-    await expect
-      .poll(
-        () =>
-          observed.includes('gap') &&
-          observed.indexOf('gap') > 0 &&
-          observed.slice(observed.indexOf('gap') + 1).includes('data'),
-        {
-          message: 'the real WebSocket did not preserve pre-gap, gap, post-gap order',
-        },
-      )
-      .toBe(true)
-  } finally {
-    releaseGate?.()
-    await snapshotWatchedClients()
-    backend.stop()
-    fixture?.proc.kill('SIGKILL')
-    await setupPage
-      ?.context()
-      .close()
-      .catch(() => {})
-    await liveContext?.close().catch(() => {})
     rmSync(remoteRoot, { recursive: true, force: true })
     rmSync(backendRoot.root, { recursive: true, force: true })
   }

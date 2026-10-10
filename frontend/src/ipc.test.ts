@@ -707,6 +707,170 @@ describe('inbound data', () => {
     ).toBe(12)
   })
 
+  it('surfaces an already-crossed gap informationally without changing stream state', async () => {
+    const { session, ws, client } = await connectedSession()
+    const seen: string[] = []
+    const gaps: { start: number; end: number; reason: string }[] = []
+    session.onData((data) => seen.push(data))
+    session.onOutputGap((gap) => gaps.push(gap))
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array([0xe2])))
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(
+      SID,
+    )!
+    expect(state.offset).toBe(4)
+    const acksBeforeInfo = ws
+      .requests()
+      .filter((request) => request.method === 'ack')
+      .map((request) => request.params)
+
+    const firstInfo = {
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 1, end: 2, reason: 'hostWindow' },
+    }
+    ws.deliverText(firstInfo)
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 0, end: 1, reason: 'hostWindow' },
+    })
+    ws.deliverText(firstInfo)
+
+    expect(gaps).toEqual([
+      { sessionId: SID, start: 1, end: 2, reason: 'hostWindow' },
+      { sessionId: SID, start: 0, end: 1, reason: 'hostWindow' },
+    ])
+    expect(state.offset).toBe(4)
+    expect(
+      ws
+        .requests()
+        .filter((request) => request.method === 'ack')
+        .map((request) => request.params),
+    ).toEqual(acksBeforeInfo)
+
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array([0x82, 0xac])))
+    expect(seen.join('')).toBe('abc€')
+    expect(state.offset).toBe(6)
+  })
+
+  it('surfaces an inconsistent gap as a protocol error and stops later bytes', async () => {
+    const { session, ws, client } = await connectedSession()
+    const seen: string[] = []
+    const errors: string[] = []
+    session.onData((data) => seen.push(data))
+    session.onProtocolError((message) => errors.push(message))
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(
+      SID,
+    )!
+    const acksBeforeError = ws
+      .requests()
+      .filter((request) => request.method === 'ack')
+      .map((request) => request.params)
+    expect(state.offset).toBe(3)
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 4, end: 5, reason: 'hostWindow' },
+    })
+
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('protocol error')
+    expect(state.offset).toBe(3)
+    expect(
+      ws
+        .requests()
+        .filter((request) => request.method === 'ack')
+        .map((request) => request.params),
+    ).toEqual(acksBeforeError)
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
+    expect(seen.join('')).toBe('abc')
+    expect(state.offset).toBe(3)
+  })
+
+  it.each([
+    { name: 'empty range', start: 3, end: 3 },
+    { name: 'unsafe end', start: 3, end: Number.MAX_SAFE_INTEGER + 1 },
+    { name: 'fractional start', start: 3.5, end: 4 },
+    { name: 'missing end', start: 3 },
+  ])('reports malformed known-session gap bounds ($name) and stops later bytes', async (bounds) => {
+    const { session, ws, client } = await connectedSession()
+    const seen: string[] = []
+    const errors: string[] = []
+    session.onData((data) => seen.push(data))
+    session.onProtocolError((message) => errors.push(message))
+
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(
+      SID,
+    )!
+    const acksBeforeError = ws
+      .requests()
+      .filter((request) => request.method === 'ack')
+      .map((request) => request.params)
+    expect(state.offset).toBe(3)
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, ...bounds, reason: 'hostWindow' },
+    })
+
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('malformed')
+    expect(state.offset).toBe(3)
+    expect(
+      ws
+        .requests()
+        .filter((request) => request.method === 'ack')
+        .map((request) => request.params),
+    ).toEqual(acksBeforeError)
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
+    expect(seen.join('')).toBe('abc')
+    expect(state.offset).toBe(3)
+  })
+
+  it('shows a visible protocol error instead of growing an unbounded gap dedupe set', async () => {
+    const { session, ws, client } = await connectedSession()
+    const seen: string[] = []
+    const gaps: { start: number; end: number }[] = []
+    const errors: string[] = []
+    session.onData((data) => seen.push(data))
+    session.onOutputGap((gap) => gaps.push(gap))
+    session.onProtocolError((message) => errors.push(message))
+
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array(129)))
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(
+      SID,
+    )!
+    expect(state.offset).toBe(129)
+    for (let start = 0; start < 128; start++) {
+      ws.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.outputGap',
+        params: { sessionId: SID, start, end: start + 1, reason: 'hostWindow' },
+      })
+    }
+    expect(gaps).toHaveLength(128)
+    const beforeLimitFailure = seen.join('')
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 128, end: 129, reason: 'hostWindow' },
+    })
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('deduplication limit')
+    expect(gaps).toHaveLength(128)
+    expect(state.offset).toBe(129)
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
+    expect(seen.join('')).toBe(beforeLimitFailure)
+  })
+
   it('reassembles a UTF-8 rune split across two frames', async () => {
     const { session, ws } = await connectedSession()
     const seen: string[] = []
@@ -2201,6 +2365,54 @@ describe('reclaiming a live session', () => {
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('!')))
 
     expect(seen.join('')).toBe('ok!')
+  })
+
+  it('drops a recovered partial rune when the attach result crosses a ring hole', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 1 }))
+
+    await answerRecording(ws, {
+      runs: [{ offset: 0, body: btoa('\xc3') }],
+      produced: 1,
+    })
+    const attach = ws
+      .requests()
+      .filter((request) => request.method === 'attach')
+      .pop()
+    expect((attach?.params as { offset: number }).offset).toBe(1)
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 3 })
+    await settle()
+
+    const state = (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(
+      SID,
+    )!
+    expect(state.offset).toBe(3)
+    const acksBeforeInfo = ws
+      .requests()
+      .filter((request) => request.method === 'ack')
+      .map((request) => request.params)
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.outputGap',
+      params: { sessionId: SID, start: 1, end: 3, reason: 'hostWindow' },
+    })
+    expect(state.offset).toBe(3)
+    expect(
+      ws
+        .requests()
+        .filter((request) => request.method === 'ack')
+        .map((request) => request.params),
+    ).toEqual(acksBeforeInfo)
+
+    const session = await reclaiming
+    const seen: string[] = []
+    const gaps: { start: number; end: number }[] = []
+    session.onData((data) => seen.push(data))
+    session.onOutputGap((gap) => gaps.push(gap))
+    expect(gaps).toEqual([{ sessionId: SID, start: 1, end: 3, reason: 'hostWindow' }])
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array([0xa9])))
+    expect(seen.join('')).toBe('�')
+    expect(seen.join('')).not.toContain('é')
   })
 
   // The read's failure path, paired with every success above: a backend with

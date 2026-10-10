@@ -74,7 +74,11 @@ import { mountIntegrationNotice } from './integration/notice'
 import { mountIntegrationWaiting } from './integration/waiting'
 import { mountToolSurfaceNotice } from './tool-surface-notice'
 import type { SessionOutputGap } from './generated/session.outputGap'
-import { mountRecoveryNotice, mountLiveOutputGapNotice } from './recovery-notice'
+import {
+  mountRecoveryNotice,
+  mountLiveOutputGapNotice,
+  uncoveredGapRanges,
+} from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
@@ -1398,6 +1402,13 @@ export class TerminalContent extends BasePaneContent {
    *  session state that comes and goes, this one is a settled fact about one
    *  reclaim that will never stop being true. */
   private _recoveryNoticeDispose: (() => void) | null = null
+  /** User dismissal is sticky for this reclaim only; a session rebind resets it. */
+  private _recoveryNoticeDismissedForSession = false
+  /** Each disjoint live-gap notice has its own dismissible lifetime. */
+  private readonly _liveOutputGapNoticeDisposers = new Map<string, () => void>()
+  /** Every live range named during this session, used to partition those
+   *  bytes out of the historical recovery account. */
+  private _liveOutputGaps: SessionOutputGap[] = []
   /** The third state's card (nocx-k6p18.5), raised by a RESTORE rather
    *  than by a session: it is a fact about the blocks this pane read back,
    *  not about the pipe it is attached to now. */
@@ -4651,6 +4662,10 @@ export class TerminalContent extends BasePaneContent {
       return false
     }
 
+    this._dropRecoveryNotice()
+    this._dropLiveOutputGapNotices()
+    this._recoveryNoticeDismissedForSession = false
+    this._liveOutputGaps = []
     this.session = session
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
@@ -4680,7 +4695,8 @@ export class TerminalContent extends BasePaneContent {
     // like a session that printed less. Mounted here, with the session,
     // because that is where the fact arrives and where the pane is known.
     this._showRecoveryNotice(session, target)
-    session.onOutputGap((gap) => this._showLiveOutputGapNotice(gap, target))
+    session.onOutputGap((gap) => this._showLiveOutputGapNotice(session, gap, target))
+    session.onProtocolError((message) => showToast({ level: 'danger', message }))
     historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
@@ -6308,32 +6324,42 @@ export class TerminalContent extends BasePaneContent {
     return this.hooks.outputRecording ?? RECORDING_UNKNOWN
   }
 
-  /** Raise the reclaimed-pane card, when this session came back short
-   *  (nocx-fz4qa).
-   *
-   *  A FRESH SESSION RAISES NOTHING: `recovered` is null for a pane that
-   *  opened its own, and a reclaim that got the whole recording back has no
-   *  gaps — mountRecoveryNotice answers null for both, and the decision lives
-   *  there so this side is not a second reader of it.
-   *
-   *  Any card from a PREVIOUS session goes first. A rebind is a new session
-   *  with its own past, and a card left over from the old one would be
-   *  describing bytes that have nothing to do with what is on screen now. */
-  private _showLiveOutputGapNotice(gap: SessionOutputGap, target: HTMLElement): void {
-    this._dropRecoveryNotice()
-    this._recoveryNoticeDispose = mountLiveOutputGapNotice(target, gap, () => {
-      this._dropRecoveryNotice()
-      this.scheduleLiveResize()
-    })
+  /** Keep live transport loss separate from the reclaim's historical loss.
+   *  The live range is subtracted from the historical account before both
+   *  cards are mounted, so overlapping bytes are named exactly once. */
+  private _showLiveOutputGapNotice(
+    session: SessionHandle,
+    gap: SessionOutputGap,
+    target: HTMLElement,
+  ): void {
+    if (this.session !== session) return
+    const uncovered = uncoveredGapRanges(gap, this._liveOutputGaps)
+    if (uncovered.length === 0) return
+    const newGaps = uncovered.map((range) => ({ ...gap, ...range }))
+    const unannouncedBytes = uncovered.reduce((total, range) => total + range.end - range.start, 0)
+    this._liveOutputGaps.push(...newGaps)
+    this._showRecoveryNotice(session, target)
+    const key = `${gap.start}:${gap.end}:${gap.reason}`
+    const dispose = mountLiveOutputGapNotice(
+      target,
+      gap,
+      () => this._dropLiveOutputGapNotice(key),
+      unannouncedBytes,
+    )
+    this._liveOutputGapNoticeDisposers.set(key, dispose)
     this.scheduleLiveResize()
   }
 
+  /** Raise the reclaimed-pane card for the historical ranges not already
+   *  named by a live gap card. A fresh session or whole recording mounts none. */
   private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
     this._dropRecoveryNotice()
+    if (this._recoveryNoticeDismissedForSession) return
     this._recoveryNoticeDispose = session.recovered
       ? mountRecoveryNotice(target, {
           recovery: session.recovered,
-          onDismiss: () => this._dropRecoveryNotice(),
+          liveGaps: this._liveOutputGaps,
+          onDismiss: () => this._dismissRecoveryNotice(),
         })
       : null
     // The card takes its height off the top of the pane, so the scroller is
@@ -6377,11 +6403,36 @@ export class TerminalContent extends BasePaneContent {
     this.scheduleLiveResize()
   }
 
+  /** Remember the user's choice for this reclaim so later gap updates do not
+   *  resurrect the historical card. */
+  private _dismissRecoveryNotice(): void {
+    this._recoveryNoticeDismissedForSession = true
+    this._dropRecoveryNotice()
+  }
+
   /** Take the reclaim card down and give the pane back to the terminal. */
   private _dropRecoveryNotice(): void {
     if (!this._recoveryNoticeDispose) return
     this._recoveryNoticeDispose()
     this._recoveryNoticeDispose = null
+    this.scheduleLiveResize()
+  }
+
+  /** Take one live-gap card down without changing the ranges already named. */
+  private _dropLiveOutputGapNotice(key: string): void {
+    const dispose = this._liveOutputGapNoticeDisposers.get(key)
+    if (!dispose) return
+    this._liveOutputGapNoticeDisposers.delete(key)
+    dispose()
+    this.scheduleLiveResize()
+  }
+
+  /** A rebind or disposal ends every card from the previous live session. */
+  private _dropLiveOutputGapNotices(): void {
+    if (this._liveOutputGapNoticeDisposers.size === 0) return
+    const disposers = [...this._liveOutputGapNoticeDisposers.values()]
+    this._liveOutputGapNoticeDisposers.clear()
+    for (const dispose of disposers) dispose()
     this.scheduleLiveResize()
   }
 
@@ -8288,6 +8339,9 @@ export class TerminalContent extends BasePaneContent {
     this._integrationWaitingDispose = null
     this._recoveryNoticeDispose?.()
     this._recoveryNoticeDispose = null
+    for (const dispose of this._liveOutputGapNoticeDisposers.values()) dispose()
+    this._liveOutputGapNoticeDisposers.clear()
+    this._liveOutputGaps = []
     this._unreconciledNoticeDispose?.()
     this._unreconciledNoticeDispose = null
     this._lifecycleChangeUnsub?.()

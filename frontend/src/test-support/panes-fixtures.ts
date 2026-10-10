@@ -10,6 +10,7 @@ import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
 import type { SessionEffect } from '../generated/session.effect'
+import type { SessionOutputGap } from '../generated/session.outputGap'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -444,6 +445,9 @@ export interface SessionFake {
   onExit: ReturnType<typeof vi.fn>
   onReset: ReturnType<typeof vi.fn>
   onOutputGap: ReturnType<typeof vi.fn>
+  /** Fire the registered output-gap callback. */
+  fireOutputGap(gap: SessionOutputGap): void
+  onProtocolError: ReturnType<typeof vi.fn>
   onInputStalled: ReturnType<typeof vi.fn>
   /** The reachability axis (nocx-iarf9): the backend's revised belief about
    *  reaching this session. */
@@ -455,6 +459,8 @@ export interface SessionFake {
    *  per metadata frame the backend publishes. */
   onScreenFrame: ReturnType<typeof vi.fn>
   onEffect: ReturnType<typeof vi.fn>
+  /** Fire the registered output-protocol error callback. */
+  fireProtocolError(message: string): void
   /** Fire the registered runtime effect callback. */
   fireEffect(effect: SessionEffect): void
   /** Fire the registered screen-frame callback with one document. */
@@ -501,6 +507,8 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
   let screenCb: ((frame: SessionFrame) => void) | null = null
   let effectCb: ((effect: SessionEffect) => void) | null = null
+  let protocolErrorCb: ((message: string) => void) | null = null
+  let outputGapCb: ((gap: SessionOutputGap) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
@@ -529,7 +537,13 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     }),
     onExit: vi.fn(),
     onReset: vi.fn(),
-    onOutputGap: vi.fn(),
+    onOutputGap: vi.fn((cb: (gap: SessionOutputGap) => void) => {
+      outputGapCb = cb
+    }),
+    fireOutputGap: (gap: SessionOutputGap) => outputGapCb?.(gap),
+    onProtocolError: vi.fn((cb: (message: string) => void) => {
+      protocolErrorCb = cb
+    }),
     onInputStalled: vi.fn(),
     onLiveness: vi.fn((cb: (l: SessionLiveness) => void) => {
       livenessCb = cb
@@ -544,6 +558,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
       effectCb = cb
     }),
     fireEffect: (effect: SessionEffect) => effectCb?.(effect),
+    fireProtocolError: (message: string) => protocolErrorCb?.(message),
     // The live tier's page seam (nocx-zg3k3.10.4): the default answers the
     // head read with the empty page of an empty history, so a pane test
     // that never scrolls never pages.

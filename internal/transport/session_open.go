@@ -809,9 +809,8 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 	// on the session's own Done and ends the read pump StartOutput starts.
 	if rx := s.getOrCreateRx(opened.Session.ID()); rx != nil {
 		if opened.Hosted != nil && opened.Hosted.ObserveOutputHoles != nil {
-			ring := rx.ring
 			opened.Hosted.ObserveOutputHoles(func(lost uint64, reason string) {
-				ring.hole(lost, sessionOutputHoleReason(reason))
+				rx.recordOutputHole(lost, sessionOutputHoleReason(reason))
 			})
 		}
 		go s.pumpToRing(context.Background(), opened.Session, rx.ring)

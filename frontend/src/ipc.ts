@@ -34,6 +34,8 @@ import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
 import type { WorkersTabClosed } from './generated/workers.tabClosed'
 
+const maxRememberedOutputGaps = 128
+
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
  *  same ack so the tab's capability control starts from the backend's own
@@ -421,7 +423,10 @@ interface SessionState {
   resetCallback: (() => void) | null
   outputGapCallback: ((gap: SessionOutputGapNotification) => void) | null
   pendingOutputGaps: SessionOutputGapNotification[]
-  lastOutputGap: SessionOutputGapNotification | null
+  protocolErrorCallback: ((message: string) => void) | null
+  pendingProtocolErrors: string[]
+  protocolBlocked: boolean
+  seenOutputGaps: Set<string>
 
   // Fires when the backend reports that this session's write queue refused
   // a frame — the channel has stopped accepting bytes and the keystrokes
@@ -580,9 +585,14 @@ export class SessionHandle {
     this.client.onSessionReset(this.sessionId, cb)
   }
 
-  /** Registers the visible live-stream notice for an ordered output gap. */
+  /** Registers the visible live-stream notice for an output gap. */
   onOutputGap(cb: (gap: SessionOutputGapNotification) => void): void {
     this.client.onSessionOutputGap(this.sessionId, cb)
+  }
+
+  /** Registers the visible signal for a gap that violates the stream cursor. */
+  onProtocolError(cb: (message: string) => void): void {
+    this.client.onSessionProtocolError(this.sessionId, cb)
   }
 
   // onInputStalled registers a callback for the backend's report that this
@@ -741,6 +751,7 @@ export class WSClient {
             }
             const state = this.sessions.get(frame.sessionId)
             if (state) {
+              if (state.protocolBlocked) return
               // Count payload bytes for the per-session offset (AD-9
               // reconnect). Use byteLength, not decoded string length,
               // because every byte counts on the wire.
@@ -770,6 +781,7 @@ export class WSClient {
       const reattached = [...this.sessions.entries()].map(([sid, state]) =>
         this._sendAttach(sid, state.offset, state, state.reported)
           .then((result) => {
+            state.protocolBlocked = false
             if (result.reset) {
               state.offset = result.from ?? 0
               // A reset means the client fell out of the ring — there
@@ -827,54 +839,70 @@ export class WSClient {
     this.dispatcher.subscribe('session.outputGap', (params: unknown) => {
       if (!params || typeof params !== 'object') return
       const raw = params as Record<string, unknown>
-      if (
-        typeof raw.sessionId !== 'string' ||
-        typeof raw.start !== 'number' ||
-        typeof raw.end !== 'number' ||
-        typeof raw.reason !== 'string'
-      )
-        return
-      const { sessionId, start, end, reason } = {
-        sessionId: raw.sessionId,
-        start: raw.start,
-        end: raw.end,
-        reason: raw.reason,
+      if (typeof raw.sessionId !== 'string') return
+      const sessionId = raw.sessionId
+      const state = this.sessions.get(sessionId)
+      if (!state || state.protocolBlocked) return
+
+      const reportProtocolError = (message: string, details: Record<string, unknown>) => {
+        state.protocolBlocked = true
+        log.error('nocx: stopped session after an invalid output-gap notification', {
+          sessionId,
+          ...details,
+        })
+        if (state.protocolErrorCallback) state.protocolErrorCallback(message)
+        else state.pendingProtocolErrors.push(message)
       }
+
+      const start = raw.start
+      const end = raw.end
+      const reason = raw.reason
       const maxSafe = Number.MAX_SAFE_INTEGER
       if (
+        typeof start !== 'number' ||
+        typeof end !== 'number' ||
+        typeof reason !== 'string' ||
         !Number.isSafeInteger(start) ||
         !Number.isSafeInteger(end) ||
         start < 0 ||
-        end < start ||
+        end <= start ||
         end > maxSafe
       ) {
-        log.error('nocx: refused malformed session output-gap offsets', { sessionId, start, end })
+        const message = `Session output protocol error: malformed gap bounds [${String(start)}, ${String(end)}). Output is paused.`
+        reportProtocolError(message, { start, end, reason })
         return
       }
-      const state = this.sessions.get(sessionId)
-      if (!state) return
       const gap: SessionOutputGapNotification = { sessionId, start, end, reason }
-      const previous = state.lastOutputGap
-      if (
-        previous &&
-        previous.start === start &&
-        previous.end === end &&
-        previous.reason === reason &&
-        state.offset === end
-      )
-        return
-      if (state.offset !== start) {
-        log.error('nocx: refused out-of-order session output gap', {
-          sessionId,
-          expected: state.offset,
-          start,
-          end,
-        })
+      const gapKey = JSON.stringify([start, end, reason])
+      if (state.seenOutputGaps.has(gapKey)) return
+      if (state.seenOutputGaps.size >= maxRememberedOutputGaps) {
+        const message = `Session output protocol error: the ${maxRememberedOutputGaps}-range deduplication limit was reached. Output is paused.`
+        reportProtocolError(message, { limit: maxRememberedOutputGaps, start, end })
         return
       }
+
+      // A reset may have reached a new browser after its restored cursor has
+      // already passed the hole. It is still a fact to show, but it is not a
+      // stream transition: the decoder, cursor and ack have already moved on.
+      if (end <= state.offset) {
+        state.seenOutputGaps.add(gapKey)
+        if (state.outputGapCallback) state.outputGapCallback(gap)
+        else state.pendingOutputGaps.push(gap)
+        return
+      }
+
+      // The only ordered transition is a hole at exactly the next expected
+      // byte. Every other relation is ambiguous and stops this session's data
+      // path rather than silently splicing or skipping output.
+      if (start !== state.offset) {
+        const message = `Session output protocol error: gap [${start}, ${end}) does not match current offset ${state.offset}. Output is paused.`
+        reportProtocolError(message, { expected: state.offset, start, end })
+        return
+      }
+
+      state.seenOutputGaps.add(gapKey)
       state.decoder.reset()
       state.offset = end
-      state.lastOutputGap = gap
       this._flushAck(sessionId)
       this._sendAck(sessionId, end)
       if (state.outputGapCallback) state.outputGapCallback(gap)
@@ -1392,7 +1420,10 @@ export class WSClient {
       resetCallback: null,
       outputGapCallback: null,
       pendingOutputGaps: [],
-      lastOutputGap: null,
+      protocolErrorCallback: null,
+      pendingProtocolErrors: [],
+      protocolBlocked: false,
+      seenOutputGaps: new Set(),
       inputStalledCallback: null,
       livenessCallback: null,
       observationCallback: null,
@@ -1609,10 +1640,21 @@ export class WSClient {
           // session.
           gaps.push({ start: recording.produced, end: entry.replayFrom, reason: UNRECORDED })
         }
-        return Promise.all([this._sendAttach(entry.sessionId, attachAt, identity), recoveryStatus])
+        const attach = this._sendAttach(entry.sessionId, attachAt, identity).then((result) => {
+          const attached = this.sessions.get(entry.sessionId)
+          if (attached) {
+            if (result.from > attachAt) {
+              // The attach response crossed a ring hole after the recording
+              // frontier. Reset now, before waiting on optional recovery
+              // metadata or processing the following informational event.
+              attached.decoder.reset()
+            }
+            attached.offset = result.from
+          }
+          return result
+        })
+        return Promise.all([attach, recoveryStatus])
           .then(([result, metadata]) => {
-            const attached = this.sessions.get(entry.sessionId)
-            if (attached) attached.offset = result.from
             // No cwd, no mode, no parent, no workspace: every one of those is
             // a fact of the PANE or of the open that made the session, and
             // the reclaiming window reads them from the layout store it
@@ -1868,6 +1910,14 @@ export class WSClient {
     state.outputGapCallback = cb
     const pending = state.pendingOutputGaps.splice(0)
     for (const gap of pending) cb(gap)
+  }
+
+  onSessionProtocolError(sessionId: string, cb: (message: string) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.protocolErrorCallback = cb
+    const pending = state.pendingProtocolErrors.splice(0)
+    for (const message of pending) cb(message)
   }
 
   onSessionInputStalled(sessionId: string, cb: () => void): void {

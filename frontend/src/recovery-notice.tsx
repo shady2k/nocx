@@ -77,7 +77,42 @@ export interface RecoveryAccount {
  * subtracted: it is a hole of unknown size, and letting it cancel a real one
  * would turn a reporting bug into a silence.
  */
-export function recoveryAccount(recovery: SessionRecovery | null): RecoveryAccount | null {
+/** Partition a byte range by removing the portions already covered by other
+ *  ranges. This is shared by historical accounting and live-notice mounting:
+ *  one interval owner keeps overlap semantics identical in both places. */
+export function uncoveredGapRanges(
+  gap: Pick<SessionOutputGap, 'start' | 'end'>,
+  covered: readonly Pick<SessionOutputGap, 'start' | 'end'>[],
+): Array<{ start: number; end: number }> {
+  if (!Number.isFinite(gap.start) || !Number.isFinite(gap.end) || gap.end <= gap.start) {
+    return []
+  }
+  let remaining: Array<[number, number]> = [[gap.start, gap.end]]
+  for (const range of covered) {
+    if (!Number.isFinite(range.start) || !Number.isFinite(range.end) || range.end <= range.start) {
+      continue
+    }
+    const next: Array<[number, number]> = []
+    for (const [start, end] of remaining) {
+      const overlapStart = Math.max(start, range.start)
+      const overlapEnd = Math.min(end, range.end)
+      if (overlapStart >= overlapEnd) {
+        next.push([start, end])
+        continue
+      }
+      if (start < overlapStart) next.push([start, overlapStart])
+      if (overlapEnd < end) next.push([overlapEnd, end])
+    }
+    remaining = next
+    if (remaining.length === 0) return []
+  }
+  return remaining.map(([start, end]) => ({ start, end }))
+}
+
+export function recoveryAccount(
+  recovery: SessionRecovery | null,
+  liveGaps: readonly Pick<SessionOutputGap, 'start' | 'end'>[] = [],
+): RecoveryAccount | null {
   if (recovery === null) return null
   const account: RecoveryAccount = {
     missing: 0,
@@ -88,7 +123,15 @@ export function recoveryAccount(recovery: SessionRecovery | null): RecoveryAccou
     statusUnavailable: recovery.statusUnavailable ?? false,
   }
   for (const gap of recovery.gaps) {
-    const bytes = gap.end - gap.start
+    const originalBytes = gap.end - gap.start
+    if (!Number.isFinite(originalBytes) || originalBytes <= 0) continue
+    // A live gap notice already names these exact byte offsets. Remove their
+    // overlap from the historical account so the same lost bytes are never
+    // attributed twice; any distinct recording/cap loss remains visible.
+    const bytes = uncoveredGapRanges(gap, liveGaps).reduce(
+      (total, range) => total + range.end - range.start,
+      0,
+    )
     if (!Number.isFinite(bytes) || bytes <= 0) continue
     account.missing += bytes
     if (gap.reason === CAP) {
@@ -143,6 +186,9 @@ function description(account: RecoveryAccount): string {
 export interface RecoveryNoticeProps {
   /** What the reclaim recovered, and what it could not. */
   recovery: SessionRecovery
+  /** Live gaps already named by the neighboring live notice. Their byte
+   *  ranges are removed from the historical account to avoid double-counting. */
+  liveGaps?: readonly Pick<SessionOutputGap, 'start' | 'end'>[]
   /** Take this card away. It records nothing: the hole is permanent and the
    *  card is not, which is the whole of what dismissing it means. */
   onDismiss: () => void
@@ -184,7 +230,7 @@ export function mountRecoveryNotice(
   target: HTMLElement,
   props: RecoveryNoticeProps,
 ): (() => void) | null {
-  const account = recoveryAccount(props.recovery)
+  const account = recoveryAccount(props.recovery, props.liveGaps)
   if (account === null) return null
   const host = document.createElement('div')
   host.className = 'nocx-recovery-notice'
@@ -201,16 +247,19 @@ export function mountRecoveryNotice(
 
 /** Mount the same per-pane warning-card surface for a gap crossed while the
  * tab remains live. This is a transport fact, distinct from a reclaim card;
- * offsets remain exact byte counts and the terminal surface is left in place. */
+ * offsets remain exact byte counts and the terminal surface is left in place.
+ * `unannouncedBytes` is smaller than the event range when it overlaps a live
+ * loss already named by an earlier notice. */
 export function mountLiveOutputGapNotice(
   target: HTMLElement,
   gap: SessionOutputGap,
   onDismiss: () => void,
+  unannouncedBytes = gap.end - gap.start,
 ): () => void {
   const host = document.createElement('div')
   host.className = 'nocx-recovery-notice'
   target.insertBefore(host, target.firstChild)
-  const bytes = gap.end - gap.start
+  const bytes = unannouncedBytes
   const description =
     gap.reason === 'hostWindow'
       ? "The execution host's output window moved past this tab."

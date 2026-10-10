@@ -40,13 +40,17 @@ afterEach(() => {
 
 /** A stand-in for the tab's pane with the terminal already in it — the state
  *  a pane is in the instant a reclaim resolves. */
-function mount(rec: SessionRecovery, onDismiss = vi.fn()) {
+function mount(
+  rec: SessionRecovery,
+  onDismiss = vi.fn(),
+  liveGaps: readonly SessionOutputGap[] = [],
+) {
   pane = document.createElement('div')
   const terminal = document.createElement('div')
   terminal.className = 'scrollback-layout'
   pane.appendChild(terminal)
   document.body.appendChild(pane)
-  dispose = mountRecoveryNotice(pane, { recovery: rec, onDismiss })
+  dispose = mountRecoveryNotice(pane, { recovery: rec, liveGaps, onDismiss })
   return { pane, terminal, onDismiss }
 }
 
@@ -187,6 +191,42 @@ describe('recoveryAccount (nocx-fz4qa)', () => {
       reasons: [],
       statusUnavailable: false,
     })
+  })
+
+  it('subtracts bytes already named by a live notice but retains distinct cap loss', () => {
+    const historical = recovery({
+      gaps: [
+        { start: 2700, end: 99_000, reason: 'hostWindow' },
+        { start: 131_072, end: 4_046_848, reason: 'cap' },
+      ],
+    })
+    const live: SessionOutputGap[] = [
+      {
+        sessionId: '0123456789abcdef0123456789abcdef',
+        start: 2722,
+        end: 98_304,
+        reason: 'hostWindow',
+      },
+    ]
+
+    expect(recoveryAccount(historical, live)).toEqual({
+      missing: 3_916_494,
+      dropped: 3_915_776,
+      unrecorded: 0,
+      other: 718,
+      reasons: ['hostWindow'],
+      statusUnavailable: false,
+    })
+    mount(historical, vi.fn(), live)
+    expect(title()).toBe("3.9 MB of this session's output is missing")
+    expect(desc()).toContain("3.9 MB the recording's size limit dropped")
+    expect(desc()).toContain('718 B missing as "hostWindow"')
+  })
+
+  it('keeps a historical host-window loss visible when no live notice arrives', () => {
+    mount(recovery({ gaps: [{ start: 100, end: 200, reason: 'hostWindow' }] }))
+    expect(title()).toBe("100 B of this session's output is missing")
+    expect(desc()).toContain('missing as "hostWindow"')
   })
 
   it('ignores a range that runs backwards rather than subtracting it', () => {

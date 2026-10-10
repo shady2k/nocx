@@ -3633,6 +3633,30 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	}
 }
 
+// enqueueSessionOutputGap places one missing output range in the same ordered
+// outbound queue as PTY bytes. False means the gap was unsafe or could not be
+// delivered; callers must not send later bytes past an unreported hole.
+func enqueueSessionOutputGap(ctx context.Context, wconn *wsConn, sid session.ID, start, end uint64, reason string) bool {
+	if start > maxSafeSessionOffset || end > maxSafeSessionOffset || end < start {
+		log.From(ctx).Error("session output gap exceeds the JSON-safe byte-offset boundary; stopping stream",
+			"session_id", string(sid), "start", start, "end", end)
+		return false
+	}
+	notice, err := json.Marshal(sessionOutputGapNotification{
+		SessionID: string(sid), Start: start, End: end, Reason: reason,
+	})
+	if err != nil {
+		log.From(ctx).Error("session output gap could not be marshalled", "session_id", string(sid), "error", err)
+		return false
+	}
+	if err := wconn.EnqueueOrderedNotify(ctx, "session.outputGap", notice); err != nil {
+		log.From(ctx).Warn("session output gap could not be delivered; stopping later output",
+			"session_id", string(sid), "start", start, "end", end, "error", err)
+		return false
+	}
+	return true
+}
+
 // ringToConn streams a session's output ring to a WebSocket connection
 // starting at the given byte offset. Exits when the connection drops, when the
 // ring closes, or when this connection STOPS BEING the session's subscriber.
@@ -3684,21 +3708,7 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 			data, from, needsReset, hole := ring.snapshot(pos)
 			if hole != nil {
 				end := from
-				if pos > maxSafeSessionOffset || end > maxSafeSessionOffset || end < pos {
-					s.log.Error("session output gap exceeds the JSON-safe byte-offset boundary; stopping stream",
-						"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end)
-					return
-				}
-				notice, err := json.Marshal(sessionOutputGapNotification{
-					SessionID: string(session.IDFromBytes(sidBytes)), Start: pos, End: end, Reason: hole.reason,
-				})
-				if err != nil {
-					s.log.Error("session output gap could not be marshalled", "session_id", session.IDFromBytes(sidBytes), "error", err)
-					return
-				}
-				if err := wconn.EnqueueOrderedNotify(ctx, "session.outputGap", notice); err != nil {
-					s.log.Warn("session output gap could not be delivered; stopping later output",
-						"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end, "error", err)
+				if !enqueueSessionOutputGap(ctx, wconn, session.IDFromBytes(sidBytes), pos, end, hole.reason) {
 					return
 				}
 				s.log.Warn("session output pump crossed an execution-host output-window gap",

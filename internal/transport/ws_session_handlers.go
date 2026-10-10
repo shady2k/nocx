@@ -909,12 +909,12 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			return nil
 		}
 
-		// A hole is not a case of its own here: snapshot answers `from` with
-		// the offset the stream continues at, which is past the hole, and an
-		// attach is exactly a client being told where to continue. The hole
-		// itself is the recording's to state (session.output's gaps), not
-		// this answer's.
-		_, from, needsReset, _ := rx.ring.snapshot(params.Offset)
+		// Preserve a hole at the requested cursor. The attach result still
+		// names `from`, the first available byte after it, but that offset
+		// alone would make the new ringToConn start past the hole. The live
+		// notification below is the renderer-facing half; the recording has
+		// its own durable recovery metadata.
+		_, from, needsReset, hole := rx.ring.snapshot(params.Offset)
 		if msg := unsafeSessionOffset("attach.from", from); msg != "" {
 			_ = r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
 			return nil
@@ -968,6 +968,19 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			AccessEpoch:       accessEpochOf(ctx, h.intents, sid),
 		}))
 
+		// The response is queued first, then the gap in the same ordered
+		// outbound path. `from` is already at the far side of this hole, so
+		// ringToConn below cannot observe or duplicate it; enqueue before that
+		// pump starts so no later binary frame can pass the notification.
+		gapQueued := true
+		if hole != nil {
+			gapQueued = enqueueSessionOutputGap(ctx, wconn, sid, params.Offset, from, hole.reason)
+			if gapQueued {
+				log.From(ctx).Warn("session output gap notification delivered during attach",
+					"session_id", string(sid), "start", params.Offset, "end", from, "reason", hole.reason)
+			}
+		}
+
 		// Files (fm-w8): deliver the dirty paths the session's bindings
 		// accumulated while no connection was attached. Runs after the attach
 		// response — and after setSubscriber above, so the notifications
@@ -995,7 +1008,9 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayToolSurface(sid)
 		h.machine.replayPaneObservation(sid)
 		sidBytes, _ := session.IDToBytes(sid)
-		go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+		if gapQueued {
+			go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+		}
 		attached = true
 		return nil
 	})

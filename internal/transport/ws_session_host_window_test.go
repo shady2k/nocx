@@ -340,6 +340,136 @@ func TestLiveHostWindowHoleIsOrderedOnTheRealSocket(t *testing.T) {
 	}
 }
 
+// A subscriber that attaches with a cursor inside a ring hole must hear the
+// live gap after its attach result and before any bytes beyond the hole. This
+// is distinct from the recording's recovery metadata: it is the stream event
+// the pane needs in order to name a live hole.
+func TestAttachInsideHostWindowHoleEmitsOrderedGapOnTheRealSocket(t *testing.T) {
+	const lost = uint64(4096)
+	term := newFeedablePTY()
+	ws, stop := newRecordingWSServer(t, term)
+	defer stop()
+
+	first := connectWS(t, ws)
+	t.Cleanup(func() { _ = first.Close() })
+	openRaw := jsonrpcCallWithID(t, first, "open", map[string]uint16{"cols": 80, "rows": 24}, 1)
+	var opened struct {
+		Result struct {
+			SessionID    string `json:"sessionId"`
+			InstanceID   string `json:"instanceId"`
+			SessionEpoch uint64 `json:"sessionEpoch"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(openRaw, &opened); err != nil {
+		t.Fatalf("decode open result: %v (%s)", err, openRaw)
+	}
+	if opened.Error != nil {
+		t.Fatalf("open: %+v", opened.Error)
+	}
+	sid := session.ID(opened.Result.SessionID)
+	if sid == "" {
+		t.Fatal("open returned an empty session id")
+	}
+	awaitSubscriber(t, ws, sid)
+	if err := first.Close(); err != nil {
+		t.Fatalf("close original client: %v", err)
+	}
+	awaitDetached(t, ws, sid)
+
+	// This is the helper reset represented at the transport seam: no bytes
+	// before the gap, then a host-window hole at the stale reader's offset.
+	rx := ws.getRx(sid)
+	if rx == nil {
+		t.Fatal("opened session has no output ring")
+	}
+	rx.ring.hole(lost, content.GapReasonHostWindow)
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	attachRequest, marshalErr := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "attach",
+		"params": map[string]any{
+			"sessionId": sid, "instanceId": opened.Result.InstanceID,
+			"sessionEpoch": opened.Result.SessionEpoch, "offset": 0,
+		},
+	})
+	if marshalErr != nil {
+		t.Fatalf("marshal attach: %v", marshalErr)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, attachRequest); err != nil {
+		t.Fatalf("write attach: %v", err)
+	}
+
+	read := func(what string) (int, []byte) {
+		t.Helper()
+		if err := conn.SetReadDeadline(time.Now().Add(wantWithin)); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		kind, raw, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read %s: %v", what, err)
+		}
+		return kind, raw
+	}
+
+	// The attach result must be the first frame. The event is enqueued only
+	// after this response, and ringToConn is not started until after the event.
+	responseType, responseRaw := read("attach response")
+	if responseType != websocket.TextMessage {
+		t.Fatalf("attach response frame type = %d, want text", responseType)
+	}
+	var response struct {
+		ID     int             `json:"id"`
+		Result attachResult    `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(responseRaw, &response); err != nil {
+		t.Fatalf("decode attach response: %v (%s)", err, responseRaw)
+	}
+	if response.ID != 2 || len(response.Error) != 0 {
+		t.Fatalf("attach response = %+v, want successful response id 2", response)
+	}
+	if response.Result.From != lost || !response.Result.Resumed || response.Result.Reset {
+		t.Fatalf("attach result = %+v, want resumed at the far side %d of the hole", response.Result, lost)
+	}
+
+	gapType, gapRaw := read("attach-time output-gap notification")
+	if gapType != websocket.TextMessage {
+		t.Fatalf("attach-time gap frame type = %d, want text notification before later output", gapType)
+	}
+	var gap struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(gapRaw, &gap); err != nil {
+		t.Fatalf("decode attach-time gap notification: %v (%s)", err, gapRaw)
+	}
+	if gap.JSONRPC != "2.0" || gap.Method != "session.outputGap" {
+		t.Fatalf("attach-time notification = %+v, want session.outputGap", gap)
+	}
+	var params sessionOutputGapNotification
+	if err := json.Unmarshal(gap.Params, &params); err != nil {
+		t.Fatalf("decode attach-time gap params: %v (%s)", err, gap.Params)
+	}
+	if params.SessionID != string(sid) || params.Start != 0 || params.End != lost || params.Reason != content.GapReasonHostWindow {
+		t.Fatalf("attach-time gap = %+v, want session %s range [0,%d) reason %s", params, sid, lost, content.GapReasonHostWindow)
+	}
+	validateJSON(t, loadSchema(t, "session.outputGap.schema.json"), gap.Params, "attach-time session.outputGap params off the real socket")
+
+	after := []byte("after-attach-hole")
+	awaitPush(t, "the bytes after the attach-time hole", pushOutput(term, after))
+	lastType, lastRaw := read("post-gap output")
+	if lastType != websocket.BinaryMessage {
+		t.Fatalf("post-gap frame type = %d, want binary after session.outputGap", lastType)
+	}
+	last, err := DecodeFrame(lastRaw)
+	if err != nil || !bytesEqual(last.Payload, after) {
+		t.Fatalf("post-gap payload = %q, err %v; want %q", last.Payload, err, after)
+	}
+}
+
 func TestSessionByteOffsetJSONBoundaryIsInclusiveAndRejectsUnsafeValues(t *testing.T) {
 	const ceiling = uint64(9007199254740991)
 	for _, tc := range []struct {

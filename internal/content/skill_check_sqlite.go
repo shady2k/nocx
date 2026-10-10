@@ -63,7 +63,7 @@ func (r *skillCheckSqlite) Put(ctx context.Context, check SkillCheck) error {
 		return fmt.Errorf("content: skill check: encode findings: %w", err)
 	}
 	return r.s.run(ctx, func(ctx context.Context) error {
-		_, execErr := r.s.db.ExecContext(ctx, `INSERT INTO skill_checks
+		_, execErr := r.s.conn(ctx).ExecContext(ctx, `INSERT INTO skill_checks
 			(name, provenance, verdict, report, role, endpoint, model, digest,
 			 checked_at, read_paths, omitted, findings, max_bytes)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -99,7 +99,7 @@ func (r *skillCheckSqlite) Get(ctx context.Context, name string) (SkillCheck, bo
 		readPaths, omitted, findings string
 	)
 	check.Name = name
-	err := r.s.db.QueryRowContext(ctx, `SELECT provenance, verdict, report, role, endpoint,
+	err := r.s.conn(ctx).QueryRowContext(ctx, `SELECT provenance, verdict, report, role, endpoint,
 		model, digest, checked_at, read_paths, omitted, findings, max_bytes
 		FROM skill_checks WHERE name = ?`, name).Scan(
 		&check.Provenance, &check.Verdict, &check.Report, &check.Role, &check.Endpoint,
@@ -129,7 +129,7 @@ func (r *skillCheckSqlite) Get(ctx context.Context, name string) (SkillCheck, bo
 // error, the same rule DeleteEntry and DeleteWorkspace already keep.
 func (r *skillCheckSqlite) Delete(ctx context.Context, name string) error {
 	return r.s.run(ctx, func(ctx context.Context) error {
-		if _, err := r.s.db.ExecContext(ctx, `DELETE FROM skill_checks WHERE name = ?`, name); err != nil {
+		if _, err := r.s.conn(ctx).ExecContext(ctx, `DELETE FROM skill_checks WHERE name = ?`, name); err != nil {
 			return fmt.Errorf("content: skill check: delete %q: %w", name, err)
 		}
 		return nil

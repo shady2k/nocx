@@ -74,6 +74,8 @@ type SessionOutputRecorder interface {
 	// byte ranges the bound dropped. An unknown session is an empty
 	// recording and not an error.
 	Read(ctx context.Context, sessionID string) (content.SessionOutputRecording, error)
+	// RecoveryStatus reads only the recorded end offset and known gap metadata.
+	RecoveryStatus(ctx context.Context, sessionID string) (content.SessionOutputRecoveryStatus, error)
 	// Stance says whether output produced now would be kept, and why not.
 	Stance() content.SessionOutputStance
 }

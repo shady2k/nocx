@@ -34,7 +34,9 @@ func (w *WailsApp) initializeDownloadSave() {
 	w.downloadOnce.Do(func() {
 		svc, err := downloadsave.New(downloadsave.Config{
 			Picker: wailsDownloadPicker{app: w},
-			Sink:   local.New().Sink(),
+			PrepareDestination: func(path string) (downloadsave.Destination, error) {
+				return local.PrepareDownload(path)
+			},
 			Address: func() (string, error) {
 				w.downloadMu.RLock()
 				defer w.downloadMu.RUnlock()

@@ -1026,6 +1026,7 @@ func TestSectionGroups_ProductionMappings(t *testing.T) {
 		"Interface": "application",
 		"Clipboard": "application",
 		"History":   "application",
+		"Terminal":  "application",
 		"Test":      "developer",
 	} {
 		got, ok := sg[section]

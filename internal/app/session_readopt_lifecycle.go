@@ -44,7 +44,8 @@ package app
 // stream. The one new vector adoption WOULD open is replay of the helper's
 // retained lifecycle window into a domain whose capability is unchanged, and
 // it is closed in session_readopt.go, where the attachment resumes at the
-// window's head instead of its base.
+// cursor this machine stored of the last frame it applied (ADR-0077) — never
+// at the window's base, and at its head only when no cursor was stored.
 //
 // AND WHEN IT CANNOT BE DONE, THE PANE SAYS SO. Three ways it fails and all
 // three are stated rather than logged: a helper generation from before the op
@@ -85,6 +86,10 @@ type lifecycleAdoption struct {
 	adapter *lifecyclechannel.Adapter
 	peer    net.Conn
 	lane    lifecycle.LaneID
+	// cursor is the leg's applied cursor (lifecycle_cursor.go, ADR-0077):
+	// the adapter reports into it, the bridge feeds it, the re-adopt binds
+	// it and the end hold waits on it.
+	cursor *lifecycleCursor
 	// log is the readopt pass's own logger, carried so the bridge this
 	// adoption starts can say what it carries. It is bound here rather than
 	// reached for at attachTo, which runs on the transport's goroutine with
@@ -146,6 +151,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	driveKernel := client.NewCompletionObservingAdoptingKernel(kernel, downlink)
 
 	coordinatorConn, peerConn := net.Pipe()
+	cursor := newLifecycleCursor(ctx, rp.registry.lifecycleCursors, rp.registry.lifecycleStopping)
 	adapter, err := lifecyclechannel.NewAdoptedStream(
 		log.NewSlogAdapter(rp.registry.log), driveKernel, coordinatorConn,
 		lifecyclechannel.Launch{
@@ -155,7 +161,8 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 			Capability: launch.Capability,
 			Recovery:   launch.Recovery,
 		},
-		lifecyclechannel.WithLossReporter(rp.registry.reportLifecycleLoss))
+		lifecyclechannel.WithLossReporter(rp.registry.reportLifecycleLoss),
+		lifecyclechannel.WithFrameScope(cursor.applyFrame))
 	if err != nil {
 		_ = peerConn.Close()
 		stopDownlink()
@@ -169,6 +176,12 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	if rp.registry.environmentEntries != nil {
 		rp.registry.environmentEntries.register(sessionCtx, adapter.Lane(), downlink)
 	}
+	// The leg's end ends every wait on its cursor: a pump that has stopped
+	// applies nothing more, so nobody may wait for it to reach a target.
+	go func() {
+		<-adapter.Done()
+		cursor.end()
+	}()
 	return lifecycleAdoption{
 		// STARTING and not INTEGRATED, even though the domain is already
 		// Established: "a domain is live" is the kernel's word, and the axis
@@ -180,6 +193,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 		reason:  ssh.ReasonNone,
 		adapter: adapter,
 		peer:    peerConn,
+		cursor:  cursor,
 		lane:    adapter.Lane(),
 		log:     log.NewSlogAdapter(rp.registry.log),
 
@@ -197,10 +211,11 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 	adapter, peer := a.adapter, a.peer
 	var startOnce sync.Once
 	var abortOnce sync.Once
+	var detachOnce sync.Once
 	open.LifecycleLane = a.lane
 	open.StartLifecycle = func() {
 		startOnce.Do(func() {
-			bridgeLifecycle(a.log, adapter.TransportID(), peer, attached.Lifecycle())
+			bridgeLifecycle(a.log, adapter.TransportID(), peer, attached.Lifecycle(), a.cursor, attached)
 		})
 	}
 	open.AbortLifecycle = func() {
@@ -210,6 +225,17 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 			// An adoption the transport refuses never became a pane; its
 			// downlink's lifetime ends with the rollback, not at some
 			// session end that will never arrive.
+			a.stopDownlink()
+		})
+	}
+	// The adopted leg hands over exactly as a freshly opened one does: the
+	// NEXT coordinator departure must detach it, not lose it, or the
+	// premature close this wiring exists to prevent returns with a
+	// different process doing the closing (ADR-0076).
+	open.DetachLifecycle = func() {
+		detachOnce.Do(func() {
+			_ = adapter.Detach()
+			_ = peer.Close()
 			a.stopDownlink()
 		})
 	}
@@ -240,4 +266,5 @@ func (a lifecycleAdoption) abort() {
 // method this file uses so the wiring does not depend on the whole attachment.
 type lifecycleCarrierSource interface {
 	Lifecycle() io.ReadWriteCloser
+	lifecycleOffsets
 }

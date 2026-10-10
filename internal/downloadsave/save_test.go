@@ -111,7 +111,7 @@ func TestSaveStreamsAndRequiresSentTrailerBeforeAtomicPromotion(t *testing.T) {
 			}))
 			defer server.Close()
 			picker := &fixedPicker{path: destination}
-			svc := newTestService(t, picker, local.New().Sink(), func() (string, error) { return server.Listener.Addr().String(), nil }, time.Now, server.Client())
+			svc := newTestService(t, picker, nil, func() (string, error) { return server.Listener.Addr().String(), nil }, time.Now, server.Client())
 			handle, err := svc.Prepare(context.Background(), "target.bin")
 			if err != nil {
 				t.Fatal(err)
@@ -186,11 +186,15 @@ func TestSaveClassifiesLocalWriteFailureAndOnlyReportsSuccessAfterSinkReturns(t 
 		w.Header().Set("X-Nocx-Download-Status", "sent")
 	}))
 	defer server.Close()
-	picker := &fixedPicker{path: filepath.Join(t.TempDir(), "missing", "target")}
-	svc := newTestService(t, picker, local.New().Sink(), func() (string, error) { return server.Listener.Addr().String(), nil }, time.Now, server.Client())
+	picker := &fixedPicker{path: filepath.Join(t.TempDir(), "target")}
+	svc := newTestService(t, picker, nil, func() (string, error) { return server.Listener.Addr().String(), nil }, time.Now, server.Client())
 	handle, err := svc.Prepare(context.Background(), "target")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A directory can become unwritable after Prepare even with a pinned root.
+	if removeErr := os.Remove(filepath.Dir(picker.path)); removeErr != nil {
+		t.Fatal(removeErr)
 	}
 	if got := svc.Save(context.Background(), handle, strings.Repeat("c", 64), 2).Outcome; got != "destination-failed" {
 		t.Fatalf("write failure outcome = %q", got)
@@ -273,35 +277,6 @@ func TestDiscardClosesRunningBodyAndIsIdempotent(t *testing.T) {
 	}
 }
 
-type countingCloser struct{ calls atomic.Int32 }
-
-func (c *countingCloser) Close() error {
-	c.calls.Add(1)
-	return nil
-}
-
-func TestRepeatedDiscardDoesNotRepeatCancelOrClose(t *testing.T) {
-	svc := newTestService(t, &fixedPicker{}, &observingSink{}, func() (string, error) {
-		return "127.0.0.1:1", nil
-	}, time.Now, nil)
-	const handle = "0123456789abcdef0123456789abcdef"
-	var cancelCalls atomic.Int32
-	body := &countingCloser{}
-	svc.entries[handle] = &entry{
-		state:  "running",
-		cancel: func() { cancelCalls.Add(1) },
-		body:   body,
-	}
-	svc.Discard(handle)
-	svc.Discard(handle)
-	if got := cancelCalls.Load(); got != 1 {
-		t.Fatalf("cancel called %d times, want 1", got)
-	}
-	if got := body.calls.Load(); got != 1 {
-		t.Fatalf("body closed %d times, want 1", got)
-	}
-}
-
 type waitingSink struct{ entered chan struct{} }
 
 func (s *waitingSink) Put(ctx context.Context, _ transfer.Upload, r io.Reader, _ func(int64)) (transfer.Outcome, error) {
@@ -310,9 +285,33 @@ func (s *waitingSink) Put(ctx context.Context, _ transfer.Upload, r io.Reader, _
 	return transfer.Outcome{}, err
 }
 
+type sinkDestination struct {
+	sink   transfer.Sink
+	target transfer.Upload
+}
+
+func (d *sinkDestination) Put(ctx context.Context, size int64, reader io.Reader) (transfer.Outcome, error) {
+	target := d.target
+	target.Size = size
+	return d.sink.Put(ctx, target, reader, nil)
+}
+
+func (*sinkDestination) Close() error { return nil }
+
+func testDestinationFactory(sink transfer.Sink) func(string) (Destination, error) {
+	return func(path string) (Destination, error) {
+		if sink == nil {
+			return local.PrepareDownload(path)
+		}
+		return &sinkDestination{sink: sink, target: transfer.Upload{
+			DestDir: filepath.Dir(path), Name: filepath.Base(path), OnExists: transfer.Overwrite,
+		}}, nil
+	}
+}
+
 func newTestService(t *testing.T, picker Picker, sink transfer.Sink, address func() (string, error), now func() time.Time, client *http.Client) *Service {
 	t.Helper()
-	svc, err := New(Config{Picker: picker, Sink: sink, Address: address, Client: client, Now: now, Random: rand.Reader})
+	svc, err := New(Config{Picker: picker, PrepareDestination: testDestinationFactory(sink), Address: address, Client: client, Now: now, Random: rand.Reader})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,9 +321,9 @@ func newTestService(t *testing.T, picker Picker, sink transfer.Sink, address fun
 
 func TestNewRequiresClockAndRandomSource(t *testing.T) {
 	base := Config{
-		Picker:  &fixedPicker{},
-		Sink:    &observingSink{},
-		Address: func() (string, error) { return "127.0.0.1:1", nil },
+		Picker:             &fixedPicker{},
+		PrepareDestination: testDestinationFactory(&observingSink{}),
+		Address:            func() (string, error) { return "127.0.0.1:1", nil },
 	}
 	if _, err := New(base); err == nil {
 		t.Fatal("New accepted missing clock and random source")
@@ -358,7 +357,7 @@ func TestPrepareBoundsHandlesAndDiscardIsOneShot(t *testing.T) {
 	}
 	svc.Discard(handles[0])
 	svc.Discard(handles[0])
-	if got := svc.Save(context.Background(), handles[0], strings.Repeat("a", 64), 0).Outcome; got != "source-failed" {
+	if got := svc.Save(context.Background(), handles[0], strings.Repeat("a", 64), 0).Outcome; got != "cancelled" {
 		t.Fatalf("discarded handle outcome = %q", got)
 	}
 	now = now.Add(handleTTL)
@@ -420,7 +419,7 @@ func TestZeroByteDownloadRequiresSentTrailer(t *testing.T) {
 			if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			svc := newTestService(t, &fixedPicker{path: destination}, local.New().Sink(),
+			svc := newTestService(t, &fixedPicker{path: destination}, nil,
 				func() (string, error) { return server.Listener.Addr().String(), nil }, time.Now, server.Client())
 			handle, err := svc.Prepare(context.Background(), "empty")
 			if err != nil {

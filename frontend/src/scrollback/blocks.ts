@@ -1085,7 +1085,15 @@ function isOutputEmpty(html: string): boolean {
  */
 export function blockOutputText(blockEl: HTMLElement | null): string {
   if (!blockEl) return ''
-  const outputEl = blockEl.querySelector('.cmd-output')
+  // A block whose stored rows could not be painted still says WHY on an
+  // incomplete notice (paintStoredRows); with no output container that
+  // notice IS the output, so the model read and Copy keep seeing it rather
+  // than an empty string (nocx-2v80t.3.27's separation, kept by this
+  // fallback). The empty-output statement is deliberately not read: a
+  // command that printed nothing answers ''.
+  const outputEl =
+    blockEl.querySelector<HTMLElement>('.cmd-output') ??
+    blockEl.querySelector<HTMLElement>('[data-output-incomplete]')
   if (!outputEl) return ''
   const lines = outputEl.querySelectorAll('.term-line, .term-grid-row')
   if (lines.length === 0) return outputEl.textContent ?? ''
@@ -1475,6 +1483,16 @@ function wireBlockSelection(
 
 // ── Block builders ─────────────────────────────────────────────────────────
 
+/** Give the block tree a named, keyboard-reachable structure. The block
+ *  owns its group name; its header text remains the content name, and nested
+ *  blocks remain separate groups in DOM order. */
+function setBlockAccessibility(wrapper: HTMLElement, kind: BlockKind): void {
+  const label = wrapper.querySelector<HTMLElement>('.cmd-header-text')?.textContent?.trim()
+  wrapper.setAttribute('role', 'group')
+  wrapper.tabIndex = 0
+  wrapper.setAttribute('aria-label', label ? `${kind} block: ${label}` : `${kind} block`)
+}
+
 /**
  * Create a frozen command block DOM element with header + serialized output.
  * `status` 'entered' (N6) is the block the ssh command froze into when the
@@ -1578,6 +1596,7 @@ export function createCommandBlock(
   if (outputEl) wrapper.appendChild(outputEl)
 
   // Full-block click-to-select with drag distinction (P1-7, P1-8).
+  setBlockAccessibility(wrapper, kind)
   wireBlockSelection(wrapper, getContainer(), id, onSelect)
 
   // Double-click selects a whole token the way xterm does it (nocx-w7h.11,
@@ -1735,6 +1754,7 @@ export function createRunningBlock(
   if (right) right.appendChild(overflow)
 
   wrapper.appendChild(header)
+  setBlockAccessibility(wrapper, 'command')
   wireBlockSelection(wrapper, getContainer(), id, onSelect)
 
   return wrapper

@@ -51,36 +51,6 @@ describe('browser download preparation', () => {
   })
 })
 describe('native prepared downloads', () => {
-  it('sends the opaque handle, ticket, and measured size and retires the handle', async () => {
-    const calls: unknown[][] = []
-    const saver = createNativeDownloadSaver({
-      prepare(name) {
-        calls.push(['prepare', name])
-        return Promise.resolve('opaque-handle')
-      },
-      save(handle, ticket, size) {
-        calls.push(['save', handle, ticket, size])
-        return Promise.resolve({ outcome: 'saved' })
-      },
-      discard(handle) {
-        calls.push(['discard', handle])
-        return Promise.resolve()
-      },
-    })
-    const prepared = await saver.prepare('suggested.iso')
-    expect(prepared?.destination).toBe('native')
-    await expect(
-      prepared?.save(downloadResultFixture({ ticket: 'b'.repeat(64), size: 42 }), null),
-    ).resolves.toBe('saved')
-    expect(calls).toEqual([
-      ['prepare', 'suggested.iso'],
-      ['save', 'opaque-handle', 'b'.repeat(64), 42],
-      ['discard', 'opaque-handle'],
-    ])
-    prepared?.dispose()
-    expect(calls).toHaveLength(3)
-  })
-
   it('discards a handle when save rejects before consumption', async () => {
     const discarded: string[] = []
     const prepared = await createNativeDownloadSaver({
@@ -144,5 +114,34 @@ describe('native prepared downloads', () => {
     prepared?.cancel()
     prepared?.dispose()
     expect(discarded).toEqual(['opaque-handle'])
+  })
+
+  it('reports cancellation when a prepared save is cancelled before consumption', async () => {
+    const prepared = await createNativeDownloadSaver({
+      prepare: () => Promise.resolve('opaque-handle'),
+      save: () => Promise.reject(new Error('cancelled save must not start')),
+      discard: () => Promise.resolve(),
+    }).prepare('a')
+    if (prepared === null) throw new Error('expected a native prepared handle')
+    prepared.cancel()
+    await expect(prepared.save(downloadResultFixture(), null)).resolves.toBe('cancelled')
+  })
+
+  it('does not retract a saved result when cancellation loses the commit race', async () => {
+    let committed!: (result: { outcome: string }) => void
+    const savingResult = new Promise<{ outcome: string }>((resolve) => {
+      committed = resolve
+    })
+    const prepared = await createNativeDownloadSaver({
+      prepare: () => Promise.resolve('opaque-handle'),
+      save: () => savingResult,
+      discard: () => Promise.resolve(),
+    }).prepare('a')
+    if (prepared === null) throw new Error('expected a native prepared handle')
+    const saving = prepared.save(downloadResultFixture(), null)
+    prepared.cancel()
+    committed({ outcome: 'saved' })
+    await expect(saving).resolves.toBe('saved')
+    await expect(prepared.save(downloadResultFixture(), null)).resolves.toBe('destination-failed')
   })
 })

@@ -144,6 +144,13 @@ type SessionOutputRun struct {
 	Body   []byte
 }
 
+// SessionOutputRecoveryStatus is the small metadata view needed to explain a
+// reclaim gap. It never reads or returns stored byte chunks.
+type SessionOutputRecoveryStatus struct {
+	Produced uint64
+	Gaps     []Gap
+}
+
 // SessionOutputRecording is everything the store kept for one session.
 type SessionOutputRecording struct {
 	SessionID string
@@ -224,6 +231,9 @@ type SessionOutputRepository interface {
 	// unknown session is an empty recording and not an error: nothing was
 	// produced, or all of it was dropped, and neither is a fault.
 	Read(ctx context.Context, sessionID string) (SessionOutputRecording, error)
+	// RecoveryStatus reads only the produced offset and gap metadata used by
+	// the reclaim warning. It does not read recorded chunks or return bytes.
+	RecoveryStatus(ctx context.Context, sessionID string) (SessionOutputRecoveryStatus, error)
 	// Stance reports whether output produced right now would be kept, and
 	// why not. Read live, per call: the History settings apply without a
 	// restart, so an answer cached at startup would be wrong by lunchtime.

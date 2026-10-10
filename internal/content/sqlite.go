@@ -59,6 +59,12 @@ type Config struct {
 	// Clock supplies wall time for restart marks and their retention bound.
 	// Production uses time.Now; tests may provide a deterministic clock.
 	Clock func() time.Time
+	// FrameTimer arms the bound on how long a lifecycle frame may hold the
+	// store's connection (LifecycleFrameMaxHold): fire runs once d has
+	// passed, and stop disarms it, reporting whether it did so before fire
+	// ran. Production uses time.AfterFunc; a test hands in a timer it fires
+	// itself, so no test waits on a duration.
+	FrameTimer func(d time.Duration, fire func()) (stop func() bool)
 }
 
 const (
@@ -169,6 +175,16 @@ func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) er
 	if s.closed.Load() {
 		return ErrClosed
 	}
+	// A write inside a lifecycle frame joins the frame's transaction and
+	// runs here, on the frame's goroutine: the frame holds the one
+	// connection until it commits, so the writer goroutine could not run it
+	// before then (lifecycle_frame.go).
+	if f := s.frameOf(ctx); f != nil {
+		return f.write(ctx, fn)
+	}
+	if err := s.checkFrameContext(ctx); err != nil {
+		return err
+	}
 	req := writeReq{ctx: ctx, fn: fn, done: make(chan writeOutcome, 1)}
 	// Before the handoff the request is still the caller's, so a cancel or a
 	// Close may abandon it: nothing has run and nothing is owed.
@@ -223,6 +239,11 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	}
 	if cfg.Policy == nil {
 		cfg.Policy = NewPolicy()
+	}
+	if cfg.FrameTimer == nil {
+		cfg.FrameTimer = func(d time.Duration, fire func()) func() bool {
+			return time.AfterFunc(d, fire).Stop
+		}
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now

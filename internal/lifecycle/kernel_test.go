@@ -1341,8 +1341,10 @@ func TestCompleteWithoutAttemptIDResolvesByContext(t *testing.T) {
 	}
 }
 
-// A named id that is not the domain's open attempt is still refused, so making
-// the field optional did not loosen the cross-attempt rule.
+// A named id that is not the domain's open attempt is still refused on a
+// kernel-native domain, so making the field optional did not loosen the
+// cross-attempt rule. The adopted-domain exception is completion-only
+// replay's own (adopt_test.go).
 func TestCompleteWithForeignAttemptIDRejected(t *testing.T) {
 	k, _, _ := newTestKernel()
 	p := &fakePort{}
@@ -1626,4 +1628,32 @@ func outboundKinds(outs []Outbound) []EventKind {
 		kinds = append(kinds, o.Envelope.Event.Kind)
 	}
 	return kinds
+}
+
+// The shipped shells name their completion with the id they minted at start
+// (nocx-zg3k3.5.11: the block's identity must be stable across coordinators,
+// so every frame of a command carries it). For a command submitted from the
+// app that id is the app attempt's alias, never its key, and the completion
+// resolves it the way a snapshot resolves last_completed — exact id first,
+// then this domain's alias — and completes the app attempt.
+func TestACompletionNamingTheShellAliasCompletesTheAppAttempt(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	app, err := k.SubmitAttempt(h.Domain, "make", "/home/dev", "local", "")
+	if err != nil {
+		t.Fatalf("SubmitAttempt: %v", err)
+	}
+	shellID := AttemptID("s-dom-alias-0")
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(&shellID, "make"))); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := k.Ingest("T", env("L", h, 3, completeEvt(shellID, 0, fence(0x41)))); err != nil {
+		t.Fatalf("a completion naming the shell's own id for the app attempt was refused: %v", err)
+	}
+	got, ok := k.Attempt(app.ID)
+	if !ok || got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("the app attempt after its named completion = %+v, want completed with exit 0", got)
+	}
 }

@@ -272,7 +272,7 @@ jobs:
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -tags gtk3 -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
 
       # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
       # not appear in `go list ./...` at all, so it was not merely failing to be
@@ -284,7 +284,7 @@ jobs:
       - name: Test (the local helper's ssh client, nocx_local_ssh)
         env:
           PKGS: ${{ steps.localssh.outputs.list }}
-        run: go test -race -tags gtk3,nocx_local_ssh -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -422,9 +422,9 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -433,9 +433,19 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+
+      # THE ALLOCATION BUDGETS, WITHOUT -race (nocx-zg3k3.5.8). Every pass above
+      # runs -race, which instruments and adds allocations (the pump's window
+      # reads 8.3-8.7 MB/MiB under it against 5.56 without), so each budget
+      # test skips itself there and is measured here instead. Once, in one
+      # variant: the keyring does not touch the ingest path. The list and the
+      # pattern belong to the Makefile.
+      - name: Test (allocation budgets, no race detector)
+        if: matrix.keyring == 'no-secret-service'
+        run: make -s test-alloc-budgets
 
   # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
   #
@@ -579,9 +589,9 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -590,9 +600,9 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
   ci-frontend:
     needs: changes
@@ -680,7 +690,6 @@ jobs:
   # every day. Node and a full history are the whole toolchain: no npm install,
   # no container, seconds.
   ci-backlog:
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -700,41 +709,53 @@ jobs:
           # interpolated into a shell line is a shell line somebody else can
           # write.
           BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           set -eu
           gate=.githooks/backlog-gate
-          # What was already wrong before this change. On a pull request that is
-          # the merge base with the branch being merged into; on a push it is the
-          # commit the branch was at before the push, because a merge base
-          # against the branch\'s own upstream is the branch itself — the
-          # baseline would be the backlog under test and nothing could ever be
-          # new. A first push or a shallow surprise leaves neither, and then the
-          # previous commit is the honest answer.
+          # A PR compares the actual PR head to its merge-base. A push compares
+          # its tip to the advertised old ref when that is an ancestor; for a
+          # new/unrelated ref, use the first introduced commit's real parent.
+          # There is no synthetic HEAD^ fallback.
           base=""
           if [ -n "${BASE_REF:-}" ]; then
-            base=$(git merge-base "origin/$BASE_REF" HEAD)
-          elif [ -n "${BEFORE:-}" ]; then
-            base="$BEFORE"
+            base=$(git merge-base "origin/$BASE_REF" "${HEAD_SHA:-HEAD}")
+            tip=${HEAD_SHA:-HEAD}
+          else
+            tip=$(git rev-parse HEAD)
+            set -- --introduced "$tip" --by "$GITHUB_REF" --remote origin
+            case "${BEFORE:-}" in
+              *[!0]*) set -- "$@" --before "$BEFORE" ;;
+            esac
+            introduced=$(node "$gate/commit-links.mjs" --list-introduced "$@")
+            if [ -z "$introduced" ]; then
+              echo "no introduced commits; backlog policy has nothing new to check"
+              exit 0
+            fi
+            base=""
+            case "${BEFORE:-}" in
+              *[!0]*) base=$BEFORE ;;
+            esac
+            if [ -z "$base" ] || ! git merge-base --is-ancestor "$base" "$tip"; then
+              base=$(printf '%s\n' "$introduced" | while IFS= read -r row; do printf '%s\n' "$row"; break; done | cut -d' ' -f2)
+            fi
           fi
-          if [ -z "$base" ] || ! git rev-parse -q --verify "$base^{commit}" >/dev/null ||
-            [ "$(git rev-parse "$base^{commit}")" = "$(git rev-parse HEAD)" ]; then
-            base=$(git rev-parse HEAD^)
+          if [ -z "$base" ] || ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
+            echo "no valid preceding backlog revision" >&2
+            exit 2
           fi
           echo "baseline: $base"
           node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
-          # The baseline is judged by the config of its own day, so a config
-          # change that creates violations (a lowered budget, a new milestone)
-          # shows up as new errors instead of passing as old debt.
+          node "$gate/adapter.mjs" --at "$tip" > "$RUNNER_TEMP/backlog-tip.json"
+          git show "$tip:$gate/config.json" > "$RUNNER_TEMP/backlog-tip-config.json"
           baseline_config=""
           if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
             baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
           fi
-          # shellcheck disable=SC2086 # baseline_config is two words or none
-          node "$gate/adapter.mjs" |
-            node "$gate/check.mjs" \
-              --config "$gate/config.json" \
-              --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config -
+          # shellcheck disable=SC2086
+          node "$gate/check.mjs" --config "$RUNNER_TEMP/backlog-tip-config.json" \
+            --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config "$RUNNER_TEMP/backlog-tip.json"
 
       - name: Every new commit names a task
         env:
@@ -744,27 +765,27 @@ jobs:
         run: |
           set -eu
           gate=.githooks/backlog-gate
-          # Every commit this change introduces, each checked on its own. On a
-          # pull request that is the merge base to the PR's head — not HEAD,
-          # which is GitHub's synthetic merge — and an empty range is an error,
-          # never a pass. On a push (a release branch, release.yml's tag, a
-          # manual run) it is the commits of the pushed tip that no other ref
-          # the remote holds reaches, past the ref's own "before" when it had
-          # one. Never a merge base with main: a tag or a new branch on a commit
-          # the remote already holds introduces nothing, and the script says so
-          # and passes, because those commits were checked when they arrived.
           if [ -n "${BASE_REF:-}" ]; then
             range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
             echo "range: $range"
             node "$gate/commit-links.mjs" --range "$range"
           else
-            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF"
-            if [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
-              set -- "$@" --before "$BEFORE"
-            fi
+            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF" --remote origin
+            case "${BEFORE:-}" in
+              *[!0]*) set -- "$@" --before "$BEFORE" ;;
+            esac
             echo "introduced by $GITHUB_REF at $(git rev-parse --short HEAD)"
             node "$gate/commit-links.mjs" "$@"
           fi
+
+      - name: Product documents at the checked revision
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          revision=${HEAD_SHA:-HEAD}
+          echo "product documents at $revision"
+          node .githooks/backlog-gate/check-product.mjs --rev "$revision"
 
       - name: The documents that describe the present name paths that exist
         if: ${{ github.event_name == 'pull_request' }}

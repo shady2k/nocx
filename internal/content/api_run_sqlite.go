@@ -128,11 +128,11 @@ func (s *sqliteContent) Begin(ctx context.Context, start APIRunStart) (APIRun, e
 	}
 	var id int64
 	err = s.run(ctx, func(ctx context.Context) error {
-		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, txErr := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if txErr != nil {
 			return fmt.Errorf("content: api run: begin: %w", txErr)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		if insertErr := tx.QueryRowContext(ctx, `INSERT INTO api_runs
 			(collection_path, request_rel_path, repeated_from, method, url, outcome,
@@ -145,7 +145,7 @@ func (s *sqliteContent) Begin(ctx context.Context, start APIRunStart) (APIRun, e
 		if artifactErr := insertAPIRunArtifact(ctx, tx, id, apiRunArtifactRequest, start.Request.Text); artifactErr != nil {
 			return artifactErr
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return fmt.Errorf("content: api run: commit begin: %w", commitErr)
 		}
 		return nil
@@ -215,11 +215,11 @@ func (s *sqliteContent) Complete(ctx context.Context, id int64, result APIRunRes
 	}
 	var start APIRunStart
 	err = s.run(ctx, func(ctx context.Context) error {
-		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, txErr := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if txErr != nil {
 			return fmt.Errorf("content: api run: begin complete: %w", txErr)
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var spansJSON string
 		if scanErr := tx.QueryRowContext(ctx, `SELECT collection_path, request_rel_path,
@@ -257,7 +257,7 @@ func (s *sqliteContent) Complete(ctx context.Context, id int64, result APIRunRes
 		if evictErr := evictAPIRunsTx(ctx, tx, s.cfg.Budget.RetentionBytes); evictErr != nil {
 			return evictErr
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return fmt.Errorf("content: api run: commit complete: %w", commitErr)
 		}
 		return nil
@@ -335,7 +335,7 @@ func (s *sqliteContent) Get(ctx context.Context, id int64) (APIRun, error) {
 		return APIRun{}, errors.New("content: api run: id must be positive")
 	}
 	var row storedAPIRun
-	if err := s.db.QueryRowContext(ctx, `SELECT id, collection_path, request_rel_path,
+	if err := s.conn(ctx).QueryRowContext(ctx, `SELECT id, collection_path, request_rel_path,
 		repeated_from, method, url, outcome, request_spans, metadata, started_at, ended_at
 		FROM api_runs WHERE id = ?`, id).Scan(
 		&row.id, &row.collectionPath, &row.requestPath, &row.repeatedFrom, &row.method,
@@ -349,7 +349,7 @@ func (s *sqliteContent) Get(ctx context.Context, id int64) (APIRun, error) {
 }
 
 func (s *sqliteContent) List(ctx context.Context, collectionPath, requestRelPath string) ([]APIRun, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, collection_path, request_rel_path,
+	rows, err := s.conn(ctx).QueryContext(ctx, `SELECT id, collection_path, request_rel_path,
 		repeated_from, method, url, outcome, request_spans, metadata, started_at, ended_at
 		FROM api_runs WHERE collection_path = ? AND request_rel_path = ?
 		ORDER BY started_at DESC, id DESC`, collectionPath, requestRelPath)
@@ -469,7 +469,7 @@ func readAPIRunArtifactTx(ctx context.Context, tx *sql.Tx, runID int64, kind str
 }
 
 func (s *sqliteContent) readAPIRunArtifact(ctx context.Context, runID int64, kind string) (string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT c.body FROM api_run_artifact_chunks c
+	rows, err := s.conn(ctx).QueryContext(ctx, `SELECT c.body FROM api_run_artifact_chunks c
 		JOIN api_run_artifacts a ON a.id = c.artifact_id
 		WHERE a.run_id = ? AND a.kind = ? ORDER BY c.seq`, runID, kind)
 	if err != nil {
@@ -499,7 +499,7 @@ func (s *sqliteContent) Delete(ctx context.Context, id int64) error {
 		return errors.New("content: api run: id must be positive")
 	}
 	return s.run(ctx, func(ctx context.Context) error {
-		res, err := s.db.ExecContext(ctx, `DELETE FROM api_runs WHERE id = ?`, id)
+		res, err := s.conn(ctx).ExecContext(ctx, `DELETE FROM api_runs WHERE id = ?`, id)
 		if err != nil {
 			return fmt.Errorf("content: api run: delete: %w", err)
 		}

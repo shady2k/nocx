@@ -69,6 +69,19 @@ REPO="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 # machine is yours alone or a timing bug is being bisected.
 CPUS="${NOCX_CI_CPUS:-4}"
 
+# HOW MANY PACKAGES' TEST BINARIES MAY RUN AT ONCE (nocx-n7yrq), and it is a
+# MEMORY bound rather than the timing cap AGENTS.md refuses. `go test` runs one
+# test binary per package and defaults to GOMAXPROCS of them at once — and
+# GOMAXPROCS here is the HOST's core count, not --cpus, because a cgroup CPU
+# quota does not change what `nproc` answers inside the container. A single
+# race-instrumented binary measured 3.3 GB (internal/notify on this VM), so six
+# at once is where the merged-tree gate was killed by the kernel's global OOM
+# killer. `-p` says how many run beside each other and never which tests run;
+# a test that depends on its neighbours is broken on a fast machine too, which
+# is the rule AGENTS.md already states. `make ci-backend` and `make ci-linux`
+# pass the Makefile's GO_TEST_P; a bare invocation gets the same number.
+TEST_P="${NOCX_CI_TEST_P:-2}"
+
 # One heavy containerized run at a time on this machine.
 . "$(dirname "$0")/gate-lock.sh"
 trap gate_lock_release EXIT INT TERM
@@ -104,6 +117,18 @@ if [ -n "${NOCX_LOCAL_SSH_PKGS:-}" ]; then
     LOCAL_SSH_PKGS="$NOCX_LOCAL_SSH_PKGS"
 else
     LOCAL_SSH_PKGS="$(cd "$REPO" && make -s print-local-ssh-pkgs)"
+fi
+
+# THE ALLOCATION BUDGETS (nocx-zg3k3.5.8), run without -race in the no-Secret-
+# Service variant. `make ci-backend` passes them (its job owns both packages);
+# `make ci-linux` passes none; a bare invocation, which runs the whole tree,
+# gets them from the Makefile.
+if [ -n "${NOCX_ALLOC_BUDGET_PKGS+set}" ]; then
+    ALLOC_BUDGET_PKGS="$NOCX_ALLOC_BUDGET_PKGS"
+elif [ "$PKGS" = "./..." ]; then
+    ALLOC_BUDGET_PKGS="$(cd "$REPO" && make -s print-alloc-budget-pkgs)"
+else
+    ALLOC_BUDGET_PKGS=""
 fi
 
 # An empty list must not read as "the tagged packages passed": it is the shape
@@ -161,7 +186,9 @@ run_variant() {
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
         -e PKGS="$PKGS" \
+        -e TEST_P="$TEST_P" \
         -e LOCAL_SSH_PKGS="$LOCAL_SSH_PKGS" \
+        -e ALLOC_BUDGET_PKGS="$ALLOC_BUDGET_PKGS" \
         -e INNER="$_cmd" \
         -w /src \
         "$IMAGE" \
@@ -181,9 +208,15 @@ run_variant() {
 RC=0
 
 if [ "$RUN_NO_KEYRING" = 1 ]; then
+    # The allocation budgets (nocx-zg3k3.5.8) skip themselves under -race,
+    # which instruments allocations; they are measured here, without it, in
+    # the variant ci.yml runs them in (make test-alloc-budgets owns the list).
     run_variant "no Secret Service" '
-        go test -race -tags gtk3 -count=1 $PKGS
-        go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+        go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 $PKGS
+        go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+        if [ -n "$ALLOC_BUDGET_PKGS" ]; then
+            go test -count=1 -p "$TEST_P" -tags gtk3,nocx_local_ssh -run "StaysWithinItsBudget\$" $ALLOC_BUDGET_PKGS
+        fi
     ' || RC=1
 fi
 
@@ -198,8 +231,8 @@ if [ "$RUN_KEYRING" = 1 ]; then
             set -euo pipefail
             eval \"\$(echo -n nocx-ci | gnome-keyring-daemon --daemonize --login)\"
             echo -n nocx-ci | gnome-keyring-daemon --unlock
-            go test -race -tags gtk3 -count=1 $PKGS
-            go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+            go test -race -p "$TEST_P" -tags gtk3,nocx_framecheck -count=1 $PKGS
+            go test -race -p "$TEST_P" -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
         "' || RC=1
 fi
 

@@ -86,12 +86,31 @@ export interface CellPainterOptions {
   /** The theme the wire's palette colours resolve against. Defaults to the
    *  same snapshot the frozen path falls back to. */
   readonly palette?: TerminalSnapshot
+  /** Told where the caret was just placed, in the surface's own CSS pixels —
+   *  the same coordinates the overlay is drawn at.
+   *
+   *  ONE OWNER, TWO READERS. "Where is the terminal caret" is answered here and
+   *  nowhere else (createMapping's cellToPixel, the mapping the rows and the
+   *  overlay already share), and the pane's input element is the second reader:
+   *  an IME draws its candidate window against a focused element's position, so
+   *  the element that carries the keyboard has to sit ON the caret
+   *  (nocx-zg3k3.3.1). Fired on every placement, including one where the
+   *  program has hidden its cursor: the anchor is about where typing goes, and
+   *  a hidden caret is still a place the person is typing at. */
+  readonly onCaretPlaced?: (at: { left: number; top: number; height: number }) => void
 }
 
 export interface CellPainter {
   /** Apply one installed revision. Rows whose content is unchanged keep
    *  their DOM; changed rows are repainted through run-geometry. */
   apply(snapshot: ScreenSnapshot): void
+  /** Paint a selection from model coordinates, or clear it. End offsets are exclusive. */
+  setSelection(
+    range: {
+      readonly anchor: { readonly row: number; readonly offset: number }
+      readonly focus: { readonly row: number; readonly offset: number }
+    } | null,
+  ): void
   /** THE mapping, bound to the installed revision's committed geometry.
    *  Null before the first apply — there is nothing to map yet. */
   mapping(): PixelMapping | null
@@ -101,19 +120,93 @@ export interface CellPainter {
 
 const GRID_CLASS = 'term-grid'
 const CURSOR_CLASS = 'term-grid-cursor'
+const SELECTION_CLASS = 'term-grid-selection'
 
 export function createCellPainter(opts: CellPainterOptions): CellPainter {
   const surface = opts.surface
   const palette = opts.palette ?? DEFAULT_SNAPSHOT
   surface.classList.add(GRID_CLASS)
+  surface.setAttribute('role', 'grid')
+  surface.setAttribute('aria-label', 'Terminal output')
+
+  let activeRow: number | null = null
+  let keyboardFocus = false
+
+  function updateRowAccessibility(): void {
+    rows.forEach((row, index) => {
+      row.setAttribute('role', 'row')
+      row.setAttribute('aria-rowindex', String(index + 1))
+      const selected =
+        selection !== null &&
+        index >= Math.min(selection.anchor.row, selection.focus.row) &&
+        index <= Math.max(selection.anchor.row, selection.focus.row)
+      row.setAttribute('aria-selected', String(selected))
+      if (activeRow === index) row.setAttribute('aria-current', 'true')
+      else row.removeAttribute('aria-current')
+      row.tabIndex = activeRow === null ? (index === 0 ? 0 : -1) : activeRow === index ? 0 : -1
+      if (activeRow === index && keyboardFocus) row.dataset.focusVisible = 'true'
+      else delete row.dataset.focusVisible
+    })
+  }
+
+  function onFocus(event: FocusEvent): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.term-grid-row')
+    const index = row === null ? -1 : rows.indexOf(row as HTMLDivElement)
+    if (index < 0) return
+    activeRow = index
+    updateRowAccessibility()
+  }
+
+  function onFocusOut(event: FocusEvent): void {
+    if (event.relatedTarget instanceof Node && surface.contains(event.relatedTarget)) return
+    activeRow = null
+    keyboardFocus = false
+    updateRowAccessibility()
+  }
+
+  function onKeyDown(event: KeyboardEvent): void {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.term-grid-row')
+    if (row === null) return
+    const index = rows.indexOf(row as HTMLDivElement)
+    const destination =
+      event.key === 'ArrowDown'
+        ? index + 1
+        : event.key === 'ArrowUp'
+          ? index - 1
+          : event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+              ? rows.length - 1
+              : index
+    if (destination === index || destination < 0 || destination >= rows.length) return
+    event.preventDefault()
+    keyboardFocus = true
+    rows[destination].focus()
+  }
+
+  function onPointerDown(): void {
+    keyboardFocus = false
+    updateRowAccessibility()
+  }
+
+  surface.addEventListener('focusin', onFocus)
+  surface.addEventListener('focusout', onFocusOut)
+  surface.addEventListener('keydown', onKeyDown)
+  surface.addEventListener('pointerdown', onPointerDown)
 
   const cursor = document.createElement('div')
   cursor.className = CURSOR_CLASS
+  cursor.setAttribute('aria-hidden', 'true')
   surface.appendChild(cursor)
 
   let rows: HTMLDivElement[] = []
   let installed: ScreenSnapshot | null = null
   let lastMetric: RunMetric | null = null
+  let selection: {
+    anchor: { row: number; offset: number }
+    focus: { row: number; offset: number }
+  } | null = null
+  let selectionNodes: HTMLDivElement[] = []
 
   /** A changed metric re-verdicts every run's spacing — rule 1's output is
    *  painted output — so it repaints like a content change. The numbers
@@ -160,13 +253,61 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
         rows[r] = next
       }
     }
+    if (activeRow !== null && activeRow >= rows.length)
+      activeRow = rows.length === 0 ? null : rows.length - 1
+    updateRowAccessibility()
     lastMetric = metric
     installed = snapshot
     placeCursor(snapshot)
+    paintSelection(snapshot)
+  }
+
+  function paintSelection(snapshot: ScreenSnapshot): void {
+    for (const node of selectionNodes) node.remove()
+    selectionNodes = []
+    if (selection === null) return
+    const ordered =
+      selection.anchor.row < selection.focus.row ||
+      (selection.anchor.row === selection.focus.row &&
+        selection.anchor.offset <= selection.focus.offset)
+        ? ([selection.anchor, selection.focus] as const)
+        : ([selection.focus, selection.anchor] as const)
+    const [start, end] = ordered
+    const mapping = createMapping(snapshot)
+    const dpr = displayDpr()
+    const cellWidth = devicePxToCssPx(snapshot.geometry.cellWidthPx, dpr)
+    const cellHeight = devicePxToCssPx(snapshot.geometry.cellHeightPx, dpr)
+    for (let row = start.row; row <= end.row; row++) {
+      if (row < 0 || row >= snapshot.rows.length) continue
+      const from = row === start.row ? start.offset : 0
+      const to = row === end.row ? end.offset : snapshot.rows[row].cells.length
+      if (to <= from) continue
+      const point = mapping.cellToPixel(from, row)
+      if (point === null) continue
+      const node = document.createElement('div')
+      node.className = SELECTION_CLASS
+      node.setAttribute('aria-hidden', 'true')
+      node.dataset.row = String(row)
+      node.dataset.start = String(from)
+      node.dataset.end = String(to)
+      node.style.left = `${point.x}px`
+      node.style.top = `${point.y}px`
+      node.style.width = `${(to - from) * cellWidth}px`
+      node.style.height = `${cellHeight}px`
+      surface.insertBefore(node, cursor)
+      selectionNodes.push(node)
+    }
   }
 
   function placeCursor(snapshot: ScreenSnapshot): void {
     const position = createMapping(snapshot).cellToPixel(snapshot.cursor.x, snapshot.cursor.y)
+    const height = devicePxToCssPx(snapshot.geometry.cellHeightPx, displayDpr())
+    if (position !== null) {
+      // Told whatever the program decided about VISIBILITY: an IME's candidate
+      // window follows where typing goes, not whether the caret is painted, and
+      // a full-screen program that hid its cursor is still typed into.
+      opts.onCaretPlaced?.({ left: position.x, top: position.y, height })
+    }
     if (!snapshot.cursor.visible || position === null) {
       cursor.hidden = true
       return
@@ -175,11 +316,17 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
     cursor.style.left = `${position.x}px`
     cursor.style.top = `${position.y}px`
     cursor.style.width = `${devicePxToCssPx(snapshot.geometry.cellWidthPx, displayDpr())}px`
-    cursor.style.height = `${devicePxToCssPx(snapshot.geometry.cellHeightPx, displayDpr())}px`
+    cursor.style.height = `${height}px`
   }
 
   return {
     apply,
+
+    setSelection(range) {
+      selection = range === null ? null : { anchor: { ...range.anchor }, focus: { ...range.focus } }
+      updateRowAccessibility()
+      if (installed !== null) paintSelection(installed)
+    },
 
     mapping() {
       return installed === null ? null : createMapping(installed)
@@ -190,7 +337,15 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
       rows = []
       installed = null
       lastMetric = null
+      selection = null
+      selectionNodes = []
       cursor.remove()
+      surface.removeEventListener('focusin', onFocus)
+      surface.removeEventListener('focusout', onFocusOut)
+      surface.removeEventListener('keydown', onKeyDown)
+      surface.removeEventListener('pointerdown', onPointerDown)
+      surface.removeAttribute('role')
+      surface.removeAttribute('aria-label')
       surface.classList.remove(GRID_CLASS)
     },
 

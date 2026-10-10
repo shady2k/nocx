@@ -4,6 +4,7 @@
 import type { ITheme } from '@xterm/xterm'
 import type { CapturedFrame } from '../frame/types'
 import type { OscNotification } from '../osc-notification'
+import type { SessionEffect } from '../generated/session.effect'
 
 export type DataCallback = (data: string) => void
 export type ResizeCallback = (cols: number, rows: number) => void
@@ -182,6 +183,9 @@ export interface TerminalRenderer {
   // tab bar always lights the activity indicator on bell.
   onBell(cb: () => void): void
 
+  /** Deliver a non-visual event produced by the authoritative session runtime. */
+  applySessionEffect?(effect: SessionEffect): void
+
   // onSelectionChange fires when the user completes a selection gesture in
   // the terminal, not per cell or per boundary movement. The callback
   // receives the current selection text (via getSelection()). An empty
@@ -212,6 +216,9 @@ export interface TerminalRenderer {
    *  False when no terminal is mounted. The snippet policy reads this to
    *  decide whether a multi-line body may be pasted (design §9.4). */
   bracketedPasteActive(): boolean
+
+  /** Whether xterm currently owns pointer input for a DEC mouse-report mode. */
+  mouseReportingActive(): boolean
 
   /** Register the snippet-palette chord (⌥⌘P) handler. The renderer's
    *  custom key handler sees the chord BEFORE xterm encodes it, calls this

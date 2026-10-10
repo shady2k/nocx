@@ -305,6 +305,23 @@ func newTestOwner(t *testing.T, proc Process) (*sessionOwner, *sessionruntime.Se
 
 // grantAgent gives an agent principal control, the authority every intent in
 // these tests is admitted under.
+func TestPromptBoundaryOffsetMatchesSessionOutputWindowCursor(t *testing.T) {
+	owner, rt := newTestOwner(t, newOwnerFakeProcess())
+	consumer := rt.Consumers().Attach()
+	payload := []byte("prefix\x1b]133;B\x07live suffix")
+	owner.ingestOne(payload)
+
+	_, written := owner.win.span()
+	if uint64(written) != uint64(len(payload)) {
+		t.Fatalf("session window cursor = %d, want %d bytes", written, len(payload))
+	}
+	effects := consumer.Effects()
+	wantBoundary := uint64(len("prefix\x1b]133;B\x07"))
+	if len(effects) != 1 || effects[0].Kind != sessionruntime.EffectPromptBoundary || effects[0].StreamOffset != wantBoundary {
+		t.Fatalf("prompt boundary effect = %#v, want stream offset %d", effects, wantBoundary)
+	}
+}
+
 func grantAgent(t *testing.T, rt *sessionruntime.Session) sessionruntime.Control {
 	t.Helper()
 	ctrl, err := rt.GrantControl(sessionruntime.Principal{Kind: sessionruntime.PrincipalAgent, ID: "agent-under-test"})
@@ -817,8 +834,13 @@ printf 'REPLY:%%s\n' "$answer"
 	// observable the watchdog loop above already uses, win.changed(), until
 	// isClosed() actually reports true.
 	closeDeadline := time.After(15 * time.Second)
-	for !win.isClosed() {
+	for {
+		// gate.wait requires taking the channel before rechecking the state:
+		// otherwise a close between the check and wait can be missed forever.
 		changed := win.changed()
+		if win.isClosed() {
+			break
+		}
 		select {
 		case <-changed:
 		case <-closeDeadline:

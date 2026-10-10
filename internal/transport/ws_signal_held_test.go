@@ -1145,7 +1145,7 @@ func TestHeldStop_AnAttemptThatLeavesOpenDropsTheHold(t *testing.T) {
 	ws.heldMu.Lock()
 	ws.armHeldStopAndStateLocked(attempt, session.ID("sid-held"))
 	ws.heldMu.Unlock()
-	ws.PublishAttemptClosed(attempt)
+	ws.PublishAttemptClosed(context.Background(), attempt)
 	if _, ok := ws.claimHeldStop(attempt); ok {
 		t.Fatal("an attempt that left open left its held Stop behind")
 	}
@@ -1362,7 +1362,7 @@ func TestHeldStop_ARefusedFrameThatRevokesStillDropsTheHold(t *testing.T) {
 	// The scan window elapses. The NEXT frame is refused for arriving at a
 	// desynchronized domain — and the budget check runs ahead of that refusal.
 	now = now.Add(24 * time.Hour)
-	if err := pub.Ingest("T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 30"))); err == nil {
+	if err := pub.Ingest(context.Background(), "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "sleep 30"))); err == nil {
 		t.Fatal("a frame into a revoked domain must be refused")
 	}
 

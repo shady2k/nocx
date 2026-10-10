@@ -27,6 +27,7 @@ import type { ShellComplete } from './generated/shell.complete'
 import type { CommandSnapshotStore } from './command-snapshot'
 import type { ShellCommandNames } from './generated/shell.commandNames'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
+import { IntentInput, type SessionIntent } from './intent-input'
 import { AgentInputTarget } from './agent-ask'
 import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
@@ -117,6 +118,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import { attachTerminalLinks } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
+import { LiveHistorySurface } from './scrollback/live-history'
 import type {
   AnswerToolCall,
   BlockRecord,
@@ -192,6 +194,7 @@ import {
 import { createCellModel, type CellModel, type ScreenSnapshot } from './cell-model'
 import type { SessionFrame } from './generated/session.frame'
 import { createCellPainter, metricOf, type CellPainter } from './painter/painter'
+import { installLiveSelectionGesture, type LiveSelectionGesture } from './painter/selection-gesture'
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
@@ -322,7 +325,13 @@ const SETTLE_BACKSTOP_MS = 3000
  * (nocx-xn63t.6.12) — and a literal '\x03' at that decision point would be
  * the second spelling of the same key.
  */
-const INTERRUPT = '\x03'
+/** The interrupt, as the person presses it (nocx-zg3k3.3.1): the payload the
+ *  input element produces for Ctrl-C, matching the runtime's own spelling of
+ *  that key (internal/sessionruntime/intent.go's keyNames, "ctrl" prefix).
+ *  What the key then means — SIGINT at a shell, a byte for a program in raw
+ *  mode — is the runtime's decision, and this is only the identity of the key
+ *  the held window watches for. */
+const INTERRUPT_KEY = 'Ctrl+c'
 
 /**
  * Whether a settle call failed because the backend no longer holds the
@@ -515,16 +524,19 @@ interface HeldRange {
 }
 
 /** The window between a person's submit and the command's own bytes reaching
- *  the pty, as the grid's keystrokes see it: the keys typed into it, and
- *  whether a Ctrl-C cancelled the submission they were waiting for.
+ *  the pty, as the pane's INPUT sees it: the intents produced in it, and
+ *  whether a Ctrl-C cancelled the submission they were waiting for. INTENTS
+ *  rather than bytes since nocx-zg3k3.3.1 — what the person did is what is
+ *  held and what is delivered, and nothing here decides what a key is worth.
  *
  *  Two facts, one object, because they are one state: a cancelled window
  *  holds no keys — the interrupt discards the line it interrupted, and every
  *  key in here belongs to that line. Read as one take (takeHeldWindow) for
  *  the same reason. */
 interface HeldWindow {
-  /** The keys, in the order they were typed. A cancelled window holds none. */
-  keys: string[]
+  /** The intents, in the order they were produced. A cancelled window holds
+   *  none. */
+  keys: SessionIntent[]
   /** True once a Ctrl-C arrived in the window: the submission is not to be
    *  written, and nothing held for it is delivered. */
   cancelled: boolean
@@ -801,6 +813,11 @@ export class TerminalContent extends BasePaneContent {
   // have. Everything else here still uses it through the interface's methods.
   private renderer: XtermRenderer | null = null
   private session: SessionHandle | null = null
+  /** Control-plane calls carry user intent in order. Adjacent committed-text
+   *  events coalesce while queued, so fast typing does not flood the bounded
+   *  executor; intervening keys and other intent kinds remain ordering fences. */
+  private _intentQueue: Array<{ session: SessionHandle; intent: SessionIntent }> = []
+  private _intentSending = false
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
@@ -895,21 +912,19 @@ export class TerminalContent extends BasePaneContent {
    *  valid only while the live renderer has parsed bytes after that freeze. */
   private _lastFrozenBlock: BlockRecord | null = null
   private _screenWriteGeneration = 0
-  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. The
-   *  interval it closes has both ends named: it OPENS at a block's visual
-   *  freeze, which takes the command's rows out of the grid, and it CLOSES
-   *  when the prompt that follows has finished painting — the OSC 133 B
-   *  marker, which nocx.bash appends to PS1 as its final action in every
-   *  branch (__nocx_b_marker, :1227/:1243/:1245), so B is the prompt's last
-   *  byte. A write parsed AFTER that belongs to something else, and that is
-   *  the whole test for whether this screen is worth attaching. */
+  /** THE SCREEN WAS LAST HANDED BACK TO NOBODY AT THIS GENERATION. A block's
+   *  visual freeze opens the interval; the backend's promptBoundary closes it.
+   *  The transport orders PTY data before its effect, but xterm parses that
+   *  data asynchronously, so close at its FIFO write barrier. */
   private _screenHandbackGeneration = -1
-  /** B was parsed in the pass now running; stamp the handback at the END of
-   *  it. The OSC handler fires inside the parse, the generation counts the
-   *  pass when the parse finishes (xterm WriteBuffer fires onWriteParsed
-   *  after its chunk loop), so stamping on the marker itself would leave the
-   *  prompt's own pass counting as newer bytes — off by exactly one. */
-  private _handbackPendingParse = false
+  /** A finished block is not a live screen until the following promptBoundary
+   *  has been observed. This closes the gap where the shell prompt bytes parse
+   *  before their control-plane boundary arrives. */
+  private _screenHandbackAwaitingBoundary = false
+  /** Do not offer a frozen screen while its promptBoundary write fence is open. */
+  private _screenHandbackPending = false
+  /** A clear invalidates a promptBoundary barrier still waiting on xterm. */
+  private _screenHandbackEpoch = 0
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -1349,15 +1364,19 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** Backend block-row notification subscriptions for the current pane. */
   private _blockRowsUnsubs: Array<() => void> = []
-  /** The most recently started rows fetch per entry, keyed by attempt id —
-   *  what a block.grew/block.closed notification only STARTS
-   *  (`blockRowsForEntry`'s two more RPC round trips), not the rows
-   *  themselves. `_ensureBlockRows` reuses whatever is parked here rather
-   *  than starting a second fetch for the same entry when one is already
-   *  running — block.closed's closing read above all — and starts its own (also tracked here) when nothing was; either way the
-   *  run tool's completion waits on the SAME fetch this map would otherwise
-   *  let a second caller duplicate (nocx-2v80t.3.19). */
+  /** One stored-row read chain per entry, keyed by attempt id. Growth
+   *  notifications during a read share it and queue one follow-up; block.closed
+   *  marks that same follow-up final. `_ensureBlockRows` waits for the chain so
+   *  a freeze sees the latest rows without duplicate fetches or paints. */
   private readonly _blockRowsInFlight = new Map<string, Promise<void>>()
+  /** At least one newer notification arrived during a read. This is state,
+   *  not a debounce timer: the next read starts when the current one settles,
+   *  so the final growth is not dropped. */
+  private readonly _blockRowsRefreshPending = new Set<string>()
+  /** The promise that includes a queued final read, for `_ensureBlockRows` to
+   *  await after block.closed. It points at the same chain as `_blockRowsInFlight`. */
+  private readonly _blockRowsFinalPending = new Map<string, Promise<void>>()
+
   /** The held-Stop settlement subscription (nocx-zas0d). It exists because
    *  `held` is an ACCEPTANCE the request cannot follow up on: whatever happens
    *  to the byte afterwards is said by session.signalUndelivered or not at
@@ -1394,6 +1413,7 @@ export class TerminalContent extends BasePaneContent {
    *  a live region before it has a session — and fed by the one frame
    *  handler below. */
   private _painter: CellPainter | null = null
+  private _selectionGesture: LiveSelectionGesture | null = null
   /** The surface element the painter paints into, held for disposal. */
   private _painterSurface: HTMLElement | null = null
   /** THE measuring authority the frozen blocks publish for (cell-fit.ts):
@@ -1404,6 +1424,16 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
+  /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
+   *  the live rectangle in a session with no shell integration. Created at
+   *  mount beside the painter it shares its painter and its measuring
+   *  authority with; bound to the page seam per session below. */
+  private _liveHistory: LiveHistorySurface | null = null
+  /** The committed columns of the last frame this pane applied, so a
+   *  reflow — the one event that renumbers the emulator's history under
+   *  the reader (ADR-0078) — is seen by the one watcher frames flow
+   *  through. */
+  private _paintedCols: number | null = null
   // The last thing the backend said about REACHING this pane's host, and the
   // corner mark drawn from it. Null liveness is the ordinary state of a local
   // pane: this machine is never probed, so there is nothing to say about
@@ -2466,8 +2496,10 @@ export class TerminalContent extends BasePaneContent {
         onClear: () => {
           this._lastFrozenBlock = null
           this._automaticFrameOwner = null
+          this._screenHandbackEpoch++
           this._screenHandbackGeneration = -1
-          this._handbackPendingParse = false
+          this._screenHandbackAwaitingBoundary = false
+          this._screenHandbackPending = false
           this.clearGrants()
         },
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
@@ -2501,8 +2533,16 @@ export class TerminalContent extends BasePaneContent {
         // What a tool call returned, read back from the action entry it was
         // recorded under — the handle agent.runToolCall sends instead of the
         // bytes (nocx-hp8p2.13).
-        toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
+        toolResult: (actionEntryId: string) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
+        // The live tier's surface follows the pane's hands (nocx-zg3k3.10.4):
+        // it is the unstructured mode's alone, and a return to the live end
+        // is what drops a stale past so the next scroll-up reads the head.
+        onModeChanged: (mode) =>
+          this._liveHistory?.setMode(mode === 'unstructured' ? 'unstructured' : 'other'),
+        onTailFollow: (following) => {
+          if (following) this._liveHistory?.tailReengaged()
+        },
       })
 
       // ── THE LIVE REGION'S PAINTER (nocx-zg3k3.2.5) ─────────────────────
@@ -2537,7 +2577,32 @@ export class TerminalContent extends BasePaneContent {
         // fit the stored rows warm — so a cluster new to the session is
         // measured before it paints, not left at the default spacing.
         warm: (candidates) => this._cellFit?.warm(candidates),
+        // The input element rides the caret the painter draws (nocx-zg3k3.3.1):
+        // one owner of "where is the caret", two readers. Read lazily, because
+        // the painter is built before the element is.
+        onCaretPlaced: (at) => this._intentInput?.placeAt(at.left, at.top, at.height),
       })
+
+      // ── THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4) ───────────
+      // The rows above the live rectangle when no shell integration has
+      // ever produced a block: pages of the emulator's own scrollback,
+      // painted by the same painter (paintRow, the primitive above) with
+      // the same measuring authority (the fit at the painter's own metric
+      // supplier) and the live painter's own palette. The session seam is
+      // bound per session in attachSession; the mode and the tail follow
+      // arrive through the controller's hooks, wired above.
+      const liveHistory = new LiveHistorySurface({
+        scroller: this.scrollback.scrollbackArea,
+        stack: this.scrollback.scrollbackInner,
+        columns: () => this._cellModel?.current()?.geometry.cols ?? null,
+        metric: () => {
+          const fit = this._cellFit
+          if (fit === null || !fit.begin()) return null
+          return metricOf(fit)
+        },
+        warm: (candidates) => this._cellFit?.warm(candidates),
+      })
+      this._liveHistory = liveHistory
 
       // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
       // decision.md §1 item 3) — chrome above the transcript, never a row
@@ -2561,6 +2626,29 @@ export class TerminalContent extends BasePaneContent {
         this._readyResolve(false)
         return
       }
+
+      // ── THE PANE'S INPUT ELEMENT (nocx-zg3k3.3.1) ───────────────────────
+      // Appended AFTER the renderer's root, so it is the topmost element and
+      // the pointer and the keyboard land on it: xterm keeps no path from a
+      // person's key any more. What a person SEES is the painter's cells; this
+      // element is invisible, and it exists because an IME draws its candidate
+      // window against a focused editable element's position — so it is placed
+      // where the caret is (onCaretPlaced above), not at the page's fallback
+      // corner.
+      const intentInput = new IntentInput({
+        emit: (intent) => this.onSessionIntent(intent),
+        // THE CHORD IS THE PANE'S, not the program's: consumed before it
+        // becomes an intent, and handed to the ONE opener every keyboard
+        // boundary answers through (design §10.1, AD-8) — the same
+        // handler the editor arbiter calls and the xterm boundary called.
+        consume: (e) => {
+          if (!isSnippetChord(e)) return false
+          this.handleSnippetChord()
+          return true
+        },
+      })
+      this.scrollback.mountTarget.append(intentInput.element)
+      this._intentInput = intentInput
 
       log.info('nocx: renderer mounted', { cols: renderer.cols, rows: renderer.rows })
       this.cols = renderer.cols
@@ -2629,8 +2717,7 @@ export class TerminalContent extends BasePaneContent {
         unresolvedRedactionField,
       ]
       this.shellTarget = new ShellInputTarget(
-        (text: string) => renderer.paste(text),
-        (data: string) => this.session!.send(data),
+        (intent) => this.sendIntent(intent),
         // The target carries the shell's editor extensions through the §8.8
         // seam: the shell highlighter and the completion surface — the two
         // that ARE about commands — on top of the shared document layer.
@@ -3003,7 +3090,7 @@ export class TerminalContent extends BasePaneContent {
           // the shell target owned both behaviours directly.
           submitEmpty: () => {
             if (this.inputTargets?.active().routesToShell === false) return
-            this.session?.send('\r')
+            this.sendIntent({ kind: 'key', payload: 'enter' })
           },
           cancel: () => {
             const target = this.inputTargets?.active()
@@ -3018,13 +3105,13 @@ export class TerminalContent extends BasePaneContent {
               }
               return true
             }
-            // Ctrl-C at a prompt is a keystroke to the SHELL — its line
-            // editor discards the line and prints a fresh prompt — and the
-            // byte is what delivers that. Over a RUNNING command the same
-            // key is an interrupt addressed to the execution, which is the
-            // active block's business and goes through the one owner of it.
+            // Ctrl-C at a prompt is a key intent to the SHELL — its line
+            // editor discards the line and prints a fresh prompt. The runtime
+            // owns its encoding. Over a RUNNING command the same key is an
+            // interrupt addressed to the execution, which is the active
+            // block's business and goes through the one owner of it.
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
-            else this.session?.send('\x03')
+            else this.sendIntent({ kind: 'key', payload: 'Ctrl+c' })
             return true
           },
           // The editor's own overlay/IME arbiters run first. An unclaimed
@@ -3298,23 +3385,6 @@ export class TerminalContent extends BasePaneContent {
           }
         }
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
-        // ONE thing is read off a marker here, and it is not a decision about
-        // the session: B is prompt-end, so the shell has finished starting
-        // and is waiting on a person. That is the moment this pane's output
-        // stops being its own start and becomes something a user can miss
-        // (PaneHost.contentSettled). It grants nothing, opens nothing and
-        // persists nothing, so ADR-0024 §1's severed list is untouched.
-        // AND the same B closes the interval in which this screen belongs to
-        // nobody (_screenHandbackGeneration): PS1 ends with this marker in
-        // every branch nocx.bash writes, so B is the last byte of the
-        // prompt's own redraw. Reading it here grants nothing and opens
-        // nothing — it moves a generation counter the automatic Ask
-        // attachment compares against, which is the same render-only
-        // partition A/B already exist for.
-        if (marker.kind === 'B') {
-          this._settle()
-          this._handbackPendingParse = true
-        }
       })
 
       // Optional on the renderer contract (types.ts): a renderer that does
@@ -3403,7 +3473,15 @@ export class TerminalContent extends BasePaneContent {
         if (this._recovery && hex === this._recovery.fence) void this._ackRecovery()
       })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
+        if (this.lifecycle.state.kind === 'running') {
+          this._screenHandbackAwaitingBoundary = true
+        }
         this._syncLifecycleOwnership()
+        // An integrated pane is settled by its authenticated lifecycle fact,
+        // not by the non-authoritative promptBoundary observation. Without
+        // this, a session that awaited integration never settles before the
+        // backstop and background activity is discarded.
+        if (this.lifecycle.state.kind === 'prompt_ready') this._settle()
         // A conventional terminal stays unstructured: the scrollback-block
         // model never takes over (ADR-0024 §4). Conventional means no live
         // authenticated domain — Native, Lost, and a Desynchronized domain
@@ -4065,6 +4143,28 @@ export class TerminalContent extends BasePaneContent {
           e.preventDefault()
           void doPaste()
         }
+        // CLICKING THE LIVE GRID TAKES THE KEYBOARD TO THE INTENT ELEMENT
+        // (nocx-zg3k3.3.1). xterm's root is what selects, drags and reports the
+        // mouse, and it is unchanged — but the keyboard must be the element's,
+        // or the keys would still be read and encoded by xterm's own handler.
+        // This listener is on the pane, an ANCESTOR of xterm's root, so a
+        // bubbling mousedown reaches it AFTER xterm has focused itself: the
+        // last focus wins, and this is it.
+        //
+        // ONLY FOR THE LIVE GRID. A click on a frozen block belongs to the
+        // scrollback (selection, and the editor's paste rescue, which stands
+        // down when the focus is already inside the pane) — taking the keyboard
+        // there would put the caret in the grid and swallow the rescue's own
+        // handoff, which is what the block-paste test measures.
+        const live = this.scrollback?.mountTarget ?? null
+        if (
+          e.button === 0 &&
+          live !== null &&
+          e.target instanceof Node &&
+          live.contains(e.target)
+        ) {
+          this.takeKeyboardToGrid()
+        }
       })
 
       renderer.onResize((cols: number, rows: number) => {
@@ -4402,6 +4502,8 @@ export class TerminalContent extends BasePaneContent {
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsRefreshPending.clear()
+    this._blockRowsFinalPending.clear()
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -4498,10 +4600,9 @@ export class TerminalContent extends BasePaneContent {
       // the block's rows are whole. It is the ONE event a finished block
       // closes on — the renderer no longer watches the stream for a fence of
       // its own (ADR-0066 moved that rendezvous beside the emulator). A kept
-      // block's closing read starts FIRST, so the close that follows — and
-      // an agent run waiting on it — reads the rows the close made final,
-      // never the ones an earlier block.grew left. A block the store did not
-      // keep has nothing to read.
+      // block requests a final read here. If a growth read is still running,
+      // `_refreshBlockRows` queues one follow-up so a waiter receives the rows
+      // the close made final. A block the store did not keep has nothing to read.
       if (typeof params !== 'object' || params === null) return
       if (!('entryId' in params) || typeof params.entryId !== 'string' || params.entryId === '')
         return
@@ -4509,7 +4610,7 @@ export class TerminalContent extends BasePaneContent {
         entryId: params.entryId,
         kept: 'kept' in params && params.kept === true,
       }
-      if (closed.kept) void this._refreshBlockRows(closed.entryId)
+      if (closed.kept) void this._refreshBlockRows(closed.entryId, true)
       this.scrollback?.blockManager.blockClosed(closed.entryId)
     }
     const onBlockCleared = (params: unknown): void => {
@@ -4518,6 +4619,18 @@ export class TerminalContent extends BasePaneContent {
       // the client no longer decides a clear from the command's text.
       if (typeof params !== 'object' || params === null || !('keepEntryId' in params)) return
       const keepEntryId = typeof params.keepEntryId === 'string' ? params.keepEntryId : null
+      // The live tier's surface rendezvouses with the same fact
+      // (nocx-zg3k3.10.4): ED3 erased the emulator's saved lines, so
+      // nothing painted above the live rectangle survives it, and no
+      // boundary row is invented. But the notification reaches EVERY
+      // pane's dispatcher (one socket, one client), so the wipe is scoped
+      // by the session the event names — a markerless pane beside an
+      // integrated one loses nothing when the other clears.
+      const clearedSession =
+        'sessionId' in params && typeof params.sessionId === 'string' ? params.sessionId : null
+      if (clearedSession !== null && this.session?.sessionId === clearedSession) {
+        this._liveHistory?.cleared()
+      }
       this.scrollback?.onClearBoundary(keepEntryId)
     }
     this._blockRowsUnsubs.push(
@@ -4544,6 +4657,11 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
+    // historyPage call and its rows carrier, handed to the surface in one
+    // bind. A rebind replaces both with the new session's — a new session
+    // is a new history space, and the bind forgets the painted past.
+    this._liveHistory?.bind(session)
     // Reclaimed bytes are flushed as soon as onData is registered. Start
     // capture before that registration so their parsed C/D markers cannot
     // outrun the later ledger restore.
@@ -4705,11 +4823,49 @@ export class TerminalContent extends BasePaneContent {
     // prompt marker — see SETTLE_BACKSTOP_MS.
     this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
+    session.onEffect((effect) => {
+      // OSC 133 B is an at-most-once observation from the backend's sole
+      // terminal parser. It settles conventional startup and closes Ask's
+      // prompt redraw interval; it never mutates authenticated lifecycle state.
+      if (effect.kind === 'promptBoundary') {
+        if (!this._awaitsIntegration) this._settle()
+        const epoch = this._screenHandbackEpoch
+        this._screenHandbackAwaitingBoundary = true
+        this._screenHandbackPending = true
+        const closeHandback = () => {
+          if (this._disposed || epoch !== this._screenHandbackEpoch) return
+          this._screenHandbackGeneration = this._screenWriteGeneration
+          this._screenHandbackAwaitingBoundary = false
+          this._screenHandbackPending = false
+        }
+        if (renderer.hasUnsettledWrite()) {
+          // Until the barrier opens, a frozen screen is not a safe attachment:
+          // the prompt bytes may already be queued but not yet parsed.
+          this._screenHandbackPending = true
+          // The FIFO barrier includes writes already handed to xterm when the
+          // effect arrives; the next parsed write below covers data that the
+          // control-plane event overtook.
+          void renderer.awaitWriteBarrier().then(closeHandback, () => {
+            // Keep automatic attachment closed if the renderer cannot prove
+            // where this boundary landed; a clear or disposal ends the fence.
+          })
+        } else {
+          // PTY bytes precede their effect on the ordered subscription. With
+          // no writes outstanding, the current generation is the boundary.
+          closeHandback()
+        }
+      }
+      renderer.applySessionEffect?.(effect)
+    })
     session.onData((data: string) => {
       log.debug('nocx: session data received', { length: data.length })
       renderer.write(data)
-      if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
-        host.requestAttention()
+      if (this._bufferType === 'normal') {
+        // The live tier's past may have moved under the reader (nocx-zg3k3.10.4):
+        // rows departed while the pane wrote, so the surface re-arms on the
+        // reader's next return to the live end.
+        this._liveHistory?.noteOutput()
+        if (Date.now() >= this.echoUntil) host.requestAttention()
       }
     })
     // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
@@ -4721,6 +4877,27 @@ export class TerminalContent extends BasePaneContent {
     // keeps the byte path exactly as it was.
     const cellModel = createCellModel()
     this._cellModel = cellModel
+    const painter = this._painter
+    const painterSurface = this._painterSurface
+    const gestureRoot = this.scrollback?.scrollbackArea
+    if (painter && painterSurface && gestureRoot) {
+      this._selectionGesture = installLiveSelectionGesture({
+        model: cellModel,
+        painter,
+        surface: painterSurface,
+        gestureRoot,
+        surfaceId: this.pane.paneId,
+        mouseReportingActive: () => renderer.mouseReportingActive(),
+        focusInput: () => renderer.focus(),
+        copy: (text) => {
+          if (shouldCopy(text)) {
+            this.clipboard.writeText(text).catch((e) => {
+              console.warn('nocx: clipboard write failed (live cell selection)', e)
+            })
+          }
+        },
+      })
+    }
     installPaneScreenSeam()
     paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
@@ -4775,13 +4952,6 @@ export class TerminalContent extends BasePaneContent {
       this.scheduleLiveResize()
       // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
       this._screenWriteGeneration++
-      // The prompt finished painting in this pass: the screen is nobody's
-      // as of now, so anything parsed later belongs to something that is
-      // still writing it (_screenHandbackGeneration).
-      if (this._handbackPendingParse) {
-        this._handbackPendingParse = false
-        this._screenHandbackGeneration = this._screenWriteGeneration
-      }
       // carries the same "working, nothing written yet" indicator a turn
       // does, in the live region where its output will appear, and the
       // first parsed write is the moment that claim stops being true.
@@ -4792,9 +4962,13 @@ export class TerminalContent extends BasePaneContent {
       this.scrollback?.blockManager.noteCommandOutput()
     })
 
-    // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
-    // is enabled (setReadOnly(false)). The editor captures keys while it is
-    // visible and the terminal is read-only, so these only arrive in RAW mode.
+    // THE HELD WINDOW, and the two moments the pane's own input is looked at:
+    // the INTENT handler below (the person's keyboard, an IME commit, a focus
+    // change — the element owns all of it since nocx-zg3k3.3.1) and the byte
+    // handler further down, which is what is left of the client's own writes.
+    //
+    // The editor captures keys while it is visible and the element is not
+    // focused, so these only arrive in RAW mode.
     //
     // Held, never dropped, while a submitted command is still on its way to
     // the pty: the keyboard changed hands at the commit and the command
@@ -4818,32 +4992,24 @@ export class TerminalContent extends BasePaneContent {
     // immediately behind the command is precisely that ordering, so the
     // interrupt is not held and not flushed: it is the person's own "this
     // line is not to run".
+    // THE PERSON'S KEYBOARD, AS INTENT (nocx-zg3k3.3.1). The element above owns
+    // every key, IME commit and focus change, and what reaches here is what the
+    // person DID: a physical key with its modifiers, or the text the layout
+    // produced. Nothing here encodes a byte, and nothing here consults a mode —
+    // the runtime owns both (ADR-0065/0066).
+    //
+    // WHAT IS LEFT ON onData BELOW IS NOT THE PERSON'S KEYBOARD. xterm still
+    // receives this session's bytes (renderer.write), answers program queries
+    // and handles explicit client writes such as the grid's context-menu paste;
+    // those arrive here as bytes and go out as bytes. Shell submission no
+    // longer uses that path: its paste and Enter are session intents, serialized
+    // by the queue above. The remaining xterm writes are a separate cutover.
     renderer.onData((data: string) => {
+      // The integration gate stays where it was (nocx-ui8q6.1): the bytes that
+      // still travel this way are the client's own writes, and a write to a
+      // shell that has not proved itself has nowhere good to land either — the
+      // owner's own words are in the intent handler above.
       if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
-      const held = this._heldRaw
-      if (held !== null && !held.cancelled) {
-        const at = data.indexOf(INTERRUPT)
-        if (at < 0) {
-          held.keys.push(data)
-          return
-        }
-        // The interrupt discards the line it interrupts, which is every key
-        // held in this window: they are the pending line, and a terminal
-        // with ISIG set flushes the input it has not read yet.
-        held.keys = []
-        held.cancelled = true
-        // What followed the interrupt in the same read does NOT belong to
-        // the line it discarded — it was typed at the fresh prompt that
-        // discard leaves — so it is delivered rather than swallowed with
-        // what came before it.
-        const after = data.slice(at + 1)
-        if (after !== '') this.session?.send(after)
-        return
-      }
-      // No window, or one already cancelled: an ordinary keystroke, and the
-      // ordinary route. A second Ctrl-C lands here too, which is right — by
-      // now there is no pending line to discard, so it is the shell's own
-      // interrupt exactly as it is outside the window.
       this.session?.send(data)
     })
     // The pane's classification, for an enrolled agent pane. Registered
@@ -4980,6 +5146,15 @@ export class TerminalContent extends BasePaneContent {
    * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
    */
   private _paintFrame(snapshot: ScreenSnapshot): void {
+    // THE ONE WATCHER FRAMES FLOW THROUGH (nocx-zg3k3.10.4): a column
+    // change is a reflow, and a reflow renumbers the emulator's history
+    // under the reader (ADR-0078) — the surface drops its pages rather
+    // than show rows at addresses that no longer exist. A rows-only
+    // change renumbers nothing.
+    if (snapshot.geometry.cols !== this._paintedCols) {
+      this._paintedCols = snapshot.geometry.cols
+      this._liveHistory?.reflowed()
+    }
     this._pendingPaint = snapshot
     if (this._paintFrameHandle !== 0) return
     this._paintFrameHandle = requestAnimationFrame(() => {
@@ -5522,7 +5697,10 @@ export class TerminalContent extends BasePaneContent {
       this.editor.focus()
       return
     }
-    this.renderer?.focus()
+    // Through the ONE method that decides who owns input, never a second
+    // renderer.focus() call: the element and xterm are two different owners of
+    // the keyboard and only this method may choose between them (AD-8).
+    this.takeKeyboardToGrid()
   }
 
   /**
@@ -6720,6 +6898,8 @@ export class TerminalContent extends BasePaneContent {
     }
     const frozen = this._lastFrozenBlock
     if (
+      this._screenHandbackPending ||
+      this._screenHandbackAwaitingBoundary ||
       frozen === null ||
       this._screenWriteGeneration <= this._screenHandbackGeneration ||
       !manager.blocks.includes(frozen) ||
@@ -6749,7 +6929,11 @@ export class TerminalContent extends BasePaneContent {
         this.editor !== editor ||
         !editor.isVisible ||
         targets.active().id !== agentId ||
-        !this.scrollback?.blockManager.blocks.includes(owner)
+        !this.scrollback?.blockManager.blocks.includes(owner) ||
+        // The boundary can arrive while the frame capture is awaiting xterm.
+        // Re-evaluate the shared owner predicate at commit time so bytes that
+        // were only the finished command's prompt cannot win that race.
+        this.automaticAttachmentOwner(true) !== owner
       )
         return
       this._automaticFrameOwner = owner
@@ -7279,13 +7463,18 @@ export class TerminalContent extends BasePaneContent {
       // on past the end would make this a second owner of the scroll position
       // for the whole of a long streamed answer.
       if (settle && typeof ResizeObserver !== 'undefined') {
-        let seatedHeight = -1
+        let seatedHeight: number | null = null
         const observer = new ResizeObserver((entries) => {
-          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight
-          const grew = height !== seatedHeight
+          const height = entries[entries.length - 1]?.contentRect.height ?? seatedHeight ?? 0
+          // The first delivery is only a baseline. WebKit may report the
+          // overlay box before the reparented answer has grown in flow, while
+          // the old scroller is still at its tail; that measurement is not
+          // evidence the seated tail has landed.
+          const baseline = seatedHeight === null
+          const grew = !baseline && height !== seatedHeight
           seatedHeight = height
           followSeatedTail()
-          if (!grew || settle.tailReached()) observer.disconnect()
+          if (!baseline && (!grew || settle.tailReached())) observer.disconnect()
         })
         observer.observe(tail)
       }
@@ -7688,7 +7877,11 @@ export class TerminalContent extends BasePaneContent {
    *  rule about who owns input (AD-8). */
   private takeKeyboardToGrid(): void {
     this.renderer?.setReadOnly(false)
-    this.renderer?.focus()
+    // THE ELEMENT TAKES THE KEYBOARD, not xterm (nocx-zg3k3.3.1): it is what
+    // reads the person now, and it is where an IME's candidate window is
+    // anchored. xterm's own textarea is still mounted and still holds no
+    // keystroke path.
+    this._intentInput?.focus()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before
@@ -7708,11 +7901,95 @@ export class TerminalContent extends BasePaneContent {
    *
    *  Since nocx-xn63t.6.12 it also carries whether a Ctrl-C arrived in the
    *  window, which cancels the submission rather than flushing the interrupt
-   *  behind it (see HeldWindow, and the onData handler that arms this). */
+   *  behind it (see HeldWindow, and onSessionIntent, which arms this). */
   private _heldRaw: HeldWindow | null = null
 
+  /** The pane's input element (nocx-zg3k3.3.1): a real focusable textarea that
+   *  the keyboard, the IME and the focus are read from, and whose position
+   *  follows the caret the painter draws. Null until mount, and again after
+   *  dispose — the pane outlives no element. */
+  private _intentInput: IntentInput | null = null
+
+  /** One thing a person did, on its way to the session.
+   *
+   *  THE HELD WINDOW IS THE SAME WINDOW IT ALWAYS WAS (see _heldRaw): between a
+   *  submit and the command's own bytes reaching the pty, what follows the
+   *  submit belongs AFTER it, and a Ctrl-C in that window cancels it. It is
+   *  expressed in INTENTS now, so the interrupt is the key the person pressed
+   *  rather than a byte found inside a string, and what is held is delivered as
+   *  intent instead of raw bytes (nocx-zg3k3.3.1).
+   *
+   *  The old byte handler also delivered what FOLLOWED an interrupt inside the
+   *  same read; there is no "same read" here — every intent is one act, so
+   *  whatever the person does next arrives on its own and is delivered on its
+   *  own. That was the point of the tail, and it is preserved by construction. */
+  private onSessionIntent(intent: SessionIntent): void {
+    if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return
+    const held = this._heldRaw
+    if (held !== null && !held.cancelled) {
+      if (intent.kind === 'key' && intent.payload === INTERRUPT_KEY) {
+        // The interrupt discards the line it interrupts, which is every intent
+        // held in this window: they are the pending line, and a terminal with
+        // ISIG set flushes the input it has not read yet. The interrupt itself
+        // is NOT sent — the command is not to run, so there is nothing at the
+        // pty for it to mean (nocx-xn63t.6.12), and the shell's own Ctrl-C
+        // arrives as a fresh intent once this window is gone.
+        held.keys = []
+        held.cancelled = true
+        return
+      }
+      held.keys.push(intent)
+      return
+    }
+    this.sendIntent(intent)
+  }
+
+  /** Hand one intent to the session, which decides what it means.
+   *
+   *  The handle owns the access epoch and re-presents a refusal that wrote
+   *  nothing once (ipc.ts), so an intent that raced a revocation costs a round
+   *  trip rather than a keystroke. A rejection here is the transport itself
+   *  failing — a closed socket, a refused call — and it is logged rather than
+   *  swallowed: a keystroke that reached nobody is a fact the person is owed,
+   *  and printing it to a console would be the silent version of it. */
+  private sendIntent(intent: SessionIntent): void {
+    const session = this.session
+    if (!session) return
+    const tail = this._intentQueue[this._intentQueue.length - 1]
+    if (intent.kind === 'text' && tail?.session === session && tail.intent.kind === 'text') {
+      this._intentQueue[this._intentQueue.length - 1] = {
+        session,
+        intent: { kind: 'text', payload: tail.intent.payload + intent.payload },
+      }
+    } else {
+      this._intentQueue.push({ session, intent })
+    }
+    void this.drainIntentQueue()
+  }
+
+  private async drainIntentQueue(): Promise<void> {
+    if (this._intentSending) return
+    this._intentSending = true
+    try {
+      while (this._intentQueue.length > 0) {
+        const { session, intent } = this._intentQueue.shift()!
+        try {
+          await session.intent(intent.kind, intent.payload)
+        } catch (err: unknown) {
+          log.warn('nocx: session intent did not reach the session', {
+            kind: intent.kind,
+            error: String(err),
+          })
+        }
+      }
+    } finally {
+      this._intentSending = false
+      if (this._intentQueue.length > 0) void this.drainIntentQueue()
+    }
+  }
+
   /** Start holding, and hand back the window being held in: from here until
-   *  takeHeldWindow, the grid's bytes queue.
+   *  takeHeldWindow, the pane's input queue.
    *
    *  A second submit inside the window JOINS the existing one — the order is
    *  the invariant, and re-arming would publish the earlier queue twice — so
@@ -7959,9 +8236,16 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    // The input element goes with the pane (nocx-zg3k3.3.1): it holds the
+    // keyboard and a live listener set, and a disposed pane that kept either
+    // would take keys for a session it no longer has.
+    this._intentInput?.destroy()
+    this._intentInput = null
     for (const unsubscribe of this._blockRowsUnsubs) unsubscribe()
     this._blockRowsUnsubs = []
     this._blockRowsInFlight.clear()
+    this._blockRowsRefreshPending.clear()
+    this._blockRowsFinalPending.clear()
     this._detachLinks?.()
     this._detachLinks = null
     this._homeUnsub?.()
@@ -8031,6 +8315,8 @@ export class TerminalContent extends BasePaneContent {
     // reader has no model worth reading and no session to be found under.
     if (this.session) paneScreenReaders.delete(this.session.sessionId)
     this._cellModel = null
+    this._selectionGesture?.dispose()
+    this._selectionGesture = null
     this._connectionMark?.dispose()
     this._connectionMark = null
     this._reconnectAbort?.abort()
@@ -8051,6 +8337,8 @@ export class TerminalContent extends BasePaneContent {
     this._painterSurface = null
     this._cellFit?.dispose()
     this._cellFit = null
+    this._liveHistory?.dispose()
+    this._liveHistory = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()
@@ -8267,12 +8555,11 @@ export class TerminalContent extends BasePaneContent {
       if (beforeWrite && !beforeWrite()) return
       // Detach the queue BEFORE the command goes out, flush it after.
       //
-      // Both halves matter and the order is the whole point. The command is
-      // delivered through renderer.paste, and a paste is itself an onData —
-      // so a queue still armed here would swallow the command and put it
-      // BEHIND the keys that were waiting for it, which is the same
-      // reordering with the operands swapped (measured: a bare `\r`
-      // reaching the pty ahead of its own command line).
+      // Both halves matter and the order is the whole point. Close the held
+      // window before submitting so the command's paste and Enter enter the
+      // session-intent queue first; then replay keys captured during the
+      // attempt RPC. The serial queue keeps those later intents behind the
+      // command, rather than allowing Enter to bypass its paste.
       const taken = this.takeHeldWindow()
       try {
         // A Ctrl-C that arrived while this submission was in flight
@@ -8307,7 +8594,7 @@ export class TerminalContent extends BasePaneContent {
         // A cancelled window holds no keys — the interrupt discarded them —
         // so this is empty on the withdrawal path by construction, never by
         // a second rule about which keys a cancelled submission may carry.
-        for (const data of taken?.keys ?? []) this.session?.send(data)
+        for (const intent of taken?.keys ?? []) this.sendIntent(intent)
       }
     }
     if (recordLine === '') {
@@ -8572,14 +8859,34 @@ export class TerminalContent extends BasePaneContent {
 
   /** Fetch one entry's stored rows, paint them, and follow the tail —
    *  everything a block.grew/block.closed notification's delivery does.
-   *  Tracked in `_blockRowsInFlight` so a freeze landing while this is
-   *  still running can wait for it (`_ensureBlockRows`) instead of reading
-   *  `.cmd-output` before it has anything written into it. Cleared only if
-   *  nothing newer replaced the entry — block.grew and then block.closed
-   *  for the same entry each start their own fetch, and the closing one is
-   *  the one worth waiting for; never removing a newer entry's promise out
-   *  from under it. */
-  private _refreshBlockRows(entryId: string): Promise<void> {
+   *  Repeated growth notifications share one in-flight read and set one
+   *  pending refresh. block.closed marks that same follow-up final, and
+   *  `_ensureBlockRows` waits for the whole chain instead of reading
+   *  `.cmd-output` before the final stored rows are ready. The pending flag
+   *  is state, not a timer, so the last growth cannot be dropped. */
+  private _refreshBlockRows(entryId: string, final = false): Promise<void> {
+    if (final) {
+      const closing = this._blockRowsFinalPending.get(entryId)
+      if (closing) return closing
+    }
+
+    const active = this._blockRowsInFlight.get(entryId)
+    if (active) {
+      this._blockRowsRefreshPending.add(entryId)
+      if (!final) return active
+      // The closing request shares the pending follow-up rather than
+      // creating another read after a growth burst.
+      this._blockRowsFinalPending.set(entryId, active)
+      const clearFinalPending = (): void => {
+        if (this._blockRowsFinalPending.get(entryId) === active) {
+          this._blockRowsFinalPending.delete(entryId)
+        }
+      }
+      void active.then(clearFinalPending, clearFinalPending)
+      return active
+    }
+
+    this._blockRowsRefreshPending.delete(entryId)
     const fetch: Promise<void> = blockRowsForEntry(this.client, entryId).then((read) => {
       if (this._disposed) return
       const sb = this.scrollback
@@ -8596,7 +8903,10 @@ export class TerminalContent extends BasePaneContent {
           entry: entryId,
           reason: read.reason,
         })
-        if (this._blockRowsInFlight.get(entryId) === fetch) {
+        if (
+          this._blockRowsInFlight.get(entryId) === tracked &&
+          !this._blockRowsRefreshPending.has(entryId)
+        ) {
           sb.blockManager.markRowsUnreadable(entryId, read.reason)
         }
         return
@@ -8614,26 +8924,43 @@ export class TerminalContent extends BasePaneContent {
         sb.scrollToBottomIfFollowing()
       })
     })
-    this._blockRowsInFlight.set(entryId, fetch)
-    void fetch.finally(() => {
-      if (this._blockRowsInFlight.get(entryId) === fetch) this._blockRowsInFlight.delete(entryId)
+    const tracked = fetch.finally(() => {
+      if (this._blockRowsInFlight.get(entryId) !== tracked) return
+      if (this._blockRowsRefreshPending.delete(entryId)) {
+        this._blockRowsInFlight.delete(entryId)
+        return this._refreshBlockRows(entryId)
+      }
+      this._blockRowsInFlight.delete(entryId)
     })
-    return fetch
+    this._blockRowsInFlight.set(entryId, tracked)
+    if (final) {
+      this._blockRowsFinalPending.set(entryId, tracked)
+      const clearFinalPending = (): void => {
+        if (this._blockRowsFinalPending.get(entryId) === tracked) {
+          this._blockRowsFinalPending.delete(entryId)
+        }
+      }
+      void tracked.then(clearFinalPending, clearFinalPending)
+    }
+    return tracked
   }
 
   /** Guarantee this record's stored rows are being asked for, and answer
    *  once the asking is done — successfully or not; `_refreshBlockRows`
    *  itself decides what a failed or empty answer paints, if anything.
-   *  Reuses a fetch a notification already started — block.closed starts
-   *  the closing one before it closes the block — resolves at once when
-   *  none is in flight and the record already carries rows, and starts its
-   *  own only when neither is true (a block closed with no read behind it:
-   *  one the store did not keep, or a completion that carried no fence). */
+   *  Reuses the chain a notification already started. `block.closed` asks
+   *  for a final read before closing the block; if a growth read is active,
+   *  the chain includes its queued follow-up. Resolves at once when none is
+   *  in flight and the record already carries rows, and starts its own only
+   *  when neither is true (a block closed with no read behind it: one the
+   *  store did not keep, or a completion that carried no fence). */
   private _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void> {
-    // A read in flight comes first, even when the record already holds rows:
-    // the block closes on block.closed, which starts the closing read before
-    // it closes the block (nocx-2v80t.3.27), and the rows an earlier
-    // block.grew left are not the final ones.
+    // A queued close chain outranks its older growth read, even when the
+    // record already holds rows: block.closed names the final artifact.
+    const closing = this._blockRowsFinalPending.get(entryId)
+    if (closing) return closing
+    // Otherwise the active chain comes first. A close received during that
+    // read marks its one pending follow-up final before the block freezes.
     const inFlight = this._blockRowsInFlight.get(entryId)
     if (inFlight) return inFlight
     if (rec.storedRows) return Promise.resolve()
@@ -8649,6 +8976,9 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    if (this.lifecycle.state.kind !== 'prompt_ready') {
+      this._screenHandbackAwaitingBoundary = true
+    }
     // The freeze REPLACED rec.el with a freshly built element that knows
     // nothing about home or branch (createCommandBlock takes neither) —
     // restate them from what this block recorded at submit (nocx-9bpeq.16,
@@ -8656,12 +8986,9 @@ export class TerminalContent extends BasePaneContent {
     // have moved the branch (`git checkout`) without moving the cwd.
     setBlockWhere(rec.el, { home: this.currentHome(), branch: this._blockBranch.get(rec.id) })
     this._requestBranchAfterSettle()
-    // The screen is handed back HERE and stays handed back until the prompt
-    // that follows has finished painting; the marker handler closes the
-    // interval by re-stamping this on B. Both ends move the generation
-    // forward only — the freeze reads the counter now, B reads it at a later
-    // parse — so the later of the two always stands.
-    this._screenHandbackGeneration = this._screenWriteGeneration
+    // A completed command's prompt bytes are not live screen output. The
+    // running lifecycle (or this fallback for an unintegrated pane) holds the
+    // attachment closed until promptBoundary's ordered write barrier lands.
     this.refreshGrant(rec.el)
 
     const waiter = this.agentRuns.get(rec)

@@ -95,18 +95,8 @@ func TestAFenceBatchedWithTrailingPromptBytesClosesOnTheFencesOwnScreen(t *testi
 		t.Fatalf("ingest the batched fence and its trailing prompt bytes: %v", err)
 	}
 
-	rec, ok := s.ObservationFor(nonce2)
-	if !ok {
-		t.Fatal("the second interval sealed no record")
-	}
-	last := rec.Closing.Lines[rec.Closing.Cursor.Y]
-	if got := obsRowText(last); got != "" {
-		t.Fatalf("the closing screen's cursor row reads %q, want blank: "+
-			"the next prompt's own text leaked into this interval's closing screen", got)
-	}
-
 	// The end marker on the row stream — the seam ws_block_rows.go stores a
-	// block's closing rows from — carries the same, corrected screen. Its
+	// block's closing rows from — carries the corrected screen. Its
 	// own trailing (blank) cursor row is trimmed by closingRowsForStream
 	// (nocx-2v80t.3.12), so the assertion here is that the leaked prompt
 	// text never appears anywhere in it at all, not merely off its end.

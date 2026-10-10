@@ -25,7 +25,6 @@ import type {
 } from './types'
 import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
-import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
 import {
   CaptureAbortedError,
@@ -36,7 +35,7 @@ import { mintLiveFrame } from '../frame/mint'
 import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
-import { parseOscNotification } from '../osc-notification'
+import type { SessionEffect } from '../generated/session.effect'
 import { logDecision, isDecisionTracing } from '../log'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
@@ -321,7 +320,10 @@ export class XtermRenderer implements TerminalRenderer {
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
   private notificationSubs: NotificationRequestCallback[] = []
-  private notifyOscDisposables: Array<{ dispose(): void }> = []
+  private titleSubs: TitleCallback[] = []
+  private cwdSubs: CwdCallback[] = []
+  private bellSubs: BellCallback[] = []
+  private clipboardSubs: ClipboardWriteCallback[] = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private recoverySubs: Array<(hex: string) => void> = []
@@ -957,7 +959,12 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onTitle(cb: TitleCallback): void {
-    this.term?.onTitleChange(cb)
+    this.titleSubs.push(cb)
+    // Title is presentation metadata. Until xterm's cutover (.8), its parser
+    // also reconstructs this value from replayed session.output; the
+    // at-most-once session.effect route cannot restore an event from before
+    // this renderer attached.
+    this.term?.onTitleChange((title) => cb(title))
   }
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
@@ -976,11 +983,13 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onCwd(cb: CwdCallback): void {
+    this.cwdSubs.push(cb)
+    // Like title, cwd must be reconstructed from replayed session.output
+    // while xterm remains this renderer's OSC parser. The session.effect path
+    // is at-most-once and cannot restore a report produced before attach.
     this.term?.parser.registerOscHandler(7, (data: string) => {
       const parsed = parseOsc7(data)
-      if (parsed) {
-        cb({ host: parsed.host, path: parsed.path })
-      }
+      if (parsed) cb({ host: parsed.host, path: parsed.path })
       return false // let xterm.js also handle it (default render is no-op)
     })
   }
@@ -1004,36 +1013,14 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  /** Subscribe to notification requests: a program asked nocx to present a
-   *  message (ADR-0047). OSC 9 and OSC 777 are two spellings of one request,
-   *  so both register here and fan out to one subscriber list — the consumer
-   *  never learns which sequence a program chose, because nothing downstream
-   *  may depend on it.
+  /** Subscribe to notification effects from the session runtime.
    *
-   *  Render-only, exactly like every other OSC on this renderer: the request
-   *  is reported, never granted. This handler decides nothing about where the
-   *  message goes — that is the router's, on the backend — and it cannot,
-   *  because the only thing it can send is the text the program supplied. */
+   * The runtime owns VT parsing now. Its identity-bearing session.effect is
+   * the sole source for this callback; parsing the compatibility renderer's
+   * byte mirror here would report the same OSC once without an effect id and
+   * again through the replay-safe route (nocx-zg3k3.3.3). */
   onNotification(cb: NotificationRequestCallback): void {
     this.notificationSubs.push(cb)
-    if (this.notifyOscDisposables.length || !this.term) return
-    for (const ident of [9, 777] as const) {
-      this.notifyOscDisposables.push(
-        this.term.parser.registerOscHandler(ident, (data: string) => {
-          // Untrusted bytes from whatever the user ran. parseOscNotification
-          // is total and returns null rather than throwing; a throw inside a
-          // parser callback would take the renderer down.
-          const parsed = parseOscNotification(ident, data)
-          if (parsed) {
-            for (const sub of this.notificationSubs) sub(parsed)
-          }
-          // false: xterm.js may also handle the ident. This matters for 9 —
-          // the ConEmu progress payload (9;4;…) parses to null here and must
-          // stay available to anything that renders progress.
-          return false
-        }),
-      )
-    }
   }
 
   /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
@@ -1046,7 +1033,35 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onBell(cb: BellCallback): void {
-    this.term?.onBell(cb)
+    this.bellSubs.push(cb)
+  }
+
+  applySessionEffect(effect: SessionEffect): void {
+    switch (effect.kind) {
+      case 'bell':
+        for (const sub of this.bellSubs) sub()
+        break
+      case 'notification':
+        for (const sub of this.notificationSubs) sub({ title: effect.title, body: effect.body })
+        break
+      case 'clipboard':
+        // The runtime effect already carries decoded clipboard text, not the
+        // OSC 52 wire payload. Empty writes remain refused by policy.
+        if (effect.body !== '') {
+          for (const sub of this.clipboardSubs) sub(effect.body)
+        }
+        break
+      case 'title':
+        for (const sub of this.titleSubs) sub(effect.body)
+        break
+      case 'cwd': {
+        const cwd = parseOsc7(effect.body)
+        if (cwd) {
+          for (const sub of this.cwdSubs) sub(cwd)
+        }
+        break
+      }
+    }
   }
 
   onSelectionChange(cb: SelectionCallback): void {
@@ -1056,16 +1071,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onClipboardWrite(cb: ClipboardWriteCallback): void {
-    this.term?.parser.registerOscHandler(52, (data: string) => {
-      // decodeOsc52 is a pure parser imported from the clipboard module
-      // and does not touch the clipboard — the callback fires the decoded
-      // text upward, the policy layer writes it (AD-6).
-      const decoded = decodeOsc52(data)
-      if (decoded !== null) {
-        cb(decoded)
-      }
-      return false
-    })
+    this.clipboardSubs.push(cb)
   }
 
   paste(text: string): boolean {
@@ -1093,6 +1099,12 @@ export class XtermRenderer implements TerminalRenderer {
    *  terminal is mounted. */
   bracketedPasteActive(): boolean {
     return this.term?.modes.bracketedPasteMode ?? false
+  }
+
+  /** The input engine owns pointer input while a DEC mouse mode is active. */
+  mouseReportingActive(): boolean {
+    const term = this.term
+    return term !== null && term.modes.mouseTrackingMode !== 'none'
   }
 
   refreshAtlas(): void {
@@ -1288,9 +1300,11 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
-    for (const d of this.notifyOscDisposables) d.dispose()
-    this.notifyOscDisposables = []
     this.notificationSubs = []
+    this.titleSubs = []
+    this.cwdSubs = []
+    this.bellSubs = []
+    this.clipboardSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)
       this._dprMedia = null

@@ -158,7 +158,7 @@ type recordingEmitter struct {
 	facts []lifecyclepub.Fact
 }
 
-func (e *recordingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+func (e *recordingEmitter) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	e.mu.Lock()
 	e.facts = append(e.facts, f)
 	e.mu.Unlock()

@@ -106,9 +106,16 @@ vi.mock('./ui/dialog', () => ({
  * (PaneHost.contentSettled). Before it, output is the pane's own start and
  * marks nothing — which is what stops a restore from lighting every tab.
  */
-async function settlePane(index: number): Promise<void> {
-  const renderers = await getRendererMocks()
-  renderers[index]._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+function settlePane(index: number, client: ClientFake): void {
+  const session = client._sessions[index]
+  session.fireEffect({
+    sessionId: session.sessionId,
+    generation: '1',
+    effectId: '1',
+    kind: 'promptBoundary',
+    title: '',
+    body: '',
+  })
 }
 
 describe('PaneManager', () => {
@@ -757,7 +764,7 @@ describe('PaneManager', () => {
 
     // The pane's opening is over — its shell has drawn a prompt — so what
     // arrives now is output rather than a start (PaneHost.contentSettled).
-    await settlePane(1)
+    settlePane(1, client)
 
     // Deliver output to the background tab (index 1 = session 2).
     const bgSession = client._sessions[1]
@@ -834,7 +841,7 @@ describe('PaneManager', () => {
     )
 
     // After it, the same bytes are something a person can have missed.
-    await settlePane(1)
+    settlePane(1, client)
     bgSession.fireData('normal output')
 
     const indicators = bar.querySelectorAll('.nocx-tab-indicator')
@@ -854,7 +861,7 @@ describe('PaneManager', () => {
 
     // Settled first: a bell rung while the pane is still starting up is part
     // of that start, like everything else it emits then.
-    await settlePane(1)
+    settlePane(1, client)
 
     // Put the background tab into the alternate buffer via onBufferChange.
     const renderers = await getRendererMocks()

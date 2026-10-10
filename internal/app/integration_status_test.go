@@ -80,6 +80,10 @@ func TestLossCauseSpellingsAgree(t *testing.T) {
 		t.Errorf("closed spelled %q by the adapter and %q by the transport",
 			lifecyclechannel.LossClosed, transport.LossCauseClosed)
 	}
+	if string(lifecyclechannel.LossStoreRefused) != transport.LossCauseStoreRefused {
+		t.Errorf("store-refused spelled %q by the adapter and %q by the transport",
+			lifecyclechannel.LossStoreRefused, transport.LossCauseStoreRefused)
+	}
 	// The two causes the transport does NOT name must not accidentally
 	// collide with the two it does, or a broken descriptor would be
 	// reported as a handshake that expired.

@@ -44,7 +44,7 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	for i := range 20 {
 		rows = append(rows, aStreamRow(fmt.Sprintf("row-%02d", i)))
 	}
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows); !confirm || written != 20 {
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); !confirm || written != 20 {
 		t.Fatalf("rows ack = (%d, %v), want the exclusive end 20 confirmed", written, confirm)
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")}, false)
@@ -81,7 +81,7 @@ func TestBlockIntervalEnded_SealsWhenTheEndRowIsBehindTheArtifact(t *testing.T) 
 	// boundary) and a repeated end marker neither retry the close nor add a
 	// second closing screen. Before the fix the first of these was the retry
 	// that could never succeed.
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("row-00")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("row-00")}, ""); !confirm {
 		t.Fatal("a replay below the closed boundary was not confirmed")
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 10, []emulator.Row{aStreamRow("closing")}, false)
@@ -118,7 +118,7 @@ func TestBlockIntervalEnded_SealsWithoutClaimingRowsItNeverReceived(t *testing.T
 	for i := range 10 {
 		rows = append(rows, aStreamRow(fmt.Sprintf("delivered-%02d", i)))
 	}
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows); !confirm || written != 10 {
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, rows, ""); !confirm || written != 10 {
 		t.Fatalf("rows ack = (%d, %v), want the exclusive end 10 confirmed", written, confirm)
 	}
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 40, []emulator.Row{aStreamRow("closing")}, false)
@@ -169,7 +169,7 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 	attempt := startsACommand(t, e, pub, lane, h, 2, "printf stuck")
 	fence := lifecycleFence(0x98)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("running")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("running")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
@@ -178,7 +178,7 @@ func TestBlockRowsCloseAbandonsAtTheAttemptBound(t *testing.T) {
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
 	for i := range maxCloseAttempts {
 		from := uint64(i + 1) //nolint:gosec // a row index, never negative
-		e.ws.BlockRowsArrived(session.ID(sid), from, 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))})
+		e.ws.BlockRowsArrived(session.ID(sid), from, 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))}, "")
 	}
 
 	e.ws.blockStream.mu.Lock()

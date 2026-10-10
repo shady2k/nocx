@@ -425,8 +425,8 @@ func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
 	w.logger.Info("notification authorization resolved", "permission", perm.String())
 }
 
-// ServiceShutdown tears down the manually-started notifications service. The
-// framework calls it because WailsApp is itself a registered service.
+// ServiceShutdown joins native download cleanup before stopping notifications.
+// The framework calls it because WailsApp is itself a registered service.
 //
 //wails:ignore
 func (w *WailsApp) ServiceShutdown() error {

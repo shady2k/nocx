@@ -180,7 +180,7 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 func tierCommand(t *testing.T, kind ShellKind, home string, opts LaunchOptions) (string, []string) {
 	t.Helper()
 	root := filepath.Join(home, dirName)
-	res, err := NewPublisher(testLogger(), NewOSFS(), root).Publish(launchBundle())
+	res, err := NewPublisher(testLogger(), NewOSFS(), root).Publish(shippedBundle())
 	if err != nil {
 		t.Fatalf("publish the bundle into the fixture home: %v", err)
 	}

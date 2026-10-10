@@ -232,6 +232,39 @@ func TestSessionOutput_ExceedingTheCapDropsOldestFirstAndSaysSo(t *testing.T) {
 	assertMatchesStreamByOffset(t, rec, stream)
 }
 
+// Reclaim reads only the small offset/gap projection; it does not need the
+// chunk bodies that the retired renderer byte reader used to fetch.
+func TestSessionOutput_RecoveryStatusReturnsOnlyMetadata(t *testing.T) {
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(64 << 10)
+	db, _ := newRecordingStore(t, policy)
+	repo := db.SessionOutput()
+	stream := streamOf(300 << 10)
+	appendAll(t, repo, "sess-recovery-status", stream, 32<<10)
+
+	status, err := repo.RecoveryStatus(context.Background(), "sess-recovery-status")
+	if err != nil {
+		t.Fatalf("RecoveryStatus: %v", err)
+	}
+	if status.Produced != uint64(len(stream)) {
+		t.Fatalf("Produced = %d, want %d", status.Produced, len(stream))
+	}
+	if len(status.Gaps) != 1 || status.Gaps[0].Reason != content.GapReasonCap {
+		t.Fatalf("Gaps = %+v, want the cap gap metadata", status.Gaps)
+	}
+	if status.Gaps[0].Start >= status.Gaps[0].End {
+		t.Fatalf("invalid gap bounds: %+v", status.Gaps[0])
+	}
+
+	empty, err := repo.RecoveryStatus(context.Background(), "not-recorded")
+	if err != nil {
+		t.Fatalf("RecoveryStatus for unknown session: %v", err)
+	}
+	if empty.Produced != 0 || empty.Gaps == nil || len(empty.Gaps) != 0 {
+		t.Fatalf("unknown status = %+v, want produced=0 and gaps=[]", empty)
+	}
+}
+
 // Retention off: nothing is kept, it is not a failure, and the stance names
 // the switch that did it. Two switches, two stances — a person has to know
 // which one to flip.

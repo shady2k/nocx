@@ -38,6 +38,7 @@
 package lifecycleremote
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -95,7 +96,7 @@ const DefaultMaxCandidates = defaultMaxCandidates
 type Kernel interface {
 	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
 	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
-	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
+	Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
 	TransportLost(t lifecycle.TransportID) error
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
@@ -618,7 +619,7 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 				a.mu.Lock()
 				a.claim[env.Domain] = c
 				a.mu.Unlock()
-				ierr := a.kernel.Ingest(a.id, env)
+				ierr := a.kernel.Ingest(context.Background(), a.id, env)
 				a.mu.Lock()
 				accepted := ierr == nil
 				if !accepted && a.claim[env.Domain] == c {
@@ -635,7 +636,7 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 					"domain", env.Domain, "error", ierr)
 				return
 			}
-			if ierr := a.kernel.Ingest(a.id, env); ierr != nil {
+			if ierr := a.kernel.Ingest(context.Background(), a.id, env); ierr != nil {
 				// Quarantine (a Desynchronized domain), a rejected event,
 				// an illegal kind: the kernel mutates nothing and this
 				// adapter records nothing but the fact.

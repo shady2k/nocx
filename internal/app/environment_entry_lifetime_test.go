@@ -49,16 +49,16 @@ func TestPanesThatOpenAndCloseLeaveNothingInTheEntryRegistry(t *testing.T) {
 		registry.register(ctx, lane, obs)
 
 		stacks[lane] = 1
-		emitter.checkGrowth(lane)
+		emitter.checkGrowth(context.Background(), lane)
 		stacks[lane] = 2
-		emitter.checkGrowth(lane)
+		emitter.checkGrowth(context.Background(), lane)
 		if obs.n != 1 {
 			t.Fatalf("pane %d: its live lane fired %d entries, want 1", i, obs.n)
 		}
 
 		closePane()
 		stacks[lane] = 1
-		emitter.checkGrowth(lane) // the late fact, after the pane is gone
+		emitter.checkGrowth(context.Background(), lane) // the late fact, after the pane is gone
 	}
 
 	// A pane's end is its context's, and the registration is dropped when
@@ -68,7 +68,7 @@ func TestPanesThatOpenAndCloseLeaveNothingInTheEntryRegistry(t *testing.T) {
 	})
 	// And a fact arriving after the drop does not bring a lane back.
 	for _, lane := range lanes {
-		emitter.checkGrowth(lane)
+		emitter.checkGrowth(context.Background(), lane)
 	}
 	if n := registry.retained(); n != 0 {
 		t.Fatalf("a late fact put %d lanes back into the registry, want 0", n)

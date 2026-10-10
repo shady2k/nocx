@@ -157,11 +157,11 @@ func (s *sqliteContent) Skip(ctx context.Context, sessionID string, resumeAt uin
 // in which the cursor has advanced and the gap has not, because they are one
 // UPDATE.
 func (s *sqliteContent) skipSessionOutput(ctx context.Context, sessionID string, at int64, reason string, capBytes int64) (SessionOutputResult, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return SessionOutputResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer txEnd.rollback()
 
 	now := time.Now().UnixMilli()
 	// The recording's coordinate space begins at the START OF THE STREAM and
@@ -180,7 +180,7 @@ func (s *sqliteContent) skipSessionOutput(ctx context.Context, sessionID string,
 		// The same skip, sent again — a retry after an error the caller
 		// could not classify. A zero-width gap is not a hole, and recording
 		// one would turn a retry into a fiction.
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return SessionOutputResult{}, commitErr
 		}
 		return SessionOutputResult{Kept: true}, nil
@@ -210,7 +210,7 @@ func (s *sqliteContent) skipSessionOutput(ctx context.Context, sessionID string,
 		row.next, truncated, gaps, now, sessionID); updateErr != nil {
 		return SessionOutputResult{}, fmt.Errorf("content: session output: record a skipped range: %w", updateErr)
 	}
-	if commitErr := tx.Commit(); commitErr != nil {
+	if commitErr := txEnd.commit(); commitErr != nil {
 		return SessionOutputResult{}, commitErr
 	}
 	// Dropped is zero and not merely unset: a skip evicts nothing. It cannot
@@ -236,11 +236,11 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 	// BEGIN IMMEDIATE for the reason Submit and CaptureOutput both state: the
 	// write lock is taken at BEGIN rather than at the first write, so a
 	// second writer waits instead of failing an upgrade.
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return SessionOutputResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer txEnd.rollback()
 
 	now := time.Now().UnixMilli()
 	// Offsets are byte counts of a stream one process produced; they cannot
@@ -257,7 +257,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 		// A zero-length read is a non-event, not a degrade. The row exists
 		// now, which is what makes "this session produced nothing" a
 		// recording rather than an absence.
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return SessionOutputResult{}, commitErr
 		}
 		return SessionOutputResult{Kept: true}, nil
@@ -265,7 +265,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 		// The run that ended at the cursor, sent again — a retry after an
 		// error the caller could not classify. Every chunk of it is already
 		// there under the same key.
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return SessionOutputResult{}, commitErr
 		}
 		return SessionOutputResult{Kept: true}, nil
@@ -304,7 +304,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 		row.next, row.byteLen, truncated, gaps, now, in.SessionID); updateErr != nil {
 		return SessionOutputResult{}, fmt.Errorf("content: session output: update recording: %w", updateErr)
 	}
-	if commitErr := tx.Commit(); commitErr != nil {
+	if commitErr := txEnd.commit(); commitErr != nil {
 		return SessionOutputResult{}, commitErr
 	}
 	return SessionOutputResult{Kept: true, Dropped: uint64(dropped)}, nil //nolint:gosec // dropped ≥ 0
@@ -581,12 +581,37 @@ func sessionOutputGaps(ctx context.Context, tx *sql.Tx, sessionID string, row se
 // Read returns everything kept for a session, adjacent chunks joined into
 // runs. An unknown session is an empty recording: nothing was produced, or
 // all of it was dropped, and neither is a fault a caller can act on.
+// RecoveryStatus reads only the row metadata that explains what a reclaim
+// cannot recover from the replay ring. In particular, it never selects from
+// session_output_chunks: the raw-byte reader is retired at the renderer cutover.
+func (s *sqliteContent) RecoveryStatus(ctx context.Context, sessionID string) (SessionOutputRecoveryStatus, error) {
+	out := SessionOutputRecoveryStatus{Gaps: []Gap{}}
+	var next int64
+	var gaps string
+	err := s.conn(ctx).QueryRowContext(ctx,
+		`SELECT next_offset, gaps FROM session_output WHERE session_id = ?`, sessionID).
+		Scan(&next, &gaps)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, nil
+	}
+	if err != nil {
+		return SessionOutputRecoveryStatus{}, fmt.Errorf("content: session output: read recovery status: %w", err)
+	}
+	out.Produced = uint64(next) //nolint:gosec // byte offsets are non-negative by schema
+	if gaps != "" && gaps != "[]" {
+		if decodeErr := json.Unmarshal([]byte(gaps), &out.Gaps); decodeErr != nil {
+			return SessionOutputRecoveryStatus{}, fmt.Errorf("content: session output: decode recovery gaps: %w", decodeErr)
+		}
+	}
+	return out, nil
+}
+
 func (s *sqliteContent) Read(ctx context.Context, sessionID string) (SessionOutputRecording, error) {
 	out := SessionOutputRecording{SessionID: sessionID}
 	var first, next, byteLen int64
 	var truncated sql.NullString
 	var gaps string
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		`SELECT first_offset, next_offset, byte_len, truncated, gaps
 		   FROM session_output WHERE session_id = ?`, sessionID).
 		Scan(&first, &next, &byteLen, &truncated, &gaps)
@@ -608,7 +633,7 @@ func (s *sqliteContent) Read(ctx context.Context, sessionID string) (SessionOutp
 		}
 	}
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn(ctx).QueryContext(ctx,
 		`SELECT byte_offset, body FROM session_output_chunks
 		  WHERE session_id = ? ORDER BY byte_offset`, sessionID)
 	if err != nil {

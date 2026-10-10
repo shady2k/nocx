@@ -378,13 +378,39 @@ func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
 		return
 	}
 
-	outcome := ""
+	if dst == nil {
+		// No GET acquired the response writer, so the native receiver could
+		// not have committed anything. In particular, cancellation here must
+		// not wait for a completion ACK that cannot arrive.
+		s.finishNativeDownload(rt, sourceErr)
+		return
+	}
+
 	select {
-	case outcome = <-rt.completion:
+	case <-rt.completion:
 	case <-s.transfers.afterTimeout(s.transfers.nativeCompletionTimeout()):
 	}
+	s.finishNativeDownload(rt, sourceErr)
+}
+
+// finishNativeDownload orders the final decision against completion ACK
+// acceptance. Whichever obtains rt.mu first is authoritative: an ACK already
+// accepted is used even when the timeout select arm fired, while finalization
+// first makes subsequent ACKs fail.
+func (s *WSServer) finishNativeDownload(rt *runningTransfer, sourceErr error) {
+	now := s.transfers.clock()
+	rt.mu.Lock()
+	outcome := ""
+	if rt.completionSet {
+		outcome = rt.completionOutcome
+	}
 	state, finalErr := nativeDownloadFinal(rt, outcome, sourceErr)
-	rt.finish(state, transfer.Outcome{}, finalErr, s.transfers.clock())
+	rt.state = state
+	rt.outcome = transfer.Outcome{}
+	rt.err = finalErr
+	rt.endedAt = now
+	rt.finalized = true
+	rt.mu.Unlock()
 	s.transfers.retireTicket(rt.ticket)
 	s.settleDownload(rt)
 }
@@ -639,7 +665,15 @@ func (h downloadHandlers) handleDownloadComplete(state *connState, req jsonrpcRe
 		return
 	}
 	if rt.finalized {
+		// downloadCancel may settle before the native receiver reports its
+		// matching completion. Accept only that same cancelled outcome;
+		// other terminal records remain closed to late ACKs.
+		sameCancelled := params.Outcome == "cancelled" && rt.state == downloadStateCancelled
 		rt.mu.Unlock()
+		if sameCancelled {
+			_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+			return
+		}
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}

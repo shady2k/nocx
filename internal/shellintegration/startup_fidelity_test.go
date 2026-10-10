@@ -218,7 +218,7 @@ func runStartupSession(t *testing.T, home, shellPath string, lines ...string) st
 func publishCarrierInto(t *testing.T, home string) {
 	t.Helper()
 	if _, err := NewPublisher(testLogger(), NewOSFS(), filepath.Join(home, dirName)).
-		Publish(launchBundle()); err != nil {
+		Publish(shippedBundle()); err != nil {
 		t.Fatalf("publish for carrier: %v", err)
 	}
 }

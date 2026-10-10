@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type Mock } from 'vitest'
 import { createFeedStore, type FeedClientLike } from './feed-store'
 import type { NotifyFeedRead, Occurrence } from '../generated/notify.feed.read'
 import type { NotifyFeedMarkRead } from '../generated/notify.feed.markRead'
@@ -48,9 +48,9 @@ const MARKED: NotifyFeedMarkRead = { revision: 6 }
 /** The client and the very mocks it is made of. notes-store.test.ts keeps
  *  the spies beside the object for the same reason: reading a method OFF the
  *  client to assert on it is an unbound reference the lint rule refuses. */
-function fakeClient(over: Partial<Record<'read' | 'markRead', ReturnType<typeof vi.fn>>> = {}) {
-  const read = over.read ?? vi.fn().mockResolvedValue(snapshot())
-  const markRead = over.markRead ?? vi.fn().mockResolvedValue(MARKED)
+function fakeClient(over: Partial<{ [K in 'read' | 'markRead']: Mock<FeedClientLike[K]> }> = {}) {
+  const read = over.read ?? vi.fn<FeedClientLike['read']>().mockResolvedValue(snapshot())
+  const markRead = over.markRead ?? vi.fn<FeedClientLike['markRead']>().mockResolvedValue(MARKED)
   const client: FeedClientLike = { read, markRead }
   return { client, read, markRead }
 }

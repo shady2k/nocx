@@ -317,3 +317,17 @@ func TestAZeroPartCountIsRefused(t *testing.T) {
 		t.Fatalf("Feed = %v, want ErrScreenAssemblyOrphanPart", err)
 	}
 }
+
+func TestTheEffectFrameTypeIsInTheClosedSet(t *testing.T) {
+	if !TypeSessionEffect.valid() {
+		t.Fatal("TypeSessionEffect is not in the closed set")
+	}
+	var got FrameType
+	d := NewDecoder(func(ft FrameType, _, _ uint32, _ []byte) { got = ft }, func(int) { t.Fatal("decoder scanned a live effect frame as garbage") })
+	if err := d.Feed(EncodeFrame(TypeSessionEffect, 1, 0, EncodeEffectFrame(EffectFrame{Kind: EffectBell}))); err != nil {
+		t.Fatalf("Feed: %v", err)
+	}
+	if got != TypeSessionEffect {
+		t.Fatalf("decoder delivered type %d, want TypeSessionEffect", got)
+	}
+}

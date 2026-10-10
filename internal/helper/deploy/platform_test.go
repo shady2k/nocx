@@ -14,11 +14,24 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	helperartifacts "github.com/shady2k/nocx/internal/helper/deploy/artifacts"
 )
+
+// matrixPlatforms is the D20 build matrix as this package asserts it: the four
+// targets a release must resolve. It is a literal here rather than a read of
+// the artifacts package's own list on purpose — an assertion that asks the
+// implementation what to expect cannot report a platform going missing, which
+// is the defect it exists to catch.
+var matrixPlatforms = []deploy.Platform{
+	{GOOS: "linux", GOARCH: "amd64"},
+	{GOOS: "linux", GOARCH: "arm64"},
+	{GOOS: "darwin", GOARCH: "amd64"},
+	{GOOS: "darwin", GOARCH: "arm64"},
+}
 
 // requireArtifacts gates the tests in this package that assert the real
 // embedded binaries: a fresh checkout compiles without them (the artifacts
@@ -31,14 +44,32 @@ import (
 // build was supposed to run `make helpers`, and a skip there is exactly
 // how every published release came to embed nothing (nocx-mchgh). The
 // default stays the skip, because a fresh checkout is not a broken build.
+//
+// IT ASKS ABOUT THE WHOLE MATRIX, and that is a correction (nocx-klyj6). It
+// used to ask about linux/amd64 alone, which made this gate's verdict depend
+// on WHICH LEG RAN FIRST. e2e/stand.ts builds this machine's own helper on its
+// way up (`make helpers-this-machine`, one target of the four), so over an
+// untouched tree the second `make ci-full` found linux/amd64 present, the skip
+// did not fire, and the loop below failed on linux/arm64: run 1 green, run 2
+// red, same source, `ci` running before `ci-e2e` in the composite. A partial
+// matrix is not a build that ran `make helpers` — it is a checkout that ran
+// the e2e leg — and only the COMPLETE matrix, or none of it, is a state this
+// gate may draw a conclusion from.
 func requireArtifacts(t *testing.T) {
 	t.Helper()
-	if _, _, err := helperartifacts.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
-		if os.Getenv("NOCX_REQUIRE_HELPER_ARTIFACTS") != "" {
-			t.Fatal("embedded helper artifacts absent while NOCX_REQUIRE_HELPER_ARTIFACTS is set: this build was supposed to run `make helpers` and did not")
+	var missing []string
+	for _, p := range matrixPlatforms {
+		if _, _, err := helperartifacts.DefaultSource.Artifact(p); errors.Is(err, helperartifacts.ErrArtifactsNotBuilt) {
+			missing = append(missing, p.GOOS+"/"+p.GOARCH)
 		}
-		t.Skip("embedded helper artifacts absent — run `make helpers` first")
 	}
+	if len(missing) == 0 {
+		return
+	}
+	if os.Getenv("NOCX_REQUIRE_HELPER_ARTIFACTS") != "" {
+		t.Fatalf("embedded helper artifacts absent for %s while NOCX_REQUIRE_HELPER_ARTIFACTS is set: this build was supposed to run `make helpers` and did not", strings.Join(missing, ", "))
+	}
+	t.Skipf("embedded helper artifacts absent for %s — run `make helpers` first. A PARTIAL matrix skips too, deliberately: the e2e leg builds this machine's helper alone, so a guard that fired on one present artifact would make this package's verdict depend on whether `ci` or `ci-e2e` ran first", strings.Join(missing, ", "))
 }
 
 // scriptedExec is a deploy.ExecOnce that answers one canned stdout.
@@ -121,12 +152,7 @@ func TestArtifactUnknownPlatformIsUnsupported(t *testing.T) {
 // FAILS where NOCX_REQUIRE_HELPER_ARTIFACTS says a build should have them.
 func TestEveryMatrixPlatformResolves(t *testing.T) {
 	requireArtifacts(t)
-	for _, p := range []deploy.Platform{
-		{GOOS: "linux", GOARCH: "amd64"},
-		{GOOS: "linux", GOARCH: "arm64"},
-		{GOOS: "darwin", GOARCH: "amd64"},
-		{GOOS: "darwin", GOARCH: "arm64"},
-	} {
+	for _, p := range matrixPlatforms {
 		if _, _, err := helperartifacts.DefaultSource.Artifact(p); err != nil {
 			t.Fatalf("Artifact(%+v): %v", p, err)
 		}

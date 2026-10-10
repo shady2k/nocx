@@ -240,7 +240,7 @@ type ledgerHandlers struct {
 	// openRows retries the block stream after the durable bind. Lifecycle
 	// publication can race the renderer's ledger.bind, so the first open may
 	// legitimately see no ledger row yet.
-	openRows func(session.ID, string)
+	openRows func(context.Context, session.ID, string)
 
 	// raiser is the notification pipeline's ingress (ADR-0029); nil when the
 	// host built no pipeline, which every headless test server is. The close
@@ -298,7 +298,7 @@ func (h ledgerHandlers) handleBind(ctx context.Context, req jsonrpcRequest) {
 	}
 	_, ok := h.apply(ctx, req, cmd)
 	if ok && h.openRows != nil {
-		h.openRows(session.ID(p.Envelope.SessionID), p.Envelope.AttemptID)
+		h.openRows(ctx, session.ID(p.Envelope.SessionID), p.Envelope.AttemptID)
 	}
 }
 
@@ -857,8 +857,8 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			// store refuses a replayed id whose content changed.
 			clientID: connectionID(w),
 			r:        r,
-			openRows: func(sid session.ID, attempt string) {
-				s.blockStream.openAttemptFor(s, sid, attempt)
+			openRows: func(ctx context.Context, sid session.ID, attempt string) {
+				s.blockStream.openAttemptFor(ctx, s, sid, attempt)
 			},
 			raiser: s.notifyRaiser,
 			broker: s.broker,

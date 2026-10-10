@@ -208,7 +208,7 @@ func driveAcceptedCompletion(t *testing.T, k *client.CompletionObservingKernel, 
 			Epoch: h.Epoch, Sequence: seq, Capability: h.Capability, Event: evt,
 		}
 	}
-	if helloErr := k.Ingest(dlTransport, env(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); helloErr != nil {
+	if helloErr := k.Ingest(context.Background(), dlTransport, env(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); helloErr != nil {
 		t.Fatalf("hello: %v", helloErr)
 	}
 	att, err := pub.SubmitAttempt(h.Domain, "true", "/tmp", "", "submit-under-test")
@@ -216,13 +216,13 @@ func driveAcceptedCompletion(t *testing.T, k *client.CompletionObservingKernel, 
 		t.Fatalf("submit attempt: %v", err)
 	}
 	id := att.ID
-	if err := k.Ingest(dlTransport, env(2, lifecycle.Event{Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &id, Command: "true"}})); err != nil {
+	if err := k.Ingest(context.Background(), dlTransport, env(2, lifecycle.Event{Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &id, Command: "true"}})); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	var fence [32]byte
 	fence[0] = 0xCC
 	code := 7
-	if err := k.Ingest(dlTransport, env(3, lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id, ExitCode: &code, Fence: lifecycle.FenceNonce(fence)}})); err != nil {
+	if err := k.Ingest(context.Background(), dlTransport, env(3, lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id, ExitCode: &code, Fence: lifecycle.FenceNonce(fence)}})); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
 	return att, h, fence
@@ -334,7 +334,7 @@ func TestObserveEnvironmentEntryRidesDownToTheSpawnedSession(t *testing.T) {
 	}
 	downlink.Bind(spawned.HostSessionID)
 
-	downlink.ObserveEnvironmentEntry("dom-child")
+	downlink.ObserveEnvironmentEntry(context.Background(), "dom-child")
 
 	select {
 	case <-rec.seenEntered:
@@ -369,7 +369,7 @@ func TestObserveEnvironmentEntryBeforeBindIsBufferedAndDeliveredInOrder(t *testi
 	ctx := context.Background()
 
 	downlink := client.NewCompletionDownlink(c, ctx, nil)
-	downlink.ObserveEnvironmentEntry("dom-child")
+	downlink.ObserveEnvironmentEntry(context.Background(), "dom-child")
 
 	spawned, err := c.Spawn(ctx, proto.SpawnParams{
 		Cols: 80, Rows: 24,
@@ -460,7 +460,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request domain: %v", err)
 	}
-	if ingestErr := observing.Ingest(dlTransport, lifecycle.Envelope{
+	if ingestErr := observing.Ingest(context.Background(), dlTransport, lifecycle.Envelope{
 		Version: lifecycle.ProtocolVersion, Lane: lane, Domain: h.Domain,
 		Epoch: h.Epoch, Sequence: 1, Capability: h.Capability,
 		Event: lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}},
@@ -478,7 +478,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	code := 7
 	// A completion under a foreign capability: authentication terminates
 	// before any state is consulted, and nothing is sent down.
-	if err := observing.Ingest(dlTransport, lifecycle.Envelope{
+	if err := observing.Ingest(context.Background(), dlTransport, lifecycle.Envelope{
 		Version: lifecycle.ProtocolVersion, Lane: lane, Domain: h.Domain,
 		Epoch: h.Epoch, Sequence: 2, Capability: capabilityFromHex(t, hex.EncodeToString(make([]byte, 32))),
 		Event: lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id, ExitCode: &code, Fence: lifecycle.FenceNonce(fence)}},
@@ -487,7 +487,7 @@ func TestARefusedFinishSendsNothingDown(t *testing.T) {
 	}
 	// A completion that skips the start's sequence: the monotonic rule
 	// refuses it, and nothing is sent down either.
-	if err := observing.Ingest(dlTransport, lifecycle.Envelope{
+	if err := observing.Ingest(context.Background(), dlTransport, lifecycle.Envelope{
 		Version: lifecycle.ProtocolVersion, Lane: lane, Domain: h.Domain,
 		Epoch: h.Epoch, Sequence: 9, Capability: h.Capability,
 		Event: lifecycle.Event{Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{AttemptID: &id, ExitCode: &code, Fence: lifecycle.FenceNonce(fence)}},
@@ -542,7 +542,7 @@ func TestAFailedDownlinkLeavesTheKernelStateAsTheKernelSetIt(t *testing.T) {
 	// tail against the still-live domain. The shell reaches its next prompt
 	// FIRST — submit requires a ready prompt, which is the kernel's own rule.
 	prompt := func(seq uint64, evt lifecycle.Event) {
-		if promptErr := observing.Ingest(dlTransport, lifecycle.Envelope{
+		if promptErr := observing.Ingest(context.Background(), dlTransport, lifecycle.Envelope{
 			Version: lifecycle.ProtocolVersion, Lane: att.Lane, Domain: att.Domain,
 			Epoch: handle.Epoch, Sequence: seq, Capability: handle.Capability, Event: evt,
 		}); promptErr != nil {

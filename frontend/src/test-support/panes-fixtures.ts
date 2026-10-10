@@ -9,6 +9,7 @@
 import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
+import type { SessionEffect } from '../generated/session.effect'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -28,8 +29,7 @@ import type {
   Pane as LayoutPane,
   Workspace as LayoutWorkspace,
 } from '../generated/layout.read'
-import type { ClipboardAccess } from '../clipboard'
-import type { ClipboardGate } from '../clipboard'
+import { type ClipboardAccess, type ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
@@ -41,6 +41,7 @@ import type { DriverState } from '../pane-observation'
 import type { WorkersTabCreated } from '../generated/workers.tabCreated'
 import type { WorkersTabClosed } from '../generated/workers.tabClosed'
 import type { Open } from '../generated/open'
+import type { SessionHandle, WSClient } from '../ipc'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -165,6 +166,7 @@ export interface RendererMock extends TerminalRenderer {
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
   awaitWriteBarrier: Mock<() => Promise<void>>
+  hasUnsettledWrite: Mock<() => boolean>
   /** The snippet-palette chord handler — stored, so a test can fire it the
    *  way xterm's custom key handler would. */
   onSnippetChord: Mock<(cb: (() => void) | null) => void>
@@ -203,6 +205,7 @@ export interface RendererMock extends TerminalRenderer {
   _fireSelectionChange(text: string): void
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
+  applySessionEffect(effect: SessionEffect): void
   /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
   _fireRecoveryFence(hex: string): void
   /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
@@ -260,6 +263,24 @@ export function createRendererMock(): RendererMock {
     onClipboardWrite: vi.fn((cb: (text: string) => void) => {
       cbs.onClipboardWrite = cb
     }),
+    applySessionEffect: vi.fn((effect: SessionEffect) => {
+      switch (effect.kind) {
+        case 'bell':
+          cbs.onBell?.()
+          break
+        case 'clipboard':
+          if (effect.body !== '') cbs.onClipboardWrite?.(effect.body)
+          break
+        case 'title':
+          cbs.onTitle?.(effect.body)
+          break
+        case 'cwd':
+          cbs.onCwd?.({ host: '', path: effect.body })
+          break
+        case 'notification':
+          break
+      }
+    }),
     // A paste IS input: xterm's term.paste() writes the payload (bracketed
     // when the program asked for it) through the same onData every keystroke
     // takes — which is how a submitted command reaches the pty at all. A mock
@@ -281,6 +302,9 @@ export function createRendererMock(): RendererMock {
     // the ORDER (nocx-8rtr.1 — write() is fire-and-forget, so a synchronous
     // read can answer about the terminal before the bytes) overrides it.
     awaitWriteBarrier: vi.fn(async () => {}),
+    // A normal fixture has no parse work outstanding; ordering tests opt into
+    // it explicitly so a parse barrier has a meaningful target.
+    hasUnsettledWrite: vi.fn(() => false),
     onSnippetChord: vi.fn((cb: (() => void) | null) => {
       snippetChordCb = cb
     }),
@@ -414,6 +438,12 @@ export interface SessionFake {
   awaitsIntegration: boolean
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
+  /** Hand one session intent to the pane's helper (nocx-zg3k3.3.1). What a
+   *  person typed, pasted or clicked lands here now, as the kind and payload
+   *  the wire carries — never as bytes. Resolves `executed` by default: the
+   *  case a test that is not about a refusal wants, and the same default
+   *  `signal` uses. */
+  intent: Mock<SessionHandle['intent']>
   /** Address a signal to the command running in this session (nocx-23rph).
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
@@ -433,8 +463,18 @@ export interface SessionFake {
   /** The screen plane (nocx-zg3k3.2.8): one parsed session.frame document
    *  per metadata frame the backend publishes. */
   onScreenFrame: ReturnType<typeof vi.fn>
+  onEffect: ReturnType<typeof vi.fn>
+  /** Fire the registered runtime effect callback. */
+  fireEffect(effect: SessionEffect): void
   /** Fire the registered screen-frame callback with one document. */
   fireScreenFrame(frame: SessionFrame): void
+  /** The live tier's page seam (nocx-zg3k3.10.4): rows documents arrive
+   *  on the carrier the surface registers here. */
+  onHistoryPageRows: ReturnType<typeof vi.fn>
+  /** One page of the live history, as session.historyPage answers it. The
+   *  default is the empty head read of an empty history — inert to every
+   *  pane behavior that does not scroll. */
+  historyPage: ReturnType<typeof vi.fn>
   /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
    *  undefined for a handle that was opened rather than taken back. `size` is
    *  the grid the BACKEND says the session runs at — the one the recovered
@@ -469,6 +509,7 @@ export interface SessionFake {
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
   let screenCb: ((frame: SessionFrame) => void) | null = null
+  let effectCb: ((effect: SessionEffect) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
   let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
@@ -480,6 +521,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     awaitsIntegration: false,
     send: vi.fn(),
     sendResize: vi.fn(),
+    intent: vi.fn<SessionHandle['intent']>(() =>
+      Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),
+    ),
     // The signal is ECHOED back, exactly as the wire echoes it: a fixture
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.
@@ -506,6 +550,24 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onScreenFrame: vi.fn((cb: (frame: SessionFrame) => void) => {
       screenCb = cb
     }),
+    onEffect: vi.fn((cb: (effect: SessionEffect) => void) => {
+      effectCb = cb
+    }),
+    fireEffect: (effect: SessionEffect) => effectCb?.(effect),
+    // The live tier's page seam (nocx-zg3k3.10.4): the default answers the
+    // head read with the empty page of an empty history, so a pane test
+    // that never scrolls never pages.
+    onHistoryPageRows: vi.fn(),
+    historyPage: vi.fn(() =>
+      Promise.resolve({
+        pageId: 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8',
+        start: 0,
+        end: 0,
+        floor: 0,
+        more: false,
+        durableThrough: null,
+      }),
+    ),
     fireData: (data: string) => {
       dataCb?.(data)
     },
@@ -580,12 +642,12 @@ const FIXTURE_INSTANCE_ID = 'fedcba9876543210fedcba9876543210'
  *  shape of ClientFake, never named by consumers. */
 interface DispatcherFake {
   subscribe: ReturnType<typeof vi.fn>
-  call: ReturnType<typeof vi.fn>
+  call: Mock<(...args: Parameters<Dispatcher['call']>) => Promise<unknown>>
 }
 
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
-  openSession: ReturnType<typeof vi.fn>
+  openSession: Mock<(...args: Parameters<WSClient['openSession']>) => Promise<SessionFake>>
   openSSHSession: ReturnType<typeof vi.fn>
   openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -599,7 +661,7 @@ export interface ClientFake {
   /** Control-plane calls (history.record, history.query, …). Rejects by
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
-  call: ReturnType<typeof vi.fn>
+  call: Mock<(...args: Parameters<WSClient['call']>) => Promise<unknown>>
   /** The pane.close notification (nocx-tsajw): records the wire identity of
    *  the closed pane so tests can assert the backend was told. */
   notifyPaneClosed: ReturnType<typeof vi.fn>
@@ -640,7 +702,7 @@ export interface ClientFake {
   listHelperSessions: ReturnType<typeof vi.fn>
   /** Take one of those back. Answers a fresh session by default, so a pane
    *  that adopts one still has a handle to drive. */
-  reclaimSession: ReturnType<typeof vi.fn>
+  reclaimSession: Mock<(...args: Parameters<WSClient['reclaimSession']>) => Promise<SessionFake>>
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
   /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
@@ -745,11 +807,15 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   }
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
-    openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSession: vi.fn<(...args: Parameters<WSClient['openSession']>) => Promise<SessionFake>>(() =>
+      Promise.resolve(newSession()),
+    ),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     listLiveSessions: vi.fn(() => Promise.resolve([])),
-    reclaimSession: vi.fn(() => Promise.resolve(newSession())),
+    reclaimSession: vi.fn<
+      (...args: Parameters<WSClient['reclaimSession']>) => Promise<SessionFake>
+    >(() => Promise.resolve(newSession())),
     listHelperSessions: vi.fn(() => Promise.resolve([] as SessionEntry[])),
     close: vi.fn(),
     sendToSession: vi.fn(),
@@ -798,22 +864,26 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default
       // resolves so the write always proceeds (fail-open).
-      call: vi.fn().mockResolvedValue({
-        id: 'att-0',
-        domain: 'd1',
-        state: 'open',
-        command: '',
-        cwd: '',
-        host: '',
-        origin: 'app',
-        startedAt: '2026-08-08T12:00:00Z',
-      }),
+      call: vi
+        .fn<(...args: Parameters<Dispatcher['call']>) => Promise<unknown>>()
+        .mockResolvedValue({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        }),
     },
     // What the backend answers when no content store is wired: a JSON-RPC
     // -32601, not a transport failure — a reader that tells "the store
     // keeps nothing" from "the read failed" (restore-client's
     // blockRowsForEntry, nocx-2v80t.3.27) must see the same refusal here.
-    call: vi.fn().mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
+    call: vi
+      .fn<(...args: Parameters<WSClient['call']>) => Promise<unknown>>()
+      .mockRejectedValue(new RpcError('no store wired (fake)', -32601)),
     get connected() {
       return true
     },
@@ -828,8 +898,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface ClipboardFake extends ClipboardAccess {
-  readText: ReturnType<typeof vi.fn>
-  writeText: ReturnType<typeof vi.fn>
+  readText: Mock<ClipboardAccess['readText']>
+  writeText: Mock<ClipboardAccess['writeText']>
 }
 
 /**
@@ -850,7 +920,7 @@ export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake
 
 export interface BannerFake extends ClipboardBanner {
   shown: boolean
-  show: ReturnType<typeof vi.fn>
+  show: Mock<ClipboardBanner['show']>
 }
 
 /**

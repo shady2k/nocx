@@ -22,7 +22,7 @@ func twoCommands(t *testing.T, fence lifecycle.FenceNonce) (*lifecycleTestEnv, s
 	sid := session.ID(sidStr)
 	e.ws.AttachBlockRows(sid)
 	first := startsACommand(t, e, pub, lane, h, 2, "make one")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("one")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("one")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(first), 0, fence)))

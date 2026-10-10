@@ -223,7 +223,7 @@ func TestEveryDeliveryIsBoundedSoAWedgedHelperCannotStallTheLifecycleStream(t *t
 // downlink's own acceptance seam.
 func acceptCompletion(t *testing.T, d *client.CompletionDownlink, fence [32]byte, exit *int) {
 	t.Helper()
-	if err := d.Accept(func() error { return nil }, &lifecycle.Complete{Fence: lifecycle.FenceNonce(fence), ExitCode: exit}); err != nil {
+	if err := d.Accept(context.Background(), func() error { return nil }, &lifecycle.Complete{Fence: lifecycle.FenceNonce(fence), ExitCode: exit}); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 }

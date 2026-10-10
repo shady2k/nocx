@@ -34,11 +34,14 @@ type pendingSession struct {
 	profileID     string
 	helperCommand string
 	fingerprint   string
-	sinceMs       int64
-	bytes         uint64
-	openRows      int
-	cause         UnreconciledCause
-	detail        string
+	// lifecycleApplied is the binding's stored lifecycle cursor (ADR-0077);
+	// nil when the binding never recorded one.
+	lifecycleApplied *uint64
+	sinceMs          int64
+	bytes            uint64
+	openRows         int
+	cause            UnreconciledCause
+	detail           string
 }
 
 // carryOver reads the set of sessions a previous incarnation left behind. It
@@ -76,6 +79,9 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 			Profile       string `json:"profile"`
 			HelperCommand string `json:"helperCommand"`
 			Fingerprint   string `json:"fingerprint"`
+			// LifecycleApplied is ADR-0077's cursor; a pointer so a binding
+			// that never recorded one reads as absent rather than as 0.
+			LifecycleApplied *uint64 `json:"lifecycleApplied"`
 		}
 		if decodeErr := json.Unmarshal([]byte(payload), &metadata); decodeErr != nil {
 			_ = rows.Close()
@@ -85,8 +91,9 @@ func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*
 			id: id, host: metadata.Host, account: metadata.Account,
 			generation: metadata.Generation, paneID: metadata.Pane,
 			profileID: metadata.Profile, helperCommand: metadata.HelperCommand,
-			fingerprint: metadata.Fingerprint,
-			sinceMs:     sinceMs, cause: CauseNotYetAsked,
+			fingerprint:      metadata.Fingerprint,
+			lifecycleApplied: metadata.LifecycleApplied,
+			sinceMs:          sinceMs, cause: CauseNotYetAsked,
 		}
 	}
 	if closeErr := errors.Join(rows.Err(), rows.Close()); closeErr != nil {
@@ -155,20 +162,21 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 	out := make([]PendingSession, 0, len(s.pending))
 	for _, p := range s.pending {
 		out = append(out, PendingSession{
-			SessionID:     p.id,
-			SessionExists: p.sessionExists,
-			Host:          p.host,
-			Account:       p.account,
-			Generation:    p.generation,
-			PaneID:        p.paneID,
-			ProfileID:     p.profileID,
-			HelperCommand: p.helperCommand,
-			Fingerprint:   p.fingerprint,
-			Since:         time.UnixMilli(p.sinceMs),
-			Cause:         p.cause,
-			Detail:        p.detail,
-			OpenEntries:   p.openRows,
-			RecordedBytes: p.bytes,
+			SessionID:        p.id,
+			SessionExists:    p.sessionExists,
+			Host:             p.host,
+			Account:          p.account,
+			Generation:       p.generation,
+			PaneID:           p.paneID,
+			ProfileID:        p.profileID,
+			HelperCommand:    p.helperCommand,
+			Fingerprint:      p.fingerprint,
+			LifecycleApplied: p.lifecycleApplied,
+			Since:            time.UnixMilli(p.sinceMs),
+			Cause:            p.cause,
+			Detail:           p.detail,
+			OpenEntries:      p.openRows,
+			RecordedBytes:    p.bytes,
 		})
 	}
 	s.pendingMu.Unlock()

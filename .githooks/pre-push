@@ -1,80 +1,102 @@
 #!/bin/sh
 set -eu
 
-# PUSHING IS CHEAP. THE GATE IS CI.
-#
-# This hook used to run the two containerized suites before letting a push
-# leave the machine — the whole Go module under -race, the whole vitest suite.
-# They are gone. What is left is the issue tracker, which is not a test and
-# costs a second.
-#
-# Measured here on 2026-08-28 (12 cores, 16 GiB, the OrbStack VM capped at
-# 7.8 GiB), pushing a branch whose entire diff was frontend/ and
-# .beads/issues.jsonl:
-#
-#   go test -race (container)    273 %CPU   1.99 GiB
-#   vitest        (container)    455 %CPU   1.72 GiB
-#   another worktree's vitest    369 %CPU   2.10 GiB
-#   load average                 4.3 -> 21.6 over four minutes, still running
-#
-# Two of those three were this hook, and the Go one had no business running at
-# all: there is no .go file in that diff. The scoping could not see it. git
-# hands a pre-push hook the REMOTE's sha for every ref, and for a branch the
-# remote has never seen that sha is forty zeros — no range, nothing to diff, so
-# the hook took its conservative branch and ran everything. Every task in this
-# repo gets its own worktree and its own branch, so the first push of a branch
-# IS the push, and "scoped to what the push actually changes" described a code
-# path that almost never executed.
-#
-# That was fixable — the commits being pushed are `git rev-list <tip> --not
-# --remotes=<remote>` whether or not the remote knows the branch. It was not
-# fixed, because fixing it would only have made a heavy gate fire half as
-# often, and a push has to be cheap for a reason that has nothing to do with
-# how well it is scoped: a gate a person waits four minutes for is a gate they
-# learn to pass with --no-verify, and then it guards nothing at all.
-#
-# WHAT CATCHES A BREAK INSTEAD, in the order it bites:
-#
-#   - pre-commit, untouched. Static, seconds: formatting, linting, the
-#     ratchets, the wire contracts, the type checkers. That is what keeps a
-#     commit both cheap and honest.
-#   - CI, which is the source of truth and always was. It runs the four jobs in
-#     the environments they belong to, and a developer Mac is not one of them —
-#     AGENTS.md records internal/pty hanging to its 600s panic here while green
-#     on the runner.
-#   - `make ci-full` on the MERGED tree, by whoever integrates, before main.
-#
-# And the suites are still one command away when you want them by hand — the
-# runners stayed, and three test failure messages already point at them:
-#
-#   sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized'
-#   sh -c '. ./.githooks/containerized-tests.sh; vitest_containerized'
-
-# WARN WHEN THE BACKLOG IS BEING LEFT BEHIND.
-#
-# `br` never runs git — that is its whole design — so nothing but this hook
-# notices when the code goes out and the backlog stays home. It used to be the
-# other way round: the backlog lived in refs/dolt/data and .githooks/beads-hook.sh
-# pushed it here, because there was no tracked .beads/issues.jsonl to fall back
-# on. Now the file IS the transport, and it travels as an ordinary tracked file
-# in the commit you are pushing.
-#
-# So this warns and never blocks. A push that leaves the backlog behind costs a
-# colleague a stale `br ready`; a push this hook REFUSES costs the developer
-# their next twenty minutes, and a hook people learn to pass with --no-verify
-# guards nothing at all.
-command -v br >/dev/null 2>&1 || exit 0
-br where >/dev/null 2>&1 || exit 0
-
-# Changes sitting in SQLite that never reached the file git is about to push.
-if ! br sync --status 2>/dev/null | grep -q "Dirty issues: 0"; then
-    printf "\nWARN: br has changes that never reached .beads/issues.jsonl.\n" >&2
-    printf "      br sync --flush-only && git add .beads/issues.jsonl\n" >&2
+gate=.githooks/backlog-gate
+if [ ! -e "$gate/config.json" ] && [ ! -e "$gate/commit-links.mjs" ] &&
+    ! git cat-file -e "HEAD:$gate/config.json" 2>/dev/null; then
+    printf 'pre-push: this tree has never configured the backlog integration; not checked here\n' >&2
+    exit 0
 fi
+for f in adapter.mjs check.mjs time-format.mjs merge-gate.mjs check-commits.mjs commit-links.mjs config.json; do
+    if [ ! -r "$gate/$f" ]; then
+        printf 'pre-push: %s is missing or unreadable; run make connect\n' "$gate/$f" >&2
+        exit 2
+    fi
+done
+for command in node br git; do
+    command -v "$command" >/dev/null 2>&1 || {
+        printf 'pre-push: %s is missing; run make connect\n' "$command" >&2
+        exit 2
+    }
+done
 
-# The file changed but was never staged, so the push carries the code without
-# the backlog that explains it.
+# Preserve the tracker warning, but never let it replace the mandatory gates.
+if br --no-auto-import --no-auto-flush where >/dev/null 2>&1; then
+    if ! br --no-auto-import --no-auto-flush sync --status 2>/dev/null | grep -q "Dirty issues: 0"; then
+        printf '\nWARN: br has changes that never reached .beads/issues.jsonl.\n' >&2
+        printf '      Publish only changes owned by your tracked work; read docs/agents/backlog.md before writing the shared export.\n' >&2
+    fi
+fi
 if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
-    printf "\nWARN: .beads/issues.jsonl is modified and uncommitted — the backlog stays here.\n" >&2
-    printf "      git add .beads/issues.jsonl && git commit\n" >&2
+    printf '\nWARN: .beads/issues.jsonl is modified and uncommitted — the backlog stays here.\n' >&2
+    printf '      Keep unrelated tracker changes out of this commit; follow docs/agents/backlog.md to publish your own delta.\n' >&2
 fi
+
+remote=${1:-}
+url=${2:-$remote}
+[ -n "$remote" ] || { printf 'pre-push: remote name is missing\n' >&2; exit 2; }
+refs=$(node "$gate/commit-links.mjs" --parse-pre-push) || exit 2
+[ -n "$refs" ] || { printf 'pre-push: stdin contains no ref lines\n' >&2; exit 2; }
+
+while IFS="$(printf '\t')" read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "$local_ref" ] || continue
+    case "$local_sha" in
+        *[!0-9a-f]*|'') printf 'pre-push: unreadable local object %s\n' "$local_sha" >&2; exit 2 ;;
+    esac
+    case "$remote_sha" in
+        *[!0-9a-f]*|'') printf 'pre-push: malformed remote object %s\n' "$remote_sha" >&2; exit 2 ;;
+    esac
+    case "$local_sha" in
+        *[!0]*) : ;;
+        *) continue ;;
+    esac
+    if ! tip=$(git rev-parse -q --verify "$local_sha^{commit}" 2>/dev/null); then
+        printf 'pre-push: %s does not peel to a readable commit\n' "$local_ref" >&2
+        exit 2
+    fi
+    set -- --introduced "$tip" --by "$remote_ref" --remote "$url"
+    case "$remote_sha" in
+        *[!0]*) set -- "$@" --before "$remote_sha" ;;
+    esac
+    node "$gate/commit-links.mjs" "$@" || { status=$?; exit "$status"; }
+
+    introduced=$(node "$gate/commit-links.mjs" --list-introduced "$@") || exit 2
+    [ -n "$introduced" ] || continue
+    first=$(printf '%s\n' "$introduced" | while IFS= read -r row; do printf '%s\n' "$row"; break; done)
+    baseline=$remote_sha
+    case "$baseline" in
+        *[!0]*)
+            if ! git merge-base --is-ancestor "$baseline" "$tip"; then
+                baseline=$(printf '%s\n' "$first" | awk '{print $2}')
+            fi
+            ;;
+        *) baseline=$(printf '%s\n' "$first" | awk '{print $2}') ;;
+    esac
+    if [ -z "$baseline" ] || ! git rev-parse -q --verify "$baseline^{commit}" >/dev/null 2>&1; then
+        printf 'pre-push: no valid preceding backlog revision for %s\n' "$remote_ref" >&2
+        exit 2
+    fi
+    baseline_file=$(mktemp)
+    staged_file=$(mktemp)
+    baseline_config=$(mktemp)
+    tip_config=$(mktemp)
+    if ! node "$gate/adapter.mjs" --at "$baseline" >"$baseline_file" ||
+        ! node "$gate/adapter.mjs" --at "$tip" >"$staged_file" ||
+        ! git show "$tip:$gate/config.json" >"$tip_config"; then
+        rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
+        printf 'pre-push: backlog export or configuration cannot be read at the pushed revisions\n' >&2
+        exit 2
+    fi
+    set --
+    if git show "$baseline:$gate/config.json" >"$baseline_config" 2>/dev/null; then
+        set -- --baseline-config "$baseline_config"
+    fi
+    node "$gate/check.mjs" --config "$tip_config" --baseline "$baseline_file" "$@" "$staged_file" || {
+        status=$?
+        rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
+        exit "$status"
+    }
+    rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
+done <<EOF_REFS
+$refs
+EOF_REFS

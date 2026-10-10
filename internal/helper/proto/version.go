@@ -267,4 +267,42 @@ package proto
 // gained `incomplete`, the helper's one marker that its row buffer overflowed,
 // and both spawn shapes `rowBufferBytes`, the person's bound on that buffer
 // (nocx-2v80t.3.36). Nothing has shipped at 15.
-const Version = "15"
+// This is still 15, widened in place for the same reason: the session
+// service gained `set-scrollback`, the op by which the coordinator applies
+// the person's scrollback budget to a RUNNING session's emulator, and both
+// spawn shapes gained `scrollbackLines`, the budget read at spawn
+// (nocx-zg3k3.10.1). The op is the half that degrades by generation: an
+// older generation answers unknown_op, which the coordinator reads as "this
+// machine's helper is older than this app" and tolerates — the pane keeps
+// the budget it was spawned with. The field rides the same reasoning that
+// widened the spawn shapes twice already at 15, and nothing has shipped at
+// 15 to reject it.
+// This is still 15, widened in place for the same reason: the session service
+// gained `history-page`, one page of a session's live scrollback read as the
+// emulator holds it (nocx-zg3k3.10.3). An older generation answers
+// `unknown_op`, which the coordinator reads as "this machine's helper is
+// older than this app" — a pane whose history cannot be paged, which is a
+// fact about the generation and not about the session. Nothing shipped at 15
+// carries a shape the op changes, so nothing moved with it.
+// This is still 15, widened in place: `TypeOutputStartRow` adds the VT output
+// mark's absolute row position as another event on the ordered row plane. The
+// mark carries position only; authenticated lifecycle Start remains its own
+// authority-bearing channel, and the frame byte is recognized before any
+// helper generation can scan through it as garbage.
+//
+// This is 16 rather than 15 because session.intent now carries structured
+// interactive pane input as well as token-bearing automation intents. The new
+// `interactive` discriminator allows the same owner/encoder path to accept a
+// controller's key, text or paste without a screen target, while always
+// checking the observed access epoch; a 15-helper rejects the new field under
+// additionalProperties:false, and cannot provide the controller input path.
+// The row mark above was added at 15 without a bump and the intent field
+// cannot be, so the number moves here and only here.
+// This is 17 rather than 16 because TypeSessionEffect gained the notification
+// title as a separately length-prefixed field beside its body (ADR-0047 §2.2).
+// A 16-helper would decode the title bytes as body text, silently changing the
+// notification, so the hello fence and side-by-side install are required.
+// This is 18 rather than 17 because TypeSessionEffect now carries the exact
+// PTY byte offset of OSC 133 B. A 17-helper would read the offset bytes as the
+// kind and title length, so the peers must be fenced before either sends data.
+const Version = "18"

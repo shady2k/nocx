@@ -14,21 +14,22 @@
 set -eu
 
 gate=.githooks/backlog-gate
-if [ ! -f "$gate/commit-links.mjs" ]; then
-    # A tree from before the commit check: this hook came from a shared
-    # hooksPath the checkout does not carry. Say so instead of passing quietly.
-    printf 'commit-msg: this tree has no %s/commit-links.mjs; commit links are not checked here\n' "$gate" >&2
+if [ ! -e "$gate/commit-links.mjs" ]; then
+    if [ -e "$gate/config.json" ] ||
+        git cat-file -e "HEAD:$gate/config.json" 2>/dev/null; then
+        printf 'commit-msg: configured tree is missing %s/commit-links.mjs; run make connect\n' "$gate" >&2
+        exit 1
+    fi
+    printf 'commit-msg: this tree has never configured commit-link checking; not checked here\n' >&2
     exit 0
 fi
 if ! command -v node >/dev/null 2>&1; then
-    printf 'commit-msg: node is not on PATH, so the commit-link check cannot run; run make connect, which names what is missing\n' >&2
+    printf 'commit-msg: node is not on PATH; run make connect\n' >&2
     exit 1
 fi
-# A missing input refuses by name: without one of these, node dies on a module
-# import or a spawn, which says nothing about how to repair the clone.
 for f in adapter.mjs check-commits.mjs config.json; do
-    if [ ! -f "$gate/$f" ]; then
-        printf 'commit-msg: %s is missing from this checkout; run make connect\n' "$gate/$f" >&2
+    if [ ! -r "$gate/$f" ]; then
+        printf 'commit-msg: %s is missing or unreadable; run make connect\n' "$gate/$f" >&2
         exit 1
     fi
 done

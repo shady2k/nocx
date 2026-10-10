@@ -95,6 +95,7 @@ type Decoder struct {
 	cfg          Config
 	gap          GapSink
 	pending      []byte // bytes already read from the stream, not yet consumed
+	read         uint64 // every byte ever read from the stream, pending included
 	inScan       bool
 	regionBytes  int
 	regionFrames int
@@ -104,6 +105,15 @@ type Decoder struct {
 // protocol defaults; gap, when non-nil, receives every skipped region.
 func NewDecoder(r io.Reader, cfg Config, gap GapSink) *Decoder {
 	return &Decoder{r: r, cfg: cfg.withDefaults(), gap: gap}
+}
+
+// Consumed answers how many bytes of the stream the decoder has taken: every
+// frame it returned and every garbage byte it skipped, and none it has only
+// buffered. Read straight after ReadFrame returns a frame, it is the stream
+// position that frame ends at — the coordinator's lifecycle cursor, once the
+// frame's effect is stored (ADR-0077).
+func (d *Decoder) Consumed() uint64 {
+	return d.read - uint64(len(d.pending))
 }
 
 // ReadFrame returns the next frame's envelope. It may scan past garbage to
@@ -243,6 +253,7 @@ func (d *Decoder) topUp(n int) error {
 		var chunk [4096]byte
 		m, err := d.r.Read(chunk[:])
 		d.pending = append(d.pending, chunk[:m]...)
+		d.read += uint64(m) //nolint:gosec // a read count, never negative
 		if err != nil {
 			if errors.Is(err, io.EOF) && m > 0 {
 				continue
@@ -326,7 +337,6 @@ type wireEnvelope struct {
 	Opts        []string `json:"opts,omitempty"`
 	GrantDomain *string  `json:"grant_domain,omitempty"`
 	GrantEpoch  *uint64  `json:"grant_epoch,omitempty"`
-	Bootstrap   *string  `json:"bootstrap,omitempty"`
 	// Agent enrolment (protocol doc §15). Agent names what is about to run;
 	// Enrolled and Reason are the answer. Enrolled is a VALUE rather than a
 	// pointer on purpose: a missing field decodes to false, which is the
@@ -339,6 +349,14 @@ type wireEnvelope struct {
 	// only a frame that says so holds a shell on a question (nocx-cyhfw).
 	Pending bool    `json:"pending,omitempty"`
 	Reason  *string `json:"reason,omitempty"`
+	Ticket  *string `json:"ticket,omitempty"`
+	Payload *string `json:"payload,omitempty"`
+	// Local is a backend-generated classification, not a caller assertion.
+	Local bool `json:"local"`
+	// Bootstrap remains last in the wire struct because remote domain_grant
+	// shells extract it from a fixed trailing position. All fields above it
+	// are omitted on that event.
+	Bootstrap *string `json:"bootstrap,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -438,11 +456,28 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		}
 	case lifecycle.KindAgentEnrol:
 		env.Event.AgentEnrol = &lifecycle.AgentEnrol{
+			RequestID:    lifecycle.RequestID(str(w.Request)),
+			Agent:        str(w.Agent),
+			LaunchTicket: str(w.Ticket),
+			Cols:         derefInt(w.Cols),
+			Rows:         derefInt(w.Rows),
+		}
+	case lifecycle.KindAgentLaunchResolve:
+		env.Event.AgentLaunchResolve = &lifecycle.AgentLaunchResolve{
 			RequestID: lifecycle.RequestID(str(w.Request)),
 			Agent:     str(w.Agent),
-			Cols:      derefInt(w.Cols),
-			Rows:      derefInt(w.Rows),
 		}
+	case lifecycle.KindAgentLaunchResolved:
+		env.Event.AgentLaunchResolved = &lifecycle.AgentLaunchResolved{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Agent:     str(w.Agent),
+			Local:     w.Local,
+			Ticket:    str(w.Ticket),
+			Payload:   str(w.Payload),
+			Reason:    str(w.Reason),
+		}
+	case lifecycle.KindAgentLaunchCancel:
+		env.Event.AgentLaunchCancel = &lifecycle.AgentLaunchCancel{Agent: str(w.Agent), Ticket: str(w.Ticket)}
 	case lifecycle.KindAgentEnrolled:
 		env.Event.AgentEnrolled = &lifecycle.AgentEnrolled{
 			RequestID: lifecycle.RequestID(str(w.Request)),
@@ -569,8 +604,36 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 		if p := env.Event.AgentEnrol; p != nil {
 			we.Request = new(string(p.RequestID))
 			we.Agent = new(p.Agent)
+			if p.LaunchTicket != "" {
+				we.Ticket = new(p.LaunchTicket)
+			}
 			we.Cols = new(p.Cols)
 			we.Rows = new(p.Rows)
+		}
+	case lifecycle.KindAgentLaunchResolve:
+		if p := env.Event.AgentLaunchResolve; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+		}
+	case lifecycle.KindAgentLaunchResolved:
+		if p := env.Event.AgentLaunchResolved; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Agent = new(p.Agent)
+			we.Local = p.Local
+			if p.Ticket != "" {
+				we.Ticket = new(p.Ticket)
+			}
+			if p.Payload != "" {
+				we.Payload = new(p.Payload)
+			}
+			if p.Reason != "" {
+				we.Reason = new(p.Reason)
+			}
+		}
+	case lifecycle.KindAgentLaunchCancel:
+		if p := env.Event.AgentLaunchCancel; p != nil {
+			we.Agent = new(p.Agent)
+			we.Ticket = new(p.Ticket)
 		}
 	case lifecycle.KindAgentEnrolled:
 		if p := env.Event.AgentEnrolled; p != nil {
@@ -598,16 +661,16 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	if len(body) > lifecycle.MaxFrameBytes {
 		return 0, ErrFrameTooLarge
 	}
-	var hdr [4]byte
+	// One Write for the whole frame: a lifecycle descriptor can have a second
+	// writer (a nested child holds a dup of its parent's), and a frame split
+	// across two writes lets the other writer's frame land between its length
+	// and its body, which costs the reader its framing for good.
+	frame := make([]byte, 4, 4+len(body))
 	// #nosec G115 -- len(body) is checked against MaxFrameBytes (64 KiB)
 	// above, far below the uint32 ceiling; the frame length is the JSON
 	// byte count by contract.
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
-	if _, werr := w.Write(hdr[:]); werr != nil {
-		return 0, werr
-	}
-	n, err := w.Write(body)
-	return 4 + n, err
+	binary.BigEndian.PutUint32(frame, uint32(len(body)))
+	return w.Write(append(frame, body...))
 }
 
 func derefInt(p *int) int {

@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -77,7 +78,16 @@ type orderedStallingSink struct {
 	// second round: proving a drain-time delivery is bounded (deliverForPump)
 	// rather than left to hang stop() forever.
 	blockAfterExhausted bool
-	neverReleased       chan struct{} // deliberately never closed by any test
+	// draining, when set, makes this sink take the owed marker only while the
+	// session under test is draining (hostSession.drainRequested) — the state
+	// in which a delivery may count as stop()'s own. A test that instead flips
+	// failIncompleteTimes from its own goroutine after the first failure races
+	// the pump's immediate retry: when that retry wins, the marker lands
+	// without stop() having drained anything and the test passes having proved
+	// nothing (nocx-xn63t.6.17). Asking the session is the condition stated;
+	// a wakeup count is a guess at it.
+	draining      func() bool   // nil: this sink has no such gate
+	neverReleased chan struct{} // deliberately never closed by any test
 }
 
 func newOrderedStallingSink() *orderedStallingSink {
@@ -85,6 +95,26 @@ func newOrderedStallingSink() *orderedStallingSink {
 		stalled: make(chan struct{}), release: make(chan struct{}), changed: make(chan struct{}, 1),
 		failed: make(chan struct{}), exhausted: make(chan struct{}), neverReleased: make(chan struct{}),
 	}
+}
+
+// refusesUntilDraining answers the gate without holding s.mu: drainRequested
+// takes the session's own rowMu, and a sink caller must not reach for a
+// second lock with the fixture's still held.
+func (s *orderedStallingSink) refusesUntilDraining() bool {
+	s.mu.Lock()
+	gate := s.draining
+	s.mu.Unlock()
+	return gate != nil && !gate()
+}
+
+// takeIncompleteOnlyWhileDraining arms that gate with the session's own
+// predicate, under the fixture's lock: a test sets it while the pump is
+// already running, and an unsynchronised write beside the sink's reads would
+// be a race rather than a condition.
+func (s *orderedStallingSink) takeIncompleteOnlyWhileDraining(draining func() bool) {
+	s.mu.Lock()
+	s.draining = draining
+	s.mu.Unlock()
 }
 
 func (s *orderedStallingSink) SendSessionData(proto.SessionFrame) error    { return nil }
@@ -124,7 +154,11 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	}
 	blockNow := !fail && doc.Incomplete && s.blockAfterExhausted
 	s.mu.Unlock()
-	if fail {
+	// The gate is a refusal of its own, and deliberately not one of the
+	// configured failures: nothing is decremented, so `exhausted` still means
+	// "the last SCHEDULED failure happened" for the tests that count them.
+	refuse := fail || (doc.Incomplete && s.refusesUntilDraining())
+	if refuse {
 		s.failedOnce.Do(func() { close(s.failed) })
 		if last {
 			s.exhaustedOnce.Do(func() { close(s.exhausted) })
@@ -151,6 +185,7 @@ func (s *orderedStallingSink) SendClearBoundary(proto.ClearBoundaryFrame) error 
 	s.record(recordedDelivery{clear: true})
 	return nil
 }
+func (s *orderedStallingSink) SendEffectFrame(proto.EffectFrame) error { return nil }
 
 func (s *orderedStallingSink) snapshot() []recordedDelivery {
 	s.mu.Lock()
@@ -254,7 +289,10 @@ func endNonce(b byte) sessionruntime.FenceNonce {
 // and no more, measured by the bridge's own accounting.
 func bufferOf(hs *hostSession, n int) {
 	one := rowEmission{from: 0, rows: []emulator.Row{textRow("x")}}
-	hs.rowBufferBytes = int64(n) * emissionBytes(one)
+	markerBytes := emissionBytes(rowEmission{incomplete: true})
+	endReserve := int64(maxResendEnds) * int64(unsafe.Sizeof(droppedEnd{}))
+	fifoRecord := int64(unsafe.Sizeof(rowEmission{}))
+	hs.rowBufferBytes = markerBytes + endReserve + int64(n+1)*(emissionBytes(one)+fifoRecord)
 }
 
 // queuedBytes is the bridge's own count of what its queue holds.

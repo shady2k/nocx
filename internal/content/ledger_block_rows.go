@@ -28,6 +28,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // blockRowsChunkBytes bounds one chunk and is the eviction granularity: the
@@ -48,9 +50,22 @@ type blockRowsPayload struct {
 	HeadEnd *int64 `json:"headEnd,omitempty"`
 	// NextRow is the absolute index the NEXT delivery must start at.
 	NextRow uint64 `json:"nextRow,omitempty"`
+	// FirstRow is the absolute index the block's stored span begins
+	// at. It can sit above the session's origin: a command's first
+	// rows may depart before its open lands and the block's first
+	// delivery then starts above row 0 (nocx-zg3k3.5.3 Round 7). A
+	// CONTIGUOUS delivery below it — exactly the rows that join the
+	// stored span's beginning — moves it down; anything else below it
+	// is the discontinuity it always was.
+	FirstRow uint64 `json:"firstRow,omitempty"`
 	// LostRows is what the emulator pruned before the coordinator could
 	// read it, carried here because no cap chose it.
 	LostRows uint64 `json:"lostRows,omitempty"`
+	// UnavailableRows is the part of LostRows the coordinator's own absence
+	// caused (nocx-zg3k3.5.3): rows pruned from the helper's scrollback
+	// before the resend could read them back. Same index space as LostRows,
+	// a different why.
+	UnavailableRows uint64 `json:"unavailableRows,omitempty"`
 	// DroppedRows is written once, at close, derived from the chunks.
 	DroppedRows uint64 `json:"droppedRows,omitempty"`
 	// Appended is the total bytes ever appended, BEFORE any eviction. It is
@@ -72,15 +87,27 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 	if !s.policy.OutputEnabled() {
 		return "", nil
 	}
-	opened := ""
+	opened, openedExec := "", int64(-1) // the execution the open resolved to; probe context (nocx-zg3k3.5.3 round 7)
+	// answer settles the artifact the open resolved to. A lifecycle frame
+	// replays this write into a fresh transaction when its first one failed
+	// (lifecycle_frame.go), and its caller already holds the first answer:
+	// a different artifact is not the block the caller installed.
+	var first frameAnswer[string]
+	answer := func(id string) error {
+		if err := first.settle(id); err != nil {
+			return err
+		}
+		opened = id
+		return nil
+	}
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE for the reason Submit and CaptureOutput state:
 		// the write lock is taken at BEGIN rather than at the first write.
-		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, txErr := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if txErr != nil {
 			return txErr
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var sensitivity string
 		if err := tx.QueryRowContext(ctx,
@@ -91,7 +118,7 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			return err
 		}
 		if Sensitivity(sensitivity) == SensitivitySensitive {
-			return nil
+			return answer("")
 		}
 
 		// The entry's own execution — the run the authenticated start
@@ -113,8 +140,9 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			return err
 		}
 		if Criticality(criticality) == CriticalityCritical {
-			return nil
+			return answer("")
 		}
+		openedExec = execID
 
 		// The caller's id first: untrusted, exactly CaptureOutput's
 		// idempotency key. A replay of an open whose ack was lost must find
@@ -130,8 +158,10 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 				return fmt.Errorf("content: block rows: artifact %s belongs to entry %s: %w",
 					in.ArtifactID, heldEntry, ErrIDConflict)
 			}
-			opened = heldID
-			return tx.Commit()
+			if err := answer(heldID); err != nil {
+				return err
+			}
+			return txEnd.commit()
 		case !errors.Is(byIDErr, sql.ErrNoRows):
 			return byIDErr
 		}
@@ -155,14 +185,23 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			}); insertErr != nil {
 				return insertErr
 			}
-			opened = in.ArtifactID
+			if err := answer(in.ArtifactID); err != nil {
+				return err
+			}
 		case lookupErr != nil:
 			return lookupErr
 		default:
-			opened = existingID
+			if err := answer(existingID); err != nil {
+				return err
+			}
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
+	// Probe (nocx-zg3k3.5.3 round 7): which id the caller asked for and
+	// which id the store answered — the per-execution idempotency reuse is
+	// the seam a second artifact could open through.
+	log.From(ctx).Debug("block rows open: the store answered the keep decision",
+		"entry", in.EntryID, "requested", in.ArtifactID, "opened", opened, "execution", openedExec)
 	return opened, err
 }
 
@@ -188,11 +227,11 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 	capBytes := int64(s.policy.OutputCapBytes())
 	return s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE — CaptureOutput's reason, again.
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var known int
 		if knownErr := tx.QueryRowContext(ctx,
@@ -205,6 +244,82 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 		state, err := openBlockRowsForAppend(ctx, tx, in)
 		if err != nil {
 			return err
+		}
+
+		// A delivery reaching below the block's stored floor: the
+		// block's own head, departed before its open and offered again
+		// by the resend (nocx-zg3k3.5.3 Round 8). The artifact is
+		// append-only, so the only rows that can enter below the floor
+		// are exactly the ones that join the stored span's beginning;
+		// anything else below is refused as the discontinuity it is.
+		// The head reservation does not reach here: the prepend is
+		// bytes-scale next to the cap, and the eviction walk's
+		// leading-run arithmetic (a chunk is head by seq order) absorbs
+		// the shifted offsets.
+		if state.hasCursor && state.payload.FirstRow > 0 && in.FromRow < state.payload.FirstRow {
+			end := in.FromRow + uint64(len(in.Rows))
+			if in.LostRows != 0 || end != state.payload.FirstRow {
+				return fmt.Errorf("%w: block %s floor is %d, delivery spans %d..%d",
+					ErrBlockRowsDiscontinuous, in.ArtifactID, state.payload.FirstRow,
+					in.FromRow, end)
+			}
+			var chunks [][]byte
+			current := make([]byte, 0, blockRowsChunkBytes)
+			for i, row := range in.Rows {
+				line, encErr := encodeBlockRowsLine(in.FromRow+uint64(i), row) //nolint:gosec // row counts, not byte counts
+				if encErr != nil {
+					return encErr
+				}
+				if len(current) > 0 && len(current)+len(line) > blockRowsChunkBytes {
+					chunks = append(chunks, current)
+					current = make([]byte, 0, blockRowsChunkBytes)
+				}
+				current = append(current, line...)
+			}
+			chunks = append(chunks, current)
+			var minSeq int
+			if err := tx.QueryRowContext(ctx,
+				`SELECT coalesce(min(seq), 1) FROM artifact_chunks WHERE artifact_id = ?`,
+				in.ArtifactID).Scan(&minSeq); err != nil {
+				return err
+			}
+			var appended int64
+			for i, body := range chunks {
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO artifact_chunks (artifact_id, seq, body) VALUES (?, ?, ?)`,
+					in.ArtifactID, minSeq-len(chunks)+i, body); err != nil {
+					return err
+				}
+				appended += int64(len(body)) //nolint:gosec // a chunk is bounded well below the ceiling
+			}
+			state.payload.FirstRow = in.FromRow
+			state.payload.Appended += appended
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE artifacts SET byte_len = byte_len + ?, payload = ? WHERE id = ?`,
+				appended, state.payload.json(), in.ArtifactID); err != nil {
+				return err
+			}
+			log.From(ctx).Debug("block rows prepend: the block's head joined below the floor",
+				"entry", in.EntryID, "artifact", in.ArtifactID, "from", in.FromRow,
+				"rows", len(in.Rows), "floor", state.payload.FirstRow)
+			// The cap binds the prepend like any other write: a recovered
+			// head is bytes, and a prepend that lands past the cap evicts
+			// by the walk's own rule — the reservation keeps the head's
+			// start, the reserve keeps the newest rows, the middle goes —
+			// so the close derives the drop from the survivors and the
+			// sealed artifact never outgrows the cap it was given
+			// (nocx-zg3k3.5.10).
+			if err := evictBlockRowsToCap(ctx, tx, in.ArtifactID, capBytes); err != nil {
+				return err
+			}
+			return txEnd.commit()
+		}
+
+		// The block's stored floor is its FIRST delivery's FromRow —
+		// set here, on the pristine payload, whatever shape that first
+		// delivery takes.
+		if !state.hasCursor && state.payload.Appended == 0 && state.payload.FirstRow == 0 {
+			state.payload.FirstRow = in.FromRow
 		}
 
 		// Continuity, both ends: a replay from behind the cursor is the
@@ -229,6 +344,9 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			}
 		}
 
+		log.From(ctx).Debug("block rows append accepted past the continuity check",
+			"entry", in.EntryID, "artifact", in.ArtifactID, "from", in.FromRow,
+			"lost", in.LostRows, "rows", len(in.Rows))
 		if state.payload.HeadEnd == nil {
 			// The reservation is FIXED here and never moves; see the header.
 			head := capBytes / 2
@@ -241,12 +359,13 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			// and that is all it has to say.
 			state.payload.NextRow = in.FromRow
 			state.payload.LostRows += in.LostRows
+			state.payload.UnavailableRows += unavailableShare(in)
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE artifacts SET payload = ? WHERE id = ?`,
 				state.payload.json(), in.ArtifactID); err != nil {
 				return err
 			}
-			return tx.Commit()
+			return txEnd.commit()
 		}
 
 		// Encode, then cut into chunk rows at line boundaries — every line
@@ -304,6 +423,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 
 		state.payload.NextRow = in.FromRow + uint64(len(in.Rows)) //nolint:gosec // row counts, not byte counts
 		state.payload.LostRows += in.LostRows
+		state.payload.UnavailableRows += unavailableShare(in)
 		state.payload.Appended += appended
 
 		if _, err := tx.ExecContext(ctx,
@@ -318,7 +438,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 		if err := evictBlockRowsToCap(ctx, tx, in.ArtifactID, capBytes); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 }
 
@@ -327,12 +447,15 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		return BlockRowsSummary{}, errors.New("content: block rows: entry id and artifact id are required")
 	}
 	var summary BlockRowsSummary
+	// The seal's summary is its answer: a replay that would seal another
+	// span is not the seal the caller decided on (frameAnswer).
+	var answer frameAnswer[BlockRowsSummary]
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		state, err := blockRowsForClose(ctx, tx, in)
 		if err != nil {
@@ -340,7 +463,10 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		}
 		if state.sealed {
 			summary = state.summary
-			return tx.Commit()
+			if settleErr := answer.settle(summary); settleErr != nil {
+				return settleErr
+			}
+			return txEnd.commit()
 		}
 
 		// The cap's count is DERIVED from the chunks that are actually
@@ -353,9 +479,19 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		if err != nil {
 			return err
 		}
-		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows}
+		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
+		if settleErr := answer.settle(summary); settleErr != nil {
+			return settleErr
+		}
+		// Probe (nocx-zg3k3.5.3 round 7): which artifact the seal landed on
+		// and at what cursor — the close sealing the OTHER artifact is one
+		// of the two ways confirmed rows go missing from a read.
+		log.From(ctx).Debug("block rows close: sealing",
+			"entry", in.EntryID, "artifact", in.ArtifactID, "cursor", state.payload.NextRow,
+			"dropped", dropped, "lost", state.payload.LostRows,
+			"unavailable", state.payload.UnavailableRows)
 
-		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows}
+		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
 		// The PRIMARY reason, one of them: the cap names rows it dropped by
 		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
@@ -370,20 +506,80 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 			string(ArtifactSealed), truncated, final.json(), in.ArtifactID); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 	return summary, err
+}
+
+// OpenBlockRowsForSession reads the session's newest open rows artifact
+// with its cursor. The join is on the entry's session — the artifact rows
+// carry no session of their own — and the newest wins (entries.ingest_seq,
+// the store's total order) because at most one of a session's blocks is
+// the one still receiving rows: the current interval's. An earlier open
+// artifact under a still-unclosed interval would be found by its own
+// stream's continuation, never by this read.
+func (s *sqliteContent) OpenBlockRowsForSession(ctx context.Context, sessionID string) (OpenBlockRowsEntry, error) {
+	if sessionID == "" {
+		return OpenBlockRowsEntry{}, errors.New("content: block rows: session id is required")
+	}
+	var out OpenBlockRowsEntry
+	err := s.run(ctx, func(ctx context.Context) error {
+		var entryID, artifactID, payload string
+		scanErr := s.conn(ctx).QueryRowContext(ctx,
+			`SELECT a.entry_id, a.id, a.payload
+			   FROM artifacts a
+			   JOIN entries e ON e.id = a.entry_id
+			  WHERE e.session_id = ? AND a.media_type = ? AND a.state = ?
+			  ORDER BY e.ingest_seq DESC
+			  LIMIT 1`,
+			sessionID, string(MediaBlockRows), string(ArtifactOpen)).Scan(&entryID, &artifactID, &payload)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			// No open block: the honest empty answer, never an error —
+			// every fresh session's first attach lands here.
+			log.From(ctx).Debug("block rows session read: no open block",
+				"session", sessionID)
+			return nil
+		}
+		if scanErr != nil {
+			return scanErr
+		}
+		payloadDecoded := decodeBlockRowsPayload(payload)
+		out = OpenBlockRowsEntry{
+			EntryID: entryID, ArtifactID: artifactID,
+			NextRow:  payloadDecoded.NextRow,
+			FirstRow: payloadDecoded.FirstRow,
+		}
+		// Probe (nocx-zg3k3.5.3 round 7): what the re-bind read.
+		log.From(ctx).Debug("block rows session read: an open block",
+			"session", sessionID, "entry", entryID, "artifact", artifactID,
+			"cursor", out.NextRow)
+		return nil
+	})
+	return out, err
 }
 
 // blockRowsState is what an append or a close reads the block as.
 type blockRowsState struct {
 	payload blockRowsPayload
+	// execID is the execution the artifact hangs off, read with the row —
+	// probe context for the append path (nocx-zg3k3.5.3 round 7).
+	execID int64
 	// hasCursor is true once the payload carries a NextRow — the first
 	// append of a block has no cursor yet, and its FromRow is the block's
 	// own beginning.
 	hasCursor bool
 	sealed    bool
 	summary   BlockRowsSummary
+}
+
+// unavailableShare answers how much of a delivery's loss the coordinator's
+// own absence caused: the whole gap when the delivery named that cause,
+// nothing otherwise.
+func unavailableShare(in AppendBlockRows) uint64 {
+	if in.LostCause == LostCauseCoordinatorUnavailable {
+		return in.LostRows
+	}
+	return 0
 }
 
 // json is the payload's stored form. The error json.Marshal declares for
@@ -415,9 +611,10 @@ func decodeBlockRowsPayload(raw string) blockRowsPayload {
 func blockRowsArtifactFor(ctx context.Context, tx *sql.Tx, entryID, artifactID string) (blockRowsState, error) {
 	var state blockRowsState
 	var entryIDHeld, stateHeld, payload string
+	var execIDHeld int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT entry_id, state, payload FROM artifacts WHERE id = ? AND media_type = ?`,
-		artifactID, string(MediaBlockRows)).Scan(&entryIDHeld, &stateHeld, &payload)
+		`SELECT entry_id, state, payload, execution_id FROM artifacts WHERE id = ? AND media_type = ?`,
+		artifactID, string(MediaBlockRows)).Scan(&entryIDHeld, &stateHeld, &payload, &execIDHeld)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, fmt.Errorf("%w: %s", ErrBlockNotOpen, artifactID)
 	}
@@ -429,10 +626,11 @@ func blockRowsArtifactFor(ctx context.Context, tx *sql.Tx, entryID, artifactID s
 			artifactID, entryIDHeld, ErrIDConflict)
 	}
 	state.payload = decodeBlockRowsPayload(payload)
+	state.execID = execIDHeld
 	state.hasCursor = state.payload.NextRow > 0
 	state.sealed = stateHeld == string(ArtifactSealed)
 	if state.sealed {
-		state.summary = BlockRowsSummary{DroppedRows: state.payload.DroppedRows, LostRows: state.payload.LostRows}
+		state.summary = BlockRowsSummary{DroppedRows: state.payload.DroppedRows, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
 	}
 	return state, nil
 }
@@ -442,11 +640,22 @@ func blockRowsArtifactFor(ctx context.Context, tx *sql.Tx, entryID, artifactID s
 func openBlockRowsForAppend(ctx context.Context, tx *sql.Tx, in AppendBlockRows) (blockRowsState, error) {
 	state, err := blockRowsArtifactFor(ctx, tx, in.EntryID, in.ArtifactID)
 	if err != nil {
+		log.From(ctx).Debug("block rows append resolve: refused",
+			"entry", in.EntryID, "artifact", in.ArtifactID, "from", in.FromRow, "error", err)
 		return state, err
 	}
 	if state.sealed {
+		log.From(ctx).Debug("block rows append resolve: refused, the block is sealed",
+			"entry", in.EntryID, "artifact", in.ArtifactID, "from", in.FromRow,
+			"cursor", state.payload.NextRow)
 		return state, fmt.Errorf("%w: %s is sealed", ErrBlockNotOpen, in.ArtifactID)
 	}
+	// Probe (nocx-zg3k3.5.3 round 7): one line per append resolve — which
+	// execution and artifact the delivery names, and the payload cursor it
+	// was read against.
+	log.From(ctx).Debug("block rows append resolve: the block is open",
+		"entry", in.EntryID, "artifact", in.ArtifactID, "execution", state.execID,
+		"from", in.FromRow, "cursor", state.payload.NextRow)
 	return state, nil
 }
 

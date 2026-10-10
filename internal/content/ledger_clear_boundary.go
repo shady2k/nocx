@@ -35,11 +35,11 @@ func (s *sqliteContent) RecordClearBoundary(ctx context.Context, in RecordClearB
 	id := mintID()
 	var out ClearBoundaryRecorded
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, txErr := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if txErr != nil {
 			return txErr
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		// The pane this boundary bounds is resolved from the session's own
 		// newest entry — the same edge every block already carries (design
@@ -82,7 +82,7 @@ func (s *sqliteContent) RecordClearBoundary(ctx context.Context, in RecordClearB
 		); err != nil {
 			return err
 		}
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return commitErr
 		}
 		out = ClearBoundaryRecorded{ID: id, PaneID: nullableString(paneID), IngestSeq: ingestSeq}

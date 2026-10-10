@@ -755,6 +755,12 @@ func testBashChannelHandshakeAndLifecycle(t *testing.T, shell string) {
 	if !ok || code != 0 {
 		t.Errorf("complete must carry exit_code 0, got %v", complete.Body)
 	}
+	// The complete names the same attempt the start did (ADR-0077): the
+	// block's identity, the same for every coordinator the shell outlives,
+	// so a completion delivered twice closes one block.
+	if named, isID := complete.Body["attempt"].(string); !isID || named != start.Body["attempt"] {
+		t.Errorf("complete must name the start's attempt %v, got %v", start.Body["attempt"], complete.Body["attempt"])
+	}
 	fence, ok := complete.Body["fence"].(string)
 	if !ok || len(fence) != 64 {
 		t.Fatalf("complete must carry a 64-hex fence, got %v", complete.Body)
@@ -1342,6 +1348,12 @@ func TestZshChannel_HandshakeAndLifecycle(t *testing.T) {
 	}
 	if complete == nil {
 		t.Fatalf("no complete accepted; events=%v", events)
+	}
+	// The complete names the same attempt the start did (ADR-0077): the
+	// block's identity, the same for every coordinator the shell outlives,
+	// so a completion delivered twice closes one block.
+	if named, isID := complete.Body["attempt"].(string); !isID || named != start.Body["attempt"] {
+		t.Errorf("complete must name the start's attempt %v, got %v", start.Body["attempt"], complete.Body["attempt"])
 	}
 	fence, ok := complete.Body["fence"].(string)
 	if !ok || len(fence) != 64 {

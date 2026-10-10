@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,10 +30,12 @@ import (
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/workers"
 )
@@ -313,7 +316,16 @@ type workerSpawner struct {
 	// checkout is listed by git regardless, and what is lost is only the
 	// name and task a later coordinator would have read beside it.
 	checkouts *workerCheckouts
-	log       log.Logger
+	// agents answers which agent a pane was enrolled as, which is how a
+	// spawn's pane learns the one fact the restart record needs and cannot
+	// derive (ADR-0079). It is asked LAZILY, at MarkLive, because the
+	// enrolment arrives after Spawn returns: read at spawn it would name no
+	// agent for every worker, which is the silent-degrade shape this file
+	// refuses. Nil is the absence case — the record is then written without
+	// an agent, and the restore refuses it by name rather than guessing a
+	// binary to launch.
+	agents agentOnPane
+	log    log.Logger
 }
 
 // paneReadiness is the spawner's narrow view of the pane-observation watcher
@@ -513,7 +525,22 @@ func refusePaneNeverTypable(lg log.Logger, paneID string, last paneWaitState, la
 // are the ones internal/workers reaches through the Spawned interface rather
 // than through workerSpawner's own locals.
 type spawnedParticipant struct {
-	tabID    string
+	tabID string
+	// paneID and cwd are the two facts the durable restart record needs
+	// (ADR-0079) and nothing else in this process holds together: the tab is
+	// the close's seat, the pane is the identity a restore reopens and the
+	// cwd is the directory it was launched in — the pane ROW's cwd is where a
+	// restore opens the pane and says nothing about what ran there.
+	paneID string
+	cwd    string
+	// resumeID is the explicit session id this spawn passed through the
+	// {UUID} argument placeholder. It is empty when the agent is expected
+	// to mint an id lazily, which makes a shared-checkout restart unavailable
+	// rather than a guess at a later session.
+	resumeID string
+	// agents answers the pane's agent at the moment the restart record is
+	// written, which is after the enrolment arrived. See workerSpawner.agents.
+	agents   agentOnPane
 	sess     session.Session
 	sessions sessionCloser
 	// layout is asked for tabID's removal. It is the same paneMinter Spawn
@@ -549,6 +576,35 @@ func (s spawnedParticipant) TaskDelivery() workers.TaskDelivery { return s.deliv
 // "attempted nothing says nothing" reading TaskDelivery's own seam uses.
 func (s spawnedParticipant) WorktreeLocation() workers.Worktree {
 	return s.worktree.location()
+}
+
+// RestartIdentity is what a restart would find in this participant's pane
+// (ADR-0079): the pane and tab the spawn minted, the directory it launched in,
+// and the agent that enrolled there.
+//
+// IT IS CALLED AT MarkLive, NOT HERE, and that is the whole reason the agent is
+// a seam rather than a field: the enrolment arrives after Spawn has returned,
+// so an agent read at spawn would be empty for every worker — a record that
+// looks complete and restores as nothing. A restart identity with no agent is
+// still written, because the pane and the checkout are worth keeping and the
+// restore refuses an unknown agent BY NAME rather than guessing one.
+func (s spawnedParticipant) RestartIdentity() workers.RestartIdentity {
+	id := workers.RestartIdentity{PaneID: s.paneID, TabID: s.tabID, Cwd: s.cwd}
+	if s.agents != nil {
+		if agent, known := s.agents.AgentOn(s.paneID); known {
+			id.Agent = agent
+		}
+	}
+	// Location chooses the resume shape: a worktree's CWD is private to
+	// this task, while a shared checkout must use only the stable session id
+	// that the launch line explicitly received. No UUID placeholder means a
+	// lazy-id agent is recorded as non-resumable, not as "resume latest".
+	var worktree workers.Worktree
+	if s.worktree != nil {
+		worktree = s.worktree.location()
+	}
+	id.Resume = workers.ResumeIdentityFor(worktree, s.resumeID)
+	return id
 }
 
 func (s spawnedParticipant) Liveness() workers.Liveness {
@@ -782,6 +838,14 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	if err != nil {
 		return nil, fmt.Errorf("worker spawn: minting a pane id: %w", err)
 	}
+	launchID, err := uuid.NewV7()
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: minting a launch id: %w", err)
+	}
+	commandArgv, err := shellintegration.SplitAgentCommand(req.Command)
+	if err != nil {
+		return nil, fmt.Errorf("worker spawn: parsing participant command: %w", err)
+	}
 	coordPane := s.coordinatorPane(req.CoordinatorSession, lg)
 	// WHERE THE PARTICIPANT STANDS, resolved ONCE and used three times
 	// (nocx-ty5ks, nocx-tdiqs): the pane's row records its directory, so a
@@ -820,6 +884,23 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			s.checkouts.recordCreated(ctx, lg, undo, req.Group, req.Task)
 		}
 	}
+	placeholderValues := map[string]string{
+		"UUID":           launchID.String(),
+		"WORKSPACE_ID":   s.workspace,
+		"WORKSPACE_PATH": paneCwd,
+	}
+	if undo != nil {
+		placeholderValues["BRANCH"] = undo.branch
+	}
+	resumeID := ""
+	for _, arg := range commandArgv {
+		if strings.Contains(strings.ToUpper(arg), "{UUID}") {
+			resumeID = launchID.String()
+			break
+		}
+	}
+	commandLine := shellintegration.QuoteAgentArgv(
+		shellintegration.ExpandAgentArgv(commandArgv, placeholderValues))
 	madeTab, tabErr := s.layout.CreateTabAfter(ctx,
 		content.Tab{ID: tabID.String(), WorkspaceID: s.workspace, Layout: content.LayoutRow},
 		content.Pane{ID: paneID.String(), TabID: tabID.String(), Cwd: paneCwd, Kind: content.PaneLocal, SizeShare: 1},
@@ -888,7 +969,8 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	lg.Debug("worker spawn: the participant's session is open",
 		"cols", participantCols, "rows", participantRows)
 	spawned := spawnedParticipant{
-		tabID: tabID.String(), sess: opened.Session, sessions: s.sessions, layout: s.layout,
+		tabID: tabID.String(), paneID: paneID.String(), cwd: paneCwd,
+		resumeID: resumeID, agents: s.agents, sess: opened.Session, sessions: s.sessions, layout: s.layout,
 		participant: req.Participant, tabs: s.tabs, worktree: undo,
 	}
 
@@ -942,7 +1024,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 			outcome.Status, outcome.Reason)
 	}
 
-	if req.Command != "" && !opened.Session.EnqueueWrite([]byte(req.Command+"\n")) {
+	if commandLine != "" && !opened.Session.EnqueueWrite([]byte(commandLine+"\n")) {
 		// A queue that refused is a session that is already going away.
 		// Compensate here rather than letting the enrolment deadline do it:
 		// the failure is known now, and waiting would spend the deadline
@@ -953,7 +1035,7 @@ func (s *workerSpawner) Spawn(ctx context.Context, req workers.SpawnRequest) (_ 
 	// THE WRITE IS AN ATTEMPT AND NOT A START. What follows it is the
 	// launcher's own startup, over which this has no visibility at all, so the
 	// line says what was written rather than that anything ran.
-	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(req.Command)+1)
+	lg.Debug("worker spawn: the participant's first line is queued", "bytes", len(commandLine)+1)
 	lg.Info("worker participant spawned",
 		"participant", string(req.Participant), "worker", string(req.Group))
 
@@ -1182,6 +1264,8 @@ func (s *workerSpawner) compensateSpawn(ctx context.Context, participant workers
 		s.log.Warn("worker spawn: could not withdraw a failed spawn's enrolment",
 			"participant", string(participant), "error", err)
 	}
+	// No pane, no cwd and no agent here, and deliberately: this value exists
+	// only to be killed, so it is never asked what a restart would find there.
 	sp := spawnedParticipant{
 		tabID: tabID, sess: sess, sessions: s.sessions, layout: s.layout,
 		participant: participant, tabs: s.tabs, worktree: undo,
@@ -1299,6 +1383,31 @@ func (e *workerEnrolments) enrolled(sid session.ID, lane string) {
 		default:
 		}
 	}
+}
+
+// armedForSession is the server-owned bridge between a worker spawn's pane
+// registration and shell launch resolution. Before the first agent_enrol
+// arrives, the pane id is in byPane; afterwards, the participant is in bySess.
+// Both states identify the server-created worker pane and preserve
+// workers.spawn's literal command semantics without trusting a shell flag.
+func (e *workerEnrolments) armedForSession(sid session.ID) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if _, ok := e.bySess[sid]; ok {
+		return true
+	}
+	if e.sessions == nil {
+		return false
+	}
+	sess, err := e.sessions.Get(sid)
+	if err != nil {
+		return false
+	}
+	_, ok := e.byPane[sess.PaneID()]
+	return ok
 }
 
 // participantFor answers which participant a session speaks for, or false for
@@ -1434,6 +1543,10 @@ func (s *workerSupervisor) report(ctx context.Context, p workers.Participant, e 
 // lifecyclepub is given, and the worker is what it also tells.
 func (e *workerEnrolments) hookInto(p *paneEnroller) *paneEnroller {
 	p.onEnrol = func(sessionID, lane string) { e.enrolled(session.ID(sessionID), lane) }
+	p.isWorkerLaunch = func(lane lifecycle.LaneID) bool {
+		sid, ok := p.sessions.lookup(lane)
+		return ok && e.armedForSession(session.ID(sid))
+	}
 	return p
 }
 

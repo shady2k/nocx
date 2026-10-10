@@ -54,6 +54,10 @@ var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // word a person reads in a refusal, so [A-Za-z0-9._-] and nothing else.
 var agentNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,` + strconv.Itoa(maxAgentNameLen) + `}$`)
 
+// Tickets are 256 random bits in unpadded base64url form. The shape is checked
+// at the authenticated protocol boundary before the app consults its ticket map.
+var launchTicketRe = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
 // Bounds on a domain request's carried ssh options (nocx-c6z0). They are not
 // a shape — an ssh option argument is an arbitrary path, host list or config
 // string, and constraining its CHARACTERS would refuse lines OpenSSH accepts.
@@ -275,6 +279,10 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyDomainRequest(d, ls, env)
 	case KindAgentEnrol:
 		out, err = k.applyAgentEnrol(d, ls, env)
+	case KindAgentLaunchResolve:
+		out, err = k.applyAgentLaunchResolve(d, ls, env)
+	case KindAgentLaunchCancel:
+		out, err = k.applyAgentLaunchCancel(d, ls, env)
 	case KindAgentWithdraw:
 		out, err = k.applyAgentWithdraw(d, ls, env)
 	default:
@@ -550,6 +558,30 @@ func (k *Kernel) OpenAttempt(domain DomainID) (ExecutionAttempt, bool) {
 }
 
 // Domain returns the read model of one domain.
+// TerminalDomainOfLane returns the lane's most recent domain in a terminal
+// state (closed or lost). A domain_closed can be ingested while the lane is
+// still unregistered — the shell exits while the coordinator is away — and
+// the projection replay derives nothing for an already-closed domain, so
+// the recorded terminal state is what a re-adopting attach settles from
+// (nocx-zg3k3.5.3 Round 9/10).
+func (k *Kernel) TerminalDomainOfLane(lane LaneID) (Domain, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	var out *Domain
+	for _, d := range k.registry.All() {
+		if d.Lane != lane || (d.State != DomainClosed && d.State != DomainLost) {
+			continue
+		}
+		if out == nil || d.ID > out.ID {
+			out = d
+		}
+	}
+	if out == nil {
+		return Domain{}, false
+	}
+	return *out, true
+}
+
 func (k *Kernel) Domain(id DomainID) (Domain, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -689,9 +721,35 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	}
 	att := k.openAttemptFor(d.ID)
 	if c.AttemptID != nil {
-		named, ok := k.attempts[*c.AttemptID]
-		if !ok {
-			return nil, ErrAttemptNotOpen
+		// The id the shell names is its own: the attempt's key for a
+		// shell-originated command, the alias the start recorded for one
+		// submitted from the app. Resolved exactly as a snapshot's
+		// last_completed is (resolveAttempt), so both shipped shells can
+		// name every completion with the id they minted at start — the
+		// block's identity across coordinators (nocx-zg3k3.5.11).
+		// A found id of another domain is refused below
+		// (ErrAttemptDomainMismatch), so resolveAttempt's ownership bool is
+		// not needed here.
+		named, _ := k.resolveAttempt(d, *c.AttemptID)
+		if named == nil {
+			// A completion naming an attempt this kernel never saw is the
+			// retained window's replay of a command that ran for the
+			// coordinator BEFORE this one: the shell is the only witness
+			// its old attempt ever had, and the frame carries the same
+			// authenticated capability the live commands do. On an adopted
+			// domain the attempt is reconstructed from that word and
+			// completed below, so the lane fact closes the ledger row the
+			// previous coordinator opened under the same id and resolves
+			// the interval end the helper resent (ADR-0076). The lane is
+			// set Running with the attempt named, which is what carries
+			// the terminal fact — a completion never changes the lane
+			// state itself. A kernel-native domain keeps the foreign-id
+			// refusal: an id it neither minted nor adopted names nothing.
+			if !d.adopted {
+				return nil, ErrAttemptNotOpen
+			}
+			named = k.createAttempt(d, *c.AttemptID, OriginShell, true, "", "", "", k.now())
+			k.setLifecycle(ls, LifecycleRunning, d.ID, named.ID)
 		}
 		if named.Domain != d.ID {
 			return nil, ErrAttemptDomainMismatch
@@ -702,7 +760,22 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 		att = named
 	}
 	if att == nil {
-		return nil, ErrAttemptNotOpen
+		// The shell's own complete frame names no attempt id (the kernel
+		// resolves the domain's single open attempt), so a completion-only
+		// replay of a command that ran for the coordinator BEFORE this one
+		// arrives unnamed on an adopted domain with no open attempt to
+		// resolve. The attempt is reconstructed under a synthetic id — the
+		// real id lives in the previous coordinator's ledger, which the
+		// transport resolves when the fact closes the row — and completed
+		// below with the frame's authenticated fence and exit (ADR-0076).
+		// A kernel-native domain keeps the refusal: an unnamed completion
+		// with no open attempt says nothing this kernel can hear.
+		if !d.adopted {
+			return nil, ErrAttemptNotOpen
+		}
+		att = k.createAttempt(d, AttemptID("adopted-complete/"+string(d.ID)+"/"+strconv.FormatUint(env.Sequence, 10)),
+			OriginShell, true, "", "", "", k.now())
+		k.setLifecycle(ls, LifecycleRunning, d.ID, att.ID)
 	}
 	if !att.Started {
 		return nil, ErrAttemptNotStarted
@@ -912,6 +985,9 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 	if !agentNameRe.MatchString(req.Agent) {
 		return nil, ErrBadRequest
 	}
+	if req.LaunchTicket != "" && !launchTicketRe.MatchString(req.LaunchTicket) {
+		return nil, ErrBadRequest
+	}
 	if req.Cols <= 0 || req.Rows <= 0 || req.Cols > maxPaneDimension || req.Rows > maxPaneDimension {
 		return nil, ErrBadRequest
 	}
@@ -919,6 +995,43 @@ func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outb
 		Kind:          KindAgentEnrolled,
 		AgentEnrolled: &AgentEnrolled{RequestID: req.RequestID, Agent: req.Agent},
 	})}, nil
+}
+
+// applyAgentLaunchResolve authenticates a request to resolve a launch name.
+// The kernel echoes only the request identity; the publisher supplies the
+// server-owned record-applicability classification, optional snapshot payload
+// and ticket afterward.
+func (k *Kernel) applyAgentLaunchResolve(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentLaunchResolve
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	if !agentNameRe.MatchString(req.Agent) {
+		return nil, ErrBadRequest
+	}
+	return []Outbound{k.outbound(d, Event{
+		Kind: KindAgentLaunchResolved,
+		AgentLaunchResolved: &AgentLaunchResolved{
+			RequestID: req.RequestID,
+			Agent:     req.Agent,
+		},
+	})}, nil
+}
+
+// applyAgentLaunchCancel is an authenticated best-effort ticket discard. It
+// moves no lifecycle state and needs no reply: any ticket that is already gone
+// is indistinguishable from one successfully cancelled.
+func (k *Kernel) applyAgentLaunchCancel(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	if !agentNameRe.MatchString(env.Event.AgentLaunchCancel.Agent) || !launchTicketRe.MatchString(env.Event.AgentLaunchCancel.Ticket) {
+		return nil, ErrBadRequest
+	}
+	return nil, nil
 }
 
 // applyAgentWithdraw closes the caller's end of the interval. It is answered
@@ -1386,8 +1499,10 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // place and which already owns the session's keyboard and its whole output
 // stream. The one new exposure adoption WOULD create is replay of the
 // helper's retained lifecycle window, and it is closed where the window is
-// read rather than here: the re-attachment resumes at the window's head, so
-// no frame the previous coordinator already consumed is ever re-delivered.
+// read rather than here: the re-attachment resumes at the cursor the
+// previous coordinator stored of the last frame it applied (ADR-0077,
+// superseding ADR-0024's resume at the head), so no frame it already
+// applied is ever re-delivered.
 //
 // The domain is installed Established and the lane PromptReady — the state
 // the shell is actually in, since it has its accept and speaks only from a
@@ -1421,6 +1536,7 @@ func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability 
 		State:      DomainEstablished,
 		capability: capability,
 		recovery:   recovery,
+		adopted:    true,
 	}
 	k.registry.Register(d)
 	// The adopted epoch came from another process's counter. Lifting ours

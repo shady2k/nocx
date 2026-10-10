@@ -46,6 +46,10 @@ type raceOpenStore struct {
 	closeCalls    int
 }
 
+func (s *raceOpenStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
+	return s.ledger.OpenBlockRowsForSession(ctx, sessionID)
+}
+
 func (s *raceOpenStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
 	select {
 	case <-s.bound:
@@ -146,7 +150,7 @@ func heldReopen(t *testing.T, e *lifecycleTestEnv, sid session.ID, attempt strin
 	done = make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 	}()
 	select {
 	case <-store.entered:
@@ -196,7 +200,7 @@ func TestALateOpenAfterItsCommandClosedInstallsNothing(t *testing.T) {
 func TestAnOrdinaryOpenStillInstallsAndCloses(t *testing.T) {
 	e, pub, lane, h, sid, attempt, store, db := lateOpenSetup(t)
 	close(store.bound)
-	e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 
 	fence := lifecycleFence(0x12)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
@@ -245,6 +249,13 @@ type queueingOpenStore struct {
 	hold    chan struct{}
 	entered chan struct{}
 	seals   int
+}
+
+// OpenBlockRowsForSession: no ledger behind this fake holds an open
+// block, so the honest answer is the zero value — what every fresh
+// session's re-adopt read answers.
+func (s *queueingOpenStore) OpenBlockRowsForSession(context.Context, string) (content.OpenBlockRowsEntry, error) {
+	return content.OpenBlockRowsEntry{}, nil
 }
 
 func (s *queueingOpenStore) OpenBlockOutput(_ context.Context, in content.OpenBlockOutput) (string, error) {
@@ -305,7 +316,7 @@ func TestThreeAttemptsQueuedBehindOneOpenAllOpenOnceEachInOrder(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -314,9 +325,9 @@ func TestThreeAttemptsQueuedBehindOneOpenAllOpenOnceEachInOrder(t *testing.T) {
 	}
 
 	// B, then C, then D ask while A is still in flight.
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "C")
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "D")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "C")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "D")
 
 	close(release)
 	<-done
@@ -347,7 +358,7 @@ func TestOneAttemptQueuedBehindOneOpenStillOpens(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -355,7 +366,7 @@ func TestOneAttemptQueuedBehindOneOpenStillOpens(t *testing.T) {
 		t.Fatal("A's open never reached the store")
 	}
 
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 
 	close(release)
 	<-done
@@ -390,7 +401,7 @@ func TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -399,7 +410,7 @@ func TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing(t *testing.T) {
 	}
 
 	// B asks while A is still in flight: queued behind A, not yet opening.
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 	bs := e.ws.blockStream
 	bs.mu.Lock()
 	queued := append([]string(nil), bs.reopen[sid]...)
@@ -411,7 +422,7 @@ func TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing(t *testing.T) {
 	// B's own command completes and its interval ends while B is still only
 	// queued — well before A's open resolves, let alone before B's own open
 	// is ever attempted.
-	e.ws.closeBlockRows(sid, "B", 0, nil, "", false)
+	e.ws.closeBlockRows(context.Background(), sid, "B", 0, nil, "", false)
 	closedB := awaitBlockClosed(t, e)
 	if closedB.EntryID != "B" || closedB.Kept {
 		t.Fatalf("block.closed = %+v, want %q not kept", closedB, "B")

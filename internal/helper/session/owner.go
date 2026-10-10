@@ -110,9 +110,10 @@ type pendingIntent struct {
 	Intent sessionruntime.Intent
 	Check  func(sessionruntime.Snapshot) error
 
-	Token     Token
-	Canonical canonicalIntent
-	CommitBy  int64
+	Token       Token
+	Interactive bool
+	Canonical   canonicalIntent
+	CommitBy    int64
 
 	admittedID sessionruntime.IntentID
 }
@@ -482,6 +483,9 @@ func (o *sessionOwner) dispatchIncoming(it ownerItem) {
 		o.applyAccessBump(it)
 	case o.closing:
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateCancelled, Err: errOwnerClosing})
+	case it.kind == itemIntent && it.intent.Interactive && o.interactiveGate(it):
+		// Interactive input has no screen target, but its caller's access
+		// epoch is still checked before queue admission.
 	case it.kind == itemIntent && it.intent.Token.ID != (TokenID{}) && o.tokenGate(it, it.intent):
 		// tokenGate (tokens.go) resolved it directly: a replay of an
 		// already-recorded or in-flight token, or a refusal decided before
@@ -796,11 +800,19 @@ func (o *sessionOwner) commitIntent(it ownerItem) {
 	// screen right now, so every intent on it is refused before Admit is
 	// ever asked. Reads and snapshots are unaffected: they read whatever
 	// has already been ingested, not "as of this instant".
-	if !o.hasReadBarrier() {
+	if !it.intent.Interactive && !o.hasReadBarrier() {
 		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: ErrNoReadBarrier})
 		return
 	}
 	pi := it.intent
+	if pi.Interactive && pi.Canonical.AccessEpoch != o.currentAccessEpoch() {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
+		return
+	}
+	if pi.Interactive && pi.CommitBy != 0 && o.nowMono() > pi.CommitBy {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
+		return
+	}
 	if pi.Token.ID != (TokenID{}) && o.nowMono() > pi.CommitBy {
 		res := ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline}
 		o.recordTokenOutcome(pi, res)
@@ -1004,6 +1016,25 @@ func (o *sessionOwner) Reply(p []byte) error {
 	}
 	o.replyBytes += len(p)
 	o.pending = append(o.pending, ownerItem{kind: itemReply, payload: append([]byte(nil), p...)})
+	return nil
+}
+
+// PromptBoundary synchronously records OSC 133 B in the session output
+// window. Runtime.Ingest calls this before it returns to ingestOne, which
+// writes the raw PTY bytes; the subscriber pump can therefore split exactly
+// at B even if it is already active and the screen consumer is stalled.
+func (o *sessionOwner) PromptBoundary(effect sessionruntime.Effect) error {
+	if effect.Kind != sessionruntime.EffectPromptBoundary {
+		return errors.New("session owner: ordered boundary callback received another effect kind")
+	}
+	dropped, err := o.win.markPromptBoundary(effect)
+	if err != nil {
+		o.log.Warn("prompt boundary could not be ordered with session output", "stream_offset", effect.StreamOffset, "error", err)
+		return err
+	}
+	if dropped {
+		o.log.Warn("oldest retained prompt boundary was evicted from the bounded output window", "stream_offset", effect.StreamOffset)
+	}
 	return nil
 }
 

@@ -14,6 +14,10 @@
  */
 export interface BlockCleared {
   /**
+   * The session whose emulator was sighted erased. The notification reaches every pane's dispatcher (one socket, one client), and the live tier's scrollback surface wipes only its OWN session's past — a markerless pane beside an integrated one loses nothing when the other clears (nocx-zg3k3.10.4).
+   */
+  sessionId: string
+  /**
    * The block whose interval the erase happened inside — almost always the `clear` command's own block, still running and never hidden by its own report of the clear. Null when no interval was open at the sighting, in which case every block the client currently shows is removed.
    */
   keepEntryId: string | null

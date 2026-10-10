@@ -420,12 +420,16 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		c.channelData(payload)
 	case proto.TypeScreenFrame:
 		c.screenFrame(payload)
+	case proto.TypeSessionEffect:
+		c.sessionEffect(payload)
 	case proto.TypeOutputRows:
 		c.outputRows(payload)
 	case proto.TypeIntervalEnd:
 		c.intervalEnd(payload)
 	case proto.TypeClearBoundary:
 		c.clearBoundary(payload)
+	case proto.TypeOutputStartRow:
+		c.outputStartRow(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
@@ -600,6 +604,23 @@ func (c *Client) lifecycleData(payload []byte) {
 // attachment's screen-lost observer, because the invariant with both ends is
 // that the reader holds the whole frame at that revision or has been told it
 // lost it.
+func (c *Client) sessionEffect(payload []byte) {
+	f, err := proto.DecodeEffectFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed session effect frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("session effect dropped: no matching attachment",
+			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber), "effect_id", f.EffectID)
+		return
+	}
+	a.deliverEffect(f)
+}
+
 func (c *Client) screenFrame(payload []byte) {
 	f, err := proto.DecodeScreenDataFrame(payload)
 	if err != nil {

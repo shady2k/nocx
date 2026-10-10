@@ -29,11 +29,13 @@ import (
 // rowsSink is a Sink that records the rows-plane frames the pump sends, in
 // order, and keeps the raw payloads for the contract checks.
 type rowsSink struct {
-	mu     sync.Mutex
-	rows   []proto.OutputRowsFrame
-	ends   []proto.IntervalEndFrame
-	clears []proto.ClearBoundaryFrame
-	rawRow [][]byte
+	mu           sync.Mutex
+	rows         []proto.OutputRowsFrame
+	ends         []proto.IntervalEndFrame
+	clears       []proto.ClearBoundaryFrame
+	outputStarts []proto.OutputStartRowFrame
+	events       []string
+	rawRow       [][]byte
 	// changed is signalled after every recorded frame: what a test waits on
 	// is the frame arriving, never a duration passing.
 	changed chan struct{}
@@ -52,6 +54,18 @@ func (s *rowsSink) signal() {
 // end markers and nClears clear boundaries, woken by each delivery. A pump
 // that never delivers them hangs into go test's own timeout, which names this
 // frame.
+func (s *rowsSink) waitForOutputStarts(n int) {
+	for {
+		s.mu.Lock()
+		done := len(s.outputStarts) >= n
+		s.mu.Unlock()
+		if done {
+			return
+		}
+		<-s.changed
+	}
+}
+
 func (s *rowsSink) waitFor(nRows, nEnds, nClears int) {
 	for {
 		s.mu.Lock()
@@ -70,11 +84,22 @@ func (s *rowsSink) SendNotification(proto.Notification) error  { return nil }
 func (s *rowsSink) SendScreenFrame(proto.ScreenDataFrame) error {
 	return nil
 }
+func (s *rowsSink) SendEffectFrame(proto.EffectFrame) error { return nil }
 
 func (s *rowsSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	s.mu.Lock()
+	s.events = append(s.events, "rows")
 	s.rows = append(s.rows, f)
 	s.rawRow = append(s.rawRow, f.Payload)
+	s.mu.Unlock()
+	s.signal()
+	return nil
+}
+
+func (s *rowsSink) SendOutputStartRow(f proto.OutputStartRowFrame) error {
+	s.mu.Lock()
+	s.events = append(s.events, "output-start")
+	s.outputStarts = append(s.outputStarts, f)
 	s.mu.Unlock()
 	s.signal()
 	return nil
@@ -143,6 +168,24 @@ func rowsBridgeSession(t *testing.T, cols, rows int) (*hostSession, *sessionrunt
 	go hs.serveRows()
 	t.Cleanup(func() { close(hs.rowsDone) })
 	return hs, rt, sink
+}
+
+// rowsAttachReader uses the session's real attachment path for a reader
+// returning to the rows pump. Tests that mutate subs directly bypass the
+// resend obligation production attach establishes for unconfirmed output.
+func rowsAttachReader(t *testing.T, hs *hostSession, id proto.SubscriberID, sink *rowsSink) {
+	t.Helper()
+	hs.mu.Lock()
+	if hs.attachments == nil {
+		hs.attachments = make(map[proto.AttachmentID]*attachment)
+	}
+	hs.mu.Unlock()
+	attachmentID := proto.AttachmentID("att-" + string(id))
+	if _, err := hs.attach(proto.AttachParams{Subscriber: id, Session: hs.id, Fresh: true}, sink,
+		func() proto.AttachmentID { return attachmentID }, hs.log); err != nil {
+		t.Fatalf("attach rows reader %s: %v", id, err)
+	}
+	t.Cleanup(func() { hs.detach(sink, attachmentID) })
 }
 
 func mintRaw(t *testing.T) [16]byte {

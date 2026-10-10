@@ -34,32 +34,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	filesystem "github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/transfer"
 )
-
-// DownloadTarget validates a locally selected destination and builds the
-// Upload consumed by the shared atomic sink.
-func DownloadTarget(path string, size int64) (transfer.Upload, error) {
-	if err := checkPath(path); err != nil {
-		return transfer.Upload{}, err
-	}
-	name := filepath.Base(path)
-	if name == "" || name == "." || name == string(filepath.Separator) {
-		return transfer.Upload{}, fmt.Errorf("%w: destination has no filename", transfer.ErrInvalidUpload)
-	}
-	if size < 0 {
-		return transfer.Upload{}, fmt.Errorf("%w: negative size %d", transfer.ErrInvalidUpload, size)
-	}
-	return transfer.Upload{
-		DestDir:  filepath.Dir(path),
-		Name:     name,
-		Size:     size,
-		OnExists: transfer.Overwrite,
-	}, nil
-}
 
 // newFileMode is what an uploaded file is created with. The process umask
 // then applies, so the result is what a shell redirect in that same tab

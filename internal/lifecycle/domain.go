@@ -43,10 +43,16 @@ type Domain struct {
 	// remote disk, and no decision that matters is taken on it.
 	BundleGeneration string
 
-	capability     Capability
-	recovery       FenceNonce // the one-shot recovery fence, minted with the capability
-	acceptPending  bool       // hello accepted, accept minted but not yet delivered (decision 9)
-	lastSeq        uint64     // last accepted inbound sequence
+	capability Capability
+	recovery   FenceNonce // the one-shot recovery fence, minted with the capability
+	// adopted marks a domain taken over from a previous coordinator
+	// (AdoptDomain): its shell's own attempt ids predate this kernel, so
+	// the retained window's completion-only replay of a command that ran
+	// for the process before this one reconstructs its attempt instead of
+	// being refused as a foreign id (ADR-0076).
+	adopted        bool
+	acceptPending  bool   // hello accepted, accept minted but not yet delivered (decision 9)
+	lastSeq        uint64 // last accepted inbound sequence
 	desyncBytes    int
 	desyncFrames   int
 	desyncSince    time.Time

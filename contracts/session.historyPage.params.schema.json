@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.historyPage.params.schema.json",
+  "title": "SessionHistoryPageParams",
+  "description": "Params for session.historyPage: one page of a session's live history, read as the emulator holds it (nocx-zg3k3.10.3). The rows do not ride this result — they travel the binary data plane on the screen frame's own carrier, keyed by the pageId the result mints (AD-1, ADR-0066, ADR-0073).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "before", "limit"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "before": {
+      "description": "The exclusive upper bound of the page, in the session's absolute history row numbering — the numbering every result carries in start/end/floor, where a row's number is fixed for its lifetime and only the floor beneath it moves. null asks for the head: the newest retained rows. A cursor below the retained floor is not an error; the answer is the empty interval at the cursor with the floor stated.",
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "limit": {
+      "description": "The most rows one page may carry. The bound is the page's own: a page is one helper round trip and one carrier document, so it is small by construction, and paging is how a caller reaches deeper history.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    }
+  }
+}

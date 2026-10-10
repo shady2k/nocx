@@ -154,6 +154,16 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 		hosted.StartLifecycle()
 	}
 	s.replayLifecycleFacts(sid)
+	// The replay derives nothing for a domain the helper already closed
+	// before the lane registered — the one-shot settle it would have
+	// carried was lost to the unregistered lane (nocx-zg3k3.5.3 Round 9).
+	// The kernel still holds the domain's recorded terminal state; the
+	// session's open entry settles from it here — behind an armed end hold
+	// (nocx-zg3k3.5.11 Round 4), where the settle waits for the replayed
+	// window instead of reading a kernel that has ingested nothing yet.
+	if !s.settleWhenEndHoldLifts(sid) {
+		s.settleAdoptedTerminalDomains(sid)
+	}
 	return nil
 }
 
@@ -180,9 +190,9 @@ func (s *WSServer) recordedThrough(ctx context.Context, sid session.ID) uint64 {
 	if s.sessionRecorder == nil {
 		return 0
 	}
-	rec, err := s.sessionRecorder.Read(ctx, string(sid))
+	rec, err := s.sessionRecorder.RecoveryStatus(ctx, string(sid))
 	if err != nil {
-		s.log.Warn("a session's recording could not be read, so it resumes from the beginning; whatever is already recorded will be reported as a hole",
+		s.log.Warn("a session's recovery metadata could not be read, so it resumes from the beginning; whatever is already recorded will be reported as a hole",
 			"session_id", string(sid), "error", err)
 		return 0
 	}

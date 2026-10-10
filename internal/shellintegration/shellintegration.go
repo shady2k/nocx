@@ -67,14 +67,46 @@ type RemoteHome interface {
 type Impl struct {
 	log    log.Logger
 	isHost func(host string) bool
+	// agents answers the ENABLED agent set this machine offers, read afresh on
+	// every publish so a record a person just edited reaches the next host this
+	// process connects to rather than the next start of the app.
+	//
+	// Nil means this build's own set, which is what a caller that has no record
+	// to read — a test, or a build compiled for a target that has none — must
+	// get rather than an empty wrapper block that quietly stopped offering
+	// anything.
+	agents func() []string
 }
 
+// WithAgentNames wires the record this machine publishes its agent wrappers
+// from (nocx-t5e7d). The composition root passes the record store's own
+// EnabledNames, so the set a host is told and the set the record describes have
+// ONE owner.
+func WithAgentNames(names func() []string) Option {
+	return func(i *Impl) { i.agents = names }
+}
+
+// Option configures the implementation at the composition root.
+type Option func(*Impl)
+
 // New returns a production ShellIntegration implementation.
-func New(logger log.Logger) *Impl {
-	return &Impl{
+func New(logger log.Logger, opts ...Option) *Impl {
+	i := &Impl{
 		log:    logger,
 		isHost: isLocalHost,
 	}
+	for _, o := range opts {
+		o(i)
+	}
+	return i
+}
+
+// agentNames answers the enabled set this publish is generated from.
+func (s *Impl) agentNames() []string {
+	if s == nil || s.agents == nil {
+		return shippedAgentNames()
+	}
+	return s.agents()
 }
 
 func (s *Impl) ValidateCwd(host string, path string) (CwdInfo, error) {

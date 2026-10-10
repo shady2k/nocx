@@ -398,6 +398,14 @@ type Session struct {
 	// a helper-hosted session's channel is not closed by an uninstall
 	// whether it was opened or taken back.
 	Fingerprint string
+	// LifecycleApplied is the coordinator's own lifecycle cursor (ADR-0077):
+	// the helper's lifecycle stream offset one past the last frame whose
+	// effect this coordinator stored. A binding records it at 0 — the leg is
+	// attached at the stream's start and nothing is applied yet — and
+	// ApplyLifecycleFrame moves it forward, in each frame's own transaction. Nil records none, and a
+	// re-adopt reads that as "this coordinator holds no record of what it
+	// applied", never as offset 0.
+	LifecycleApplied *uint64
 }
 
 // Environment is the durable identity of where work happens (design §3.1,
@@ -525,7 +533,21 @@ type SubmitResult struct {
 // immutable once execution starts (the workspace minted it; it is not the
 // enforcement object).
 type StartExecution struct {
-	EntryID            string
+	EntryID string
+	// ShellAttempt is the id the shell minted for this run's command when it
+	// differs from EntryID — a command the app submitted, whose entry is
+	// keyed by the app's id while every frame the shell sends names its own
+	// (ADR-0077). Recorded on the execution, and what EntryForShellAttempt
+	// answers from. Empty when the two are one id.
+	ShellAttempt string
+	// PinRoutineIfNone pins a routine, empty observation when the entry's
+	// environment has none yet — recorded in the same transaction, the way
+	// a frame capture ensures its own (ensureLedgerContext) — instead of
+	// refusing the run. It is the shell lifecycle's answer: a start the
+	// shell authenticated names a run that happened, and the only fact
+	// known about its environment is that it exists. Unset keeps the
+	// refusal for every caller that has something better to pin.
+	PinRoutineIfNone   bool
 	Lane               *string
 	Attempt            int
 	LeaseDeadline      *int64
@@ -1251,6 +1273,13 @@ type AppendBlockRows struct {
 	ArtifactID string
 	FromRow    uint64
 	LostRows   uint64
+	// LostCause names which bucket LostRows belongs to when it is not the
+	// emulator's own: LostCauseCoordinatorUnavailable says the gap is rows
+	// the helper could not resend because the coordinator was away while
+	// the scrollback pruned them (nocx-zg3k3.5.3). The store counts them
+	// separately so the block says how many went missing and why. Empty
+	// leaves LostRows meaning what it always meant.
+	LostCause string
 	// Rows are the departed rows in order, in the emulator's own shape. The
 	// store encodes them; a caller that serialized them first would be a
 	// second owner of the stored vocabulary.
@@ -1282,7 +1311,35 @@ type CloseBlockRows struct {
 type BlockRowsSummary struct {
 	DroppedRows uint64
 	LostRows    uint64
+	// UnavailableRows is the part of LostRows the coordinator's own absence
+	// caused: rows pruned from the helper's scrollback before the resend
+	// could read them back (nocx-zg3k3.5.3). A count and a cause, distinct
+	// from the cap's DroppedRows and the emulator's share of LostRows.
+	UnavailableRows uint64
 }
+
+// OpenBlockRowsEntry is the one streamed block a session still holds open,
+// read back by its session: the entry that opened it, the open rows
+// artifact under that entry, and the artifact's own row cursor. The entry
+// id doubles as the block stream's attempt id — OpenBlockOutput is called
+// with EntryID: attempt, so the two are one id by construction and this
+// read needs no second registry to name the attempt.
+type OpenBlockRowsEntry struct {
+	EntryID    string
+	ArtifactID string
+	// NextRow is the absolute departed-row index the NEXT delivery must
+	// start at — the cursor a re-adopting stream continues the block from.
+	NextRow uint64
+	// FirstRow is the absolute index the stored span begins at: the block's
+	// own head may be missing below it (its first delivery started above
+	// the session's origin), and the re-adopting stream must not trim or
+	// confirm rows the artifact does not hold (nocx-zg3k3.5.3 Round 8).
+	FirstRow uint64
+}
+
+// LostCauseCoordinatorUnavailable is the lost-rows cause the resend names:
+// the coordinator was away while ghostty pruned what it had not confirmed.
+const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
 
 // RecordClearBoundary is the coordinator sighting the program erase its own
 // saved lines inside an authenticated interval (nocx-2v80t.3.17): ED3, or a
@@ -1841,6 +1898,16 @@ type LedgerRepository interface {
 	// CreateSession records a restore key under a workspace. The workspace
 	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error
+	// ApplyLifecycleFrame applies one lifecycle frame as ONE transaction
+	// (ADR-0077): every store write apply makes under the context it is
+	// handed, and the session's lifecycle cursor moved forward to offset —
+	// the stream offset one past the frame — commit together, or none of
+	// them does. A write that fails under the frame fails the frame, and a
+	// failed frame returns an error wrapping ErrLifecycleFrameFailed with
+	// the store exactly as it was before it. The cursor never moves back: a
+	// frame at or behind the stored cursor changes it nothing, and a session
+	// with no binding row records none.
+	ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its
 	// session, ADR-0019 §5).
@@ -1945,6 +2012,14 @@ type LedgerRepository interface {
 	// is nothing to pin, and an unpinned execution would be
 	// reinterpreted later with today's facts.
 	StartExecution(ctx context.Context, in StartExecution) (int64, error)
+	// EntryForShellAttempt answers which entry of the pane a shell's own
+	// attempt id names: the entry keyed by that id, or the one whose
+	// execution recorded it as its ShellAttempt. "" when neither exists.
+	// It is how a frame delivered again to a coordinator that never saw the
+	// attempt finds the block it belongs to by identity (ADR-0077). Scoped
+	// by the pane — the anchor every entry a session records carries, where
+	// a command submitted from the editor names no session.
+	EntryForShellAttempt(ctx context.Context, paneID, shellAttempt string) (string, error)
 	// FinishExecution closes the run with its termination reason and
 	// closes the entry with its final status.
 	FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error
@@ -1976,6 +2051,14 @@ type LedgerRepository interface {
 	// the cap dropped (derived from the chunks that are actually there) and
 	// how many the emulator lost before they could be read.
 	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
+	// OpenBlockRowsForSession returns the streamed block the session still
+	// holds open — its newest open rows artifact, with the artifact's own
+	// row cursor — or the zero value when none stands open. The read a
+	// re-adopting coordinator re-binds its block stream from (ADR-0076
+	// decision 3): the open block and its cursor survive the coordinator's
+	// restart in this store, and the session's rows continue them without
+	// waiting for a lifecycle fact.
+	OpenBlockRowsForSession(ctx context.Context, sessionID string) (OpenBlockRowsEntry, error)
 	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
 	// an ordinary read applies rather than a mark on every entry it hides
 	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -14,9 +15,9 @@ type recordingLaneObserver struct {
 	exits  []int
 }
 
-func (r *recordingLaneObserver) ObserveEnvironmentEntry(string) {}
+func (r *recordingLaneObserver) ObserveEnvironmentEntry(context.Context, string) {}
 
-func (r *recordingLaneObserver) Accept(ingest func() error, c *lifecycle.Complete) error {
+func (r *recordingLaneObserver) Accept(_ context.Context, ingest func() error, c *lifecycle.Complete) error {
 	if err := ingest(); err != nil {
 		return err
 	}
@@ -41,7 +42,7 @@ type sshChildStand struct {
 	child lifecycle.DomainHandle
 	lane  lifecycle.LaneID
 	k     interface {
-		Ingest(lifecycle.TransportID, lifecycle.Envelope) error
+		Ingest(context.Context, lifecycle.TransportID, lifecycle.Envelope) error
 	}
 }
 
@@ -65,10 +66,10 @@ func newSSHChildStand(t *testing.T, observers *environmentEntryRegistry) *sshChi
 			Epoch: parent.Epoch, Sequence: seq, Capability: parent.Capability, Event: evt,
 		}
 	}
-	if err = pub.Ingest(parentTransport, penv(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
+	if err = pub.Ingest(context.Background(), parentTransport, penv(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("parent hello: %v", err)
 	}
-	if err = pub.Ingest(parentTransport, penv(2, lifecycle.Event{Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{}})); err != nil {
+	if err = pub.Ingest(context.Background(), parentTransport, penv(2, lifecycle.Event{Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{}})); err != nil {
 		t.Fatalf("parent suspends for the child: %v", err)
 	}
 
@@ -81,7 +82,7 @@ func newSSHChildStand(t *testing.T, observers *environmentEntryRegistry) *sshChi
 		t.Fatalf("request the child domain: %v", err)
 	}
 	st := &sshChildStand{pub: pub, child: child, lane: lane, k: k}
-	if err = k.Ingest(sshChildTransport, st.env(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
+	if err = k.Ingest(context.Background(), sshChildTransport, st.env(1, lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("child hello: %v", err)
 	}
 	return st
@@ -103,7 +104,7 @@ func (st *sshChildStand) runRemoteCommand(t *testing.T, seq uint64, fenceByte by
 		t.Fatalf("submit the remote command: %v", err)
 	}
 	id := att.ID
-	if err = st.k.Ingest(sshChildTransport, st.env(seq, lifecycle.Event{
+	if err = st.k.Ingest(context.Background(), sshChildTransport, st.env(seq, lifecycle.Event{
 		Kind:  lifecycle.KindStart,
 		Start: &lifecycle.Start{AttemptID: &id, Command: "echo remote"},
 	})); err != nil {
@@ -113,7 +114,7 @@ func (st *sshChildStand) runRemoteCommand(t *testing.T, seq uint64, fenceByte by
 	for i := range fence {
 		fence[i] = fenceByte
 	}
-	return fence, st.k.Ingest(sshChildTransport, st.env(seq+1, lifecycle.Event{
+	return fence, st.k.Ingest(context.Background(), sshChildTransport, st.env(seq+1, lifecycle.Event{
 		Kind:     lifecycle.KindComplete,
 		Complete: &lifecycle.Complete{AttemptID: &id, ExitCode: &code, Fence: fence},
 	}))
@@ -150,7 +151,7 @@ func TestSSHChildCompletionReachesThePaneRuntime(t *testing.T) {
 	var replay lifecycle.FenceNonce
 	replay[0] = 0x77
 	code := 0
-	if err = st.k.Ingest(sshChildTransport, st.env(3, lifecycle.Event{
+	if err = st.k.Ingest(context.Background(), sshChildTransport, st.env(3, lifecycle.Event{
 		Kind:     lifecycle.KindComplete,
 		Complete: &lifecycle.Complete{Fence: replay, ExitCode: &code},
 	})); err == nil {

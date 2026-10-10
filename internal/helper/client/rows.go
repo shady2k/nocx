@@ -41,10 +41,16 @@ import (
 // Incomplete is the helper's one marker that its row buffer overflowed
 // (nocx-2v80t.3.36): the block in flight ends incomplete here, Rows is empty,
 // and FromRow is the first row that was not recorded.
+//
+// LostCause names which bucket LostRows belongs to when it is not the
+// emulator's own: coordinator-unavailable says the rows left the screen
+// while nobody was attached and the scrollback pruned them before the
+// resend could read them back (nocx-zg3k3.5.3).
 type OutputRows struct {
 	FromRow    uint64
 	Rows       []emulator.Row
 	LostRows   uint64
+	LostCause  string
 	Incomplete bool
 }
 
@@ -145,6 +151,41 @@ func (a *AttachedSession) deliverClearBoundary() {
 	obs()
 }
 
+// OutputStartRow is the absolute row position where command output begins.
+type OutputStartRow struct{ FromRow uint64 }
+
+// OnOutputStartRow registers the ordered output-position marker consumer.
+func (a *AttachedSession) OnOutputStartRow(f func(OutputStartRow)) {
+	a.mu.Lock()
+	a.outputStartRowObs = f
+	a.mu.Unlock()
+}
+
+func (a *AttachedSession) deliverOutputStartRow(mark OutputStartRow) {
+	a.mu.Lock()
+	obs := a.outputStartRowObs
+	a.mu.Unlock()
+	if obs != nil {
+		obs(mark)
+	}
+}
+
+func (c *Client) outputStartRow(payload []byte) {
+	f, err := proto.DecodeOutputStartRowFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed output-start-row frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.mu.Lock()
+	a := c.attachments[f.Subscriber]
+	c.mu.Unlock()
+	if a == nil || a.session != f.Session {
+		c.log.Warn("output-start-row frame dropped: no matching attachment", "fromRow", f.FromRow)
+		return
+	}
+	a.deliverOutputStartRow(OutputStartRow{FromRow: f.FromRow})
+}
+
 // outputRows is one TypeOutputRows frame arriving: decode, find the
 // attachment the frame names, deliver. A frame whose attachment is gone is
 // dropped with a log line — the rows belonged to a reader that left, the
@@ -184,7 +225,7 @@ func (c *Client) outputRows(payload []byte) {
 			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 		return
 	}
-	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows, Incomplete: doc.Incomplete})
+	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows, LostCause: doc.LostCause, Incomplete: doc.Incomplete})
 }
 
 // intervalEnd is one TypeIntervalEnd frame arriving, on the same terms the

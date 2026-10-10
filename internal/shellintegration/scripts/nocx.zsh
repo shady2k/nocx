@@ -671,12 +671,16 @@ __nocx_agent_await_answer() {
 # carries the long form of why the wait for a question is here, outside the
 # handshake (nocx-cyhfw, nocx-t7xds).
 __nocx_agent_enrol() {
-    local __agent="$1" __told=0 __rc
+    local __agent="$1" __told=0 __rc __ticket_field
+    __ticket_field=
+    if [[ -n "${__nocx_agent_launch_ticket:-}" ]]; then
+        __ticket_field=',"ticket":"'"$__nocx_agent_launch_ticket"'"'
+    fi
     while :; do
         __nocx_agent_reason=
         __nocx_agent_geometry
         __nocx_agent_rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
-        __nocx_lc_send agent_enrol ',"request":"'"$__nocx_agent_rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
+        __nocx_lc_send agent_enrol ',"request":"'"$__nocx_agent_rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows""$__ticket_field" \
             || return 1
         __nocx_lc_read_agent_answer "$__nocx_agent_rid" || return 1
         (( __nocx_agent_enrolled == 1 )) && return 0
@@ -698,17 +702,225 @@ __nocx_agent_enrol() {
 # orchestration, not that a terminal declines to start the program it was asked
 # for. A question is not a refusal: the agent starts when it closes, and not at
 # all if the person cancels the wait.
+# @NOCX_AGENT_LAUNCH_HELPERS_START@
+# Decode one UTF-8 field carried as even-length hex. NUL is not representable
+# in argv or environment and is refused rather than truncated by the shell.
+__nocx_agent_launch_hex_to_value() {
+    local __hex="$1" __pair __escaped= __i
+    [[ $(( ${#__hex} % 2 )) == 0 && "$__hex" != *[!0-9a-f]* ]] || return 1
+    for ((__i=0; __i<${#__hex}; __i+=2)); do
+        __pair="${__hex:$__i:2}"
+        [[ "$__pair" != "00" ]] || return 1
+        __escaped+="\\x$__pair"
+    done
+    builtin printf -v __nocx_agent_launch_decoded '%b' "$__escaped"
+}
+
+# Read one delimiter-terminated payload line, preserving an empty field.
+__nocx_agent_launch_next_line() {
+    [[ "$__nocx_agent_launch_rest" == *$'\n'* ]] || return 1
+    __nocx_agent_launch_line="${__nocx_agent_launch_rest%%$'\n'*}"
+    __nocx_agent_launch_rest="${__nocx_agent_launch_rest#*$'\n'}"
+}
+
+# The payload is v1, argv count, hex argv fields (executable first), env count,
+# then key<TAB>value hex pairs. It is data throughout; no eval or shell parser.
+__nocx_agent_launch_decode() {
+    local __payload="$1" __count __i __entry __keyhex __valuehex __key __value
+    __nocx_agent_launch_command=
+    __nocx_agent_launch_args=()
+    __nocx_agent_launch_env=()
+    __nocx_agent_launch_rest="$__payload"
+    __nocx_agent_launch_next_line || return 1
+    [[ "$__nocx_agent_launch_line" == "v1" ]] || return 1
+    __nocx_agent_launch_next_line || return 1
+    __count="$__nocx_agent_launch_line"
+    [[ "$__count" =~ ^[0-9]+$ ]] || return 1
+    (( __count >= 1 && __count <= ${#__payload} )) || return 1
+    for ((__i=0; __i<__count; __i++)); do
+        __nocx_agent_launch_next_line || return 1
+        __nocx_agent_launch_hex_to_value "$__nocx_agent_launch_line" || return 1
+        if (( __i == 0 )); then
+            __nocx_agent_launch_command="$__nocx_agent_launch_decoded"
+        else
+            __nocx_agent_launch_args+=("$__nocx_agent_launch_decoded")
+        fi
+    done
+    [[ -n "$__nocx_agent_launch_command" ]] || return 1
+    __nocx_agent_launch_next_line || return 1
+    __count="$__nocx_agent_launch_line"
+    [[ "$__count" =~ ^[0-9]+$ ]] || return 1
+    (( __count <= ${#__payload} )) || return 1
+    for ((__i=0; __i<__count; __i++)); do
+        __nocx_agent_launch_next_line || return 1
+        __entry="$__nocx_agent_launch_line"
+        [[ "$__entry" == *$'\t'* ]] || return 1
+        __keyhex="${__entry%%$'\t'*}"
+        __valuehex="${__entry#*$'\t'}"
+        __nocx_agent_launch_hex_to_value "$__keyhex" || return 1
+        __key="$__nocx_agent_launch_decoded"
+        [[ "$__key" == [A-Za-z_]* && "$__key" != *[^A-Za-z0-9_]* ]] || return 1
+        __nocx_agent_launch_hex_to_value "$__valuehex" || return 1
+        __value="$__nocx_agent_launch_decoded"
+        __nocx_agent_launch_env+=("$__key=$__value")
+    done
+    [[ -z "$__nocx_agent_launch_rest" ]] || return 1
+    return 0
+}
+
+__nocx_agent_launch_readable() {
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        if zmodload zsh/zselect 2>/dev/null; then
+            zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null
+        else
+            return 0
+        fi
+    else
+        __nocx_lc_probe_readable
+    fi
+}
+
+__nocx_agent_launch_read_answer() {
+    local __rid="$1" __t=0 __raw __ticket __payload
+    __nocx_agent_launch_local=0
+    __nocx_agent_launch_valid=0
+    __nocx_agent_launch_ticket=
+    __nocx_agent_launch_payload=
+    __nocx_agent_launch_reason=
+    while (( __t < __nocx_lc_grant_timeout_s )); do
+        (( __nocx_agent_cancelled )) && return 130
+        if ! __nocx_agent_launch_readable; then
+            sleep 1
+            __t=$(( __t + 1 ))
+            continue
+        fi
+        if ! __nocx_lc_read_frame 1; then
+            (( __nocx_agent_cancelled )) && return 130
+            return 1
+        fi
+        case "$__nocx_lc_frame" in
+            *'"evt":"agent_launch_resolved"'*) : ;;
+            *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
+            *) continue ;;
+        esac
+        case "$__nocx_lc_frame" in
+            *'"request":"'"$__rid"'"'*) : ;;
+            *) continue ;;
+        esac
+        case "$__nocx_lc_frame" in
+            *'"reason":"'*)
+                __raw="${__nocx_lc_frame#*\"reason\":\"}"
+                __raw="${__raw%%\"*}"
+                __nocx_lc_json_unescape "$__raw"
+                __nocx_agent_launch_reason="$__nocx_lc_json_unescaped"
+                ;;
+        esac
+        case "$__nocx_lc_frame" in
+            *'"local":true'*)
+                __nocx_agent_launch_local=1
+                __raw="${__nocx_lc_frame#*\"ticket\":\"}"
+                if [[ "$__raw" == "$__nocx_lc_frame" ]]; then
+                    [[ "$__nocx_lc_frame" != *'"payload":'* ]] || return 1
+                    __nocx_agent_launch_valid=0
+                    return 0
+                fi
+                __ticket="${__raw%%\"*}"
+                [[ ${#__ticket} -eq 43 && "$__ticket" != *[^A-Za-z0-9_-]* ]] || return 1
+                __nocx_agent_launch_ticket="$__ticket"
+                __raw="${__nocx_lc_frame#*\"payload\":\"}"
+                if [[ "$__raw" == "$__nocx_lc_frame" ]]; then
+                    __nocx_agent_launch_cancel
+                    return 1
+                fi
+                __raw="${__raw%%\"*}"
+                __nocx_lc_json_unescape "$__raw"
+                __payload="$__nocx_lc_json_unescaped"
+                if [[ -z "$__payload" ]]; then
+                    __nocx_agent_launch_cancel
+                    return 1
+                fi
+                __nocx_agent_launch_payload="$__payload"
+                if ! __nocx_agent_launch_decode "$__payload"; then
+                    __nocx_agent_launch_cancel
+                    __nocx_agent_launch_clear
+                    return 1
+                fi
+                __nocx_agent_launch_valid=1
+                return 0
+                ;;
+            *'"local":false'*)
+                if [[ "$__nocx_lc_frame" == *'"ticket":'* || "$__nocx_lc_frame" == *'"payload":'* ]]; then
+                    return 1
+                fi
+                __nocx_agent_launch_valid=1
+                return 0
+                ;;
+            *) return 1 ;;
+        esac
+    done
+    return 1
+}
+
+__nocx_agent_launch_resolve() {
+    local __agent="$1" __rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))" __rc
+    __nocx_agent_launch_agent="$__agent"
+    __nocx_lc_send agent_launch_resolve ',"request":"'"$__rid"'","agent":"'"$__agent"'"' || return 1
+    __nocx_agent_launch_read_answer "$__rid"
+    __rc=$?
+    (( __rc == 0 )) || return $__rc
+    if (( __nocx_agent_launch_local && ! __nocx_agent_launch_valid )); then
+        return 0
+    fi
+    return 0
+}
+
+__nocx_agent_launch_cancel() {
+    if [[ -n "${__nocx_agent_launch_ticket:-}" && "${__nocx_lc_active:-0}" == "1" ]]; then
+        __nocx_lc_send agent_launch_cancel ',"agent":"'"$__nocx_agent_launch_agent"'","ticket":"'"$__nocx_agent_launch_ticket"'"' || true
+    fi
+}
+
+__nocx_agent_launch_clear() {
+    __nocx_agent_launch_ticket=
+    __nocx_agent_launch_agent=
+    __nocx_agent_launch_payload=
+    __nocx_agent_launch_command=
+    __nocx_agent_launch_args=()
+    __nocx_agent_launch_env=()
+    __nocx_agent_launch_local=0
+    __nocx_agent_launch_valid=0
+    __nocx_agent_launch_reason=
+}
+
+__nocx_agent_launch_exec() {
+    local __surface="$1" __assignment
+    shift
+    (
+        for __assignment in "${__nocx_agent_launch_env[@]}"; do
+            export "$__assignment" || exit 126
+        done
+        if [[ "$__surface" == "1" ]]; then
+            command "$__nocx_agent_launch_command" "${__nocx_agent_launch_args[@]}" \
+                "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
+        else
+            command "$__nocx_agent_launch_command" "${__nocx_agent_launch_args[@]}" "$@"
+        fi
+    )
+}
+# @NOCX_AGENT_LAUNCH_HELPERS_END@
+
 __nocx_agent_run() {
     local __agent="$1" __rid __rc __stage_reason __staged=0
     shift
     if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
         builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
-        command "$__agent" "$@"
-        return $?
+        # @NOCX_AGENT_UNORCHESTRATED@
     fi
+    # @NOCX_AGENT_LAUNCH_SETUP@
     __nocx_agent_enrol "$__agent"
     __rc=$?
     if (( __rc == 130 )); then
+        # @NOCX_AGENT_LAUNCH_CANCEL@
         builtin printf '\nnocx: cancelled — %s was not started\n' "$__agent" >&2
         return 130
     fi
@@ -719,22 +931,25 @@ __nocx_agent_run() {
         else
             builtin printf 'nocx: not orchestrated — nocx did not answer\n' >&2
         fi
-        command "$__agent" "$@"
-        return $?
+        # @NOCX_AGENT_ENROL_REFUSAL@
     fi
-    if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
-        "${NOCX_TOOL_SOCKET:-$__nocx_agent_tool_socket}"; then
-        __staged=1
-        __nocx_agent_capture_traps
-    else
-        __stage_reason="$__nocx_agent_stage_reason"
-        builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
+    if (( __nocx_agent_launch_local )); then
+        if __nocx_agent_stage "${NOCX_AGENT_HELPER_PATH:-$__nocx_agent_helper_path}" \
+            "${NOCX_TOOL_SOCKET:-$__nocx_agent_tool_socket}"; then
+            __staged=1
+            __nocx_agent_capture_traps
+        else
+            __stage_reason="$__nocx_agent_stage_reason"
+            builtin printf 'nocx: tool surface unavailable — %s\n' "$__stage_reason" >&2
+        fi
     fi
-    # Claude's --mcp-config option is variadic: placing it before "$@" would
-    # swallow a user's positional prompt as another config path. Keep it last.
-    # If a future Claude subcommand rejects trailing flags, update this
-    # argv proof and feed the prompt through stdin instead of moving the flag
-    # ahead of user arguments.
+    # THE LAST PER-AGENT ARGUMENT IN THE BUNDLE, and it does not reach a host:
+    # the wrapper block above carries NAMES because this script is published to
+    # hosts nobody here controls, and the staged exec below is rendered with a
+    # tool-surface argument for a LOCAL pane and without one for a published
+    # generation (nocx-t5e7d). The argument is Claude's and its rule is kept
+    # where it is used: variadic, so it goes LAST — placed before "$@" it would
+    # swallow a user's positional prompt as another config path.
     # Cleared before the agent is exec'd: the staging above has taken its copy,
     # nothing after this point needs the bearer, and a shell that ran a child
     # with it still in its own variable space is one `printenv`-style accident
@@ -742,11 +957,12 @@ __nocx_agent_run() {
     # the same door — a non-exported variable is not inherited anyway — and it
     # is kept because the cost is one builtin.
     unset __nocx_agent_token 2>/dev/null || true
-    if (( __staged )); then
-        command "$__agent" "$@" --mcp-config "$__nocx_agent_launch_dir/mcp.json"
-    else
-        command "$__agent" "$@"
-    fi
+    # THE STAGED EXEC, and the ONE block that differs by delivery (nocx-t5e7d):
+    # a pane on this machine is pointed at its tool surface, while a published
+    # generation carries agent names and no per-agent argument at all, because
+    # that argument is this machine's configuration and a host is not ours.
+    # agents.go renders both forms and says why.
+    # @NOCX_TOOL_SURFACE@
     __rc=$?
     # The withdrawal closes the interval the enrolment opened, and it runs
     # whatever the agent returned — a crash, an interrupt and a clean exit
@@ -757,12 +973,18 @@ __nocx_agent_run() {
         __nocx_agent_cleanup
         __nocx_agent_restore_traps
     fi
+    __nocx_agent_launch_clear
     return $__rc
 }
 
-# One agent today (D15: one worker first, not three). A function, not an alias,
-# and not exported: what it wraps is what the user TYPES in a nocx pane.
-claude() { __nocx_agent_run claude "$@"; }
+# The agents nocx wraps, GENERATED from the agent record (nocx-t5e7d): the line
+# below is replaced, before this script is stripped and delivered, by one
+# wrapper per ENABLED agent — by NAME and nothing else, because this script is
+# published to hosts nobody here controls (agents.go says why in full).
+#
+# A function, not an alias, and not exported: what it wraps is what the user
+# TYPES in a nocx pane.
+# @NOCX_AGENT_WRAPPERS@
 
 __nocx_lc_read_grant() {
     local __rid="$1" __t=0 __env __bootstrap
@@ -1149,8 +1371,8 @@ __nocx_precmd() {
     # Authenticated channel first: refresh, complete (with the exit status
     # and a fresh fence nonce), write the SAME nonce to the pty after the
     # command's output (the render-order rendezvous, decision 1 carve-out),
-    # then prompt_ready. The complete carries no attempt id; the kernel
-    # resolves the domain's single open attempt.
+    # then prompt_ready. The complete names the attempt this shell minted
+    # at start (ADR-0077): the block's identity across coordinators.
     # A nested child whose command the widget consumed leaves __nocx_exit_code
     # = the widget's own last status (the launch's assignments clobbered $?);
     # the child's REAL status was captured right after the launch and
@@ -1187,7 +1409,7 @@ __nocx_precmd() {
             __nocx_lc_attempt_open=0
         elif [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
             if __nocx_lc_fence; then
-                if __nocx_lc_send complete ',"exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
+                if __nocx_lc_send complete ',"attempt":"'"$__nocx_lc_attempt_id"'","exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
                     builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
                 else
                     __nocx_lc_recover

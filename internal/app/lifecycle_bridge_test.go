@@ -29,7 +29,7 @@ func TestTheLifecycleBridgeSaysItStartedAndWhatItCarried(t *testing.T) {
 	peer, adapterEnd := net.Pipe()
 	carrier := newFakeCarrier()
 
-	bridgeLifecycle(lg, lifecycle.TransportID("tpt-b52fcdbe2de97285"), peer, carrier)
+	bridgeLifecycle(lg, lifecycle.TransportID("tpt-b52fcdbe2de97285"), peer, carrier, nil, nil)
 
 	// The shell's hello: the helper pushes it onto the carrier and the
 	// adapter's end of the pipe is what has to see it.
@@ -71,7 +71,7 @@ func TestABridgeThatEndsWithoutCarryingAnythingSaysSo(t *testing.T) {
 
 	peer, _ := net.Pipe()
 	carrier := newFakeCarrier()
-	bridgeLifecycle(lg, lifecycle.TransportID("tpt-quiet"), peer, carrier)
+	bridgeLifecycle(lg, lifecycle.TransportID("tpt-quiet"), peer, carrier, nil, nil)
 	carrier.close()
 
 	waitFor(t, "the bridge to report an empty carry", func() bool { return strings.Contains(buf.String(), "carried_nothing=true") })

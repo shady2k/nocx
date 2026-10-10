@@ -411,7 +411,7 @@ func portOfURL(t *testing.T, raw string) string {
 // commit are internal/lifecyclepub's own tests.
 type notifyingEmitter struct{}
 
-func (notifyingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (notifyingEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // lossRecorder records the losses the lifecycle adapter reports.
 type lossRecorder struct {

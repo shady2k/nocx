@@ -298,7 +298,7 @@ func (s *s14RealStand) mailRows(t *testing.T) []workers.Message {
 	return rows
 }
 
-// waitForObservations waits until the mailbox holds at least want observations
+// waitForObservedStates waits until the mailbox holds at least want observations
 // of one worker in one state, and returns them. It is what every "the worker
 // settled / blocked / exited" step waits on, and the COUNT is the point: a
 // worker that comes up idle and then settles idle again after its turn
@@ -306,7 +306,7 @@ func (s *s14RealStand) mailRows(t *testing.T) []workers.Message {
 // idle observation" would be satisfied by the arrival and would let a step
 // that needs the second one run early — measured, under a loaded machine, in
 // this check's own first package-wide run.
-func (s *s14RealStand) waitForObservations(t *testing.T, worker string, state workers.ObservedState, want int) []workers.Message {
+func (s *s14RealStand) waitForObservedStates(t *testing.T, worker string, state workers.ObservedState, want int) []workers.Message {
 	t.Helper()
 	var found []workers.Message
 	waittest.WaitForDetail(t, fmt.Sprintf("%q to be seen %s %d time(s)", worker, state, want), func() string {
@@ -627,7 +627,21 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// Set BEFORE the stand: the real daemon it starts inherits this process's
 	// environment at THAT moment, and every shell it forks afterwards — the
 	// coordinator's own pane and every worker's alike — inherits the daemon's.
-	t.Setenv("PATH", mockDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The test-only launcher keeps workers.spawn's command a literal argv.
+	// After the mocked agent exits, it ends the pane's shell so the supervisor
+	// observes a real session exit without passing shell syntax to workers.spawn.
+	workerLaunchDir := t.TempDir()
+	realClaude := filepath.Join(mockDir, "claude")
+	quotedClaude := "'" + strings.ReplaceAll(realClaude, "'", "'\\''") + "'"
+	launcher := "#!/bin/sh\n" + quotedClaude + " \"$@\"\nstatus=$?\n" +
+		"kill -KILL \"$PPID\" 2>/dev/null || true\nexit \"$status\"\n"
+	if err := os.WriteFile(filepath.Join(workerLaunchDir, "claude"), []byte(launcher), 0o700); err != nil { //nolint:gosec // this test launcher must be executable in its private temp directory
+		t.Fatalf("write worker exit launcher: %v", err)
+	}
+	// Set BEFORE the stand: the real daemon it starts inherits this process's
+	// environment at THAT moment, and every shell it forks afterwards — the
+	// coordinator's own pane and every worker's alike — inherits it.
+	t.Setenv("PATH", workerLaunchDir+string(os.PathListSeparator)+mockDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("S14_CAPTURES_DIR", capturesDir)
 	t.Setenv("S14_STATE_DIR", stateDir)
 
@@ -703,7 +717,7 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// that HELD is news (design §4.3) — the first row the coordinator's mailbox
 	// holds, and the row the settle probe below counts on. It is not the
 	// report: nothing has been said yet.
-	stand.waitForObservations(t, w1, workers.ObservedIdle, 1)
+	stand.waitForObservedStates(t, w1, workers.ObservedIdle, 1)
 
 	// THE COORDINATOR'S OWN FIRST READING, and the settle-window probe begins
 	// with it: nothing has been delivered to the coordinator yet, so this is
@@ -757,7 +771,7 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// FOLLOWS the report in the mailbox, in the order the brief states.
 	stand.cueMock(t, w1Session, "idle")
 	stand.waitForState(t, w1Session, agentdriver.StateFreeText)
-	stand.waitForObservations(t, w1, workers.ObservedIdle, 2)
+	stand.waitForObservedStates(t, w1, workers.ObservedIdle, 2)
 
 	// NOTHING BUT A NOTE IS NEEDED FOR THIS: the call that ends the search for
 	// workers.wait is that the vocabulary is gone, so the coordinator's own
@@ -851,19 +865,13 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	blockedSession := stand.liveSession(t, blockedSpawn.ID)
 	stand.cueMock(t, blockedSession, "menu")
 	stand.waitForState(t, blockedSession, agentdriver.StatePermissionChoice)
-	stand.waitForObservations(t, blockedSpawn.ID, workers.ObservedBlocked, 1)
+	stand.waitForObservedStates(t, blockedSpawn.ID, workers.ObservedBlocked, 1)
 
-	// The worker whose PROCESS ends. The command runs the agent and then ENDS
-	// THE PANE, which is what a worker's process ending actually is here: the
-	// supervisor watches the SESSION (workers.go's Attach), so a pane whose
-	// shell is gone is the fact, and an agent that merely returns to its
-	// prompt leaves one behind. `exec` would be the other way to make the mock
-	// the session's process, and it is not usable: the shell integration wraps
-	// the agent's name in an enrolment function, and a pane that never
-	// enrolled is a pane the readiness axis never observed at all — measured,
-	// this journey's own first attempt, which failed with "nocx never observed
-	// this pane".
-	doomed := stand.cueCall(t, coordinator, "workers.spawn", map[string]any{"command": "claude; exit", "task": "you will not get far"})
+	// The worker whose PROCESS ends. Its command remains a literal executable;
+	// the test launcher above ends the shell after the mocked agent exits. The
+	// shell integration can therefore enrol the pane before the supervisor sees
+	// the session close, without shell metacharacters in workers.spawn.
+	doomed := stand.cueCall(t, coordinator, "workers.spawn", map[string]any{"command": "claude", "task": "you will not get far"})
 	var doomedSpawn struct {
 		ID string `json:"id"`
 	}
@@ -872,11 +880,11 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	}
 	doomedSession := stand.liveSession(t, doomedSpawn.ID)
 	stand.cueMock(t, doomedSession, "exit")
-	stand.waitForObservations(t, doomedSpawn.ID, workers.ObservedExited, 1)
+	stand.waitForObservedStates(t, doomedSpawn.ID, workers.ObservedExited, 1)
 	// What nocx SAW, as the coordinator is about to read it back: the pane's
 	// own classification for the blocked one, and the process fact for the
 	// other — both addressed to this coordinator by the record itself.
-	blockedRow := stand.waitForObservations(t, blockedSpawn.ID, workers.ObservedBlocked, 1)[0]
+	blockedRow := stand.waitForObservedStates(t, blockedSpawn.ID, workers.ObservedBlocked, 1)[0]
 	if blockedRow.Sender != "nocx" {
 		t.Fatalf("the blocked observation is %+v, want the record's own sender", blockedRow)
 	}
@@ -963,22 +971,21 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	if ids := idsOf(t, tabs); containsID(ids, tabID) {
 		t.Fatalf("the closed worker's tab is still in the window: %v", ids)
 	}
-	// THE REST OF THE STRIP KEEPS ITS ORDER. The window reads a workspace's
-	// tabs in position order, and the seats of the tabs that stayed are the
-	// ones they already had — the store renumbers around an INSERT
-	// (content/layout_sqlite.go's createTab: "the strip is renumbered around
-	// the new tab") and does not renumber on a close, so asserting density
-	// here would be asserting an invariant the store never claimed. This
-	// check's worker is the OLDEST of three, so its seat is not the last one:
-	// worker_close_tab_test.go's own density assertion is made where it
-	// holds, on a strip whose closed tab is last.
+	// THE REST OF THE STRIP IS STILL DENSE AND STILL IN ITS ORDER. The window
+	// reads a workspace's tabs in position order, and a close renumbers the
+	// strip behind the tab that left, through the same writer CreateTabAfter
+	// seats a new tab with and ReorderTabs writes the user's order with
+	// (nocx-xn63t.4.14). This check's worker is the OLDEST of three, so its
+	// seat is not the last one — the case a close leaves a hole in, and the
+	// reason this asserts density rather than the neighbouring order alone.
 	positions := make([]int, 0, len(tabs))
 	for _, tab := range tabs {
 		positions = append(positions, tab.Position)
 	}
-	for i := 1; i < len(positions); i++ {
-		if positions[i] <= positions[i-1] {
-			t.Fatalf("the strip's remaining tabs are out of order after the close: %v", positions)
+	for seat, tab := range tabs {
+		if tab.Position != seat {
+			t.Fatalf("tab %s sits at position %d, want %d — the strip is not dense after the close: %v",
+				tab.ID, tab.Position, seat, positions)
 		}
 	}
 	var closed struct {

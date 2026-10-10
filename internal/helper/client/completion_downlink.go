@@ -16,12 +16,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -40,6 +42,21 @@ type pendingCompletion struct {
 	entry    string
 	fence    [32]byte
 	exitCode *int
+	// hold is the lifecycle frame the fact was accepted in (ADR-0077
+	// decision 12): the fact keeps its place in the queue from acceptance,
+	// and is not sent until that frame is stored — or is taken out when it
+	// is not. Released at once for a fact accepted outside a frame.
+	hold *frameHold
+}
+
+// frameHold is one queued fact's wait for its frame's commit. Guarded by the
+// downlink's mu.
+type frameHold struct {
+	released bool
+	// abandoned is set when the session ended while the fact still waited:
+	// if its frame is then stored, the fact is reported lost as the rest of
+	// the abandoned queue was.
+	abandoned error
 }
 
 // CompletionDownlink delivers the completions one hosted pane's kernel
@@ -149,7 +166,7 @@ var errNeverBound = errors.New("the helper session's identity was never bound an
 // incomplete (transport's BlockBoundaryLost). A boundary lost before Bind
 // named a session is not reported: nothing on the coordinator streams that
 // session's blocks yet.
-type BoundaryLost func(session string, fence [32]byte)
+type BoundaryLost func(ctx context.Context, session string, fence [32]byte)
 
 // CompletionSender is what the downlink needs from the pane's client: the
 // carrier ops the already-authenticated completion, and an authenticated
@@ -221,7 +238,12 @@ func (d *CompletionDownlink) Bind(entry HostSessionID) {
 // purpose: the gap between the kernel accepting a completion and the queue
 // learning of it is exactly where a second source's completion used to
 // overtake it.
-func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.Complete) error {
+// ctx is the frame's (ADR-0077): a completion that cannot be queued because
+// the session has already ended is reported lost from inside Accept, and
+// that report settles a block — a write that joins the frame's transaction.
+// A completion accepted inside a frame takes its place in the queue now and
+// is sent only once that frame is stored (ADR-0077 decision 12; settleHold).
+func (d *CompletionDownlink) Accept(ctx context.Context, ingest func() error, completion *lifecycle.Complete) error {
 	d.accept.Lock()
 	defer d.accept.Unlock()
 	if err := ingest(); err != nil {
@@ -233,7 +255,7 @@ func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.C
 			e := *completion.ExitCode
 			c.exitCode = &e
 		}
-		d.enqueue(c)
+		d.enqueue(ctx, c)
 	}
 	return nil
 }
@@ -248,38 +270,82 @@ func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.C
 // the lane. A failed send is retried, and an attempt that timed out may have
 // landed, so every attempt carries the same identity and the helper seals
 // one interval per entry rather than one per delivery (nocx-2v80t.3.28).
-func (d *CompletionDownlink) ObserveEnvironmentEntry(entry string) {
-	d.enqueue(pendingCompletion{entered: true, entry: entry})
+func (d *CompletionDownlink) ObserveEnvironmentEntry(ctx context.Context, entry string) {
+	d.enqueue(ctx, pendingCompletion{entered: true, entry: entry})
 }
 
 // enqueue puts one accepted fact at the back of the queue and wakes the
 // worker. See maxPendingCompletions for what a full queue does.
-func (d *CompletionDownlink) enqueue(c pendingCompletion) {
+func (d *CompletionDownlink) enqueue(ctx context.Context, c pendingCompletion) {
 	d.mu.Lock()
 	for {
 		// THE STOP. A session that has ended has no runtime left to tell,
 		// and nothing is put on a wire the session's end has condemned.
 		if err := d.ctx.Err(); err != nil {
 			d.mu.Unlock()
-			d.lost(c, err)
+			d.lost(ctx, c, err)
 			return
 		}
-		if len(d.pending) < maxPendingCompletions {
+		if d.deliverableLocked() < maxPendingCompletions {
 			break
 		}
 		if !d.bound {
 			d.mu.Unlock()
-			d.lost(c, errNeverBound)
+			d.lost(ctx, c, errNeverBound)
 			return
 		}
 		d.space.Wait()
 	}
+	hold := &frameHold{}
+	c.hold = hold
 	d.pending = append(d.pending, c)
+	d.mu.Unlock()
+	// Its place is taken; its send waits for the frame that accepted it.
+	// Outside a frame this settles at once.
+	lifecyclecommit.After(ctx, nil, func(committed bool) { d.settleHold(c, committed) })
+}
+
+// settleHold releases a queued fact whose frame was stored, or takes it out of
+// the queue when its frame was not: the next coordinator applies that frame
+// and queues the fact again then.
+func (d *CompletionDownlink) settleHold(c pendingCompletion, committed bool) {
+	d.mu.Lock()
+	if err := c.hold.abandoned; err != nil {
+		d.mu.Unlock()
+		if committed {
+			d.lost(context.WithoutCancel(d.ctx), c, err)
+		}
+		return
+	}
+	if committed {
+		c.hold.released = true
+	} else {
+		d.pending = slices.DeleteFunc(d.pending, func(p pendingCompletion) bool { return p.hold == c.hold })
+		d.space.Broadcast()
+	}
 	d.mu.Unlock()
 	select {
 	case d.wake <- struct{}{}:
 	default:
 	}
+}
+
+// deliverableLocked counts the queued facts released for sending: the bound
+// holds those, and a fact still waiting for its own frame's commit never
+// makes that frame wait for room.
+func (d *CompletionDownlink) deliverableLocked() int {
+	n := 0
+	for _, p := range d.pending {
+		if p.hold == nil || p.hold.released {
+			n++
+		}
+	}
+	return n
+}
+
+// headReadyLocked says the queue's head may be sent.
+func (d *CompletionDownlink) headReadyLocked() bool {
+	return len(d.pending) > 0 && (d.pending[0].hold == nil || d.pending[0].hold.released)
 }
 
 // run is the worker: the only sender. It delivers the queue's head, and only
@@ -288,7 +354,7 @@ func (d *CompletionDownlink) enqueue(c pendingCompletion) {
 func (d *CompletionDownlink) run() {
 	for {
 		d.mu.Lock()
-		for len(d.pending) == 0 && d.ctx.Err() == nil {
+		for !d.headReadyLocked() && d.ctx.Err() == nil {
 			d.mu.Unlock()
 			select {
 			case <-d.wake:
@@ -297,24 +363,38 @@ func (d *CompletionDownlink) run() {
 			d.mu.Lock()
 		}
 		if err := d.ctx.Err(); err != nil {
-			abandoned := d.pending
+			var abandoned []pendingCompletion
+			for _, c := range d.pending {
+				if c.hold != nil && !c.hold.released {
+					// Its frame decides: reported lost if stored.
+					c.hold.abandoned = err
+					continue
+				}
+				abandoned = append(abandoned, c)
+			}
 			d.pending = nil
 			d.space.Broadcast()
 			d.mu.Unlock()
 			for _, c := range abandoned {
-				d.lost(c, err)
+				d.lost(context.WithoutCancel(d.ctx), c, err)
 			}
 			return
 		}
 		head := d.pending[0]
 		d.mu.Unlock()
 
-		d.deliver(head)
+		cause := d.deliver(head)
 
 		d.mu.Lock()
 		d.pending = d.pending[1:]
 		d.space.Broadcast()
 		d.mu.Unlock()
+		// Reported only once the queue has made room: the report settles a
+		// block in the store, and an Accept waiting for room may be inside a
+		// lifecycle frame that holds the store until it returns (ADR-0077).
+		if cause != nil {
+			d.lost(context.WithoutCancel(d.ctx), head, cause)
+		}
 	}
 }
 
@@ -329,11 +409,11 @@ func (d *CompletionDownlink) run() {
 // may BEGIN only while the session's context is live, and one already on
 // the wire when the session ends finishes there — its own context ends with
 // the session's, which is as far as a write already made can be recalled.
-func (d *CompletionDownlink) deliver(c pendingCompletion) {
+// deliver answers nil once the fact landed, or the cause it was lost to.
+func (d *CompletionDownlink) deliver(c pendingCompletion) error {
 	for attempt := 1; ; attempt++ {
 		if err := d.ctx.Err(); err != nil {
-			d.lost(c, err)
-			return
+			return err
 		}
 		err := d.sendOnce(c)
 		if err == nil {
@@ -341,17 +421,15 @@ func (d *CompletionDownlink) deliver(c pendingCompletion) {
 				log.From(d.ctx).Info("helper: the "+c.kind()+" the kernel accepted reached the helper session on a retry",
 					"attempt", attempt)
 			}
-			return
+			return nil
 		}
 		if !retryable(err) || d.ctx.Err() != nil {
-			d.lost(c, err)
-			return
+			return err
 		}
 		log.From(d.ctx).Warn("helper: delivering the "+c.kind()+" the kernel accepted failed; retrying",
 			"attempt", attempt, "err", err)
 		if waitErr := d.retryWait(d.ctx, attempt); waitErr != nil {
-			d.lost(c, fmt.Errorf("%w; the session ended before the retry: %w", err, waitErr))
-			return
+			return fmt.Errorf("%w; the session ended before the retry: %w", err, waitErr)
 		}
 	}
 }
@@ -428,14 +506,14 @@ func waitToRetry(ctx context.Context, attempt int) error {
 // boundary. The log line — with the cause chain intact — is how an operator
 // learns of it, and onLost is how the pane does: the block the boundary
 // would have closed is settled as incomplete (nocx-2v80t.3.29).
-func (d *CompletionDownlink) lost(c pendingCompletion, cause error) {
+func (d *CompletionDownlink) lost(ctx context.Context, c pendingCompletion, cause error) {
 	log.From(d.ctx).Warn("helper: the "+c.kind()+" the kernel accepted did not reach the helper session",
 		"err", fmt.Errorf("%s not delivered: %w", c.kind(), cause))
 	d.mu.Lock()
 	bound, session := d.bound, d.entry.Session
 	d.mu.Unlock()
 	if bound && d.onLost != nil {
-		d.onLost(session, c.fence)
+		d.onLost(ctx, session, c.fence)
 	}
 }
 
@@ -474,7 +552,7 @@ type CompletionObservingKernel struct {
 // (CompletionDownlink.Accept). *CompletionDownlink is the one production
 // implementation.
 type CompletionObserver interface {
-	Accept(ingest func() error, completion *lifecycle.Complete) error
+	Accept(ctx context.Context, ingest func() error, completion *lifecycle.Complete) error
 }
 
 // CompletionObservingAdoptingKernel is the adopting form of the observing
@@ -526,10 +604,10 @@ func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d CompletionObserve
 // EVERY envelope goes through the observer's Accept, not only completions:
 // an environment entry is observed from inside the Ingest of whatever frame
 // grew the stack, and it has to take its place in the same order.
-func (k *CompletionObservingKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+func (k *CompletionObservingKernel) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
 	var completion *lifecycle.Complete
 	if env.Event.Kind == lifecycle.KindComplete {
 		completion = env.Event.Complete
 	}
-	return k.downlink.Accept(func() error { return k.Kernel.Ingest(t, env) }, completion)
+	return k.downlink.Accept(ctx, func() error { return k.Kernel.Ingest(ctx, t, env) }, completion)
 }

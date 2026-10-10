@@ -926,7 +926,7 @@ func (s *WSServer) dropHeldStopsFor(sid session.ID) {
 // queued task, immediately before the attempt is re-read — so that a concurrent
 // discard (the attempt closing) is decided by whoever gets there first rather
 // than by the order two goroutines happened to run in.
-func (s *WSServer) PublishAttemptStarted(attempt lifecycle.AttemptID) {
+func (s *WSServer) PublishAttemptStarted(_ context.Context, attempt lifecycle.AttemptID) {
 	if !s.heldStopArmed(attempt) {
 		return
 	}
@@ -938,9 +938,9 @@ func (s *WSServer) PublishAttemptStarted(attempt lifecycle.AttemptID) {
 // for that start can never be delivered and is discarded — and the person is
 // told, because a Stop that quietly evaporates because the command ended (or
 // never started) is the failure the whole notice exists for.
-func (s *WSServer) PublishAttemptClosed(attempt lifecycle.AttemptID) {
+func (s *WSServer) PublishAttemptClosed(ctx context.Context, attempt lifecycle.AttemptID) {
 	s.discardHeldStop(attempt, undeliveredAttemptClosed)
-	s.publishClosedAttemptHistory(attempt)
+	s.publishClosedAttemptHistory(ctx, attempt)
 }
 
 // submitHeldStop runs one held Stop's delivery on the signal lane, and the

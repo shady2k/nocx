@@ -23,11 +23,11 @@ func detachWithSeal(t *testing.T, sealFails bool) (blockClosedParams, string, co
 	e.ws.blockRowsStore = &closeFailureBlockStore{ledger: db.Ledger(), fail: sealFails}
 	e.ws.AttachBlockRows(session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make watch")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("partial")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
-	e.ws.DetachBlockRows(session.ID(sid))
+	e.ws.HelperSessionEnded(session.ID(sid))
 	return awaitBlockClosed(t, e), attempt, db
 }
 
@@ -63,7 +63,7 @@ func abandonAtTheBound(t *testing.T, sealFails bool) (blockClosedParams, string)
 
 	e.ws.BlockIntervalEnded(session.ID(sid), fence, 0, []emulator.Row{aStreamRow("final screen")}, false)
 	for i := range maxCloseAttempts {
-		e.ws.BlockRowsArrived(session.ID(sid), uint64(i), 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))}) //nolint:gosec // a row index
+		e.ws.BlockRowsArrived(session.ID(sid), uint64(i), 0, []emulator.Row{aStreamRow(fmt.Sprintf("later-%d", i))}, "") //nolint:gosec // a row index
 	}
 	return awaitBlockClosed(t, e), attempt
 }

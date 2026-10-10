@@ -358,6 +358,26 @@ type SpawnParams struct {
 	// running one; the helper clamps it to its own ceiling. Past it the block
 	// in flight ends incomplete. Zero means the helper's default.
 	RowBufferBytes int64 `json:"rowBufferBytes"`
+	// Agents is the ENABLED agent set the launched shell's wrappers are
+	// generated from (nocx-t5e7d): the names the record offers, as a SET.
+	//
+	// A SET and not a directory to go and read. The daemon is a separate
+	// process and is built without the release tag, so a profile directory
+	// resolved in it would be the development one under a release app; the
+	// backend owns "which agents does this machine offer" and the helper
+	// receives the answer.
+	//
+	// A MAP and not a []string, for the reason Env above is one: D3 refuses an
+	// operation whose params carry a free-form string list, because such a list
+	// is argv and a helper that accepts argv is a remote shell. A map cannot
+	// express a positional argument, and the names here are membership rather
+	// than a sequence — the order they are rendered in is the generator's, and
+	// internal/shellintegration sorts them.
+	//
+	// Empty is legitimate: a caller that has no record to read gets the
+	// build's own set, and a pane is still orchestrated for the agents this
+	// build ships.
+	Agents map[string]bool `json:"agents,omitempty"`
 	// Lifecycle is optional for conventional sessions. When present, the
 	// helper passes its descriptor-side channel and these values to the shell.
 	// The capability is never copied into argv or environment.
@@ -419,6 +439,16 @@ type SpawnParams struct {
 	// launch options, which render it into the descriptor the shell reads —
 	// never into the agent env block, and never into a log line.
 	AgentToolToken string `json:"agentToolToken,omitempty"`
+	// ScrollbackLines is the session's scrollback budget in physical lines:
+	// how far the live terminal keeps history, read by the coordinator at
+	// spawn the way RowBufferBytes is (nocx-zg3k3.10.1). It is a POINTER
+	// because zero is a VALUE here — a session that keeps no history —
+	// where RowBufferBytes' zero means the helper's default. Nil means the
+	// coordinator carries no setting at all, and the default is this
+	// package's DefaultScrollbackLines. A change after the spawn rides
+	// OpSetScrollback; this field is only the budget the session was born
+	// with.
+	ScrollbackLines *uint64 `json:"scrollbackLines,omitempty"`
 }
 
 // MaxIdempotencyKey bounds the key a caller may mint. The helper keeps one
@@ -659,6 +689,13 @@ type SSHSpawnParams struct {
 	// ssh.ConnectConfig.KeepaliveCountMax already states for the coordinator's
 	// own (non-helper) dials. Meaningless when KeepaliveIntervalMS is zero.
 	KeepaliveCountMax int `json:"keepaliveCountMax,omitempty"`
+	// ScrollbackLines is the session's scrollback budget in physical lines,
+	// on exactly the terms SpawnParams states (nocx-zg3k3.10.1): a pointer
+	// because zero is a value — a session that keeps no history — and nil
+	// means the coordinator carries no setting at all, so this package's
+	// DefaultScrollbackLines stands in. A change after the spawn rides
+	// OpSetScrollback.
+	ScrollbackLines *uint64 `json:"scrollbackLines,omitempty"`
 }
 
 // SessionsParams asks for the inventory. The workspace filter is D15's

@@ -5,6 +5,41 @@ import (
 	"testing"
 )
 
+func TestFrameTypeValuesAreUniqueAndRecognized(t *testing.T) {
+	types := []struct {
+		name  string
+		value FrameType
+	}{
+		{"hello", TypeHello},
+		{"hello-ok", TypeHelloOK},
+		{"request", TypeRequest},
+		{"response", TypeResponse},
+		{"notify", TypeNotify},
+		{"cancel", TypeCancel},
+		{"chunk", TypeChunk},
+		{"keep-alive", TypeKeepAlive},
+		{"session-data", TypeSessionData},
+		{"lifecycle-data", TypeLifecycleData},
+		{"channel-data", TypeChannelData},
+		{"screen-frame", TypeScreenFrame},
+		{"output-rows", TypeOutputRows},
+		{"interval-end", TypeIntervalEnd},
+		{"clear-boundary", TypeClearBoundary},
+		{"output-start-row", TypeOutputStartRow},
+		{"session-effect", TypeSessionEffect},
+	}
+	seen := make(map[FrameType]string, len(types))
+	for _, frameType := range types {
+		if previous, exists := seen[frameType.value]; exists {
+			t.Errorf("frame type %d is shared by %s and %s", frameType.value, previous, frameType.name)
+		}
+		seen[frameType.value] = frameType.name
+		if !frameType.value.valid() {
+			t.Errorf("%s type %d is not recognized", frameType.name, frameType.value)
+		}
+	}
+}
+
 func TestFrameRoundTripPreservesBinaryPayload(t *testing.T) {
 	payload := []byte{0x00, 0x0A, 0x0D, 0x0A, 0xFF, '{', '}'}
 	var gotType FrameType
@@ -181,5 +216,23 @@ func TestGarbageRegionAccountingSpansFeedCalls(t *testing.T) {
 	}
 	if gapped != len(garbage) {
 		t.Fatalf("want %d gapped bytes across both feeds, got %d", len(garbage), gapped)
+	}
+}
+
+func TestOutputStartRowBelongsToClosedFrameSet(t *testing.T) {
+	if !TypeOutputStartRow.valid() {
+		t.Fatal("output-start-row type rejected by closed frame registry")
+	}
+	var got FrameType
+	d := NewDecoder(func(ty FrameType, _, _ uint32, _ []byte) { got = ty }, func(int) { t.Fatal("known frame skipped") })
+	payload, err := EncodeOutputStartRowFrame(OutputStartRowFrame{FromRow: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Feed(EncodeFrame(TypeOutputStartRow, 0, 0, payload)); err != nil {
+		t.Fatalf("feed output-start-row frame: %v", err)
+	}
+	if got != TypeOutputStartRow {
+		t.Fatalf("decoded frame type = %d", got)
 	}
 }

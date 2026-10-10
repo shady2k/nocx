@@ -36,6 +36,8 @@ import { AssistantPermissionsSection } from './assistant-permissions-section'
 import type { PolicyClient } from './policy-client'
 import { AgentAccessSection } from './agent-access-section'
 import type { AgentAccessClient } from './agent-access-client'
+import { AgentRecordsSection } from './agent-records-section'
+import type { AgentRecordsClient } from './agent-records-client'
 import { AgentEmittingSection } from './agent-emitting-section'
 import { AgentCalibrationSection } from './agent-calibration-section'
 import { AgentRulesSection } from './agent-rules-section'
@@ -258,6 +260,8 @@ export interface SettingsComponentProps {
    *  some other state exists is how a feature ships unreachable. */
   emittingClient?: EmittingClient
   agentAccessClient?: AgentAccessClient
+  /** The live launch records shared with the wrappers and coordinator. */
+  agentRecordsClient?: AgentRecordsClient
   /** The guided calibration (nocx-etejh). Optional like every other client
    *  here: without it the page is still registered and says so. */
   calibrationClient?: CalibrationClient
@@ -735,6 +739,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
       ),
     }
 
+    const agentRecordsPage: SettingsPage = {
+      kind: 'component',
+      id: 'agents',
+      title: 'Agents',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.agentRecordsClient}
+          fallback={
+            <PageSection title="Agents">
+              Agent launch records are not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentRecordsSection client={props.agentRecordsClient!} />
+        </Show>
+      ),
+    }
+
     const emittingPage: SettingsPage = {
       kind: 'component',
       id: 'emitting',
@@ -854,6 +878,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // after it because the assistant is ours and these are the programs a
       // person brought (nocx-6jbad).
       agentAccessPage,
+      agentRecordsPage,
       emittingPage,
       rulesPage,
       calibrationPage,

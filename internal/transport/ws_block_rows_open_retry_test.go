@@ -79,7 +79,7 @@ func commandBeforeItsRow(t *testing.T) (*lifecycleTestEnv, session.ID, string, *
 // and answers the block.closed it was said with.
 func finishes(t *testing.T, e *lifecycleTestEnv, sid session.ID, attempt string, ingest func(uint64, lifecycle.Event)) blockClosedParams {
 	t.Helper()
-	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")})
+	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}, "")
 	fence := lifecycleFence(0x42)
 	ingest(3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence))
 	e.ws.BlockIntervalEnded(sid, fence, 1, []emulator.Row{aStreamRow("$ ")}, false)
@@ -97,7 +97,7 @@ func TestTheBindsOpenIsNotSwallowedByAnOpenStillInFlight(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 	}()
 	select {
 	case <-store.entered:
@@ -107,7 +107,7 @@ func TestTheBindsOpenIsNotSwallowedByAnOpenStillInFlight(t *testing.T) {
 
 	// The bind lands and asks for the open while the other is in flight.
 	close(store.bound)
-	e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 
 	// The in-flight read fails, as a read before the bind must.
 	close(release)
@@ -131,7 +131,7 @@ func TestTheBindsOpenOpensTheBlock(t *testing.T) {
 	e, sid, attempt, store, ingest := commandBeforeItsRow(t)
 
 	close(store.bound)
-	e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 
 	got := finishes(t, e, sid, attempt, ingest)
 	if got.EntryID != attempt || !got.Kept {

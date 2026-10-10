@@ -322,6 +322,47 @@ func (s *ptySession) termios() unix.Termios {
 	return *ts
 }
 
+func TestObservableTermiosEqualCanonicalizesEquivalentInputBaud(t *testing.T) {
+	want := unix.Termios{Cflag: uint32(unix.B38400)}
+	canonicalized := want
+	canonicalized.Cflag |= uint32(unix.B38400) << 16
+	if !observableTermiosEqual(want, canonicalized) {
+		t.Fatalf("equivalent input baud representations differ: want %#x got %#x", want.Cflag, canonicalized.Cflag)
+	}
+
+	changedControl := canonicalized
+	changedControl.Cflag |= uint32(unix.CSTOPB)
+	if observableTermiosEqual(want, changedControl) {
+		t.Fatal("accepted a changed control setting")
+	}
+
+	changedInputBaud := want
+	changedInputBaud.Cflag |= uint32(unix.B9600) << 16
+	if observableTermiosEqual(want, changedInputBaud) {
+		t.Fatal("accepted a changed input baud rate")
+	}
+}
+
+// observableTermiosEqual compares the settings a terminal applies, rather than
+// the raw encoding of an input baud rate. Linux permits CIBAUD to be omitted
+// when the input baud matches the output baud; GNU stty versions differ on
+// whether they preserve that redundant encoding during a save/restore cycle.
+func observableTermiosEqual(a, b unix.Termios) bool {
+	canonicalize := func(ts unix.Termios) unix.Termios {
+		cflag := ts.Cflag
+		outputBaud := cflag & uint32(unix.CBAUD)
+		inputBaud := (cflag & uint32(unix.CIBAUD)) >> 16
+		if inputBaud == 0 {
+			inputBaud = outputBaud
+		}
+		if inputBaud == outputBaud {
+			ts.Cflag &^= unix.CIBAUD
+		}
+		return ts
+	}
+	return canonicalize(a) == canonicalize(b)
+}
+
 // settleUntilReadline waits (bounded) until the shell is idle at its prompt
 // again — readline re-entered its own termios mode. The A marker fires from
 // PROMPT_COMMAND BEFORE readline preps, so an immediate capture would race
@@ -331,8 +372,7 @@ func (s *ptySession) settleUntilReadline(want unix.Termios, timeout time.Duratio
 	waittest.WaitForTimeoutDetail(s.t, "shell prompt termios", timeout,
 		func() string { return fmt.Sprintf("got %+v want %+v", s.termios(), want) },
 		func() bool {
-			ts := s.termios()
-			return ts.Iflag == want.Iflag && ts.Lflag == want.Lflag && ts.Cflag == want.Cflag
+			return observableTermiosEqual(s.termios(), want)
 		})
 }
 
@@ -559,8 +599,8 @@ func TestInBandBootstrap_RealDashIntegratesAndRestores(t *testing.T) {
 	s.waitFor("\x1b]133;A", 15*time.Second)
 	s.settleUntilReadline(before, 5*time.Second)
 	after := s.termios()
-	if before != after {
-		s.t.Errorf("termios not restored exactly (dash): before %+v after %+v", before, after)
+	if !observableTermiosEqual(before, after) {
+		s.t.Errorf("observable termios settings not restored (dash): before %+v after %+v", before, after)
 	}
 	s.assertEchoUnchanged(before, after)
 	s.assertNoPayloadLeak()

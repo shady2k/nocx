@@ -354,6 +354,32 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	if s == nil || s.sessions == nil || s.store == nil {
 		return errors.New("nocx cannot ask for agent approval")
 	}
+	executable, err := s.resolveExecutable(agent)
+	if err != nil {
+		return err
+	}
+	return s.approveExecutable(ctx, sid, agent, executable, false)
+}
+
+// ApproveResolved uses the exact executable snapshot paired with a local
+// agent-record ticket. It refuses if the file changed after resolution; an
+// approval prompt that waits on a person is revalidated again before its
+// answer is persisted.
+func (s *agentApprovalService) ApproveResolved(ctx context.Context, sid session.ID, agent string, executable agentapproval.Executable) error {
+	if s == nil || s.sessions == nil || s.store == nil {
+		return errors.New("nocx cannot ask for agent approval")
+	}
+	current, err := agentapproval.IdentityForPath(executable.Path)
+	if err != nil || current != executable {
+		return errors.New("the configured agent executable changed before approval")
+	}
+	return s.approveExecutable(ctx, sid, agent, executable, true)
+}
+
+func (s *agentApprovalService) approveExecutable(ctx context.Context, sid session.ID, agent string, executable agentapproval.Executable, revalidateAfterConsent bool) error {
+	if s == nil || s.sessions == nil || s.store == nil {
+		return errors.New("nocx cannot ask for agent approval")
+	}
 	// Not for the identity — for the provenance, and this is now the TWO
 	// provenances one fact each.
 	//
@@ -380,10 +406,6 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	// refused rather than keyed on a partial fact, because an answer that
 	// cannot name its machine is an answer for whichever machine asks next.
 	domain, err := sessionDomain(s.sessions, sid)
-	if err != nil {
-		return err
-	}
-	executable, err := s.resolveExecutable(agent)
 	if err != nil {
 		return err
 	}
@@ -438,7 +460,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 	s.asking[k] = append(waiters, settled)
 	s.mu.Unlock()
 	if !up {
-		go s.ask(executable, agent, domain)
+		go s.ask(executable, agent, domain, revalidateAfterConsent)
 	}
 	return &lifecyclepub.EnrolmentPending{
 		Reason:  fmt.Sprintf("nocx is asking whether %s may use its tools", agent),
@@ -453,7 +475,7 @@ func (s *agentApprovalService) Approve(ctx context.Context, sid session.ID, agen
 // Its own context, for the same reason. The enrolment's is finished by the
 // time anybody clicks, and cancelling the question with it would take the
 // dialog off the screen mid-read.
-func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string, domain agentapproval.Domain) {
+func (s *agentApprovalService) ask(executable agentapproval.Executable, agent string, domain agentapproval.Domain, revalidateAfterConsent bool) {
 	response, err := s.requester.RequestHost(context.Background(), transport.HostAsk{
 		Capability: transport.HostCapAgentApproval,
 		Executable: executable.Path,
@@ -473,6 +495,16 @@ func (s *agentApprovalService) ask(executable agentapproval.Executable, agent st
 	}
 	decision := agentapproval.Denied
 	if response.Approved {
+		if revalidateAfterConsent {
+			// A local record ticket is bound to the executable bytes resolved
+			// before the question. Re-read after the person answers; the shell
+			// retries that same ticket and must not authorize a replacement.
+			current, identityErr := agentapproval.IdentityForPath(executable.Path)
+			if identityErr != nil || current != executable {
+				s.settle(executable, domain, "the configured agent executable changed while you were deciding")
+				return
+			}
+		}
 		decision = agentapproval.Granted
 	}
 	if err := s.store.Record(executable, domain, s.scope, decision); err != nil {

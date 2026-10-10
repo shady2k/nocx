@@ -319,7 +319,7 @@ type factLog struct {
 	all []lifecyclepub.Fact
 }
 
-func (l *factLog) PublishLifecycle(f lifecyclepub.Fact) {
+func (l *factLog) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	l.mu.Lock()
 	l.all = append(l.all, f)
 	l.mu.Unlock()
@@ -424,7 +424,11 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 			// Nor a helper binary for the same reason: the child runs on
 			// another machine, where this one's install is not what it execs
 			// (nocx-e2bws).
-			func() string { return "" })))
+			func() string { return "" },
+			// And no agent names: this child runs on ANOTHER machine, whose
+			// shell is given the wrappers by the generation published there,
+			// never by this machine's request (nocx-t5e7d).
+			func() []string { return nil })))
 	facts := &factLog{}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
@@ -839,8 +843,15 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 			t.Logf("child attempts published: %v", h.facts.commands(h.child))
 		}
 	})
-	waittest.WaitForTimeout(t, "child domain Established via its own hello", 30*time.Second, func() bool {
-		return h.domainState(h.child) == lifecycle.DomainEstablished
+	// Kernel.Domain becomes Established inside Ingest before the publisher
+	// emits the frontend projection. Observe both sides of that boundary: a
+	// kernel read alone is not evidence the destination fact has been sent.
+	waittest.WaitForTimeout(t, "child domain Established and its destination published", 30*time.Second, func() bool {
+		if h.domainState(h.child) != lifecycle.DomainEstablished {
+			return false
+		}
+		_, published := h.facts.destinationOf(h.child)
+		return published
 	})
 
 	// The child says WHERE it is (nocx-ax79). Without this the pane shows a

@@ -66,6 +66,11 @@ type ProcessGroupSignaller interface {
 // command — host.Register refuses argv-shaped params, and this is the same
 // rule one layer in.
 type SpawnRequest struct {
+	// Agents is the enabled agent set the launched shell's wrappers are
+	// generated from (nocx-t5e7d), carried from the request that asked for the
+	// pane and never resolved here: this process must not read the app
+	// directory (see proto.SpawnParams.Agents).
+	Agents []string
 	// SessionID is minted by the helper before launch so the in-memory shell
 	// integration can identify the session without an installed script.
 	SessionID string
@@ -256,6 +261,9 @@ type Sink interface {
 	// (nocx-2v80t.3.17), on the same ordered carrier as the rows and the
 	// end markers, in the position it occurred.
 	SendClearBoundary(proto.ClearBoundaryFrame) error
+	// SendEffectFrame carries one identity-bearing non-visual runtime effect.
+	// It is separate from screen snapshots so re-sending cells cannot repeat it.
+	SendEffectFrame(proto.EffectFrame) error
 }
 
 // push. It is AD-10's own constant and the same value internal/transport uses,
@@ -275,8 +283,9 @@ const creditLimit = 64 * 1024
 // SUBSCRIBER's and outlives the connection that carried it (D2), which is why
 // `ack` is keyed by subscriber and session and never by attachment.
 type subscriber struct {
-	id  proto.SubscriberID
-	raw [16]byte
+	id                  proto.SubscriberID
+	raw                 [16]byte
+	outputStartSequence uint64
 
 	// screenCons is this subscriber's own consumer of the session runtime's
 	// screen deliveries, and screenDone closes when its drain ends. One per
@@ -295,8 +304,9 @@ type subscriber struct {
 	// it was never sent, so it sent none, so nothing was acked, so the window
 	// stayed shut. internal/transport paid for that lesson in creditFloor and
 	// it is the same lesson here.
-	sent  proto.StreamOffset
-	acked proto.StreamOffset
+	sent               proto.StreamOffset
+	acked              proto.StreamOffset
+	lastBoundaryOffset proto.StreamOffset
 
 	// lifecycleSent/lifecycleAcked are the cursor pair for the independent
 	// lifecycle window. They never share PTY offsets.
@@ -367,6 +377,11 @@ type hostSession struct {
 	// going are all inside that interval and none of them creates it or ends
 	// it (requirement 5 of nocx-ygxjv.12).
 	runtime *sessionruntime.Session
+	// scrollback is the live-history setting this helper session was given.
+	// It is separate from the emulator's bounded capture floor: at zero the
+	// runtime still captures departures, while historyPage serves no rows.
+	scrollback atomic.Uint64
+
 	// screen is the emulator the runtime directs. It is held here for its
 	// LIFETIME and not for its behaviour: every read and every write goes
 	// through runtime, and Close is this object's to call because a runtime
@@ -409,10 +424,13 @@ type hostSession struct {
 	// bridge records (nocx-2v80t.3.36), and rowStreamNext is the index one
 	// past the last batch the runtime handed over, recorded or not — where
 	// the incomplete marker says recording stopped when a marker overflows.
-	rowMu         sync.Mutex
-	rowQueue      []rowEmission
-	rowState      rowRecording
-	rowStreamNext uint64
+	rowMu               sync.Mutex
+	rowQueue            []rowEmission
+	rowState            rowRecording
+	rowStreamNext       uint64
+	outputStartRow      uint64
+	outputStartKnown    bool
+	outputStartSequence uint64
 	// rowWake wakes the pump when the queue was empty and a new emission
 	// arrived; capacity 1, because a pending wake means "the queue is
 	// non-empty" and coalesces the same way a watermark does — the pump
@@ -428,11 +446,16 @@ type hostSession struct {
 	// every emission the shutdown drain gave up on (nocx-2v80t.3.54).
 	// owedMarker is an incomplete marker no subscriber took, stated before
 	// the next delivery (rows.go, nocx-2v80t.3.38). The pump's alone.
-	owedMarker     *rowEmission
-	rowBufferBytes int64
-	rowQueuedBytes int64
-	rowsIncomplete atomic.Uint64
-	rowsDone       chan struct{}
+	owedMarker            *rowEmission
+	rowBufferBytes        int64
+	rowQueuedBytes        int64 // FIFO owner's charge in rowPool
+	rowPool               rowBytePool
+	resendWindow          []retainedRowSpan // original indexed cells kept until a proven prefix ack
+	resendReclaimed       uint64
+	rowsIncomplete        atomic.Uint64
+	rowBufferOverflows    atomic.Uint64 // ADR-0075 helper-pool exhaustion, distinct from live-tier shortfall
+	rowsLiveRetentionLost atomic.Uint64
+	rowsDone              chan struct{}
 	// rowsDrainDone, once armed by requestRowsDrain, is closed by the pump
 	// the moment its queue is next empty with nothing owed (rows.go,
 	// nocx-2v80t.3.52) — the event stop() waits on, under rowMu since it is
@@ -454,10 +477,21 @@ type hostSession struct {
 	rowSendSeq        int
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
-	writer            *proto.SubscriberID
-	writerAtt         proto.AttachmentID
-	epoch             proto.LeaseEpoch
-	exit              *proto.SessionExitStatus
+	// resendDue is the row pump's flag (rows.go): an emission reached zero
+	// subscribers, a reader was replaced before its detach arrived, or a
+	// reader attached while rows remained unconfirmed; in each case the next
+	// reader owes a read-back from the retained window
+	// (nocx-zg3k3.5.3). Guarded by rowMu because attach/detach arm it too.
+	resendDue bool
+	// resendEnds is the row pump's list of the interval ends its drops
+	// took (rows.go, nocx-zg3k3.5.3): the boundaries the coordinator's
+	// return is handed again. Guarded by rowMu — the pump writes it, and
+	// a test waits on it as the observable that the drop was recorded.
+	resendEnds []droppedEnd
+	writer     *proto.SubscriberID
+	writerAtt  proto.AttachmentID
+	epoch      proto.LeaseEpoch
+	exit       *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -668,6 +702,25 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		return proto.AttachResult{}, ErrNoSuchSession
 	}
 
+	// A newly bound reader needs the retained suffix when rows departed before
+	// it attached, and the position mark even when that suffix is empty. Set
+	// the obligation before publishing the subscriber under this mutex:
+	// deliverRowEmission takes the same lock while checking resendDue, so a
+	// queued live emission cannot overtake the replay in the gap between the
+	// pump's due check and its fan-out.
+	departedRows := uint64(0)
+	if s.runtime != nil {
+		departedRows = s.runtime.DepartedRowCount()
+	}
+	s.rowMu.Lock()
+	outputStartSequence := s.outputStartSequence
+	outputMarkKnown := s.outputStartKnown
+	needsReplay := s.runtime != nil && s.rowsConfirmed < departedRows
+	if needsReplay || outputMarkKnown {
+		s.resendDue = true
+	}
+	s.rowMu.Unlock()
+
 	// One pump per subscriber: a second attach by the same subscriber
 	// REPLACES the first, because a subscriber is one reader and two pumps on
 	// one cursor would interleave frames into a stream that must stay ordered.
@@ -678,6 +731,14 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	if previous, ok := s.subs[p.Subscriber]; ok {
 		old = previous
 		oldWriter = s.writer != nil && *s.writer == p.Subscriber && s.writerAtt == previous.attachment
+		// A replacement can win the race with the old connection's
+		// asynchronous detach. In that ordering detach will later find no
+		// attachment to remove, so it cannot arm the resend. Replacing a
+		// reader is itself proof that its last unconfirmed rows may need
+		// replay; rowsConfirmed keeps already-stored output idempotent.
+		s.rowMu.Lock()
+		s.resendDue = true
+		s.rowMu.Unlock()
 		delete(s.subs, p.Subscriber)
 		delete(s.attachments, previous.attachment)
 		if oldWriter {
@@ -688,7 +749,8 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 
 	sub := &subscriber{
 		id: p.Subscriber, raw: raw,
-		sent: resume.From, acked: resume.From,
+		outputStartSequence: outputStartSequence,
+		sent:                resume.From, acked: resume.From,
 		lifecycleSent: lifecycleResume.From, lifecycleAcked: lifecycleResume.From,
 		wake: newGate(), lifecycleWake: newGate(),
 		stop: stop, done: make(chan struct{}), lifecycleDone: make(chan struct{}),
@@ -761,10 +823,10 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		dataChanged := s.win.changed()
 		acked := sub.wake.wait()
 		sub.cursorMu.Lock()
-		sent, confirmed := sub.sent, sub.acked
+		sent, confirmed, lastBoundary := sub.sent, sub.acked, sub.lastBoundaryOffset
 		sub.cursorMu.Unlock()
 
-		data, resume := s.win.read(sent)
+		data, resume, boundary := s.win.readOrdered(sent, lastBoundary)
 		if resume.Reset {
 			// The live reset: stated, never only logged. The reader clears and
 			// resumes at the base, and its credit floor moves with it — a
@@ -781,6 +843,21 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 			sub.cursorMu.Lock()
 			sub.sent = resume.From
 			sub.acked = resume.From
+			sub.cursorMu.Unlock()
+			continue
+		}
+
+		if boundary != nil {
+			if err := sub.sink.SendEffectFrame(proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(boundary.At.Generation), EffectID: uint64(boundary.ID),
+				StreamOffset: boundary.StreamOffset, Kind: proto.EffectPromptBoundary,
+			}); err != nil {
+				nocxlog.From(ctx).Warn("ordered prompt boundary not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(boundary.ID), "err", err)
+				return
+			}
+			sub.cursorMu.Lock()
+			sub.lastBoundaryOffset = proto.StreamOffset(boundary.StreamOffset)
 			sub.cursorMu.Unlock()
 			continue
 		}
@@ -845,6 +922,7 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 	// one the connection bound, with module and trace already on it.
 	log := nocxlog.From(ctx)
 	defer close(sub.screenDone)
+	seenEffects := make(map[[2]uint64]struct{})
 	for {
 		select {
 		case <-cons.Ready():
@@ -871,6 +949,56 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 				}
 			}
 		}
+		for _, effect := range cons.Effects() {
+			// An ordered prompt boundary is carried by the output-window pump
+			// at its byte offset, not by this independently scheduled screen
+			// consumer. Re-emitting it here could let it overtake those bytes.
+			if effect.Kind == sessionruntime.EffectPromptBoundary && effect.Ordered {
+				continue
+			}
+			identity := [2]uint64{uint64(effect.At.Generation), uint64(effect.ID)}
+			if _, seen := seenEffects[identity]; seen {
+				continue
+			}
+			seenEffects[identity] = struct{}{}
+			kind, ok := protoEffectKind(effect.Kind)
+			if !ok {
+				log.Warn("session effect refused: unknown runtime effect kind", "session", s.id.Session, "kind", effect.Kind)
+				continue
+			}
+			frame := proto.EffectFrame{
+				Session: s.raw, Subscriber: sub.raw,
+				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
+				StreamOffset: effect.StreamOffset,
+				Kind:         kind, Title: effect.Title, Body: effect.Body,
+			}
+			if err := sub.sink.SendEffectFrame(frame); err != nil {
+				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)
+				return
+			}
+		}
+	}
+}
+
+// protoEffectKind is the single explicit translation from the runtime's
+// closed vocabulary to the helper carrier's wire values. Unknown runtime
+// values are refused rather than narrowed into an unrelated wire kind.
+func protoEffectKind(kind sessionruntime.EffectKind) (proto.EffectKind, bool) {
+	switch kind {
+	case sessionruntime.EffectBell:
+		return proto.EffectBell, true
+	case sessionruntime.EffectNotification:
+		return proto.EffectNotification, true
+	case sessionruntime.EffectClipboard:
+		return proto.EffectClipboard, true
+	case sessionruntime.EffectTitle:
+		return proto.EffectTitle, true
+	case sessionruntime.EffectCwdReport:
+		return proto.EffectCwdReport, true
+	case sessionruntime.EffectPromptBoundary:
+		return proto.EffectPromptBoundary, true
+	default:
+		return 0, false
 	}
 }
 
@@ -1031,6 +1159,17 @@ func (s *hostSession) detach(sink Sink, att proto.AttachmentID) (bool, bool) {
 	}
 	sub := s.subs[entry.subscriber]
 	delete(s.subs, entry.subscriber)
+	// The departing reader may have taken rows above the confirmed mark —
+	// it went away without confirming, exactly what a coordinator's death
+	// does to its last in-flight window. The mark is the only dedup line
+	// there is, so the next attach owes a read-back from it: arm the
+	// resend unconditionally (an empty span reads back nothing). Set
+	// under rowMu because the pump owns the flag everywhere else, and
+	// wake the pump so a quiet queue still reaches the check.
+	s.rowMu.Lock()
+	s.resendDue = true
+	s.rowMu.Unlock()
+	s.wakeRows()
 	s.mu.Unlock()
 
 	s.stopSubscriber(sub)

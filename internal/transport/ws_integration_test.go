@@ -603,3 +603,27 @@ func TestIntegration_TheUnderlyingTransportIsNotTheChannelGoing(t *testing.T) {
 		}
 	}
 }
+
+// A leg halted because the store refused a lifecycle frame on every attempt
+// (ADR-0077) is a loss the pane shows, not a line only in the log (AGENTS.md:
+// a soft degrade is visible in the product). After establishment it reads as
+// any other lost channel; before it, as nocx's own channel being unavailable
+// — the shell is fine, what failed is this coordinator's side.
+func TestIntegration_AStoreRefusedLegIsAVisibleLoss(t *testing.T) {
+	e := newIntegrationEnv(t)
+	if got := e.establish(t); got.Status != IntegrationIntegrated {
+		t.Fatalf("status = %q, want integrated before the loss", got.Status)
+	}
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseStoreRefused)
+	got := readIntegration(t, e.conn, e.sid)
+	if got.Status != IntegrationLost || got.Reason != string(ssh.ReasonChannelLost) {
+		t.Errorf("status = %q reason = %q, want lost / channel-lost", got.Status, got.Reason)
+	}
+
+	before := newIntegrationEnv(t)
+	before.ws.NoteIntegrationLoss(before.lane, LossCauseStoreRefused)
+	got = awaitIntegration(t, before.conn, before.sid, IntegrationConventional)
+	if got.Reason != string(ssh.ReasonChannelUnavailable) {
+		t.Errorf("before establishment: reason = %q, want channel-unavailable", got.Reason)
+	}
+}

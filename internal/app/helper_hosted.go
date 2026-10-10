@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -71,6 +72,7 @@ type hostedSpawn struct {
 	// built without a transport — and registers no observer rather than
 	// dropping frames nobody asked for.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half
 	// (helper_block_rows.go): the rows that leave the screen and each
 	// command's end become the command's block in history. Nil wires nothing.
@@ -83,7 +85,13 @@ type hostedSpawn struct {
 	// PTY. Nil wires nothing, the same shape blockRows and publishScreen
 	// already have.
 	environmentEntries *environmentEntryRegistry
-	log                *slog.Logger
+	// cursors keeps the pane's lifecycle cursor (lifecycle_cursor.go,
+	// ADR-0077) with its binding, for the coordinator that takes the session
+	// back. Nil keeps nothing.
+	cursors lifecycleCursorStore
+	// stopping is the coordinator's stopping signal. Nil never stops.
+	stopping *atomic.Bool
+	log      *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -102,6 +110,14 @@ type hostedSpawnResult struct {
 	LifecycleTransport lifecycle.TransportID
 	StartLifecycle     func()
 	AbortLifecycle     func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss
+	// anywhere: the kernel is not told, the open attempts stay, and the
+	// store's open entry and open block survive for whichever coordinator
+	// re-adopts (ADR-0076). AbortLifecycle above is the failure rollback;
+	// this is the departure.
+	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
@@ -168,6 +184,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// paneLife is that delivery context: the pane's own lifetime, which the
 	// lane's registration below is tied to as well (nocx-2v80t.3.32).
 	var paneLife context.Context
+	// cursor is the leg's applied cursor (ADR-0077): built with the adapter
+	// it is an option of, bound to the session once the helper names it.
+	var cursor *lifecycleCursor
 	if h.lifecycle != nil {
 		// THE DELIVERY CONTEXT IS THE HOSTED SESSION'S LIFETIME, not the open
 		// request's. The request context is cancelled the moment the
@@ -187,7 +206,11 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()
-		opts := []lifecyclechannel.Option{lifecyclechannel.WithLossReporter(h.loss)}
+		cursor = newLifecycleCursor(ctx, h.cursors, h.stopping)
+		opts := []lifecyclechannel.Option{
+			lifecyclechannel.WithLossReporter(h.loss),
+			lifecyclechannel.WithFrameScope(cursor.applyFrame),
+		}
 		if h.helloTimeout > 0 {
 			opts = append(opts, lifecyclechannel.WithHelloTimeout(h.helloTimeout))
 		}
@@ -223,6 +246,18 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			stopDownlink()
 		}
 	}
+	// The detach mirrors the rollback but ends the adapter with Detach, not
+	// Close: the leg's adapter learns the handover from this side instead of
+	// reading its own carrier's EOF as the loss it is not.
+	detachLifecycleNow := func() {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Detach()
+			_ = lifecyclePeer.Close()
+		}
+		if stopDownlink != nil {
+			stopDownlink()
+		}
+	}
 
 	entry, err := spawn(ctx, life)
 	if err != nil {
@@ -233,6 +268,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		downlink.Bind(entry.HostSessionID)
 	}
 
+	// The rows plane is held from the first frame, for the reason the
+	// re-adopt's is (heldRows): the stream is bound below.
+	holdOpt, held := holdRowsBeforeAttach(h.blockRows)
 	attached, err := h.client.Attach(ctx, proto.AttachParams{
 		Subscriber: subscriber,
 		Session: proto.HostSessionID{
@@ -241,11 +279,14 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		},
 		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
-	})
+	}, holdOpt)
 	if err != nil {
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
+	}
+	if cursor != nil {
+		cursor.bind(entry.HostSessionID.Session, attached.LifecycleIngested())
 	}
 
 	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
@@ -282,11 +323,15 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 				"session", string(screenSid), "reason", reason)
 		})
 	}
+	if h.publishEffect != nil {
+		effectSid := session.ID(entry.HostSessionID.Session)
+		attached.OnEffect(func(effect proto.EffectFrame) { h.publishEffect(effectSid, effect) })
+	}
 
 	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
 	// adopt, like the screen drain, so no row the runtime streams from its
 	// first output is dropped at a door nobody opened yet.
-	stopBlockRows := bindBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached)
+	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
 
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {
@@ -296,7 +341,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
-	bindDownlinkToSession(sess, stopBlockRows)
+	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
 	if stopDownlink != nil {
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
 		// the delivery context ends when it does.
@@ -319,11 +364,13 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		out.StartLifecycle = func() {
 			startOnce.Do(func() {
 				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
-					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle())
+					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle(), cursor, attached)
 			})
 		}
 		var abortOnce sync.Once
 		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
+		var detachOnce sync.Once
+		out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
 	}
 	return out, nil
 }
@@ -334,9 +381,40 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 // hangs off the existing edge rather than owning a lifetime of its own — two
 // owners of one lifetime being the defect whichever wins. One goroutine per
 // hosted pane, exactly like that monitor; it exits at the session's end.
+// bindDownlinkToSession ends a completion downlink's delivery context when
+// the hosted session's own lifetime ends. sess.Done() is the signal the
+// transport's teardown owner already waits on (monitorExit), so the downlink
+// hangs off the existing edge rather than owning a lifetime of its own — two
+// owners of one lifetime being the defect whichever wins. One goroutine per
+// hosted pane, exactly like that monitor; it exits at the session's end.
 func bindDownlinkToSession(sess session.Session, stop context.CancelFunc) {
 	go func() {
 		<-sess.Done()
+		stop()
+	}()
+}
+
+// bindBlockEndToSession ends a hosted session's block-rows streaming when
+// the session's own lifetime ends. sess.Done() is the helper-reported end
+// of the shell (the same edge monitorExit waits on), so the block the
+// helper still holds open settles HERE — the one detach that seals
+// (ADR-0076) — and the coordinator-side teardown afterwards changes no
+// block. One goroutine per hosted pane, exactly like monitorExit; it exits
+// at the session's end.
+func bindBlockEndToSession(sess session.Session, attached *helperclient.AttachedSession, sink blockRowsSink, sid session.ID, stop context.CancelFunc) {
+	go func() {
+		<-sess.Done()
+		// sess.Done fires on coordinator wire loss too; only the HELPER'S
+		// OWN exit report (recordExit, the status monitorExit reads) is
+		// the session's end as the helper states it (ADR-0076). A wire
+		// loss seals nothing: the open block and its cursor survive for
+		// whichever coordinator re-adopts the session. No attached session
+		// object means no helper-reported exit either.
+		if attached != nil && sink != nil {
+			if _, reported := attached.WaitErr(); reported {
+				sink.HelperSessionEnded(sid)
+			}
+		}
 		stop()
 	}()
 }

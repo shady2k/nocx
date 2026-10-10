@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
@@ -31,15 +30,22 @@ type Picker interface {
 	SaveFile(context.Context, string) (string, error)
 }
 
+// Destination owns the selected directory and its atomic sink.
+// Close releases it only after Put has returned.
+type Destination interface {
+	Put(context.Context, int64, io.Reader) (transfer.Outcome, error)
+	Close() error
+}
+
 // Config contains the receiver's platform and transport dependencies.
 type Config struct {
-	Picker  Picker
-	Sink    transfer.Sink
-	Address func() (string, error)
-	Client  *http.Client
-	Logger  *slog.Logger
-	Now     func() time.Time
-	Random  io.Reader
+	Picker             Picker
+	PrepareDestination func(string) (Destination, error)
+	Address            func() (string, error)
+	Client             *http.Client
+	Logger             *slog.Logger
+	Now                func() time.Time
+	Random             io.Reader
 }
 
 // Result is the only information returned from a native save operation.
@@ -48,34 +54,36 @@ type Result struct {
 }
 
 type entry struct {
-	target    transfer.Upload
-	state     string
-	expires   time.Time
-	cancel    context.CancelFunc
-	body      io.Closer
-	discarded bool
+	destination Destination
+	state       string
+	expires     time.Time
+	cancel      context.CancelFunc
+	body        io.Closer
+	discarded   bool
 }
 
 // Service owns one-shot, in-memory save destinations and their active streams.
 type Service struct {
-	picker Picker
-	sink   transfer.Sink
-	addr   func() (string, error)
-	client *http.Client
-	logger *slog.Logger
-	now    func() time.Time
-	random io.Reader
+	picker             Picker
+	prepareDestination func(string) (Destination, error)
+	addr               func() (string, error)
+	client             *http.Client
+	logger             *slog.Logger
+	now                func() time.Time
+	random             io.Reader
 
-	randomMu sync.Mutex
-	mu       sync.Mutex
-	closed   bool
-	entries  map[string]*entry
+	randomMu  sync.Mutex
+	mu        sync.Mutex
+	closed    bool
+	entries   map[string]*entry
+	cleanup   sync.WaitGroup
+	closeDone chan struct{}
 }
 
 // New constructs a receiver. Clock and randomness are mandatory so expiry
 // and capability creation cannot silently become nondeterministic.
 func New(cfg Config) (*Service, error) {
-	if cfg.Picker == nil || cfg.Sink == nil || cfg.Address == nil || cfg.Now == nil || cfg.Random == nil {
+	if cfg.Picker == nil || cfg.PrepareDestination == nil || cfg.Address == nil || cfg.Now == nil || cfg.Random == nil {
 		return nil, errors.New("download save service is not configured")
 	}
 	client := cfg.Client
@@ -114,8 +122,9 @@ func New(cfg Config) (*Service, error) {
 	copyClient.Timeout = 0
 	copyClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &Service{
-		picker: cfg.Picker, sink: cfg.Sink, addr: cfg.Address, client: &copyClient,
+		picker: cfg.Picker, prepareDestination: cfg.PrepareDestination, addr: cfg.Address, client: &copyClient,
 		logger: cfg.Logger, now: cfg.Now, random: cfg.Random, entries: make(map[string]*entry),
+		closeDone: make(chan struct{}),
 	}, nil
 }
 
@@ -125,30 +134,36 @@ func (s *Service) Prepare(ctx context.Context, name string) (string, error) {
 		return "", errors.New("download save is unavailable")
 	}
 	s.mu.Lock()
-	s.sweepLocked(s.now())
+	expired := s.sweepLocked(s.now())
+	defer func() { s.closeDestinations(expired) }()
 	if s.closed || len(s.entries) >= maxHandles {
 		s.mu.Unlock()
 		return "", errors.New("download save is unavailable")
 	}
-	// Reserve a slot across the non-cooperative platform prompt.
-	reservation := s.newID()
-	if reservation == "" {
+	// Keep the slot reserved through both the prompt and destination preparation.
+	handle := s.newID()
+	if handle == "" {
 		s.mu.Unlock()
 		return "", errors.New("download save is unavailable")
 	}
 	promptCtx, cancelPrompt := context.WithCancel(ctx)
-	s.entries[reservation] = &entry{state: "preparing", cancel: cancelPrompt}
+	e := &entry{state: "preparing", cancel: cancelPrompt}
+	s.entries[handle] = e
 	s.mu.Unlock()
+	s.closeDestinations(expired)
+	expired = nil
+	defer func() {
+		cancelPrompt()
+		s.mu.Lock()
+		if s.entries[handle] == e && e.state == "preparing" {
+			delete(s.entries, handle)
+		}
+		s.mu.Unlock()
+	}()
 
 	path, err := s.picker.SaveFile(promptCtx, name)
 	promptReturned := s.now()
-	promptErr := promptCtx.Err()
-	cancelPrompt()
-	s.mu.Lock()
-	delete(s.entries, reservation)
-	closed := s.closed
-	s.mu.Unlock()
-	if promptErr != nil || ctx.Err() != nil || closed {
+	if promptCtx.Err() != nil || ctx.Err() != nil {
 		return "", nil
 	}
 	if err != nil {
@@ -157,30 +172,47 @@ func (s *Service) Prepare(ctx context.Context, name string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	target, err := local.DownloadTarget(path, 0)
-	if err != nil {
-		return "", errors.New("download destination is invalid")
-	}
-	handle := s.newID()
-	if handle == "" {
-		return "", errors.New("download save is unavailable")
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sweepLocked(s.now())
-	if s.closed || ctx.Err() != nil {
+	if s.closed || e.discarded || promptCtx.Err() != nil {
+		s.mu.Unlock()
 		return "", nil
 	}
-	if len(s.entries) >= maxHandles {
-		return "", errors.New("download save is unavailable")
+	s.cleanup.Add(1)
+	s.mu.Unlock()
+	defer s.cleanup.Done()
+	destination, err := s.prepareDestination(path)
+	if err != nil || destination == nil {
+		return "", errors.New("download destination could not be prepared")
 	}
-	s.entries[handle] = &entry{target: target, state: "prepared", expires: promptReturned.Add(handleTTL)}
+	published := false
+	defer func() {
+		if !published {
+			_ = destination.Close()
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || ctx.Err() != nil || e.discarded {
+		return "", nil
+	}
+	e.destination = destination
+	e.state = "prepared"
+	e.expires = promptReturned.Add(handleTTL)
+	e.cancel = nil
+	published = true
 	return handle, nil
 }
 
 // Save consumes a prepared destination, streams the ticket directly into the
 // atomic local sink, and confirms saved only after the sink returns success.
 func (s *Service) Save(parent context.Context, handle, ticket string, size int64) (result Result) {
+	active := false
+	// Registered first so shutdown joins all cleanup and the final log.
+	defer func() {
+		if active {
+			s.cleanup.Done()
+		}
+	}()
 	defer func() {
 		if s.logger != nil {
 			s.logger.Debug("native download save finished", "outcome", result.Outcome)
@@ -190,30 +222,43 @@ func (s *Service) Save(parent context.Context, handle, ticket string, size int64
 		return Result{Outcome: "source-failed"}
 	}
 	s.mu.Lock()
-	s.sweepLocked(s.now())
+	expired := s.sweepLocked(s.now())
+	defer func() { s.closeDestinations(expired) }()
 	e := s.entries[handle]
+	if e != nil && e.state == "cancelled" {
+		delete(s.entries, handle)
+		s.mu.Unlock()
+		return Result{Outcome: "cancelled"}
+	}
 	if s.closed || e == nil || e.state != "prepared" {
 		s.mu.Unlock()
 		return Result{Outcome: "source-failed"}
 	}
 	e.state = "running"
-	if parent == nil || !ticketPattern.MatchString(ticket) || size < 0 {
-		delete(s.entries, handle)
-		s.mu.Unlock()
-		return Result{Outcome: "source-failed"}
-	}
-	e.target.Size = size
-	ctx, rawCancel := context.WithCancel(parent)
-	var cancelOnce sync.Once
-	cancel := func() { cancelOnce.Do(rawCancel) }
-	e.cancel = cancel
-	s.mu.Unlock()
+	s.cleanup.Add(1)
+	active = true
+	destination := e.destination
+	var cancel context.CancelFunc
 	defer func() {
-		cancel()
+		if cancel != nil {
+			cancel()
+		}
+		_ = destination.Close()
 		s.mu.Lock()
 		delete(s.entries, handle)
 		s.mu.Unlock()
 	}()
+	if parent == nil || !ticketPattern.MatchString(ticket) || size < 0 {
+		s.mu.Unlock()
+		return Result{Outcome: "source-failed"}
+	}
+	ctx, rawCancel := context.WithCancel(parent)
+	var cancelOnce sync.Once
+	cancel = func() { cancelOnce.Do(rawCancel) }
+	e.cancel = cancel
+	s.mu.Unlock()
+	s.closeDestinations(expired)
+	expired = nil
 
 	address, err := s.addr()
 	if err != nil {
@@ -252,7 +297,7 @@ func (s *Service) Save(parent context.Context, handle, ticket string, size int64
 		return Result{Outcome: "source-failed"}
 	}
 	reader := &statusReader{body: body, trailer: resp.Trailer}
-	if _, err := s.sink.Put(ctx, e.target, reader, nil); err != nil {
+	if _, err := destination.Put(ctx, size, reader); err != nil {
 		var writeErr *transfer.WriteError
 		if errors.As(err, &writeErr) {
 			return Result{Outcome: "destination-failed"}
@@ -274,24 +319,26 @@ func (s *Service) Save(parent context.Context, handle, ticket string, size int64
 	return Result{Outcome: "saved"}
 }
 
-// Discard removes a prepared capability or interrupts an active save.
+// Discard releases a prepared destination or interrupts an active save.
 func (s *Service) Discard(handle string) {
 	if !validID(handle) {
 		return
 	}
 	s.mu.Lock()
 	e := s.entries[handle]
-	if e == nil {
-		s.mu.Unlock()
-		return
-	}
-	if e.discarded {
+	if e == nil || e.discarded {
 		s.mu.Unlock()
 		return
 	}
 	e.discarded = true
-	if e.state == "prepared" || e.state == "preparing" {
-		delete(s.entries, handle)
+	var destination Destination
+	if e.state == "prepared" {
+		// Retain the bounded, expiring cancellation fact for a racing Save.
+		e.state = "cancelled"
+		destination, e.destination = e.destination, nil
+	}
+	if destination != nil {
+		s.cleanup.Add(1)
 	}
 	cancel, body := e.cancel, e.body
 	e.cancel, e.body = nil, nil
@@ -302,15 +349,26 @@ func (s *Service) Discard(handle string) {
 	if body != nil {
 		_ = body.Close()
 	}
+	if destination != nil {
+		_ = destination.Close()
+		s.cleanup.Done()
+	}
 }
 
-// Close cancels active operations and removes every outstanding capability.
+// Close interrupts streams and joins their cleanup, but never waits for an OS prompt.
 func (s *Service) Close() {
 	type pending struct {
-		cancel context.CancelFunc
-		body   io.Closer
+		cancel      context.CancelFunc
+		body        io.Closer
+		destination Destination
 	}
 	s.mu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.mu.Unlock()
+		<-done
+		return
+	}
 	s.closed = true
 	active := make([]pending, 0, len(s.entries))
 	for _, e := range s.entries {
@@ -318,10 +376,14 @@ func (s *Service) Close() {
 			continue
 		}
 		e.discarded = true
-		active = append(active, pending{cancel: e.cancel, body: e.body})
+		p := pending{cancel: e.cancel, body: e.body}
+		if e.state == "prepared" {
+			p.destination, e.destination = e.destination, nil
+		}
+		active = append(active, p)
 		e.cancel, e.body = nil, nil
 	}
-	s.entries = make(map[string]*entry)
+	clear(s.entries)
 	s.mu.Unlock()
 	for _, e := range active {
 		if e.cancel != nil {
@@ -330,14 +392,34 @@ func (s *Service) Close() {
 		if e.body != nil {
 			_ = e.body.Close()
 		}
+		if e.destination != nil {
+			_ = e.destination.Close()
+		}
 	}
+	// Adds and the closed check share mu, so no work can start during Wait.
+	// Also join destination releases already removed from entries.
+	s.cleanup.Wait()
+	close(s.closeDone)
 }
 
-func (s *Service) sweepLocked(now time.Time) {
+func (s *Service) sweepLocked(now time.Time) []Destination {
+	var expired []Destination
 	for id, e := range s.entries {
-		if e.state == "prepared" && !now.Before(e.expires) {
+		if (e.state == "prepared" || e.state == "cancelled") && !now.Before(e.expires) {
 			delete(s.entries, id)
+			if e.destination != nil {
+				expired = append(expired, e.destination)
+				s.cleanup.Add(1)
+			}
 		}
+	}
+	return expired
+}
+
+func (s *Service) closeDestinations(destinations []Destination) {
+	for _, destination := range destinations {
+		_ = destination.Close()
+		s.cleanup.Done()
 	}
 }
 

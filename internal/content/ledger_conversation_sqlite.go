@@ -72,7 +72,7 @@ func (s *sqliteContent) priorTurns(ctx context.Context, paneID, beforeEntryID st
 	// accepted it.
 	var seq int64
 
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		`SELECT ingest_seq FROM entries WHERE id = ?`, beforeEntryID).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("content: prior turns before %s: %w", beforeEntryID, ErrNoSuchEntry)
@@ -87,7 +87,7 @@ func (s *sqliteContent) priorTurns(ctx context.Context, paneID, beforeEntryID st
 	// with no lane. Asking for the run rather than matching on the frame's
 	// intent string means the two are told apart by the thing that actually
 	// differs, not by a literal two packages would both have to hold.
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.intent
+	rows, err := s.conn(ctx).QueryContext(ctx, `SELECT e.id, e.intent
 		 FROM entries e
 		 WHERE e.pane_id = ? AND e.kind = 'ask' AND e.ingest_seq < ?
 		   AND EXISTS (SELECT 1 FROM executions x
@@ -263,7 +263,7 @@ func formatToolLine(call string, term TerminationReason, availability toolResult
 func (s *sqliteContent) turnProse(ctx context.Context, turnID string) (TurnProse, error) {
 	var p TurnProse
 	var state sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		`SELECT id, attempt, state FROM executions
 		  WHERE entry_id = ? AND lane = ?
 		  ORDER BY attempt DESC, id DESC LIMIT 1`, turnID, agentLane).
@@ -281,7 +281,7 @@ func (s *sqliteContent) turnProse(ctx context.Context, turnID string) (TurnProse
 	}
 
 	var runs int
-	if err = s.db.QueryRowContext(ctx,
+	if err = s.conn(ctx).QueryRowContext(ctx,
 		`SELECT count(*) FROM executions WHERE entry_id = ? AND lane = ?`,
 		turnID, agentLane).Scan(&runs); err != nil {
 		return TurnProse{}, err
@@ -296,7 +296,7 @@ func (s *sqliteContent) turnProse(ctx context.Context, turnID string) (TurnProse
 		` FROM entries c JOIN artifacts a ON a.entry_id = c.id
 		   WHERE c.parent_id = ? AND c.kind = 'text'
 		   ORDER BY c.pos, a.id`
-	rows, err := s.db.QueryContext(ctx, children, turnID)
+	rows, err := s.conn(ctx).QueryContext(ctx, children, turnID)
 	if err != nil {
 		return TurnProse{}, err
 	}
@@ -344,7 +344,7 @@ func (s *sqliteContent) turnProse(ctx context.Context, turnID string) (TurnProse
 // FrameText does one level up, and it stays here because prose is read by the
 // block and never by the execution — there is no attempt to reach through.
 func (s *sqliteContent) artifactText(ctx context.Context, artifactID string) (string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn(ctx).QueryContext(ctx,
 		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, artifactID)
 	if err != nil {
 		return "", err

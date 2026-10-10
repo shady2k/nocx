@@ -135,25 +135,26 @@ func (s *typedAxisStack) drain() {
 // this helper is what makes that assertion non-vacuous.
 func (s *typedAxisStack) integratedParent(t *testing.T) {
 	t.Helper()
-	// The subscriber is installed by the open handler's tail, which outlives
-	// the response it answered, so the first emit can be dropped for having
-	// nobody to reach. Re-registering resets the axis to `starting`, which
-	// makes the next published fact a CHANGE again — so this retries the
-	// state transition and waits on the frame, never on a duration.
-	deadline := time.Now().Add(wantWithinTypedAxis)
-	for time.Now().Before(deadline) {
-		s.ws.RegisterIntegration(session.ID(s.sid), "/bin/bash", transport.IntegrationStarting, ssh.ReasonNone)
-		s.ws.PublishLifecycle(lifecyclepub.Fact{
-			Lane:      string(typedAxisLane),
-			Domain:    "dom-typed-axis",
-			Epoch:     1,
-			Lifecycle: lifecyclepub.LifecyclePromptReady,
-		})
-		if got, ok := s.tryReadIntegration(200 * time.Millisecond); ok && got.Status == "integrated" {
-			return
-		}
+	// This is a precondition, not the behavior under test. Establish it once
+	// and read the server's state instead of retrying the same lifecycle fact
+	// on a timer; repeated publishes can leave stale integration frames queued
+	// ahead of the typed outcome this test observes on the wire.
+	s.ws.RegisterIntegration(session.ID(s.sid), "/bin/bash", transport.IntegrationStarting, ssh.ReasonNone)
+	s.ws.PublishLifecycle(context.Background(), lifecyclepub.Fact{
+		Lane:      string(typedAxisLane),
+		Domain:    "dom-typed-axis",
+		Epoch:     1,
+		Lifecycle: lifecyclepub.LifecyclePromptReady,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), wantWithinTypedAxis)
+	defer cancel()
+	got, err := s.ws.AwaitIntegration(ctx, session.ID(s.sid))
+	if err != nil {
+		t.Fatalf("the parent session did not reach integrated state: %v", err)
 	}
-	t.Fatal("the parent session never reported `integrated`; the precondition this test is about was never reached")
+	if !got.Registered || got.Status != transport.IntegrationIntegrated {
+		t.Fatalf("the parent session state is registered=%t status=%q reason=%q, want integrated", got.Registered, got.Status, got.Reason)
+	}
 }
 
 const wantWithinTypedAxis = 30 * time.Second
@@ -166,15 +167,6 @@ type integrationFrame struct {
 	Status    string `json:"status"`
 	Reason    string `json:"reason"`
 	Shell     string `json:"shell"`
-}
-
-func (s *typedAxisStack) tryReadIntegration(within time.Duration) (integrationFrame, bool) {
-	select {
-	case f, ok := <-s.frames:
-		return f, ok
-	case <-time.After(within):
-		return integrationFrame{}, false
-	}
 }
 
 // awaitStatus waits for the axis to REACH a status. A re-send of the status

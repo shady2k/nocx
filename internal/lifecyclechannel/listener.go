@@ -21,6 +21,7 @@ package lifecyclechannel
 // deliver an accepted event or receive an outbound envelope.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -384,7 +385,9 @@ func (l *Listener) serveCandidate(c net.Conn) {
 				l.mu.Lock()
 				l.claim[env.Domain] = c
 				l.mu.Unlock()
-				ierr := l.kernel.Ingest(l.id, env)
+				// The listener keeps no lifecycle cursor, so its frames
+				// are applied under no store frame (ADR-0077).
+				ierr := l.kernel.Ingest(context.Background(), l.id, env)
 				l.mu.Lock()
 				if ierr != nil && l.claim[env.Domain] == c {
 					delete(l.claim, env.Domain)
@@ -398,7 +401,7 @@ func (l *Listener) serveCandidate(c net.Conn) {
 				l.fulfillExpectation(env.Domain)
 				continue // the accept comes through Send once acknowledged
 			}
-			if ierr := l.kernel.Ingest(l.id, env); ierr != nil {
+			if ierr := l.kernel.Ingest(context.Background(), l.id, env); ierr != nil {
 				l.log.Debug("lifecycle listener envelope rejected",
 					"domain", env.Domain, "kind", env.Event.Kind, "error", ierr)
 				continue

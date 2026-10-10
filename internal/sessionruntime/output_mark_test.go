@@ -17,8 +17,8 @@ import (
 //
 // Every test drives the real emulator directly through Session.Ingest, the
 // way the shell's own bytes would arrive, and reads back what actually
-// streamed (recordingRowStream) or what a sealed record's own closing
-// screen holds — never what the code was written to do.
+// streamed and what the interval's end marker carries (recordingRowStream)
+// — never what the code was written to do.
 
 // collectStreamedText gathers every row's text ever handed to OutputRows,
 // in the order it streamed.
@@ -79,13 +79,14 @@ func TestTheFirstIntervalsWrappedEchoIsNotStoredAsOutput(t *testing.T) {
 	if containsText(streamed, echoRow0) || containsText(streamed, echoRow1) {
 		t.Fatalf("the wrapped echo (%q / %q) streamed as output: %v", echoRow0, echoRow1, streamed)
 	}
-	rec, ok := s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("the interval sealed no record")
-	}
-	for _, row := range rec.Closing.Lines {
-		if text := obsRowText(row); text == echoRow0 || text == echoRow1 {
-			t.Fatalf("the closing screen holds the echo (%q): it was never suppressed", text)
+	for _, e := range rs.snapshot() {
+		if e.kind != "end" || e.nonce != nonce {
+			continue
+		}
+		for _, row := range e.closing {
+			if text := streamRowText(row); text == echoRow0 || text == echoRow1 {
+				t.Fatalf("the end marker's closing rows hold the echo (%q): it was never suppressed", text)
+			}
 		}
 	}
 	if !containsText(streamed, "L000000") {
@@ -123,15 +124,16 @@ func TestAMultiLineCommandsEchoIsNotStoredAsOutput(t *testing.T) {
 			t.Fatalf("echoed line %q streamed as output: %v", line, streamed)
 		}
 	}
-	rec, ok := s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("the interval sealed no record")
-	}
-	for _, row := range rec.Closing.Lines {
-		text := obsRowText(row)
-		for _, line := range lines {
-			if text == line {
-				t.Fatalf("the closing screen holds echoed line %q: it was never suppressed", line)
+	for _, e := range rs.snapshot() {
+		if e.kind != "end" || e.nonce != nonce {
+			continue
+		}
+		for _, row := range e.closing {
+			text := streamRowText(row)
+			for _, line := range lines {
+				if text == line {
+					t.Fatalf("the end marker's closing rows hold echoed line %q: it was never suppressed", line)
+				}
 			}
 		}
 	}

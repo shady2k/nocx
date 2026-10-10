@@ -11,6 +11,7 @@ package transport
 // "whichever block is current" — each block is settled by its own fence.
 
 import (
+	"context"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -32,21 +33,24 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 			e, pub, lane, h, sidStr, db := newLifecycleLedgerEnv(t, true)
 			sid := session.ID(sidStr)
 			e.ws.AttachBlockRows(sid)
+			e.ws.BlockOutputStartPlaneAttached(sid)
 
 			// A: running when the helper's buffer overflows.
 			a := startsACommand(t, e, pub, lane, h, 2, "make a")
-			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0"), aStreamRow("a1")}); !confirm {
+			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0"), aStreamRow("a1")}, ""); !confirm {
 				t.Fatal("A's rows were not confirmed")
 			}
 			if tc.overflow {
 				e.ws.BlockOutputIncomplete(sid, 2)
 				// What the helper still sends until it can record again is
-				// confirmed and not kept.
-				if up, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("unrecorded")}); !confirm || up != 3 {
-					t.Fatalf("a row after the marker was answered (%d, %v), want confirmed through 3", up, confirm)
+				// dropped and not kept — and NOT confirmed: the mark means
+				// stored (nocx-zg3k3.5.3), nothing holds these rows, and
+				// the resend offers them again.
+				if up, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("unrecorded")}, ""); confirm || up != 0 {
+					t.Fatalf("a row after the marker was answered (%d, %v), want nothing confirmed", up, confirm)
 				}
 			} else {
-				e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("a2")})
+				e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("a2")}, "")
 			}
 			fenceA := lifecycleFence(0x41)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(a), 0, fenceA)))
@@ -68,7 +72,7 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 
 			// B: started and finished while nothing could be recorded.
 			b := startsACommand(t, e, pub, lane, h, 5, "make b")
-			e.ws.BlockRowsArrived(sid, 3, 0, []emulator.Row{aStreamRow("b-unrecorded")})
+			e.ws.BlockRowsArrived(sid, 3, 0, []emulator.Row{aStreamRow("b-unrecorded")}, "")
 			fenceB := lifecycleFence(0x42)
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(b), 0, fenceB)))
 			assertSealedAs(t, db, b, gap)
@@ -89,7 +93,10 @@ func TestAnIncompleteMarkerEndsTheBlockInFlightIncomplete(t *testing.T) {
 
 			// D: the next command, recorded whole.
 			d := startsACommand(t, e, pub, lane, h, 11, "make d")
-			if _, confirm := e.ws.BlockRowsArrived(sid, 5, 0, []emulator.Row{aStreamRow("d0")}); !confirm {
+			// D's output begins after the session's pre-command rows; this is
+			// the authenticated block's absolute first row, not a missing head.
+			e.ws.BlockOutputStartRow(sid, 5)
+			if _, confirm := e.ws.BlockRowsArrived(sid, 5, 0, []emulator.Row{aStreamRow("d0")}, ""); !confirm {
 				t.Fatal("D's row was not confirmed")
 			}
 			fenceD := lifecycleFence(0x44)
@@ -140,7 +147,7 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 			e.ws.blockStream.flushing[sid] = true
 			e.ws.blockStream.mu.Unlock()
 			for i := range tc.rows {
-				e.ws.BlockRowsArrived(sid, uint64(i), 0, []emulator.Row{wide}) //nolint:gosec // a small index
+				e.ws.BlockRowsArrived(sid, uint64(i), 0, []emulator.Row{wide}, "") //nolint:gosec // a small index
 				assertHeldWithin(t, e, sid, bound)
 			}
 			e.ws.blockStream.mu.Lock()
@@ -160,7 +167,7 @@ func TestTheCoordinatorsBufferEndsTheBlockInFlightIncomplete(t *testing.T) {
 
 			// The next command, after the store and the stream recovered.
 			d := startsACommand(t, e, pub, lane, h, 5, "make d")
-			if _, confirm := e.ws.BlockRowsArrived(sid, end, 0, []emulator.Row{aStreamRow("d0")}); !confirm {
+			if _, confirm := e.ws.BlockRowsArrived(sid, end, 0, []emulator.Row{aStreamRow("d0")}, ""); !confirm {
 				t.Fatal("the next command's row was not confirmed")
 			}
 			fenceD := lifecycleFence(0x52)
@@ -242,7 +249,7 @@ func TestAnIncompleteMarkerAfterItsCompletionStillSettlesTheBlock(t *testing.T) 
 	e.ws.AttachBlockRows(sid)
 
 	a := startsACommand(t, e, pub, lane, h, 2, "make a")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("a0")}, ""); !confirm {
 		t.Fatal("A's row was not confirmed")
 	}
 	fenceA := lifecycleFence(0x61)
@@ -266,7 +273,7 @@ func TestAnIncompleteMarkerAfterItsCompletionStillSettlesTheBlock(t *testing.T) 
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 7, lifecyclePromptEvt()))
 
 	c := startsACommand(t, e, pub, lane, h, 8, "make c")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("c0")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(sid, 2, 0, []emulator.Row{aStreamRow("c0")}, ""); !confirm {
 		t.Fatal("C's row was not confirmed")
 	}
 	if rows := streamRows(t, db, a); len(rows) != 1 {
@@ -333,7 +340,7 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			// lock hold that extracts it (nocx-2v80t.3.51).
 			e.ws.blockStream.beginFlushLocked(sid, pending)
 			e.ws.blockStream.mu.Unlock()
-			e.ws.blockStream.flushPendingRows(e.ws, sid, block, pending, nil)
+			e.ws.blockStream.flushPendingRows(context.Background(), e.ws, sid, block, pending, nil)
 			if len(closing) == len(small) {
 				assertSealedAs(t, db, a, nil)
 			} else {
@@ -351,7 +358,7 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			e.ws.blockStream.beyond[sid] = []pendingRows{{from: 1, rows: big}}
 			e.ws.blockStream.mu.Unlock()
 			fenceSecond := lifecycleFence(0x75)
-			e.ws.blockStream.publishFence(e.ws, sid, hex.EncodeToString(fenceSecond[:]), second)
+			e.ws.blockStream.publishFence(context.Background(), e.ws, sid, hex.EncodeToString(fenceSecond[:]), second)
 			e.ws.BlockIntervalEnded(sid, fenceSecond, 2, closing, false)
 			assertHeldWithin(t, e, sid, bound)
 			e.ws.blockStream.mu.Lock()

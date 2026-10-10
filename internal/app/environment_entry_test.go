@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -14,12 +15,12 @@ type fakeEnvEntryObserver struct {
 	entries []string
 }
 
-func (f *fakeEnvEntryObserver) ObserveEnvironmentEntry(entry string) {
+func (f *fakeEnvEntryObserver) ObserveEnvironmentEntry(_ context.Context, entry string) {
 	f.n++
 	f.entries = append(f.entries, entry)
 }
 
-func (f *fakeEnvEntryObserver) Accept(ingest func() error, _ *lifecycle.Complete) error {
+func (f *fakeEnvEntryObserver) Accept(_ context.Context, ingest func() error, _ *lifecycle.Complete) error {
 	return ingest()
 }
 
@@ -28,7 +29,7 @@ func (f *fakeEnvEntryObserver) Accept(ingest func() error, _ *lifecycle.Complete
 // scope and stubbed to nothing.
 type noopEmitter struct{}
 
-func (noopEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (noopEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // silentPort is the lifecycle transport's outbound side: what the kernel
 // mints (accepts, grants) goes nowhere, because this file's criterion is
@@ -71,7 +72,7 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 
 	// The parent's own hello: depth 0 -> 1, the lane's first domain
 	// integrating — not an entry into anything.
-	if err = pub.Ingest(transportID, env(1, h.Domain, h.Epoch, h.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(1, h.Domain, h.Epoch, h.Capability,
 		lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("parent hello: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 
 	// The parent suspends, handing the lane off: no entry yet, because the
 	// child has said nothing.
-	if err = pub.Ingest(transportID, env(2, h.Domain, h.Epoch, h.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(2, h.Domain, h.Epoch, h.Capability,
 		lifecycle.Event{Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{}})); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 	if err != nil {
 		t.Fatalf("request child domain: %v", err)
 	}
-	if err = pub.Ingest(transportID, env(1, childH.Domain, childH.Epoch, childH.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(1, childH.Domain, childH.Epoch, childH.Capability,
 		lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("child hello: %v", err)
 	}
@@ -109,11 +110,11 @@ func TestEnvironmentEntryEmitterFiresOnlyWhenTheStackGrowsPastTheFirstDomain(t *
 	}
 
 	// The child closes and the parent reactivates: a SHRINK, never counted.
-	if err = pub.Ingest(transportID, env(2, childH.Domain, childH.Epoch, childH.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(2, childH.Domain, childH.Epoch, childH.Capability,
 		lifecycle.Event{Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{}})); err != nil {
 		t.Fatalf("child close: %v", err)
 	}
-	if err = pub.Ingest(transportID, env(3, h.Domain, h.Epoch, h.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(3, h.Domain, h.Epoch, h.Capability,
 		lifecycle.Event{Kind: lifecycle.KindDomainActivated, DomainActivated: &lifecycle.DomainActivatedEvent{}})); err != nil {
 		t.Fatalf("parent activate: %v", err)
 	}
@@ -148,11 +149,11 @@ func TestEnvironmentEntryEmitterWithNoRegisteredObserverIsANoOp(t *testing.T) {
 			Epoch: epoch, Sequence: seq, Capability: capability, Event: evt,
 		}
 	}
-	if err = pub.Ingest(transportID, env(1, h.Domain, h.Epoch, h.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(1, h.Domain, h.Epoch, h.Capability,
 		lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("parent hello: %v", err)
 	}
-	if err = pub.Ingest(transportID, env(2, h.Domain, h.Epoch, h.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(2, h.Domain, h.Epoch, h.Capability,
 		lifecycle.Event{Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{}})); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestEnvironmentEntryEmitterWithNoRegisteredObserverIsANoOp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request child domain: %v", err)
 	}
-	if err = pub.Ingest(transportID, env(1, childH.Domain, childH.Epoch, childH.Capability,
+	if err = pub.Ingest(context.Background(), transportID, env(1, childH.Domain, childH.Epoch, childH.Capability,
 		lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "/bin/fake"}})); err != nil {
 		t.Fatalf("child hello: %v", err)
 	}

@@ -153,7 +153,7 @@ func lifecycleFence(n byte) lifecycle.FenceNonce {
 
 func mustLifecycleIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycle.TransportID, e lifecycle.Envelope) {
 	t.Helper()
-	if err := pub.Ingest(tID, e); err != nil {
+	if err := pub.Ingest(context.Background(), tID, e); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 }
@@ -208,7 +208,7 @@ func (f *openLifecyclePTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty
 		return f.stub, nil
 	}
 	ws.RegisterLifecycleLane(f.lane, session.ID(cfg.SessionID))
-	if err := f.pub.Ingest("T", lifecycleEnv(f.lane, f.h, 1, lifecycleHelloEvt())); err != nil {
+	if err := f.pub.Ingest(context.Background(), "T", lifecycleEnv(f.lane, f.h, 1, lifecycleHelloEvt())); err != nil {
 		return nil, err
 	}
 	return f.stub, nil
@@ -478,7 +478,7 @@ func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) 
 	// After close, the fact is dropped again — nothing reaches connB. Last
 	// read on connB. The event is accepted (the domain is live), so the
 	// drop is a routing property, not a rejection.
-	if err := pub.Ingest("T", lifecycleEnv("lane-1", h, 2, lifecyclePromptEvt())); err != nil {
+	if err := pub.Ingest(context.Background(), "T", lifecycleEnv("lane-1", h, 2, lifecyclePromptEvt())); err != nil {
 		t.Fatalf("prompt_ready after close: %v", err)
 	}
 	if raw := tryReadNotification(t, connB, "lifecycle.changed", 300*time.Millisecond); raw != nil {

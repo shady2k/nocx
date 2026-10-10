@@ -128,7 +128,7 @@ type localHelperRoute interface {
 // the opener owns. *client.Client satisfies it; so does localHelperOpener, by
 // forwarding both to the connection it holds.
 type hostedCarrier interface {
-	Attach(ctx context.Context, params proto.AttachParams) (*client.AttachedSession, error)
+	Attach(ctx context.Context, params proto.AttachParams, opts ...client.AttachOption) (*client.AttachedSession, error)
 	AdoptLifecycle(ctx context.Context, id client.HostSessionID) (*proto.LifecycleLaunch, error)
 	// LifecycleComplete carries one already-authenticated completion DOWN to
 	// the helper session it names (owner decision 2026-09-19) — the third
@@ -148,11 +148,16 @@ type hostedCarrier interface {
 
 // sessionAdopter installs the transport-owned half of a re-adopted session:
 // the replay ring at the offset the recording ends at, the hole observer, the
-// output pump and the exit monitor. *transport.WSServer satisfies it; the
-// interface exists so this pass is testable without a WebSocket server, and so
-// the composition root keeps naming the direction of the dependency.
+// output pump and the exit monitor. HoldSessionEndFor arms the per-session
+// end hold (nocx-zg3k3.5.11 Round 4): the session's shell exit waits the
+// given drain — the attachment's lifecycle cursor reaching the window's
+// head — before its teardown may unregister the replay's lane.
+// *transport.WSServer satisfies it; the interface exists so this pass is
+// testable without a WebSocket server, and so the composition root keeps
+// naming the direction of the dependency.
 type sessionAdopter interface {
 	ReadoptHostedSession(ctx context.Context, sid session.ID, reattach transport.HostedSessionReattach) error
+	HoldSessionEndFor(sid session.ID, drained <-chan struct{})
 }
 
 // readoptPass is the collaborator reconcileSessions calls. It holds the
@@ -180,6 +185,7 @@ type readoptPass struct {
 	// snapshots, and without this registration they would land at a client
 	// that forwards them nowhere. Nil is a legitimate wiring.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half, the same seam
 	// the fresh-open path carries: a restored pane's runtime goes on streaming
 	// the rows that leave its screen (helper_block_rows.go). Nil wires nothing.
@@ -187,6 +193,24 @@ type readoptPass struct {
 }
 
 var _ sessionReadopter = (*readoptPass)(nil)
+
+// pipeOpenedAt answers when the session's pipe was really opened, from the
+// helper's own session record -- the daemon's spawn moment, carried on the
+// inventory's startedAt (RFC3339Nano). A re-adopted session is THE SAME
+// session, so this -- not the adoption, and not the recording's persist
+// time -- is the opened-at its pane-scoped floors must use
+// (nocx-zg3k3.5.3, REVIEW-1). A record without a readable moment falls
+// back to the carried-over mark.
+func pipeOpenedAt(mine *client.SessionEntry, fallback time.Time) time.Time {
+	if mine == nil || mine.StartedAt == "" {
+		return fallback
+	}
+	opened, err := time.Parse(time.RFC3339Nano, mine.StartedAt)
+	if err != nil {
+		return fallback
+	}
+	return opened
+}
 
 // readoptAttemptTimeout bounds ONE session's attempt.
 //
@@ -382,6 +406,12 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		Cwd:       launchCwd(mine),
 		PaneID:    p.PaneID,
 		ProfileID: p.ProfileID,
+		// THE SAME SESSION (nocx-zg3k3.5.3, REVIEW-1): the re-adopted
+		// session opens when its pipe really opened -- the helper's own
+		// spawn moment -- so the pane-scoped floors read the blocks
+		// recorded before the restart instead of hiding them below the
+		// adoption.
+		OpenedAt: pipeOpenedAt(mine, p.Since),
 		// No size: nothing here measured a viewport. The registry's own
 		// default stands until the client that claims this session
 		// resizes it, which it does on attach.
@@ -504,6 +534,9 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// machine's daemon opened has no directory on THIS machine to report.
 		Cwd:    launchCwd(mine),
 		PaneID: p.PaneID,
+		// THE SAME SESSION, the local half of the carried opened-at above:
+		// the helper's own spawn moment.
+		OpenedAt: pipeOpenedAt(mine, p.Since),
 	}
 	if p.Host != "" {
 		// A remote destination, carried locally. Its remote half resolves the
@@ -582,6 +615,27 @@ func isLocalBinding(p content.PendingSession) bool {
 	return p.Generation != "" && p.HelperCommand == ""
 }
 
+// lifecycleResumePoint is where a re-adopt asks the helper's lifecycle stream
+// to resume, and whether the asker holds no lifecycle state of its own
+// (ADR-0077). The binding's stored cursor is the answer whenever there is one:
+// the offset one past the last frame the previous coordinator applied. A
+// binding with no cursor is a coordinator that kept no record of what it
+// applied, and the one resume that re-delivers nothing is the window's head —
+// ADR-0024's answer, which stands exactly where nothing better is known.
+func lifecycleResumePoint(p content.PendingSession, entry client.SessionEntry) (proto.StreamOffset, bool) {
+	if p.LifecycleApplied != nil {
+		return proto.StreamOffset(*p.LifecycleApplied), false
+	}
+	return proto.StreamOffset(entry.LifecycleWindow.Written), true
+}
+
+// lifecycleRangeLostSink is the transport's settle for a lifecycle range the
+// helper no longer holds (WSServer.LifecycleRangeLost, ADR-0077): an optional
+// capability of the block rows seam, the same shape the confirmation sink has.
+type lifecycleRangeLostSink interface {
+	LifecycleRangeLost(sid session.ID)
+}
+
 // entrySummaries is nocx-73aln's diagnostic: one line per entry a helper's
 // `sessions` op answered with, so a mismatch between what a binding names and
 // what the helper actually holds is a measurement rather than a guess.
@@ -648,6 +702,15 @@ func (rp *readoptPass) readopt(
 		// launch to adopt, "this session is conventional", or a reason the
 		// product will state (nocx-k6p18.31).
 		adoption := rp.adoptLifecycle(ctx, carrier, entry)
+		lifecycleFrom, lifecycleFresh := lifecycleResumePoint(p, entry)
+		nocxlog.From(ctx).Debug("re-adopt: the lifecycle stream resumes",
+			"session", p.SessionID, "offset", uint64(lifecycleFrom), "storedCursor", !lifecycleFresh,
+			"windowBase", entry.LifecycleWindow.Base, "windowHead", entry.LifecycleWindow.Written)
+		// THE ROWS PLANE IS HELD FROM THE FIRST FRAME (nocx-zg3k3.5.11):
+		// the helper sends the rows this coordinator is owed as soon as the
+		// subscriber exists, before it answers, and the stream is bound only
+		// below (heldRows).
+		holdOpt, held := holdRowsBeforeAttach(rp.blockRows)
 		attached, err := carrier.Attach(ctx, proto.AttachParams{
 			Subscriber: proto.SubscriberID(hex.EncodeToString(subscriberRaw[:])),
 			Session: proto.HostSessionID{
@@ -662,22 +725,64 @@ func (rp *readoptPass) readopt(
 			// range it lost — when the host out-produced the window while
 			// nobody was listening, which is the case this epic is about.
 			Offset: proto.StreamOffset(from), Fresh: false,
-			// THE LIFECYCLE STREAM RESUMES AT THE HELPER'S HEAD, NOT AT ITS
-			// BASE, and that is a security property rather than an
-			// optimisation. The adopted domain keeps the capability the shell
-			// has been stamping every frame with, so the helper's retained
-			// window is a stretch of already-authenticated events: replaying
-			// it into the new kernel would re-deliver commands that already
-			// ran. `Fresh` is true because this coordinator holds no lifecycle
-			// state at all — the offset is where the stream stands now, and
-			// what came before it belongs to the kernel that is gone.
-			LifecycleOffset: proto.StreamOffset(entry.LifecycleWindow.Written),
-			LifecycleFresh:  true,
+			// THE LIFECYCLE STREAM RESUMES AT THIS MACHINE'S OWN CURSOR
+			// (ADR-0077, lifecycleResumePoint): one past the last frame the
+			// coordinator that is gone applied and stored. Nothing before it
+			// is offered again — those frames carry a capability the adopted
+			// domain still honours, which is ADR-0024's reason for never
+			// replaying the window from its base — and nothing after it is
+			// skipped: a command's end the shell spoke while nobody was
+			// attached reaches the replacing kernel exactly once (ADR-0076
+			// decision 4).
+			LifecycleOffset: lifecycleFrom,
+			LifecycleFresh:  lifecycleFresh,
 			RequestWrite:    true,
-		})
+		}, holdOpt)
 		if err != nil {
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", reattachTarget(p), err)
+		}
+		// THE END HOLD IS ARMED BEFORE ANYTHING SETTLES (nocx-zg3k3.5.11
+		// Round 4). The window the helper retained is the replay this
+		// attachment is about to deliver, and the shell's exit carry —
+		// AdoptExitStatus above, once the pane's own output drains — must
+		// not tear the lane down ahead of it. Armed only when a window
+		// exists, so a conventional session arms nothing and its end
+		// proceeds exactly as it always did.
+		//
+		// The drain is the leg's APPLIED cursor reaching the window's head
+		// (ADR-0077), not its ingest cursor: bytes the bridge has read are
+		// not yet frames the kernel has applied, and a teardown that ran in
+		// between unregistered the lane under the replay (the loaded
+		// shell-exit acceptance, nocx-zg3k3.5.11). A session whose leg was
+		// not adopted has no applied cursor and keeps the ingest drain.
+		if adoption.cursor != nil {
+			adoption.cursor.bind(p.SessionID, attached.LifecycleIngested())
+		}
+		// The same drain gates the rows plane (heldRows.bindAfter): the
+		// read-back the helper sends at the attach may belong to a block
+		// only the replayed window's start frame opens.
+		var replayed <-chan struct{}
+		if entry.LifecycleWindow.Written > 0 {
+			head := proto.StreamOffset(entry.LifecycleWindow.Written)
+			drained := attached.LifecycleDrained(head)
+			if adoption.cursor != nil {
+				drained = adoption.cursor.reached(head)
+			}
+			rp.adopter.HoldSessionEndFor(sid, drained)
+			replayed = drained
+		}
+		// THE STORED CURSOR IS NO LONGER IN THE HELPER'S WINDOW: the helper
+		// answered from its base, and every frame between the cursor and the
+		// base is gone. The block those frames could have settled is marked
+		// from the helper's own statement of the loss, before the stream
+		// re-binds it, never left running (ADR-0077).
+		if p.LifecycleApplied != nil && uint64(attached.LifecycleIngested()) > *p.LifecycleApplied {
+			nocxlog.From(ctx).Warn("the helper no longer holds the lifecycle stream from this coordinator's cursor; the frames between are lost",
+				"session", p.SessionID, "cursor", *p.LifecycleApplied, "resumedAt", uint64(attached.LifecycleIngested()))
+			if lost, ok := rp.blockRows.(lifecycleRangeLostSink); ok {
+				lost.LifecycleRangeLost(sid)
+			}
 		}
 		// THE HOST'S OWN VERDICT ON A SHELL THAT ENDED WHILE WE WERE AWAY.
 		// The helper's exit notification fired once, at the moment the process
@@ -701,6 +806,9 @@ func (rp *readoptPass) readopt(
 					"session", string(sid), "reason", reason)
 			})
 		}
+		if rp.publishEffect != nil {
+			attached.OnEffect(func(effect proto.EffectFrame) { rp.publishEffect(sid, effect) })
+		}
 		if entry.Exit != nil {
 			// The window frontier travels WITH the exit status (nocx-isjh4):
 			// entry.Window.Written is the offset this stream can never
@@ -708,6 +816,13 @@ func (rp *readoptPass) readopt(
 			// gone, and it is what lets this attachment reach EOF/Done on
 			// its own once it has actually read that far, instead of
 			// hanging forever waiting for bytes that will never come.
+			// And the lifecycle window with it (nocx-zg3k3.5.11): an adopted
+			// leg is owed the replay up to the window's head — the command's
+			// completion among it — and the attachment's end would otherwise
+			// close the leg's reader before that replay arrives.
+			if adoption.cursor != nil && entry.LifecycleWindow.Written > 0 {
+				attached.ExitAfterLifecycle(proto.StreamOffset(entry.LifecycleWindow.Written))
+			}
 			attached.AdoptExitStatus(*entry.Exit, proto.StreamOffset(entry.Window.Written))
 		}
 		if !attached.WriteGranted() {
@@ -724,8 +839,10 @@ func (rp *readoptPass) readopt(
 				"another nocx already holds the keyboard of this session on %s", reattachTarget(p))
 		}
 		// THE STREAMED BLOCK OUTPUT, restored-pane half (nocx-2v80t.3.7):
-		// registered before the adopt, like the screen drain above.
-		stopBlockRows := bindBlockRows(ctx, rp.blockRows, sid, attached)
+		// registered before the adopt, like the screen drain above — and
+		// after the lost-range settle, so the re-bind finds the store as the
+		// settle left it; what the helper sent meanwhile was held.
+		stopBlockRows := bindHeldBlockRowsAfter(ctx, rp.blockRows, sid, attached, held, replayed)
 		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
 			stopBlockRows()
@@ -736,7 +853,7 @@ func (rp *readoptPass) readopt(
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
 		// again, and the downlink the adoption built ends when it does.
 		adoption.endWithSession(sess)
-		bindDownlinkToSession(sess, stopBlockRows)
+		bindBlockEndToSession(sess, attached, rp.blockRows, sid, stopBlockRows)
 		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
 		// records it (helper_git.go's openFarHelper, helper_local.go's
 		// OpenHosted) — and it must be, because a re-adopted session's own

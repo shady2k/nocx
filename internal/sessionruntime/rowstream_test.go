@@ -12,20 +12,20 @@ import (
 // The streamed block output's helper half (nocx-2v80t.3.6): rows leave the
 // runtime as they leave the screen, handed once each, in order, to the
 // session's row stream; the interval's end marker follows its rows on the
-// same ordered stream. The runtime keeps NO copy of departed rows — the
-// record keeps boundaries, counts and the closing screen only — because the
+// same ordered stream. The runtime keeps NO copy of departed rows at all —
+// and no sealed record either (nocx-zg3k3.5.4) — because the
 // owner's decision gives the helper no second buffer: ghostty's own
 // scrollback is the store (nocx-2v80t.3.4's decisions, 2026-09-23).
 //
 // Every test here runs over the real emulator (libghostty-vt behind its
-// port) with the harness terminal, the way the observation record's tests
-// do: the test controls every ingest, and nothing waits on a duration.
+// port) with the harness terminal, the way the interval tests do: the test
+// controls every ingest, and nothing waits on a duration.
 
 // rowEvent is one emission in stream order: a row batch or an interval's
 // end marker. One slice, because the order between the two kinds is the
 // seam's whole point — a row can never be attributed to the wrong interval.
 type rowEvent struct {
-	kind    string // "rows" | "end" | "clear"
+	kind    string // "rows" | "end" | "clear" | "output-start"
 	from    uint64
 	lost    uint64
 	rows    []emulator.Row
@@ -59,6 +59,12 @@ func (r *recordingRowStream) ClearBoundary() {
 	r.events = append(r.events, rowEvent{kind: "clear"})
 }
 
+func (r *recordingRowStream) OutputStartRow(from uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, rowEvent{kind: "output-start", from: from})
+}
+
 func (r *recordingRowStream) snapshot() []rowEvent {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -74,8 +80,8 @@ func streamSession(t *testing.T, g Geometry) (*Session, *recordingRowStream) {
 	return s, rs
 }
 
-// streamRowText reads one streamed row's text the way the record's reader
-// does: the graphemes that carry text, trailing blanks dropped.
+// streamRowText reads one streamed row's text: the graphemes that carry
+// text, trailing blanks dropped.
 func streamRowText(r emulator.Row) string {
 	var sb strings.Builder
 	for _, c := range r.Cells {
@@ -84,6 +90,32 @@ func streamRowText(r emulator.Row) string {
 		}
 	}
 	return strings.TrimRight(sb.String(), " ")
+}
+
+// The output mark names the absolute stream position where command output
+// starts. It is ordered before rows emitted after OSC 133 C.
+func TestOutputMarkEmitsItsAbsoluteRowPositionOnTheRowStream(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	obsFeed(t, s, 0, 80)
+	before := s.DepartedRowCount()
+	if err := s.Ingest([]byte("\x1b]133;C\a")); err != nil {
+		t.Fatalf("ingest output mark: %v", err)
+	}
+	events := rs.snapshot()
+	if len(events) == 0 || events[len(events)-1].kind != "output-start" {
+		t.Fatalf("events = %+v, want output-start after prior rows", events)
+	}
+	if got := events[len(events)-1].from; got != before {
+		t.Fatalf("output-start row = %d, want absolute stream position %d", got, before)
+	}
+	// A replacement reader receives the current mark before it can consume
+	// the runtime's resend rows.
+	replacement := &recordingRowStream{}
+	s.SetRowStream(replacement)
+	replayed := replacement.snapshot()
+	if len(replayed) != 1 || replayed[0].kind != "output-start" || replayed[0].from != before {
+		t.Fatalf("replacement stream marks = %+v, want output-start at %d", replayed, before)
+	}
 }
 
 // The boundary's two halves are ONE instant. The end marker stops at the row
@@ -280,17 +312,45 @@ func TestDepartedRowsStreamOnceInOrderBeforeTheEnd(t *testing.T) {
 		t.Fatalf("the closing screen ends at %q, want L000029", last)
 	}
 
-	// The record itself holds no departed rows: the stream took them as they
-	// left. Reading the record back names boundaries, counts, screens.
-	rec, ok := s.ObservationFor(obsNonce(1))
-	if !ok {
-		t.Fatal("the interval sealed no record")
+	if end.noFence {
+		t.Fatal("an ordinary streamed interval's end marker claims its fence never arrived")
 	}
-	if rec.Completeness != CompletenessComplete {
-		t.Fatalf("an ordinary streamed interval reads back %v, want complete", rec.Completeness)
+}
+
+// A heavy interval streams every row it departs, at the session's own
+// indices, oldest first: six hundred lines on a twenty-four row screen, and
+// no batch ever skips or reorders, however far past one screen the command
+// runs. The stream half of the lean-interval test the retired record's file
+// carried (nocx-zg3k3.5.4).
+func TestAHeavyIntervalStreamsEveryRowAtItsOwnIndex(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	obsFeed(t, s, 0, 600)
+
+	const departed = 600 - 23
+	var streamed uint64
+	first, last := "", ""
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			t.Fatalf("a running interval streamed a %q event, want row batches only", e.kind)
+		}
+		if len(e.rows) == 0 {
+			continue
+		}
+		if got := e.from; got != streamed {
+			t.Fatalf("a batch names FromRow %d with %d rows already streamed, want %d — the index never skips", got, streamed, streamed)
+		}
+		if streamed == 0 {
+			first = streamRowText(e.rows[0])
+		}
+		last = streamRowText(e.rows[len(e.rows)-1])
+		streamed += uint64(len(e.rows)) // #nosec G115 -- len is never negative
 	}
-	if len(rec.Closing.Lines) != 24 {
-		t.Fatalf("the record's closing screen is %d rows, want 24", len(rec.Closing.Lines))
+	if streamed != departed {
+		t.Fatalf("the stream carried %d rows, want every one of the %d departures", streamed, departed)
+	}
+	if first != "L000000" || last != "L"+fmt6(departed-1) {
+		t.Fatalf("the stream ran %q..%q, want L000000..L%s, oldest first", first, last, fmt6(departed-1))
 	}
 }
 

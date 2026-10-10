@@ -30,11 +30,21 @@ import {
 } from './harness'
 import { readStand } from './stand'
 import { judgeFrames, type FrameVerdict } from './frame-budget.mts'
+import { recordRowsCensusForTest } from './failure-context'
 
 const serverBin = () => readStand().server
 
 const BLOCKS = 500
 const ROWS_PER_BLOCK = 100
+// The zero-retention subtest's single command must output far more rows than
+// the library's bounded capture floor at 0 lines (~399 rows at 80 cols, design
+// section 7): with a small batch the pages are never pruned and the test would
+// pass without the history-erased effect. 5000 rows force pruning inside the
+// write, which is the mechanism under test.
+const ZERO_COMMAND_ROWS = 5000
+// The ledger search limit the zero subtest queries with; must hold the whole
+// command's rows after restart.
+const ZERO_QUERY_LIMIT = 6000
 // The transcript's own last row: the off-screen half of the native find probe.
 // Derived from BLOCKS, never spelled out — a reduced run is the same spec.
 const LAST_MARKER = `transcript-${String(BLOCKS).padStart(4, '0')}-${String(ROWS_PER_BLOCK).padStart(3, '0')}`
@@ -48,6 +58,146 @@ const BLOCK = '.pane.active .scrollback-inner > .cmd-block:not(.cmd-block-runnin
 const RUNNING_BLOCK = '.pane.active .scrollback-inner > .cmd-block.cmd-block-running'
 const SCROLLER = '.pane.active .scrollback-area'
 const ROW = `${BLOCK} .cmd-output .term-grid-row`
+// The media type a command's streamed rows are stored under (contracts/ledger.blockRows.schema.json).
+const ROWS_MEDIA_TYPE = 'application/x-nocx-rows'
+// How much of the backend's log the census greps for the seal's own numbers.
+// It is read at the failure, while the file is live; the appends of a
+// 5000-row command are a small part of a few hundred kilobytes.
+const CENSUS_LOG_BYTES = 8 * 1024 * 1024
+
+/** One artifact's metadata, as ledger.get reports it (contracts/ledger.get.schema.json). */
+interface LedgerArtifactMeta {
+  id: string
+  executionId: number
+  mediaType: string
+  state: string
+  byteLen: number
+  chunkCount: number
+  truncated: string | null
+  payload: unknown
+}
+
+/**
+ * WHAT THE STORE ACTUALLY HOLDS FOR ONE COMMAND (nocx-rb4ca), taken at the
+ * moment this spec's own comparison of the stored rows fails.
+ *
+ * A short durable transcript has three shapes that look identical in the
+ * failure report, and the backend log alone cannot tell them apart: the rows
+ * arrived and were refused into a sealed artifact, they are parked in a SECOND
+ * rows artifact of the same entry (a reader takes the first one —
+ * internal/transport/ws_blocks.go's blockBody returns one artifact and never
+ * joins a second), or they never arrived at all. So this reads back everything
+ * the read path can see, in the read path's own terms:
+ *
+ *   - every artifact of the entry whose media type is application/x-nocx-rows,
+ *     with the state and payload the store reports for it;
+ *   - for each, the rows READ THROUGH ledger.artifact — how many, how many
+ *     carry this command's marker, and the absolute row RANGE (the `from` of
+ *     its first and last line, which is the index space the seal's own cursor
+ *     and endRow are stated in);
+ *   - and the store's and the transport's own lines about the seal, taken
+ *     verbatim from the backend log: `block rows close: sealing` (its cursor,
+ *     dropped, lost, unavailable) and `interval end sealed the block` (the
+ *     interval end's endRow). Those two numbers are what the report has never
+ *     carried, and they are the ones that say whether the artifact's own
+ *     record agrees with the read.
+ *
+ * Read-only: it asks the same questions findStoredRows asks, by the same
+ * methods, and changes nothing about the comparison it explains.
+ */
+async function rowsCensus(
+  ep: { port: number; token: string },
+  backendLog: string,
+  command: string,
+  marker: string,
+): Promise<string> {
+  const out: string[] = [`command ${JSON.stringify(command)}`]
+  const wire = await openControlPlane(ep.port, ep.token)
+  try {
+    const query = (await wire.call('ledger.query', {
+      scope: 'everywhere',
+      limit: ZERO_QUERY_LIMIT,
+    })) as { entries: Array<{ id: string; intent: string }> }
+    const entries = query.entries.filter((entry) => entry.intent === command)
+    out.push(
+      `ledger.query: ${query.entries.length} entries in the page, ${entries.length} of them this command`,
+    )
+    for (const entry of entries) {
+      const detail = (await wire.call('ledger.get', { id: entry.id })) as {
+        artifacts: LedgerArtifactMeta[]
+      }
+      const rowsArtifacts = detail.artifacts.filter(
+        (artifact) => artifact.mediaType === ROWS_MEDIA_TYPE,
+      )
+      // WHICH ONE THE READER TAKES is the question a list of artifacts cannot
+      // answer on its own: both this spec's own read and the product's
+      // blockBody take the FIRST artifact of this media type in execution
+      // order and never join a second (internal/transport/ws_blocks.go), so
+      // the first line below is the one the comparison actually saw.
+      out.push(
+        `entry ${entry.id}: ${detail.artifacts.length} artifact(s), ` +
+          `${rowsArtifacts.length} of media type ${ROWS_MEDIA_TYPE}`,
+      )
+      out.push(
+        rowsArtifacts.length === 0
+          ? '  the read path takes: nothing — no artifact of this media type exists for this entry'
+          : `  the read path takes the first of these: ${rowsArtifacts[0]!.id}`,
+      )
+      for (const [index, artifact] of rowsArtifacts.entries()) {
+        const body = (await wire.call('ledger.artifact', { id: artifact.id })) as { body: string }
+        const rows = body.body
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { from: number; row: { text: string } })
+        const mine = rows.filter((row) => row.row.text.replace(/\s+$/, '').startsWith(`${marker}-`))
+        const first = rows[0]
+        const last = rows[rows.length - 1]
+        const text = (row: { row: { text: string } } | undefined) =>
+          row ? JSON.stringify(row.row.text.replace(/\s+$/, '')) : '(none)'
+        out.push(
+          `  artifact ${index === 0 ? '(the read takes this one)' : '(not read)'} ` +
+            `${artifact.id} execution=${artifact.executionId} ` +
+            `state=${artifact.state} byteLen=${artifact.byteLen} ` +
+            `chunks=${artifact.chunkCount} truncated=${String(artifact.truncated)} ` +
+            `payload=${JSON.stringify(artifact.payload)}`,
+        )
+        out.push(
+          `    rows ${rows.length}, marker rows ${mine.length}, ` +
+            `range [${first ? first.from : '-'}..${last ? last.from : '-'}], ` +
+            `first ${text(first)}, last ${text(last)}`,
+        )
+      }
+      // The two shapes a short read can have, stated rather than left to be
+      // worked out: a tail parked in another artifact is invisible to a reader
+      // that joins none of them, and an artifact that is the only one rules
+      // that shape out entirely.
+      out.push(
+        rowsArtifacts.length === 1
+          ? '  one rows artifact exists: a missing tail cannot be parked in a second one — it is this artifact or it never arrived'
+          : `  ${rowsArtifacts.length} rows artifacts exist and the read joins none of them: only the first is read, so a tail in any of the others is invisible to this comparison`,
+      )
+    }
+    if (entries.length === 0) {
+      out.push('(no entry in this page has this command as its intent)')
+    }
+  } finally {
+    wire.close()
+  }
+  const seals = backendLog
+    .split('\n')
+    .filter(
+      (line) =>
+        line.includes('block rows close: sealing') ||
+        line.includes('interval end sealed the block'),
+    )
+  out.push(
+    seals.length === 0
+      ? 'backend log: neither "block rows close: sealing" nor "interval end sealed the block" is in it'
+      : `backend log, the store's and the transport's own lines:\n    ${seals.join('\n    ')}`,
+  )
+  return out.join('\n')
+}
+
 interface TranscriptMetrics {
   blocks: number
   rows: number
@@ -408,6 +558,9 @@ test.describe('long transcript scroll budget', () => {
     }
   }
 
+  // Active stage acceptance for nocx-zg3k3.5: durable capture must retain
+  // every row independently of the default live scrollback budget.
+
   test('measures 500 blocks and preserves native selection/search', async ({ page }) => {
     const endpoint = await backend.start()
     await bindEndpoint(page, endpoint)
@@ -494,5 +647,144 @@ test.describe('long transcript scroll budget', () => {
       type: 'frame budget (reported, not asserted)',
       description: `median ${frames.medianMs} ms, p95 ${frames.p95Ms} ms against an idle ${frames.baselineMs} ms; ${frames.failures.join('; ') || 'within budget'}`,
     })
+  })
+
+  // WAS SKIPPED 2026-10-05, UN-SKIPPED WITH THE FIX (nocx-n5ent). After a
+  // coordinator restart the stored transcript lost the tail of the command: one
+  // sealed artifact, `truncated=gap`, `endRow == cursor` (a seal with no closing
+  // screen) and 1157 rows never stored, because an interval was frozen at the
+  // count measured on the authenticated channel while the pty still held the
+  // command's output. The settle that could do that is deferred now:
+  // a completion for another nonce, an environment entry and the rendezvous
+  // bound no longer freeze an interval whose rows are still in flight — the
+  // interval keeps them and is sealed by its own fence's sighting, or by the
+  // byte stream's next boundary when that fence truly never comes
+  // (internal/sessionruntime/observation.go, deferPendingLocked; ADR-0074
+  // case 3 amended).
+  test('zero live retention leaves durable output after restart and no live history', async ({
+    page,
+  }, testInfo) => {
+    const endpoint = await backend.start()
+    const setupWire = await openControlPlane(endpoint.port, endpoint.token)
+    try {
+      // Set through the same settings RPC the Settings screen uses, before
+      // the initial pane is created so its spawn carries the zero budget.
+      await setupWire.call('settings.set', { key: 'terminal.scrollbackLines', value: 0 })
+      // A single 5000-row command is past the default per-command cap (256 KiB,
+      // ~80 bytes per encoded row), so raise it to its maximum: this test is
+      // about the zero-budget capture floor, not the output cap.
+      await setupWire.call('settings.set', { key: 'history.outputCapKB', value: 4096 })
+    } finally {
+      setupWire.close()
+    }
+    await bindEndpoint(page, endpoint)
+    await page.goto('/')
+    await appReadyForInput(page)
+
+    const marker = 'transcript-zero-retention'
+    // One command far larger than the zero-budget capture floor, so pruning
+    // inside the write is exercised (see ZERO_COMMAND_ROWS).
+    const command = `printf '${marker}-%03d\\n' {1..${ZERO_COMMAND_ROWS}}`
+    await page.locator(INPUT).fill(command)
+    await page.keyboard.press('Enter')
+    await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
+
+    const findStoredRows = async (ep: typeof endpoint): Promise<string[]> => {
+      const wire = await openControlPlane(ep.port, ep.token)
+      try {
+        const query = (await wire.call('ledger.query', {
+          scope: 'everywhere',
+          limit: ZERO_QUERY_LIMIT,
+        })) as { entries: Array<{ id: string; intent: string }> }
+        const entry = query.entries.find((candidate) => candidate.intent === command)
+        if (!entry) return []
+        const detail = (await wire.call('ledger.get', { id: entry.id })) as {
+          artifacts: Array<{ mediaType: string; id: string }>
+        }
+        const rowsArtifact = detail.artifacts.find(
+          (artifact) => artifact.mediaType === 'application/x-nocx-rows',
+        )
+        if (!rowsArtifact) return []
+        const body = (await wire.call('ledger.artifact', { id: rowsArtifact.id })) as {
+          body: string
+        }
+        return (
+          body.body
+            .split('\n')
+            .filter(Boolean)
+            .map((line) =>
+              (JSON.parse(line) as { row: { text: string } }).row.text.replace(/\s+$/, ''),
+            )
+            // Drop the echoed command line (the terminal's own echo of the
+            // input) and keep only the marker rows this command generated.
+            .filter((text) => text.startsWith(`${marker}-`))
+        )
+      } finally {
+        wire.close()
+      }
+    }
+
+    const own = Array.from(
+      { length: ZERO_COMMAND_ROWS },
+      (_, index) => `${marker}-${String(index + 1).padStart(3, '0')}`,
+    )
+
+    // The census is taken ONLY on the path where this comparison fails, and it
+    // is taken HERE rather than in the failure report because the backend this
+    // read needs is stopped by `afterEach` before that report runs (nocx-rb4ca).
+    // It never throws: a diagnostic that is missing must not replace the
+    // failure it was taken for, so a read that fails is recorded as the line
+    // saying so.
+    const recordCensus = async (label: string, ep: { port: number; token: string }) => {
+      try {
+        recordRowsCensusForTest(
+          testInfo.testId,
+          label,
+          await rowsCensus(ep, backend.logTail(CENSUS_LOG_BYTES), command, marker),
+        )
+      } catch (censusError) {
+        recordRowsCensusForTest(
+          testInfo.testId,
+          label,
+          `(the store could not be read for this census: ${String(censusError)})`,
+        )
+      }
+    }
+
+    try {
+      await expect.poll(async () => findStoredRows(endpoint), { timeout: 30_000 }).toEqual(own)
+    } catch (error) {
+      await recordCensus('the comparison before the restart', endpoint)
+      throw error
+    }
+
+    const restarted = await backend.restart()
+    await bindEndpoint(page, restarted)
+    await page.reload()
+    await appReadyForInput(page)
+    await expect(page.locator(BLOCK)).toHaveCount(1, { timeout: 30_000 })
+    const storedAfterRestart = await findStoredRows(restarted)
+    try {
+      expect(storedAfterRestart).toEqual(own)
+    } catch (error) {
+      await recordCensus('the comparison after the restart', restarted)
+      throw error
+    }
+
+    const pane = page.locator('.pane.active')
+    const sessionId = await pane.getAttribute('data-session-id')
+    expect(sessionId).toBeTruthy()
+    const historyWire = await openControlPlane(restarted.port, restarted.token)
+    try {
+      const pageResult = (await historyWire.call('session.historyPage', {
+        sessionId,
+        before: null,
+        limit: 64,
+      })) as { start: number; end: number; floor: number }
+      expect(pageResult.end - pageResult.start, 'zero-budget live history page is empty').toBe(0)
+    } finally {
+      historyWire.close()
+    }
+    await expect(page.locator('.pane.active .live-history-page')).toHaveCount(0)
   })
 })

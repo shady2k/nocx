@@ -21,9 +21,16 @@ var bashScriptRaw string
 //go:embed scripts/nocx.posix
 var posixScriptRaw string
 
+// The delivered scripts, rendered by the ONE generator (agents.go): the
+// authored text with its agent-wrapper marker replaced by a block generated
+// from the names, then comment-stripped. For the EMBEDDED pair the names are
+// the ones THIS BUILD ships, because a helper-hosted shell has no profile to
+// read — the helper is built without the release tag and must not guess the
+// app directory (see nocx-t5e7d's report for that seam). A published bundle is
+// rendered from the machine's own record instead, in launchBundle.
 var (
-	zshScript   = stripShellComments(zshScriptRaw)
-	bashScript  = stripShellComments(bashScriptRaw)
+	zshScript   = renderScript(zshScriptRaw, shippedAgentNames(), DeliveryLocal)
+	bashScript  = renderScript(bashScriptRaw, shippedAgentNames(), DeliveryLocal)
 	posixScript = stripShellComments(posixScriptRaw)
 )
 
@@ -109,6 +116,21 @@ var (
 // — so macOS's bash 3.2 rejected the script at the `coproc` token and every
 // shell on the platform this product ships to first came up with no
 // integration at all.
+// 57: the tool-surface argument is LOCAL only (nocx-t5e7d, the owner's
+// decision of 2026-10-05). The wrapper block was already generated from the
+// record at v56; what changed here is the second thing a delivery decides — a
+// pane on this machine still points its agent at the tool surface, and a
+// PUBLISHED generation carries agent names and no per-agent argument at all.
+// The embedded pair's bytes are unchanged, so this version's digest is v56's;
+// the bump is for the installs that hold GENERATION files, whose content moved.
+//
+// 56: the agent wrappers are GENERATED from the agent record (nocx-t5e7d).
+// The bundle used to spell `claude() { __nocx_agent_run claude "$@"; }` by
+// hand, so the agents nocx offered in a shell were a fact about this script.
+// The block is now rendered from the enabled names, by the one generator both
+// delivery paths go through (agents.go), and a bundle generated from a
+// different name set is a different generation.
+//
 // 32: two decoding defects the nested launch died on (nocx-aupk). The zsh
 // decoder built \NNN escapes without zero-padding, so a \uXXXX whose octal
 // is short swallowed the next character when it was a digit — Go escapes >
@@ -264,7 +286,17 @@ var (
 // protocol together. Every installed copy must be rewritten, because a shell
 // still sourcing 53 sends a frame (`agent_report`) the backend no longer
 // knows, and spends the agent's launch on a rendezvous nobody reads.
-const version = "54"
+// 55: both shells name every completion with the attempt id they minted at
+// start (ADR-0077). The id is the block's identity across coordinators: a
+// completion delivered again to a coordinator that never saw the start
+// closes the block it belongs to, found by that id, rather than whatever the
+// session happens to hold open. A shell still sourcing 54 sends unnamed
+// completions, which a fresh coordinator can only resolve by that guess.
+// 58: local agent wrappers resolve a saved record over the authenticated
+// lifecycle channel and stage its command/arguments/environment as data; a
+// shell still sourcing 57 treats the agent ID as the executable and cannot
+// launch the saved configuration (nocx-h64wy).
+const version = "58"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

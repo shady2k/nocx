@@ -55,7 +55,7 @@ import (
 // sshChildKernel). The registry is therefore the lane -> pane-runtime
 // observer map, and entries are one of the two facts it carries.
 type environmentEntryObserver interface {
-	ObserveEnvironmentEntry(entry string)
+	ObserveEnvironmentEntry(ctx context.Context, entry string)
 	helperclient.CompletionObserver
 }
 
@@ -174,9 +174,9 @@ func newEnvironmentEntryEmitter(inner lifecyclepub.Emitter, stacks laneStacker, 
 // after — so a panic or a slow subscriber downstream can never suppress the
 // one fact this file exists to catch; forwarding is unconditional regardless
 // of what checkGrowth found.
-func (e *environmentEntryEmitter) PublishLifecycle(f lifecyclepub.Fact) {
-	e.checkGrowth(lifecycle.LaneID(f.Lane))
-	e.inner.PublishLifecycle(f)
+func (e *environmentEntryEmitter) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
+	e.checkGrowth(ctx, lifecycle.LaneID(f.Lane))
+	e.inner.PublishLifecycle(ctx, f)
 }
 
 // checkGrowth reads the lane's stack fresh — the fact just published was
@@ -187,7 +187,7 @@ func (e *environmentEntryEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 // establishing is depth 0 -> 1 (integration itself, not an entry into
 // anything), and a parent reclaiming the lane after a child closes is a
 // SHRINK, never counted here at all.
-func (e *environmentEntryEmitter) checkGrowth(lane lifecycle.LaneID) {
+func (e *environmentEntryEmitter) checkGrowth(ctx context.Context, lane lifecycle.LaneID) {
 	snap, err := e.stacks.State(lane)
 	if err != nil {
 		return
@@ -200,31 +200,31 @@ func (e *environmentEntryEmitter) checkGrowth(lane lifecycle.LaneID) {
 		// one whose establishment grew it. A domain id is minted once and
 		// never recurs, so it tells a retried delivery of this entry from
 		// the next entry (nocx-2v80t.3.28).
-		o.ObserveEnvironmentEntry(string(snap.Stack[depth-1]))
+		o.ObserveEnvironmentEntry(ctx, string(snap.Stack[depth-1]))
 	}
 }
 
 // PublishLifecycleProjection forwards to the real emitter's own
 // ProjectionEmitter, if it has one — this file adds no projection of its
 // own, so there is nothing to check here.
-func (e *environmentEntryEmitter) PublishLifecycleProjection(f lifecyclepub.Fact) {
+func (e *environmentEntryEmitter) PublishLifecycleProjection(ctx context.Context, f lifecyclepub.Fact) {
 	if pe, ok := e.inner.(lifecyclepub.ProjectionEmitter); ok {
-		pe.PublishLifecycleProjection(f)
+		pe.PublishLifecycleProjection(ctx, f)
 	}
 }
 
 // PublishAttemptStarted forwards to the real emitter's own
 // AttemptTransitionEmitter, unchanged.
-func (e *environmentEntryEmitter) PublishAttemptStarted(id lifecycle.AttemptID) {
+func (e *environmentEntryEmitter) PublishAttemptStarted(ctx context.Context, id lifecycle.AttemptID) {
 	if te, ok := e.inner.(lifecyclepub.AttemptTransitionEmitter); ok {
-		te.PublishAttemptStarted(id)
+		te.PublishAttemptStarted(ctx, id)
 	}
 }
 
 // PublishAttemptClosed forwards to the real emitter's own
 // AttemptTransitionEmitter, unchanged.
-func (e *environmentEntryEmitter) PublishAttemptClosed(id lifecycle.AttemptID) {
+func (e *environmentEntryEmitter) PublishAttemptClosed(ctx context.Context, id lifecycle.AttemptID) {
 	if te, ok := e.inner.(lifecyclepub.AttemptTransitionEmitter); ok {
-		te.PublishAttemptClosed(id)
+		te.PublishAttemptClosed(ctx, id)
 	}
 }

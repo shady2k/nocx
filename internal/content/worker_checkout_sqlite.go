@@ -33,7 +33,7 @@ func (r *workerCheckoutSqlite) Put(ctx context.Context, co WorkerCheckout) error
 		return errors.New("content: worker checkout: repo key and path are both the primary key; neither may be empty")
 	}
 	return r.s.run(ctx, func(ctx context.Context) error {
-		_, execErr := r.s.db.ExecContext(ctx, `INSERT INTO worker_checkouts
+		_, execErr := r.s.conn(ctx).ExecContext(ctx, `INSERT INTO worker_checkouts
 			(repo_key, path, branch, base, name, task, created_at, last_used_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(repo_key, path) DO UPDATE SET
@@ -61,7 +61,7 @@ func (r *workerCheckoutSqlite) Touch(ctx context.Context, path string, at int64)
 		return errors.New("content: worker checkout: touch needs a path")
 	}
 	return r.s.run(ctx, func(ctx context.Context) error {
-		_, execErr := r.s.db.ExecContext(ctx,
+		_, execErr := r.s.conn(ctx).ExecContext(ctx,
 			`UPDATE worker_checkouts SET last_used_at = ? WHERE path = ? AND last_used_at < ?`,
 			at, path, at)
 		if execErr != nil {
@@ -73,7 +73,7 @@ func (r *workerCheckoutSqlite) Touch(ctx context.Context, path string, at int64)
 
 // List returns every row of one repository's key.
 func (r *workerCheckoutSqlite) List(ctx context.Context, repoKey string) ([]WorkerCheckout, error) {
-	rows, err := r.s.db.QueryContext(ctx, `SELECT repo_key, path, branch, base, name, task, created_at, last_used_at
+	rows, err := r.s.conn(ctx).QueryContext(ctx, `SELECT repo_key, path, branch, base, name, task, created_at, last_used_at
 		FROM worker_checkouts WHERE repo_key = ?`, repoKey)
 	if err != nil {
 		return nil, fmt.Errorf("content: worker checkout: list %q: %w", repoKey, err)
@@ -84,7 +84,7 @@ func (r *workerCheckoutSqlite) List(ctx context.Context, repoKey string) ([]Work
 
 // All returns every row regardless of repository.
 func (r *workerCheckoutSqlite) All(ctx context.Context) ([]WorkerCheckout, error) {
-	rows, err := r.s.db.QueryContext(ctx, `SELECT repo_key, path, branch, base, name, task, created_at, last_used_at
+	rows, err := r.s.conn(ctx).QueryContext(ctx, `SELECT repo_key, path, branch, base, name, task, created_at, last_used_at
 		FROM worker_checkouts`)
 	if err != nil {
 		return nil, fmt.Errorf("content: worker checkout: list all: %w", err)
@@ -97,7 +97,7 @@ func (r *workerCheckoutSqlite) All(ctx context.Context) ([]WorkerCheckout, error
 func (r *workerCheckoutSqlite) Delete(ctx context.Context, repoKey string, paths []string) error {
 	return r.s.run(ctx, func(ctx context.Context) error {
 		for _, path := range paths {
-			if _, execErr := r.s.db.ExecContext(ctx,
+			if _, execErr := r.s.conn(ctx).ExecContext(ctx,
 				`DELETE FROM worker_checkouts WHERE repo_key = ? AND path = ?`, repoKey, path); execErr != nil {
 				return fmt.Errorf("content: worker checkout: delete %q: %w", path, execErr)
 			}

@@ -258,6 +258,7 @@ func (s *recordingSink) SendNotification(n proto.Notification) error {
 func (s *recordingSink) SendOutputRows(proto.OutputRowsFrame) error       { return nil }
 func (s *recordingSink) SendIntervalEnd(proto.IntervalEndFrame) error     { return nil }
 func (s *recordingSink) SendClearBoundary(proto.ClearBoundaryFrame) error { return nil }
+func (s *recordingSink) SendEffectFrame(proto.EffectFrame) error          { return nil }
 
 func (s *recordingSink) SendLifecycleData(f proto.SessionFrame) error {
 	s.mu.Lock()
@@ -1103,6 +1104,17 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// row index — scalars all, and no free-form []string, which is
 		// the rule this list exists to hold.
 		proto.OpConfirmRows: true,
+		// The scrollback budget (nocx-zg3k3.10.1): a session handle and a
+		// line count — a scalar and nothing else — applied through the
+		// session's runtime, so no caller can name a program with it and
+		// no free-form []string rides past the registration rule below.
+		proto.OpSetScrollback: true,
+		// The live-history page (nocx-zg3k3.10.3): one page of the
+		// scrollback the session's emulator holds. Its params are a
+		// session handle, a nullable cursor and a row bound — scalars
+		// all, and no free-form []string, which is the rule this list
+		// exists to hold.
+		proto.OpHistoryPage: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

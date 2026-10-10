@@ -37,7 +37,7 @@ type orderingKernel struct {
 	accepted []lifecycle.FenceNonce
 }
 
-func (k *orderingKernel) Ingest(_ lifecycle.TransportID, env lifecycle.Envelope) error {
+func (k *orderingKernel) Ingest(_ context.Context, _ lifecycle.TransportID, env lifecycle.Envelope) error {
 	k.mu.Lock()
 	k.accepted = append(k.accepted, env.Event.Complete.Fence)
 	k.mu.Unlock()
@@ -118,7 +118,7 @@ func TestCompletionsFromBothSourcesReachTheRuntimeInAcceptanceOrder(t *testing.T
 			for i := 0; i < perSource; i++ {
 				var fence lifecycle.FenceNonce
 				fence[0], fence[1], fence[2] = byte(s), byte(i), byte(i>>8)
-				if err := k.Ingest("t", lifecycle.Envelope{Event: lifecycle.Event{
+				if err := k.Ingest(context.Background(), "t", lifecycle.Envelope{Event: lifecycle.Event{
 					Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{Fence: fence},
 				}}); err != nil {
 					t.Errorf("ingest: %v", err)

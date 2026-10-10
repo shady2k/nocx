@@ -32,7 +32,9 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -240,15 +242,52 @@ func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 
 // PublishLifecycleProjection updates server-owned projections without
 // emitting a duplicate lifecycle notification to the renderer.
-func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
-	recorded := s.syncLifecycleLedger(f)
+func (s *WSServer) PublishLifecycleProjection(ctx context.Context, f lifecyclepub.Fact) {
+	stored := s.storedAttempt(ctx, f)
+	recorded := s.syncLifecycleLedger(ctx, stored)
 	if recorded != nil {
-		s.publishHistoryRecorded(f, *recorded)
+		lifecyclecommit.OnCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
 	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
 	// completed attempt publishes the fence its interval end waits for.
-	s.blockStream.attemptFact(s, f)
+	s.blockStream.attemptFact(ctx, s, stored)
+}
+
+// storedAttempt is f with its attempt named the way the store keys it
+// (ADR-0077). A coordinator that never saw a command's start knows it only
+// by the id the shell minted, while the store may key it by the id the app
+// minted when the command was submitted from nocx's editor — the shell id is
+// then that entry's alias, recorded on its execution. Every store-facing
+// projection of a fact reads this copy, so a frame delivered again to a
+// fresh coordinator reaches the block it belongs to by identity rather than
+// opening a second one. The renderer keeps the kernel's own name.
+func (s *WSServer) storedAttempt(ctx context.Context, f lifecyclepub.Fact) lifecyclepub.Fact {
+	if s.contentDB == nil || f.Attempt == nil || f.Attempt.ID == "" {
+		return f
+	}
+	s.lifecycleMu.Lock()
+	sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+	s.lifecycleMu.Unlock()
+	if !ok {
+		return f
+	}
+	sess, err := s.registry.Get(sid)
+	if err != nil || sess.PaneID() == "" {
+		return f
+	}
+	entry, err := s.contentDB.Ledger().EntryForShellAttempt(ctx, sess.PaneID(), f.Attempt.ID)
+	if err != nil {
+		s.log.Warn("lifecycle ledger: the attempt's stored name could not be read", "attempt", f.Attempt.ID, "error", err)
+		return f
+	}
+	if entry == "" || entry == f.Attempt.ID {
+		return f
+	}
+	named := *f.Attempt
+	named.ID = entry
+	f.Attempt = &named
+	return f
 }
 
 // THE TWO TRANSITIONS THE FACT STREAM CANNOT CARRY are delivered through the
@@ -275,7 +314,7 @@ func (s *WSServer) publishHistoryRecorded(f lifecyclepub.Fact, data historyRecor
 	}
 }
 
-func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
+func (s *WSServer) publishClosedAttemptHistory(ctx context.Context, id lifecycle.AttemptID) {
 	if s.lifecyclePub == nil {
 		return
 	}
@@ -306,11 +345,11 @@ func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
 		// call, a block this attempt opened stays "current" forever, and
 		// every later command in the session queues up behind one that can
 		// never close.
-		s.blockStream.attemptFact(s, fact)
+		s.blockStream.attemptFact(ctx, s, s.storedAttempt(ctx, fact))
 	}
-	if recorded := s.syncLifecycleLedger(fact); recorded != nil {
+	if recorded := s.syncLifecycleLedger(ctx, s.storedAttempt(ctx, fact)); recorded != nil {
 		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {
-			s.raiseLifecycleBlockFinished(*recorded, fact)
+			lifecyclecommit.OnCommit(ctx, func() { s.raiseLifecycleBlockFinished(*recorded, fact) })
 		}
 		// STASHED, not sent: this report runs before the lane's own
 		// completing fact (transitionsBelow's ordering in Ingest), and a
@@ -402,7 +441,7 @@ func (s *WSServer) unknownAttemptImpliesSessionEnd(domain lifecycle.DomainID) bo
 // publisher's emitter after construction. The destination is resolved at emit
 // time, exactly like files.changed — with no subscriber the fact is dropped
 // and the projection re-syncs on the next attach.
-func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
+func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 	lane := lifecycle.LaneID(f.Lane)
 	s.lifecycleMu.Lock()
 	sid, ok := s.lifecycleLanes[lane]
@@ -411,12 +450,13 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
-	recorded := s.syncLifecycleLedger(f)
+	stored := s.storedAttempt(ctx, f)
+	recorded := s.syncLifecycleLedger(ctx, stored)
 	// The streamed block's half of the same fact (ws_block_rows.go): an
 	// authenticated start opens — and answers the keep decision for — the
 	// command's block; a completed attempt publishes the fence its interval
 	// end waits for. Inert without a rows source.
-	s.blockStream.attemptFact(s, f)
+	s.blockStream.attemptFact(ctx, s, stored)
 	// Session death wins, and it wins BEFORE the wire (protocol §12.1).
 	// When the pty/SSH channel's Done() has closed, the session's whole
 	// remaining contract is `exit`: "emit exit, cancel any pending
@@ -447,98 +487,107 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// because it describes the host integration, not the renderer watching it.
 	s.recordInstalledFact(f)
 
-	// The session's integration axis (nocx-dvql): a live domain is the
-	// kernel's own word that this session integrated, and it is read from
-	// the published fact rather than re-derived, so there is exactly one
-	// authority for "is a domain live". The loss half is NOT taken from
-	// here — a handshake that expires moves no projection and publishes no
-	// fact — it comes from the adapter's loss cause (NoteIntegrationLoss).
-	// Before the subscriber checks below: this updates backend state, and
-	// the emit inside it does its own subscriber lookup.
-	if integrationLiveFromFact(f) {
-		s.noteIntegrationLive(sid)
-	}
-
-	// An episode without a subscriber is not opened: the next attach replays
-	// the fact, and the episode opens then, when the ack can actually come
-	// back.
-	//
-	// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
-	// silence while the one below it said "no subscriber" out loud, and the
-	// difference is not cosmetic: a session opened by the BACKEND has no
-	// receiver at all — OpenSession creates no ring and no subscriber by
-	// design — so this is the branch a worker participant's pane takes, every
-	// time, and the whole establishment then expires with the only visible
-	// trace being the adapter's bare hello-timeout ten seconds later.
-	rx := s.getRx(sid)
-	if rx == nil {
-		s.log.Info("lifecycle.changed dropped: the session has no receiver",
-			"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
-		return
-	}
-	wconn, state := rx.getSubscriber()
-	if wconn == nil {
-		// Said out loud, because the drop is otherwise invisible: the fact is
-		// gone and the only trace is a renderer that never hears about a
-		// transition. That silence is what made nocx-2h08 read as three
-		// different tests hanging on three different deadlines.
-		s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
-		return
-	}
-	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
-		s.openRecovery(sid, f)
-	}
-	// The envelope is the Responder's now (nocx-292k): every write goes
-	// through the outbound queue and its pump, which is the only writer on
-	// the socket. SessionID is transport addressing, not a lifecycle fact:
-	// one WebSocket carries several tabs, and the renderer must route this
-	// notification before any tab mutates or acknowledges its state.
-	//
-	// The session identity rides the fact (nocx-3oupk): the renderer
-	// compares it against the pair it learned at open, so a fact for this
-	// sessionId out of a previous backend instance — or an earlier epoch of
-	// this one — is refused instead of applied. It is distinct from the
-	// domain epoch the Fact itself carries, which is the lifecycle
-	// kernel's per-domain counter.
-	params := lifecycleChangedParams{
-		SessionID:      string(sid),
-		InstanceID:     string(sess.Identity().InstanceID),
-		SessionEpoch:   sess.Identity().Epoch,
-		SignalDelivery: s.signalDeliveryFor(f),
-		Fact:           f,
-	}
-	// THIS FACT BEFORE ITS OWN RECEIPT (nocx-2v80t.3.22): history.recorded
-	// names the attempt this fact is the one to report as done, and a
-	// renderer that reads the receipt first still has the attempt open in
-	// its own kernel — the receipt then has no finished block to attach to
-	// and is dropped for good, never retried. Measured against a real echo
-	// of a command carrying a credential: the receipt reached the socket
-	// every time before the fact naming its completion did, and the block
-	// never got its capture-offer chip. Sending the fact first costs
-	// nothing else it did not already cost — the receipt is still the very
-	// next write on this connection.
-	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
-		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
-		return
-	}
-	// The delivered path is audible too. Every drop above says so, and this
-	// was the one branch that did not — so a renderer that never showed its
-	// editor left a log in which "sent and refused" and "never sent" read the
-	// same (nocx-n14oo.8's reasoning, for the other half).
-	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
-		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
-	if recorded != nil {
-		s.historyRecordedNotification(wconn, state, *recorded)
-	} else if f.Attempt != nil {
-		// publishClosedAttemptHistory (transitionsBelow, run before this
-		// fact by Ingest) is usually the one that actually closed the
-		// ledger row for this attempt's completion, which is why syncing it
-		// again HERE answers nil — its receipt is waiting in the stash for
-		// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
-		if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
-			s.historyRecordedNotification(wconn, state, stashed)
+	// WHAT THE RENDERER IS TOLD WAITS FOR THE FRAME (ADR-0077 decision 12).
+	// Everything below leaves the process — the integration axis, the
+	// recovery episode, the fact itself and its history receipt — so inside a
+	// lifecycle frame it runs once the frame is stored, in the order the
+	// frame caused it and after the shell's own ACCEPT, and not at all for a
+	// frame that failed every attempt; the next coordinator applies that
+	// frame and tells the renderer then. Outside a frame it runs at once.
+	lifecyclecommit.OnCommit(ctx, func() {
+		// The session's integration axis (nocx-dvql): a live domain is the
+		// kernel's own word that this session integrated, and it is read from
+		// the published fact rather than re-derived, so there is exactly one
+		// authority for "is a domain live". The loss half is NOT taken from
+		// here — a handshake that expires moves no projection and publishes no
+		// fact — it comes from the adapter's loss cause (NoteIntegrationLoss).
+		// Before the subscriber checks below: this updates backend state, and
+		// the emit inside it does its own subscriber lookup.
+		if integrationLiveFromFact(f) {
+			s.noteIntegrationLive(sid)
 		}
-	}
+
+		// An episode without a subscriber is not opened: the next attach replays
+		// the fact, and the episode opens then, when the ack can actually come
+		// back.
+		//
+		// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
+		// silence while the one below it said "no subscriber" out loud, and the
+		// difference is not cosmetic: a session opened by the BACKEND has no
+		// receiver at all — OpenSession creates no ring and no subscriber by
+		// design — so this is the branch a worker participant's pane takes, every
+		// time, and the whole establishment then expires with the only visible
+		// trace being the adapter's bare hello-timeout ten seconds later.
+		rx := s.getRx(sid)
+		if rx == nil {
+			s.log.Info("lifecycle.changed dropped: the session has no receiver",
+				"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
+			return
+		}
+		wconn, state := rx.getSubscriber()
+		if wconn == nil {
+			// Said out loud, because the drop is otherwise invisible: the fact is
+			// gone and the only trace is a renderer that never hears about a
+			// transition. That silence is what made nocx-2h08 read as three
+			// different tests hanging on three different deadlines.
+			s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
+			return
+		}
+		if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
+			s.openRecovery(sid, f)
+		}
+		// The envelope is the Responder's now (nocx-292k): every write goes
+		// through the outbound queue and its pump, which is the only writer on
+		// the socket. SessionID is transport addressing, not a lifecycle fact:
+		// one WebSocket carries several tabs, and the renderer must route this
+		// notification before any tab mutates or acknowledges its state.
+		//
+		// The session identity rides the fact (nocx-3oupk): the renderer
+		// compares it against the pair it learned at open, so a fact for this
+		// sessionId out of a previous backend instance — or an earlier epoch of
+		// this one — is refused instead of applied. It is distinct from the
+		// domain epoch the Fact itself carries, which is the lifecycle
+		// kernel's per-domain counter.
+		params := lifecycleChangedParams{
+			SessionID:      string(sid),
+			InstanceID:     string(sess.Identity().InstanceID),
+			SessionEpoch:   sess.Identity().Epoch,
+			SignalDelivery: s.signalDeliveryFor(f),
+			Fact:           f,
+		}
+		// THIS FACT BEFORE ITS OWN RECEIPT (nocx-2v80t.3.22): history.recorded
+		// names the attempt this fact is the one to report as done, and a
+		// renderer that reads the receipt first still has the attempt open in
+		// its own kernel — the receipt then has no finished block to attach to
+		// and is dropped for good, never retried. Measured against a real echo
+		// of a command carrying a credential: the receipt reached the socket
+		// every time before the fact naming its completion did, and the block
+		// never got its capture-offer chip. Sending the fact first costs
+		// nothing else it did not already cost — the receipt is still the very
+		// next write on this connection.
+		if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
+			s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
+			return
+		}
+		// The delivered path is audible too. Every drop above says so, and this
+		// was the one branch that did not — so a renderer that never showed its
+		// editor left a log in which "sent and refused" and "never sent" read the
+		// same (nocx-n14oo.8's reasoning, for the other half).
+		s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
+			"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
+		if recorded != nil {
+			s.historyRecordedNotification(wconn, state, *recorded)
+		} else if f.Attempt != nil {
+			// publishClosedAttemptHistory (transitionsBelow, run before this
+			// fact by Ingest) is usually the one that actually closed the
+			// ledger row for this attempt's completion, which is why syncing it
+			// again HERE answers nil — its receipt is waiting in the stash for
+			// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
+			if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
+				s.historyRecordedNotification(wconn, state, stashed)
+			}
+		}
+	})
 }
 
 // raiseLifecycleBlockFinished raises the attested completion event for the
@@ -580,13 +629,10 @@ func (s *WSServer) raiseLifecycleBlockFinished(data historyRecordedData, f lifec
 // The lifecycle publisher is the authority for state; this function only
 // advances the ledger's existing Submit → StartExecution → FinishExecution
 // lifecycle and never invents a second phase machine.
-func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData {
+func (s *WSServer) syncLifecycleLedger(ctx context.Context, f lifecyclepub.Fact) *historyRecordedData {
 	if s.contentDB == nil || f.Attempt == nil {
 		return nil
 	}
-	// Owner: the lifecycle publisher's synchronous projection callback.
-	// Closing event: callback return after this ledger transition completes.
-	ctx := context.Background()
 	ledger := s.contentDB.Ledger()
 	row, err := ledger.Entry(ctx, f.Attempt.ID)
 	if err != nil {
@@ -598,87 +644,114 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 	sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
 	s.lifecycleMu.Unlock()
 	if row == nil {
-		if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
-			s.lifecycleMu.Lock()
-			scope, scoped := s.historySources[f.Attempt.ID]
-			sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-			s.lifecycleMu.Unlock()
-			if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
-				return nil
+		// A completion the kernel reconstructed for a command that ran for
+		// the coordinator BEFORE this one (the completion-only replay,
+		// ADR-0076) names no ledger row: its real id lives in the previous
+		// process, and the shell's own complete frame names no id at all.
+		// The session's one open entry IS that command's row — the same
+		// session-id join the re-adopting block stream re-binds from — and
+		// the authenticated completion is the fact that closes it with its
+		// real status. Resolved here, the row skips the record-a-new-entry
+		// path below: that path is for a shell attempt the ledger never
+		// saw, and this one the ledger saw under its real id.
+		if f.Attempt.State == lifecyclepub.AttemptCompleted && f.Attempt.Origin == lifecyclepub.OriginShell {
+			if open, openErr := s.blockStore().OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
+				if reopened, rerr := ledger.Entry(ctx, open.EntryID); rerr == nil && reopened != nil && reopened.Phase != content.PhaseClosed {
+					row = reopened
+					// Probe (nocx-zg3k3.5.3 round 7): the synthetic completion
+					// resolved to the session's open entry.
+					log.From(ctx).Debug("lifecycle completion replay resolved the session's open entry",
+						"attempt", f.Attempt.ID, "entry", open.EntryID, "artifact", open.ArtifactID)
+				}
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
-				return nil
-			}
-			s.lifecycleMu.Lock()
-			delete(s.historySources, f.Attempt.ID)
-			s.lifecycleMu.Unlock()
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
-				Generation: scope.Generation, Source: scope.Source,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
-			}
-		}
-		s.lifecycleMu.Lock()
-		laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-		sid = laneSID
-		s.lifecycleMu.Unlock()
-		if !ok {
-			return nil
-		}
-		sess, sessErr := s.registry.Get(sid)
-		if sessErr != nil {
-			return nil
-		}
-		s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
-			lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
-		row, err = ledger.Entry(ctx, f.Attempt.ID)
-		if err != nil {
-			s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
-			return nil
 		}
 		if row == nil {
-			if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+			if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
+				s.lifecycleMu.Lock()
+				scope, scoped := s.historySources[f.Attempt.ID]
+				sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+				s.lifecycleMu.Unlock()
+				if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				s.lifecycleMu.Lock()
+				delete(s.historySources, f.Attempt.ID)
+				s.lifecycleMu.Unlock()
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
+					Generation: scope.Generation, Source: scope.Source,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
+			}
+			s.lifecycleMu.Lock()
+			laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+			sid = laneSID
+			s.lifecycleMu.Unlock()
+			if !ok {
 				return nil
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+			sess, sessErr := s.registry.Get(sid)
+			if sessErr != nil {
 				return nil
 			}
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
-				Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
+			s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
+				lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
+			row, err = ledger.Entry(ctx, f.Attempt.ID)
+			if err != nil {
+				s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
+				return nil
+			}
+			if row == nil {
+				if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
+					Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
 			}
 		}
 	}
+	// The shell's own id for this command, recorded on the execution when
+	// the entry is keyed by another — the alias a fresh coordinator finds
+	// the block by (storedAttempt).
+	var shellAttempt string
+	if s.lifecyclePub != nil {
+		if att, ok := s.lifecyclePub.Attempt(lifecycle.AttemptID(f.Attempt.ID)); ok {
+			shellAttempt = string(att.ShellID())
+		}
+	}
+	// One store call and no recovered failure: inside a lifecycle frame
+	// every failed write fails the whole frame (ADR-0077), so the start pins
+	// a routine observation itself when the environment has none rather
+	// than failing and retrying.
 	start := func() (int64, error) {
-		execID, startErr := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
-		if startErr == nil {
-			return execID, nil
-		}
-		env := content.Environment{ID: row.EnvironmentID}
-		if row.Environment != nil {
-			env = *row.Environment
-		}
-		if ensureErr := ledger.EnsureEnvironment(ctx, env); ensureErr != nil {
-			return 0, ensureErr
-		}
-		if _, observeErr := ledger.RecordObservation(ctx, content.Observation{
-			EnvironmentID: row.EnvironmentID, Confidence: "{}", Criticality: content.CriticalityRoutine, Payload: "{}",
-		}); observeErr != nil {
-			return 0, observeErr
-		}
-		return ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
+		return ledger.StartExecution(ctx, content.StartExecution{
+			EntryID: row.ID, ShellAttempt: shellAttempt, PinRoutineIfNone: true,
+		})
 	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
 		if row.Phase == content.PhaseOpen {
+			// Probe (nocx-zg3k3.5.3 round 7): this line firing twice for one
+			// entry means two execution rows — the seam a second, artifact-less
+			// execution opens through.
+			log.From(ctx).Debug("lifecycle ledger start on an open fact for an open entry",
+				"attempt", row.ID)
 			if _, startErr := start(); startErr != nil {
 				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", startErr)
 			}
@@ -799,6 +872,40 @@ func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 	}
 }
 
+// settleAdoptedTerminalDomains settles the session's streaming when a lane
+// bound to it carries a domain the helper already closed or lost. The
+// helper's own end fact can arrive while the lane is still unregistered —
+// the shell exits while the coordinator is away, the re-adopting process
+// adopts the channel, and the domain_closed is ingested before anything
+// routes it (the loaded 3/20 shell-exit shape, nocx-zg3k3.5.3 Round 9) —
+// and the projection replay derives nothing for an already-closed domain,
+// so the one-shot settle was lost. The kernel still holds the domain's
+// recorded terminal state — the helper's own word, replayed, never a guess
+// (ADR-0076) — and the session's open entry settles from it now.
+// Idempotent: a session whose entry the completion already closed has
+// nothing open to settle, and HelperSessionEnded seals only open blocks.
+func (s *WSServer) settleAdoptedTerminalDomains(sid session.ID) {
+	if s.lifecyclePub == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	var lanes []lifecycle.LaneID
+	for lane, cur := range s.lifecycleLanes {
+		if cur == sid {
+			lanes = append(lanes, lane)
+		}
+	}
+	s.lifecycleMu.Unlock()
+	for _, lane := range lanes {
+		// The derive clears a closed lane's domain from the snapshot (its
+		// Domain reads empty) — the kernel's own record is the source.
+		if _, ok := s.lifecyclePub.TerminalDomainOfLane(lane); ok {
+			s.HelperSessionEnded(sid)
+			return
+		}
+	}
+}
+
 // ── lifecycle.submitAttempt (ADR-0024 decision 5) ────────────────────────
 
 // submitAttemptParams is the payload of the "lifecycle.submitAttempt" RPC:
@@ -907,13 +1014,13 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 	// The submit IS this command's authenticated start: the block stream
 	// answers the keep decision here, once per command, before any row
 	// exists. Inert without a rows source (ws_block_rows.go).
-	s.blockStream.openAttemptFor(s, sid, string(att.ID))
+	s.blockStream.openAttemptFor(ctx, s, sid, string(att.ID))
 	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
 		// The shell can authenticate its Start concurrently with the
 		// store insert. The publisher emitted that fact before this row
 		// existed, so reconcile the kernel's current state once the row
 		// is durable.
-		s.syncLifecycleLedger(lifecyclepub.Fact{
+		s.syncLifecycleLedger(ctx, lifecyclepub.Fact{
 			Attempt: &lifecyclepub.Attempt{ID: string(current.ID), State: lifecyclepub.AttemptOpen},
 		})
 	}

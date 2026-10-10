@@ -481,3 +481,15 @@ func TestOneCoordinatorStartsOneWorkerAndIsToldWhatHoldsIt(t *testing.T) {
 		t.Fatalf("held = %v, want the worker closed by its coordinator", held)
 	}
 }
+
+func TestWorkerEnrolmentsArmedForSessionIncludesEnrolledParticipant(t *testing.T) {
+	e := &workerEnrolments{bySess: map[session.ID]workers.ParticipantID{
+		"worker-session": "participant-1",
+	}}
+	if !e.armedForSession("worker-session") {
+		t.Fatal("the already-enrolled worker pane was not classified as a literal launch")
+	}
+	if e.armedForSession("ordinary-session") {
+		t.Fatal("an ordinary session was classified as a worker launch")
+	}
+}

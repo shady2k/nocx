@@ -1,6 +1,7 @@
 package ghostty
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -60,6 +61,27 @@ func TestTheOutputMarkIsSighted(t *testing.T) {
 // TestTheOutputMarkNeverEatsTheBytesAroundIt: the mark splits the feed, it
 // never withholds bytes — output before and after it both reach the screen,
 // in the same ingest call the mark itself arrived in.
+func TestPromptBoundaryIsAnUntrustedEmptyEffectAcrossEveryChunkBoundary(t *testing.T) {
+	seq := promptBoundaryFixed
+	for cut := 0; cut <= len(seq); cut++ {
+		t.Run(fmt.Sprintf("cut-%d", cut), func(t *testing.T) {
+			term := newTerminal(t, 20, 4)
+			ingest(t, term, seq[:cut])
+			got := term.Effects()
+			if cut < len(seq) && len(got) != 0 {
+				t.Fatalf("partial B emitted effects: %#v", got)
+			}
+			if cut < len(seq) {
+				ingest(t, term, seq[cut:])
+				got = term.Effects()
+			}
+			if len(got) != 1 || got[0].Kind != emulator.EffectPromptBoundary || len(got[0].Title) != 0 || len(got[0].Body) != 0 {
+				t.Fatalf("B effects = %#v, want one empty prompt-boundary observation", got)
+			}
+		})
+	}
+}
+
 func TestTheOutputMarkNeverEatsTheBytesAroundIt(t *testing.T) {
 	term := newTerminal(t, 20, 4)
 	ingest(t, term, "before"+outputMarkSeq+"after")

@@ -39,10 +39,10 @@ func TestALostBoundaryReachesTheBlockStreamOfItsSession(t *testing.T) {
 	downlink.Bind(client.HostSessionID{Generation: "gen", Session: helperSession})
 
 	fence := lifecycle.FenceNonce{0x71}
-	if err := downlink.Accept(func() error { return nil }, &lifecycle.Complete{Fence: fence}); err != nil {
+	if err := downlink.Accept(context.Background(), func() error { return nil }, &lifecycle.Complete{Fence: fence}); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
-	downlink.ObserveEnvironmentEntry("dom-child")
+	downlink.ObserveEnvironmentEntry(context.Background(), "dom-child")
 	for i := range 2 {
 		select {
 		case <-sink.lostCh:

@@ -243,3 +243,106 @@ func TestAnAdoptedDomainDiesWithItsTransport(t *testing.T) {
 		t.Fatalf("the lost lane must publish the recovery fence the shell was given at spawn")
 	}
 }
+
+// The retained window's completion-only replay (ADR-0076): a command that
+// ran for the coordinator BEFORE this one completes over the adopted
+// domain, naming the shell's own attempt id this kernel never saw. The
+// attempt is reconstructed from the shell's authenticated word and
+// completed with the reported exit and fence — the lane fact then closes
+// the ledger row the previous coordinator opened under the same id and
+// resolves the interval end the helper resent. A kernel-native domain
+// keeps the foreign-id refusal: an id it neither minted nor adopted names
+// nothing.
+func TestACompletionOnlyReplayReconstructsTheAdoptedAttempt(t *testing.T) {
+	k, _, _ := newTestKernel()
+	port := &fakePort{}
+	if err := k.BindTransport("tpt-adopt", port); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	lane, dom, epoch, cap, rec := adoptedHandle()
+	h, err := k.AdoptDomain(lane, dom, epoch, cap, rec, "tpt-adopt")
+	if err != nil {
+		t.Fatalf("AdoptDomain: %v", err)
+	}
+
+	id := AttemptID("shell-attempt-past")
+	if _, ierr := k.Ingest("tpt-adopt", env(lane, h, 41, Event{
+		Kind: KindComplete, Complete: &Complete{AttemptID: &id, ExitCode: intPtr(0), Fence: fence(0x71)},
+	})); ierr != nil {
+		t.Fatalf("the replayed completion of the previous coordinator's attempt was refused: %v", ierr)
+	}
+	got, ok := k.Attempt(id)
+	if !ok || got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 0 || got.Fence != fence(0x71) {
+		t.Fatalf("reconstructed attempt = %+v, want completed with the replay's exit and fence", got)
+	}
+	snap, serr := k.State(lane)
+	if serr != nil {
+		t.Fatalf("State: %v", serr)
+	}
+	// The lane fact must still name the attempt, completed: it is what
+	// carries the terminal fact to the ledger and the block stream.
+	if snap.Attempt != id {
+		t.Fatalf("lane attempt after the replay = %q, want the reconstructed attempt named", snap.Attempt)
+	}
+	if snap.Lifecycle != LifecycleRunning {
+		t.Fatalf("lane lifecycle after the replay = %v, want Running until the prompt", snap.Lifecycle)
+	}
+	// Exit status is set exactly once here too.
+	if _, ierr := k.Ingest("tpt-adopt", env(lane, h, 42, Event{
+		Kind: KindComplete, Complete: &Complete{AttemptID: &id, ExitCode: intPtr(1), Fence: fence(0x72)},
+	})); !errors.Is(ierr, ErrAttemptNotOpen) {
+		t.Fatalf("second completion must be rejected, got %v", ierr)
+	}
+}
+
+// The native-domain guard stands: an unknown id on a domain this kernel
+// minted is refused, exactly as before.
+func TestACompletionForAnUnknownAttemptOnANativeDomainIsRefused(t *testing.T) {
+	k, _, _ := newTestKernel()
+	port := &fakePort{}
+	if err := k.BindTransport("tpt", port); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	h := establish(t, k, "tpt", port, "lane-x", nil)
+	bogus := AttemptID("does-not-exist")
+	if _, ierr := k.Ingest("tpt", env("lane-x", h, 2, Event{
+		Kind: KindComplete, Complete: &Complete{AttemptID: &bogus, ExitCode: intPtr(0), Fence: fence(0x73)},
+	})); !errors.Is(ierr, ErrAttemptNotOpen) {
+		t.Fatalf("foreign attempt id on a native domain must be refused, got %v", ierr)
+	}
+}
+
+// The replayed completion is unnamed by protocol — the kernel resolves the
+// domain's single open attempt — so the completion-only replay of a command
+// that ran for the previous coordinator arrives with no id at all. On an
+// adopted domain it reconstructs the attempt under a synthetic id, and the
+// lane names it so the terminal fact still flows.
+func TestAnUnnamedCompletionOnlyReplayReconstructsTheAdoptedAttempt(t *testing.T) {
+	k, _, _ := newTestKernel()
+	port := &fakePort{}
+	if err := k.BindTransport("tpt-adopt", port); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	lane, dom, epoch, cap, rec := adoptedHandle()
+	h, err := k.AdoptDomain(lane, dom, epoch, cap, rec, "tpt-adopt")
+	if err != nil {
+		t.Fatalf("AdoptDomain: %v", err)
+	}
+
+	if _, ierr := k.Ingest("tpt-adopt", env(lane, h, 41, Event{
+		Kind: KindComplete, Complete: &Complete{ExitCode: intPtr(0), Fence: fence(0x74)},
+	})); ierr != nil {
+		t.Fatalf("the unnamed replayed completion was refused: %v", ierr)
+	}
+	snap, serr := k.State(lane)
+	if serr != nil {
+		t.Fatalf("State: %v", serr)
+	}
+	if snap.Attempt == "" {
+		t.Fatal("the lane names no attempt after the unnamed replay: the terminal fact would carry nothing")
+	}
+	got, ok := k.Attempt(snap.Attempt)
+	if !ok || got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 0 || got.Fence != fence(0x74) {
+		t.Fatalf("reconstructed attempt = %+v, want completed with the replay's exit and fence", got)
+	}
+}

@@ -41,6 +41,15 @@ func nocxGoBell(handle C.uintptr_t) {
 	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectBell})
 }
 
+//export nocxGoHistoryErased
+func nocxGoHistoryErased(handle C.uintptr_t, firstRow C.uint32_t, count C.uint32_t) {
+	t := lookup(uintptr(handle))
+	if t == nil || !t.historyCapture.active {
+		return
+	}
+	t.captureHistoryErasedLocked(int(firstRow), int(count))
+}
+
 //export nocxGoTitle
 func nocxGoTitle(handle C.uintptr_t, data *C.uint8_t, n C.size_t) {
 	t := lookup(uintptr(handle))
@@ -78,14 +87,15 @@ func nocxGoClipboard(handle C.uintptr_t, data *C.uint8_t, n C.size_t) {
 }
 
 //export nocxGoNotification
-func nocxGoNotification(handle C.uintptr_t, data *C.uint8_t, n C.size_t) {
+func nocxGoNotification(handle C.uintptr_t, title *C.uint8_t, titleLen C.size_t, body *C.uint8_t, bodyLen C.size_t) {
 	t := lookup(uintptr(handle))
 	if t == nil {
 		return
 	}
 	t.effects = append(t.effects, emulator.Effect{
-		Kind: emulator.EffectNotification,
-		Body: copyBorrowed(data, n),
+		Kind:  emulator.EffectNotification,
+		Title: copyBorrowed(title, titleLen),
+		Body:  copyBorrowed(body, bodyLen),
 	})
 }
 

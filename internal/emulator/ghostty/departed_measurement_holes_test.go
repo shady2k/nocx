@@ -99,51 +99,26 @@ func TestATornMeasurementIsReportedAsAGapAndNeverAsSilence(t *testing.T) {
 	t.Logf("torn=%v recovered=%d rows", tornErr, len(recovered))
 }
 
-// A budget that prunes is the other honest failure, and the adapter keeps it:
-// the feed that crosses the boundary mixes its own departures with the pages
-// the library removed, so it is reported as a hole rather than guessed at, and
-// the next feed measures again. Production clears the budget (terminal.go's
-// install), so this path is reached by stating one here — which is the point of
-// keeping it: a budget that comes back must fail loudly, not silently.
-func TestABudgetThatPrunesIsReportedAsAHoleAndTheNextFeedRecovers(t *testing.T) {
+// A retention prune is explicit through history-erased callbacks: the rows
+// that leave during the feed are copied before their pages die, so the port
+// reports the complete stream without a synthetic hole.
+func TestABudgetThatPrunesKeepsDepartedRowsComplete(t *testing.T) {
 	term := departedTerm(t, 80, 24)
-	// The limit must be larger than one page: the library prunes whole pages,
-	// and a budget that takes the history to ZERO is the reset path (silence,
-	// by contract) rather than the prune path this test is about.
 	departedRetention(t, term, 2_000)
 
-	flagged := 0
-	for c := 1; c <= 30 && flagged == 0; c++ {
+	reported := 0
+	for c := 1; c <= 30; c++ {
 		departedFeed(t, term, numberedRows("P", 100))
 		rows, err := term.DepartedRows()
-		if err == nil {
-			if len(rows) == 0 {
-				t.Fatalf("command %d reported 0 rows and no gap: a hundred lines scrolled a 24-row screen", c)
-			}
-			continue
+		if err != nil {
+			t.Fatalf("command %d: %v", c, err)
 		}
-		flagged = c
-		if len(rows) != 0 {
-			t.Fatalf("command %d was flagged and still handed over %d rows: the pruned pages and the feed's own departures are one count and none may be claimed",
-				c, len(rows))
+		if len(rows) == 0 {
+			t.Fatalf("command %d reported 0 rows: a hundred lines scrolled a 24-row screen", c)
 		}
-		t.Logf("the budget pruned inside command %d: %v", c, err)
-
-		// Re-baselined, not stuck: the feed after the prune measures again —
-		// which is also what tells the two failure branches apart. A torn
-		// measurement owes a gap on the NEXT feed; a prune does not, because
-		// the count it leaves behind IS a measurement.
-		departedFeed(t, term, numberedRows("Q", 100))
-		after, afterErr := term.DepartedRows()
-		if afterErr != nil {
-			t.Fatalf("the feed after the prune was flagged too: %v", afterErr)
-		}
-		if len(after) == 0 {
-			t.Fatal("the feed after the prune reported nothing: the boundary did not re-baseline")
-		}
+		reported += len(rows)
 	}
-
-	if flagged == 0 {
-		t.Fatalf("no feed was flagged inside the configured budget: the prune branch the port documents was not reached")
+	if reported != 2_977 {
+		t.Fatalf("reported %d rows, want 2977", reported)
 	}
 }

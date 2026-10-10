@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.recoveryStatus.schema.json",
+  "title": "SessionRecoveryStatus",
+  "description": "Metadata-only recovery status for one reclaimed session. It reports the recorded stream end offset and known missing ranges without reading or returning recorded byte chunks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "produced", "gaps"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{32}$"
+    },
+    "produced": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "End offset recorded for this session; combined with replayFrom to determine whether reclaim left an unrecorded interval."
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "$ref": "ledger.get.schema.json#/$defs/gap"
+      },
+      "description": "Known gaps in the recorded stream. Always an array; contains metadata only."
+    }
+  }
+}

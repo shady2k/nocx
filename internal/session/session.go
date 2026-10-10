@@ -174,6 +174,14 @@ type Config struct {
 	// It carries provenance and nothing else: no part of Open reads it to
 	// decide what the session may do.
 	Parent Ref
+	// OpenedAt is the moment this session's pipe was really opened. A fresh
+	// open leaves it zero and the registry stamps the construction instant;
+	// a RE-ADOPTION carries the original across (the helper's session
+	// record, via the pending session's started-at), because a re-adopted
+	// session is THE SAME session -- a floor stamped at the adoption would
+	// hide every block recorded before the restart (nocx-zg3k3.5.3,
+	// REVIEW-1).
+	OpenedAt time.Time
 	// PaneID names the pane this session is the pipe of (design §6.1 and
 	// §7). Frontend-minted UUIDv7, validated and resolved by the transport
 	// BEFORE anything is spawned, and empty when this session is attached to
@@ -709,8 +717,14 @@ func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session
 	if cfg.Remote != nil {
 		opts = sshOptionsFromConfig(cfg.Remote)
 	}
+	// The carried opened-at wins when a re-adoption supplies it; a fresh
+	// open is stamped here, at construction.
+	openedAt := time.Now()
+	if !cfg.OpenedAt.IsZero() {
+		openedAt = cfg.OpenedAt
+	}
 	s := &realSession{
-		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
+		id: id, openedAt: openedAt, identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
 		sshOpts: opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
@@ -858,6 +872,13 @@ func (r *Reg) Close(id ID) error {
 	// opened this session, so a close reads under the same trace as the open
 	// — which is the pairing somebody diagnosing a torn-down pane is looking
 	// for. Close has no context of its own to bind, and does not need one.
+	//
+	// The lifecycle leg's orderly handover runs BEFORE the channel closes:
+	// after it, the adapter would learn of the detach only from its
+	// carrier's EOF and would have to read that as a loss — settling the
+	// session's open attempts unknown and closing the ledger entry of a
+	// command that is still running (ADR-0076).
+	s.runLifecycleDetach()
 	s.log.Info("session closed", "id", string(id))
 	err := s.Close()
 	if r.usageTracker != nil && s.profileID != "" {
@@ -1120,6 +1141,19 @@ type realSession struct {
 	// HostKeyFingerprint() the way a coordinator-dialed one can.
 	hostKeyFingerprintMu sync.RWMutex
 	hostKeyFingerprint   string
+
+	// lifecycleDetach is the hosted lifecycle's orderly handover, armed by
+	// the transport when the open carried a lifecycle leg, and run by the
+	// registry's Close — the coordinator-detach verb — BEFORE the channel
+	// closes. The order is the point: after the channel closes, the leg's
+	// adapter could learn of the detach only from its own carrier's EOF,
+	// which it would have to read as a loss — settling the session's open
+	// attempts unknown and closing the ledger entry of a command that is
+	// still running (the exact wrong ADR-0076 forbids). Guarded by
+	// lifecycleDetachMu on the same terms as hostKeyFingerprint above: a
+	// fact set once, after the session already exists.
+	lifecycleDetachMu sync.Mutex
+	lifecycleDetach   func()
 
 	ch        Channel
 	log       log.Logger
@@ -1450,6 +1484,28 @@ func (s *realSession) EndSession() error {
 
 func (s *realSession) Done() <-chan struct{} {
 	return s.ch.Done()
+}
+
+// SetLifecycleDetach arms the session's hosted lifecycle orderly handover.
+// An optional capability in this package's existing style (see
+// ShellIntegrationReason): only a session whose open carried a lifecycle
+// leg is armed, and the transport holds the closure because it built the
+// leg. Run by the registry's Close; see the field's own comment for why
+// the order is load-bearing.
+func (s *realSession) SetLifecycleDetach(f func()) {
+	s.lifecycleDetachMu.Lock()
+	defer s.lifecycleDetachMu.Unlock()
+	s.lifecycleDetach = f
+}
+
+func (s *realSession) runLifecycleDetach() {
+	s.lifecycleDetachMu.Lock()
+	f := s.lifecycleDetach
+	s.lifecycleDetach = nil
+	s.lifecycleDetachMu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 // ShellIntegrationReason surfaces the connect-time refusal reason

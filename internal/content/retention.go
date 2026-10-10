@@ -155,11 +155,11 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 	// BEGIN IMMEDIATE, for the reason Submit states: the write lock is taken
 	// at BEGIN rather than at the first write, so a second process's writer
 	// waits instead of failing an upgrade with SQLITE_BUSY_SNAPSHOT.
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return EvictionResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer txEnd.rollback()
 
 	ids, newest, err := evictionVictims(ctx, tx, req)
 	if err != nil {
@@ -169,10 +169,10 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 		// Nothing to remove: the store lost nothing, so the watermark must
 		// not move. A pass that recorded a horizon here would narrow the
 		// store's stated coverage without any row having gone.
-		if commitErr := tx.Commit(); commitErr != nil {
+		if commitErr := txEnd.commit(); commitErr != nil {
 			return EvictionResult{}, commitErr
 		}
-		wm, wmErr := s.watermark(ctx, s.db)
+		wm, wmErr := s.watermark(ctx, s.conn(ctx))
 		if wmErr != nil {
 			return EvictionResult{}, wmErr
 		}
@@ -259,7 +259,7 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 		return EvictionResult{}, fmt.Errorf("content: evict: record watermark: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := txEnd.commit(); err != nil {
 		return EvictionResult{}, err
 	}
 	return EvictionResult{Evicted: removed, TotalEvicted: total, Horizon: horizon}, nil
@@ -338,7 +338,7 @@ func evictionVictims(ctx context.Context, tx *sql.Tx, req EvictionRequest) ([]st
 // Watermark reports what this store has lost. It is a plain read — no writer
 // turn — because it answers from the watermark row alone.
 func (s *sqliteContent) Watermark(ctx context.Context) (RetentionWatermark, error) {
-	return s.watermark(ctx, s.db)
+	return s.watermark(ctx, s.conn(ctx))
 }
 
 // watermark reads the one row through rowQuerier — the seam this package
@@ -504,11 +504,11 @@ func (s *sqliteContent) EvictBodies(ctx context.Context, req BodyEvictionRequest
 // the writer goroutine and must never call back into run.
 func (s *sqliteContent) evictBodies(ctx context.Context, req BodyEvictionRequest) (BodyEvictionResult, error) {
 	// BEGIN IMMEDIATE, for the reason Submit and evictEntries both state.
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return BodyEvictionResult{}, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer txEnd.rollback()
 
 	var retained int64
 	if err = tx.QueryRowContext(ctx,
@@ -519,7 +519,7 @@ func (s *sqliteContent) evictBodies(ctx context.Context, req BodyEvictionRequest
 	if need <= 0 {
 		// Inside the budget: there is nothing to free, and a pass that
 		// stripped a body here would be data loss rather than housekeeping.
-		if err = tx.Commit(); err != nil {
+		if err = txEnd.commit(); err != nil {
 			return BodyEvictionResult{}, err
 		}
 		return BodyEvictionResult{RetainedBytes: retained}, nil
@@ -547,7 +547,7 @@ func (s *sqliteContent) evictBodies(ctx context.Context, req BodyEvictionRequest
 		// pinned, or belongs to a block that has not closed. That is not an
 		// error: the store is honestly unable to shrink, and says so by
 		// reporting what it still retains.
-		if err = tx.Commit(); err != nil {
+		if err = txEnd.commit(); err != nil {
 			return BodyEvictionResult{}, err
 		}
 		return BodyEvictionResult{RetainedBytes: retained}, nil
@@ -584,7 +584,7 @@ func (s *sqliteContent) evictBodies(ctx context.Context, req BodyEvictionRequest
 		actuallyFreed += v.bytes
 		actuallyBodies++
 	}
-	if err := tx.Commit(); err != nil {
+	if err := txEnd.commit(); err != nil {
 		return BodyEvictionResult{}, err
 	}
 	return BodyEvictionResult{

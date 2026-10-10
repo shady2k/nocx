@@ -64,12 +64,29 @@ type sessionRx struct {
 	subscriber  *wsConn    // current attached connection (nil if none)
 	subState    *connState // subscriber's connection-scoped state
 	monitorOnce sync.Once
+	// deliveryMu linearizes binary PTY frames and effects before they enter
+	// the shared outbound queue. Effects wait in this bounded list until the
+	// per-pump cursor reaches their exact stream offset.
+	deliveryMu     sync.Mutex
+	deliveryConn   *wsConn
+	deliveryOffset uint64
+	pendingEffects []pendingSessionEffect
 	// inputStalled is true from the moment this session's write queue
 	// refuses a frame until it accepts one again. It exists to make the
 	// notification fire once per stall rather than once per keystroke:
 	// a person holding a key against a stuck channel would otherwise
 	// raise a hundred of them.
 	inputStalled atomic.Bool
+}
+
+const maxPendingSessionEffects = 64
+
+type pendingSessionEffect struct {
+	conn         *wsConn
+	offset       uint64
+	waitForBytes bool
+	method       string
+	params       json.RawMessage
 }
 
 // setSubscriber installs wconn as the session's one subscriber and RETURNS
@@ -86,10 +103,15 @@ type sessionRx struct {
 // caller compares before announcing anything.
 func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *connState) {
 	rx.mu.Lock()
-	defer rx.mu.Unlock()
 	prevConn, prevState := rx.subscriber, rx.subState
 	rx.subscriber = wconn
 	rx.subState = state
+	rx.deliveryMu.Lock()
+	rx.deliveryConn = wconn
+	rx.deliveryOffset = 0
+	rx.pendingEffects = nil
+	rx.deliveryMu.Unlock()
+	rx.mu.Unlock()
 	// The ring is told, because it has two consumers now and only one of
 	// them is allowed to free it on nobody's behalf (nocx-22k1c.1). This
 	// mutator and clearSubscriber are the flag's only writers, which is what
@@ -122,10 +144,15 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 // tell them apart.
 func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 	rx.mu.Lock()
-	defer rx.mu.Unlock()
 	if rx.subscriber == wconn {
 		rx.subscriber = nil
 		rx.subState = nil
+		rx.deliveryMu.Lock()
+		rx.deliveryConn = nil
+		rx.deliveryOffset = 0
+		rx.pendingEffects = nil
+		rx.deliveryMu.Unlock()
+		rx.mu.Unlock()
 		// THE MOMENT THE INTERVAL OPENS. From here until a subscriber is
 		// installed again, the ring's consumer is the recorder, and a writer
 		// already parked against a client that will never ack is released by
@@ -133,7 +160,111 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 		rx.ring.setAttached(false)
 		return true
 	}
+	rx.mu.Unlock()
 	return false
+}
+
+func (rx *sessionRx) beginDelivery(wconn *wsConn, offset uint64) {
+	rx.deliveryMu.Lock()
+	if rx.deliveryConn == wconn {
+		rx.deliveryOffset = offset
+	}
+	rx.deliveryMu.Unlock()
+}
+
+func (rx *sessionRx) deliveryCursor(wconn *wsConn) (uint64, bool) {
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	return rx.deliveryOffset, rx.deliveryConn == wconn
+}
+
+func (rx *sessionRx) deliveryLimitLocked(wconn *wsConn, offset uint64, max int) int {
+	for _, effect := range rx.pendingEffects {
+		if effect.conn == wconn && effect.waitForBytes && effect.offset > offset {
+			distance := effect.offset - offset
+			// max is a positive byte-slice length; only narrow after proving
+			// the stream distance is smaller than that platform-sized value.
+			if distance < uint64(max) { //nolint:gosec
+				return int(distance) //nolint:gosec
+			}
+		}
+	}
+	return max
+}
+
+func (rx *sessionRx) enqueueDueEffectsLocked(wconn *wsConn, offset uint64) bool {
+	if rx.deliveryConn != wconn {
+		return true
+	}
+	for len(rx.pendingEffects) > 0 {
+		effect := rx.pendingEffects[0]
+		if effect.conn != wconn {
+			rx.pendingEffects = rx.pendingEffects[1:]
+			continue
+		}
+		if effect.waitForBytes && effect.offset > offset {
+			return true
+		}
+		if err := wconn.TryNotify(effect.method, effect.params); err != nil {
+			return false
+		}
+		rx.pendingEffects = rx.pendingEffects[1:]
+	}
+	return true
+}
+
+func (rx *sessionRx) enqueueDueEffects(wconn *wsConn, offset uint64) bool {
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	return rx.enqueueDueEffectsLocked(wconn, offset)
+}
+
+func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool, method string, params json.RawMessage) (accepted, coalesced bool) {
+	rx.deliveryMu.Lock()
+	if rx.deliveryConn != wconn {
+		rx.deliveryMu.Unlock()
+		return false, false
+	}
+	if waitForBytes && len(rx.pendingEffects) >= maxPendingSessionEffects {
+		// A newer prompt boundary supersedes an older boundary that has not
+		// reached the client yet. Remove the oldest one, but keep intervening
+		// effects in their original order and reserve the slot for this latest
+		// boundary. This keeps the current B fence bounded and deliverable under
+		// backpressure instead of letting its suffix escape without a fence.
+		for i := range rx.pendingEffects {
+			if rx.pendingEffects[i].conn == wconn && rx.pendingEffects[i].waitForBytes {
+				copy(rx.pendingEffects[i:], rx.pendingEffects[i+1:])
+				rx.pendingEffects = rx.pendingEffects[:len(rx.pendingEffects)-1]
+				coalesced = true
+				break
+			}
+		}
+	}
+	if len(rx.pendingEffects) >= maxPendingSessionEffects {
+		rx.deliveryMu.Unlock()
+		return false, coalesced
+	}
+	if !waitForBytes && len(rx.pendingEffects) >= maxPendingSessionEffects-1 {
+		hasBoundary := false
+		for _, pending := range rx.pendingEffects {
+			if pending.conn == wconn && pending.waitForBytes {
+				hasBoundary = true
+				break
+			}
+		}
+		if !hasBoundary {
+			rx.deliveryMu.Unlock()
+			return false, coalesced
+		}
+	}
+	rx.pendingEffects = append(rx.pendingEffects, pendingSessionEffect{
+		conn: wconn, offset: offset, waitForBytes: waitForBytes, method: method, params: params,
+	})
+	rx.deliveryMu.Unlock()
+	// Wake a ring pump parked on an empty stream so it can flush an effect
+	// whose marker bytes were already queued before this event arrived.
+	rx.ring.wake()
+	return true, coalesced
 }
 
 type WSServer struct {
@@ -260,6 +391,9 @@ type WSServer struct {
 	// available" rather than an empty list, because "nothing is remembered"
 	// and "this window cannot see what is remembered" are different facts.
 	agentAccess AgentAccessStore
+	// agentRecords is the existing per-agent launch record store, surfaced to
+	// Settings so edits change the same source the wrappers and spawner read.
+	agentRecords AgentRecordsStore
 	// liveEffects is which of that policy's seven rows govern anything at
 	// all: the effect classes at least one DECLARED tool carries. It is
 	// static, derived at build time from the tool declaration table, and it
@@ -309,9 +443,16 @@ type WSServer struct {
 	// session nobody watches runs exactly as it did before, and the byte path
 	// never depends on it.
 	paneScreens paneScreens
+	// paneIntentSource routes structured renderer input to the helper that
+	// owns the session's emulator. Nil leaves session.intent unwired.
+	paneIntentSource paneIntentSource
 	// screenResender asks for the frame a subscriber is owed the moment it is
 	// installed (screen.go). Nil sends nothing until the next revision.
 	screenResender ScreenResender
+	// historyPager answers session.historyPage from the helper that holds a
+	// session's terminal (history_page.go). Nil leaves the method
+	// unregistered, exactly as an unwired store leaves session.output.
+	historyPager HistoryPager
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
@@ -820,6 +961,12 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// The per-session end hold (ws_end_hold.go): the replay window a
+	// re-adopted session owes before its shell's exit may tear the lane
+	// down. endHoldMu guards endHolds; nothing else takes it, and it takes
+	// nothing else.
+	endHoldMu sync.Mutex
+	endHolds  map[session.ID]*sessionEndHold
 	// historySources preserves the submitting target and capture scope for an
 	// app attempt when history policy suppresses its row before completion.
 	historySources map[string]historyAttemptScope
@@ -1221,6 +1368,11 @@ func WithAgentAccess(store AgentAccessStore) WSServerOption {
 	return func(ws *WSServer) { ws.agentAccess = store }
 }
 
+// WithAgentRecords connects Settings to the same store the launcher reads.
+func WithAgentRecords(store AgentRecordsStore) WSServerOption {
+	return func(ws *WSServer) { ws.agentRecords = store }
+}
+
 // WithLiveEffects names which effect classes a declared tool actually
 // carries — policy.get's "live". The value is agenttools.LiveEffects(), read
 // at the composition root beside WithAgentPolicy: the policy says what a run
@@ -1520,6 +1672,12 @@ type HostedSessionOpen struct {
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss anywhere
+	// (ADR-0076). AbortLifecycle is the failure rollback; this is the
+	// departure.
+	DetachLifecycle func()
 	// IntegrationShell, IntegrationStatus and IntegrationReason are what the
 	// opener already knows about this session's shell integration, for the
 	// axis session.integrationChanged renders (nocx-k6p18.31).
@@ -1822,11 +1980,13 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.agentAccessSpecs()...)
+	specs = append(specs, s.agentRecordsSpecs()...)
 	specs = append(specs, s.agentEmittingSpecs()...)
 	specs = append(specs, s.agentRuleStoreSpecs()...)
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
+	specs = append(specs, s.historyPageSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
 		panic("nocx: control-plane registration: " + err.Error())
@@ -2024,6 +2184,13 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	// Stop ordered submissions before tearing down server-owned resources.
+	// Existing tasks can finish, but no new task is admitted during shutdown.
+	for _, spec := range s.methods {
+		if stopper, ok := spec.submission.(control.Shutdownable); ok {
+			stopper.Shutdown()
+		}
+	}
 	// Cancel every running upload first. A transfer holds (over SFTP) a
 	// pooled connection reference for its lifetime and nothing else in this
 	// teardown would release it, and the POST that carries its body waits
@@ -3448,12 +3615,22 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 	ring := rx.ring
 	var pending []byte
 	pos := startOffset
+	rx.beginDelivery(wconn, pos)
 
 	for {
 		// The displacement check comes FIRST, before any wait: a pump that
 		// has lost the session must not send the byte it is already holding.
 		if cur, _ := rx.getSubscriber(); cur != wconn {
 			return
+		}
+		// Control effects are small and share the outbound queue with data.
+		// Flush an eligible one before the next byte; if the queue is full,
+		// wait cancellably for room rather than letting later PTY bytes pass it.
+		if !rx.enqueueDueEffects(wconn, pos) {
+			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
+				return
+			}
+			continue
 		}
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
@@ -3484,6 +3661,11 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 				s.log.Warn("session output pump stepped over a hole the execution host's window left",
 					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
 				pos = from
+				rx.deliveryMu.Lock()
+				if rx.deliveryConn == wconn {
+					rx.deliveryOffset = pos
+				}
+				rx.deliveryMu.Unlock()
 				continue
 			}
 			if needsReset {
@@ -3523,13 +3705,26 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		// Cap each frame at FairChunk for cross-session fairness (AD-10).
-		// Splitting one PTY read (~32 KB) into ≤4 frames keeps one
-		// flooding session from occupying the shared outbound queue.
+		// A pending promptBoundary also splits the frame at its exact byte
+		// offset, so bytes after OSC 133 B cannot overtake the effect.
 		chunk := pending
 		if len(chunk) > FairChunk {
 			chunk = chunk[:FairChunk]
 		}
 
+		rx.deliveryMu.Lock()
+		if rx.deliveryConn != wconn {
+			rx.deliveryMu.Unlock()
+			return
+		}
+		if !rx.enqueueDueEffectsLocked(wconn, pos) {
+			rx.deliveryMu.Unlock()
+			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
+				return
+			}
+			continue
+		}
+		chunk = chunk[:rx.deliveryLimitLocked(wconn, pos, len(chunk))]
 		f := Frame{
 			Version:   FrameVersion,
 			MsgType:   MsgTypeData,
@@ -3542,16 +3737,21 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		// source of truth and pos advances only once the frame is queued,
 		// so a reconnect at the renderer's ack offset replays anything
 		// that never made it (AD-9).
-		for {
-			if err := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode()); err == nil {
-				break
-			}
+		err := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode())
+		if err == nil {
+			pos += uint64(len(chunk))
+			pending = pending[len(chunk):]
+			rx.deliveryOffset = pos
+		}
+		dueOK := err == nil && rx.enqueueDueEffectsLocked(wconn, pos)
+		rx.deliveryMu.Unlock()
+		if err != nil || !dueOK {
 			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
 				return
 			}
+			continue
 		}
-		pos += uint64(len(chunk))
-		pending = pending[len(chunk):]
+
 	}
 }
 
@@ -3588,6 +3788,30 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// e2e/remote-coordinator-reclaim.spec.ts's 60s bound. So the message
 	// that tells the far helper goes out while the connection to send it on
 	// is still guaranteed open.
+	// THE END HOLD (nocx-zg3k3.5.11 Round 4, REVIEW-2's decision): a
+	// re-adopted session whose helper retained a lifecycle window replays it
+	// through its lane — start, rows, end, domain close — and the exit carry
+	// rides the pane's output stream, so Done can fire while the replay is
+	// still in flight. The re-adopt armed the hold with the attachment's
+	// lifecycle-drain signal; waiting it here is what keeps the teardown
+	// below from unregistering the lane before the window's start frame
+	// ingests (the Round-2 probe chain: attemptFact dropped with "no lane",
+	// the block never opened, the settle sealed nothing). The bounds that
+	// keep a dead replay from hanging this goroutine: the drain channel
+	// closes when the attachment ends, and NoteIntegrationLoss releases the
+	// hold when the lifecycle channel is lost.
+	//
+	// AFTER the wait, and BEFORE EndSession: the settle from the helper's
+	// own record. It is idempotent with the deferred boundary consults, and
+	if hold := s.waitSessionEnd(sess.ID()); hold != nil {
+		select {
+		case <-hold.drained:
+		case <-hold.released:
+		}
+		s.settleAdoptedTerminalDomains(sess.ID())
+		s.dropSessionEndHold(sess.ID())
+	}
+
 	_ = s.registry.EndSession(sess.ID())
 
 	// The pane's observation closes here, because everything below this line

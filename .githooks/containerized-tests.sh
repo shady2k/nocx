@@ -190,7 +190,7 @@ go_test_containerized() {
             # pair in cmd/nocx-helper, which is the assertion that the shipped
             # artifact registers no ssh service at all.
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
-                sh -euc "go test -race -tags gtk3 ./... ; go test -race -tags gtk3,nocx_local_ssh $LOCAL_SSH_PKGS"
+                sh -euc "go test -race -tags gtk3,nocx_framecheck ./... ; go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck $LOCAL_SSH_PKGS"
         '
 }
 

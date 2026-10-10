@@ -1,6 +1,7 @@
 package lifecycleremote
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"net"
@@ -50,7 +51,7 @@ func newTestKernel() *lifecyclepub.Publisher {
 // exist.
 type ackingEmitter struct{}
 
-func (ackingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (ackingEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // fakeTunnel is a TunnelConn whose Listen returns a real loopback listener —
 // the shell side of the tests dials the adapter's allocated port over TCP,

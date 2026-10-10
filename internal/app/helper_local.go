@@ -39,6 +39,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -333,6 +334,7 @@ type localHelperOpener struct {
 	// composition root once the transport exists (the opener itself is built
 	// before it). Nil is a legitimate wiring and registers no observer.
 	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	publishEffect func(sid session.ID, effect proto.EffectFrame) bool
 	// blockRows is the streamed block output's transport half, bound late for
 	// the same reason publishScreen is (helper_block_rows.go). Nil wires
 	// nothing.
@@ -340,10 +342,20 @@ type localHelperOpener struct {
 	// rowBuffers carries the helper's row buffer setting to each spawn
 	// (nocx-2v80t.3.36). Nil sends zero, the helper's default.
 	rowBuffers *rowBuffers
+	// scrollback is the person's scrollback budget (nocx-zg3k3.10.1): what a
+	// pane this opener creates is born with, and what a change fans out to
+	// every live session through watchScrollback.
+	scrollback *scrollbackSetting
 	// environmentEntries is the lane -> downlink registry
 	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
 	// reason blockRows is. Nil wires nothing.
 	environmentEntries *environmentEntryRegistry
+	// lifecycleCursors keeps each pane's lifecycle cursor with its binding
+	// (lifecycle_cursor.go, ADR-0077). Nil keeps nothing.
+	lifecycleCursors lifecycleCursorStore
+	// lifecycleStopping is the coordinator's stopping signal, the same one
+	// helperRegistry carries. Nil never stops.
+	lifecycleStopping *atomic.Bool
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -353,6 +365,17 @@ type localHelperOpener struct {
 	// binds lane to session through laneRegistrar — and one closure doing
 	// both would put two owners on one statement.
 	noteChildDomainParent func(t lifecycle.TransportID, lane lifecycle.LaneID, sid string)
+	// agentNames answers the ENABLED agent set a pane on this machine is born
+	// with (nocx-t5e7d): what its shell offers wrappers for. It is a closure
+	// rather than a captured list because a record the person edits must reach
+	// the NEXT pane, and it is read per spawn for that reason.
+	//
+	// It travels as a LIST in the spawn request, not as a directory the daemon
+	// could read: this machine's helper is built without the release tag, so a
+	// profile it resolved itself would be the development one under a release
+	// app (proto.SpawnParams.Agents). Nil is a legitimate wiring for a test, and
+	// then a pane gets this build's own set.
+	agentNames func() []string
 	// hostKeys is the coordinator's own record of the fingerprint its
 	// verifyHostKey reverse handler judged for a destination, read back
 	// after a successful ssh spawn to give the session a fact its wire does
@@ -616,6 +639,27 @@ func (o *localHelperOpener) installedHelperBinary() string {
 // pane, and this opener serves several panes at once. Handing it to the daemon
 // once — which is what a `NOCX_TOOL_SOCKET` in the daemon's own environment
 // was — made it a fact about whichever coordinator started that daemon.
+// agents is what a pane's shell offers, read per spawn so an edit reaches the
+// next pane; nil means this build's own set (see the field's own note).
+//
+// A SET on the wire, because the helper's own rule refuses a free-form string
+// list in any operation's params: such a list is argv, and a helper that takes
+// argv is a remote shell (D3, proto.SpawnParams.Agents).
+func (o *localHelperOpener) agents() map[string]bool {
+	if o.agentNames == nil {
+		return nil
+	}
+	names := o.agentNames()
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
 func (o *localHelperOpener) toolEndpoint() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -654,8 +698,11 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
 		publishScreen:      o.publishScreen,
+		publishEffect:      o.publishEffect,
 		blockRows:          o.blockRows,
 		environmentEntries: o.environmentEntries,
+		cursors:            o.lifecycleCursors,
+		stopping:           o.lifecycleStopping,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is
@@ -684,6 +731,10 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 				// The person's row buffer setting, as it reads now: a
 				// changed value applies to the next pane (nocx-2v80t.3.36).
 				RowBufferBytes: o.rowBuffers.helperBytes(),
+				// The person's scrollback budget, as it reads now
+				// (nocx-zg3k3.10.1): the budget a pane is born with, while a
+				// change reaches the panes already running through the watch.
+				ScrollbackLines: o.scrollback.linesPtr(),
 				// THIS backend's own tool endpoint, carried per pane
 				// (nocx-50w7p.18): the pane's tools belong to the coordinator
 				// that opened it, and the daemon cannot know which of its
@@ -691,6 +742,10 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 				// pane then renders no NOCX_TOOL_SOCKET at all — the soft
 				// degrade, stated above.
 				AgentToolEndpoint: o.toolEndpoint(),
+				// The agents this pane's shell wraps (nocx-t5e7d), read now:
+				// the record's answer, carried as a list. This is a pane on
+				// THIS machine, so its shell is the embedded local tier.
+				Agents: o.agents(),
 			})
 		})
 	}
@@ -767,6 +822,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		LifecycleLane:      res.LifecycleLane,
 		StartLifecycle:     res.StartLifecycle,
 		AbortLifecycle:     res.AbortLifecycle,
+		DetachLifecycle:    res.DetachLifecycle,
 		ObserveOutputHoles: res.ObserveOutputHoles,
 		IntegrationShell:   shell,
 		IntegrationStatus:  status,
@@ -915,6 +971,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	params := proto.SSHSpawnParams{
 		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
 		RowBufferBytes: o.rowBuffers.helperBytes(),
+		// The person's scrollback budget, as it reads now (nocx-zg3k3.10.1):
+		// the budget a pane is born with, while a change reaches the panes
+		// already running through the watch.
+		ScrollbackLines: o.scrollback.linesPtr(),
 		// ConnectionName and ProfileID ride on WireDestination itself now
 		// (internal/ssh's resolveDialEndpoint reads them off the resolved
 		// config), so every destination this coordinator builds — this
@@ -1440,12 +1500,12 @@ func (o *localHelperOpener) LocalSessions(ctx context.Context, generation string
 // attachment's own Close is what releases the daemon's subscriber; this
 // connection then sits idle until the coordinator goes, which is exactly what
 // the ordinary open's shared connection does between panes.
-func (o *localHelperOpener) Attach(ctx context.Context, params proto.AttachParams) (*helperclient.AttachedSession, error) {
+func (o *localHelperOpener) Attach(ctx context.Context, params proto.AttachParams, opts ...helperclient.AttachOption) (*helperclient.AttachedSession, error) {
 	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
 	if err != nil {
 		return nil, err
 	}
-	return c.Attach(ctx, params)
+	return c.Attach(ctx, params, opts...)
 }
 
 // AdoptLifecycle asks this machine's daemon for the identity a taken-back

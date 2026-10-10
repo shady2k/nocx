@@ -128,6 +128,11 @@ type TargetResult struct {
 type IntentParams struct {
 	Session HostSessionID `json:"session"`
 	Token   string        `json:"token"`
+	// Interactive marks input from the pane's current controller. Unlike an
+	// agent intent it has no screen target: a person may press Enter at a
+	// shell prompt. It still passes through the same ordered owner and runtime
+	// encoder, and AccessEpoch is checked at receipt and commit.
+	Interactive bool `json:"interactive,omitempty"`
 	// AccessEpoch is the epoch the coordinator believes is current (design
 	// §7.2) — bound into the token's canonical intent at the commit point, so
 	// a replay of the same token under a DIFFERENT epoch is refused
@@ -156,6 +161,14 @@ type IntentResult struct {
 	State        string `json:"state"`
 	BytesWritten int    `json:"bytesWritten"`
 	FenceAfter   uint64 `json:"fenceAfter"`
+	// AccessEpoch is the epoch in force in this session when the answer was
+	// decided (nocx-zg3k3.3.1), and it is what makes a refusal actionable: a
+	// controller that presented a stale epoch is told the current one, so the
+	// intent it was refused can be presented again and written. Absent when
+	// nothing in the session decided the answer at all — a refusal reached
+	// before the session was consulted (busy, closing) names no epoch it
+	// could have read.
+	AccessEpoch uint64 `json:"accessEpoch,omitempty"`
 	// RetryAfterMs is set only alongside state "in_progress": the caller's
 	// own write is still resolving (a replay of a token whose first attempt
 	// has not settled), and this is how long before asking again is worth

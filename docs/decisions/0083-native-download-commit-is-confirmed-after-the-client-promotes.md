@@ -1,4 +1,4 @@
-# ADR-0076 — A native download is complete only after the client promotes it
+# ADR-0083 — A native download is complete only after the client promotes it
 
 - **Status:** Accepted
 - **Date:** 2026-09-28

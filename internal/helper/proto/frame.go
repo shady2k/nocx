@@ -80,6 +80,9 @@ const (
 	// type would resync through a live screen stream rather than dropping
 	// one frame. See screen_frame.go for the layout.
 	TypeScreenFrame FrameType = 13
+	// TypeSessionEffect carries one identity-bearing non-visual runtime effect.
+	// It is separate from TypeScreenFrame so snapshots never replay effects.
+	TypeSessionEffect FrameType = 18
 )
 
 // valid reports whether the type belongs to the closed set above. A byte
@@ -87,7 +90,7 @@ const (
 // trusting anything after it.
 func (t FrameType) valid() bool {
 	switch t {
-	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData, TypeScreenFrame, TypeOutputRows, TypeIntervalEnd, TypeClearBoundary:
+	case TypeHello, TypeHelloOK, TypeRequest, TypeResponse, TypeNotify, TypeCancel, TypeChunk, TypeKeepAlive, TypeSessionData, TypeLifecycleData, TypeChannelData, TypeScreenFrame, TypeSessionEffect, TypeOutputRows, TypeIntervalEnd, TypeClearBoundary, TypeOutputStartRow:
 		return true
 	}
 	return false

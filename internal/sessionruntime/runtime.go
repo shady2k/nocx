@@ -193,6 +193,15 @@ type Session struct {
 	rendezvousLatest    FenceNonce
 	rendezvousHasLatest bool
 
+	// streamedFromFloor is the smallest absolute row-stream index any
+	// interval of this session has ever streamed from. The interval in
+	// flight's own start dies at its seal; the floor is folded at every
+	// interval's first streamed batch and survives them all, because the
+	// helper's resend reads it as its walk's lower bound at a re-adopt
+	// whose command has already ended (nocx-zg3k3.5.11). Guarded by mu.
+	streamedFromFloor    uint64
+	streamedFromFloorSet bool
+
 	completeness Completeness
 
 	allowance *Allowance
@@ -215,17 +224,13 @@ type Session struct {
 	ingestWork uint64
 	ingestLost uint64
 
-	// The observation record (nocx-zg3k3.5.2): observation is the interval
-	// in flight — its opening screen and the losses it has counted (the
-	// departed rows themselves leave through rowStream, nocx-2v80t.3.6;
-	// the helper keeps no copy); observations are the records authenticated
-	// boundaries have sealed, oldest first, bounded by [MaxObservations]
-	// with the evictions counted in observationsEvicted. All three are
-	// guarded by mu, like everything else here, and the reads that hand
-	// records out live in observation.go.
-	observation         *observationOpen
-	observations        []ObservationRecord
-	observationsEvicted uint64
+	// observation is the interval in flight (nocx-zg3k3.5.2, its shape
+	// retired by nocx-zg3k3.5.4): the boundary and output-mark bookkeeping
+	// a sealed interval's end marker is built from. The departed rows
+	// themselves leave through rowStream (nocx-2v80t.3.6) — the helper
+	// keeps no copy of them and no sealed record either. Guarded by mu,
+	// like everything else here.
+	observation *observationOpen
 	// rowStream is where departed rows leave the session as they leave the
 	// screen, and IntervalEnd joins them. Nil is ordinary — nobody is
 	// watching — and never loses the indices: departedRows keeps counting
@@ -288,16 +293,25 @@ type Session struct {
 	// pin could be located; the repair runs when the primary is back
 	// (settleOwedReflowLocked, nocx-2v80t.5).
 	reflowOwed bool
+	// deferredSettle names the interval whose settle an AUTHENTICATED-channel
+	// event asked for and did NOT take (nocx-n5ent; ADR-0074 case 3, amended).
+	// The completion travels the authenticated channel and the command's rows
+	// travel the pty, and the shell sends its completion BEFORE it writes its
+	// fence: so a completion for another nonce is no proof that the parked
+	// interval's own bytes have been read, and settling there froze a
+	// 5000-row command's block at the 3843 rows the fast channel had reached
+	// while the pty still held the rest. The interval therefore stays in
+	// flight — its remaining rows keep streaming as its own — and is sealed
+	// either by its own fence's sighting (with the screen the fence sat on) or,
+	// when that fence truly never comes, by the byte stream's next boundary or
+	// the session's end, with no closing screen as ADR-0074 case 3 records.
+	// deferredSettleSet is its presence: a zero nonce is a real nonce for an
+	// environment entry and must not read as "nothing deferred".
+	deferredSettle    FenceNonce
+	deferredSettleSet bool
 	// markerCarry is the tail of the last feed that could still begin a
 	// marker, searched in front of the next feed (Ingest, nocx-2v80t.8).
 	markerCarry []byte
-	// obsCarried is how much of ingestLost some observation record already
-	// carries: a hole reported before the first ingest, or in the gap
-	// between one sealed interval and the next output, reaches no record at
-	// the moment it is reported, and this is the marker that seeds it into
-	// the record that opens next instead of letting the count die between
-	// intervals (observation.go).
-	obsCarried uint64
 
 	// bufferInstance, bufferActive and bufferSeen are ScreenIdentity's own
 	// bookkeeping (nocx-6q1uh.4, digest.go's ScreenIdentity doc): the
@@ -675,6 +689,24 @@ func (s *Session) ReadScreen(read func(emulator.Terminal) error) (Revision, Comp
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := read(s.emulator); err != nil {
+		return 0, CompletenessUnknown, err
+	}
+	return s.rev, s.completeness, nil
+}
+
+// ReadDepartedScreen is ReadScreen for a reader that also needs the
+// session's departed-row count as of the read: the count and the terminal
+// are lent under ONE acquisition of this lock, so the page a walk reads
+// and the departure count it is measured against cannot disagree. It
+// exists because the resend's walk took them separately and rows
+// departing between the two acquisitions were labelled with the wrong
+// absolute index — lost from their true position, duplicated at their
+// next delivery (nocx-zg3k3.5.10). A read that fails answers no revision
+// and no completeness, exactly as ReadScreen does.
+func (s *Session) ReadDepartedScreen(read func(departed uint64, t emulator.Terminal) error) (Revision, Completeness, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := read(s.departedRows, s.emulator); err != nil {
 		return 0, CompletenessUnknown, err
 	}
 	return s.rev, s.completeness, nil
@@ -1058,7 +1090,7 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 	// are drained now, exactly as a feed's own departures are drained at the
 	// feed — not at whichever ingest comes next, which may carry the fence
 	// that closes this interval, or open another one.
-	s.drainObservationLocked(0)
+	s.drainObservationLocked()
 	// The rows the boundary bookkeeping names were just re-laid out; bring it
 	// up to the new grid before anything else reads it (nocx-2v80t.5).
 	s.reflowBoundaryLocked()
@@ -1141,8 +1173,8 @@ func (s *Session) Ingest(b []byte) error {
 	}
 	s.ingestWork += uint64(len(b))
 	// The interval in flight opens BEFORE the feed that triggered it is
-	// applied, so its opening screen is the screen the interval began on and
-	// carries none of the output that opened it (observation.go).
+	// applied, so the rows this feed departs are drained as its own from
+	// the first byte (observation.go).
 	s.openObservationLocked()
 
 	var replyErr error
@@ -1185,13 +1217,13 @@ func (s *Session) Ingest(b []byte) error {
 			replyErr = rerr
 		}
 		// The departure report is drained BEFORE the effects are read,
-		// because one of them may carry the fence that seals this record: a
+		// because one of them may carry the fence that seals this interval: a
 		// feed's own departures belong to the interval that feed belongs to
 		// (observation.go). Draining per sub-feed, in the same order the
 		// bytes arrived, is what keeps this true when a fence split b: the
 		// rows THIS sub-feed departed stream before the end marker its own
 		// fence emits, exactly as they would have for one combined feed.
-		s.drainObservationLocked(len(chunk))
+		s.drainObservationLocked()
 		for _, e := range s.emulator.Effects() {
 			if e.Kind == emulator.EffectFence {
 				// The join: a fence the emulator drained LOCATES the
@@ -1237,10 +1269,21 @@ func (s *Session) Ingest(b []byte) error {
 			}
 			s.nextEffect++
 			effect := Effect{
-				ID:   s.nextEffect,
-				At:   s.inc,
-				Kind: effectKindOf(e.Kind),
-				Body: e.Body,
+				ID:           s.nextEffect,
+				At:           s.inc,
+				Kind:         effectKindOf(e.Kind),
+				Title:        e.Title,
+				Body:         e.Body,
+				StreamOffset: e.StreamOffset,
+			}
+			if effect.Kind == EffectPromptBoundary {
+				if sink, ok := s.replies.(PromptBoundarySink); ok {
+					if err := sink.PromptBoundary(effect); err != nil {
+						replyErr = err
+						continue
+					}
+					effect.Ordered = true
+				}
 			}
 			if err := s.deliverLocked(effectDelivery(effect)); err != nil {
 				return err
@@ -1272,6 +1315,8 @@ func effectKindOf(k emulator.EffectKind) EffectKind {
 		return EffectTitle
 	case emulator.EffectCwdReport:
 		return EffectCwdReport
+	case emulator.EffectPromptBoundary:
+		return EffectPromptBoundary
 	default:
 		return EffectNone
 	}
@@ -1291,16 +1336,9 @@ func (s *Session) ReportHole(lost uint64) error {
 	}
 	// The count is the ingest path's own record of what it discarded, and a
 	// hole the carrier reported is output this session never saw: it belongs
-	// in the same number for the same reason.
+	// in the same number for the same reason. The session's completeness
+	// degrades with it — the one claim about the stream a hole makes.
 	s.ingestLost += lost
-	// The record in flight counts the hole beside the session: bytes that
-	// never reached the emulator never became rows, so bytes are the honest
-	// unit here and the session's completeness above is what the record's own
-	// claim will fold down from (observation.go).
-	if s.observation != nil {
-		s.observation.Loss.IngestLostBytes += lost
-		s.obsCarried += lost
-	}
 	s.completeness = CompletenessLostIngest
 	s.tick()
 	return nil
@@ -1308,7 +1346,7 @@ func (s *Session) ReportHole(lost uint64) error {
 
 // --------------------------------------------------------------- rendezvous
 
-// rendezvousEntry is one tracked meeting: its record, and — when a fence
+// rendezvousEntry is one tracked meeting, and — when a fence
 // sighted it with nothing authenticated behind it — the boundary capture
 // that sighting took. No wait is armed on it and no timer exists in the
 // rendezvous at all (nocx-2v80t.3.9): a meeting left with one half missing
@@ -1318,10 +1356,10 @@ func (s *Session) ReportHole(lost uint64) error {
 type rendezvousEntry struct {
 	Rendezvous
 	// captured is what a PARKING sighting took at the fence's instant: the
-	// interval record's content up to the fence, and the screen as the fence
+	// interval's boundaries up to the fence, and the screen as the fence
 	// sat on it. The boundary is where the fence sits in the byte stream, so
 	// the capture detaches from the interval in flight — the output that
-	// follows the fence starts the next record's content — and the join at
+	// follows the fence belongs to the interval that follows — and the join at
 	// [Session.Completed] seals the capture rather than re-reading a screen
 	// the stream has moved past. A sighting nobody authenticated returns its
 	// capture to the interval in flight (observation.go). Nil on every other
@@ -1348,7 +1386,7 @@ func (e *rendezvousEntry) pending() bool {
 // outputMarkSkipLocked), is appended and the block is sealed.
 //
 // There is no fence for this boundary — the shell that would have printed
-// one is no longer the one holding the terminal — so the record seals with
+// one is no longer the one holding the terminal — so the interval seals with
 // the ZERO nonce, which an ordinary command's fence never is (32
 // cryptographically random bytes) and which the row stream's consumer reads
 // as "no fence to match, close whichever interval is open" rather than
@@ -1413,12 +1451,16 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	if s.avail != AvailabilityAvailable || at != s.inc {
 		return
 	}
-	// One of the events that settles a parked interval: a completion for a
-	// DIFFERENT nonce means the interval before it is done and its fence's
-	// sighting never arrived, so that record seals here, with no closing
-	// screen and no fence (observation.go). A completion for the parked
-	// nonce is that very interval's own join and settles nothing.
-	s.settlePendingLocked(nonce)
+	// One of the events that asks for a parked interval to be settled: a
+	// completion for a DIFFERENT nonce means the interval before it is done and
+	// its fence's sighting has not been READ — and this carrier cannot tell
+	// "not read yet" from "never written", because the shell sends its
+	// completion before it writes its fence (nocx-n5ent). So the settle is
+	// DEFERRED, not taken: the interval keeps its own rows until the byte
+	// stream reaches its boundary (observation.go, deferPendingLocked). A
+	// completion for the parked nonce is that very interval's own join and
+	// asks for nothing.
+	s.deferPendingLocked(nonce)
 	if e := s.rendezvous[nonce]; e != nil {
 		// The meeting is already tracked. Only a parked sighting with THIS
 		// nonce is the half this completion closes; a duplicate completion,
@@ -1431,10 +1473,10 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 			s.rendezvousLatest, s.rendezvousHasLatest = nonce, true
 			s.tick()
 			// The authenticated boundary just closed. In the fence-first
-			// order the sighting captured the record AT the fence — the
+			// order the sighting captured the boundary AT the fence — the
 			// boundary this completion is authenticating — so the capture
 			// seals, and the interval in flight, rebased at the fence, is
-			// already the next record. Under the same lock the join holds.
+			// already the interval that follows. Under the same lock the join holds.
 			//
 			// e.captured is set at the ONE call site that ever puts an entry
 			// into RendezvousAwaitingAuthenticated (sightDrainedFenceLocked,
@@ -1469,10 +1511,10 @@ func (s *Session) Completed(at Incarnation, nonce FenceNonce, _ int) {
 	}
 	// An interval whose screen and row window were taken at ANOTHER fence's
 	// sighting belongs to that fence's command. Parking this half on it would
-	// give one record two overlapping spans, and the stale half's end marker
+	// give one interval two overlapping row spans, and the stale half's end marker
 	// arrives behind rows the interval already streamed (nocx-2v80t.3.9). The
 	// meeting is admitted and NOT parked: if its own sighting never arrives,
-	// the settle degrades completeness and invents no record, which is the
+	// the settle degrades completeness and invents no end marker, which is the
 	// honest answer for a boundary nobody saw.
 	if o := s.observation; o != nil && o.Rebased != (FenceNonce{}) && o.Rebased != nonce {
 		return
@@ -1539,7 +1581,7 @@ func (s *Session) admitRendezvousLocked(e *rendezvousEntry, authenticated bool) 
 // An eviction is an event like the ones that settle a parked interval
 // (observation.go): an authenticated completion whose fence never arrived has
 // an interval in flight PARKED on it, and dropping the meeting without
-// settling that record would leak a record nothing could seal afterwards. So
+// settling that interval would leak one nothing could seal afterwards. So
 // the settle runs here, after the meeting is out of the set, for the same
 // reason the next interval's start and the session's end settle it.
 func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
@@ -1553,7 +1595,12 @@ func (s *Session) evictRendezvousLocked(keep func(*rendezvousEntry) bool) bool {
 			}
 			delete(s.rendezvous, nonce)
 			s.rendezvousOrder = append(s.rendezvousOrder[:i], s.rendezvousOrder[i+1:]...)
-			s.settleParkedLocked(nonce)
+			// The bound is a SIZE, and spending a slot is not a proof about
+			// the byte stream: an eviction DEFERS like every other event that
+			// arrives off the authenticated channel (nocx-n5ent,
+			// deferParkedLocked). The interval it names is sealed when the
+			// stream reaches its next boundary, or at the session's end.
+			s.deferParkedLocked(nonce)
 			return true
 		}
 	}
@@ -1578,10 +1625,25 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	if err := s.live(); err != nil {
 		return err
 	}
+	// A fence's sighting is BYTE STREAM EVIDENCE, and it is what a deferred
+	// settle was waiting for (nocx-n5ent). The sighting that names the deferred
+	// nonce IS that interval's own boundary — the command's output is over and
+	// the fence sat on its closing screen — so the deferral is dropped and the
+	// ordinary join below seals the interval in flight, with its rows and its
+	// screen. A sighting that names ANOTHER nonce is the stream's next
+	// boundary: the deferred interval is over and seals now, with no closing
+	// screen, exactly as ADR-0074 case 3 records.
+	if s.deferredSettleSet {
+		if s.deferredSettle == nonce {
+			s.deferredSettle, s.deferredSettleSet = FenceNonce{}, false
+		} else {
+			s.flushDeferredSettleLocked()
+		}
+	}
 	// A fence's sighting is an interval's start as much as a join: the fence
 	// belongs to the command that just ended, so a sighting for a different
 	// nonce than the parked one means the parked interval's own fence never
-	// arrived and its record seals here (observation.go). A sighting for the
+	// arrived and its interval seals here (observation.go). A sighting for the
 	// parked nonce IS that interval's join and settles nothing.
 	s.settlePendingLocked(nonce)
 	if e := s.rendezvous[nonce]; e != nil {
@@ -1617,10 +1679,10 @@ func (s *Session) sightFenceLocked(nonce FenceNonce, source []byte) error {
 	// A fence with nothing authenticated behind it parks and grants nothing
 	// (ADR-0024 decision 1). At the bound it is REFUSED rather than evicting
 	// anybody: it authorises nothing, so refusing it costs nothing. Once it
-	// is admitted, the sighting takes the boundary's capture — the record
-	// content up to here, the screen as the fence sits on it — and the
-	// interval in flight is rebased to start its next record here, so the
-	// output that follows the fence never lands in the record this boundary
+	// is admitted, the sighting takes the boundary's capture — the boundaries
+	// up to here, the screen as the fence sits on it — and the
+	// interval in flight is rebased to start the interval that follows here,
+	// so the output that follows the fence never lands in the interval this boundary
 	// will seal (observation.go).
 	entry := &rendezvousEntry{Rendezvous: Rendezvous{
 		State:        RendezvousAwaitingAuthenticated,
@@ -1678,7 +1740,7 @@ func fenceNonceOf(body []byte) (FenceNonce, bool) {
 //
 // The two pending states are not the same thing and do not settle the same
 // way. AwaitingSighting is an AUTHENTICATED completion whose fence never
-// arrived: the interval in flight is parked on it, its record seals with NO
+// arrived: the interval in flight is parked on it, its seal carries NO
 // closing screen at the count the completion measured
 // (settleParkedLocked, observation.go), and completeness becomes
 // [CompletenessNoFence] because an authenticated boundary went unmet.
@@ -1700,8 +1762,8 @@ func (s *Session) ExpireRendezvous(nonce FenceNonce) error {
 	}
 	if e.State == RendezvousAwaitingSighting {
 		// The interval in flight may be PARKED on this meeting, and then the
-		// settle is the record's too: the meeting reads expired, completeness
-		// goes no-fence, and the record seals with no closing screen at the
+		// settle is the interval's too: the meeting reads expired, completeness
+		// goes no-fence, and the interval seals with no closing screen at the
 		// count the completion measured (settleParkedLocked, observation.go).
 		if s.settleParkedLocked(nonce) {
 			s.tick()
@@ -1709,7 +1771,7 @@ func (s *Session) ExpireRendezvous(nonce FenceNonce) error {
 		}
 		// Nothing is parked under this nonce: the settle is the state alone.
 		// The authenticated boundary still went unmet, so the session's own
-		// claim about its stream is no longer complete, and no record is
+		// claim about its stream is no longer complete, and no end marker is
 		// invented for an interval that was never parked.
 		e.State = RendezvousExpired
 		e.PinnedSource = nil
@@ -1778,10 +1840,17 @@ func (s *Session) Fail(cause string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// The session's end is one of the events that settles a parked interval
-	// (observation.go): a completion whose fence never arrived leaves a
-	// record nothing else could seal, and this is the last event there is.
+	// (observation.go): a completion whose fence never arrived leaves an
+	// interval nothing else could seal, and this is the last event there is.
 	// It runs before the refusal below so that a second Fail is not the
-	// reason a parked record leaks.
+	// reason a parked interval leaks.
+	//
+	// A settle the authenticated channel asked for and the byte stream never
+	// proved is taken HERE, at the last event there is (nocx-n5ent): the pty
+	// is over, so no more of the interval's rows can arrive, and what streamed
+	// is all there is. The flush runs first because it seals the interval the
+	// deferral holds; the settle below then finds nothing parked.
+	s.flushDeferredSettleLocked()
 	s.settlePendingLocked(FenceNonce{})
 	// The other pending shape, closed the same way rather than left to leak:
 	// a sighting nobody authenticated authorised nothing while it waited, and
@@ -1825,6 +1894,7 @@ type queued struct {
 // delivered, and the identity the duplicate policy is stated over would name
 // different bytes at different times.
 func effectDelivery(e Effect) queued {
+	e.Title = bytes.Clone(e.Title)
 	e.Body = bytes.Clone(e.Body)
 	return queued{class: deliveryClassOf(e.Kind), effect: e}
 }
@@ -1834,7 +1904,7 @@ func effectDelivery(e Effect) queued {
 // [DeliveryUnclassified] and is REFUSED rather than delivered under a guess.
 func deliveryClassOf(k EffectKind) DeliveryClass {
 	switch k {
-	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport:
+	case EffectBell, EffectNotification, EffectClipboard, EffectTitle, EffectCwdReport, EffectPromptBoundary:
 		return DeliveryAtMostOnce
 	default:
 		return DeliveryUnclassified
@@ -1898,7 +1968,7 @@ func (c *subscriber) HeldBytes() int {
 func (c *subscriber) heldBytesLocked() int {
 	held := 0
 	for _, p := range c.queue {
-		held += len(p.bytes) + len(p.effect.Body)
+		held += len(p.bytes) + len(p.effect.Title) + len(p.effect.Body)
 	}
 	return held
 }
@@ -1927,10 +1997,11 @@ func (c *subscriber) Effects() []Effect {
 	held := make([]Effect, 0, len(c.queue))
 	for _, p := range c.queue {
 		if p.class == DeliveryAtMostOnce {
-			// The body is COPIED out: a caller that wrote through it would be
-			// editing what the runtime holds, and the lock is released the
+			// Both fields are COPIED out: a caller that wrote through either
+			// would edit what the runtime holds, and the lock is released the
 			// moment this returns.
 			e := p.effect
+			e.Title = bytes.Clone(e.Title)
 			e.Body = bytes.Clone(e.Body)
 			held = append(held, e)
 		}

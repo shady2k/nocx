@@ -17,6 +17,7 @@ package transport
 //     stood open and the map grew.
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -43,7 +44,7 @@ func TestAStaleOpensReturnLeavesTheLaterAttachmentAlone(t *testing.T) {
 	doneA := make(chan struct{})
 	go func() {
 		defer close(doneA)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -64,14 +65,14 @@ func TestAStaleOpensReturnLeavesTheLaterAttachmentAlone(t *testing.T) {
 	doneB := make(chan struct{})
 	go func() {
 		defer close(doneB)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 	}()
 	select {
 	case <-store.entered:
 	case <-time.After(wantWithin):
 		t.Fatal("B's open never reached the store")
 	}
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "C")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "C")
 
 	bs := e.ws.blockStream
 	bs.mu.Lock()
@@ -235,7 +236,7 @@ func TestAttachDetachCyclesRetainNoGenerationState(t *testing.T) {
 	doneA := make(chan struct{})
 	go func() {
 		defer close(doneA)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -273,7 +274,7 @@ func TestAttachDetachCyclesRetainNoGenerationState(t *testing.T) {
 
 	// Ordinary path, same attachment: a fresh open under the newest stamp
 	// installs like any other.
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 	bs.mu.Lock()
 	current = bs.current[sid]
 	bs.mu.Unlock()

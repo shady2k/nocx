@@ -222,7 +222,31 @@ function storeKeepsNothing(err: unknown): boolean {
   return err instanceof RpcError && (err.code === -32602 || err.code === -32601)
 }
 
-export async function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+// A block's rows can be requested by several simultaneous restoration and
+// notification paths. They are the same read of the same stored artifact, so
+// share the in-flight operation per client and entry instead of putting
+// duplicate large artifact responses on the WebSocket at once.
+const blockRowsInFlight = new WeakMap<WSClient, Map<string, Promise<BlockRowsRead>>>()
+
+export function blockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
+  let entries = blockRowsInFlight.get(client)
+  if (!entries) {
+    entries = new Map()
+    blockRowsInFlight.set(client, entries)
+  }
+  const existing = entries.get(entryId)
+  if (existing) return existing
+
+  const read = readBlockRowsForEntry(client, entryId)
+  entries.set(entryId, read)
+  const clear = () => {
+    if (entries?.get(entryId) === read) entries.delete(entryId)
+  }
+  void read.then(clear, clear)
+  return read
+}
+
+async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise<BlockRowsRead> {
   let artifact: FetchedArtifact
   try {
     let entry: LedgerGet
@@ -240,7 +264,10 @@ export async function blockRowsForEntry(client: WSClient, entryId: string): Prom
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
   try {
-    return { kind: 'rows', rows: parseStoredBlockRows(artifact.body, artifact.metadata) }
+    return {
+      kind: 'rows',
+      rows: parseStoredBlockRows(artifact.body, artifact.metadata, artifact.metadata.id),
+    }
   } catch (err) {
     return { kind: 'unreadable', reason: reasonOf(err) }
   }
@@ -416,11 +443,14 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const caused = entry.caused ?? []
     const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (entry.entry.kind !== 'ask' && rows) {
-      const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: rows.id })
+      // Restoration shares the in-flight row read used by notifications.
+      // Reading the large artifact through the coalescing reader avoids a
+      // second response when restoration races a block notification.
+      const stored = await blockRowsForEntry(client, entryId)
       return {
         kind: 'command',
         body: null,
-        rows: parseStoredBlockRows(artifact.body, rows),
+        ...(stored.kind === 'rows' ? { rows: stored.rows } : {}),
         caused,
         proseEvicted: !!entry.proseEvicted,
       }

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.recoveryStatus.params.schema.json",
+  "title": "SessionRecoveryStatusParams",
+  "description": "Params for metadata-only recovery status. The session identity is the claim received from sessions.live.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "instanceId", "sessionEpoch"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{32}$"
+    },
+    "instanceId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{32}$"
+    },
+    "sessionEpoch": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

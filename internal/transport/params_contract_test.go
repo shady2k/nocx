@@ -68,6 +68,34 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 	}
 	invalid = append(invalid, idsProbe)
 	valid := map[string][][]byte{
+		"session.recoveryStatus": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"0123456789abcdef0123456789abcdef","sessionEpoch":1}`),
+		},
+		"session.historyPage": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":null,"limit":30}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":17,"limit":1}`),
+		},
+		// Structured input from the pane's own renderer. One probe per kind
+		// THIS contract carries: the check below refuses a registered method
+		// with no probes at all, and session.intent was registered without
+		// them, so this method's own package failed its own gate.
+		//
+		// Three and not five, deliberately: the runtime's vocabulary is key,
+		// text, paste, mouse and focus, and a click and a focus change are
+		// input a person produced — but widening that enum is the frontend
+		// half's change (nocx-zg3k3.3.1), and a probe whose kind this schema
+		// does not carry would be rejected as a valid probe. When the two
+		// kinds arrive, they bring their probes.
+		"session.intent": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"key","payload":"RW50ZXI="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"text","payload":"aGk="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":2,"kind":"paste","payload":"aGkKdGhlcmU="}`),
+			// The two kinds that arrived with the widening (nocx-zg3k3.3.1):
+			// a click and a focus change are input a person produced, and
+			// sessionruntime has encoded both all along.
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"mouse","payload":"cHJlc3MgbGVmdCAyIDM="}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","accessEpoch":1,"kind":"focus","payload":"aW4="}`),
+		},
 		"notes.create": {
 			[]byte(`{}`),
 			[]byte(`{"body":"body"}`),
@@ -777,6 +805,18 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"capture","step":0}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"skip","step":3}`),
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","action":"redo","step":1}`),
+		},
+		// Settings reads and writes the existing single agentrecord.Store; each
+		// registered method has a schema-valid probe so the registry-wide
+		// contract check detects drift in this UI surface as well.
+		"agentRecords.list": {
+			[]byte(`{}`),
+		},
+		"agentRecords.save": {
+			[]byte(`{"id":"custom-agent","displayName":"Custom agent","command":"/usr/bin/env","args":["--flag"],"icon":"sparkles","colour":"#ffffff","disabled":false,"env":["MODE=dev"],"resume":{"sessionIdArgs":[],"resumeIdArgs":[],"resumeCwdArgs":[]}}`),
+		},
+		"agentRecords.remove": {
+			[]byte(`{"id":"custom-agent"}`),
 		},
 		// Listing asks nothing: a backend composes exactly one scope, so
 		// there is no workspace to select. `{}` is what the client sends and

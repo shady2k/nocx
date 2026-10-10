@@ -138,11 +138,11 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		// taken at BEGIN rather than at the first write, so a second writer
 		// waits instead of failing an upgrade with SQLITE_BUSY_SNAPSHOT
 		// (nocx-rtg0.18).
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var lookupErr error
 		if in.AttemptID != "" {
@@ -154,7 +154,7 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 				}
 				if phase == string(PhaseClosed) {
 					id = in.AttemptID
-					return tx.Commit()
+					return txEnd.commit()
 				}
 				var executionID int64
 				if executionErr := tx.QueryRowContext(ctx,
@@ -179,7 +179,7 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 					return entryErr
 				}
 				id = in.AttemptID
-				return tx.Commit()
+				return txEnd.commit()
 			}
 			if lookupErr != sql.ErrNoRows {
 				return lookupErr
@@ -265,7 +265,7 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 			return err
 		}
 
-		if err := tx.Commit(); err != nil {
+		if err := txEnd.commit(); err != nil {
 			return err
 		}
 		id = entryID

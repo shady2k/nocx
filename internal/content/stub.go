@@ -130,6 +130,11 @@ func (s *sessionOutputStub) Skip(_ context.Context, sessionID string, resumeAt u
 	return SessionOutputResult{}, nil
 }
 
+func (s *sessionOutputStub) RecoveryStatus(_ context.Context, sessionID string) (SessionOutputRecoveryStatus, error) {
+	s.log.Info("content stub: SessionOutputRepository.RecoveryStatus", "session_id", sessionID)
+	return SessionOutputRecoveryStatus{Gaps: []Gap{}}, nil
+}
+
 func (s *sessionOutputStub) Read(_ context.Context, sessionID string) (SessionOutputRecording, error) {
 	s.log.Info("content stub: SessionOutputRepository.Read", "session_id", sessionID)
 	return SessionOutputRecording{SessionID: sessionID}, nil
@@ -271,6 +276,13 @@ func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error {
+	s.log.Info("content stub: LedgerRepository.ApplyLifecycleFrame", "id", sessionID, "offset", offset)
+	// The frame is the kernel's as well as the store's: it is applied, and
+	// with no store there is nothing to record and nothing that can fail.
+	return apply(ctx)
+}
+
 func (s *ledgerStub) DeleteSession(_ context.Context, id string) error {
 	s.log.Info("content stub: LedgerRepository.DeleteSession", "id", id)
 	return ErrNotImplemented
@@ -336,6 +348,11 @@ func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
 	return RetentionWatermark{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) EntryForShellAttempt(_ context.Context, paneID, shellAttempt string) (string, error) {
+	s.log.Info("content stub: LedgerRepository.EntryForShellAttempt", "pane", paneID, "shellAttempt", shellAttempt)
+	return "", nil
+}
+
 func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {
 	s.log.Info("content stub: LedgerRepository.StartExecution", "entry", in.EntryID)
 	return 0, ErrNotImplemented
@@ -373,6 +390,14 @@ func (s *ledgerStub) CloseBlockRows(_ context.Context, in CloseBlockRows) (Block
 	s.log.Info("content stub: LedgerRepository.CloseBlockRows",
 		"entry", in.EntryID, "artifact", in.ArtifactID)
 	return BlockRowsSummary{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) OpenBlockRowsForSession(_ context.Context, sessionID string) (OpenBlockRowsEntry, error) {
+	s.log.Info("content stub: LedgerRepository.OpenBlockRowsForSession", "session", sessionID)
+	// No database behind the stub holds an open block, so the honest
+	// answer is the zero value rather than a refusal: every fresh
+	// session's first attach lands here too.
+	return OpenBlockRowsEntry{}, nil
 }
 
 func (s *ledgerStub) RecordClearBoundary(_ context.Context, in RecordClearBoundary) (ClearBoundaryRecorded, error) {

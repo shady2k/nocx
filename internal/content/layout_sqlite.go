@@ -284,7 +284,7 @@ func (s *sqliteContent) Workspaces(ctx context.Context) ([]Workspace, error) {
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	return scanWorkspaces(s.db.QueryContext(ctx,
+	return scanWorkspaces(s.conn(ctx).QueryContext(ctx,
 		`SELECT id, name, colour, position FROM workspaces ORDER BY position, id`))
 }
 
@@ -379,15 +379,15 @@ func (s *sqliteContent) DeleteWorkspace(ctx context.Context, id string, next Rep
 // row goes in the SAME TRANSACTION that removes its last member" a property of
 // the code rather than a sentence in a comment.
 func (s *sqliteContent) inTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, txEnd, err := s.beginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer txEnd.rollback()
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return txEnd.commit()
 }
 
 // ── leaving the window ───────────────────────────────────────────────────
@@ -445,7 +445,31 @@ func dissolveTabIfEmpty(ctx context.Context, tx *sql.Tx, tabID string) error {
 	if err := markTabClosed(ctx, tx, tabID, closedNow()); err != nil {
 		return err
 	}
+	if err := renumberStrip(ctx, tx, workspaceID); err != nil {
+		return err
+	}
 	return dissolveWorkspaceIfEmpty(ctx, tx, workspaceID)
+}
+
+// renumberStrip closes the gap a tab left in its workspace's strip, through the
+// SAME writer CreateTabAfter's placement and ReorderTabs use — because "a
+// workspace's open tabs are 0..n-1 in drawing order" is one invariant and a
+// close is not the place to grow a second form of it (nocx-xn63t.4.14).
+//
+// The order the remaining tabs keep is read INSIDE the caller's transaction,
+// so the strip it renumbers is the one the close just changed.
+//
+// It runs on the tabs that SURVIVE, in the caller's transaction and therefore
+// rolled back with it: a failed close leaves the strip exactly as it was, the
+// same property CreateTabAfter's own failure test asserts for an insert.
+func renumberStrip(ctx context.Context, tx *sql.Tx, workspaceID string) error {
+	held, err := idsOf(ctx, tx,
+		`SELECT id FROM tabs WHERE workspace_id = ? AND closed_at IS NULL ORDER BY position, id`,
+		workspaceID)
+	if err != nil {
+		return err
+	}
+	return writeTabPositions(ctx, tx, held)
 }
 
 // dissolveWorkspaceIfEmpty DELETES the workspace when its last open tab has
@@ -783,7 +807,7 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn(ctx).QueryContext(ctx,
 		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at
 		   FROM tabs WHERE workspace_id = ? AND closed_at IS NULL
 		  ORDER BY position, id`, workspaceID)
@@ -842,6 +866,9 @@ func (s *sqliteContent) DeleteTab(ctx context.Context, id string, next Replaceme
 				return err
 			}
 			if err := markTabClosed(ctx, tx, id, closedNow()); err != nil {
+				return err
+			}
+			if err := renumberStrip(ctx, tx, workspaceID); err != nil {
 				return err
 			}
 			if err := dissolveWorkspaceIfEmpty(ctx, tx, workspaceID); err != nil {
@@ -909,7 +936,7 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn(ctx).QueryContext(ctx,
 		`SELECT id, tab_id, cwd, kind, endpoint, size_share
 		   FROM panes WHERE tab_id = ? AND closed_at IS NULL ORDER BY id`, tabID)
 	if err != nil {
@@ -1280,7 +1307,7 @@ func (s *sqliteContent) PaneCwd(ctx context.Context, paneID string) (string, err
 		return "", ErrClosed
 	}
 	var cwd sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		// Open panes only, on the same reasoning as the walk below: a closed
 		// pane's cwd is where it WAS, and a caller choosing where to start a
 		// program must not be handed the directory of a pane nobody is
@@ -1303,7 +1330,7 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 		return "", ErrClosed
 	}
 	var workspaceID string
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		// The window's chain, both rungs: a session opens in a pane that is on
 		// screen, and a CLOSED tab's workspace_id can be null — the workspace
 		// was deleted and the row outlived it — so a walk that admitted closed
@@ -1330,7 +1357,7 @@ func (s *sqliteContent) TabForPane(ctx context.Context, paneID string) (string, 
 		return "", ErrClosed
 	}
 	var tabID string
-	err := s.db.QueryRowContext(ctx,
+	err := s.conn(ctx).QueryRowContext(ctx,
 		`SELECT p.tab_id FROM panes p JOIN tabs t ON t.id = p.tab_id
 		  WHERE p.id = ? AND p.closed_at IS NULL AND t.closed_at IS NULL`,
 		paneID,

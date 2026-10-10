@@ -29,6 +29,21 @@ const (
 // shell's view are kept distinct: on attachment the shell's text is ignored
 // outright (the wire line may carry vault-resolved secrets while the app's
 // text carries references — decision 5's privacy rule).
+// ShellID is the id the shell minted for this attempt and names in its own
+// frames: the attempt's key for a shell-originated command, the alias the
+// start recorded for one the app submitted, and empty until a start names
+// one. It is the command's identity from the shell's side, the same across
+// every coordinator the shell outlives (ADR-0077).
+func (a ExecutionAttempt) ShellID() AttemptID {
+	if a.shellID != "" {
+		return a.shellID
+	}
+	if a.Origin == OriginShell {
+		return a.ID
+	}
+	return ""
+}
+
 type ExecutionAttempt struct {
 	ID        AttemptID
 	Domain    DomainID

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.historyPage.schema.json",
+  "title": "SessionHistoryPage",
+  "description": "The session.historyPage JSON-RPC result: the facts of one page of a session's live history, read as the emulator holds it (nocx-zg3k3.10.3). The rows themselves ride the binary data plane on the screen frame's own carrier, keyed by pageId — terminal presentation data does not travel inside a JSON-RPC result (AD-1, ADR-0066, ADR-0073). The interval, the floor and more describe one instant of the buffer, read under one lock beside the rows they name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pageId", "start", "end", "floor", "more", "durableThrough"],
+  "properties": {
+    "pageId": {
+      "description": "Minted for this call; the session.historyPageRows document carrying this page's rows names the same id. A client matches document to result by it and never by arrival order.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "start": {
+      "description": "The absolute history row number of the page's FIRST row; the exclusive lower bound of what this page delivered. A row's number is fixed for its lifetime: output arriving, a resize and an alternate-screen excursion move nothing, and only retention pruning and an erase-saved-lines raise the floor beneath it. When the page is empty, start is the cursor the page was taken at and end equals it.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "end": {
+      "description": "One past the page's LAST row: start + the number of rows the page delivered, which the carrier's document holds. A client paging backwards continues with before = start.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "floor": {
+      "description": "The absolute row number below which NOTHING is retained: the oldest row a further page could reach is floor. A cursor at or below floor is answered with the empty interval at that cursor — an explicit floor, never a short list a caller could read as a short history. After `clear` (ED3) the floor is the head: the emulator's history is what it holds.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "more": {
+      "description": "True when retained rows remain below start: a further page with before = start will deliver rows. False does not mean the history is short — floor says where it ends.",
+      "type": "boolean"
+    },
+    "durableThrough": {
+      "description": "RESERVED for the live↔durable join (nocx-zg3k3.10.3 reserves it; a later task gives it meaning): how far the durable record of the session reaches, in its own cursor space, so a client can one day tell where the live tier's history hands over to the durable tier's. null until that join exists, which is every answer today.",
+      "type": ["integer", "null"]
+    }
+  }
+}

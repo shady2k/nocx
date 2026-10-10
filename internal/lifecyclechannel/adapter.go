@@ -27,6 +27,7 @@
 package lifecyclechannel
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -55,7 +56,7 @@ const writeTimeout = 5 * time.Second
 type Kernel interface {
 	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
 	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
-	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
+	Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
 	TransportLost(t lifecycle.TransportID) error
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
@@ -85,6 +86,11 @@ const (
 	// teardown. Not a failure: the session is going away and the product
 	// has nothing to say about it.
 	LossClosed LossCause = "closed"
+	// LossStoreRefused is the store refusing a frame this coordinator
+	// applied, on every attempt (ADR-0077): the leg halts, so the pane's
+	// channel is gone for this coordinator though the shell's is not, and
+	// the next coordinator applies the frame from the cursor.
+	LossStoreRefused LossCause = "store-refused"
 )
 
 // LossReporter is told which path ended an adapter's transport or which
@@ -106,6 +112,42 @@ type Option func(*options)
 type options struct {
 	helloTimeout time.Duration
 	lossReporter LossReporter
+	frameScope   FrameScope
+}
+
+// FrameScope applies one frame as one unit of work (ADR-0077). consumed is
+// the position in this adapter's carrier the frame ends at — every byte the
+// decoder has taken, the frame's own and any garbage skipped before it — and
+// apply runs the kernel's ingest of it under the context the scope hands it.
+// The scope stores the frame's effect and the coordinator's cursor past it
+// together, or neither: every write the frame's projection makes under that
+// context joins the one transaction, and the cursor is its last statement. A
+// refused frame is scoped like any other — the stream carried it and this
+// coordinator dealt with it, and resuming before it would only offer it
+// again. It runs on the pump's goroutine, before the next frame is read.
+//
+// kind is the frame's event kind, for the scope's own account of it.
+//
+// A non-nil return says the frame's effect could NOT be stored: nothing of it
+// was, and the cursor has not moved. The adapter then applies nothing more —
+// every later frame's effect would be stored past a frame the store does not
+// hold — and leaves the frame to the next coordinator, which resumes the
+// stream at the cursor and applies it once. ErrFrameLeftForNext is the
+// coordinator stopping, and ends the leg quietly, as a handover; any other
+// error is the store refusing the frame, and ends it as a stated loss
+// (LossStoreRefused), so the pane shows that its channel is gone.
+type FrameScope func(consumed uint64, kind lifecycle.EventKind, apply func(ctx context.Context)) error
+
+// ErrFrameLeftForNext is a FrameScope's answer for a frame this coordinator
+// will not apply because it has begun stopping: nothing of the frame is
+// applied — not in the kernel, not in the store — and the cursor has not
+// moved, so the next coordinator applies it from there. Not a failure: the
+// leg ends as a handover does, with nothing reported.
+var ErrFrameLeftForNext = errors.New("lifecyclechannel: the coordinator is stopping; the frame is left for the next one")
+
+// WithFrameScope registers the scope each frame is applied in.
+func WithFrameScope(f FrameScope) Option {
+	return func(o *options) { o.frameScope = f }
 }
 
 // WithHelloTimeout bounds an adapter handshake and listener expectation:
@@ -145,11 +187,20 @@ type Adapter struct {
 	// hello-timeout is measured against.
 	openedAt time.Time
 	report   LossReporter
+	scope    FrameScope
 
 	mu     sync.Mutex
 	closed bool
 	loss   sync.Once
-	timer  *time.Timer
+	// applying is held by the pump across one frame's application — the
+	// detached check and the frame's scope, its ingest and its store — so a
+	// Detach that takes it knows no frame is half-applied and none will
+	// start (ADR-0077).
+	applying sync.Mutex
+	timer    *time.Timer
+	// pumpDone is closed when the pump goroutine ends — the observable a
+	// test waits on to know the pump's own end-of-stream has run.
+	pumpDone chan struct{}
 }
 
 // NewStream constructs the same authenticated lifecycle adapter over an
@@ -183,6 +234,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 		id:   lifecycle.TransportID("tpt-" + tptHex),
 		lane: lifecycle.LaneID("lane-" + laneHex),
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+		scope:    o.frameScope,
 		openedAt: time.Now(),
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
@@ -207,6 +259,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 	a.mu.Lock()
 	a.timer = t
 	a.mu.Unlock()
+	a.pumpDone = make(chan struct{})
 	go a.pump()
 	return a, nil
 }
@@ -236,10 +289,11 @@ type AdoptingKernel interface {
 // Close, exactly as for a minted one.
 //
 // The carrier may be attached after this call; the decoder waits for bytes.
-// The caller must attach it at the HELPER's current lifecycle head and not at
-// the window's base: the helper retains the bytes the previous coordinator
-// already consumed, and replaying them into a domain whose capability is
-// unchanged would replay authenticated events.
+// The caller attaches it at the cursor the previous coordinator stored of
+// the last frame it applied (ADR-0077), never at the window's base: the
+// helper retains the bytes that coordinator already applied, and replaying
+// them into a domain whose capability is unchanged would replay
+// authenticated events.
 func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteCloser, adopt Launch, opts ...Option) (*Adapter, error) {
 	if conn == nil {
 		return nil, errors.New("lifecyclechannel: nil stream")
@@ -271,6 +325,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		lane: adopt.Lane, domain: adopt.Domain, epoch: adopt.Epoch,
 		capability: capability, recovery: recovery,
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+		scope: o.frameScope,
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
 	if bindErr := k.BindTransport(a.id, a); bindErr != nil {
@@ -288,6 +343,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 	}
 	logger.Info("lifecycle channel adopted",
 		"transport", a.id, "lane", a.lane, "domain", a.domain, "epoch", a.epoch)
+	a.pumpDone = make(chan struct{})
 	go a.pump()
 	return a, nil
 }
@@ -313,6 +369,13 @@ func (l Launch) secrets() (lifecycle.Capability, lifecycle.FenceNonce, error) {
 		copy(recovery[:], rec)
 	}
 	return capability, recovery, nil
+}
+
+// Done closes when the adapter's pump has stopped: no frame will be applied
+// after it. A caller waiting for frames to be applied waits on this too, so a
+// leg that ended short of its target never holds the wait (ADR-0077).
+func (a *Adapter) Done() <-chan struct{} {
+	return a.pumpDone
 }
 
 // Lane returns the adapter's own lane — the addressing tuple it minted and
@@ -404,6 +467,61 @@ func (a *Adapter) Close() error {
 	return nil
 }
 
+// Detach ends this adapter's leg as an ORDERLY HANDOVER: the coordinator is
+// giving the session back to its helper on its own authority — process
+// shutdown, a re-adopt that lost the write-lease — and the helper keeps
+// owning both, so the domain is not lost and its open attempts are not this
+// kernel's to settle. The kernel hears nothing from this side: a
+// coordinator going away is not data from the helper (ADR-0076), and the
+// re-adopting coordinator adopts the domain fresh (lifecycle.AdoptDomain).
+// The pump's EOF echo afterwards finds the adapter already closed and
+// answers for nothing.
+//
+// This is Close's sibling for the coordinator-detach verb, never a second
+// loss cause: a carrier that dies while the coordinator lives still runs
+// lose, and a shell that says goodbye still reaches endOfStream's clean
+// branch. Shares lose's once, so whichever of detach, loss or disposal runs
+// first decides what this leg's end was.
+//
+// THE FRAME IN FLIGHT IS FINISHED, AND NONE AFTER IT IS STARTED (ADR-0077).
+// Detach returns only once no frame is being applied: a frame the kernel is applying
+// when the handover arrives completes — its effect and its reported cursor
+// both land — and a frame the decoder already buffered behind it is left for
+// the next coordinator, which resumes the stream at the cursor this one
+// stored. The caller's next act is to let the session's block stream go; a
+// frame applied after that would report its cursor with only half its effect
+// stored (a start whose ledger entry is written and whose block never opens),
+// and the next coordinator, resuming past it, would never open that block.
+// The wait is for the frame, not for the pump's exit: a carrier whose blocked
+// read a Close does not interrupt (a socketpair descriptor) would otherwise
+// hold the handover until the shell spoke again. It is outside the once,
+// because the pump's own end may run lose, which shares it. Never call Detach
+// from the pump's own goroutine — nothing does: the callers are the
+// registry's Close and the re-adopt's lease refusal.
+func (a *Adapter) Detach() error {
+	a.loss.Do(func() {
+		a.log.Info("lifecycle channel detached for handover",
+			"transport", a.id, "lane", a.lane, "domain", a.domain)
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
+	a.applying.Lock()
+	//nolint:staticcheck // an empty critical section: the wait for the frame in flight IS the point
+	a.applying.Unlock()
+	return nil
+}
+
+// detached reports whether the leg has been handed over (or otherwise ended):
+// the pump applies no frame once it is.
+func (a *Adapter) detached() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.closed
+}
+
 // lose is the single loss path, executed once: say which caller fired,
 // report the cause, notify the kernel, mark the adapter closed, and close
 // the descriptor so the pump unblocks. Idempotent under concurrent callers
@@ -460,11 +578,31 @@ func (a *Adapter) reportGap(bytes, frames int) {
 // pump moves inbound envelopes and loss into the kernel until the stream
 // ends. It is the sole reader of the descriptor.
 func (a *Adapter) pump() {
+	defer close(a.pumpDone)
 	defer func() { _ = a.conn.Close() }()
 	for {
 		env, err := a.dec.ReadFrame()
 		if err == nil {
-			if ierr := a.kernel.Ingest(a.id, env); ierr != nil {
+			a.applying.Lock()
+			if a.detached() {
+				// Handed over: this frame, even one the decoder already
+				// holds, is the next coordinator's to apply (see Detach).
+				a.applying.Unlock()
+				return
+			}
+			ierr, serr := a.applyFrame(env)
+			if errors.Is(serr, ErrFrameLeftForNext) {
+				a.leaveForNext(env.Event.Kind)
+				a.applying.Unlock()
+				return
+			}
+			if serr != nil {
+				a.halt(serr)
+				a.applying.Unlock()
+				return
+			}
+			a.applying.Unlock()
+			if ierr != nil {
 				// Quarantine (a Desynchronized domain), a rejected
 				// candidate, an illegal event: the kernel mutates nothing
 				// and this adapter records nothing but the fact.
@@ -505,6 +643,11 @@ func (a *Adapter) pump() {
 			a.endOfStream()
 			return
 		default:
+			if a.detached() {
+				// The handover closed the carrier under the read: its echo,
+				// not a transport that broke.
+				return
+			}
 			// A read error: the transport broke.
 			a.log.Warn("lifecycle transport read error", "error", err)
 			a.lose(LossReadError)
@@ -513,11 +656,71 @@ func (a *Adapter) pump() {
 	}
 }
 
+// applyFrame ingests one frame inside its scope: ingestErr is the kernel's
+// verdict on the frame, storeErr says its effect could not be stored.
+func (a *Adapter) applyFrame(env lifecycle.Envelope) (ingestErr, storeErr error) {
+	apply := func(ctx context.Context) { ingestErr = a.kernel.Ingest(ctx, a.id, env) }
+	if a.scope == nil {
+		// No scope, no store frame: a leg whose frames nothing records
+		// (a test's, or one with no cursor) applies them under nothing.
+		apply(context.Background())
+		return ingestErr, nil
+	}
+	storeErr = a.scope(a.dec.Consumed(), env.Event.Kind, apply)
+	return ingestErr, storeErr
+}
+
+// leaveForNext ends the leg without applying the frame in hand, because the
+// coordinator is stopping (ErrFrameLeftForNext): a handover, said at info and
+// reported to nobody. Called on the pump with applying held.
+func (a *Adapter) leaveForNext(kind lifecycle.EventKind) {
+	a.loss.Do(func() {
+		a.log.Info("lifecycle channel left for the next coordinator: this one is stopping, and the frame in hand is not applied",
+			"transport", a.id, "lane", a.lane, "domain", a.domain, "kind", kind)
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
+}
+
+// halt ends the leg after a frame whose effect could not be stored
+// (FrameScope): as a handover does — the carrier closed, the kernel not told
+// the transport was lost, since nothing about the shell's channel failed —
+// so the frame and everything after it are the next coordinator's to apply.
+// Called on the pump with applying held.
+func (a *Adapter) halt(cause error) {
+	a.loss.Do(func() {
+		a.log.Error("lifecycle channel halted: a frame's effect could not be stored, so this coordinator applies nothing more and the next one resumes before it",
+			"transport", a.id, "lane", a.lane, "domain", a.domain, "error", cause)
+		// The pane says so (AGENTS.md: a soft degrade is visible in the
+		// product): its channel is gone for this coordinator.
+		if a.report != nil {
+			a.report(a.lane, LossStoreRefused)
+		}
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
+}
+
 // endOfStream applies the end-of-stream policy: a domain the shell already
 // closed (domain_closed, or a revoked one) ends cleanly; a domain that is
 // still live lost its speaker without saying goodbye, so the kernel marks it
 // Lost and its open attempts unknown (protocol §12).
 func (a *Adapter) endOfStream() {
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		// This leg already ended here — an orderly detach or a loss. The
+		// EOF is its echo, and the policy ran with the ending.
+		a.log.Info("lifecycle transport ended after the leg was already accounted for", "domain", a.domain)
+		return
+	}
 	d, ok := a.kernel.Domain(a.domain)
 	if ok {
 		switch d.State {

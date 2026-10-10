@@ -64,6 +64,15 @@ export interface ScrollbackControllerOpts {
    *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
    *  neither summons the editor nor signals a session. */
   runningActions?: RunningBlockActions
+  /** Fired whenever the mode settles — idle, running, unstructured,
+   *  fullscreen. The live tier's surface (scrollback/live-history.ts) is
+   *  the unstructured mode's alone, and this is how it learns the pane
+   *  changed hands (nocx-zg3k3.10.4). */
+  onModeChanged?: (mode: LiveRegionMode) => void
+  /** Fired when the follow sentinel's answer CHANGES: the reader left the
+   *  live end, or returned to it. The same observer that owns `_tail`
+   *  delivers it — no second watcher of one scroller. */
+  onTailFollow?: (following: boolean) => void
 }
 
 export class ScrollbackController {
@@ -122,10 +131,14 @@ export class ScrollbackController {
    *  cleared, so the chip — and with it the agent target — closes when its
    *  block is gone. */
   private _onClear?: () => void
+  private readonly _onModeChanged?: (mode: LiveRegionMode) => void
+  private readonly _onTailFollow?: (following: boolean) => void
 
   constructor(opts: ScrollbackControllerOpts) {
     this._renderer = opts.renderer
     this._onClear = opts.onClear
+    this._onModeChanged = opts.onModeChanged
+    this._onTailFollow = opts.onTailFollow
     this.snapshotStore = opts.snapshotStore
     const now = opts.now ?? (() => performance.now())
 
@@ -238,7 +251,14 @@ export class ScrollbackController {
     if (typeof IntersectionObserver === 'undefined') return
     this._followObserver = new IntersectionObserver(
       (entries) => {
-        for (const e of entries) this._tail.observe(this.scrollbackArea, e.isIntersecting)
+        for (const e of entries) {
+          const was = this._tail.following
+          this._tail.observe(this.scrollbackArea, e.isIntersecting)
+          // The flip, not the delivery: the reader left the live end or
+          // returned to it. The live tier's surface drops a stale past and
+          // re-arms its paging on the return (nocx-zg3k3.10.4).
+          if (this._tail.following !== was) this._onTailFollow?.(this._tail.following)
+        }
       },
       { root: this.scrollbackArea, threshold: 0 },
     )
@@ -291,9 +311,11 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
+    this.scrollbackInner.classList.remove('inner-unstructured')
     // The echo shift is a running-mode property: clear it with the region.
     this._applyEchoShift()
     this._updateSeparator()
+    this._onModeChanged?.(this._mode)
   }
 
   /** Show live output below the running block. */
@@ -310,10 +332,12 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-running'
     this.xtermInner.className = 'xterm-inner'
+    this.scrollbackInner.classList.remove('inner-unstructured')
     // The block just opened; its echo row is the grid's top row, so the
     // shift applies from the first frame (nocx-w1n4).
     this._applyEchoShift()
     this._updateSeparator()
+    this._onModeChanged?.(this._mode)
     this._watchPaintedTop()
     // Size both layers from the rows that exist now. A short command therefore
     // opens beside the prompt instead of reserving a pane-high empty window.
@@ -338,7 +362,12 @@ export class ScrollbackController {
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
     this._applyEchoShift()
+    // The live tier's surface is this mode's alone: the class is what the
+    // stylesheet's filled-pane exclusion reads to hand the rows above the
+    // live rectangle back (nocx-zg3k3.10.4).
+    this.scrollbackInner.classList.add('inner-unstructured')
     this._fillPane()
+    this._onModeChanged?.(this._mode)
   }
 
   /**
@@ -627,7 +656,12 @@ export class ScrollbackController {
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
     this._applyEchoShift()
+    // The program owns the pane: the primary's history must not be
+    // reachable by scrolling, so the surface loses the hand-back class and
+    // the filled-pane exclusion hides it (nocx-zg3k3.10.4).
+    this.scrollbackInner.classList.remove('inner-unstructured')
     this._fillPane()
+    this._onModeChanged?.(this._mode)
   }
 
   /** The live box IS the scroller, in the two modes where the terminal owns
@@ -663,8 +697,10 @@ export class ScrollbackController {
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
     this._applyEchoShift()
+    this.scrollbackInner.classList.remove('inner-unstructured')
     this.scrollbackInner.classList.remove('inner-fullscreen-mode')
     this._updateSeparator()
+    this._onModeChanged?.(this._mode)
   }
 
   // ── Command cycle ─────────────────────────────────────────────────────

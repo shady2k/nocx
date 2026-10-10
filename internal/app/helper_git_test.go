@@ -66,7 +66,7 @@ func TestBridgeLifecycleCarriesOpaqueBytesAndCloses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bridgeLifecycle(nil, lifecycle.TransportID("tpt-test"), peer, carrier)
+	bridgeLifecycle(nil, lifecycle.TransportID("tpt-test"), peer, carrier, nil, nil)
 
 	const outbound = "opaque lifecycle bytes"
 	writeDone := make(chan error, 1)

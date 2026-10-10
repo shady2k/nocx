@@ -36,18 +36,20 @@ var errEnough = errors.New("git: enough output received")
 // facts about how to invoke git in this repository; the interface methods
 // each spawn a fresh child, so Repo itself owns no process.
 type Repo struct {
-	gitPath   string
-	pinnedEnv []string  // WithEnv's pinned environment; nil when resolving from the shell
-	resolver  *envCache // the shared resolution; nil with a pinned environment
-	toplevel  string    // the worktree this Repo is bound to; every invocation that is not about another worktree runs here
-	gitDir    string
+	gitPath      string
+	pinnedEnv    []string  // WithEnv's pinned environment; nil when resolving from the shell
+	resolver     *envCache // the shared resolution; nil with a pinned environment
+	toplevel     string    // the worktree this Repo is bound to; every invocation that is not about another worktree runs here
+	gitDir       string
+	commonGitDir string
 	// worktreeNUL says which encoding the worktree listing is read in: the
 	// NUL-terminated form git 2.36 added, or the line form every version from
 	// the 2.25 floor up can answer. Set once at open from the probed version
 	// (worktreeListHasNUL) — the operation PREFERS the path-safe form and
 	// does not require it.
-	worktreeNUL bool
-	ceilings    ceilings
+	worktreeNUL  bool
+	worktreeAdds *worktreeAddGate
+	ceilings     ceilings
 }
 
 type ceilings struct {

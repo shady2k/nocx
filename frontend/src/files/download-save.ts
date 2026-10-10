@@ -62,7 +62,8 @@ export function createNativeDownloadSaver(bindings: NativeDownloadBindings): Dow
       return {
         destination: 'native',
         async save(result): Promise<DownloadSaveOutcome> {
-          if (disposed || consumed) return 'destination-failed'
+          if (consumed) return 'destination-failed'
+          if (disposed) return 'cancelled'
           consumed = true
           try {
             const outcome = (await bindings.save(handle, result.ticket, result.size)).outcome

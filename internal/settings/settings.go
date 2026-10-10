@@ -1123,6 +1123,24 @@ var AgentRunQuietMinutes = MustRegisterNumber(NumberSpec{
 // window geometry, as a whole number of CSS pixels. See ADR-0048 for the line
 // between the two stores, and check a new key against it before adding one
 // here.
+// TerminalScrollbackLines is how far the live terminal scrolls back, in
+// physical lines (nocx-zg3k3.10.1). It is a section of its own because it is
+// not a History question: History is what survives a restart, and this is
+// how far a person can scroll right now. The two were deliberately
+// separated, and this section is also where the terminal settings the xterm
+// removal brings will land.
+var TerminalScrollbackLines = MustRegisterNumber(NumberSpec{
+	Key:         "terminal.scrollbackLines",
+	Section:     "Terminal",
+	Label:       "Scroll back, at most",
+	Description: "How many lines of output the live terminal keeps above the current screen. Pruning happens in whole pages (about 400 KB each), so the terminal usually keeps somewhat more than this — by dozens of lines, sometimes a hundred. Heavily styled output keeps fewer, because the emulator's internal memory ceiling is reached first. Lowering the value prunes live scrollback immediately. Set to 0 for no live scrollback; output remains available to durable capture.",
+	DataClass:   PublicConfig,
+	Default:     10000,
+	Min:         fp(0),
+	Max:         fp(100000),
+	Unit:        "lines",
+	ZeroLabel:   "No scrollback — only the current screen",
+})
 
 // ── Declared groups ────────────────────────────────────────────────────
 // The settings rail's group catalogue (nocx-dgsp): declared here, shipped
@@ -1205,6 +1223,7 @@ func init() {
 	// and mints no rail row for them; a group mapping here would name a
 	// placement that nothing places. See settings-rail-pages.ts.
 	RegisterSectionGroup("Worktrees", "application")
+	RegisterSectionGroup("Terminal", "application")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).

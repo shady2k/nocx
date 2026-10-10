@@ -12,6 +12,7 @@ import type {
   Run as WireRun,
   SessionOutput,
 } from './generated/session.output'
+import type { Gap as RecoveryGap, SessionRecoveryStatus } from './generated/session.recoveryStatus'
 
 // The one report shape — grid plus whole-text-area pixels — re-exported so
 // the surfaces that compute a report spell the same type the client sends
@@ -20,6 +21,10 @@ export type { SessionSize }
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
+import type { SessionEffect } from './generated/session.effect'
+import type { SessionHistoryPage } from './generated/session.historyPage'
+import type { SessionHistoryPageRows } from './generated/session.historyPageRows'
+import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import { log } from './log'
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
@@ -64,6 +69,14 @@ type OpenResult = {
    *  (AD-7). See SessionHandle.awaitsIntegration for what it does and does
    *  not answer. */
   awaitsIntegration?: Open['awaitsIntegration']
+  /** The epoch this pane's intents present (nocx-zg3k3.3.1). It rides this
+   *  ack rather than a notification because a notification would arrive after
+   *  the person's first key, and a renderer cannot type without it — the
+   *  session refuses an intent presented under any other epoch, and one
+   *  presented under none. Absent when the backend could not read one, which
+   *  the wire admits: the handle then presents none and the refusal names the
+   *  epoch in force. See SessionHandle.accessEpoch. */
+  accessEpoch?: Open['accessEpoch']
 }
 
 /**
@@ -75,6 +88,26 @@ type OpenResult = {
  * every misalignment type-check — which is exactly the defect that put
  * onSetupVault into the onAdoptabilityChange slot.
  */
+/** The wire's encoding of one intent payload: base64 of its UTF-8 bytes, the
+ *  shape contracts/session.intent.params.schema.json declares. It lives here,
+ *  beside the handle that owns every other wire detail of an intent, so no
+ *  surface has to know it. */
+function intentPayload(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+/** The kinds of input a person produces, as the wire spells them
+ *  (contracts/session.intent.params.schema.json's `kind`). It is the whole of
+ *  sessionruntime's intent vocabulary and not the printable subset of it: a
+ *  click and a focus change are input too, and this renderer is the only
+ *  source of them (nocx-zg3k3.3.1, design §6.1). What the payload looks like
+ *  follows from the kind — a key name with modifiers, committed text, a paste
+ *  body, a mouse event in cells, or "in"/"out". */
+export type SessionIntentKind = 'key' | 'text' | 'paste' | 'mouse' | 'focus'
+
 export interface OpenAnchor {
   /**
    * The pane this session is the pipe of: the renderer-minted UUIDv7 the
@@ -164,11 +197,13 @@ function decodeRun(run: WireRun): RecordedRun {
 export interface SessionRecovery {
   /** Bytes handed to the terminal ahead of the live stream. */
   bytes: number
-  gaps: SessionOutputGap[]
+  gaps: RecoveryGap[]
   /** The size the recovered bytes were produced at. A surface rendering them
    *  at anything else is drawing a different screen from the one the session
    *  printed. */
   size: SessionSize
+  /** True when metadata could not be checked during reclaim. */
+  statusUnavailable?: boolean
 }
 
 /** What a read that could not happen came back with. A named constant, not
@@ -367,6 +402,15 @@ interface SessionState {
   // equivalent on purpose: buffering would only move the same superseded
   // snapshot one hop.
   screenFrameCallback: ((frame: SessionFrame) => void) | null
+  effectCallback: ((effect: SessionEffect) => void) | null
+  seenEffects: Set<string>
+  pendingEffects: SessionEffect[]
+  // historyPageCallback receives one parsed session.historyPageRows
+  // document (nocx-zg3k3.10.3) — the rows of one live-history page, riding
+  // the same metadata frame the screen plane shares, keyed by the pageId
+  // the session.historyPage result names. The correlation is the caller's:
+  // this layer delivers the document as parsed, exactly as a frame's.
+  historyPageCallback: ((page: SessionHistoryPageRows) => void) | null
   // exitCallback receives the wire Exit (contracts/exit.schema.json): the
   // closed-set cause separating an authoritative shell exit (with its
   // status) from a loss. The failed-reattach path delivers a loss with the
@@ -468,6 +512,21 @@ export class SessionHandle {
      *  direction regardless, since a false default can only ever show a
      *  terminal a fact later says to hide, never the other way round. */
     readonly awaitsIntegration: boolean = false,
+    /** The epoch this pane's intents present (nocx-zg3k3.3.1), or null when
+     *  the backend could not read one.
+     *
+     *  THE HANDLE OWNS IT, and that is the point: the epoch belongs to the
+     *  session the helper holds, not to the surface that draws the pane, and a
+     *  renderer that had to carry it would be holding a second copy of a fact
+     *  it cannot see. It is seated here from the ack that created or claimed
+     *  the session, and re-seated by every answer that names one — which is
+     *  how a revocation heals: the refusal says what to present next, and the
+     *  intent it refused is presented again (intent() below).
+     *
+     *  Null is a state the wire admits rather than a default to invent: an
+     *  open whose helper could not answer carries no epoch, the first intent
+     *  presents none, and the refusal names the one in force. */
+    public accessEpoch: number | null = null,
   ) {}
 
   send(data: string): void {
@@ -541,6 +600,91 @@ export class SessionHandle {
    *  side refuses what it cannot install, and nothing here counts or acks. */
   onScreenFrame(cb: (frame: SessionFrame) => void): void {
     this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
+
+  onEffect(cb: (effect: SessionEffect) => void): void {
+    this.client.onSessionEffect(this.sessionId, cb)
+  }
+
+  /** Asks for one page of this session's live history, as the emulator
+   *  holds it (nocx-zg3k3.10.3). before is the exclusive upper bound in the
+   *  absolute row numbering every result carries — null asks for the head.
+   *  The RESULT carries the page's facts; the rows arrive separately, on
+   *  the screen plane, keyed by the result's pageId — see
+   *  onHistoryPageRows. A dropped page (nobody attached, or the outbound
+   *  queue refused it) rejects; the caller retries, it is not an error to
+   *  survive silently. */
+  historyPage(before: number | null, limit: number): Promise<SessionHistoryPage> {
+    return this.client.historyPage(this.sessionId, before, limit)
+  }
+
+  /** Sends structured input to this pane's helper: what the person did, never
+   *  the bytes it means. The helper owns terminal mode interpretation, and it
+   *  refuses an intent presented under an obsolete access epoch before writing
+   *  anything.
+   *
+   *  A REFUSAL IS RE-PRESENTED ONCE, and only one that wrote nothing
+   *  (nocx-zg3k3.3.1). A revocation lands between two keystrokes: the epoch
+   *  this handle holds becomes stale, the session refuses the intent with
+   *  `access_revoked` and zero bytes, and the answer names the epoch in force.
+   *  Re-seating the copy and sending the SAME intent again is what turns that
+   *  from a keystroke lost forever into a round trip — and it is safe for
+   *  exactly the reason the refusal is: nothing was written, so the second
+   *  attempt is the first write. A partial write (bytesWritten > 0) is never
+   *  re-presented, because that one did reach the program. */
+  intent(kind: SessionIntentKind, payload: string): Promise<SessionIntentResult> {
+    return this._intent(kind, payload, true)
+  }
+
+  /** The wire's own encoding of one intent payload, in the one place that
+   *  decides it.
+   *
+   *  THE SCHEMA CARRIES BYTES AND THIS API CARRIES WHAT THE PERSON DID.
+   *  contracts/session.intent.params.schema.json declares `payload` as base64
+   *  (`contentEncoding`), because the intent's argument is bytes on the Go side
+   *  — a key name, committed text, a paste body — and a renderer that sent the
+   *  text raw would be sending a field the transport cannot decode. Measured:
+   *  it cost the whole RAW-mode path, silently — the intent never reached the
+   *  session, no refusal came back, and the shell's `read` waited forever,
+   *  while every unit test passed because they assert the INTENT and not the
+   *  frame it rides in (nocx-zg3k3.3.1).
+   *
+   *  UTF-8 and not `btoa(payload)`: an IME commit is what this carries most
+   *  often, and btoa throws on anything outside Latin-1. */
+
+  private async _intent(
+    kind: SessionIntentKind,
+    payload: string,
+    mayRepresent: boolean,
+  ): Promise<SessionIntentResult> {
+    const presented = this.accessEpoch
+    const result = await this.client.sessionIntent(
+      this.sessionId,
+      presented,
+      kind,
+      intentPayload(payload),
+    )
+    if (typeof result.accessEpoch === 'number' && result.accessEpoch > 0) {
+      this.accessEpoch = result.accessEpoch
+    }
+    if (
+      mayRepresent &&
+      result.state === 'refused' &&
+      result.refusal?.cause === 'access_revoked' &&
+      result.bytesWritten === 0 &&
+      this.accessEpoch !== presented
+    ) {
+      return this._intent(kind, payload, false)
+    }
+    return result
+  }
+
+  /** Registers a callback for one live-history page's rows: the parsed
+   *  session.historyPageRows document whose pageId a historyPage result
+   *  named. Same plane, same policy as onScreenFrame — the model validates
+   *  on intake, nothing here counts or acks. */
+  onHistoryPageRows(cb: (page: SessionHistoryPageRows) => void): void {
+    this.client.onSessionHistoryPageRows(this.sessionId, cb)
   }
 }
 
@@ -765,6 +909,40 @@ export class WSClient {
       })
     })
 
+    this.dispatcher.subscribe('session.effect', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      const generation = raw.generation
+      const effectId = raw.effectId
+      const kind = raw.kind
+      const title = raw.title
+      const body = raw.body
+      if (typeof generation !== 'string' || !/^[1-9][0-9]*$/.test(generation)) return
+      if (typeof effectId !== 'string' || !/^[1-9][0-9]*$/.test(effectId)) return
+      if (
+        kind !== 'bell' &&
+        kind !== 'notification' &&
+        kind !== 'clipboard' &&
+        kind !== 'title' &&
+        kind !== 'cwd' &&
+        kind !== 'promptBoundary'
+      ) {
+        log.debug('nocx: session effect refused: unknown kind', { sessionId: sid, kind })
+        return
+      }
+      if (typeof title !== 'string' || typeof body !== 'string') return
+      const identity = `${generation}:${effectId}`
+      if (state.seenEffects.has(identity)) return
+      state.seenEffects.add(identity)
+      const effect: SessionEffect = { sessionId: sid, generation, effectId, kind, title, body }
+      if (state.effectCallback) state.effectCallback(effect)
+      else state.pendingEffects.push(effect)
+    })
+
     this.dispatcher.subscribe('session.liveness', (params: unknown) => {
       if (!params || typeof params !== 'object') return
       const raw = params as Record<string, unknown>
@@ -943,18 +1121,31 @@ export class WSClient {
       })
       return
     }
-    let doc: SessionFrame
+    let parsed: unknown
     try {
       // Boundary assertion: the payload is wire JSON the model validates on
       // intake; the parse here is the only shape this layer judges.
-      doc = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload))) as SessionFrame
+      parsed = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload)))
     } catch {
-      log.debug('nocx: screen frame dropped: payload is not a frame document', {
+      log.debug('nocx: screen plane dropped: payload is not a JSON document', {
         sessionId: frame.sessionId,
       })
       return
     }
-    state.screenFrameCallback?.(doc)
+    // One carrier, two cargos (nocx-zg3k3.10.3): a live-history page names
+    // its pageId; a screen frame never does — the frame contract is
+    // additionalProperties:false and has no such field, so a frame carrying
+    // one would be malformed at the source. The discrimination is exact,
+    // not a guess from shape.
+    const candidate =
+      parsed !== null && typeof parsed === 'object'
+        ? (parsed as { pageId?: unknown; rows?: unknown })
+        : undefined
+    if (typeof candidate?.pageId === 'string' && Array.isArray(candidate.rows)) {
+      state.historyPageCallback?.(parsed as SessionHistoryPageRows)
+      return
+    }
+    state.screenFrameCallback?.(parsed as SessionFrame)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -1084,6 +1275,7 @@ export class WSClient {
       result?.workspaceId ?? '',
       null,
       result?.awaitsIntegration ?? false,
+      result?.accessEpoch ?? null,
     )
   }
 
@@ -1104,6 +1296,10 @@ export class WSClient {
       reported,
       dataCallback: null,
       screenFrameCallback: null,
+      effectCallback: null,
+      seenEffects: new Set(),
+      pendingEffects: [],
+      historyPageCallback: null,
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
@@ -1169,6 +1365,19 @@ export class WSClient {
     return this.dispatcher
       .call<SessionsInventoryResult>('sessions.inventory', {})
       .then((result) => result.sessions)
+  }
+
+  /** Read only the offset and gap metadata used for the reclaim notice. The
+   *  byte recording remains a separate session.output path and is still fed
+   *  through this session's decoder. */
+  private readSessionRecoveryStatus(
+    sessionId: string,
+    identity: { instanceId: string; sessionEpoch: number },
+  ): Promise<SessionRecoveryStatus> {
+    return this.dispatcher.call<SessionRecoveryStatus>('session.recoveryStatus', {
+      sessionId,
+      ...identity,
+    })
   }
 
   // --- the recording -------------------------------------------------------
@@ -1268,6 +1477,9 @@ export class WSClient {
     // pane worth looking at; taking the session back is the job, and a
     // backend with no content store wired answers this method "not found"
     // (registration.go) on an otherwise perfectly reclaimable session.
+    const recoveryStatus = this.readSessionRecoveryStatus(entry.sessionId, identity).catch(
+      () => null,
+    )
     return this.readSessionOutput(entry.sessionId, identity)
       .catch(() => EMPTY_RECORDING)
       .then((recording) => {
@@ -1307,8 +1519,8 @@ export class WSClient {
           // session.
           gaps.push({ start: recording.produced, end: entry.replayFrom, reason: UNRECORDED })
         }
-        return this._sendAttach(entry.sessionId, attachAt, identity)
-          .then((result) => {
+        return Promise.all([this._sendAttach(entry.sessionId, attachAt, identity), recoveryStatus])
+          .then(([result, metadata]) => {
             const attached = this.sessions.get(entry.sessionId)
             if (attached) attached.offset = result.from
             // No cwd, no mode, no parent, no workspace: every one of those is
@@ -1333,10 +1545,19 @@ export class WSClient {
               '',
               {
                 bytes: recovered.length,
-                gaps,
+                gaps: metadata
+                  ? [
+                      ...metadata.gaps,
+                      ...(metadata.produced < entry.replayFrom
+                        ? [{ start: metadata.produced, end: entry.replayFrom, reason: UNRECORDED }]
+                        : []),
+                    ]
+                  : gaps,
                 size: recording.size,
+                statusUnavailable: metadata === null,
               },
               result.awaitsIntegration,
+              result.accessEpoch ?? null,
             )
           })
           .catch((err) => {
@@ -1459,6 +1680,49 @@ export class WSClient {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
   }
 
+  /** Sends a control-plane session intent for the pane's renderer. Payload is
+   *  the schema's base64 string; PTY bytes stay on the separate data plane. */
+  sessionIntent(
+    sessionId: string,
+    accessEpoch: number | null,
+    kind: SessionIntentKind,
+    payload: string,
+  ): Promise<SessionIntentResult> {
+    // The epoch is omitted rather than defaulted when the caller has none:
+    // the session refuses an intent presented under a number nobody observed,
+    // and it answers with the epoch in force, so the absence is a question
+    // rather than a claim (contracts/session.intent.params.schema.json).
+    return this.dispatcher.call<SessionIntentResult>('session.intent', {
+      sessionId,
+      kind,
+      payload,
+      ...(accessEpoch !== null && accessEpoch > 0 ? { accessEpoch } : {}),
+    })
+  }
+
+  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
+   *  answer's facts ride the result; the rows ride the screen plane keyed
+   *  by the result's pageId — one socket, one FIFO, so a caller reading in
+   *  order finds the rows already queued when the promise resolves. */
+  historyPage(
+    sessionId: string,
+    before: number | null,
+    limit: number,
+  ): Promise<SessionHistoryPage> {
+    return this.dispatcher.call<SessionHistoryPage>('session.historyPage', {
+      sessionId,
+      before,
+      limit,
+    })
+  }
+
+  onSessionHistoryPageRows(sessionId: string, cb: (page: SessionHistoryPageRows) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.historyPageCallback = cb
+    }
+  }
+
   detachSession(sessionId: string): void {
     const ws = this.dispatcher.socket
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1520,6 +1784,14 @@ export class WSClient {
     if (state) {
       state.screenFrameCallback = cb
     }
+  }
+
+  onSessionEffect(sessionId: string, cb: (effect: SessionEffect) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.effectCallback = cb
+    const pending = state.pendingEffects.splice(0)
+    for (const effect of pending) cb(effect)
   }
 
   onSessionObservation(

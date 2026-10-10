@@ -2,12 +2,10 @@ package session
 
 // The row stream bridge (nocx-2v80t.3.6): the session side of the streamed
 // block output. The runtime hands departed rows to its RowStream the moment
-// they leave the screen, under its own lock; this bridge is the RowStream,
-// and its whole job is to move each hand-off to the wire without ever
-// blocking the ingest that produced it and without keeping a copy — the
-// owner's decision gives the helper no second buffer, so what the pump
-// cannot carry when the time comes is shed, counted, and — for rows — stated
-// on the wire as a loss AT THE POSITION it happened.
+// they leave the screen, under its own lock. The shared row byte pool accounts
+// the wire FIFO, the retained resend window, closing emissions and dropped
+// end records; simultaneous owners of the same copy spend the bytes twice.
+// This bridge never blocks the ingest that produced a hand-off.
 //
 // The queue is a plain FIFO guarded by a mutex rather than a channel — an
 // append never blocks, so the runtime's lock is never held waiting on a slow
@@ -77,27 +75,26 @@ const (
 // runtime's gift — freshly copied by the emulator's report, owned by whoever
 // takes them next — so the pump marshals them OFF the runtime's lock.
 type rowEmission struct {
-	end     bool
-	clear   bool
-	nonce   sessionruntime.FenceNonce
-	from    uint64
-	lost    uint64
-	rows    []emulator.Row
-	closing []emulator.Row
+	end          bool
+	clear        bool
+	outputStart  bool
+	markSequence uint64
+	nonce        sessionruntime.FenceNonce
+	from         uint64
+	lost         uint64
+	rows         []emulator.Row
+	closing      []emulator.Row
 	// noFence is an end marker's settledWithoutFence (nocx-2v80t.3.29).
 	noFence bool
 	// incomplete makes this emission the buffer's one overflow marker
 	// (nocx-2v80t.3.36).
 	incomplete bool
-	// bytes is what the emission costs the buffer, fixed at enqueue.
+	// bytes is the unique row data plus emission overhead, fixed at enqueue.
 	bytes int64
 }
 
-// emissionBytes is what one emission costs the row buffer: the rows it
-// carries, cell by cell as the emulator hands them over, plus a fixed
-// overhead for the emission itself. An estimate of the heap it holds — the
-// same order as the truth, never a count that could be gamed by a row of
-// empty cells.
+// emissionBytes estimates the unique heap retained by one emission: its rows,
+// cell by cell as the emulator hands them over, plus fixed overhead.
 func emissionBytes(em rowEmission) int64 {
 	const emissionOverhead = int64(unsafe.Sizeof(rowEmission{}))
 	n := emissionOverhead
@@ -110,6 +107,25 @@ func emissionBytes(em rowEmission) int64 {
 		}
 	}
 	return n
+}
+
+// fifoEmissionBytes counts only storage unique to the FIFO. A row batch is
+// also retained for resend, and both structures reference the same row slices;
+// charge the cell data once to the resend window, not again to the FIFO.
+func fifoEmissionBytes(em rowEmission) int64 {
+	if !em.end && !em.clear && !em.incomplete && len(em.rows) > 0 {
+		return int64(unsafe.Sizeof(rowEmission{}))
+	}
+	return em.bytes
+}
+
+// retainedRowSpan owns the original cells at their absolute departure indices.
+// The wire FIFO references the same backing rows until delivery, so its pool
+// charge covers only the separate emission record.
+type retainedRowSpan struct {
+	from  uint64
+	rows  []emulator.Row
+	bytes int64
 }
 
 // rowBridge is the session's sessionruntime.RowStream. All three methods are
@@ -133,12 +149,22 @@ func (b *rowBridge) ClearBoundary() {
 	b.hs.enqueueRowEmission(rowEmission{clear: true})
 }
 
+func (b *rowBridge) OutputStartRow(from uint64) {
+	b.hs.rowMu.Lock()
+	b.hs.outputStartRow = from
+	b.hs.outputStartKnown = true
+	b.hs.outputStartSequence++
+	sequence := b.hs.outputStartSequence
+	b.hs.rowMu.Unlock()
+	b.hs.enqueueRowEmission(rowEmission{outputStart: true, from: from, markSequence: sequence})
+}
+
 // enqueueRowEmission appends one emission to the FIFO if the buffer can hold
 // it, and otherwise ends the block in flight incomplete (the header's rule).
 // Nothing here blocks: an append and a byte count, under rowMu.
 func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	s.rowMu.Lock()
-	batch := !em.end && !em.clear
+	batch := !em.end && !em.clear && !em.outputStart
 	if batch {
 		s.rowStreamNext = em.from + uint64(len(em.rows)) // #nosec G115 -- len is never negative
 	}
@@ -157,7 +183,11 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 	if budget <= 0 {
 		budget = DefaultRowBufferBytes
 	}
-	if s.rowQueuedBytes+em.bytes > budget {
+	if s.rowPool.limit != budget {
+		s.rowPool.configure(budget)
+	}
+	retainedBytes := int64(0)
+	if !s.rowPool.charge(rowOwnerFIFO, fifoEmissionBytes(em)) {
 		// The first row this buffer does not record: the dropped batch's own
 		// first, or where the stream stood when a marker would not fit.
 		from := s.rowStreamNext
@@ -166,23 +196,55 @@ func (s *hostSession) enqueueRowEmission(em rowEmission) {
 		}
 		marker := rowEmission{incomplete: true, from: from}
 		marker.bytes = emissionBytes(marker)
+		if !s.rowPool.charge(rowOwnerOverflowMarker, marker.bytes) {
+			// markerReserve is part of the pool invariant; reaching this means
+			// accounting was corrupted rather than ordinary exhaustion.
+			s.rowMu.Unlock()
+			panic("row byte pool could not fit its reserved incomplete marker")
+		}
 		s.rowQueue = append(s.rowQueue, marker)
 		s.rowQueuedBytes += marker.bytes
 		s.rowState = rowsDropping
 		s.rowMu.Unlock()
 		s.rowsIncomplete.Add(1)
+		s.rowBufferOverflows.Add(1)
 		s.log.Warn("session row buffer overflowed: the block in flight ends incomplete",
 			"session", s.id.Session, "fromRow", from, "bufferBytes", budget,
-			"overflowsTotal", s.rowsIncomplete.Load())
+			"overflowsTotal", s.rowBufferOverflows.Load())
 		s.wakeRows()
 		return
+	}
+	if batch && len(em.rows) != 0 {
+		retainedBytes = emissionBytes(rowEmission{rows: em.rows})
+		if !s.rowPool.charge(rowOwnerResend, retainedBytes) {
+			s.rowPool.release(rowOwnerFIFO, fifoEmissionBytes(em))
+			from := em.from
+			marker := rowEmission{incomplete: true, from: from}
+			marker.bytes = emissionBytes(marker)
+			if !s.rowPool.charge(rowOwnerOverflowMarker, marker.bytes) {
+				s.rowMu.Unlock()
+				panic("row byte pool could not fit its reserved incomplete marker")
+			}
+			s.rowQueue = append(s.rowQueue, marker)
+			s.rowQueuedBytes += marker.bytes
+			s.rowState = rowsDropping
+			s.rowMu.Unlock()
+			s.rowsIncomplete.Add(1)
+			s.rowBufferOverflows.Add(1)
+			s.log.Warn("session row buffer overflowed: resend window exhausted; the block in flight ends incomplete",
+				"session", s.id.Session, "fromRow", from, "bufferBytes", budget,
+				"overflowsTotal", s.rowBufferOverflows.Load())
+			s.wakeRows()
+			return
+		}
+		s.resendWindow = append(s.resendWindow, retainedRowSpan{from: em.from, rows: em.rows, bytes: retainedBytes})
 	}
 	if em.end && s.rowState == rowsAwaitingBoundary {
 		// The next command starts after this end, with the stream healthy.
 		s.rowState = rowsRecording
 	}
 	s.rowQueue = append(s.rowQueue, em)
-	s.rowQueuedBytes += em.bytes
+	s.rowQueuedBytes += fifoEmissionBytes(em)
 	s.rowMu.Unlock()
 	s.wakeRows()
 }
@@ -304,6 +366,15 @@ func (s *hostSession) abandonRowsDrain() {
 		if !ok {
 			break
 		}
+		owner := rowOwnerFIFO
+		if em.incomplete {
+			owner = rowOwnerOverflowMarker
+		}
+		bytes := fifoEmissionBytes(em)
+		if em.incomplete {
+			bytes = em.bytes
+		}
+		s.rowPool.release(owner, bytes)
 		if em.incomplete {
 			s.log.Warn("session row pump: a queued incomplete marker was never delivered at shutdown; its loss was already counted",
 				"session", s.id.Session, "fromRow", em.from)
@@ -409,6 +480,21 @@ func (s *hostSession) countRowLossOnce(em rowEmission) {
 	}
 }
 
+// releaseRowEmission ends the FIFO/in-flight owner's charge after delivery.
+func (s *hostSession) releaseRowEmission(em rowEmission) {
+	s.rowMu.Lock()
+	owner := rowOwnerFIFO
+	if em.incomplete {
+		owner = rowOwnerOverflowMarker
+	}
+	bytes := fifoEmissionBytes(em)
+	if em.incomplete {
+		bytes = em.bytes
+	}
+	s.rowPool.release(owner, bytes)
+	s.rowMu.Unlock()
+}
+
 // dequeueRowEmission pops the FIFO's head, or answers false with nothing
 // queued. Popping the incomplete marker is where the stream is healthy
 // again: everything queued before it has gone, so from here the bridge waits
@@ -429,7 +515,9 @@ func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 	em := s.rowQueue[0]
 	s.rowQueue[0] = rowEmission{}
 	s.rowQueue = s.rowQueue[1:]
-	s.rowQueuedBytes -= em.bytes
+	s.rowQueuedBytes -= fifoEmissionBytes(em)
+	// The charge follows the emission while it is in flight; releasing here
+	// would open capacity while deliverRowEmission still holds its rows.
 	if em.incomplete {
 		s.rowState = rowsAwaitingBoundary
 	}
@@ -440,8 +528,8 @@ func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 // subscriber bound at that moment — rows are the session's stream, and each
 // reader holds its own attachment — and ends when the session does. With no
 // subscriber bound there is nothing to deliver and nothing to mourn: the
-// rows were handed over once by the runtime, ghostty's scrollback is the
-// buffer, and the mark the eventual resend reads starts at zero.
+// rows were handed over once by the runtime; the retained helper window
+// is the buffer the eventual resend reads from the confirmed watermark.
 //
 // The owed marker is a gate, not a courtesy retry: while one is owed nothing
 // else is dequeued, however many attempts it takes, because the marker is the
@@ -493,7 +581,7 @@ func (s *hostSession) serveRows() {
 			// began before stop() armed the drain and failed after it gives
 			// the marker no attempt at shutdown at all, so it parks on the
 			// wake requestRowsDrain sends, and the drain's attempt follows
-			// (nocx-2v80t.9).
+			// (nocx-2v80t.3.49).
 			drainAttempt := s.drainRequested()
 			delivered, gaveUp := false, false
 			if !s.drainAbandoned() {
@@ -504,12 +592,14 @@ func (s *hostSession) serveRows() {
 			}
 			switch {
 			case delivered:
+				s.releaseRowEmission(*s.owedMarker)
 				s.owedMarker = nil
 			case s.drainAbandoned() || drainAttempt:
 				if !gaveUp {
 					s.log.Warn("session row pump: the owed incomplete marker could not be delivered at shutdown; the loss was already counted",
 						"session", s.id.Session)
 				}
+				s.releaseRowEmission(*s.owedMarker)
 				s.owedMarker = nil
 			default:
 				select {
@@ -518,6 +608,21 @@ func (s *hostSession) serveRows() {
 				case <-s.rowsDone:
 					return
 				}
+			}
+		}
+		// The coordinator's return owes a retained-window resend before
+		// anything still queued delivers: the resent rows are older than
+		// everything the bridge currently holds. During a shutdown
+		// drain the resend is pointless — the reader is going
+		// away, and the next one attaches a pump of its own.
+		s.rowMu.Lock()
+		resendDue := s.resendDue
+		s.rowMu.Unlock()
+		if resendDue && !s.drainRequested() {
+			if s.resendFromScrollback() {
+				s.rowMu.Lock()
+				s.resendDue = false
+				s.rowMu.Unlock()
 			}
 		}
 		em, ok := s.dequeueRowEmission()
@@ -549,10 +654,276 @@ func (s *hostSession) serveRows() {
 			// unless the sweep already stated this very send's loss by
 			// name. A send that fails promptly outside a drain stays
 			// unstated, as before: the pump keeps retrying it the
-			// ordinary way, on the next wake.
+			// ordinary way, on the next wake. An end is kept by name
+			// either way: the boundary is the boundary, and the
+			// coordinator's return owes its marker however the drop
+			// happened.
 			s.countRowLossOnce(em)
+			s.rowMu.Lock()
+			s.resendDue = true
+			s.rowMu.Unlock()
+			s.keepDroppedEnd(em)
+		} else if !delivered {
+			// Nobody took it: the scrollback is the buffer, and the
+			// coordinator's return owes a read-back (nocx-zg3k3.5.3). An
+			// end is kept by name — the boundary's own identity — so the
+			// return can be handed the marker again.
+			s.rowMu.Lock()
+			s.resendDue = true
+			s.rowMu.Unlock()
+			s.keepDroppedEnd(em)
+		}
+		// An undelivered incomplete marker remains charged while owedMarker
+		// owns it; other emissions release only after their send resolves.
+		if delivered || !em.incomplete {
+			s.releaseRowEmission(em)
 		}
 	}
+}
+
+// droppedEnd is one interval end the pump dropped for want of a subscriber:
+// the boundary's own identity, kept so the coordinator's return can be
+// handed the marker again (nocx-zg3k3.5.3). The pump alone holds these.
+type droppedEnd struct {
+	nonce   sessionruntime.FenceNonce
+	endRow  uint64
+	noFence bool
+}
+
+// maxResendEnds bounds the dropped ends one resend carries. One per command
+// that ended while nobody watched; more means commands ran for a coordinator
+// that was away for the whole span the scrollback could answer for anyway.
+const maxResendEnds = 64
+
+// resendFromScrollback delivers the unconfirmed span from the helper's bounded
+// retained window, in original absolute-index order, interleaving dropped end
+// markers. It never reads the mutable emulator history: absent retained rows
+// are helper-pool loss and are stated incomplete at their first missing index.
+func (s *hostSession) resendFromScrollback() bool {
+	// Count first: runtime callbacks append their retained spans while holding
+	// the runtime lock, so every departure at or below d is present in the
+	// following window snapshot. Departures after d are filtered below.
+	d := s.runtime.DepartedRowCount()
+	s.rowMu.Lock()
+	ends := append([]droppedEnd(nil), s.resendEnds...)
+	spans := append([]retainedRowSpan(nil), s.resendWindow...)
+	// Emissions still queued have not reached any reader yet. If a new
+	// attachment caused this replay, stop just before the first such row;
+	// the queue will carry that suffix after the retained prefix and neither
+	// duplicate it nor let it overtake the replay.
+	queuedFrom := d
+	for _, em := range s.rowQueue {
+		if !em.end && !em.clear && !em.outputStart && em.from < queuedFrom {
+			queuedFrom = em.from
+			break
+		}
+	}
+	s.rowMu.Unlock()
+	if queuedFrom < d {
+		d = queuedFrom
+	}
+	// Read the watermark last. An ack racing the snapshot may leave harmless
+	// extra copied rows, but can never make the snapshot claim a reclaimed
+	// prefix is missing.
+	s.mu.Lock()
+	mark := s.rowsConfirmed
+	subs := s.subscribersLocked()
+	s.mu.Unlock()
+	if len(subs) == 0 {
+		return false
+	}
+	// The output mark is position, not authority, but a replacement reader
+	// needs it before the retained-window rows so the coordinator can join
+	// those rows to an authenticated Start without a lifecycle-envelope field.
+	s.rowMu.Lock()
+	outputStartRow, outputStartKnown := s.outputStartRow, s.outputStartKnown
+	outputStartSequence := s.outputStartSequence
+	s.rowMu.Unlock()
+	if outputStartKnown {
+		for _, sub := range subs {
+			// The replay mark stands in for every queued mark at or below this
+			// snapshot. Advancing the subscriber's sequence here prevents a
+			// delayed live emission from duplicating it after retained rows.
+			if sub.outputStartSequence < outputStartSequence {
+				sub.outputStartSequence = outputStartSequence
+			}
+			if sink, ok := sub.sink.(interface {
+				SendOutputStartRow(proto.OutputStartRowFrame) error
+			}); ok {
+				if err := sink.SendOutputStartRow(proto.OutputStartRowFrame{Session: s.raw, Subscriber: sub.raw, FromRow: outputStartRow}); err != nil {
+					s.log.Warn("session output-start replay mark not delivered", "session", s.id.Session, "subscriber", sub.id, "fromRow", outputStartRow, "err", err)
+				}
+			}
+		}
+	}
+	if mark > d {
+		mark = d
+	}
+	// Flatten only the bounded retained window. These cells were copied by
+	// the runtime when they departed; they are never re-read or relabelled
+	// from the mutable, reflowable live history.
+	indexed := make(map[uint64]emulator.Row)
+	for _, span := range spans {
+		for i, row := range span.rows {
+			index := span.from + uint64(i) //nolint:gosec // slice index cannot be negative
+			if index >= mark && index < d {
+				indexed[index] = row
+			}
+		}
+	}
+	if mark >= d && len(ends) == 0 {
+		return true
+	}
+	s.log.Debug("session row resend: retained window", "session", s.id.Session, "mark", mark, "departed", d, "ends", len(ends), "rows", len(indexed))
+	// Stream order is rows below a boundary, then the boundary itself. A
+	// row absent from the bounded window is helper-pool exhaustion, not live
+	// scrollback pruning: state ADR-0075's incomplete marker at that exact
+	// position, then continue with any later retained original rows.
+	endIndex := 0
+	for at := mark; at < d; {
+		if endIndex < len(ends) && ends[endIndex].endRow <= at {
+			e := ends[endIndex]
+			if !s.deliverRowEmission(rowEmission{end: true, nonce: e.nonce, from: e.endRow, noFence: e.noFence}) {
+				return false
+			}
+			endIndex++
+			continue
+		}
+		if row, ok := indexed[at]; ok {
+			rows := []emulator.Row{row}
+			next := at + 1
+			for next < d {
+				if endIndex < len(ends) && ends[endIndex].endRow == next {
+					break
+				}
+				r, exists := indexed[next]
+				if !exists {
+					break
+				}
+				rows = append(rows, r)
+				next++
+			}
+			if !s.sendResentRows(subs, at, 0, "", rows) {
+				return false
+			}
+			at = next
+			continue
+		}
+		// One marker per contiguous hole. Its position is the first row the
+		// helper could not retain; subsequent rows resume only where retained.
+		from := at
+		for at < d {
+			if endIndex < len(ends) && ends[endIndex].endRow <= at {
+				break
+			}
+			if _, ok := indexed[at]; ok {
+				break
+			}
+			at++
+		}
+		if !s.sendIncompleteResend(subs, from) {
+			return false
+		}
+	}
+	for endIndex < len(ends) {
+		e := ends[endIndex]
+		if !s.deliverRowEmission(rowEmission{end: true, nonce: e.nonce, from: e.endRow, noFence: e.noFence}) {
+			return false
+		}
+		endIndex++
+	}
+	s.rowMu.Lock()
+	s.resendEnds = nil
+	s.rowMu.Unlock()
+	return true
+}
+
+func (s *hostSession) sendIncompleteResend(subs []*subscriber, from uint64) bool {
+	payload, err := json.Marshal(proto.OutputRowsDoc{FromRow: from, Incomplete: true})
+	if err != nil {
+		return false
+	}
+	delivered := len(subs) > 0
+	for _, sub := range subs {
+		if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{Session: s.raw, Subscriber: sub.raw, FromRow: from, Payload: payload}); err != nil {
+			delivered = false
+		}
+	}
+	return delivered
+}
+
+// keepDroppedEnd records one undelivered interval end by name, the record
+// the coordinator's return is handed again (nocx-zg3k3.5.3). Every drop
+// path goes through this: the boundary is the boundary whatever took the
+// frame.
+func (s *hostSession) keepDroppedEnd(em rowEmission) {
+	if !em.end {
+		return
+	}
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	if s.rowPool.limit == 0 {
+		limit := s.rowBufferBytes
+		if limit <= 0 {
+			limit = DefaultRowBufferBytes
+		}
+		s.rowPool.configure(limit)
+	}
+	charge := int64(unsafe.Sizeof(droppedEnd{}))
+	for {
+		if len(s.resendEnds) < maxResendEnds && s.rowPool.charge(rowOwnerDroppedEnds, charge) {
+			break
+		}
+		if len(s.resendEnds) == 0 {
+			return
+		}
+		s.resendEnds[0] = droppedEnd{}
+		s.resendEnds = s.resendEnds[1:]
+		s.rowPool.release(rowOwnerDroppedEnds, charge)
+	}
+	s.resendEnds = append(s.resendEnds, droppedEnd{
+		nonce: em.nonce, endRow: em.from, noFence: em.noFence,
+	})
+}
+
+// sendResentRows writes one resend as the ordinary rows frames, split at the
+// same bound a live batch is, to every subscriber bound at this moment.
+func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, cause string, rows []emulator.Row) bool {
+	delivered := true
+	for start := 0; start <= len(rows); start += rowsPerFrame {
+		stop := start + rowsPerFrame
+		if stop > len(rows) {
+			stop = len(rows)
+		}
+		encoded, err := sessionruntime.EncodeRows(rows[start:stop])
+		if err != nil {
+			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
+			return false
+		}
+		payload, err := json.Marshal(proto.OutputRowsDoc{FromRow: from, LostRows: lost, LostCause: cause, Rows: encoded})
+		if err != nil {
+			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
+			return false
+		}
+		taken := 0
+		for _, sub := range subs {
+			if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{
+				Session: s.raw, Subscriber: sub.raw, FromRow: from, Payload: payload,
+			}); err != nil {
+				s.log.Warn("session row resend: not delivered", "session", s.id.Session,
+					"subscriber", sub.id, "fromRow", from, "err", err)
+				continue
+			}
+			taken++
+		}
+		delivered = delivered && taken > 0
+		from += uint64(stop - start) //nolint:gosec // slice arithmetic, never negative
+		if stop == len(rows) {
+			return delivered
+		}
+		lost = 0
+	}
+	return delivered
 }
 
 // deliverRowEmission marshals once and sends per subscriber, and answers
@@ -561,6 +932,27 @@ func (s *hostSession) serveRows() {
 // dying, and releaseConnection does the teardown — one dead reader must not
 // take the others' frames with it.
 func (s *hostSession) deliverRowEmission(em rowEmission) bool {
+	if em.outputStart {
+		s.mu.Lock()
+		subs := s.subscribersLocked()
+		s.mu.Unlock()
+		for _, sub := range subs {
+			if sub.outputStartSequence >= em.markSequence {
+				continue
+			}
+			sink, ok := sub.sink.(interface {
+				SendOutputStartRow(proto.OutputStartRowFrame) error
+			})
+			if !ok {
+				s.log.Warn("session output-start mark not delivered: sink lacks row-mark support", "session", s.id.Session, "subscriber", sub.id, "fromRow", em.from)
+				continue
+			}
+			if err := sink.SendOutputStartRow(proto.OutputStartRowFrame{Session: s.raw, Subscriber: sub.raw, FromRow: em.from}); err != nil {
+				s.log.Warn("session output-start mark not delivered", "session", s.id.Session, "subscriber", sub.id, "fromRow", em.from, "err", err)
+			}
+		}
+		return len(subs) > 0
+	}
 	if em.clear {
 		payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
 		if err != nil {
@@ -581,6 +973,19 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 		return len(subs) > 0
 	}
 	if em.end {
+		// WHICH KIND OF BOUNDARY THIS IS, SAID OUT LOUD (nocx-n5ent). A
+		// settled-without-fence end marker is the one shape that reaches the
+		// coordinator's block stream with NO closing screen — the census's
+		// `truncated=gap` with `endRow == cursor` — and until this line the
+		// runner's log carried the seal and nothing about what asked for it:
+		// the interval's own fence sighting, or one of the settles the
+		// authenticated channel drives (a completion for another nonce, an
+		// environment entry, the rendezvous bound) or the session's end.
+		if em.noFence {
+			s.log.Debug("interval end settled without its fence: no closing screen",
+				"session", s.id.Session, "nonce", hex.EncodeToString(em.nonce[:]),
+				"endRow", em.from, "closingRows", len(em.closing))
+		}
 		closing, err := encodedRowsOrNothing(em.closing)
 		if err != nil {
 			s.log.Warn("session closing screen not encodable", "session", s.id.Session, "err", err)
@@ -614,6 +1019,27 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 	// LostRows is the runtime's own loss (a struck feed immediately before
 	// em.from); the incomplete marker carries no rows and says so.
 	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: em.lost, Incomplete: em.incomplete}
+	// ONE subscribers snapshot for the whole emission, not one per split
+	// frame. A re-bind landing between two frames of the same batch used to
+	// redirect the batch's TAIL to the newcomer, who then also received the
+	// returned walk's re-delivery of those very rows from below — the same
+	// index line delivered twice, out of order, the tail-after-walk seam's
+	// loaded residual (nocx-zg3k3.5.11): the walk owns the newcomer's past,
+	// the emission belongs to whoever was bound when it started.
+	s.mu.Lock()
+	s.rowMu.Lock()
+	resendDue := s.resendDue
+	s.rowMu.Unlock()
+	if resendDue && !em.incomplete {
+		// A reader attached after the pump's resend check but before this
+		// snapshot must not receive a newer queued row before its retained
+		// prefix. Returning undelivered leaves the queue's retained copy in
+		// place; the next pump turn performs the replay first.
+		s.mu.Unlock()
+		return false
+	}
+	subs := s.subscribersLocked()
+	s.mu.Unlock()
 	delivered := true
 	for start := 0; start <= len(em.rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
@@ -631,9 +1057,6 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 			s.log.Warn("session rows not encodable", "session", s.id.Session, "err", err)
 			return false
 		}
-		s.mu.Lock()
-		subs := s.subscribersLocked()
-		s.mu.Unlock()
 		taken := 0
 		for _, sub := range subs {
 			if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{
@@ -649,7 +1072,7 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 		if stop == len(em.rows) {
 			return delivered
 		}
-		doc.FromRow += uint64(stop - start) // #nosec G115 -- slice arithmetic, never negative
+		doc.FromRow += uint64(stop - start) //nolint:gosec // slice arithmetic, never negative
 		// The gap LostRows states sits immediately before em.from — the
 		// batch's own first row — and belongs to the FIRST split frame
 		// alone; a later frame of the SAME batch starts exactly where the
@@ -698,9 +1121,62 @@ func (s *hostSession) confirmRows(sink Sink, id proto.SubscriberID, upToRow uint
 		s.mu.Unlock()
 		return ErrConfirmAhead
 	}
-	if upToRow > s.rowsConfirmed {
-		s.rowsConfirmed = upToRow
+	s.mu.Unlock()
+	// A high watermark is not proof when the helper has a hole at the head.
+	// Reclaim only the contiguous retained prefix beginning at the last
+	// proven watermark; an ack beyond a hole leaves both bytes and mark intact.
+	proven := s.reclaimRetainedPrefix(upToRow)
+	s.mu.Lock()
+	if proven > s.rowsConfirmed {
+		s.rowsConfirmed = proven
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *hostSession) reclaimRetainedPrefix(upTo uint64) uint64 {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	if upTo <= s.resendReclaimed {
+		return s.resendReclaimed
+	}
+	start, cursor := s.resendReclaimed, s.resendReclaimed
+	// First find how much prefix the retained records actually prove. Do
+	// Do not mutate accounting until the proof boundary is known.
+	for _, span := range s.resendWindow {
+		end := span.from + uint64(len(span.rows)) //nolint:gosec // slice index cannot be negative
+		if span.from > cursor || end <= cursor {
+			break
+		}
+		if upTo < end {
+			cursor = upTo
+			break
+		}
+		cursor = end
+		if cursor >= upTo {
+			break
+		}
+	}
+	if cursor == start {
+		return start
+	}
+	target := cursor
+	for len(s.resendWindow) > 0 && start < target {
+		span := &s.resendWindow[0]
+		end := span.from + uint64(len(span.rows)) //nolint:gosec // slice index cannot be negative
+		if target < end {
+			cut := int(target - span.from) //nolint:gosec // bounded by span length
+			remaining := span.rows[cut:]
+			newBytes := emissionBytes(rowEmission{rows: remaining})
+			s.rowPool.release(rowOwnerResend, span.bytes-newBytes)
+			span.from, span.rows, span.bytes = target, remaining, newBytes
+			break
+		}
+		s.rowPool.release(rowOwnerResend, span.bytes)
+		start = end
+		s.resendWindow[0] = retainedRowSpan{}
+		s.resendWindow = s.resendWindow[1:]
+	}
+	s.resendReclaimed = target
+	return target
 }

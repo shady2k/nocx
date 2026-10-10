@@ -45,10 +45,11 @@ extern void nocxGoWritePty(uintptr_t handle, uint8_t *data, size_t len);
    per kind rather than a kind argument, because the kind is a port value and
    the port's numbering must not be mirrored in C. */
 extern void nocxGoBell(uintptr_t handle);
+extern void nocxGoHistoryErased(uintptr_t handle, uint32_t first_row, uint32_t count);
 extern void nocxGoTitle(uintptr_t handle, uint8_t *data, size_t len);
 extern void nocxGoPwd(uintptr_t handle, uint8_t *data, size_t len);
 extern void nocxGoClipboard(uintptr_t handle, uint8_t *data, size_t len);
-extern void nocxGoNotification(uintptr_t handle, uint8_t *data, size_t len);
+extern void nocxGoNotification(uintptr_t handle, uint8_t *title, size_t title_len, uint8_t *body, size_t body_len);
 
 /*
  * A style with its union materialised: cgo represents GhosttyStyleColorValue

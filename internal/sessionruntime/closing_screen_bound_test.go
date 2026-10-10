@@ -15,8 +15,7 @@ import (
 //
 // Every test drives the real emulator directly through Session.Ingest and
 // reads back what the row stream's own end marker carries (end.closing) —
-// the block's actual stored rows — never Session.ObservationFor's raw
-// screen, which is untrimmed by design (observation.go).
+// the block's actual stored rows.
 
 // fenceFor is the fence bytes ingested to seal the nonce obsNonce(k) names —
 // obsNonce fills every byte with k, and the fence's own wire spelling is

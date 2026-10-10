@@ -137,6 +137,33 @@ type openHandlers struct {
 	opener *sessionOpener
 	sess   openMachine
 	log    log.Logger
+	// intents is the pane's intent route, read here only for the access epoch
+	// the ack carries (nocx-zg3k3.3.1). Nil on a server built without
+	// WithPaneIntentSource, which then names no epoch at all.
+	intents paneIntentSource
+}
+
+// accessEpochOf answers the epoch a controller must present with a pane's
+// intents, or 0 when nothing can say. It is one function for both acks that
+// carry the field (open and attach) because it is one question with one
+// meaning for its absence, and a second copy is where the two would drift.
+//
+// ZERO IS THE HONEST ANSWER AND NOT A DEFAULT. The epoch belongs to the helper
+// that holds the pane; a coordinator that could not read it has nothing to
+// state, and the alternative — naming a number this process believes — is a
+// second opinion about a fact it cannot see. A renderer handed no epoch
+// presents none, is refused with the epoch in force and writes nothing
+// (contracts/session.intent.params.schema.json), so the absence costs one
+// round trip rather than a wrong write.
+func accessEpochOf(ctx context.Context, source paneIntentSource, sid session.ID) uint64 {
+	if source == nil {
+		return 0
+	}
+	epoch, err := source.AccessEpoch(ctx, string(sid))
+	if err != nil {
+		return 0
+	}
+	return epoch
 }
 
 // paneWorkspaces answers "which workspace is this pane in" — the one
@@ -195,6 +222,20 @@ type openResult struct {
 	// moment — before the first fact — that the two used to be one value
 	// (null).
 	AwaitsIntegration bool `json:"awaitsIntegration"`
+	// AccessEpoch is the epoch this pane's controller presents with its
+	// intents (nocx-zg3k3.3.1), read from the helper that holds the pane
+	// before this ack is built. A renderer cannot type without it — the
+	// session refuses an intent presented under any other epoch, and refuses
+	// one presented under none — so it travels in the ack that creates the
+	// session rather than in a notification that would arrive after the
+	// person's first key.
+	//
+	// Absent (0) only when nothing could answer: the pane has no helper, or
+	// none that reports an epoch. That is a state the wire admits rather than
+	// a number to invent — the renderer then presents none, is refused with
+	// the epoch in force and writes nothing, and the refusal names what to
+	// present next.
+	AccessEpoch uint64 `json:"accessEpoch,omitempty"`
 }
 
 // sizeResult is a session's geometry on the wire, in the same four words
@@ -475,6 +516,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		EffectiveSize:     sizeResultOf(sess.EffectiveSize()),
 		Parent:            parentResultFor(sess),
 		AwaitsIntegration: awaitsIntegration,
+		AccessEpoch:       accessEpochOf(ctx, h.intents, sess.ID()),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -577,6 +619,13 @@ type sessionOpsHandlers struct {
 	instance session.InstanceID
 	conn     *wsConn
 	machine  sessionMachine
+	// intents is the pane's intent route, read on attach only for the access
+	// epoch the ack carries (nocx-zg3k3.3.1). A reclaim is a renderer taking
+	// a session it did not open — a reconnect, or a pane adopted after a
+	// backend restart — and it must be able to type for exactly the same
+	// reason an opener must. Nil on a server built without
+	// WithPaneIntentSource, which then names no epoch.
+	intents paneIntentSource
 }
 
 // handleResize enqueues a resize into the session's operation lane.
@@ -912,6 +961,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			Reset:             needsReset,
 			From:              from,
 			AwaitsIntegration: h.machine.sessionAwaitsIntegration(sid),
+			AccessEpoch:       accessEpochOf(ctx, h.intents, sid),
 		}))
 
 		// Files (fm-w8): deliver the dirty paths the session's bindings
@@ -1080,12 +1130,16 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{opener: s.opener, sess: s, log: s.log}
+			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
+		}),
+		reg(ordered, "session.intent", params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
@@ -1096,9 +1150,15 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
 		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		}),
+		// Recovery metadata shares the session operation queue with attach and
+		// the live-session list; it is read as part of reclaiming one claim.
+		whenAvailable(regResponder(sessionSub, "session.recoveryStatus", params(validateSessionRecoveryStatusRaw), func(r Responder) handlerFunc {
+			h := sessionRecoveryStatusHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r}
+			return h.handle
+		}), func() bool { return s.sessionRecorder != nil }, "session recovery status is unavailable"),
 		// sessions.live is the session plane's read, and it rides the same
 		// per-operation queue as attach: the two are one act for a fresh
 		// client — ask what is alive, take one — and a list answered under a

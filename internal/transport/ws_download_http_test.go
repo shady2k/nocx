@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -805,11 +806,27 @@ func TestNativeDownloadStreamsBeforeFinalCompletion(t *testing.T) {
 	}
 }
 
-func TestNativeDownloadCompletionTimeoutIsTruthful(t *testing.T) {
-	expired := make(chan time.Time, 1)
-	expired <- time.Now()
+func TestNativeDownloadCompletionTimeoutUsesAcceptedACK(t *testing.T) {
+	armed := make(chan struct{})
+	expire := make(chan time.Time)
+	clockEntered := make(chan struct{})
+	releaseClock := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseClockGate := func() { releaseOnce.Do(func() { close(releaseClock) }) }
+	defer releaseClockGate()
+	blockClock := atomic.Bool{}
 	e := newDownloadTestEnv(t, func(s *WSServer) {
-		s.transfers.after = func(time.Duration) <-chan time.Time { return expired }
+		s.transfers.after = func(time.Duration) <-chan time.Time {
+			close(armed)
+			return expire
+		}
+		s.transfers.now = func() time.Time {
+			if blockClock.Load() {
+				close(clockEntered)
+				<-releaseClock
+			}
+			return time.Now()
+		}
 	})
 	sid := e.openSession(t, 1)
 	dir := t.TempDir()
@@ -827,12 +844,78 @@ func TestNativeDownloadCompletionTimeoutIsTruthful(t *testing.T) {
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
-		t.Fatalf("final state %q, want failed without completion", state)
+	<-armed
+
+	// The unbuffered clock fires only after the timeout select arm has been
+	// chosen. Hold the worker before its terminal mutex decision so the real
+	// completion RPC can establish ACK precedence.
+	blockClock.Store(true)
+	expire <- time.Now()
+	<-clockEntered
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "saved",
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
 	}
-	_, _, _, finalErr := e.ws.transferFor(started.TransferID).snapshot()
-	if finalErr == nil || finalErr.Error() != "native download completion not confirmed" {
-		t.Fatalf("timeout reason %v", finalErr)
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error != nil {
+		releaseClockGate()
+		t.Fatalf("saved ACK reply %s (decode %v)", raw, err)
+	}
+	releaseClockGate()
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateSent {
+		t.Fatalf("final state %q, want sent after accepted saved ACK", state)
+	}
+	lateCancel := jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 5)
+	if err := json.Unmarshal(lateCancel, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("late cancel reply %s (decode %v)", lateCancel, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateSent {
+		t.Fatalf("late cancel changed committed state to %q", state)
+	}
+}
+
+func TestNativeDownloadTimeoutSettlementRefusesLateACK(t *testing.T) {
+	armed := make(chan struct{})
+	expire := make(chan time.Time)
+	e := newDownloadTestEnv(t, func(s *WSServer) {
+		s.transfers.after = func(time.Duration) <-chan time.Time {
+			close(armed)
+			return expire
+		}
+	})
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "native.bin", "body")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	resp, err := uploadHTTPClient.Get(downloadURLFor(e.ws, started.Ticket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, readErr := io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	<-armed
+	expire <- time.Now()
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
+		t.Fatalf("timeout settlement state %q, want failed", state)
+	}
+
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "saved",
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error == nil {
+		t.Fatalf("late saved ACK reply %s (decode %v), want refusal", raw, err)
 	}
 }
 
@@ -859,6 +942,83 @@ func TestNativeDownloadNegativeCompletionBeforeClaimReleasesTicket(t *testing.T)
 	}
 	if code, _ := getDownload(t, e.ws, started.Ticket); code != http.StatusGone {
 		t.Fatalf("ticket after pre-claim cancellation = %d, want 410", code)
+	}
+}
+
+func TestNativeDownloadCancelBeforeGETSettlesWithoutCompletionTimer(t *testing.T) {
+	timerStarted := make(chan struct{}, 1)
+	e := newDownloadTestEnv(t, func(s *WSServer) {
+		s.transfers.after = func(time.Duration) <-chan time.Time {
+			timerStarted <- struct{}{}
+			return make(chan time.Time)
+		}
+	})
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "native.bin", "body")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadCancel", map[string]any{
+		"transferId": started.TransferID,
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("pre-GET cancellation reply %s (decode %v)", raw, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("state %q, want cancelled", state)
+	}
+	lateACK := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "cancelled",
+	}, 5)
+	if err := json.Unmarshal(lateACK, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("matching post-cancel ACK reply %s (decode %v)", lateACK, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateCancelled {
+		t.Fatalf("post-cancel ACK changed terminal state to %q", state)
+	}
+	rawDone := readNotification(t, e.conn, "files.downloadDone", wantWithin)
+	var done filesDownloadDoneParams
+	if err := json.Unmarshal(rawDone, &done); err != nil || done.Outcome != downloadStateCancelled {
+		t.Fatalf("terminal notification %s (decode %v), want cancelled", rawDone, err)
+	}
+	if extra := drainNotifications(t, e.conn, "files.downloadDone", 50*time.Millisecond); len(extra) != 0 {
+		t.Fatalf("post-cancel ACK emitted %d additional terminal notifications", len(extra))
+	}
+	select {
+	case <-timerStarted:
+		t.Fatal("pre-GET cancellation armed the native completion timer")
+	default:
+	}
+	if code, _ := getDownload(t, e.ws, started.Ticket); code != http.StatusGone {
+		t.Fatalf("ticket after pre-GET cancellation = %d, want 410", code)
+	}
+}
+
+func TestNativeDownloadSourceFailureBeforeGETSettlesFailure(t *testing.T) {
+	e := newDownloadTestEnv(t)
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	path := fixture(t, dir, "native.bin", "body")
+	bid := e.openBinding(t, sid, dir, 2)
+	params := downloadParams(bid, path)
+	params["destination"] = "native"
+	started := callDownload(t, e.conn, params, 3).mustResult(t)
+	raw := jsonrpcCallWithID(t, e.conn, "files.downloadComplete", map[string]any{
+		"transferId": started.TransferID, "outcome": "source-failed",
+	}, 4)
+	var reply struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil || reply.Error != nil {
+		t.Fatalf("source-failed ACK reply %s (decode %v)", raw, err)
+	}
+	if state := awaitTransferState(t, e.ws, started.TransferID); state != downloadStateFailed {
+		t.Fatalf("state %q, want failed", state)
 	}
 }
 

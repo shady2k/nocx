@@ -53,6 +53,10 @@ func (s *failFirstAppendStore) RecordClearBoundary(ctx context.Context, in conte
 	return s.blocking.RecordClearBoundary(ctx, in)
 }
 
+func (s *failFirstAppendStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
+	return s.blocking.OpenBlockRowsForSession(ctx, sessionID)
+}
+
 func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	db := newLedgerStore(t)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
@@ -75,9 +79,9 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	const command = "printf auto-flush"
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
 		lifecycleSubmitParams(string(h.Domain), command), 43))
-	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), got.ID)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, session.ID(sid), got.ID)
 
-	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("x")}); confirm {
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("x")}, ""); confirm {
 		t.Fatalf("pre-bind row was acknowledged through %d; it must wait in bs.pending", written)
 	}
 
@@ -103,7 +107,7 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("x")})
+		e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("x")}, "")
 	}()
 	select {
 	case <-store.blocking.entered:
@@ -119,11 +123,12 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	}
 
 	// A further full-budget arrival overflows: the block in flight ends
-	// incomplete and the row is confirmed and dropped — never admitted
-	// behind the counted batch.
-	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("x")})
-	if written != 3 || !confirm {
-		t.Fatalf("overflow arrival answered (%d, %v), want (3, true): dropped with the mark moved past it, not admitted", written, confirm)
+	// incomplete and the row is dropped, unconfirmed — the mark means
+	// stored (nocx-zg3k3.5.3), and the resend offers the row again once
+	// the coordinator returns and the buffer has drained.
+	written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("x")}, "")
+	if written != 0 || confirm {
+		t.Fatalf("overflow arrival answered (%d, %v), want (0, false): dropped, and the mark never claims it", written, confirm)
 	}
 	e.ws.blockStream.mu.Lock()
 	overflowAt, overflowed := e.ws.blockStream.unrecorded[session.ID(sid)]

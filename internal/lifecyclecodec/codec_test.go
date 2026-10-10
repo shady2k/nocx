@@ -169,6 +169,39 @@ func TestTwoFramesAndCleanEOF(t *testing.T) {
 	}
 }
 
+// writeCounter records every Write it is handed, as a descriptor shared with
+// another writer would see them.
+type writeCounter struct{ writes [][]byte }
+
+func (w *writeCounter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+// TestAFrameReachesItsWriterInOneWrite proves Encode hands its writer the
+// header and the body together. A lifecycle descriptor is shared — a nested
+// child holds a dup of its parent's, and the stillborn tests inject a frame
+// onto the socket the shell is still writing to — so a frame split across two
+// writes lets the other writer's frame land between its length and its body,
+// and the reader loses framing for good (nocx-zg3k3.5.12).
+func TestAFrameReachesItsWriterInOneWrite(t *testing.T) {
+	var w writeCounter
+	n, err := Encode(&w, env(lifecycle.KindHello, helloEvt("bash"), 1))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(w.writes) != 1 {
+		t.Fatalf("one frame took %d writes; want 1", len(w.writes))
+	}
+	if len(w.writes[0]) != n {
+		t.Fatalf("the one write holds %d bytes; Encode reported %d", len(w.writes[0]), n)
+	}
+	dec := NewDecoder(bytes.NewReader(w.writes[0]), Config{}, nil)
+	if f, err := dec.ReadFrame(); err != nil || f.Event.Kind != lifecycle.KindHello {
+		t.Fatalf("the one write is not a whole frame: kind=%s err=%v", f.Event.Kind, err)
+	}
+}
+
 // TestOversizePrefixRejectedWithoutAllocating proves a length prefix above
 // max_frame is refused before any body buffer exists: the prefix here claims
 // 4 GiB, which an allocating decoder would try to allocate (and this test
@@ -763,3 +796,33 @@ func TestNoOutboundFrameCarriesBearerMaterial(t *testing.T) {
 type captureKernelPort struct{}
 
 func (*captureKernelPort) Send(lifecycle.Envelope) error { return nil }
+
+// TestConsumedNamesTheStreamPositionEachFrameEndsAt proves the decoder says
+// where in its stream the frame it just returned ended (ADR-0077): the
+// coordinator's lifecycle cursor is that position, translated to the helper's
+// stream, so it must count every byte the decoder has taken — the frame's own
+// and any garbage skipped before it — and none it has only buffered. The
+// decoder reads the whole buffer in its first top-up, so a count of what was
+// READ rather than what was CONSUMED names the stream's end after frame one.
+func TestConsumedNamesTheStreamPositionEachFrameEndsAt(t *testing.T) {
+	var buf bytes.Buffer
+	first, _ := Encode(&buf, env(lifecycle.KindHello, helloEvt("bash"), 1))
+	garbage := "not a frame"
+	buf.WriteString(garbage)
+	second, _ := Encode(&buf, env(lifecycle.KindPromptReady, promptReadyEvt(), 2))
+	third, _ := Encode(&buf, env(lifecycle.KindPromptReady, promptReadyEvt(), 3))
+
+	dec := NewDecoder(&buf, Config{}, nil)
+	if dec.Consumed() != 0 {
+		t.Fatalf("Consumed before any frame = %d, want 0", dec.Consumed())
+	}
+	wants := []int{first, first + len(garbage) + second, first + len(garbage) + second + third}
+	for i, want := range wants {
+		if _, err := dec.ReadFrame(); err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		if got := dec.Consumed(); got != uint64(want) { //nolint:gosec // a test byte count
+			t.Fatalf("after frame %d Consumed = %d, want %d — the position the frame ends at", i, got, want)
+		}
+	}
+}

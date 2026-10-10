@@ -237,11 +237,11 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 	digest := frameDigest(in)
 	var out CaptureFrameResult
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		// Replay: the same (capture id, client, content) returns the
 		// original backend-minted id and creates nothing new — otherwise a
@@ -253,7 +253,7 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 		switch {
 		case err == nil:
 			out = CaptureFrameResult{FrameID: existing, Replayed: true}
-			return tx.Commit()
+			return txEnd.commit()
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
@@ -332,7 +332,7 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 				return err
 			}
 		}
-		if err := tx.Commit(); err != nil {
+		if err := txEnd.commit(); err != nil {
 			return err
 		}
 		out = CaptureFrameResult{FrameID: frameID}
@@ -444,11 +444,11 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 	digest := askDigest(in)
 	var out AgentAskResult
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		// Replay: the same (ask id, client, content) returns the ORIGINAL
 		// run id — the bead's "a retry duplicates both" is the defect this
@@ -482,7 +482,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			out = AgentAskResult{
 				RunID: runID, EntryID: in.ID, IngestSeq: haveSeq, Replayed: true,
 			}
-			return tx.Commit()
+			return txEnd.commit()
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
@@ -569,7 +569,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		// application/vt, because a turn has no terminal body and never
 		// will, and that stored fact is what a restored block picks its
 		// grammar from (prose wraps, a grid must not).
-		if err := tx.Commit(); err != nil {
+		if err := txEnd.commit(); err != nil {
 			return err
 		}
 		out = AgentAskResult{RunID: runID, EntryID: in.ID, IngestSeq: seq}
@@ -593,7 +593,7 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 	}
 	return s.run(ctx, func(ctx context.Context) error {
 		var current sql.NullString
-		err := s.db.QueryRowContext(ctx,
+		err := s.conn(ctx).QueryRowContext(ctx,
 			`SELECT state FROM executions WHERE id = ?`, runID).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNoSuchRun
@@ -617,7 +617,7 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 		if !legal {
 			return fmt.Errorf("content: transition run: illegal move %s → %s", cur, to)
 		}
-		if _, err := s.db.ExecContext(ctx,
+		if _, err := s.conn(ctx).ExecContext(ctx,
 			`UPDATE executions SET state = ? WHERE id = ?`, string(to), runID); err != nil {
 			return err
 		}
@@ -635,11 +635,11 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		return fmt.Errorf("content: finish agent run: %s is not terminal", in.State)
 	}
 	return s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var entryID, payload string
 		var runStartedAt sql.NullInt64
@@ -707,7 +707,7 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		if err := sealTurnBody(ctx, tx, entryID); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 }
 
@@ -790,11 +790,11 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 	}
 	var out ProseBlock
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		// The parent is RESOLVED, not left to the foreign key: the FK would
 		// refuse a dangling parent_id anyway, but a driver's constraint text
@@ -873,7 +873,7 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 			artifactID, entryID); err != nil {
 			return err
 		}
-		if err = tx.Commit(); err != nil {
+		if err = txEnd.commit(); err != nil {
 			return err
 		}
 		out = ProseBlock{EntryID: entryID, ArtifactID: artifactID}
@@ -895,7 +895,7 @@ func (s *sqliteContent) SealProse(ctx context.Context, entryID string) error {
 		return errors.New("content: seal prose: entry id is required")
 	}
 	return s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx,
+		_, err := s.conn(ctx).ExecContext(ctx,
 			`UPDATE artifacts SET state = 'sealed' WHERE entry_id = ?`, entryID)
 		return err
 	})
@@ -982,7 +982,7 @@ func validateRegion(provenance []byte, r FrameRegion) error {
 // agent run.
 func (s *sqliteContent) RunState(ctx context.Context, executionID int64) (*RunState, error) {
 	var raw sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT state FROM executions WHERE id = ?`, executionID).Scan(&raw)
+	err := s.conn(ctx).QueryRowContext(ctx, `SELECT state FROM executions WHERE id = ?`, executionID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoSuchRun
 	}

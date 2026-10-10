@@ -15,6 +15,7 @@ package transport
 //     and forgotten: the store row stood open with no owner.
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -34,21 +35,16 @@ func TestALateOpenAcrossDetachAndReattachInstallsIntoNeitherAttachment(t *testin
 	release, done := heldReopen(t, e, sid, attempt, store)
 
 	// The session detaches, then re-attaches under the same id, while the
-	// retried open is still in the store. The first attempt's own kernel
-	// state is settled independently of its (discarded) block, so the
-	// lifecycle itself allows a second command afterward.
+	// retried open is still in the store. The detach changes no block
+	// (ADR-0076) — it owes no block.closed — and the completed attempt's
+	// discarded block installs into neither attachment.
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, lifecycleFence(0x99))))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
-	e.ws.DetachBlockRows(sid)
-	// Detach owes attempt's own fence a block.closed too — its own end never
-	// arrived (recorded but never resolved by a close), independently of the
-	// late open this test is about.
-	unended := awaitBlockClosed(t, e)
-	if unended.EntryID != attempt || unended.Kept {
-		t.Fatalf("detach's own block.closed = %+v, want %q not kept", unended, attempt)
-	}
+	e.ws.HelperSessionEnded(sid)
 	e.ws.AttachBlockRows(sid)
 
+	// The open's store call now succeeds — and installs into neither
+	// attachment: the completed attempt's block was discarded.
 	close(release)
 	<-done
 
@@ -60,20 +56,26 @@ func TestALateOpenAcrossDetachAndReattachInstallsIntoNeitherAttachment(t *testin
 	if hasBlock || current != nil {
 		t.Fatalf("the late open installed into the re-attached session: hasBlock=%v current=%+v", hasBlock, current)
 	}
-	if n := store.sealCount(); n != 1 {
-		t.Fatalf("the row the late open created was sealed %d times, want exactly 1 (the discard's own seal)", n)
-	}
 	assertBlockSealed(t, db, attempt)
 
-	// Paired: the new attachment is not itself broken by the stale open's
-	// discard — a fresh command opens and closes normally under it.
+	// ADR-0076: the detach said nothing, so the completed attempt's block
+	// is settled by the establishment reconcile (the shell's post-command
+	// prompt answers the snapshot) — its close arrives here, not kept (the
+	// completed attempt's block was discarded).
+	got := awaitBlockClosed(t, e)
+	if got.EntryID != attempt || got.Kept {
+		t.Fatalf("establishment's block.closed = %+v, want %q not kept", got, attempt)
+	}
+
+	// Paired: the re-attached session is not broken by the discarded open —
+	// a fresh command opens and closes normally under it.
 	second := startsACommand(t, e, pub, lane, h, 5, "printf second")
 	fence := lifecycleFence(0x21)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 6, lifecycleCompleteEvt(lifecycle.AttemptID(second), 0, fence)))
 	e.ws.BlockIntervalEnded(sid, fence, 0, nil, false)
-	got := awaitBlockClosed(t, e)
-	if got.EntryID != second || !got.Kept {
-		t.Fatalf("block.closed = %+v, want %q kept — the new attachment stays authoritative", got, second)
+	closed := awaitBlockClosed(t, e)
+	if closed.EntryID != second || !closed.Kept {
+		t.Fatalf("block.closed = %+v, want %q kept — the new attachment stays authoritative", closed, second)
 	}
 	assertBlockSealed(t, db, second)
 }
@@ -96,7 +98,7 @@ func TestADuplicateQueuedAttemptDoesNotStrandTheQueue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -106,8 +108,8 @@ func TestADuplicateQueuedAttemptDoesNotStrandTheQueue(t *testing.T) {
 
 	// A duplicate request for A itself while it is still opening, then B
 	// queued behind that duplicate.
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 
 	close(release)
 	<-done
@@ -140,7 +142,7 @@ func TestManyDuplicateRequestsCoalesceInTheQueue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -149,7 +151,7 @@ func TestManyDuplicateRequestsCoalesceInTheQueue(t *testing.T) {
 	}
 
 	for range 50 {
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 	}
 
 	bs := e.ws.blockStream
@@ -209,7 +211,7 @@ func TestADiscardedOpensFailedCleanupSealIsRetriedThenSucceeds(t *testing.T) {
 
 	// The next close, or detach, is the retry (nocx-2v80t.3.51). Detach is
 	// forced and unambiguous either way.
-	e.ws.DetachBlockRows(sid)
+	e.ws.HelperSessionEnded(sid)
 	if n := store.closeAttempts(); n != 2 {
 		t.Fatalf("close attempts after detach = %d, want 2 (the failure, then the retry)", n)
 	}
@@ -243,7 +245,7 @@ func TestADiscardedOpensFailedCleanupSealBecomesAStatedLossAtDetach(t *testing.T
 	close(release)
 	<-done
 
-	e.ws.DetachBlockRows(sid)
+	e.ws.HelperSessionEnded(sid)
 
 	if n := store.sealCount(); n != 0 {
 		t.Fatalf("seals landed = %d, want 0 — every attempt kept failing", n)

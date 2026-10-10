@@ -2,7 +2,7 @@
 //
 // The plain-input adapter keeps SecretPicker passive over a native field:
 // the field owns its value and caret, while the picker only offers rows.
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { createSecretPickerField, type SecretPickerFieldController } from './secret-picker-field'
 import type { SecretPickerSource, SecretEntry } from './secret-picker'
 
@@ -13,11 +13,11 @@ const flush = async (): Promise<void> => {
 interface Harness {
   controller: SecretPickerFieldController
   source: {
-    status: ReturnType<typeof vi.fn>
-    list: ReturnType<typeof vi.fn>
-    requestUnseal: ReturnType<typeof vi.fn>
-    requestSetup: ReturnType<typeof vi.fn>
-    requestCreate: ReturnType<typeof vi.fn>
+    status: Mock<SecretPickerSource['status']>
+    list: Mock<SecretPickerSource['list']>
+    requestUnseal: Mock<SecretPickerSource['requestUnseal']>
+    requestSetup: Mock<SecretPickerSource['requestSetup']>
+    requestCreate: Mock<SecretPickerSource['requestCreate']>
   }
   value: { current: string }
   onChange: ReturnType<typeof vi.fn>
@@ -32,11 +32,11 @@ function setup(
   state: 'uninitialized' | 'sealed' | 'unsealed' = 'unsealed',
 ): Harness {
   const source = {
-    status: vi.fn(() => Promise.resolve({ state })),
-    list: vi.fn(() => Promise.resolve(entries)),
-    requestUnseal: vi.fn(() => Promise.resolve()),
-    requestSetup: vi.fn(() => Promise.resolve(false)),
-    requestCreate: vi.fn(),
+    status: vi.fn<SecretPickerSource['status']>(() => Promise.resolve({ state })),
+    list: vi.fn<SecretPickerSource['list']>(() => Promise.resolve(entries)),
+    requestUnseal: vi.fn<SecretPickerSource['requestUnseal']>(() => Promise.resolve()),
+    requestSetup: vi.fn<SecretPickerSource['requestSetup']>(() => Promise.resolve(false)),
+    requestCreate: vi.fn<SecretPickerSource['requestCreate']>(),
   } satisfies SecretPickerSource
   const value = { current: '' }
   const onChange = vi.fn((next: string, caret: number) => {

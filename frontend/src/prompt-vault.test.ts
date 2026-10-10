@@ -7,9 +7,9 @@
 // create, and the recall resolution door (Enter on a masked row opens the
 // picker TARGETED at the first unresolved chip). The editor and vault are
 // fakes; the seams they cross are real.
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest'
 import { PromptVaultController, type PromptVaultEditor } from './prompt-vault'
-import type { VaultClient } from './vault-client'
+import type { VaultClient, VaultStatus, SecretsDetect } from './vault-client'
 import type { UnresolvedSpan } from './unresolved-redactions'
 
 /** A fake editor with a real document model: applyReplacement behaves like
@@ -68,18 +68,24 @@ class FakeEditor implements PromptVaultEditor {
   }
 }
 
-const UNSEALED = { state: 'unsealed', defaultProvider: 'file' } as const
+const UNSEALED: VaultStatus = {
+  state: 'unsealed',
+  defaultProvider: 'file',
+  hasPassphrase: true,
+  autoSealMinutes: 0,
+  providers: [{ id: 'file', writable: true, ready: true }],
+}
 
 /** The VaultClient seams the controller touches, stubbed directly (the
  *  controller calls the client's METHODS, never the raw dispatcher). */
 interface VaultStub {
-  status: ReturnType<typeof vi.fn>
-  inventory: ReturnType<typeof vi.fn>
-  detect: ReturnType<typeof vi.fn>
-  createSecret: ReturnType<typeof vi.fn>
-  captureSave: ReturnType<typeof vi.fn>
-  captureDismiss: ReturnType<typeof vi.fn>
-  setup: ReturnType<typeof vi.fn>
+  status: Mock<VaultClient['status']>
+  inventory: Mock<VaultClient['inventory']>
+  detect: Mock<VaultClient['detect']>
+  createSecret: Mock<VaultClient['createSecret']>
+  captureSave: Mock<VaultClient['captureSave']>
+  captureDismiss: Mock<VaultClient['captureDismiss']>
+  setup: Mock<VaultClient['setup']>
 }
 
 interface Harness {
@@ -95,13 +101,24 @@ function setup(
 ): Harness {
   const editor = new FakeEditor()
   const vault: VaultStub = {
-    status: vi.fn(() => Promise.resolve({ ...UNSEALED })),
-    inventory: vi.fn(() => Promise.resolve({ entries })),
-    detect: vi.fn(),
-    createSecret: vi.fn(),
-    captureSave: vi.fn(),
-    captureDismiss: vi.fn(),
-    setup: vi.fn(() => Promise.resolve({})),
+    status: vi.fn<VaultClient['status']>(() => Promise.resolve({ ...UNSEALED })),
+    inventory: vi.fn<VaultClient['inventory']>(() =>
+      Promise.resolve({
+        entries: entries.map((entry) => ({
+          ...entry,
+          kind: 'api-token',
+          provider: 'file',
+          ownerId: '',
+          usedBy: 0,
+          reachable: true,
+        })),
+      }),
+    ),
+    detect: vi.fn<VaultClient['detect']>(),
+    createSecret: vi.fn<VaultClient['createSecret']>(),
+    captureSave: vi.fn<VaultClient['captureSave']>(),
+    captureDismiss: vi.fn<VaultClient['captureDismiss']>(),
+    setup: vi.fn<VaultClient['setup']>(() => Promise.resolve({ recoveryCode: 'test-recovery' })),
   }
   const reports: Harness['reports'] = []
   const controller = new PromptVaultController({
@@ -133,7 +150,7 @@ async function typeAndSettle(h: Harness, text: string): Promise<void> {
 const OPENAI_KEY = 'sk-proj-abcdef1234567890abcdef'
 
 /** A fake detection answer: one openai finding spanning the key. */
-function openaiDetect(revision: number, doc: string, key = OPENAI_KEY) {
+function openaiDetect(revision: number, doc: string, key = OPENAI_KEY): SecretsDetect {
   const start = doc.indexOf(key)
   const end = start + key.length
   return {

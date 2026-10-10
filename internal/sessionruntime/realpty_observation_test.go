@@ -4,35 +4,21 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/shady2k/nocx/internal/emulator"
 )
 
-// The observation record, on a REAL PTY (nocx-zg3k3.5.2; ADR-0072). A card in
-// the transcript is one command — the interval between its authenticated start
-// and its authenticated completion — and the record is what the runtime holds
-// of what was observed during that interval, INCLUDING rows no longer in the
-// live rectangle. The screen at completion is not the command's output: a
-// command whose rows scrolled away mid-run reads back from the record's
-// departed rows, not from the live grid.
+// The interval machinery, on a REAL PTY (nocx-zg3k3.5.2, its sealed record
+// retired by nocx-zg3k3.5.4). A card in the transcript is one command — the
+// interval between its authenticated start and its authenticated completion
+// — and what the runtime holds of it is the row stream: the departed rows as
+// they left, and the end marker that closes the interval. The screen at
+// completion is not the command's output: a command whose rows scrolled away
+// mid-run reads back from the stream's departed rows, not from the live grid.
 //
 // Nothing here is mocked below the contract, and no client is attached for the
 // duration of any of it: the terminal is internal/pty's real one, the emulator
 // is libghostty-vt behind its port, and the authenticated completion arrives
 // through [Session.AuthenticatedEvents] the way the helper delivers it.
 // Nothing waits on a duration; every wait ends on an observable state.
-
-// obsRowText reads one row's text the way a reader of the record would: the
-// graphemes that carry text, in order, trailing blanks dropped.
-func obsRowText(r emulator.Row) string {
-	var sb strings.Builder
-	for _, c := range r.Cells {
-		if c.Grapheme != "" {
-			sb.WriteString(c.Grapheme)
-		}
-	}
-	return strings.TrimRight(sb.String(), " ")
-}
 
 // obsLines returns a printf FORMAT fragment printing n numbered lines,
 // L%06d-shaped, starting at from. The escapes stay literal two-character
@@ -105,7 +91,7 @@ func streamedInterval(rs *recordingRowStream) (in []string, end rowEvent, after 
 // Criterion two: a command nobody watched reads back with its output. This is
 // the fence-first order: the sighting parks (an observable state), the
 // authenticated completion arrives through the port, and the join seals the
-// record.
+// interval.
 // ---------------------------------------------------------------------------
 
 // obsWatchedProgram prints a hundred numbered lines — far more than a screen —
@@ -147,20 +133,6 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 		t.Fatalf("the live screen still holds the command's first line; the test premise is broken:\n%s", screen)
 	}
 
-	rec, ok := p.s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("no observation record for the authenticated boundary: a command nobody watched left nothing to read")
-	}
-	if rec.Open() {
-		t.Fatalf("the record for a completed boundary is still open (sealed revision %d)", rec.Sealed)
-	}
-	if rec.Completeness != CompletenessComplete {
-		t.Fatalf("an ordinary watched command reads back %v, want complete", rec.Completeness)
-	}
-	if rec.Sealed <= rec.Opened {
-		t.Fatalf("the record's revisions run opened=%d sealed=%d: the boundary did not move the clock the frames carry", rec.Opened, rec.Sealed)
-	}
-
 	// The boundary is where the fence sits in the byte stream. A hundred
 	// lines on twenty-four rows: the first twenty-four fill the screen and
 	// every line after scrolls one off — seventy-seven departures,
@@ -193,27 +165,32 @@ func TestACommandNobodyWatchedReadsBackWithItsOutput(t *testing.T) {
 	}
 
 	// And the closing screen is the screen AT the fence — the flood's tail,
-	// ending at L000099, with the post-fence line nowhere in it.
-	if len(rec.Closing.Lines) != 24 {
-		t.Fatalf("the closing screen is %d rows, want the 24 the interval ran at", len(rec.Closing.Lines))
+	// ending at L000099, with the post-fence line nowhere in it. The end
+	// marker carries it on the stream: the rows at and above the cursor, its
+	// own trailing blank cursor row trimmed (closingRowsForStream).
+	if len(end.closing) != 23 {
+		t.Fatalf("the end marker carries %d closing rows, want the screen's 24 minus its blank cursor row", len(end.closing))
+	}
+	if end.noFence {
+		t.Fatal("a boundary whose fence joined reads as if its fence never arrived")
 	}
 	lastText := ""
-	for _, r := range rec.Closing.Lines {
-		txt := obsRowText(r)
+	for _, r := range end.closing {
+		txt := streamRowText(r)
 		if txt != "" {
 			lastText = txt
 		}
 		if strings.Contains(txt, "OBS-DONE") {
-			t.Fatalf("the closing screen holds post-fence output %q: the record closed after the boundary", txt)
+			t.Fatalf("the end marker's closing rows hold post-fence output %q: the boundary closed after itself", txt)
 		}
 	}
 	if lastText != "L000099" {
-		t.Fatalf("the closing screen ends at %q, want L000099 — the flood's last line at the fence", lastText)
+		t.Fatalf("the closing rows end at %q, want L000099 — the flood's last line at the fence", lastText)
 	}
 }
 
-// A command that produces no output at all still ran an interval; its record
-// reads back empty rather than not existing.
+// A command that produces no output at all still ran an interval; its end
+// marker closes it rather than never arriving.
 var obsSilentProgram = rawPreamble + `
 ` + obsFence + `
 printf 'OBS-DONE'
@@ -227,19 +204,15 @@ func TestACommandWithNoOutputStillLeavesARecord(t *testing.T) {
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
 	obsWaitSeal(t, p, nonce)
 
-	rec, ok := p.s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("an interval ran and sealed no record: the record is per interval, not per departure")
-	}
 	in, end, after, streamed := streamedInterval(rs)
 	if !streamed {
-		t.Fatal("a silent command's interval streamed no end marker")
+		t.Fatal("a silent command's interval streamed no end marker: an interval is per boundary, not per departure")
 	}
 	if len(in) != 0 || end.endRow != 0 || len(after) != 0 {
 		t.Fatalf("a silent command streamed %d rows and stopped at %d with %d after, want none anywhere", len(in), end.endRow, len(after))
 	}
-	if rec.Completeness != CompletenessComplete {
-		t.Fatalf("a silent command reads back %v, want complete: no output is not lost output", rec.Completeness)
+	if end.noFence {
+		t.Fatalf("a silent command whose fence joined reads as if its fence never arrived: no output is not lost output")
 	}
 }
 
@@ -251,9 +224,9 @@ func TestACommandWithNoOutputStillLeavesARecord(t *testing.T) {
 // anywhere in the stream — the ordering holds by construction, not by timing.
 // ---------------------------------------------------------------------------
 
-// Nothing follows the fence in this program: the record it produces is the
+// Nothing follows the fence in this program: the interval it produces is the
 // same whichever way the chunking lands, so the paired order is judged on
-// the record's content and never on where a read split the bytes.
+// the stream's content and never on where a read split the bytes.
 var obsCompletionFirstProgram = rawPreamble + `
 printf '` + obsLines(0, 100) + `'
 readhex 1 >/dev/null
@@ -276,10 +249,6 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 	p.typed("x")
 	obsWaitSeal(t, p, nonce)
 
-	rec, ok := p.s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("completion-first order sealed no record")
-	}
 	// The fence ends the stream in this program: seventy-seven departures,
 	// the flood to the fence and nothing else, whichever way the pump
 	// chunked it.
@@ -293,8 +262,8 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 	if end.endRow != 77 {
 		t.Fatalf("completion-first order's end marker stops at %d, want 77", end.endRow)
 	}
-	if rec.Completeness != CompletenessComplete {
-		t.Fatalf("completion-first order reads back %v, want complete", rec.Completeness)
+	if end.noFence {
+		t.Fatalf("completion-first order's end marker reads as if its fence never arrived, want a joined boundary")
 	}
 }
 
@@ -306,7 +275,7 @@ func TestACompletionBeforeItsFenceSealsTheSameRecord(t *testing.T) {
 // obsRunningProgram prints sixty lines, parks on a byte the test will send
 // only after the so-far read, then prints thirty more and the fence. The
 // sentinel AFTER the fence waits for a further byte, so it can never ride
-// the fence's own chunk into the capture: what the record seals is decided
+// the fence's own chunk into the stream: what the boundary seals is decided
 // by the stream's order, never by where a read split it.
 var obsRunningProgram = rawPreamble + `
 printf '` + obsLines(0, 60) + `'
@@ -317,7 +286,7 @@ readhex 1 >/dev/null
 printf 'OBS-DONE\n'
 `
 
-func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
+func TestACommandStillRunningStreamsWhatItHasPrintedSoFar(t *testing.T) {
 	rs := &recordingRowStream{}
 	p := startProgramRows(t, obsRunningProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
@@ -327,16 +296,6 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	// that observable), and the first rows are already gone.
 	p.wait("L000058")
 
-	rec, ok := p.s.OpenObservation()
-	if !ok {
-		t.Fatal("a running command has no observation record to read")
-	}
-	if !rec.Open() {
-		t.Fatalf("a running command's record is sealed at revision %d", rec.Sealed)
-	}
-	if rec.Nonce != (FenceNonce{}) {
-		t.Fatal("an open record names a nonce: no authenticated boundary exists yet")
-	}
 	// Sixty lines on twenty-four rows: sixty minus twenty-four plus the last
 	// line's own newline — thirty-seven departed so far, first line first.
 	soFar := streamedTexts(rs)
@@ -346,7 +305,7 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 
 	// The command finishes: the fence parks the sighting (observable), the
 	// sentinel line is then printed and INGESTED — an observable — and the
-	// authenticated half arrives last. The record closes at the fence: the
+	// authenticated half arrives last. The interval closes at the fence: the
 	// ninety flood lines whole, and none of the post-fence sentinel.
 	p.typed("x")
 	waitForRendezvous(t, p.s, p.changed, p.done, nonce, RendezvousAwaitingAuthenticated)
@@ -355,10 +314,6 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	p.s.AuthenticatedEvents().Completed(p.s.Incarnation(), nonce, 0)
 	obsWaitSeal(t, p, nonce)
 
-	sealed, ok := p.s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("the finished command sealed no record")
-	}
 	// Thirty more lines ran after the read, to the fence: ninety lines on
 	// twenty-four rows — sixty-seven departures, L000000..L000066 — and the
 	// post-fence sentinel's departure is the NEXT record's first.
@@ -372,11 +327,8 @@ func TestACommandStillRunningReadsBackWhatItHasPrintedSoFar(t *testing.T) {
 	if end.endRow != 67 {
 		t.Fatalf("the end marker stops at row %d, want 67", end.endRow)
 	}
-	if sealed.Opened != rec.Opened {
-		t.Fatalf("the record changed identity across the boundary: opened %d became %d", rec.Opened, sealed.Opened)
-	}
-	if sealed.Completeness != CompletenessComplete {
-		t.Fatalf("the finished command reads back %v, want complete", sealed.Completeness)
+	if end.noFence {
+		t.Fatalf("the finished command's end marker reads as if its fence never arrived, want a joined boundary")
 	}
 }
 
@@ -396,13 +348,14 @@ printf 'OBS-DONE\n'
 `
 
 // TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord: the
-// completion arrived and the fence's sighting never will. The settle seals the
-// interval's record — at the row count the completion measured and with NO
-// closing screen, because the screen is read at a SIGHTING and there was none
-// — and it says so: the meeting reads expired and the record reads no-fence,
-// which is the block's "output may be incomplete". The retired bounded wait
-// sealed nothing here and left the interval in flight running on, which is the
-// defect REVIEW-4 names: an expiry on a duration is itself the defect.
+// completion arrived and the fence's sighting never will. The settle seals
+// the interval — at the row count the completion measured and with NO
+// closing screen, because the screen is read at a SIGHTING and there was
+// none — and the end marker says so: the meeting reads expired and the
+// marker carries settledWithoutFence, which is the block's "output may be
+// incomplete". The retired bounded wait sealed nothing here and left the
+// interval in flight running on, which is the defect REVIEW-4 names: an
+// expiry on a duration is itself the defect.
 func TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord(t *testing.T) {
 	rs := &recordingRowStream{}
 	p := startProgramRows(t, obsNoFenceProgram, harnessGeometry(80, 24), rs)
@@ -421,11 +374,8 @@ func TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord(t *testing.
 
 	// A completion is not a boundary: the screen is taken at the sighting, so
 	// nothing is sealed while the sighting is still missing.
-	if recs := p.s.Observations(); len(recs) != 0 {
-		t.Fatalf("a completion with no sighting sealed %d records, want none", len(recs))
-	}
-	if _, ok := p.s.ObservationFor(nonce); ok {
-		t.Fatal("a record is keyed before the sighting that would seal it")
+	if _, ok := settledEnds(rs)[nonce]; ok {
+		t.Fatal("a completion with no sighting emitted an end marker before its sighting")
 	}
 
 	// The settle: a call here, the next interval's start or the session's end
@@ -438,26 +388,18 @@ func TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord(t *testing.
 		t.Fatalf("the settled meeting reads %s, want expired", rendezvousStateName(got))
 	}
 
-	rec, ok := p.s.ObservationFor(nonce)
-	if !ok {
-		t.Fatal("the settled interval sealed no record")
-	}
-	if len(rec.Closing.Lines) != 0 {
-		t.Fatalf("the settled record carries %d closing rows, want none: its boundary was never sighted", len(rec.Closing.Lines))
-	}
-	if rec.Completeness != CompletenessNoFence {
-		t.Fatalf("the settled record reads back %v, want no-fence", rec.Completeness)
-	}
-
-	// The stream says the same thing: forty lines on twenty-four rows leave
-	// seventeen, all of them this command's own, and the end marker carries no
-	// closing screen.
+	// The stream says what the settle did: forty lines on twenty-four rows
+	// leave seventeen, all of them this command's own, the end marker carries
+	// no closing screen, and it says its fence never arrived.
 	in, end, _, streamed := streamedInterval(rs)
 	if !streamed {
 		t.Fatal("the settled interval streamed no end marker")
 	}
 	if len(end.closing) != 0 {
-		t.Fatalf("the settled end marker carries %d closing rows, want none", len(end.closing))
+		t.Fatalf("the settled end marker carries %d closing rows, want none: its boundary was never sighted", len(end.closing))
+	}
+	if !end.noFence {
+		t.Fatal("the settled end marker does not say its fence never arrived")
 	}
 	if len(in) != 17 || in[0] != "L000000" || in[16] != "L000016" {
 		t.Fatalf("the interval streamed %d rows %q..%q, want the 17 L000000..L000016", len(in), in[0], in[len(in)-1])
@@ -470,7 +412,8 @@ func TestAnAuthenticatedBoundaryWhoseFenceNeverArrivesSealsItsRecord(t *testing.
 // A fence sighted with nothing authenticated behind it authorised nothing
 // (ADR-0024 decision 1); its expiry seals nothing either.
 func TestAnExpiredSightingSealsNothing(t *testing.T) {
-	p := startProgram(t, obsWatchedProgram, harnessGeometry(80, 24))
+	rs := &recordingRowStream{}
+	p := startProgramRows(t, obsWatchedProgram, harnessGeometry(80, 24), rs)
 	nonce := fenceNonceFromString(t, fenceNonceHex)
 
 	// The fence is in the stream; no completion ever comes. The sighting
@@ -479,7 +422,7 @@ func TestAnExpiredSightingSealsNothing(t *testing.T) {
 	if err := p.s.ExpireRendezvous(nonce); err != nil {
 		t.Fatalf("expire the parked sighting: %v", err)
 	}
-	if recs := p.s.Observations(); len(recs) != 0 {
-		t.Fatalf("an expired sighting sealed %d records, want none — a fence authorises nothing", len(recs))
+	if ends := settledEnds(rs); len(ends) != 0 {
+		t.Fatalf("an expired sighting emitted %d end markers, want none — a fence authorises nothing", len(ends))
 	}
 }

@@ -15,8 +15,7 @@ import (
 //
 // The test drives the real emulator directly, the way every other schedule
 // in this package does, and reads back what the row stream's own end marker
-// carries — the closing screen actually appended to the block — never
-// Session.ObservationFor's raw, untrimmed screen.
+// carries — the closing screen actually appended to the block.
 
 func TestSealEnvironmentEntrySealsTheOpenIntervalAtItsOwnScreen(t *testing.T) {
 	s, rs := streamSession(t, harnessGeometry(80, 24))

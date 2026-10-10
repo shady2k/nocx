@@ -195,6 +195,11 @@ type PendingSession struct {
 	// blocks that render as neither running nor finished until this is
 	// answered.
 	OpenEntries int
+	// LifecycleApplied is the cursor the previous coordinator stored with
+	// the binding (ADR-0077): the lifecycle stream offset one past the last
+	// frame whose effect it stored, where a re-adopt resumes the stream.
+	// Nil means the binding carries no record of what was applied.
+	LifecycleApplied *uint64
 	// RecordedBytes is how much of its output is being kept while nobody can
 	// say whether the session still exists. It is the cost of waiting, and
 	// naming it is what makes the age bound below arguable rather than

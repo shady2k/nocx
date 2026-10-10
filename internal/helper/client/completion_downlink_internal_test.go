@@ -102,7 +102,7 @@ func newTestDownlinkCtx(ctx context.Context, spy *spySend) *CompletionDownlink {
 // acceptance seam.
 func accept(t *testing.T, d *CompletionDownlink, fence [32]byte, exit *int) {
 	t.Helper()
-	if err := d.Accept(func() error { return nil }, &lifecycle.Complete{Fence: lifecycle.FenceNonce(fence), ExitCode: exit}); err != nil {
+	if err := d.Accept(context.Background(), func() error { return nil }, &lifecycle.Complete{Fence: lifecycle.FenceNonce(fence), ExitCode: exit}); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 }
@@ -368,7 +368,7 @@ func TestTheSessionEndingWhileRetryingSettlesTheBoundaryAsLost(t *testing.T) {
 func TestTheAcceptanceLockCoversTheKernelsAcceptance(t *testing.T) {
 	spy := newSpy()
 	dl, _ := newTestDownlink(t, spy)
-	err := dl.Accept(func() error {
+	err := dl.Accept(context.Background(), func() error {
 		if dl.accept.TryLock() {
 			dl.accept.Unlock()
 			t.Error("the kernel accepted with the acceptance lock free: a second source's completion could be queued ahead of this one")
@@ -387,7 +387,7 @@ func TestARefusedIngestQueuesNothing(t *testing.T) {
 	spy := newSpy()
 	dl, _ := newTestDownlink(t, spy)
 	refusal := errors.New("kernel: wrong capability")
-	if err := dl.Accept(func() error { return refusal }, &lifecycle.Complete{Fence: lifecycle.FenceNonce{1}}); !errors.Is(err, refusal) {
+	if err := dl.Accept(context.Background(), func() error { return refusal }, &lifecycle.Complete{Fence: lifecycle.FenceNonce{1}}); !errors.Is(err, refusal) {
 		t.Fatalf("Accept answered %v, want the kernel's own refusal", err)
 	}
 	dl.mu.Lock()
@@ -472,8 +472,8 @@ func TestARetriedEnvironmentEntryCarriesTheSameIdentityOnEveryAttempt(t *testing
 	d.retryWait = func(ctx context.Context, _ int) error { return ctx.Err() }
 	d.Bind(HostSessionID{Generation: "gen-under-test", Session: "0123456789abcdef0123456789abcdef"})
 
-	d.ObserveEnvironmentEntry("dom-child")
-	d.ObserveEnvironmentEntry("dom-grandchild")
+	d.ObserveEnvironmentEntry(context.Background(), "dom-child")
+	d.ObserveEnvironmentEntry(context.Background(), "dom-grandchild")
 	for i := range 2 {
 		select {
 		case <-landed:
@@ -499,7 +499,7 @@ type lostSink struct {
 	}
 }
 
-func (l *lostSink) report(session string, fence [32]byte) {
+func (l *lostSink) report(_ context.Context, session string, fence [32]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.events = append(l.events, struct {

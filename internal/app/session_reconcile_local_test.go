@@ -259,7 +259,7 @@ func (r *countingLocalRoute) LocalSessions(_ context.Context, generation string)
 // The carrier half is unreachable in these tests — a binding that never
 // reaches the local route is never attached to — and a call to it is a bug
 // rather than a degenerate case, so it fails loudly instead of answering.
-func (r *countingLocalRoute) Attach(context.Context, proto.AttachParams) (*client.AttachedSession, error) {
+func (r *countingLocalRoute) Attach(context.Context, proto.AttachParams, ...client.AttachOption) (*client.AttachedSession, error) {
 	panic("the local carrier was asked to attach for a binding that is not this machine's")
 }
 

@@ -1,8 +1,10 @@
 package lifecyclepub_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 )
 
@@ -56,7 +59,7 @@ type recorder struct {
 	facts []lifecyclepub.Fact
 }
 
-func (r *recorder) PublishLifecycle(f lifecyclepub.Fact) {
+func (r *recorder) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.facts = append(r.facts, f)
@@ -105,7 +108,7 @@ func fenceByte(n byte) lifecycle.FenceNonce {
 
 func mustIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycle.TransportID, e lifecycle.Envelope) {
 	t.Helper()
-	if err := pub.Ingest(tID, e); err != nil {
+	if err := pub.Ingest(context.Background(), tID, e); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 }
@@ -258,7 +261,7 @@ func TestPublisherRejectedFramePublishesNothing(t *testing.T) {
 
 	bad := env("L", h, 2, promptEvt())
 	bad.Capability[0] ^= 0xff // a wrong bearer: rejected before any state is consulted
-	if err := pub.Ingest("T", bad); err == nil {
+	if err := pub.Ingest(context.Background(), "T", bad); err == nil {
 		t.Fatal("wrong capability must be rejected")
 	}
 	if got := len(r.all()); got != 1 {
@@ -354,7 +357,7 @@ func TestPublisherPublishesRevokeWhileQuarantining(t *testing.T) {
 	}
 	clock.advance(2 * time.Second) // the recovery budget expires
 
-	if err := pub.Ingest("T", env("L", h, 2, promptEvt())); err == nil {
+	if err := pub.Ingest(context.Background(), "T", env("L", h, 2, promptEvt())); err == nil {
 		t.Fatal("a quarantined event must be rejected")
 	}
 	facts := r.all()
@@ -465,7 +468,7 @@ func (h *heldEmitter) arm() {
 	h.armed = true
 }
 
-func (h *heldEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+func (h *heldEmitter) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	h.mu.Lock()
 	hold := h.armed
 	h.armed = false
@@ -473,7 +476,7 @@ func (h *heldEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 	if hold {
 		<-h.release
 	}
-	h.recorder.PublishLifecycle(f)
+	h.recorder.PublishLifecycle(context.Background(), f)
 }
 
 // TestPublisherReplayCannotOvertakeTheFactItRaced pins the ordering of a
@@ -518,7 +521,7 @@ func TestPublisherReplayCannotOvertakeTheFactItRaced(t *testing.T) {
 
 		// The bridge ingests the hello, and goes as far as it can.
 		ingested := make(chan error, 1)
-		go func() { ingested <- pub.Ingest("T", env("L", h, 1, helloEvt())) }()
+		go func() { ingested <- pub.Ingest(context.Background(), "T", env("L", h, 1, helloEvt())) }()
 		synctest.Wait()
 
 		close(em.release)
@@ -549,7 +552,7 @@ func TestPublisherForwardsErrors(t *testing.T) {
 	pub.SetEmitter(r)
 
 	// Ingest on an unbound transport.
-	if err := pub.Ingest("nope", lifecycle.Envelope{}); err == nil {
+	if err := pub.Ingest(context.Background(), "nope", lifecycle.Envelope{}); err == nil {
 		t.Fatal("Ingest on an unbound transport must error")
 	}
 	// RequestDomain on an unbound transport.
@@ -670,7 +673,7 @@ func TestPublisherLeavesDomainPendingWhenTheAcceptCannotBeDelivered(t *testing.T
 	pub.SetEmitter(&recorder{})
 	_ = pub.BindTransport("T", failingSendPort{})
 	h, _ := pub.RequestDomain("L", nil, "T")
-	if err := pub.Ingest("T", env("L", h, 1, helloEvt())); err != nil {
+	if err := pub.Ingest(context.Background(), "T", env("L", h, 1, helloEvt())); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); !errors.Is(err, lifecycle.ErrDomainPending) {
@@ -755,4 +758,84 @@ func TestPublisherDeliversAcceptBeforePublishingPromptReady(t *testing.T) {
 	if len(facts) != 1 || facts[0].Lifecycle != lifecyclepub.LifecyclePromptReady {
 		t.Fatalf("facts = %+v, want exactly one prompt_ready published after the accept", facts)
 	}
+}
+
+// commitOrderedEmitter mirrors the renderer side of a framed publish: the
+// lifecycle fact is visible only after the storage frame commits. It shares an
+// event list with the transport port so the test can assert wire ordering.
+type commitOrderedEmitter struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (e *commitOrderedEmitter) add(event string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, event)
+}
+
+func (e *commitOrderedEmitter) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
+	lifecyclecommit.OnCommit(ctx, func() { e.add("fact:" + f.Lifecycle) })
+}
+
+func (e *commitOrderedEmitter) all() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.events...)
+}
+
+// TestPublisherReplayWaitsForAcceptFrameEffects reproduces the session.open
+// replay racing the bridge's first hello. A replay must not publish the new
+// prompt_ready fact before the frame's ACCEPT has reached the shell.
+func TestPublisherReplayWaitsForAcceptFrameEffects(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		k := lifecycle.New(lifecycle.Options{})
+		pub := lifecyclepub.New(k)
+		events := &commitOrderedEmitter{}
+		pub.SetEmitter(events)
+		port := &recordingPort{}
+		port.onSend = func(sent lifecycle.Envelope) {
+			if sent.Event.Kind == lifecycle.KindAccept {
+				events.add("accept")
+			}
+		}
+		if err := pub.BindTransport("T", port); err != nil {
+			t.Fatalf("BindTransport: %v", err)
+		}
+		h, err := pub.RequestDomain("L", nil, "T")
+		if err != nil {
+			t.Fatalf("RequestDomain: %v", err)
+		}
+		events.mu.Lock()
+		events.events = nil // ignore the native projection from RequestDomain
+		events.mu.Unlock()
+
+		ctx, frame := lifecyclecommit.Begin(context.Background())
+		if err := pub.Ingest(ctx, "T", env("L", h, 1, helloEvt())); err != nil {
+			t.Fatalf("Ingest hello: %v", err)
+		}
+
+		replayed := make(chan struct{})
+		go func() {
+			pub.ReplayLane("L")
+			close(replayed)
+		}()
+		synctest.Wait()
+		beforeCommit := events.all()
+		replayFinishedBeforeCommit := false
+		select {
+		case <-replayed:
+			replayFinishedBeforeCommit = true
+		default:
+		}
+
+		frame.End(true)
+		synctest.Wait()
+		if len(beforeCommit) != 0 || replayFinishedBeforeCommit {
+			t.Fatalf("replay published before ACCEPT and frame commit: events=%v finished=%t", beforeCommit, replayFinishedBeforeCommit)
+		}
+		if got, want := events.all(), []string{"accept", "fact:prompt_ready", "fact:prompt_ready"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("post-commit event order = %v, want %v", got, want)
+		}
+	})
 }

@@ -8,7 +8,7 @@
     "log.From(ctx) and re-running this script drops its entry; nothing else does.",
     "",
     "Keyed on file + the trimmed call line, not a line number, so an unrelated edit",
-    "above a baselined line does not make this file churn — the same tradeoff",
+    "above a baselined line does not make this file churn \u2014 the same tradeoff",
     "check-control-goroutines.mjs makes for its own baseline."
   ],
   "violations": [
@@ -420,7 +420,7 @@
     {
       "file": "internal/app/helper_git.go",
       "line": 1683,
-      "text": "outcome.Message = \"the helper installed on \" + host + \" answered with a different protocol version or content than nocx installed — reinstall it to recover (\" + err.Error() + \")\""
+      "text": "outcome.Message = \"the helper installed on \" + host + \" answered with a different protocol version or content than nocx installed \u2014 reinstall it to recover (\" + err.Error() + \")\""
     },
     {
       "file": "internal/app/helper_git.go",
@@ -1143,6 +1143,10 @@
       "text": "requestLog.Error(\"tool endpoint: \" + invalid.Error())"
     },
     {
+      "file": "internal/transport/history_page.go",
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})"
+    },
+    {
       "file": "internal/transport/session_open_helper_consent.go",
       "line": 104,
       "text": "resp := newJSONRPCError(req.ID, -32603, ask.Error())"
@@ -1180,7 +1184,7 @@
     {
       "file": "internal/transport/ws_agent.go",
       "line": 1033,
-      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error() + \" — reassign the answering role in Settings → Roles\"})"
+      "text": "_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error() + \" \u2014 reassign the answering role in Settings \u2192 Roles\"})"
     },
     {
       "file": "internal/transport/ws_agent.go",
@@ -2005,7 +2009,7 @@
     {
       "file": "internal/transport/ws_session_handlers.go",
       "line": 325,
-      "text": "msg = err.Error() // unclassifiable — use the raw wrapped error"
+      "text": "msg = err.Error() // unclassifiable \u2014 use the raw wrapped error"
     },
     {
       "file": "internal/transport/ws_session_record.go",

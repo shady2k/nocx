@@ -641,6 +641,7 @@ describe('SettingsContent', () => {
       // governs nocx's own assistant, this lists the foreign programs a
       // person admitted to nocx's tools (nocx-6jbad).
       'Agent access',
+      'Agents',
       'Agent screens',
       // The rule that reads an agent, before the pages about it: the emitting
       // view shows what a rule reads and calibration checks whether it is any

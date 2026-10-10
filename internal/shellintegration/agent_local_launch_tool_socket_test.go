@@ -95,6 +95,7 @@ func startLocalBashPane(t *testing.T, k *nestedKernel, agentToolSocketPath, binN
 func TestBashLocalPaneLaunchCarriesToolSocketAndStagesAgent(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "tool.sock")
 	k := newNestedKernel(t)
+	k.launchCommand = "claude"
 	s := startLocalBashPane(t, k, sock, "claude", inspectingAgentBody)
 
 	if _, err := s.ptmx.Write([]byte("claude --model test user-prompt\n")); err != nil {
@@ -145,6 +146,7 @@ func TestBashLocalPaneLaunchCarriesToolSocketAndStagesAgent(t *testing.T) {
 // pane that fails to start, and never one silently pointed at nothing.
 func TestBashLocalPaneLaunchWithNoToolSocketKeepsTheRefusalSoft(t *testing.T) {
 	k := newNestedKernel(t)
+	k.launchCommand = "claude"
 	s := startLocalBashPane(t, k, "", "claude", agentFallbackBody)
 
 	if _, err := s.ptmx.Write([]byte("claude --model test user-prompt\n")); err != nil {

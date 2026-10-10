@@ -704,7 +704,7 @@ func stripControl(s string) string {
 // publisher requires.
 type ackingEmitter struct{}
 
-func (ackingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (ackingEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // newRecordingKernel builds the observation seam the way production wires
 // it: publisher over the raw kernel, acking emitter bound, the publisher

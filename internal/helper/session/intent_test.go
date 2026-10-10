@@ -593,3 +593,272 @@ func TestASessionIntentRefusalShowsTheRegionOnceThenOmitsIt(t *testing.T) {
 		t.Fatalf("intent-status carried regionNow %q, want none", status.Result.Refusal.RegionNow)
 	}
 }
+
+// Interactive pane input uses the same runtime encoder and owner queue as
+// target-bearing agent intents, but it carries no screen token: a person may
+// press Enter at a shell prompt. The access epoch is still checked at receipt
+// and at commit, so a revoked renderer cannot write any bytes.
+func TestInteractiveIntentEncodesThroughRuntime(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Enter"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "executed" || got.BytesWritten != 1 {
+		t.Fatalf("interactive Enter = state=%s bytes=%d refusal=%+v, want one executed byte", got.State, got.BytesWritten, got.Refusal)
+	}
+	if written := proc.writtenPayloads(); len(written) != 1 || string(written[0]) != "\r" {
+		t.Fatalf("interactive Enter wrote %q, want CR", written)
+	}
+}
+
+func TestInteractiveIntentRefusesRevokedAccessEpochWithoutWriting(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+	bump := awaitResult(t, submitBump(t, hs, 1))
+	if bump.State != sessionruntime.IntentStateExecuted {
+		t.Fatalf("access bump = %+v, want executed", bump)
+	}
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "refused" || got.Refusal == nil || got.Refusal.Cause != "access_revoked" {
+		t.Fatalf("stale interactive intent = %+v, want refused/access_revoked", got)
+	}
+	if got.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("revoked intent wrote bytes: result=%+v writes=%q", got, proc.writtenPayloads())
+	}
+}
+
+func TestInteractiveArrowIntentFollowsProgramCursorMode(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	proc.produce([]byte("\x1b[?1h"))
+	application, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Left"),
+	})
+	if err != nil || application.State != "executed" {
+		t.Fatalf("application-cursor intent = %+v, err=%v", application, err)
+	}
+	proc.produce([]byte("\x1b[?1l"))
+	legacy, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64, Kind: "key", Payload: []byte("Left"),
+	})
+	if err != nil || legacy.State != "executed" {
+		t.Fatalf("normal-cursor intent = %+v, err=%v", legacy, err)
+	}
+	written := proc.writtenPayloads()
+	if len(written) != 2 || string(written[0]) != "\x1bOD" || string(written[1]) != "\x1b[D" {
+		t.Fatalf("program-mode arrow encodings = %q, want application then normal cursor sequences", written)
+	}
+}
+
+func TestInteractiveIntentRevocationWinsWhileQueued(t *testing.T) {
+	proc := newBlockingProcess()
+	hs, control := newIntentTestSession(t, proc)
+	blocker, err := hs.owner.submit(ownerItem{kind: itemClientFrame, payload: []byte("block")})
+	if err != nil {
+		t.Fatalf("submit blocker: %v", err)
+	}
+	proc.awaitEntered(t)
+
+	intent, err := hs.owner.submit(ownerItem{kind: itemIntent, intent: &pendingIntent{
+		Intent: sessionruntime.Intent{
+			At: hs.runtime.Incarnation(), Under: control.Epoch, By: control.Holder,
+			Kind: sessionruntime.IntentKindText, Payload: []byte("stale"),
+		},
+		Interactive: true,
+		Canonical:   canonicalIntent{Kind: sessionruntime.IntentKindText, Payload: []byte("stale"), AccessEpoch: 1},
+	}})
+	if err != nil {
+		t.Fatalf("submit intent: %v", err)
+	}
+	bump := awaitResult(t, submitBump(t, hs, 1))
+	if bump.State != sessionruntime.IntentStateExecuted || bump.Epoch != 2 {
+		t.Fatalf("access bump = %+v, want epoch 2", bump)
+	}
+	proc.release()
+	if result := awaitResult(t, blocker); result.State != sessionruntime.IntentStateExecuted {
+		t.Fatalf("blocker = %+v", result)
+	}
+	result := awaitResult(t, intent)
+	if result.State != sessionruntime.IntentStateRefused || !errors.Is(result.Err, errAccessRevoked) || result.BytesWritten != 0 {
+		t.Fatalf("queued intent = %+v, want zero-byte access_revoked", result)
+	}
+	select {
+	case written := <-proc.scriptedProcess.written:
+		if string(written) != "block" {
+			t.Fatalf("first write = %q, want blocker", written)
+		}
+	default:
+		t.Fatal("blocker write was not recorded")
+	}
+	select {
+	case written := <-proc.scriptedProcess.written:
+		t.Fatalf("revoked intent wrote unexpected bytes %q", written)
+	default:
+	}
+}
+
+// The wire's closed kind set is the whole of the runtime's intent vocabulary
+// and not the printable half of it: a person clicks, and a pane gains and loses
+// focus (nocx-zg3k3.3.1, design §6.1). Both are INTENT, and both are encoded
+// against the mode the PROGRAM set — nothing on the way in decides whether a
+// program is listening, exactly as nothing decides whether an arrow key is
+// worth an application-cursor sequence (TestInteractiveArrowIntentFollows
+// ProgramCursorMode above).
+func TestInteractiveMouseAndFocusIntentsFollowTheProgramsModes(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	// No tracking mode: the program never asked to hear about the mouse, so
+	// the click is consumed and writes nothing. That is the ordinary case at
+	// a shell prompt, and it is a refusal rather than an error — a renderer
+	// sends a click to the pane whether or not something in it is listening.
+	unheard, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "mouse", Payload: []byte("press left 2 3"),
+	})
+	if err != nil {
+		t.Fatalf("mouse intent: %v", err)
+	}
+	if unheard.State != "refused" || unheard.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("mouse with no tracking mode = %+v, writes=%q; want a refusal and no bytes", unheard, proc.writtenPayloads())
+	}
+
+	// Focus is the same state dependence for the third kind: nothing to a
+	// program that did not ask for it.
+	unwatched, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "focus", Payload: []byte("in"),
+	})
+	if err != nil {
+		t.Fatalf("focus intent: %v", err)
+	}
+	if unwatched.State != "refused" || unwatched.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("focus with mode 1004 unset = %+v, writes=%q; want a refusal and no bytes", unwatched, proc.writtenPayloads())
+	}
+
+	// Normal tracking plus the SGR format, which is what a modern program
+	// sets. The payload is in CELLS and the wire counts from one, which is
+	// the emulator's own conversion and not this layer's.
+	proc.produce([]byte("\x1b[?1000h\x1b[?1006h"))
+	click, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "mouse", Payload: []byte("press left 2 3"),
+	})
+	if err != nil {
+		t.Fatalf("mouse intent: %v", err)
+	}
+	if click.State != "executed" {
+		t.Fatalf("mouse press under tracking = %+v, want executed", click)
+	}
+
+	// And focus, once the program has asked to be told.
+	proc.produce([]byte("\x1b[?1004h"))
+	gained, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "focus", Payload: []byte("in"),
+	})
+	if err != nil || gained.State != "executed" {
+		t.Fatalf("focus gained = %+v, err=%v", gained, err)
+	}
+	lost, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "focus", Payload: []byte("out"),
+	})
+	if err != nil || lost.State != "executed" {
+		t.Fatalf("focus lost = %+v, err=%v", lost, err)
+	}
+
+	written := proc.writtenPayloads()
+	want := []string{"\x1b[<0;3;4M", "\x1b[I", "\x1b[O"}
+	if len(written) != len(want) {
+		t.Fatalf("writes = %q, want %q", written, want)
+	}
+	for i, w := range want {
+		if string(written[i]) != w {
+			t.Fatalf("write %d = %q, want %q", i, written[i], w)
+		}
+	}
+}
+
+// A refusal is also an ANSWER: the controller that presented a stale epoch is
+// told the one in force, so the intent it just failed to have written can be
+// sent again (nocx-zg3k3.3.1). The interval this closes is "from the refusal
+// until the renderer holds a current epoch" — without the epoch in the answer
+// it stays stale, and every later keystroke is refused exactly the same way,
+// zero bytes at a time, forever.
+func TestARefusedInteractiveIntentAnswersWithTheEpochInForce(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+	if bump := awaitResult(t, submitBump(t, hs, 1)); bump.Epoch != 2 {
+		t.Fatalf("access bump = %+v, want epoch 2", bump)
+	}
+
+	stale, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 1, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if stale.State != "refused" || stale.Refusal == nil || stale.Refusal.Cause != "access_revoked" {
+		t.Fatalf("stale intent = %+v, want refused/access_revoked", stale)
+	}
+	if stale.AccessEpoch != 2 {
+		t.Fatalf("the refusal named epoch %d, want the 2 in force", stale.AccessEpoch)
+	}
+
+	// The same intent, presented with the epoch the refusal named, is the
+	// write the first attempt was not allowed to make.
+	again, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: stale.AccessEpoch, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("stale"),
+	})
+	if err != nil {
+		t.Fatalf("resend: %v", err)
+	}
+	if again.State != "executed" {
+		t.Fatalf("resend with the named epoch = %+v, want executed", again)
+	}
+	if written := proc.writtenPayloads(); len(written) != 1 || string(written[0]) != "stale" {
+		t.Fatalf("writes = %q, want the intent written exactly once", written)
+	}
+}
+
+// A controller that has no epoch yet — one whose open could not read it — is a
+// case the wire admits rather than one it guesses at: the intent is refused
+// with the epoch in force and writes nothing, which is the same answer a stale
+// one gets and the only one that is safe. It is what makes the first attempt
+// from a fresh renderer cost nothing but a round trip.
+func TestAnInteractiveIntentWithNoEpochYetIsRefusedWithTheOneInForce(t *testing.T) {
+	proc := newRawReaderFakeProcess()
+	hs, _ := newIntentTestSession(t, proc)
+
+	got, err := hs.intent(context.Background(), proto.IntentParams{
+		Interactive: true, AccessEpoch: 0, CommitBy: math.MaxInt64,
+		Kind: "text", Payload: []byte("first"),
+	})
+	if err != nil {
+		t.Fatalf("intent: %v", err)
+	}
+	if got.State != "refused" || got.Refusal == nil || got.Refusal.Cause != "access_revoked" {
+		t.Fatalf("epochless intent = %+v, want refused/access_revoked", got)
+	}
+	if got.AccessEpoch != 1 {
+		t.Fatalf("the refusal named epoch %d, want the 1 in force", got.AccessEpoch)
+	}
+	if got.BytesWritten != 0 || len(proc.writtenPayloads()) != 0 {
+		t.Fatalf("an epochless intent wrote bytes: %+v %q", got, proc.writtenPayloads())
+	}
+}

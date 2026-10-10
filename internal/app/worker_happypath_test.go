@@ -543,7 +543,7 @@ func (happyEndpointOwner) OwnerUID(string) (uint32, error) {
 // as the Emitter the publisher requires.
 type happyLifecycleEmitter struct{}
 
-func (happyLifecycleEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (happyLifecycleEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // happyStandOption tunes the stand for a test that needs something other than
 // the happy path's own values — a logger it can read back, or a deadline it can
@@ -761,9 +761,12 @@ func newHappyStand(t *testing.T, opts ...happyStandOption) *happyStand {
 		t.Fatalf("pane enroller: %v", err)
 	}
 	paneEnrol = enrol.hookInto(paneEnrol)
+	launchTransports := newTransportRegistry()
+	paneEnrol.transports = launchTransports
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel,
 		lifecyclepub.WithAgentEnroller(paneEnrol),
+		lifecyclepub.WithAgentLaunchResolver(literalAgentLaunchResolver{transports: launchTransports}),
 	)
 	pub.SetEmitter(happyLifecycleEmitter{})
 	factory.kernel = pub

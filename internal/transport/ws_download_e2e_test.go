@@ -67,7 +67,9 @@ func TestNativeDownloadEndToEndWithRealSFTPSource(t *testing.T) {
 	destination := filepath.Join(t.TempDir(), "saved.bin")
 	service, err := downloadsave.New(downloadsave.Config{
 		Picker: downloadPicker{path: destination},
-		Sink:   (&local.Provider{}).Sink(),
+		PrepareDestination: func(path string) (downloadsave.Destination, error) {
+			return local.PrepareDownload(path)
+		},
 		Address: func() (string, error) {
 			return net.JoinHostPort("127.0.0.1", strconv.Itoa(e.ws.Port())), nil
 		},

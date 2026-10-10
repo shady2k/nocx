@@ -46,6 +46,21 @@ var errAccessRevoked = errors.New("session: access_revoked")
 // check above, which only ever changes at a bump.
 var errCommitDeadline = errors.New("session: commit_deadline")
 
+// interactiveGate checks a pane controller's expected access epoch at
+// receipt. Interactive input shares the ordered owner and runtime encoder
+// with target-bearing intents, but it has no screen target to verify.
+func (o *sessionOwner) interactiveGate(it ownerItem) bool {
+	if it.intent.Canonical.AccessEpoch != o.currentAccessEpoch() {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errAccessRevoked})
+		return true
+	}
+	if it.intent.CommitBy != 0 && o.nowMono() > it.intent.CommitBy {
+		o.resolve(it, ownerResult{State: sessionruntime.IntentStateRefused, Err: errCommitDeadline})
+		return true
+	}
+	return false
+}
+
 // applyAccessBump is itemAccessBump's own handling, run the moment run()
 // (owner.go) receives one — never appended to o.pending, which is what
 // makes it "ahead of queued intents" rather than merely first in line for

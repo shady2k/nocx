@@ -269,6 +269,8 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.channelData(ctx, payload)
 	case proto.TypeScreenFrame:
 		h.screenData(ctx, payload)
+	case proto.TypeSessionEffect:
+		h.effectData(payload)
 	case proto.TypeOutputRows:
 		h.rowsData(ctx, payload)
 	case proto.TypeIntervalEnd:
@@ -369,6 +371,25 @@ func (h *Host) SendScreenFrame(f proto.ScreenDataFrame) error {
 	return h.write(proto.TypeScreenFrame, proto.EncodeScreenDataFrame(f))
 }
 
+// SendEffectFrame writes one runtime effect to the coordinator on its own
+// identity-bearing plane, never on the full-screen snapshot carrier.
+func (h *Host) SendEffectFrame(f proto.EffectFrame) error {
+	return h.write(proto.TypeSessionEffect, proto.EncodeEffectFrame(f))
+}
+
+// effectData refuses the reverse direction: only the helper's runtime may
+// produce session effects.
+func (h *Host) effectData(payload []byte) {
+	f, err := proto.DecodeEffectFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed session effect frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("session effect dropped: coordinator-originated effects are refused",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"effect_id", f.EffectID, "kind", f.Kind)
+}
+
 // SendOutputRows writes one rows-plane frame: one batch of the rows the
 // session's runtime handed over as they left the screen (nocx-2v80t.3.6),
 // for the subscriber the frame names. The wire and its writer mutex are the
@@ -431,6 +452,15 @@ func (h *Host) SendClearBoundary(f proto.ClearBoundaryFrame) error {
 		return err
 	}
 	return h.write(proto.TypeClearBoundary, raw)
+}
+
+// SendOutputStartRow writes one ordered command-output position mark.
+func (h *Host) SendOutputStartRow(f proto.OutputStartRowFrame) error {
+	raw, err := proto.EncodeOutputStartRowFrame(f)
+	if err != nil {
+		return err
+	}
+	return h.write(proto.TypeOutputStartRow, raw)
 }
 
 // clearBoundaryData handles an inbound clear-boundary frame, for the reason

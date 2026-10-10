@@ -10,7 +10,9 @@
     "sessions": {
       "description": "The live sessions, in no defined order. An empty array is the ordinary answer on a backend that holds nothing — an array, never null, because the renderer maps over it.",
       "type": "array",
-      "items": { "$ref": "#/$defs/liveSession" }
+      "items": {
+        "$ref": "#/$defs/liveSession"
+      }
     }
   },
   "$defs": {
@@ -41,7 +43,8 @@
         "replayFrom": {
           "description": "The oldest byte offset the session's replay ring still holds. A fresh client attaches HERE and receives everything the ring retained, including output produced while nothing was attached; attaching below it answers reset instead, because those bytes are gone (AD-9, ring.go). A client that already knows a later offset of its own — a reconnect rather than a reclaim — attaches at that one instead.",
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "attached": {
           "description": "Whether a client currently holds this session. One client owns a session at a time (D8), so true means a claim will TAKE it from whoever has it and that client will be told it lost it. It is a fact about now, not a lock: it can change between this answer and the claim.",

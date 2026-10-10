@@ -18,22 +18,28 @@
     "from": {
       "description": "The stream offset this answer is measured from — what the caller asked for, or 0 when it asked for nothing. Everything in `runs` and `gaps` lies at or after it, and together they account for every byte of [from, produced) with nothing unstated: what is present is a run, what is gone is a gap. Echoed rather than assumed because a client that pages reads it back to confirm which page it is holding.",
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "runs": {
       "description": "The stretches of recorded bytes at or after `from`, in stream order, never overlapping. A LIST rather than one blob because the retention bound drops the middle of a long recording: head and tail are two runs with a hole between them, and a single body would silently join bytes that are not adjacent. Never null: a recording with nothing left in the requested span is [], because the renderer maps over it. A run is bounded by the per-answer byte budget, so a recording larger than one answer arrives over several calls — the caller pages by asking again from the end of the last run it received, and knows there is more whenever that end is below `produced`.",
       "type": "array",
-      "items": { "$ref": "#/$defs/run" }
+      "items": {
+        "$ref": "#/$defs/run"
+      }
     },
     "gaps": {
-      "description": "The byte ranges inside [from, produced) that the recording no longer holds, in stream order. This is the 'never silently less' half of the answer: the retention bound keeps the head and the tail of a session's output and drops the middle (internal/content/policy.go, and capBody in the renderer cuts a frozen block the same way), so an offset the bound has dropped is answered with what remains AND with the range that is gone, rather than with a shorter run nobody can tell from a shorter session. Never null: a whole recording is []. Derived from the runs that are actually there rather than accumulated as bytes are dropped, so it cannot drift from them. THREE KINDS OF HOLE, AND `reason` IS HOW THEY ARE TOLD APART (nocx-k6p18.2, nocx-k6p18.25). `cap` means the bytes were recorded and the retention bound evicted them \u2014 actionable, since the knob that dropped them is the knob that would have kept them. `unrecorded` means nobody was there to record them at all: no recorder was attached to the stream over that range, so the bound never touched those bytes and naming it would be a false statement in the product. `hostWindow` means they never reached this machine: the session runs on an execution host whose helper holds a BOUNDED output window, and that window was reclaimed past this coordinator before the bytes could be carried across \u2014 so no bound here dropped them and no recorder here was missing, and the knob that governs it is the session's WindowBytes on the host. A reader must pick its wording from `reason` and must never assume the cap; a reason it does not recognise is carried through as 'we do not know' rather than turned into a confident answer, which is what makes the vocabulary safe to extend.",
+      "description": "The byte ranges inside [from, produced) that the recording no longer holds, in stream order. This is the 'never silently less' half of the answer: the retention bound keeps the head and the tail of a session's output and drops the middle (internal/content/policy.go, and capBody in the renderer cuts a frozen block the same way), so an offset the bound has dropped is answered with what remains AND with the range that is gone, rather than with a shorter run nobody can tell from a shorter session. Never null: a whole recording is []. Derived from the runs that are actually there rather than accumulated as bytes are dropped, so it cannot drift from them. THREE KINDS OF HOLE, AND `reason` IS HOW THEY ARE TOLD APART (nocx-k6p18.2, nocx-k6p18.25). `cap` means the bytes were recorded and the retention bound evicted them — actionable, since the knob that dropped them is the knob that would have kept them. `unrecorded` means nobody was there to record them at all: no recorder was attached to the stream over that range, so the bound never touched those bytes and naming it would be a false statement in the product. `hostWindow` means they never reached this machine: the session runs on an execution host whose helper holds a BOUNDED output window, and that window was reclaimed past this coordinator before the bytes could be carried across — so no bound here dropped them and no recorder here was missing, and the knob that governs it is the session's WindowBytes on the host. A reader must pick its wording from `reason` and must never assume the cap; a reason it does not recognise is carried through as 'we do not know' rather than turned into a confident answer, which is what makes the vocabulary safe to extend.",
       "type": "array",
-      "items": { "$ref": "ledger.get.schema.json#/$defs/gap" }
+      "items": {
+        "$ref": "ledger.get.schema.json#/$defs/gap"
+      }
     },
     "produced": {
       "description": "How many bytes this session has produced in total, INCLUDING everything the bound dropped — the recording's end offset. It is what makes a hole measurable rather than invisible, it is where the next page starts, and it is the offset a client attaches at once it has read this far. Zero on a session that has printed nothing, and zero on one whose output is not being recorded at all — history.status says which, and this method deliberately does not.",
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     }
   },
   "$defs": {
@@ -45,7 +51,8 @@
         "offset": {
           "description": "The stream offset of this run's first byte — the same coordinate an ack carries, so a client can place the run against its own cursor without counting anything.",
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 9007199254740991
         },
         "body": {
           "description": "The bytes, base64-encoded. Bytes and not text: the backend never decodes the stream (AD-6), a UTF-8 rune can straddle any boundary the recorder happened to write at, and a run that arrived as a string would have to be decoded by something that does not own the decoder. Never empty — a run with no bytes is not a run, and its absence is a gap.",

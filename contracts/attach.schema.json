@@ -18,10 +18,11 @@
     "from": {
       "description": "The byte offset the stream resumes at. Equal to the requested offset when resumed; the ring's current end when reset, because everything before it is gone.",
       "type": "integer",
-      "minimum": 0
+      "minimum": 0,
+      "maximum": 9007199254740991
     },
     "accessEpoch": {
-      "description": "The epoch this pane's controller must present with its intents (nocx-zg3k3.3.1), read from the helper that holds the pane before this ack is built \u2014 attach's own half of the field open.schema.json carries. A reclaim is how a renderer comes to hold a session it never opened (a reconnect, or a pane adopted after a backend restart) and it types through the same intent wire, so it needs the same number. Read the same way, never re-derived. Absent when nothing could answer, which the wire admits: the renderer then presents none, is refused with the epoch in force, and writes nothing.",
+      "description": "The epoch this pane's controller must present with its intents (nocx-zg3k3.3.1), read from the helper that holds the pane before this ack is built — attach's own half of the field open.schema.json carries. A reclaim is how a renderer comes to hold a session it never opened (a reconnect, or a pane adopted after a backend restart) and it types through the same intent wire, so it needs the same number. Read the same way, never re-derived. Absent when nothing could answer, which the wire admits: the renderer then presents none, is refused with the epoch in force, and writes nothing.",
       "type": "integer",
       "minimum": 1
     },

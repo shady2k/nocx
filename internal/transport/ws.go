@@ -67,10 +67,12 @@ type sessionRx struct {
 	// deliveryMu linearizes binary PTY frames and effects before they enter
 	// the shared outbound queue. Effects wait in this bounded list until the
 	// per-pump cursor reaches their exact stream offset.
-	deliveryMu     sync.Mutex
-	deliveryConn   *wsConn
-	deliveryOffset uint64
-	pendingEffects []pendingSessionEffect
+	deliveryMu               sync.Mutex
+	deliveryConn             *wsConn
+	deliveryOffset           uint64
+	pendingEffects           []pendingSessionEffect
+	outputGaps               []sessionOutputGapRecord
+	outputGapHistoryOverflow bool
 	// inputStalled is true from the moment this session's write queue
 	// refuses a frame until it accepts one again. It exists to make the
 	// notification fire once per stall rather than once per keystroke:
@@ -87,6 +89,14 @@ type pendingSessionEffect struct {
 	waitForBytes bool
 	method       string
 	params       json.RawMessage
+}
+
+const maxSessionOutputGapRecords = 128
+
+type sessionOutputGapRecord struct {
+	start  uint64
+	end    uint64
+	reason string
 }
 
 // setSubscriber installs wconn as the session's one subscriber and RETURNS
@@ -119,6 +129,30 @@ func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *c
 	// anybody attached".
 	rx.ring.setAttached(true)
 	return prevConn, prevState
+}
+
+// setSubscriberIfGapHistoryAvailable installs the claimant only while the
+// replay archive is complete. The overflow check, subscriber mirror, and ring
+// attachment bit share the delivery lock with recordOutputHole, so a reset
+// after this point is live work for ringToConn rather than a lost old range.
+func (rx *sessionRx) setSubscriberIfGapHistoryAvailable(wconn *wsConn, state *connState) (*wsConn, *connState, bool) {
+	rx.mu.Lock()
+	rx.deliveryMu.Lock()
+	if rx.outputGapHistoryOverflow {
+		rx.deliveryMu.Unlock()
+		rx.mu.Unlock()
+		return nil, nil, false
+	}
+	prevConn, prevState := rx.subscriber, rx.subState
+	rx.subscriber = wconn
+	rx.subState = state
+	rx.deliveryConn = wconn
+	rx.deliveryOffset = 0
+	rx.pendingEffects = nil
+	rx.ring.setAttached(true)
+	rx.deliveryMu.Unlock()
+	rx.mu.Unlock()
+	return prevConn, prevState, true
 }
 
 func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
@@ -170,6 +204,30 @@ func (rx *sessionRx) beginDelivery(wconn *wsConn, offset uint64) {
 		rx.deliveryOffset = offset
 	}
 	rx.deliveryMu.Unlock()
+}
+
+// recordOutputHole places the ring hole and its notification record in one
+// transport-owned interval. The ring may advance past the hole after the
+// recorder consumes it, so the notification cannot be derived from the
+// retained replay window later. Retain a bounded archive for the session
+// lifetime: outbound queue admission is not proof the peer received it, and
+// this wire has no acknowledgement for an informational gap. Once the bound
+// is reached, later attaches fail visibly rather than resume without history.
+func (rx *sessionRx) recordOutputHole(lost uint64, reason string) {
+	if lost == 0 {
+		return
+	}
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	start := rx.ring.writtenLocked()
+	rx.ring.hole(lost, reason)
+	if len(rx.outputGaps) >= maxSessionOutputGapRecords {
+		rx.outputGapHistoryOverflow = true
+		return
+	}
+	rx.outputGaps = append(rx.outputGaps, sessionOutputGapRecord{
+		start: start, end: start + lost, reason: reason,
+	})
 }
 
 func (rx *sessionRx) deliveryCursor(wconn *wsConn) (uint64, bool) {
@@ -2474,6 +2532,22 @@ type RPCError struct {
 //
 // id is the per-connection (per-tab) identity: backend-assigned, monotonic,
 // and never reused.
+const maxSafeSessionOffset uint64 = 1<<53 - 1
+
+func unsafeSessionOffset(field string, value uint64) string {
+	if value > maxSafeSessionOffset {
+		return fmt.Sprintf("%s exceeds the JSON-safe session byte-offset maximum %d", field, maxSafeSessionOffset)
+	}
+	return ""
+}
+
+type sessionOutputGapNotification struct {
+	SessionID string `json:"sessionId"`
+	Start     uint64 `json:"start"`
+	End       uint64 `json:"end"`
+	Reason    string `json:"reason"`
+}
+
 type wsConn struct {
 	out            *outbound.Conn
 	log            log.Logger
@@ -2527,6 +2601,18 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 
 func (w *wsConn) TryNotify(method string, params json.RawMessage) error {
 	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}))
+}
+
+// EnqueueOrderedNotify puts a non-droppable control notification in the same
+// FIFO as session data. The ring pump uses it at a stream discontinuity: a
+// critical-priority frame could overtake earlier binary output, while a
+// refreshable notification could be dropped and followed by later bytes.
+func (w *wsConn) EnqueueOrderedNotify(ctx context.Context, method string, params json.RawMessage) error {
+	return w.out.EnqueueOrdered(ctx, websocket.TextMessage, mustMarshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  method,
 		"params":  params,
@@ -3605,6 +3691,30 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	}
 }
 
+// enqueueSessionOutputGap places one missing output range in the same ordered
+// outbound queue as PTY bytes. False means the gap was unsafe or could not be
+// delivered; callers must not send later bytes past an unreported hole.
+func enqueueSessionOutputGap(ctx context.Context, wconn *wsConn, sid session.ID, start, end uint64, reason string) bool {
+	if start > maxSafeSessionOffset || end > maxSafeSessionOffset || end < start {
+		log.From(ctx).Error("session output gap exceeds the JSON-safe byte-offset boundary; stopping stream",
+			"session_id", string(sid), "start", start, "end", end)
+		return false
+	}
+	notice, err := json.Marshal(sessionOutputGapNotification{
+		SessionID: string(sid), Start: start, End: end, Reason: reason,
+	})
+	if err != nil {
+		log.From(ctx).Error("session output gap could not be marshalled", "session_id", string(sid), "error", err)
+		return false
+	}
+	if err := wconn.EnqueueOrderedNotify(ctx, "session.outputGap", notice); err != nil {
+		log.From(ctx).Warn("session output gap could not be delivered; stopping later output",
+			"session_id", string(sid), "start", start, "end", end, "error", err)
+		return false
+	}
+	return true
+}
+
 // ringToConn streams a session's output ring to a WebSocket connection
 // starting at the given byte offset. Exits when the connection drops, when the
 // ring closes, or when this connection STOPS BEING the session's subscriber.
@@ -3655,30 +3765,23 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		if len(pending) == 0 {
 			data, from, needsReset, hole := ring.snapshot(pos)
 			if hole != nil {
-				// A stretch that never reached this machine: the execution
-				// host's window took it before the coordinator could carry
-				// it across (nocx-k6p18.25). There is nothing to send, so
-				// the pump steps over it and goes on — the bytes on the far
-				// side are real and withholding them would cost the tab its
-				// live output as well as the hole.
-				//
-				// THE STATEMENT OF THE HOLE IS NOT MADE HERE, and that is a
-				// stated limit rather than an oversight: this carrier has no
-				// mid-stream reset shape (the renderer's only reset is
-				// answered at attach), so what a live tab sees is a splice.
-				// What the person gets instead is the recording — the hole
-				// is durable, with its bounds and its reason, and
-				// session.output reports it to any client that reads it
-				// back. Giving this path its own notification is
-				// nocx-k6p18.29.
-				s.log.Warn("session output pump stepped over a hole the execution host's window left",
-					"session_id", session.IDFromBytes(sidBytes), "at", pos, "lost", hole.n, "reason", hole.reason)
-				pos = from
+				end := from
 				rx.deliveryMu.Lock()
+				if rx.deliveryConn != wconn {
+					rx.deliveryMu.Unlock()
+					return
+				}
+				if !enqueueSessionOutputGap(ctx, wconn, session.IDFromBytes(sidBytes), pos, end, hole.reason) {
+					rx.deliveryMu.Unlock()
+					return
+				}
 				if rx.deliveryConn == wconn {
-					rx.deliveryOffset = pos
+					rx.deliveryOffset = end
 				}
 				rx.deliveryMu.Unlock()
+				s.log.Warn("session output pump crossed an execution-host output-window gap",
+					"session_id", session.IDFromBytes(sidBytes), "start", pos, "end", end, "reason", hole.reason)
+				pos = end
 				continue
 			}
 			if needsReset {

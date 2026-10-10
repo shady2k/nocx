@@ -105,9 +105,8 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	// everything the host's bounded window reclaimed while no coordinator was
 	// listening (nocx-k6p18.25's `hostWindow`).
 	if hosted.ObserveOutputHoles != nil {
-		ring := rx.ring
 		hosted.ObserveOutputHoles(func(lost uint64, reason string) {
-			ring.hole(lost, sessionOutputHoleReason(reason))
+			rx.recordOutputHole(lost, sessionOutputHoleReason(reason))
 		})
 	}
 

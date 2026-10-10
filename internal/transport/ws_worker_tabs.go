@@ -93,6 +93,10 @@ func (s *WSServer) AnnounceWorkerTab(tab content.Tab, pane content.Pane, sess se
 	}
 	if rx := s.getRx(sess.ID()); rx != nil {
 		params.ReplayFrom = rx.ring.oldestLocked()
+		if msg := unsafeSessionOffset("replayFrom", params.ReplayFrom); msg != "" {
+			s.log.Error("workers.tabCreated not delivered: replay offset exceeds JSON-safe boundary", "session_id", string(sess.ID()), "error", msg)
+			return
+		}
 		wconn, _ := rx.getSubscriber()
 		params.Attached = wconn != nil
 	}

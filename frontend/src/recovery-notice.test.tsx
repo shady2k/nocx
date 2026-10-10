@@ -14,7 +14,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { mountRecoveryNotice, recoveryAccount } from './recovery-notice'
+import { mountRecoveryNotice, mountLiveOutputGapNotice, recoveryAccount } from './recovery-notice'
+import type { SessionOutputGap } from './generated/session.outputGap'
 import type { SessionRecovery } from './ipc'
 
 function recovery(over: Partial<SessionRecovery> = {}): SessionRecovery {
@@ -39,13 +40,17 @@ afterEach(() => {
 
 /** A stand-in for the tab's pane with the terminal already in it — the state
  *  a pane is in the instant a reclaim resolves. */
-function mount(rec: SessionRecovery, onDismiss = vi.fn()) {
+function mount(
+  rec: SessionRecovery,
+  onDismiss = vi.fn(),
+  liveGaps: readonly SessionOutputGap[] = [],
+) {
   pane = document.createElement('div')
   const terminal = document.createElement('div')
   terminal.className = 'scrollback-layout'
   pane.appendChild(terminal)
   document.body.appendChild(pane)
-  dispose = mountRecoveryNotice(pane, { recovery: rec, onDismiss })
+  dispose = mountRecoveryNotice(pane, { recovery: rec, liveGaps, onDismiss })
   return { pane, terminal, onDismiss }
 }
 
@@ -188,9 +193,85 @@ describe('recoveryAccount (nocx-fz4qa)', () => {
     })
   })
 
+  it('subtracts bytes already named by a live notice but retains distinct cap loss', () => {
+    const historical = recovery({
+      gaps: [
+        { start: 2700, end: 99_000, reason: 'hostWindow' },
+        { start: 131_072, end: 4_046_848, reason: 'cap' },
+      ],
+    })
+    const live: SessionOutputGap[] = [
+      {
+        sessionId: '0123456789abcdef0123456789abcdef',
+        start: 2722,
+        end: 98_304,
+        reason: 'hostWindow',
+      },
+    ]
+
+    expect(recoveryAccount(historical, live)).toEqual({
+      missing: 3_916_494,
+      dropped: 3_915_776,
+      unrecorded: 0,
+      other: 718,
+      reasons: ['hostWindow'],
+      statusUnavailable: false,
+    })
+    mount(historical, vi.fn(), live)
+    expect(title()).toBe("3.9 MB of this session's output is missing")
+    expect(desc()).toContain("3.9 MB the recording's size limit dropped")
+    expect(desc()).toContain('718 B missing as "hostWindow"')
+  })
+
+  it('keeps a historical host-window loss visible when no live notice arrives', () => {
+    mount(recovery({ gaps: [{ start: 100, end: 200, reason: 'hostWindow' }] }))
+    expect(title()).toBe("100 B of this session's output is missing")
+    expect(desc()).toContain('missing as "hostWindow"')
+  })
+
   it('ignores a range that runs backwards rather than subtracting it', () => {
     expect(
       recoveryAccount(recovery({ gaps: [{ start: 900, end: 100, reason: 'cap' }] })),
     ).toBeNull()
+  })
+})
+
+describe('a live pane says where its output stream has a hole', () => {
+  it('shows the exact missing byte count, preserves the terminal, and can be dismissed', () => {
+    pane = document.createElement('div')
+    const terminal = document.createElement('div')
+    terminal.className = 'scrollback-layout'
+    pane.appendChild(terminal)
+    document.body.appendChild(pane)
+    const onDismiss = vi.fn()
+    const gap: SessionOutputGap = {
+      sessionId: '0123456789abcdef0123456789abcdef',
+      start: 11,
+      end: 4107,
+      reason: 'hostWindow',
+    }
+    dispose = mountLiveOutputGapNotice(pane, gap, onDismiss)
+    expect(title()).toBe('4096 bytes of live output are missing')
+    expect(desc()).toContain("execution host's output window moved past this tab")
+    expect(pane.firstElementChild?.classList.contains('nocx-recovery-notice')).toBe(true)
+    expect(pane.contains(terminal)).toBe(true)
+    pane.querySelector('button')?.click()
+    expect(onDismiss).toHaveBeenCalledOnce()
+    dispose?.()
+    dispose = null
+    expect(pane.contains(terminal)).toBe(true)
+  })
+
+  it('uses generic wording for an unknown gap reason', () => {
+    pane = document.createElement('div')
+    document.body.appendChild(pane)
+    dispose = mountLiveOutputGapNotice(
+      pane,
+      { sessionId: '0123456789abcdef0123456789abcdef', start: 2, end: 9, reason: 'future-cause' },
+      vi.fn(),
+    )
+    expect(title()).toBe('7 bytes of live output are missing')
+    expect(desc()).toContain('This output gap has an unknown cause.')
+    expect(desc()).not.toContain('execution host')
   })
 })

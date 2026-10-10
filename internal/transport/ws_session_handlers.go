@@ -564,9 +564,8 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// cannot fire before there is a pump, and registering it after one would
 	// be a window in which a hole is dropped instead of recorded.
 	if hosted != nil && hosted.ObserveOutputHoles != nil {
-		ring := rx.ring
 		hosted.ObserveOutputHoles(func(lost uint64, reason string) {
-			ring.hole(lost, sessionOutputHoleReason(reason))
+			rx.recordOutputHole(lost, sessionOutputHoleReason(reason))
 		})
 	}
 
@@ -896,28 +895,53 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
 			return nil
 		}
+		// Serialize the overflow check and ring snapshot against helper-hole
+		// recording. A hole after this snapshot is live work for ringToConn;
+		// a hole already past the retention bound must refuse the attach before
+		// the cursor can jump over its unretained history.
+		rx.deliveryMu.Lock()
+		if rx.outputGapHistoryOverflow {
+			rx.deliveryMu.Unlock()
+			_ = r.TryError(req.ID, RPCError{
+				Code:    -32000,
+				Message: fmt.Sprintf("session output gap history exceeded %d ranges; cannot safely attach", maxSessionOutputGapRecords),
+			})
+			return nil
+		}
 
 		// Reject offsets that run ahead of what the ring has produced (DEFECT 4).
 		// ring.ack already validates this; attach must be equally distrustful.
 		// An offset > written means the client claims to have received bytes
 		// that were never produced — a silent data skip waiting to happen.
-		// Uses the locking accessor rather than reaching into the ring's mu.
 		w := rx.ring.writtenLocked()
 		if params.Offset > w {
+			rx.deliveryMu.Unlock()
 			resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
 			_ = respond(r, resp)
 			return nil
 		}
 
-		// A hole is not a case of its own here: snapshot answers `from` with
-		// the offset the stream continues at, which is past the hole, and an
-		// attach is exactly a client being told where to continue. The hole
-		// itself is the recording's to state (session.output's gaps), not
-		// this answer's.
-		_, from, needsReset, _ := rx.ring.snapshot(params.Offset)
+		// Preserve a hole at the requested cursor. The attach result still
+		// names `from`, the first available byte after it, but that offset
+		// alone would make the new ringToConn start past the hole. The live
+		// notification below is the renderer-facing half; the recording has
+		// its own durable recovery metadata.
+		_, from, needsReset, hole := rx.ring.snapshot(params.Offset)
+		rx.deliveryMu.Unlock()
+		if msg := unsafeSessionOffset("attach.from", from); msg != "" {
+			_ = r.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+			return nil
+		}
 
+		prev, prevState, historyAvailable := rx.setSubscriberIfGapHistoryAvailable(wconn, state)
+		if !historyAvailable {
+			_ = r.TryError(req.ID, RPCError{
+				Code:    -32000,
+				Message: fmt.Sprintf("session output gap history exceeded %d ranges; cannot safely attach", maxSessionOutputGapRecords),
+			})
+			return nil
+		}
 		state.add(sess)
-		prev, prevState := rx.setSubscriber(wconn, state)
 		if prev != nil && prev != wconn {
 			// The take, before this connection is answered: the loser is told,
 			// loses the session from its own state, and its pump is woken so
@@ -964,6 +988,50 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			AccessEpoch:       accessEpochOf(ctx, h.intents, sid),
 		}))
 
+		// The response is queued first, then retained gap facts in the same
+		// ordered outbound path. Queue admission is not a delivery receipt:
+		// keep the records so a reconnect can replay a gap whose frame a closed
+		// outbound pump discarded. The client deduplicates repeated ranges.
+		gapQueued := true
+		coveredByRetainedGap := false
+		gapCursor := params.Offset
+		if needsReset {
+			gapCursor = from
+		}
+		rx.deliveryMu.Lock()
+		for _, gap := range rx.outputGaps {
+			start, end := gap.start, gap.end
+			informational := end <= gapCursor
+			if informational {
+				log.From(ctx).Warn("session output gap notification replayed informationally during attach",
+					"session_id", string(sid), "start", start, "end", end, "reason", gap.reason)
+			} else if start <= gapCursor {
+				// The cursor is still in this lost range. Resume with the part
+				// that remains missing at the current cursor, not the old prefix.
+				start = gapCursor
+				from = end
+				coveredByRetainedGap = true
+			}
+			if end <= gapCursor || start == gapCursor {
+				if !enqueueSessionOutputGap(ctx, wconn, sid, start, end, gap.reason) {
+					gapQueued = false
+					break
+				}
+				if !informational {
+					log.From(ctx).Warn("session output gap notification delivered during attach",
+						"session_id", string(sid), "start", start, "end", end, "reason", gap.reason)
+				}
+			}
+		}
+		if gapQueued && hole != nil && !coveredByRetainedGap {
+			gapQueued = enqueueSessionOutputGap(ctx, wconn, sid, gapCursor, from, hole.reason)
+			if gapQueued {
+				log.From(ctx).Warn("session output gap notification delivered during attach",
+					"session_id", string(sid), "start", gapCursor, "end", from, "reason", hole.reason)
+			}
+		}
+		rx.deliveryMu.Unlock()
+
 		// Files (fm-w8): deliver the dirty paths the session's bindings
 		// accumulated while no connection was attached. Runs after the attach
 		// response — and after setSubscriber above, so the notifications
@@ -991,7 +1059,9 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayToolSurface(sid)
 		h.machine.replayPaneObservation(sid)
 		sidBytes, _ := session.IDToBytes(sid)
-		go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+		if gapQueued {
+			go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+		}
 		attached = true
 		return nil
 	})
@@ -1372,6 +1442,9 @@ func validateAttachRaw(raw json.RawMessage) string {
 	if p.SessionEpoch != nil && *p.SessionEpoch == 0 {
 		return "sessionEpoch starts at 1"
 	}
+	if msg := unsafeSessionOffset("offset", p.Offset); msg != "" {
+		return msg
+	}
 	return ""
 }
 
@@ -1389,6 +1462,9 @@ func validateAckRaw(raw json.RawMessage) string {
 	}
 	if msg := validateSessionIDShape(p.SessionID); msg != "" {
 		return "sessionId " + msg
+	}
+	if msg := unsafeSessionOffset("offset", p.Offset); msg != "" {
+		return msg
 	}
 	return ""
 }

@@ -99,6 +99,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import { formatBytes } from '../frontend/src/ui/format-bytes'
 import { BASE_URL } from './base-url'
 import {
   standalone as base,
@@ -183,11 +184,22 @@ async function freshClient(
   browser: Browser,
   endpoint: BackendEndpoint,
   label: string,
+  onServerFrame?: (frame: string) => void,
 ): Promise<Page> {
   // baseURL explicitly: a context made by hand inherits nothing from the
   // config's `use`, so `goto('/')` would have no origin to resolve against.
   const context = await browser.newContext({ baseURL: BASE_URL })
   const page = await context.newPage()
+  if (onServerFrame) {
+    page.on('websocket', (socket) => {
+      if (new URL(socket.url()).port !== String(endpoint.port)) return
+      socket.on('framereceived', (data) => {
+        const frame =
+          typeof data.payload === 'string' ? data.payload : data.payload.toString('utf8')
+        onServerFrame(frame)
+      })
+    })
+  }
   // On the failure report from its first byte, and the harness's to close.
   watchClient(page, label)
   await bindEndpoint(page, endpoint)
@@ -340,27 +352,43 @@ interface RemoteGates {
  *
  * POSIX sh, because the pane runs the host's real login shell.
  *
- * WHY THE FILLER IS OVERWRITTEN RATHER THAN PRINTED. It is one burst of `x`
- * ending in a carriage return, so it costs the megabytes the helper's window
- * is measured in without putting tens of thousands of rows into the browser.
- * The bytes are what the window counts, and they are real.
+ * The filler is NUL bytes, which count toward the helper window without
+ * flooding the terminal grid. The live-gap case inserts its visible marker
+ * after a 256 KiB NUL prefix so the browser can prove later output before it
+ * consumes the remaining filler.
  *
  * WHY `exit` AND NOT A SUBSHELL. The status this bead cares about is the
  * SESSION's — the one the helper reports and `ExitOutcome` maps — so the shell
  * itself has to end. A subshell would exercise shell integration instead,
  * which is a different owner answering a different question.
  */
-function longRemoteCommand(gates: RemoteGates, fillerBytes: number): string {
+function longRemoteCommand(
+  gates: RemoteGates,
+  fillerBytes: number,
+  markerAfterPrefixBytes?: number,
+): string {
   const marker = shellQuote(gates.markerFile)
   const detached = shellQuote(gates.detached)
   const fillerDone = shellQuote(gates.fillerDone)
   const finish = shellQuote(gates.finish)
+  const markerMidFiller =
+    markerAfterPrefixBytes === undefined
+      ? ''
+      : [
+          `head -c ${markerAfterPrefixBytes} /dev/zero`,
+          `printf '${MARKER_PREFIX}-%03d\\n' 1 >> ${marker}`,
+          `printf '${MARKER_PREFIX}-%03d\\n' 1`,
+          `head -c ${fillerBytes - markerAfterPrefixBytes} /dev/zero`,
+          'i=1',
+        ].join('; ')
+  const filler =
+    markerAfterPrefixBytes === undefined ? `head -c ${fillerBytes} /dev/zero` : markerMidFiller
   return [
     'i=0',
     `while [ ! -e ${finish} ]; do printf '${MARKER_PREFIX}-%03d\\n' "$i" >> ${marker}`,
     `printf '${MARKER_PREFIX}-%03d\\n' "$i"`,
     `if [ "$i" -eq 0 ]; then while [ ! -e ${detached} ]; do sleep 1; done`,
-    `head -c ${fillerBytes} /dev/zero | tr '\\0' x; printf '\\r'; : > ${fillerDone}; fi`,
+    `${filler}; printf '\\r'; : > ${fillerDone}; fi`,
     'i=$((i+1)); sleep 1; done',
     `exit ${EXIT_CODE}`,
   ].join('; ')
@@ -548,7 +576,11 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
     // The filler is sized from the HOST's own window, read out of its
     // inventory a moment ago — never from the coordinator's replay ring,
     // which is a different bound on a different machine.
-    const markerCommand = longRemoteCommand(gates, hostBefore.launch.windowBytes + 64 * 1024)
+    const markerCommand = longRemoteCommand(
+      gates,
+      hostBefore.launch.windowBytes + 64 * 1024,
+      256 * 1024,
+    )
     await clickIntoEditor(first)
     await first.keyboard.type(markerCommand)
     await first.keyboard.press('Enter')
@@ -653,9 +685,36 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .toContain(liveBefore.sessionId)
 
     // A genuinely new browser context on a genuinely new coordinator: an
-    // empty renderer session map, and a token neither of them has seen. The
-    // only route back to this pane is server-side live-session discovery.
-    returned = await freshClient(browser, endpoint, 'returned client')
+    // empty renderer session map, and a token neither of them has seen. Capture
+    // control frames before navigation so the browser's actual session.outputGap
+    // notification cannot race the assertions below.
+    let liveOutputGap: { sessionId: string; start: number; end: number; reason: string } | null =
+      null
+    returned = await freshClient(browser, endpoint, 'returned client', (frame) => {
+      if (typeof frame !== 'string') return
+      let envelope: { method?: unknown; params?: Record<string, unknown> }
+      try {
+        envelope = JSON.parse(frame) as { method?: unknown; params?: Record<string, unknown> }
+      } catch {
+        return
+      }
+      const params = envelope.params
+      if (
+        envelope.method === 'session.outputGap' &&
+        params &&
+        params.sessionId === liveBefore.sessionId &&
+        typeof params.start === 'number' &&
+        typeof params.end === 'number' &&
+        typeof params.reason === 'string'
+      ) {
+        liveOutputGap = {
+          sessionId: params.sessionId as string,
+          start: params.start,
+          end: params.end,
+          reason: params.reason,
+        }
+      }
+    })
     const returnedPane = paneForSession(returned, liveBefore.sessionId)
     await expect(returnedPane).toBeVisible({ timeout: 120_000 })
 
@@ -726,47 +785,71 @@ test('a remote helper build survives a fresh coordinator, names what it lost, an
       .first()
     await expect(returnedBlock).toBeVisible({ timeout: 60_000 })
 
-    // ── what was lost is NAMED, and named correctly ───────────────────────
-    //
-    // The card the reclaim raises (recovery-notice.tsx). A pane that came
-    // back short and said nothing is the soft degrade AGENTS.md forbids.
-    const notice = returnedPane.locator('.nocx-recovery-notice')
+    // ── the actual live event and its distinct notice ──────────────────────
+    // The new client must receive the control-plane event, not merely recover
+    // historical gap metadata. Its live title is deliberately distinct from
+    // the reclaim card below.
+    await expect
+      .poll(() => liveOutputGap, {
+        timeout: 60_000,
+        message: 'the returned browser did not receive session.outputGap for the reclaimed session',
+      })
+      .not.toBeNull()
+    expect(liveOutputGap!.sessionId).toBe(liveBefore.sessionId)
+    expect(liveOutputGap!.reason).toBe('hostWindow')
+    expect(liveOutputGap!.end).toBeGreaterThan(liveOutputGap!.start)
+
+    const liveNotice = returnedPane
+      .locator('.nocx-recovery-notice')
+      .filter({ hasText: /bytes of live output are missing/i })
+    await expect(liveNotice).toBeVisible({ timeout: 60_000 })
+    await expect(liveNotice.locator('.ui-status-card__title')).toHaveText(
+      `${liveOutputGap!.end - liveOutputGap!.start} bytes of live output are missing`,
+    )
+    await expect(liveNotice.locator('.ui-status-card__desc')).toHaveText(
+      "The execution host's output window moved past this tab.",
+    )
+
+    // ── what remains missing is named without repeating the live range ─────
+    // The historical card keeps the distinct recording loss beside the live
+    // hostWindow notice. Derive its exact byte count from the coordinator's
+    // output ledger, then require the cap clause and exclude the already-named
+    // hostWindow range.
+    const finalOutput = await recordedText(endpoint, liveAfter!)
+    const capLossBytes = finalOutput.gaps
+      .filter((gap) => gap.reason === 'cap')
+      .reduce((total, gap) => total + gap.end - gap.start, 0)
+    expect(capLossBytes).toBeGreaterThan(0)
+
+    const notice = returnedPane
+      .locator('.nocx-recovery-notice')
+      .filter({ hasText: /of this session's output is missing/i })
     await expect(notice).toBeVisible({ timeout: 60_000 })
-    await expect(notice).toContainText(/of this session's output is missing/i)
-    // And the REASON, in the product's own words and IN ITS OWN CLAUSE. The
-    // card accounts for the hole one clause per owner (recovery-notice.tsx
-    // `clauses`), so the word appearing somewhere in the sentence is not the
-    // same fact as the reason being named: `cap` bytes are reported as "the
-    // recording's size limit dropped", and only a reason this build has no
-    // sentence for reaches the reader as the wire's own word. Asserting the
-    // CLAUSE is what makes a host-window hole filed under some other reason
-    // fail here, which is the whole point — a sentence that sent a person to
-    // a retention knob would be sending them to one that did nothing about
-    // the execution host's window.
-    //
-    // MEASURED (2026-09-02): recording the hole as `unrecorded` in
-    // ws_session_record.go's sessionOutputHoleReason turns this clause into
-    // "…that was never recorded" and this line goes red.
-    //
-    // A BARE `not.toContainText('size limit')` STOOD HERE AND WAS WRONG, and
-    // the run that would have failed on it is the run where everything works.
-    // This scenario produces TWO holes and both are correctly named: the
-    // host's window reclaimed ~96 kB that no coordinator could ever have
-    // received, and the fresh coordinator's OWN retention then dropped ~3.9 MB
-    // of the 4 MiB replay it did receive — measured as
-    // `[{1797..98304 hostWindow}, {131072..4046848 cap}]`. A card that says
-    // both is the card being honest about two different owners, so a blanket
-    // negative could only ever fail the product for telling the truth.
-    await expect(notice).toContainText(/missing as "hostWindow"/)
+    await expect(notice.locator('.ui-status-card__title')).toHaveText(
+      `${formatBytes(capLossBytes)} of this session's output is missing`,
+    )
+    await expect(notice.locator('.ui-status-card__desc')).toContainText(
+      "the recording's size limit dropped",
+    )
+    await expect(notice.locator('.ui-status-card__desc')).not.toContainText('hostWindow')
 
     // The same fact off the coordinator's own method, where the reason is a
     // field rather than a sentence.
-    const finalOutput = await recordedText(endpoint, liveAfter!)
     expect(finalOutput.gaps.length).toBeGreaterThan(0)
     const hostWindowGaps = finalOutput.gaps.filter((gap) => gap.reason === 'hostWindow')
     expect(hostWindowGaps.length).toBeGreaterThan(0)
+    expect(
+      hostWindowGaps.some(
+        (gap) => gap.start === liveOutputGap!.start && gap.end === liveOutputGap!.end,
+      ),
+    ).toBe(true)
     expect(hostWindowGaps.some((gap) => gap.end - gap.start > 0)).toBe(true)
     expect(finalOutput.produced).toBeGreaterThan(producedAtDetach)
+    await expect(
+      returnedPane.locator('.xterm-live-container .term-grid-row', {
+        hasText: `${MARKER_PREFIX}-001`,
+      }),
+    ).toHaveCount(1)
 
     // The markers the recording DOES hold are one process's output in stream
     // order — not two runs spliced together at the reclaim.

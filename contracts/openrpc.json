@@ -11486,6 +11486,9 @@
       "$ref": "https://nocx.local/contracts/session.output.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/session.outputGap.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/session.recoveryStatus.schema.json"
     },
     {

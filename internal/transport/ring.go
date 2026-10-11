@@ -633,7 +633,15 @@ func (r *outputRing) inFlightLocked(floor, pos uint64) uint64 {
 // session's output permanently. Credit is a sliding window, not
 // stop-and-wait: it reopens as soon as enough has been acked, not once all
 // of it has.
-func (r *outputRing) waitForCredit(ctx context.Context, since, pos, limit uint64) (closed bool) {
+func (r *outputRing) waitForCredit(ctx context.Context, since, pos, limit uint64) bool {
+	return r.waitForCreditOrWake(ctx, since, pos, limit, nil)
+}
+
+// waitForCreditOrWake applies the same credit bound as waitForCredit, but
+// releases a ring pump to recheck its control-effect queue when wake closes.
+// The caller still has to satisfy the credit predicate before sending more
+// PTY bytes.
+func (r *outputRing) waitForCreditOrWake(ctx context.Context, since, pos, limit uint64, wake <-chan struct{}) (closed bool) {
 	r.mu.Lock()
 
 	for !r.closed && r.creditFloor(since) < pos && r.inFlightLocked(r.creditFloor(since), pos) >= limit {
@@ -642,6 +650,11 @@ func (r *outputRing) waitForCredit(ctx context.Context, since, pos, limit uint64
 
 		select {
 		case <-ctx.Done():
+			r.mu.Lock()
+			closed = r.closed
+			r.mu.Unlock()
+			return closed
+		case <-wake:
 			r.mu.Lock()
 			closed = r.closed
 			r.mu.Unlock()
@@ -702,6 +715,31 @@ func (r *outputRing) waitForData(ctx context.Context, pos uint64) (closed bool) 
 		}
 	}
 
+	closed = r.closed
+	r.mu.Unlock()
+	return closed
+}
+
+// waitForDataOrWake waits for new bytes, closure, cancellation, or a delivery
+// signal. Its closed generation broadcasts to all pumps, so a displaced pump
+// cannot consume the wake needed by the current subscriber.
+func (r *outputRing) waitForDataOrWake(ctx context.Context, pos uint64, wake <-chan struct{}) (closed bool) {
+	r.mu.Lock()
+	for !r.closed && r.written() <= pos {
+		ch := r.changed
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			r.mu.Lock()
+			closed = r.closed
+			r.mu.Unlock()
+			return closed
+		case <-wake:
+			return false
+		case <-ch:
+			r.mu.Lock()
+		}
+	}
 	closed = r.closed
 	r.mu.Unlock()
 	return closed

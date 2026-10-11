@@ -60,8 +60,8 @@ var ErrSessionItemNotFound = errors.New("no such item in this session")
 //
 // session.read naming one of the caller's DESCENDANTS is read through
 // PaneReader, which internal/app builds over the real helper client and the
-// agent rule (session_targets.go) — never through RendererRequester, which
-// stays reserved for the run's OWN pane (spec §11). This package cannot
+// agent rule (session_targets.go) — never through ScreenCaptureSource, which
+// stays reserved for the run's OWN pane. This package cannot
 // name internal/app's concrete types (app depends on assistant, not the
 // reverse — the same layering RunContext.PaneAccess already lives with), so
 // PaneReader.Read's access parameter is `any`: the RunContext.PaneAccess
@@ -201,8 +201,7 @@ func indexNewline(s string) int {
 
 // SessionSource is the shared read seam for session.list and session.read.
 // The transport implements it from the ledger for item state and finished
-// output. A running item is completed by the renderer half of session.read,
-// so the backend never reconstructs live terminal text.
+// output. A running item is completed by the owning runtime's screen capture.
 type SessionSource interface {
 	ListSessionItems(ctx context.Context, sessionID string, limit int) (SessionItems, error)
 	ReadSessionItem(ctx context.Context, sessionID, itemID string, start, count int) (SessionItemRead, error)
@@ -267,8 +266,8 @@ type sessionReadResult struct {
 	Note      string            `json:"note,omitempty"`
 	// Classification, Target, PendingMessages and ReadBarrier are set only
 	// for a sessionId naming a descendant (design §6.1, §7.1, §8, Task 8) —
-	// absent for the run's own pane, which keeps the renderer path above
-	// unchanged and has no target, classification or read barrier to
+	// absent for the run's own pane, which has no target, classification or
+	// read barrier to
 	// report.
 	Classification  string               `json:"classification,omitempty"`
 	Target          *sessionTargetWire   `json:"target,omitempty"`
@@ -384,7 +383,7 @@ func applyMarkedWindow(reader *agenttools.SessionReader, id string, start, count
 	*count = mark.Count
 }
 
-func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCapability, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
+func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCapability, source SessionSource, screenCapture ScreenCaptureSource, args json.RawMessage) (string, error) {
 	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
@@ -412,8 +411,7 @@ func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCa
 		targetSessionID = ownSession
 	}
 	// A sessionId naming a DESCENDANT is read through PaneReader — never
-	// through the renderer, which stays reserved for the run's own pane
-	// (design §11 "kept, deliberately"). This branches on the sessionId
+	// through the own-pane capture source. This branches on the sessionId
 	// alone, before any grant check: reader.Allows only ever covers the
 	// run's OWN session, and a descendant's authority is PaneAccess, a
 	// completely different capability (§7.1).
@@ -425,14 +423,14 @@ func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCa
 		return "", fmt.Errorf("session.read: session %q is outside the run's grant", sessionID)
 	}
 	if p.ID == "" {
-		return executeSessionScreen(ctx, sessionID, requester, p.Start, p.Count, bound.MaxBytes)
+		return executeSessionScreen(ctx, sessionID, screenCapture, p.Start, p.Count, bound.MaxBytes)
 	}
 	if reader.IsAutomaticItem(p.ID) {
 		// A ROW MARK NARROWS THE FROZEN SCREEN, exactly as it narrows a block
 		// below (nocx-hp8p2.7): a person who selected rows inside the pinned
 		// screen marked THAT item, and the span travelled here with the ask.
 		applyMarkedWindow(reader, p.ID, &p.Start, &p.Count)
-		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
+		return executeSessionItemScreen(ctx, sessionID, p.ID, screenCapture, p.Start, p.Count, bound.MaxBytes)
 	}
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
@@ -461,7 +459,7 @@ func executeSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCa
 		return "", fmt.Errorf("session.read: %w", err)
 	}
 	if item.State == "running" {
-		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
+		return executeSessionItemScreen(ctx, sessionID, p.ID, screenCapture, p.Start, p.Count, bound.MaxBytes)
 	}
 	outText, returnedEnd := boundBlockText(item.Text, item.Start, item.End, bound.MaxBytes)
 	out := sessionReadResult{
@@ -501,8 +499,8 @@ var descendantTargetKinds = map[string]sessionruntime.TargetKind{
 
 // executeDescendantSessionRead is session.read's path for a sessionId
 // naming one of the caller's descendants (design §6.1, §7.1, §11 "kept,
-// deliberately"): PaneReader — never RendererRequester, which stays
-// reserved for the run's own pane — asks the helper for a snapshot,
+// deliberately"): PaneReader — distinct from own-pane screen capture —
+// asks the helper for a snapshot,
 // classifies it with the agent rule, and, when target names a kind, mints
 // one from that same frame.
 func executeDescendantSessionRead(ctx context.Context, cap *agenttools.SessionDescendantCapability, sessionID, target string, maxBytes int64) (string, error) {
@@ -533,9 +531,8 @@ func executeDescendantSessionRead(ctx context.Context, cap *agenttools.SessionDe
 	return string(b), nil
 }
 
-// frameText joins a frame's rows into the same shape executeSessionScreen
-// already produces from the renderer's own frame body: one line per row,
-// blanks kept, cells joined in column order.
+// frameText joins a helper snapshot's rows into one line per row, blanks kept,
+// cells joined in column order.
 func frameText(f paneview.Frame) string {
 	lines := make([]string, 0, len(f.Lines))
 	for _, row := range f.Lines {
@@ -617,8 +614,8 @@ func sessionTargetWireFrom(t *TargetView) *sessionTargetWire {
 	return wire
 }
 
-func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, requester RendererRequester, start, count int, maxBytes int64) (string, error) {
-	body, err := executeSessionScreen(ctx, sessionID, requester, start, count, maxBytes)
+func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, screenCapture ScreenCaptureSource, start, count int, maxBytes int64) (string, error) {
+	body, err := executeSessionScreen(ctx, sessionID, screenCapture, start, count, maxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -635,15 +632,15 @@ func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, req
 	return string(b), nil
 }
 
-func executeSessionScreen(ctx context.Context, sessionID string, requester RendererRequester, start, count int, maxBytes int64) (string, error) {
-	if requester == nil {
-		return "", errors.New("session.read: no renderer requester is wired for this run")
+func executeSessionScreen(ctx context.Context, sessionID string, screenCapture ScreenCaptureSource, start, count int, maxBytes int64) (string, error) {
+	if screenCapture == nil {
+		return "", errors.New("session.read: no backend screen capture source is wired for this run")
 	}
 	var region *FrameRegion
 	if count > 0 {
 		region = &FrameRegion{Start: start, End: start + count}
 	}
-	body, err := requester.RequestScreen(ctx, sessionID, region)
+	body, err := screenCapture.RequestScreen(ctx, sessionID, region)
 	if err != nil {
 		return "", err
 	}
@@ -652,17 +649,23 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		return "", fmt.Errorf("session.read: frame body: %w", unmarshalErr)
 	}
 	if frame.Identity == nil {
-		return "", errors.New("session.read: the renderer's frame carried no capture identity")
+		return "", errors.New("session.read: backend capture carried no buffer identity")
 	}
-	asked := blockSpan{Start: 0, End: frame.Identity.Rows}
+	if frame.Range == nil {
+		return "", errors.New("session.read: backend capture carried no absolute row range")
+	}
+	if frame.Floor < 0 || frame.Total < frame.Floor || frame.Range.Start < frame.Floor || frame.Range.End < frame.Range.Start || frame.Range.End > frame.Total {
+		return "", errors.New("session.read: backend capture carried an invalid absolute row range")
+	}
+	asked := blockSpan{Start: frame.Floor, End: frame.Total}
 	if region != nil {
 		asked = blockSpan{Start: region.Start, End: region.End}
 	}
-	returned := asked
-	if frame.Range != nil {
-		returned = blockSpan{Start: frame.Range.Start, End: frame.Range.End}
+	returned := blockSpan{Start: frame.Range.Start, End: frame.Range.End}
+	if returned != asked {
+		return "", fmt.Errorf("session.read: backend capture returned [%d,%d), want the requested absolute range [%d,%d)", returned.Start, returned.End, asked.Start, asked.End)
 	}
-	// A frame row is its text: the renderer joins the cells' characters in
+	// A frame row is its text: the helper joins the cells' characters in
 	// column order before the row leaves it, blanks kept, so the row's width
 	// is the screen's (nocx-u3vxd).
 	lines := make([]string, 0, len(frame.Rows))
@@ -675,8 +678,8 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 	out := sessionReadResult{
 		SessionID: sessionID,
 		State:     "screen",
-		Source:    "renderer",
-		Total:     frame.Identity.Rows,
+		Source:    "backend",
+		Total:     frame.Total,
 		Window:    asked,
 		Returned:  returned,
 		Text:      text,
@@ -691,8 +694,9 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 	}
 	out.Identity = &readScreenIdent{
 		Buffer: struct {
-			Kind string `json:"kind"`
-		}{Kind: frame.Identity.Buffer.Kind},
+			Kind     string `json:"kind"`
+			Instance uint64 `json:"instance"`
+		}{Kind: frame.Identity.Buffer.Kind, Instance: frame.Identity.Buffer.Instance},
 		Cols: frame.Identity.Cols, Rows: frame.Identity.Rows, Generation: frame.Identity.Generation,
 	}
 	if frame.Identity.Buffer.Kind == "alternate" {

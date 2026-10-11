@@ -179,6 +179,10 @@ func (b *Budget) release(n int64) {
 	b.mu.Unlock()
 }
 
+func (b *Budget) hasRoom(n int64) bool {
+	return n >= 0 && b.queued.Load()+n <= b.max
+}
+
 // ErrStalled is returned by TryEnqueue when the frame had to be dropped:
 // the connection's outbound queue is full (or the process-wide budget is
 // exhausted), the connection is marked outbound-stalled, and the stall
@@ -217,6 +221,7 @@ type Conn struct {
 	queue         chan Frame // refreshable: PTY output, notifications
 	criticalQueue chan Frame // reserved: requests, responses, and carriers
 	overload      chan Frame // capacity 1: the reserved control-overload slot
+	roomMu        sync.Mutex
 	room          chan struct{}
 
 	stalled    atomic.Bool
@@ -240,7 +245,7 @@ func New(sock Socket, cfg Config) *Conn {
 		queue:         make(chan Frame, depth),
 		criticalQueue: make(chan Frame, DefaultCriticalQueueDepth),
 		overload:      make(chan Frame, 1),
-		room:          make(chan struct{}, 1),
+		room:          make(chan struct{}),
 		budget:        cfg.Budget,
 		onStall:       cfg.OnStall,
 		closed:        make(chan struct{}),
@@ -436,19 +441,25 @@ func (c *Conn) setStall(stalled bool) {
 	}
 }
 
-// WaitForRoom blocks until the queue has room or ctx is done. It is used by
-// the per-session ring streams (the transport's ringToConn), which are
-// credit-bounded loops rather than handlers: they are allowed to wait for
-// the renderer to drain. Handlers must never call this — their contract is
-// the non-blocking TryEnqueue.
-func (c *Conn) WaitForRoom(ctx context.Context) error {
+// WaitForRoom blocks until this queue has a slot AND the shared budget can
+// reserve bytes, or ctx/connection is closed. It is used by per-session
+// streaming and snapshot-offer workers, never request handlers. The caller
+// retries TryEnqueue after waking because another session may win the slot.
+func (c *Conn) WaitForRoom(ctx context.Context, bytes int) error {
+	if bytes < 0 || (c.budget != nil && int64(bytes) > c.budget.max) {
+		return ErrFrameExceedsBudget
+	}
 	for {
 		select {
 		case <-c.closed:
 			return ErrConnClosed
 		default:
 		}
-		if len(c.queue) < cap(c.queue) {
+		queueWake := c.roomSignal()
+		budgetWake := budgetRoom(c.budget)
+		queueReady := len(c.queue) < cap(c.queue)
+		budgetReady := c.budget == nil || c.budget.hasRoom(int64(bytes))
+		if queueReady && budgetReady {
 			return nil
 		}
 		select {
@@ -456,9 +467,19 @@ func (c *Conn) WaitForRoom(ctx context.Context) error {
 			return ctx.Err()
 		case <-c.closed:
 			return ErrConnClosed
-		case <-c.room:
+		case <-queueWake:
+		case <-budgetWake:
 		}
 	}
+}
+
+var ErrFrameExceedsBudget = errors.New("outbound frame exceeds shared queue budget")
+
+func budgetRoom(b *Budget) <-chan struct{} {
+	if b == nil {
+		return nil
+	}
+	return b.changedSignal()
 }
 
 // ReadMessage forwards to the socket. Only the transport's read loop calls
@@ -584,9 +605,15 @@ func (c *Conn) write(deadline time.Duration, f Frame) error {
 	return nil
 }
 
+func (c *Conn) roomSignal() <-chan struct{} {
+	c.roomMu.Lock()
+	defer c.roomMu.Unlock()
+	return c.room
+}
+
 func (c *Conn) pingRoom() {
-	select {
-	case c.room <- struct{}{}:
-	default:
-	}
+	c.roomMu.Lock()
+	close(c.room)
+	c.room = make(chan struct{})
+	c.roomMu.Unlock()
 }

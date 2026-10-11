@@ -901,8 +901,8 @@ func recoverAckErr(t *testing.T, conn *websocket.Conn, sid, generation string, i
 // shell's one-shot recovery fence and applying the conventional presentation
 // — moves it to Native. Until the ack lands, the lane is neither
 // authenticated nor a usable conventional terminal: it stays Lost.
-func TestRecoveryEffectRecordsSightedStateBeforeAtMostOnceDelivery(t *testing.T) {
-	e, _, sid, lost := recoverEnv(t)
+func TestRecoverySightingResyncThenAckAfterReattach(t *testing.T) {
+	e, pub, sid, lost := recoverEnv(t)
 	if lost.Recovery == nil {
 		t.Fatal("missing recovery episode")
 	}
@@ -922,9 +922,9 @@ func TestRecoveryEffectRecordsSightedStateBeforeAtMostOnceDelivery(t *testing.T)
 	if sighted.Recovery.EpisodeID != episodeID {
 		t.Fatalf("sighted episode = %+v", sighted.Recovery)
 	}
-	_, raw, err := e.conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("read session.effect: %v", err)
+	_, raw, readErr := e.conn.ReadMessage()
+	if readErr != nil {
+		t.Fatalf("read session.effect: %v", readErr)
 	}
 	var msg struct {
 		Method string          `json:"method"`
@@ -972,6 +972,66 @@ func TestRecoveryEffectRecordsSightedStateBeforeAtMostOnceDelivery(t *testing.T)
 	replayedJSON := strings.ToLower(string(replayRaw))
 	if strings.Contains(replayedJSON, "nonce") || strings.Contains(replayedJSON, "fence") {
 		t.Fatalf("replayed recovery fact exposed a private recovery token: %s", replayRaw)
+	}
+	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleLost {
+		t.Fatalf("lane after reattach but before ack = %v, want Lost", st.Lifecycle)
+	}
+
+	// The renderer can acknowledge only after resync identifies this same
+	// sighted episode. Collect the response and Native fact in either wire
+	// order from the reattached subscriber.
+	request, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 4, "method": "lifecycle.recoverAck", "params": map[string]any{
+		"sessionId": sid, "episodeId": episodeID,
+	}})
+	if err != nil {
+		t.Fatalf("marshal recoverAck: %v", err)
+	}
+	if err := connB.WriteMessage(websocket.TextMessage, request); err != nil {
+		t.Fatalf("write recoverAck after reattach: %v", err)
+	}
+	ackSeen := false
+	var nativeFact *lifecyclepub.Fact
+	loopUntil := time.Now().Add(wantWithin)
+	for !ackSeen || nativeFact == nil {
+		_ = connB.SetReadDeadline(loopUntil)
+		messageType, raw, readErr := connB.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("reattached recoverAck did not produce both response and Native fact (response=%v, fact=%+v): %v", ackSeen, nativeFact, readErr)
+		}
+		if messageType != websocket.TextMessage {
+			continue
+		}
+		var message struct {
+			ID     *json.RawMessage `json:"id"`
+			Method string           `json:"method"`
+			Error  *jsonrpcErrorObj `json:"error"`
+			Params json.RawMessage  `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &message); err != nil {
+			t.Fatalf("decode reattached recoverAck message: %v\nraw: %s", err, raw)
+		}
+		if message.ID != nil && string(*message.ID) == "4" {
+			if message.Error != nil {
+				t.Fatalf("reattached recoverAck: %+v", message.Error)
+			}
+			ackSeen = true
+			continue
+		}
+		if message.Method == "session.effect" {
+			t.Fatalf("at-most-once recovery effect replayed after reattach: %s", raw)
+		}
+		if message.Method == "lifecycle.changed" {
+			var fact lifecyclepub.Fact
+			if err := json.Unmarshal(message.Params, &fact); err != nil {
+				t.Fatalf("decode lifecycle fact after reattach: %v\nraw: %s", err, message.Params)
+			}
+			if fact.Lane == lost.Lane && fact.Lifecycle == lifecyclepub.LifecycleNative {
+				nativeFact = &fact
+			}
+		}
+	}
+	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleNative {
+		t.Fatalf("lane after reattached ack = %v, want Native", st.Lifecycle)
 	}
 }
 

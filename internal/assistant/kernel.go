@@ -1716,11 +1716,7 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 		if !ok {
 			return "", fmt.Errorf("tool %q: capability is %T, not dynamic session capability", decl.Name, capability)
 		}
-		var sessions SessionSource
-		if m.requester != nil {
-			sessions, _ = m.requester.(SessionSource)
-		}
-		return executeSessionRead(runCtx, reader, sessions, m.requester, rawArgs)
+		return executeSessionRead(runCtx, reader, m.runSeams.sessions, m.runSeams.screenCapture, rawArgs)
 	case agenttools.InRenderer:
 		return m.executeInRenderer(runCtx, decl, capability, rawArgs)
 	}
@@ -1732,10 +1728,8 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 }
 
 // seams is the run's wiring handed to an InGo executor: what a tool needs
-// that is neither its arguments nor its authority. The session record rides
-// on the same value the renderer requests do, because the transport adapts one
-// object for both (requester.go); a run with no requester wired hands over a
-// nil source, and session.list says so rather than answering empty.
+// that is neither its arguments nor its authority. Session records and screen
+// capture are separate backend-owned sources; neither is a renderer request.
 func (m *effectKernel) seams() toolSeams {
 	seams := m.runSeams
 	if m.requester != nil {

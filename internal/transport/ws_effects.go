@@ -9,13 +9,14 @@ import (
 )
 
 type sessionEffectParams struct {
-	SessionID  string `json:"sessionId"`
-	Generation string `json:"generation"`
-	EffectID   string `json:"effectId"`
-	Kind       string `json:"kind"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	EpisodeID  string `json:"episodeId,omitempty"`
+	SessionID      string `json:"sessionId"`
+	Generation     string `json:"generation"`
+	EffectID       string `json:"effectId"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	EpisodeID      string `json:"episodeId,omitempty"`
+	ScreenRevision uint64 `json:"screenRevision,omitempty"`
 }
 
 func effectKindName(kind proto.EffectKind) (string, bool) {
@@ -77,6 +78,13 @@ func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame
 	if !ok || effect.EffectID == 0 || effect.Generation == 0 {
 		return false
 	}
+	if effect.Kind == proto.EffectPromptBoundary {
+		if effect.ScreenRevision == 0 {
+			return false
+		}
+	} else if effect.ScreenRevision != 0 {
+		return false
+	}
 	if effect.Kind == proto.EffectRecovery {
 		if len(effect.Title) != 0 || len(effect.Body) != 0 || effect.EpisodeID == "" || !s.recordRecoverySighting(sid, effect.EpisodeID) {
 			return false
@@ -96,16 +104,20 @@ func (s *WSServer) PublishSessionEffect(sid session.ID, effect proto.EffectFrame
 		SessionID: string(sid), Generation: strconv.FormatUint(effect.Generation, 10),
 		EffectID: strconv.FormatUint(effect.EffectID, 10), Kind: kind,
 		Title: string(effect.Title), Body: string(effect.Body), EpisodeID: effect.EpisodeID,
+		ScreenRevision: effect.ScreenRevision,
 	}
 	waitForBytes := effect.Kind == proto.EffectPromptBoundary && effect.StreamOffset > 0
 	offset := effect.StreamOffset
-	accepted, coalesced := rx.queueEffect(wconn, offset, waitForBytes, "session.effect", mustMarshal(params))
+	accepted, coalesced := rx.queueEffect(wconn, offset, waitForBytes, effect.ScreenRevision, "session.effect", mustMarshal(params))
 	if !accepted {
 		s.log.Debug("session.effect dropped: pending delivery budget full or subscriber changed", "session", string(sid), "effect_id", effect.EffectID)
 		return false
 	}
 	if coalesced {
 		s.log.Debug("coalesced an older pending prompt boundary", "session", string(sid), "effect_id", effect.EffectID)
+	}
+	if effect.ScreenRevision > 0 {
+		s.ensureScreenOffer(sid, rx, wconn, effect.ScreenRevision)
 	}
 	if cursor, ok := rx.deliveryCursor(wconn); ok {
 		if !rx.enqueueDueEffects(wconn, cursor) {

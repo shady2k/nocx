@@ -112,7 +112,7 @@ type RequestKind struct {
 	// MaxResolutionBytes bounds one resolution RPC's params FOR THIS KIND.
 	// Zero means the mechanism default (maxResolutionBytes, 1 KiB — the
 	// bound the two existing closed-outcome resolvers run under). A kind
-	// whose resolution legitimately carries a payload (readScreen's frame)
+	// whose resolution legitimately carries a payload (the run's output window)
 	// declares its own bound here, and the broker enforces it on the
 	// read-loop ingress, before the pending request is consumed — the
 	// renderer cannot make the broker ingest an unbounded answer by volume.
@@ -175,9 +175,9 @@ var ErrRequestUndelivered = errors.New("request notification could not be delive
 // moments ago; its payload is a closed outcome and at most a small result.
 // The universal maxParamsBytes is the floor every control method gets; a
 // resolution is bounded far tighter (the budgetTiny, 1 KiB, the two existing
-// resolvers already run under), so a renderer cannot make the broker ingest
+// resolvers already run under), so a client cannot make the broker ingest
 // an unbounded answer by volume. A kind whose resolution legitimately
-// carries a payload (readScreen's frame) declares a larger bound on its
+// carries a payload (the run's output window) declares a larger bound on its
 // RequestKind; the broker learns it at register and enforces it per method.
 const maxResolutionBytes = 1 << 10 // 1 KiB
 
@@ -618,11 +618,11 @@ func (b *Broker) forgetRunLeaseLocked(requestID string) {
 // its result or its mapped error.
 //
 // The envelope's requestId is read first (presence and bound — the
-// discipline already applied to renderer params). The SIZE bound is
+// discipline already applied to client params). The SIZE bound is
 // per-kind, learned from the requests registered for this resolution
 // method, and applied BEFORE the lookup — an oversized envelope is refused
 // at the cheapest point whether or not its id is live: a kind whose
-// resolution carries a payload (readScreen's frame) declares its own bound
+// resolution carries a payload (the run's output window) declares its own bound
 // at register, while the closed-outcome asks stay at the tight mechanism
 // default. A request that was never minted, already resolved, timed out,
 // resolved through a different method than its kind declared, or answered

@@ -851,7 +851,8 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 			if err := sub.sink.SendEffectFrame(proto.EffectFrame{
 				Session: s.raw, Subscriber: sub.raw,
 				Generation: uint64(boundary.At.Generation), EffectID: uint64(boundary.ID),
-				StreamOffset: boundary.StreamOffset, Kind: proto.EffectPromptBoundary,
+				StreamOffset: boundary.StreamOffset, ScreenRevision: boundary.ScreenRevision,
+				Kind: proto.EffectPromptBoundary,
 			}); err != nil {
 				nocxlog.From(ctx).Warn("ordered prompt boundary not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(boundary.ID), "err", err)
 				return
@@ -969,11 +970,12 @@ func (s *hostSession) serveScreen(ctx context.Context, sub *subscriber, cons ses
 			frame := proto.EffectFrame{
 				Session: s.raw, Subscriber: sub.raw,
 				Generation: uint64(effect.At.Generation), EffectID: uint64(effect.ID),
-				StreamOffset: effect.StreamOffset,
-				Kind:         kind,
-				Title:        effect.Title,
-				Body:         effect.Body,
-				EpisodeID:    effect.EpisodeID,
+				StreamOffset:   effect.StreamOffset,
+				ScreenRevision: effect.ScreenRevision,
+				Kind:           kind,
+				Title:          effect.Title,
+				Body:           effect.Body,
+				EpisodeID:      effect.EpisodeID,
 			}
 			if err := sub.sink.SendEffectFrame(frame); err != nil {
 				log.Warn("session effect not delivered", "session", s.id.Session, "subscriber", sub.id, "effect_id", uint64(effect.ID), "err", err)

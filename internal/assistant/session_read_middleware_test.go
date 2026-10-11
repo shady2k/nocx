@@ -45,7 +45,29 @@ func (r *recordingRequester) RequestScreen(ctx context.Context, sessionID string
 	if r.err != nil {
 		return nil, r.err
 	}
-	return r.body, nil
+	return screenBodyForRegion(r.body, region), nil
+}
+
+func screenBodyForRegion(body json.RawMessage, region *FrameRegion) json.RawMessage {
+	if region == nil {
+		return body
+	}
+	var frame frameBodyWire
+	if err := json.Unmarshal(body, &frame); err != nil || frame.Range == nil {
+		return body
+	}
+	start := region.Start - frame.Range.Start
+	end := region.End - frame.Range.Start
+	if start < 0 || end < start || end > len(frame.Rows) {
+		return body
+	}
+	frame.Rows = frame.Rows[start:end]
+	frame.Range = &frameRangeWire{Start: region.Start, End: region.End}
+	selected, err := json.Marshal(frame)
+	if err != nil {
+		return body
+	}
+	return selected
 }
 
 // RequestRun exists only to satisfy the RendererRequester interface: the
@@ -62,16 +84,36 @@ func (r *recordingRequester) calls() []askedScreen {
 
 // liveFrameBody builds a minimal validated frame body the way the transport's
 // readScreen kind resolves one: text rows, cursor, identity and range.
+func liveFrameBodyRows(count int) json.RawMessage {
+	rows := make([]string, count)
+	for i := range rows {
+		rows[i] = "row"
+	}
+	return liveFrameBody(rows...)
+}
+
+func liveFrameBodyWithFirst(count int, first string) json.RawMessage {
+	rows := make([]string, count)
+	if count > 0 {
+		rows[0] = first
+	}
+	for i := 1; i < count; i++ {
+		rows[i] = "row"
+	}
+	return liveFrameBody(rows...)
+}
+
 func liveFrameBody(rows ...string) json.RawMessage {
 	wire := make([]map[string]any, 0, len(rows))
 	for _, text := range rows {
 		wire = append(wire, map[string]any{"kind": "text", "text": text})
 	}
 	b, _ := json.Marshal(map[string]any{
+		"floor": 0, "total": len(rows),
 		"rows":   wire,
 		"cursor": map[string]any{"line": 0, "col": 0},
 		"identity": map[string]any{
-			"buffer": map[string]any{"kind": "normal"},
+			"buffer": map[string]any{"kind": "normal", "instance": 1},
 			"cols":   80, "rows": len(rows), "generation": 7,
 		},
 		"range": map[string]any{"start": 0, "end": len(rows)},
@@ -161,7 +203,7 @@ func TestMiddleware_ReadScreenWithoutRequesterIsHonest(t *testing.T) {
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil) // requester nil
 
 	_, err := wrappedEndpoint(mw, "session.read", "c1", `{}`)
-	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
+	if err == nil || !strings.Contains(err.Error(), "no backend screen capture source is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
 	}
 }

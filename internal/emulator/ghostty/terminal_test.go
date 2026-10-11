@@ -123,6 +123,26 @@ func TestDecrqmAnswersTheAnsiForm(t *testing.T) {
 // an authoritative column width, and a colour that keeps its three shapes
 // apart. The wide cluster is the case a font measurement cannot answer and the
 // reason the emulator owns widths.
+// TestModesExposeOnlyTheClientRoutingFacts verifies the two mode facts the
+// client needs for local gesture routing. The modes are read from this same
+// emulator state; the frontend does not parse terminal bytes to reconstruct
+// them.
+func TestModesExposeOnlyTheClientRoutingFacts(t *testing.T) {
+	term := newTerminal(t, 20, 4)
+	if got, err := term.Modes(); err != nil || got != (emulator.Modes{}) {
+		t.Fatalf("initial modes = %+v, %v; want zero modes", got, err)
+	}
+	ingest(t, term, "\x1b[?2004h\x1b[?1002h")
+	want := emulator.Modes{BracketedPaste: true, MouseTracking: true}
+	if got, err := term.Modes(); err != nil || got != want {
+		t.Fatalf("enabled modes = %+v, %v; want %+v", got, err, want)
+	}
+	ingest(t, term, "\x1b[?2004l\x1b[?1002l")
+	if got, err := term.Modes(); err != nil || got != (emulator.Modes{}) {
+		t.Fatalf("reset modes = %+v, %v; want zero modes", got, err)
+	}
+}
+
 func TestCellReportsGraphemeWidthAndStyle(t *testing.T) {
 	term := newTerminal(t, 20, 3)
 	ingest(t, term, "\x1b[1;31mA\x1b[0m\x1b[38;2;1;2;3mB\x1b[0m\x1b[48;5;42mC\x1b[0m\x1b[4:3mD\x1b[0m中")

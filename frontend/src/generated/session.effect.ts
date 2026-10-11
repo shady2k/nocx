@@ -22,4 +22,8 @@ export type SessionEffect = {
   title: string
   body: string
   episodeId?: string
+  /**
+   * For promptBoundary only, the lower-bound full-frame revision that must be offered first. It is correlation, not acknowledgement or authority.
+   */
+  screenRevision?: number
 }

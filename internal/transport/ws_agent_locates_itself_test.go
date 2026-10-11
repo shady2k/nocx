@@ -2,11 +2,11 @@ package transport
 
 // The epic's own sentence, watched end to end (nocx-z4hgm, closing
 // nocx-avogl): a person asks the assistant to look at THEIR session; it
-// calls readScreen for the session the backend granted to the run.
+// calls session.read for the session the backend granted to the run.
 //
 // The model receives no session identity in its tool arguments. The backend
 // injects the grant's sole session scope into the resolver, and this test
-// asserts that the broker request still names the pane the person asked about.
+// asserts that the backend capture source reads the pane the person asked about.
 // A second session is open the whole time, so "the right session" is only a
 // claim if there was another one to get wrong.
 
@@ -27,15 +27,9 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
-// sessionIDInSystemPrompt is the model's own path to where it is: the
-// system message of the request it was just sent, scanned for a session id.
-//
-// It matches the SHAPE of a session id (session.NewID: 32 hex characters)
-// rather than the prompt's prose, so rewording "Session id:" does not
-// break the test while dropping the id does — which is the direction the
-// bead asks for. It reads only the system message: the id must arrive as a
-// standing fact about the pane, not because the person happened to type it
-// into their question.
+// sessionIDInSystemPrompt reads only the model-facing system message. The
+// run's pane identity stays backend-owned and must not be exposed there; the
+// backend resolves an omitted sessionId from the run's narrowed capability.
 var sessionIDShape = regexp.MustCompile(`[0-9a-f]{32}`)
 
 // The two panes the person has open. The question is asked in the second.
@@ -129,56 +123,7 @@ func (p *selfLocatingProvider) state() (int, string, []string) {
 // run that terminalized first is the refusal path (a call the grant does
 // not cover is refused before the broker is ever asked), and its sentence
 // is the only useful thing to print.
-func awaitReadScreenRequest(t *testing.T, h *askHarness, prov *selfLocatingProvider, d time.Duration) (requestID, sessionID string) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			reqs, learned, bodies := prov.state()
-			t.Fatalf("no agent.readScreenRequest within %s; provider requests=%d, id it read from the prompt=%q, bodies=%v",
-				d, reqs, learned, bodies)
-		}
-		_ = h.conn.SetReadDeadline(time.Now().Add(remaining))
-		_, msg, err := h.conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("waiting for agent.readScreenRequest: %v", err)
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil || n.ID != nil {
-			continue
-		}
-		switch n.Method {
-		case "agent.readScreenRequest":
-			var req struct {
-				RequestID string `json:"requestId"`
-				SessionID string `json:"sessionId"`
-			}
-			if err := json.Unmarshal(n.Params, &req); err != nil {
-				t.Fatalf("readScreenRequest unmarshal: %v\nraw: %s", err, n.Params)
-			}
-			return req.RequestID, req.SessionID
-		case "agent.runState":
-			var st struct {
-				State string `json:"state"`
-				Error string `json:"error"`
-			}
-			_ = json.Unmarshal(n.Params, &st)
-			_, learned, _ := prov.state()
-			t.Fatalf("the run reached %q (%s) before the screen was ever asked for; "+
-				"the model called readScreen with %q — the id it found in the system prompt",
-				st.State, st.Error, learned)
-		}
-	}
-}
 
-// TestAssistant_LooksAtPaneDespiteOperatorSessionScope is the transport
-// regression for a policy row that names another session. The real engine,
-// socket, ledger, broker and grant are exercised; only the model is scripted.
 func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	const marker = "(publickey)."
 
@@ -190,7 +135,8 @@ func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(operatorSessionScopedPolicyStore(t)))
+	source := &recordingScreenCapture{body: screenCaptureBody(t, 0, "Permission denied", marker)}
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(operatorSessionScopedPolicyStore(t)), WithScreenCaptureSource(source))
 	h.createEndpointAt(srv.URL)
 
 	// Two real panes on the layout chain, each with a live session as its
@@ -222,47 +168,29 @@ func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 		t.Fatalf("ask state = %q, want prepared", res.State)
 	}
 
-	// THE ASSERTION: the id that travelled. The model was told nothing by
-	// this test; whatever reached the broker came out of the system prompt
-	// and through the run's scope check.
-	requestID, gotSession := awaitReadScreenRequest(t, h, prov, 15*time.Second)
-	if gotSession != sid {
-		which := "an id belonging to neither open pane"
-		if gotSession == otherSession {
-			which = "the OTHER pane's session"
-		}
-		t.Fatalf("readScreen was aimed at %q (%s); the question was asked in %q", gotSession, which, sid)
-	}
-	if requestID == "" {
-		t.Fatal("readScreenRequest carries no requestId")
-	}
-
-	// The renderer answers with the screen the person is looking at.
-	reply := jsonrpcCall(t, h.conn, "agent.readScreenResolved",
-		readScreenFrameWire(t, requestID, "Permission denied", marker))
-	var rerr struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(reply, &rerr); err != nil {
-		t.Fatalf("resolution response unmarshal: %v", err)
-	}
-	if rerr.Error != nil {
-		t.Fatalf("readScreenResolved refused: %+v", rerr.Error)
-	}
-
-	// And the answer arrives, naming what only the frame could have told
-	// it, and the run completes: a refusal or a failure is not this test
-	// passing.
+	// The model names no session id. The backend resolves the run's pane
+	// from its narrowed capability, not from the neighboring pane or the
+	// operator-authored policy scope.
 	answer, state, stateErr := collectAnswer(t, h, res.RunID, 20*time.Second)
 	if state != "completed" {
 		reqs, learned, bodies := prov.state()
-		t.Fatalf("run state = %q (%s); answer so far %q; provider requests=%d learned=%q bodies=%v",
-			state, stateErr, answer, reqs, learned, bodies)
+		t.Fatalf("run state = %q (%s); answer %q; provider requests=%d learned=%q bodies=%v", state, stateErr, answer, reqs, learned, bodies)
 	}
 	if !strings.Contains(answer, marker) {
 		reqs, learned, bodies := prov.state()
-		t.Fatalf("answer = %q, want it to name %q — the line only the frame carried; provider requests=%d learned=%q bodies=%v",
-			answer, marker, reqs, learned, bodies)
+		t.Fatalf("answer = %q, want it to name %q — the backend screen capture carried it; provider requests=%d learned=%q bodies=%v", answer, marker, reqs, learned, bodies)
+	}
+	_, learned, _ := prov.state()
+	if learned != "" {
+		t.Fatalf("system prompt exposed session id %q; pane identity must stay backend-owned", learned)
+	}
+	calls := source.snapshotCalls()
+	if len(calls) != 1 || calls[0].sessionID != sid {
+		which := "an id belonging to neither open pane"
+		if len(calls) != 0 && calls[0].sessionID == otherSession {
+			which = "the OTHER pane's session"
+		}
+		t.Fatalf("backend screen capture calls = %+v (%s); the question was asked in %q", calls, which, sid)
 	}
 
 	// The answer reaches the block: the turn's prose, sealed, carrying the

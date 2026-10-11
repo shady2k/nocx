@@ -384,3 +384,27 @@ func TestOutputRing_ReattachAfterReclaimIsNotWedgedByCredit(t *testing.T) {
 		t.Fatal("the reattached pump parked on a credit window nothing can reopen")
 	}
 }
+
+func TestOutputRingCreditWaitYieldsForEffectWakeAtReachedBoundary(t *testing.T) {
+	ring := newOutputRingAt(0)
+	if err := ring.write(make([]byte, CreditLimit)); err != nil {
+		t.Fatalf("fill credit window: %v", err)
+	}
+	ring.setAttached(true)
+
+	pos := uint64(CreditLimit)
+	ring.mu.Lock()
+	inFlight := ring.inFlightLocked(ring.creditFloor(0), pos)
+	ring.mu.Unlock()
+	if inFlight != pos {
+		t.Fatalf("unacked bytes at the boundary = %d, want %d", inFlight, pos)
+	}
+
+	// A boundary at pos is already due and is not a PTY byte. Its wake must
+	// release the credit wait even though no acknowledgement arrives.
+	wake := make(chan struct{})
+	close(wake)
+	if ring.waitForCreditOrWake(context.Background(), 0, pos, CreditLimit, wake) {
+		t.Fatal("credit wait reported a closed ring after the effect wake")
+	}
+}

@@ -61,6 +61,39 @@ func TestTheScreenOpAnswersTheFrameTheRuntimeHolds(t *testing.T) {
 	}
 }
 
+// TestTheScreenCaptureOpPreservesAbsoluteRowsAndBufferIdentity verifies the
+// assistant's screen read at the helper boundary: history and the active grid
+// are captured as one absolute interval by the owning runtime.
+func TestTheScreenCaptureOpPreservesAbsoluteRowsAndBufferIdentity(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := procOf(t, spawner, 0)
+	var output strings.Builder
+	for row := range 30 {
+		fmt.Fprintf(&output, "row-%02d\r\n", row)
+	}
+	proc.say(t, output.String())
+	waitForScreen(t, svc, entry, "row-29")
+
+	res := call[proto.ScreenCaptureResult](t, svc, proto.OpScreenCapture, proto.ScreenCaptureParams{
+		Session: entry.Session,
+		Range:   &proto.ScreenCaptureRange{Start: 28, End: 30},
+	})
+	if res.Start != 28 || res.End != 30 || res.Floor != 0 || res.Total != 31 {
+		t.Fatalf("capture range = floor %d [%d,%d), total %d; want floor 0 [28,30), total 31", res.Floor, res.Start, res.End, res.Total)
+	}
+	if len(res.Rows) != 2 || !strings.HasPrefix(rowText(res.Rows[0]), "row-28") || !strings.HasPrefix(rowText(res.Rows[1]), "row-29") {
+		t.Fatalf("captured absolute rows = %q, want row-28 and row-29", []string{rowText(res.Rows[0]), rowText(res.Rows[1])})
+	}
+	if res.Identity.Kind != "normal" || res.Identity.Instance == 0 || res.Identity.Cols != 80 || res.Identity.Rows != 24 {
+		t.Fatalf("capture identity = %+v, want the runtime's normal buffer instance and geometry", res.Identity)
+	}
+	if res.Revision == 0 || res.Completeness != proto.CompletenessComplete {
+		t.Fatalf("capture provenance = revision %d completeness %q", res.Revision, res.Completeness)
+	}
+}
+
 // TestTheScreenOpAnswersOneInstantOfTheScreen is the property the read owes and
 // the one a green suite cannot see: WHAT the frame says is the subject above,
 // and WHEN it says it is this one's.

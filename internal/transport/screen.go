@@ -38,6 +38,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // ScreenResender asks the process that holds a session's terminal to re-offer
@@ -108,12 +109,88 @@ func (s *WSServer) PublishScreenFrame(sid session.ID, revision uint64, doc []byt
 		SessionID: sidBytes,
 		Payload:   doc,
 	}
-	if enqueueErr := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode()); enqueueErr != nil {
-		// The subscriber is behind and its stall policy is what it sees; the
-		// next revision supersedes this one whole.
+	encoded := f.Encode()
+	if enqueueErr := wconn.out.TryEnqueue(websocket.BinaryMessage, encoded); enqueueErr != nil {
+		// Ordinary snapshots remain refreshable. A prompt-boundary waiter
+		// records this exact size and asks the same runtime for its current
+		// frame again after observable outbound capacity returns.
+		rx.noteScreenFrame(wconn, revision, len(encoded), false)
 		s.log.Warn("screen frame dropped: the subscriber's outbound queue is full",
 			"session_id", string(sid), "revision", revision, "error", enqueueErr)
 		return false
 	}
+	rx.noteScreenFrame(wconn, revision, len(encoded), true)
 	return true
+}
+
+// ensureScreenOffer submits at most one per-session retry task. Its state
+// stores a revision and one failed-frame size, not a frame payload. The task
+// runs under the server's inflight submission, so Stop cancels and joins it;
+// it uses the existing helper ScreenResender path and waits for observable
+// queue/budget capacity after a drop.
+func (s *WSServer) ensureScreenOffer(sid session.ID, rx *sessionRx, wconn *wsConn, revision uint64) {
+	offerCtx, start, settled, failed := rx.requestScreenOffer(wconn, revision)
+	if settled || failed || !start {
+		return
+	}
+	if s.screenOfferSub == nil {
+		rx.rejectScreenOffer(wconn, revision)
+		return
+	}
+	rejection := s.screenOfferSub.TrySubmit(offerCtx, control.Task{Run: func(workerCtx context.Context) {
+		s.offerScreenUntil(sid, rx, wconn, workerCtx)
+	}})
+	if rejection != nil {
+		s.log.Warn("prompt boundary screen offer was refused by the bounded server queue",
+			"session_id", string(sid), "screen_revision", revision, "reason", rejection.Reason)
+		rx.rejectScreenOffer(wconn, revision)
+	}
+}
+
+func (s *WSServer) offerScreenUntil(sid session.ID, rx *sessionRx, wconn *wsConn, workerCtx context.Context) {
+	for {
+		ctx, target, offered, failed, frameBytes, wake, ok := rx.screenOfferSnapshot(wconn)
+		if !ok {
+			rx.finishScreenOffer(wconn)
+			return
+		}
+		if ctx.Err() != nil || workerCtx.Err() != nil {
+			rx.failScreenOffer(wconn, target)
+			rx.finishScreenOffer(wconn)
+			return
+		}
+		if offered >= target || failed >= target {
+			if rx.finishScreenOffer(wconn) {
+				return
+			}
+			continue
+		}
+		if s.screenResender == nil {
+			s.log.Warn("prompt boundary screen cannot be offered: no ScreenResender is configured", "session_id", string(sid), "screen_revision", target)
+			rx.failScreenOffer(wconn, target)
+			continue
+		}
+		if frameBytes > 0 {
+			if err := wconn.out.WaitForRoom(workerCtx, frameBytes); err != nil {
+				s.log.Warn("prompt boundary screen offer canceled before outbound capacity", "session_id", string(sid), "screen_revision", target, "error", err)
+				rx.failScreenOffer(wconn, target)
+				continue
+			}
+			// The source is the runtime's current full snapshot, not the frame
+			// that was dropped. The runtime and this offer worker coalesce to
+			// one current state.
+		}
+		if err := s.screenResender.ResendScreen(workerCtx, string(sid)); err != nil {
+			s.log.Warn("prompt boundary screen resend failed", "session_id", string(sid), "screen_revision", target, "error", err)
+			rx.failScreenOffer(wconn, target)
+			continue
+		}
+		// The helper's screen carrier is independent of the RPC response. Wait
+		// for its publish attempt, an offer, a newer target or subscriber close.
+		select {
+		case <-ctx.Done():
+		case <-workerCtx.Done():
+		case <-wake:
+		}
+	}
 }

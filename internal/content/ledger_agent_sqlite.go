@@ -204,10 +204,10 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 		return CaptureFrameResult{}, errors.New("content: capture frame: client is required — it binds the idempotency key")
 	}
 	// Empty Subject is the ask gesture — the renderer's captureFrame call,
-	// which is a person selecting blocks and asking. The readScreen pull is
-	// a different producer that stamps SourceAssistant when it ever
-	// persists; until then the honest default for a capture naming no
-	// subject is the person's. Defaulted HERE, before frameDigest, so a
+	// which is a person selecting blocks and asking. A backend session.read
+	// is transient and does not persist a second frame. Default the capture
+	// with no subject to the person's source. Defaulted HERE, before
+	// frameDigest, so a
 	// legacy empty-subject replay hashes identically to the normalized
 	// frame it created (the same rule Submit follows for Source).
 	if in.Subject == "" {

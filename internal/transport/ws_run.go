@@ -16,8 +16,8 @@ package transport
 // timeouts and terminalization; this file is one RequestKind plus the
 // WSServer's seams for it: the Conns snapshot, the per-connection Deliver,
 // the read-loop Resolve registration and the ConnectionLost signal in
-// connection teardown (ws.go) — the same four seams readScreen uses, with a
-// different effect and a different resolution payload.
+// connection teardown (ws.go) — the generic broker delivery and ingress
+// seams, with this request's own effect and resolution payload.
 
 import (
 	"context"
@@ -49,6 +49,9 @@ const runRequestTimeout = 10 * time.Minute
 // use terminalization language: no command existed to terminate.
 var errRunSubmissionExpired = errors.New("submission expired before execution")
 
+// maxResolutionErrorRunes bounds the renderer's failed-run sentence.
+const maxResolutionErrorRunes = 512
+
 // maxRunOutputWindowChars is the renderer-side clamp on the output window
 // text one run resolution carries: the model reads this much output per
 // command, and the honest window statement says how much more the block
@@ -57,8 +60,8 @@ var errRunSubmissionExpired = errors.New("submission expired before execution")
 const maxRunOutputWindowChars = 64 << 10 // 64 KiB of output text
 
 // errRunNoRenderer is the run kind's no-client answer: there is no renderer
-// attached to submit the command. Named, the way readScreen names its
-// no-client outcome.
+// attached to submit the command. Named so callers can distinguish an
+// unavailable renderer from a failed run.
 var errRunNoRenderer = errors.New("no renderer connected to run the command")
 
 // ── wire shapes ────────────────────────────────────────────────────────────
@@ -568,9 +571,9 @@ func (s *WSServer) laneInteractivitySpec(immediate control.ImmediateSubmission) 
 		})
 }
 
-// runResolutionSpec registers agent.runResolved alongside readScreen's
-// resolution: the broker's Resolve on the read-loop ingress (see
-// brokerSpecs in ws_readscreen.go for the disposition).
+// runResolutionSpec registers agent.runResolved on the immediate read-loop
+// ingress so a pending command request can settle without waiting behind
+// the ordinary lane.
 func (s *WSServer) runResolutionSpec(immediate control.ImmediateSubmission) methodSpec {
 	return reg(immediate, "agent.runResolved", params(validateRunResolvedRaw),
 		func(w *wsConn, _ *connState, r Responder) handlerFunc {

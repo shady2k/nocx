@@ -88,7 +88,8 @@ func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 			t.Fatalf("add %s: %v", e.Name(), addErr)
 		}
 	}
-	path := filepath.Join(contractDir, filepath.Clean(name))
+	schemaName, fragment, hasFragment := strings.Cut(name, "#")
+	path := filepath.Join(contractDir, filepath.Clean(schemaName))
 	f, openErr := os.Open(path) //nolint:gosec // a test-only path under contracts/
 	if openErr != nil {
 		t.Fatalf("open %s: %v", path, openErr)
@@ -99,12 +100,18 @@ func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 	if parseErr != nil {
 		t.Fatalf("parse %s: %v", path, parseErr)
 	}
-	if addErr := c.AddResource(name, doc); addErr != nil {
+	compileName := name
+	if hasFragment {
+		if addErr := c.AddResource(schemaName, doc); addErr != nil {
+			t.Fatalf("add %s: %v", schemaName, addErr)
+		}
+		compileName = schemaName + "#" + fragment
+	} else if addErr := c.AddResource(name, doc); addErr != nil {
 		t.Fatalf("add %s: %v", name, addErr)
 	}
-	s, err := c.Compile(name)
+	s, err := c.Compile(compileName)
 	if err != nil {
-		t.Fatalf("compile %s: %v", name, err)
+		t.Fatalf("compile %s: %v", compileName, err)
 	}
 	return s
 }
@@ -5944,90 +5951,6 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("ask error: %+v", env.Error)
 	}
 	validateJSON(t, schema, env.Result, "agent.ask result")
-}
-
-// ── agent.readScreenRequest / agent.readScreenResolved (nocx-ljfwz) ──────
-
-// The request notification is SERVER-built, so its contract check is the
-// real payload off the real socket: the broker's request params (requestId
-// + sessionId, the narrowing already applied) must satisfy the schema the
-// renderer's generated type was declared from.
-func TestAgentReadScreenRequest_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.readScreenRequest.schema.json")
-	ws, _, stop := newAgentWSServer(t)
-	defer stop()
-	conn := connectWS(t, ws)
-	defer conn.Close() //nolint:errcheck
-	sid := openLocalSession(t, conn)
-
-	done := make(chan error, 1)
-	go func() {
-		_, err := ws.RequestScreen(t.Context(), sid, nil)
-		done <- err
-	}()
-	raw := readNotification(t, conn, "agent.readScreenRequest", 5*time.Second)
-	validateJSON(t, schema, raw, "agent.readScreenRequest notification params")
-
-	// Settle the request so the goroutine above exits: a failed outcome is
-	// the honest terminal answer for a test that only wants the params.
-	var req struct {
-		RequestID string `json:"requestId"`
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("requestId decode: %v", err)
-	}
-	resp := jsonrpcCall(t, conn, "agent.readScreenResolved", map[string]any{
-		"requestId": req.RequestID,
-		"outcome":   "failed",
-		"error":     "contract test",
-	})
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if env.Error != nil {
-		t.Fatalf("resolution refused: %+v", env.Error)
-	}
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "could not capture the screen") {
-			t.Fatalf("RequestScreen returned %v, want the failed-outcome error", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RequestScreen never settled")
-	}
-}
-
-func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
-	body, err := json.Marshal(readScreenResolvedParams{
-		Outcome: "frame",
-		Rows:    []frameRowWire{{Kind: "text", Text: "hi"}},
-		Cursor:  &frameCursorWire{Line: 0, Col: 0},
-		Identity: &frameIdentityWire{
-			Buffer: frameBufferWire{Kind: "normal"},
-			Cols:   2, Rows: 1, Generation: 1,
-		},
-		Range: &frameRangeWire{Start: 0, End: 1},
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	// The wire envelope carries the broker-minted requestId beside the
-	// resolution body — the renderer echoes it back (the broker correlates
-	// on it before the kind's shape check runs).
-	var wire map[string]any
-	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
-		t.Fatalf("decode body: %v", wireErr)
-	}
-	wire["requestId"] = "0123456789abcdef"
-	raw, err := json.Marshal(wire)
-	if err != nil {
-		t.Fatalf("marshal wire: %v", err)
-	}
-	validateJSON(t, schema, raw, "agent.readScreenResolved DTO")
 }
 
 // ── agent.runRequest / agent.runResolved (nocx-tjppv) ─────────────────────

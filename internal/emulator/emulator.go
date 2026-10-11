@@ -322,7 +322,20 @@ type RowTrack interface {
 // its own. What a caller may NOT do is assume the two are ordered: an ingest
 // concurrent with a read may or may not be reflected in it, exactly as the
 // program's own output is concurrent with the read of it.
+// Modes is the portion of terminal state the client needs to route local
+// selection and mediated paste. Key encoding and mouse encoding remain owned
+// by Terminal; the client never derives terminal bytes from these flags.
+type Modes struct {
+	BracketedPaste bool
+	MouseTracking  bool
+}
+
 type Terminal interface {
+	// Modes reports the current program-selected modes needed to distinguish
+	// a local selection gesture from mouse input and to guard multi-line
+	// snippet paste. A caller must not infer these from output bytes.
+	Modes() (Modes, error)
+
 	// Geometry is the size the terminal is running at. A closed terminal has
 	// no size, so this reports [ErrClosed] rather than the last one it had —
 	// a size a caller could read after Close would be a size nobody can act on.

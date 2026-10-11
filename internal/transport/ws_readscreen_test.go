@@ -1,15 +1,9 @@
 package transport
 
-// readScreen end to end (nocx-ljfwz): the broker's first production
-// request, over a REAL socket, through the REAL engine. The grant permits
-// readScreen on a live session (the harness names the workspace policy
-// preset on the server — the run's authority, ADR-0020 decision 5); the model
-// calls the tool; the backend asks the renderer through the broker; the
-// renderer (this test, standing in for the frontend) answers with a frame;
-// and the frame's text lands in the model's tool message on the SECOND
-// request the engine sends. The wire is a party to the contract: every
-// assertion is on bytes that actually crossed the socket or the fake
-// provider, never on a payload the test built and handed to the handler.
+// Backend-owned session.read tests: the assistant runs through the real
+// engine and socket, while a narrow capture source stands in for the helper
+// runtime. The separate app acceptance test exercises the real helper-owned
+// runtime without a renderer.
 
 import (
 	"context"
@@ -20,6 +14,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,7 +25,6 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // autonomousPolicyStore returns a store seeded with the autonomous matrix —
@@ -238,86 +232,90 @@ func streamOKChunks(w http.ResponseWriter) {
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 }
 
-// readScreenFrameWire is the renderer's answer to a readScreen request: the
-// live frame shape — text rows, cursor, identity, range — under the closed
-// "frame" outcome. Each row is padded to identity.cols, the range
-// spans exactly the rows, and the cursor is inside the geometry: the wire
-// validation of the broker (validateReadScreenResolvedRaw) is what the test
-// is crossing.
-func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]any {
+type screenCaptureCall struct {
+	sessionID string
+	region    *assistant.FrameRegion
+}
+
+type recordingScreenCapture struct {
+	mu    sync.Mutex
+	body  json.RawMessage
+	err   error
+	calls []screenCaptureCall
+}
+
+func (s *recordingScreenCapture) CaptureScreen(_ context.Context, sessionID string, region *assistant.FrameRegion) (json.RawMessage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call := screenCaptureCall{sessionID: sessionID}
+	if region != nil {
+		copy := *region
+		call.region = &copy
+	}
+	s.calls = append(s.calls, call)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append(json.RawMessage(nil), s.body...), nil
+}
+
+func (s *recordingScreenCapture) snapshotCalls() []screenCaptureCall {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]screenCaptureCall(nil), s.calls...)
+}
+
+func screenCaptureBody(t *testing.T, floor int, lines ...string) json.RawMessage {
 	t.Helper()
-	cols := 0
-	for _, text := range texts {
-		if len(text) > cols {
-			cols = len(text)
-		}
+	rows := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, map[string]any{"kind": "text", "text": line})
 	}
-	rows := make([]any, 0, len(texts))
-	for _, text := range texts {
-		// Padded to the width, the way a mint pads a short line with blank
-		// cells: the row's width IS the screen's.
-		rows = append(rows, map[string]any{
-			"kind": "text",
-			"text": text + strings.Repeat(" ", cols-len(text)),
-		})
-	}
-	return map[string]any{
-		"requestId": rid,
-		"outcome":   "frame",
-		"rows":      rows,
-		"cursor":    map[string]any{"line": 0, "col": 0},
-		"identity":  map[string]any{"buffer": map[string]any{"kind": "normal"}, "cols": cols, "rows": len(texts), "generation": 1},
-		"range":     map[string]any{"start": 0, "end": len(texts)},
-	}
-}
-
-func TestReadScreen_ErrorSentences(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{
-			name: "resolution decode",
-			raw:  `{`,
-			want: "resolution: unexpected end of JSON input",
+	body, err := json.Marshal(map[string]any{
+		"floor":  floor,
+		"total":  floor + len(lines),
+		"rows":   rows,
+		"cursor": map[string]any{"line": 0, "col": 0},
+		"identity": map[string]any{
+			"buffer": map[string]any{"kind": "normal", "instance": 7},
+			"cols":   80, "rows": 24, "generation": 1,
 		},
-		{
-			name: "failed capture",
-			raw:  `{"outcome":"failed","error":"no such session: gone-session"}`,
-			want: "the renderer could not capture the screen: no such session: gone-session",
-		},
+		"range": map[string]any{"start": floor, "end": floor + len(lines)},
+	})
+	if err != nil {
+		t.Fatalf("marshal screen capture fixture: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := resolveReadScreen(json.RawMessage(tt.raw))
-			if err == nil {
-				t.Fatal("resolveReadScreen returned nil error")
-			}
-			if err.Error() != tt.want {
-				t.Fatalf("resolveReadScreen error = %q, want %q", err, tt.want)
-			}
-		})
+	return body
+}
+
+func TestRequestScreen_BackendSourceReceivesSessionAndRange(t *testing.T) {
+	body := screenCaptureBody(t, 12, "hello", "world")
+	source := &recordingScreenCapture{body: body}
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger), WithScreenCaptureSource(source))
+	region := &assistant.FrameRegion{Start: 12, End: 14}
+
+	got, err := ws.RequestScreen(t.Context(), "session-1", region)
+	if err != nil {
+		t.Fatalf("RequestScreen: %v", err)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("RequestScreen body = %s, want %s", got, body)
+	}
+	calls := source.snapshotCalls()
+	if len(calls) != 1 || calls[0].sessionID != "session-1" || calls[0].region == nil || *calls[0].region != *region {
+		t.Fatalf("capture calls = %+v, want session-1 and region [%d,%d)", calls, region.Start, region.End)
 	}
 }
 
-func TestRequestScreen_ErrorSentences(t *testing.T) {
-	_, err := (&WSServer{}).RequestScreen(context.Background(), "sid", nil)
-	if err == nil || err.Error() != "no renderer request broker is wired" {
-		t.Fatalf("unwired RequestScreen error = %v, want %q", err, "no renderer request broker is wired")
-	}
-
-	ws, _, stop := newAgentWSServer(t)
-	defer stop()
-	_, err = ws.RequestScreen(context.Background(), "sid", nil)
-	if err == nil || err.Error() != "no renderer connected to read the screen" {
-		t.Fatalf("no-client RequestScreen error = %v, want %q", err, "no renderer connected to read the screen")
+func TestRequestScreen_ReportsMissingBackendSource(t *testing.T) {
+	_, err := (&WSServer{}).RequestScreen(t.Context(), "sid", nil)
+	want := "session.read: no backend screen capture source is wired"
+	if err == nil || err.Error() != want {
+		t.Fatalf("unwired RequestScreen error = %v, want %q", err, want)
 	}
 }
 
-// createEndpointAt points the ask run at the given provider URL (the
-// harness's own createEndpoint hardcodes the loopback URL; the readScreen
-// test needs the fake provider).
 func (h *askHarness) createEndpointAt(baseURL string) {
 	h.t.Helper()
 	created, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
@@ -344,32 +342,22 @@ func (h *askHarness) createEndpointAt(baseURL string) {
 // renderer half is THIS test — it reads the broker's request notification
 // off the socket and answers it with a frame. Everything asserted crossed a
 // wire.
-func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
+func TestSessionRead_BackendCaptureOverTheRealSocket(t *testing.T) {
 	fake, srv := newToolCallingServer()
 	defer srv.Close()
 
-	// The REAL engine: the embedded schemas include readScreen.
 	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
-	// The composition-root seam, named at construction: the autonomous
-	// matrix minted with the run's own session permits observe on its own
-	// session — exactly readScreen's scope.
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
+	source := &recordingScreenCapture{body: screenCaptureBody(t, 12, "hello", "world")}
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)), WithScreenCaptureSource(source))
 	h.createEndpointAt(srv.URL)
-
 	sid := openLocalSession(t, h.conn)
 
-	// The ask that starts a grant-bearing run: the harness names the
-	// workspace policy preset (autonomous within the routine local
-	// environment), so the run's grant permits observe on its own session —
-	// exactly readScreen's scope.
 	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-readscreen-1",
-		"sessionId": sid,
-		"question":  "what is on the screen?",
-		"cwd":       "/repo",
+		"askId": "ask-backend-screen-1", "sessionId": sid,
+		"question": "what is on the screen?", "cwd": "/repo",
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
@@ -378,63 +366,25 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 		t.Fatalf("ask state = %q, want prepared", res.State)
 	}
 
-	// The renderer half: the broker's request arrives on the socket, naming
-	// the session the grant permitted.
-	raw := readNotification(t, h.conn, "agent.readScreenRequest", 10*time.Second)
-	if raw == nil {
-		t.Fatalf("no readScreenRequest within 10s; provider requests=%d bodies=%v", fake.requests.Load(), fake.bodies)
-	}
-
-	var req struct {
-		RequestID string `json:"requestId"`
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("readScreenRequest unmarshal: %v\nraw: %s", err, raw)
-	}
-	if req.RequestID == "" {
-		t.Fatal("readScreenRequest carries no requestId")
-	}
-	if req.SessionID != sid {
-		t.Fatalf("readScreenRequest sessionId = %q, want %q", req.SessionID, sid)
-	}
-
-	// Answer with a frame, over the same socket: the resolution RPC the
-	// broker correlates.
-	reply := jsonrpcCall(t, h.conn, "agent.readScreenResolved", readScreenFrameWire(t, req.RequestID, "hello", "world"))
-	var rerr struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(reply, &rerr); err != nil {
-		t.Fatalf("resolution response unmarshal: %v", err)
-	}
-	if rerr.Error != nil {
-		t.Fatalf("readScreenResolved refused: %+v", rerr.Error)
-	}
-
-	// The engine streams the tool message (the frame window) as a delta —
-	// the same behavior the assistant tests tolerate — then re-asks the
-	// model, whose streamed "ok" is the answer. Collect deltas until the
-	// run terminalizes and assert the answer arrived.
 	var answer string
-	var st struct {
+	var state struct {
 		RunID int64  `json:"runId"`
 		State string `json:"state"`
 	}
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		raw = readNotification(t, h.conn, "agent.runDelta", 10*time.Second)
-		var d struct {
+		raw := readNotification(t, h.conn, "agent.runDelta", 10*time.Second)
+		var delta struct {
 			RunID int64  `json:"runId"`
 			Text  string `json:"text"`
 		}
-		if err := json.Unmarshal(raw, &d); err != nil {
+		if err := json.Unmarshal(raw, &delta); err != nil {
 			t.Fatalf("runDelta unmarshal: %v\nraw: %s", err, raw)
 		}
-		if d.RunID != res.RunID {
-			t.Fatalf("runDelta runId = %d, want %d", d.RunID, res.RunID)
+		if delta.RunID != res.RunID {
+			t.Fatalf("runDelta runId = %d, want %d", delta.RunID, res.RunID)
 		}
-		answer += d.Text
+		answer += delta.Text
 		if strings.Contains(answer, "ok") {
 			break
 		}
@@ -442,200 +392,49 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 			t.Fatalf("answer never arrived; collected %q", answer)
 		}
 	}
-	raw = readNotification(t, h.conn, "agent.runState", 10*time.Second)
-	if err := json.Unmarshal(raw, &st); err != nil {
+	raw := readNotification(t, h.conn, "agent.runState", 10*time.Second)
+	if err := json.Unmarshal(raw, &state); err != nil {
 		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
 	}
-	if st.RunID != res.RunID || st.State != "completed" {
-		t.Fatalf("runState = runId %d state %q, want %d completed", st.RunID, st.State, res.RunID)
+	if state.RunID != res.RunID || state.State != "completed" {
+		t.Fatalf("runState = runId %d state %q, want %d completed", state.RunID, state.State, res.RunID)
 	}
-
-	// The wire evidence: the engine's SECOND request carries the tool
-	// message with the frame's text — a frame crossed the socket and landed
-	// in the model's tool message.
 	if fake.requests.Load() < 2 {
-		t.Fatalf("provider received %d requests, want >= 2; bodies=%v", fake.requests.Load(), fake.bodies)
+		t.Fatalf("provider received %d requests, want at least two", fake.requests.Load())
 	}
-	second := fake.bodies[1]
-	if !strings.Contains(second, "hello") || !strings.Contains(second, "world") {
-		t.Fatalf("the tool message lacks the frame's text; second body: %s", second)
+	if len(fake.bodies) < 2 {
+		t.Fatalf("provider bodies = %d, want tool result request", len(fake.bodies))
 	}
-}
-
-// TestReadScreen_FailedCaptureAnswersHonestly is criterion 6's first
-// direction: a renderer that cannot produce the frame (a session it does
-// not know) answers "failed" and the run is not left hanging — the failure
-func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
+	toolResult := sessionReadToolResult(t, fake.bodies[1])
+	schema := loadSchema(t, "tools/session.read.schema.json#/$defs/result")
+	if err := schema.Validate(toolResult); err != nil {
+		t.Fatalf("actual session.read tool result does not satisfy its schema: %v\nresult: %+v", err, toolResult)
 	}
-	// The model names the GRANTED session — a call naming any other session
-	// is refused by policy before the broker is ever asked (the grant tests
-	// own that direction). The RENDERER is what fails here: it answers the
-	// request honestly with outcome failed, and the failure sentence must
-	// cross as a tool error the run proceeds past — never a hang.
-	// The same composition-root seam, at construction: the autonomous
-	// matrix, run-scoped to the harness session.
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "session.read", `{}`)
-			return
-		}
-		streamOKChunks(w)
-	}))
-	defer srv.Close()
-	h.createEndpointAt(srv.URL)
-
-	sid := openLocalSession(t, h.conn)
-
-	askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-readscreen-2",
-		"sessionId": sid,
-		"question":  "read it",
-		"cwd":       "/repo",
-	}, 3)
-
-	raw := readNotification(t, h.conn, "agent.readScreenRequest", 10*time.Second)
-	var req struct {
-		RequestID string `json:"requestId"`
-		SessionID string `json:"sessionId"`
+	if toolResult["sessionId"] != sid || toolResult["source"] != "backend" || toolResult["text"] != "hello\nworld" {
+		t.Fatalf("session.read tool result = %+v, want backend capture for %q with hello/world", toolResult, sid)
 	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("readScreenRequest unmarshal: %v", err)
+	if toolResult["window"] == nil || toolResult["returned"] == nil || toolResult["identity"] == nil {
+		t.Fatalf("session.read tool result omitted range or buffer identity: %+v", toolResult)
 	}
-	if req.SessionID != sid {
-		t.Fatalf("readScreenRequest sessionId = %q, want %q", req.SessionID, sid)
-	}
-	// The renderer answers honestly: the capture failed (a session it does
-	// not know, a capture aborted by disposal — the renderer's own honest
-	// terminal answer, never a hang).
-	reply := jsonrpcCall(t, h.conn, "agent.readScreenResolved", map[string]any{
-		"requestId": req.RequestID,
-		"outcome":   "failed",
-		"error":     "no such session: gone-session",
-	})
-	var rerr struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(reply, &rerr); err != nil {
-		t.Fatalf("resolution response unmarshal: %v", err)
-	}
-	if rerr.Error != nil {
-		t.Fatalf("failed resolution refused: %+v", rerr.Error)
-	}
-	// The run is NOT left hanging: a failed capture is a terminal tool
-	// error, and eino surfaces a tool error as a run failure — the renderer
-	// answered honestly, the run reached a terminal state with the
-	// renderer's sentence on it, and nothing leaked.
-	raw = readNotification(t, h.conn, "agent.runState", 10*time.Second)
-	var st struct {
-		State string `json:"state"`
-		Error string `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &st); err != nil {
-		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
-	}
-	if st.State != "failed" {
-		t.Fatalf("runState = %q, want failed (the renderer's failed outcome is a terminal tool error)", st.State)
-	}
-	want := "the assistant's session.read call did not finish: the renderer could not capture the screen: no such session: gone-session"
-	if st.Error != want {
-		t.Fatalf("runState error = %q, want %q", st.Error, want)
+	calls := source.snapshotCalls()
+	if len(calls) != 1 || calls[0].sessionID != sid || calls[0].region != nil {
+		t.Fatalf("backend capture calls = %+v, want one whole-screen capture for %q", calls, sid)
 	}
 }
 
-// TestReadScreen_DisconnectedRendererTerminalizes is criterion 6's second
-// direction: a renderer that never answers — here, a renderer that DIES —
-// terminalizes the run through the broker's terminalization rather than
-// leaking a pending request. The ledger is the record: the run reaches a
-// terminal state.
-func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	// The tool call names the ASK's session (the grant's scope): a call
-	// naming any other session would be refused by policy before the broker
-	// is ever asked, which is the test the grant tests own.
-	// The composition-root seam (WithAgentPolicy), named at construction:
-	// the autonomous matrix minted with the run's own session permits
-	// observe on its own session — exactly readScreen's scope.
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "session.read", `{}`)
-			return
+func sessionReadToolResult(t *testing.T, requestBody string) map[string]any {
+	t.Helper()
+	content := lifecycleBlockReadToolResult(requestBody)
+	const openTag = "<tool-output>\n"
+	const closeTag = "\n</tool-output>"
+	start := strings.Index(content, openTag)
+	end := strings.LastIndex(content, closeTag)
+	if start >= 0 && end > start+len(openTag) {
+		var result map[string]any
+		if err := json.Unmarshal([]byte(content[start+len(openTag):end]), &result); err == nil && result["source"] == "backend" {
+			return result
 		}
-		streamOKChunks(w)
-	}))
-	defer srv.Close()
-	h.createEndpointAt(srv.URL)
-
-	sid := openLocalSession(t, h.conn)
-
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-readscreen-3",
-		"sessionId": sid,
-		"question":  "read it",
-		"cwd":       "/repo",
-	}, 4)
-	if errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
 	}
-
-	// The broker's request reaches us; we never answer — we close the
-	// socket instead, which is the renderer's death.
-	raw := readNotification(t, h.conn, "agent.readScreenRequest", 10*time.Second)
-	var req struct {
-		RequestID string `json:"requestId"`
-	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("readScreenRequest unmarshal: %v", err)
-	}
-	if err := h.conn.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	// The run reaches a terminal state in the ledger — the broker
-	// terminalized the request (ErrRequestDisconnected) or the connection
-	// death cancelled the stream; either way nothing hangs and nothing
-	// leaks. Poll the ledger (an observable state change, never a sleep).
-	led := h.db.Ledger()
-	ctx := context.Background()
-	var entryErr error
-	lastState, lastExecs := "<none>", -1
-	waittest.WaitForTimeoutDetail(t, "the run to terminalize", 15*time.Second,
-		func() string {
-			return fmt.Sprintf("run %d never terminalized; last state %s (executions=%d, entry err %v)",
-				res.RunID, lastState, lastExecs, entryErr)
-		},
-		func() bool {
-			entry, err := led.Entry(ctx, res.EntryID)
-			if err != nil {
-				entryErr = err
-				return true
-			}
-			if entry == nil {
-				lastExecs = -1
-				return false
-			}
-			lastExecs = len(entry.Executions)
-			if lastExecs == 0 {
-				return false
-			}
-			st := entry.Executions[0].State
-			if st == nil {
-				lastState = "<nil>"
-				return false
-			}
-			lastState = string(*st)
-			return *st != content.RunPrepared && *st != content.RunStreaming
-		})
-	if entryErr != nil {
-		t.Fatalf("question entry: %v", entryErr)
-	}
+	t.Fatalf("second provider request has no backend session.read tool result: %s", requestBody)
+	return nil
 }

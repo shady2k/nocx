@@ -59,8 +59,8 @@ type sessionScreenRequester struct {
 	err  error
 }
 
-func (r sessionScreenRequester) RequestScreen(context.Context, string, *FrameRegion) (json.RawMessage, error) {
-	return r.body, r.err
+func (r sessionScreenRequester) RequestScreen(_ context.Context, _ string, region *FrameRegion) (json.RawMessage, error) {
+	return screenBodyForRegion(r.body, region), r.err
 }
 
 func (r sessionScreenRequester) RequestRun(context.Context, string, string) (json.RawMessage, error) {
@@ -136,10 +136,10 @@ func TestExecuteSessionRead_ExitedNoBodyCarriesRetentionNote(t *testing.T) {
 	}
 }
 
-func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
+func TestExecuteSessionRead_RunningUsesBackendCaptureAndCarriesState(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
-	req := sessionScreenRequester{body: liveFrameBody("current")}
+	req := sessionScreenRequester{body: liveFrameBodyWithFirst(200, "current")}
 
 	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
@@ -150,21 +150,21 @@ func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 	}
 }
 
-func TestExecuteSessionRead_AutomaticItemUsesRendererWithoutLedgerRow(t *testing.T) {
+func TestExecuteSessionRead_AutomaticItemUsesBackendCaptureWithoutLedgerRow(t *testing.T) {
 	source := &sessionSourceFake{err: errors.New("item not found")}
 	reader := agenttools.NewSessionReader(
 		[]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}},
 		[]string{"att-shell"},
 		nil,
 	)
-	req := sessionScreenRequester{body: liveFrameBody("current screen")}
+	req := sessionScreenRequester{body: liveFrameBodyWithFirst(200, "current screen")}
 
 	out, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(`{"id":"att-shell"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
 	if !strings.Contains(out, `"state":"running"`) || !strings.Contains(out, `"text":"current screen"`) {
-		t.Fatalf("automatic result = %s, want renderer screen", out)
+		t.Fatalf("automatic result = %s, want backend screen", out)
 	}
 	if source.calls != 0 {
 		t.Fatalf("source calls = %d, want no ledger read for renderer-owned item", source.calls)
@@ -197,21 +197,31 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
-	if !strings.Contains(out, `"state":"screen"`) || !strings.Contains(out, "current screen, not accumulated output") {
-		t.Fatalf("screen result = %s, want screen state and alternate-buffer caveat", out)
+	var result sessionReadResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("decode screen result: %v", err)
+	}
+	if result.State != "screen" || result.Source != "backend" || result.Text != "fullscreen" || result.Total != 1 || result.Window != (blockSpan{Start: 0, End: 1}) || result.Returned != (blockSpan{Start: 0, End: 1}) {
+		t.Fatalf("screen result = %+v, want backend screen and exact absolute range [0,1)", result)
+	}
+	if result.Identity == nil || result.Identity.Buffer.Kind != "alternate" || result.Identity.Buffer.Instance != 1 || result.Cursor == nil {
+		t.Fatalf("screen result lost capture identity or cursor: %+v", result)
+	}
+	if result.Note == "" || !strings.Contains(result.Note, "current screen, not accumulated output") {
+		t.Fatalf("alternate-buffer note = %q, want the no-scrollback caveat", result.Note)
 	}
 }
 
-func TestExecuteSessionRead_PropagatesLedgerAndRendererFailures(t *testing.T) {
+func TestExecuteSessionRead_PropagatesLedgerAndCaptureFailures(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil, nil)
 	ledgerErr := errors.New("ledger unavailable")
 	if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("ledger error = %v, want source failure", err)
 	}
-	rendererErr := errors.New("renderer disappeared")
+	captureErr := errors.New("backend capture unavailable")
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
-	if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
-		t.Fatalf("renderer error = %v, want renderer failure", err)
+	if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, sessionScreenRequester{err: captureErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "backend capture unavailable") {
+		t.Fatalf("capture error = %v, want backend source failure", err)
 	}
 }
 
@@ -309,7 +319,7 @@ func TestExecuteSessionRead_AutomaticItemIsBoundedByItsMark(t *testing.T) {
 				[]string{"att-shell"},
 				[]agenttools.MarkedSessionWindow{{ItemID: "att-shell", Start: 3, Count: 2}},
 			)
-			req := &recordingRequester{body: liveFrameBody("marked band")}
+			req := &recordingRequester{body: liveFrameBodyRows(11)}
 			source := &sessionSourceFake{err: errors.New("item not found")}
 
 			if _, err := executeSessionRead(toolTestContext(), &agenttools.SessionDescendantCapability{SessionReader: reader}, source, req, json.RawMessage(tc.args)); err != nil {

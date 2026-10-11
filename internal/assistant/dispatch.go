@@ -131,7 +131,14 @@ func compileDispatchSchemas(registry agenttools.Registry) (map[string]*jsonschem
 // NewToolDispatcher builds the worker-only adapter over the common operation.
 // Its public surface accepts only the assembled worker declarations; the
 // record and environment are infrastructure seams, never caller parameters.
-func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, environment string) (ToolDispatcher, error) {
+func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, environment string, sessionReadSources ...SessionReadSources) (ToolDispatcher, error) {
+	if len(sessionReadSources) > 1 {
+		return nil, errors.New("assistant dispatch: at most one session-read source set may be supplied")
+	}
+	var readSources SessionReadSources
+	if len(sessionReadSources) == 1 {
+		readSources = sessionReadSources[0]
+	}
 	validators, results, err := compileDispatchSchemas(registry)
 	if err != nil {
 		return nil, err
@@ -147,6 +154,8 @@ func NewToolDispatcher(registry agenttools.Registry, workerStore WorkerRecord, e
 		allowed:    allowed,
 		executor: func(ctx context.Context, decl agenttools.Tool, cap agenttools.Capability, raw []byte) (string, error) {
 			return runDeclaredTool(ctx, decl, cap, raw, toolSeams{
+				sessions:          readSources.Sessions,
+				screenCapture:     readSources.ScreenCapture,
 				workerStore:       workerStore,
 				workerEnvironment: environment,
 			})

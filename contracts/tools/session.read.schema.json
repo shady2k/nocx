@@ -37,7 +37,7 @@
   "$defs": {
     "result": {
       "title": "SessionReadResult",
-      "description": "What session.read hands back: the output of one item, or the screen as it is now when no item id was given. The output is `text`. Which side answered is stated in `source` — the ledger for an exited item, the renderer for a running one or for the screen — because the two answer different questions and a reader must not have to guess which they got.",
+      "description": "What session.read hands back: the output of one item, or a coherent backend-owned screen capture when no item id was given. The output is `text`. Which side answered is stated in `source` — the ledger for an exited item, the backend screen capture for a running item or screen, or a descendant helper — because the sources answer different questions.",
       "type": "object",
       "additionalProperties": false,
       "required": ["sessionId", "state", "source", "text"],
@@ -57,8 +57,8 @@
         },
         "source": {
           "type": "string",
-          "enum": ["ledger", "renderer", "helper"],
-          "description": "Which side produced this: the recorded output, a live capture of your own pane, or a descendant's helper."
+          "enum": ["ledger", "backend", "helper"],
+          "description": "Which side produced this: the recorded output, a coherent capture from the owning backend runtime, or a descendant's helper."
         },
         "exitCode": {
           "type": "integer",
@@ -141,11 +141,16 @@
             "buffer": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind"],
+              "required": ["kind", "instance"],
               "properties": {
                 "kind": {
                   "type": "string",
                   "description": "normal or alternate."
+                },
+                "instance": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Monotonic backend identity of this active buffer instance."
                 }
               }
             },

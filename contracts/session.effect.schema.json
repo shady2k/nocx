@@ -33,6 +33,11 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^rec-[0-9a-f]{32}$"
+    },
+    "screenRevision": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "For promptBoundary only, the lower-bound full-frame revision that must be offered first. It is correlation, not acknowledgement or authority."
     }
   },
   "allOf": [
@@ -59,6 +64,24 @@
       "else": {
         "not": {
           "required": ["episodeId"]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "promptBoundary"
+          }
+        },
+        "required": ["kind"]
+      },
+      "then": {
+        "required": ["screenRevision"]
+      },
+      "else": {
+        "not": {
+          "required": ["screenRevision"]
         }
       }
     }

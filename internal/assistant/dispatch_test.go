@@ -116,6 +116,37 @@ func TestToolDispatcher_UnknownMethodIsNamed(t *testing.T) {
 	}
 }
 
+func TestToolDispatcher_SessionReadUsesBackendSources(t *testing.T) {
+	registry, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("assemble tools: %v", err)
+	}
+	sessions := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
+	screen := sessionScreenRequester{body: liveFrameBody("current screen")}
+	dispatcher, err := NewToolDispatcher(
+		registry, &fakeWorkerRecord{}, content.EnvironmentIDFor(content.EnvLocal, ""),
+		SessionReadSources{Sessions: sessions, ScreenCapture: screen},
+	)
+	if err != nil {
+		t.Fatalf("new dispatcher: %v", err)
+	}
+	invocation := workerInvocationForTest("session.read", workerGrantForTest(), `{"id":"item-1","start":0,"count":1}`)
+	result, err := dispatcher.Dispatch(invocation)
+	if err != nil {
+		t.Fatalf("dispatch session.read: %v", err)
+	}
+	var decoded sessionReadResult
+	if err := json.Unmarshal([]byte(result), &decoded); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, result)
+	}
+	if decoded.SessionID != "session-1" || decoded.ID != "item-1" || decoded.State != "running" || decoded.Source != "backend" || decoded.Text != "current screen" {
+		t.Fatalf("session.read result = %+v, want running backend capture for item-1", decoded)
+	}
+	if sessions.calls != 1 {
+		t.Fatalf("session source calls = %d, want one running-item lookup", sessions.calls)
+	}
+}
+
 func TestDispatchAbortedOutcomeRetainsTypedReason(t *testing.T) {
 	reason := "workers.spawn refused: approval required"
 	err := dispatchAbortedError(ToolInvocation{Method: "workers.spawn"}, &modelResult{text: reason})

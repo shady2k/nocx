@@ -1072,7 +1072,7 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// the frame it holds, the other feeds a capture to a PTY-less
 		// emulator. Both take scalars and a session handle, so neither
 		// carries a free-form []string past the registration rule below.
-		proto.OpScreen: true, proto.OpReplay: true,
+		proto.OpScreen: true, proto.OpScreenCapture: true, proto.OpReplay: true,
 		// The screen's re-offer (nocx-zg3k3.2.15): a session handle and
 		// nothing else, so it carries no free-form []string either.
 		proto.OpScreenResend: true,

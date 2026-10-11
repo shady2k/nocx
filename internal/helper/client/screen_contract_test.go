@@ -89,6 +89,37 @@ func TestTheScreenResultConformsToItsContractOverTheWire(t *testing.T) {
 	}
 }
 
+// TestTheScreenCaptureResultConformsToItsContractOverTheWire validates the
+// coherent read-screen shape on the real helper socket and through its client.
+func TestTheScreenCaptureResultConformsToItsContractOverTheWire(t *testing.T) {
+	c := hostedSessions(t)
+	entry := spawnOverTheWire(t, c)
+	params := proto.ScreenCaptureParams{Session: proto.HostSessionID{
+		Generation: proto.GenerationID(entry.HostSessionID.Generation),
+		Session:    entry.HostSessionID.Session,
+	}}
+	if err := validateHelperJSON(loadHelperSchema(t, "session.screen-capture.params.schema.json"), mustMarshal(t, params)); err != nil {
+		t.Fatalf("screen capture params violate their contract: %v", err)
+	}
+	var raw json.RawMessage
+	if err := c.Call(context.Background(), proto.ServiceSession, proto.OpScreenCapture, params, &raw); err != nil {
+		t.Fatalf("screen capture: %v", err)
+	}
+	if err := validateHelperJSON(loadHelperSchema(t, "session.screen-capture.schema.json"), raw); err != nil {
+		t.Fatalf("screen capture off the socket violates its contract:\n%v\n\npayload was:\n%s", err, raw)
+	}
+	capture, err := c.ScreenCapture(context.Background(), entry.HostSessionID, nil)
+	if err != nil {
+		t.Fatalf("client.ScreenCapture: %v", err)
+	}
+	if capture.Start != capture.Floor || capture.End != capture.Total || uint64(len(capture.Rows)) != capture.End-capture.Start {
+		t.Fatalf("client capture = floor %d [%d,%d), total %d, %d rows", capture.Floor, capture.Start, capture.End, capture.Total, len(capture.Rows))
+	}
+	if capture.Identity.Instance == 0 || capture.Identity.Kind != "normal" || capture.Revision == 0 {
+		t.Fatalf("client capture lost backend identity or revision: %+v", capture)
+	}
+}
+
 // TestTheReplayResultConformsToItsContractOverTheWire feeds a capture's bytes to
 // the helper's PTY-less emulator over the real socket.
 func TestTheReplayResultConformsToItsContractOverTheWire(t *testing.T) {

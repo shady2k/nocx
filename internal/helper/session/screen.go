@@ -20,6 +20,51 @@ import (
 )
 
 // readScreen answers the screen a session's runtime holds.
+func (s *Service) readScreenCapture(p proto.ScreenCaptureParams) (proto.ScreenCaptureResult, error) {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return proto.ScreenCaptureResult{}, err
+	}
+	if hs.runtime == nil {
+		return proto.ScreenCaptureResult{}, fmt.Errorf("session %s has no runtime to capture a screen from", p.Session.Session)
+	}
+	var region *sessionruntime.ScreenRange
+	if p.Range != nil {
+		region = &sessionruntime.ScreenRange{Start: p.Range.Start, End: p.Range.End}
+	}
+	capture, err := hs.runtime.ReadScreenCapture(region)
+	if err != nil {
+		return proto.ScreenCaptureResult{}, err
+	}
+	rows := make([][]proto.ScreenCell, len(capture.Rows))
+	for y, row := range capture.Rows {
+		cells := make([]proto.ScreenCell, len(row.Cells))
+		for x, cell := range row.Cells {
+			text := ""
+			if cell.HasText {
+				text = cell.Grapheme
+			}
+			cells[x] = proto.ScreenCell{Text: text, Width: int(cell.Width)}
+		}
+		rows[y] = cells
+	}
+	kind := "normal"
+	if capture.Identity.AltScreen {
+		kind = "alternate"
+	}
+	return proto.ScreenCaptureResult{
+		Floor: capture.Floor, Start: capture.Start, End: capture.End, Total: capture.Total,
+		Rows: rows, CursorX: capture.Cursor.X, CursorY: capture.CursorRow,
+		CursorVisible: capture.Cursor.Visible,
+		Identity: proto.ScreenCaptureIdentity{
+			Kind: kind, Instance: capture.Identity.BufferInstance,
+			Cols: capture.Identity.Cols, Rows: capture.Identity.Rows,
+			Generation: capture.Generation,
+		},
+		Revision: uint64(capture.Revision), Completeness: completenessName(capture.Completeness),
+	}, nil
+}
+
 func (s *Service) readScreen(p proto.ScreenParams) (proto.ScreenResult, error) {
 	hs, err := s.find(p.Session)
 	if err != nil {

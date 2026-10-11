@@ -50,24 +50,13 @@ import (
 //    sizes") ───────────────────────────────────────────────────────────────
 
 const (
-	// maxFrameRows bounds a frame's row count: xterm's own scrollback cap —
-	// a live frame cannot legitimately exceed it.
-	maxFrameRows = 10_000
-	// maxFrameCols bounds the per-row cell count: a generous ceiling over
-	// every real terminal (the largest shipped xterm layouts stay under
-	// 1000 columns).
-	maxFrameCols = 2_000
-	// maxFrameChars bounds the frame's total character payload — the wire
-	// cost bound. 10k rows × 500 cols is the largest plausible screen ×
-	// scrollback; anything above it is a hostile or broken renderer.
-	maxFrameChars = 5_000_000
 	// maxQuestionRunes bounds the question text.
 	maxQuestionRunes = 8_000
 	// maxAttachedContent bounds the number of item grants one ask may carry.
 	maxAttachedContent = 32
 	// maxAttachedCommandRunes bounds the descriptive command carried with a grant.
 	maxAttachedCommandRunes = 8_000
-	// maxIDRunes bounds renderer-supplied ask and attached-item ids.
+	// maxIDRunes bounds client-supplied ask and attached-item ids.
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
 	maxCwdRunes = 4_096
@@ -76,46 +65,9 @@ const (
 	// Therefore only count is bounded here; start has no ceiling, and the
 	// check below rejects integer overflow.
 	maxAttachedWindowLines = 2_000
-	// maxRowRunesPerCol bounds a frame row against the geometry it claims:
-	// one column holds one glyph, and a glyph is at most this many runes (a
-	// base plus combining marks). Anything wider is not a row of that screen.
-	maxRowRunesPerCol = 8
 )
 
 // ── wire shapes ───────────────────────────────────────────────────────────
-
-// frameRowWire is one row of a frame: its TEXT. The cells' attributes never
-// travelled anywhere — both consumers join the characters and drop the rest
-// (internal/assistant/blocks.go's session.read text, internal/content's
-// frameText) — and sending them cost a measured 878 KB for one `top` screen
-// whose text is ~9 KB (nocx-u3vxd). The renderer keeps its own cells, which
-// is where the drawing happens (AD-6).
-type frameRowWire struct {
-	Kind string `json:"kind"` // "text"
-	Text string `json:"text"`
-}
-
-type frameCursorWire struct {
-	Line int `json:"line"`
-	Col  int `json:"col"`
-}
-
-type frameIdentityWire struct {
-	Buffer     frameBufferWire `json:"buffer"`
-	Cols       int             `json:"cols"`
-	Rows       int             `json:"rows"`
-	Generation int             `json:"generation"`
-}
-
-type frameBufferWire struct {
-	Kind       string `json:"kind"` // "normal" | "alternate"
-	AltSession *int   `json:"altSession,omitempty"`
-}
-
-type frameRangeWire struct {
-	Start int `json:"start"`
-	End   int `json:"end"`
-}
 
 type agentAskParams struct {
 	AskID           string          `json:"askId"`
@@ -685,10 +637,11 @@ type agentHandlers struct {
 	// composition root named (ADR-0020 §7; runGrantFor). Nil when no policy
 	// is named — the run carries no grant and the model is offered no tools.
 	grantFor func(sessionID string) *content.Grant
-	// requester is the broker-backed seam a renderer-executed tool asks
-	// through (assistant.RendererRequester); nil when the broker is not
-	// wired, which disables InRenderer tools.
+	// requester is the renderer-orchestrated command submission seam.
 	requester assistant.RendererRequester
+	// screenCapture and sessions are the assistant's backend-owned read seams.
+	screenCapture assistant.ScreenCaptureSource
+	sessions      assistant.SessionSource
 	// expansions is the authenticated-channel seam that answers "what does
 	// $HOME read as, in the shell that would run this" for an approval
 	// question (nocx-4h0m7.5, assistant.ExpansionSource). The server
@@ -1544,6 +1497,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Grant:         rc.grant,
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
+		ScreenCapture: h.screenCapture,
+		SessionSource: h.sessions,
 		Expansions:    h.expansions,
 		Workers:       h.workerStore,
 		// The one environment a spawn can reach in this slice: the machine
@@ -2781,70 +2736,6 @@ func (h agentHandlers) answerError(req jsonrpcRequest, err error) {
 
 // ── validation ────────────────────────────────────────────────────────────
 
-// validateLiveFrameBody checks the LIVE half of a frame — the identity, the
-// buffer row range, the cursor and every row's cells against the bounds — and
-// returns the first refusal message, or "" with the row-char total when the
-// body is valid. The readScreen pull resolution is the sole caller, so a rule
-// added here applies to that direction (AD-8 — one owner per behaviour).
-func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identity *frameIdentityWire, rng *frameRangeWire) (string, int) {
-	if cursor == nil {
-		return "a live frame requires a cursor", 0
-	}
-	if identity == nil {
-		return "a live frame requires the capture identity", 0
-	}
-	if rng == nil {
-		return "a live frame requires the buffer row range", 0
-	}
-	id := identity
-	if id.Cols < 1 || id.Cols > maxFrameCols {
-		return "identity cols are out of bounds", 0
-	}
-	if id.Rows < 1 || id.Rows > maxFrameRows {
-		return "identity rows are out of bounds", 0
-	}
-	if id.Generation < 0 {
-		return "identity generation must not be negative", 0
-	}
-	switch id.Buffer.Kind {
-	case "normal":
-	case "alternate":
-		if id.Buffer.AltSession == nil || *id.Buffer.AltSession < 0 {
-			return "an alternate buffer identity requires a non-negative altSession", 0
-		}
-	default:
-		return "buffer kind must be normal or alternate", 0
-	}
-	if rng.Start < 0 || rng.End <= rng.Start || rng.End-rng.Start != len(rows) {
-		return "range must be non-negative and span exactly the frame's rows", 0
-	}
-	// The cursor is an absolute buffer line: at most scrollback cap +
-	// screen height. Col is within the frame's geometry.
-	if cursor.Col < 0 || cursor.Col >= id.Cols ||
-		cursor.Line < 0 || cursor.Line >= maxFrameRows+id.Rows {
-		return "cursor is out of bounds", 0
-	}
-	// A row is bounded by the geometry it claims rather than pinned to it:
-	// a wide glyph occupies two columns as one rune, so a full row is
-	// legitimately SHORTER than cols, while a cell of combining marks is
-	// longer. The ceiling is what one screen's worth of columns can hold.
-	var totalChars int
-	for _, row := range rows {
-		if row.Kind != "text" {
-			return "a live frame row must be text", 0
-		}
-		n := utf8.RuneCountInString(row.Text)
-		if n > id.Cols*maxRowRunesPerCol {
-			return "a live frame row is wider than its columns can hold", 0
-		}
-		totalChars += n
-	}
-	if totalChars > maxFrameChars {
-		return "frame is too large: character budget exceeded", 0
-	}
-	return "", totalChars
-}
-
 // validateAgentAsk maps the wire ask onto the ledger's AgentAsk.
 func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedContentItem, string) {
 	empty := func(msg string) (content.AgentAsk, []assistant.AttachedContentItem, string) {
@@ -3027,7 +2918,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
 			credentials: credentials, client: client, askSub: askSub,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
-			requester: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
+			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

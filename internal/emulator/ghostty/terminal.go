@@ -1898,6 +1898,27 @@ func (t *terminal) Focus(gained bool) ([]byte, error) {
 // the terminal rather than a field this adapter keeps: a mode the program set
 // is the library's state, and a copy of it here would be a second answer to the
 // same question.
+func (t *terminal) Modes() (emulator.Modes, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.t == nil {
+		return emulator.Modes{}, emulator.ErrClosed
+	}
+	bracketed, err := t.mode(modeBracketedPaste)
+	if err != nil {
+		return emulator.Modes{}, err
+	}
+	tracking := false
+	for _, mode := range []int{1000, 1002, 1003} {
+		active, modeErr := t.mode(mode)
+		if modeErr != nil {
+			return emulator.Modes{}, modeErr
+		}
+		tracking = tracking || active
+	}
+	return emulator.Modes{BracketedPaste: bracketed, MouseTracking: tracking}, nil
+}
+
 func (t *terminal) mode(value int) (bool, error) {
 	var on C.bool
 	if r := C.nocxModeValue(t.t, C.uint16_t(value), &on); r != C.GHOSTTY_SUCCESS {

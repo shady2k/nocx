@@ -456,9 +456,6 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"agent.laneInteractivity": {
 			[]byte(`{"sessionId":"session-1","bufferKind":"normal"}`),
 		},
-		"agent.readScreenResolved": {
-			[]byte(`{"requestId":"request-1","outcome":"failed","error":"capture failed"}`),
-		},
 		"agent.runResolved": {
 			[]byte(`{"requestId":"request-1","outcome":"failed","error":"run failed"}`),
 		},

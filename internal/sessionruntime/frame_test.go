@@ -135,8 +135,33 @@ func denseSnapshot(cols, rows int) Snapshot {
 			Geometry: emulator.Geometry{Cols: cols, Rows: rows, CellWidthPx: 8, CellHeightPx: 16},
 			Revision: 7,
 		},
-		Cursor: emulator.Cursor{X: 3, Y: 1, Visible: true},
-		Rows:   styled,
+		Cursor:   emulator.Cursor{X: 3, Y: 1, Visible: true},
+		Identity: ScreenIdentity{BufferInstance: 1},
+		Modes:    emulator.Modes{BracketedPaste: true, MouseTracking: true},
+		Rows:     styled,
+	}
+}
+
+func TestFrameCarriesReplayableTitleAndCwdState(t *testing.T) {
+	raw, err := EncodeFrame(denseSnapshot(80, 24))
+	if err != nil {
+		t.Fatalf("EncodeFrame: %v", err)
+	}
+	var wire struct {
+		State map[string]json.RawMessage `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("decode frame: %v", err)
+	}
+	for _, field := range []string{"title", "cwd"} {
+		value, ok := wire.State[field]
+		if !ok {
+			t.Errorf("frame state is missing replayable %q", field)
+			continue
+		}
+		if string(value) != "null" {
+			t.Errorf("unset %s = %s, want null to distinguish no report from an explicit empty value", field, value)
+		}
 	}
 }
 

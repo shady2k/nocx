@@ -25,6 +25,10 @@ package proto
 // OpScreen reports the screen a session's runtime holds right now.
 const OpScreen = "screen"
 
+// OpScreenCapture reads an absolute row range and its buffer identity from one
+// runtime lock acquisition. It serves assistant reads, not renderer frames.
+const OpScreenCapture = "screen-capture"
+
 // OpScreenResend asks a session's runtime to hand its consumers the frame it
 // last published — a full snapshot, the runtime's own Resend — over the same
 // carrier every published frame rides (nocx-zg3k3.2.15).
@@ -103,6 +107,47 @@ type ScreenResult struct {
 	// Completeness is what the runtime can claim about the stream it holds. It
 	// is what a write gate reads before it decides anything (design §6.7).
 	Completeness Completeness `json:"completeness"`
+}
+
+// ScreenCaptureRange is an absolute, half-open row interval in the active
+// buffer. A nil range requests every row still retained by that buffer.
+type ScreenCaptureRange struct {
+	Start uint64 `json:"start"`
+	End   uint64 `json:"end"`
+}
+
+// ScreenCaptureParams names the session and, optionally, the exact absolute
+// row interval to capture.
+type ScreenCaptureParams struct {
+	Session HostSessionID       `json:"session"`
+	Range   *ScreenCaptureRange `json:"range,omitempty"`
+}
+
+// ScreenCaptureIdentity describes the buffer instance, viewport geometry and
+// content generation for a capture. Instance changes whenever the active
+// primary/alternate buffer changes; generation is the runtime screen revision.
+type ScreenCaptureIdentity struct {
+	Kind       string `json:"kind"`
+	Instance   uint64 `json:"instance"`
+	Cols       int    `json:"cols"`
+	Rows       int    `json:"rows"`
+	Generation uint64 `json:"generation"`
+}
+
+// ScreenCaptureResult returns rows and every boundary needed to interpret them.
+// Rows is exactly [Start, End), never a silently clipped request.
+type ScreenCaptureResult struct {
+	Floor         uint64                `json:"floor"`
+	Start         uint64                `json:"start"`
+	End           uint64                `json:"end"`
+	Total         uint64                `json:"total"`
+	Rows          [][]ScreenCell        `json:"rows"`
+	CursorX       int                   `json:"cursorX"`
+	CursorY       uint64                `json:"cursorY"`
+	CursorVisible bool                  `json:"cursorVisible"`
+	Identity      ScreenCaptureIdentity `json:"identity"`
+	Revision      uint64                `json:"revision"`
+	Completeness  Completeness          `json:"completeness"`
 }
 
 // Completeness is the wire spelling of what a runtime can claim about the

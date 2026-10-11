@@ -2139,6 +2139,7 @@ func New(opts ...Option) (*App, error) {
 		// asked of the helper that holds the pane through the same lookup
 		// every screen read takes, and delivered by that pane's own drain.
 		transport.WithScreenResender(screenSource),
+		transport.WithScreenCaptureSource(screenSource),
 		// The live history a scroll-up reads (nocx-zg3k3.10.3): asked of the
 		// helper that holds the pane through the same owner lookup every
 		// screen read takes, and delivered on the screen carrier the frame
@@ -2589,6 +2590,7 @@ func New(opts ...Option) (*App, error) {
 	paneWatch.OnReading(workerObs.ObserveSession)
 	toolDispatcher, toolDispatcherErr := assistant.NewToolDispatcher(
 		agentToolRegistry, assistantWorkerRecord, content.EnvironmentIDFor(content.EnvLocal, ""),
+		assistant.SessionReadSources{Sessions: tp, ScreenCapture: tp},
 	)
 	if toolDispatcherErr != nil {
 		return nil, fmt.Errorf("worker dispatcher: %w", toolDispatcherErr)

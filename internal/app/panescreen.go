@@ -10,16 +10,19 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentcapture"
+	"github.com/shady2k/nocx/internal/assistant"
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/paneview"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/sessionruntime"
 )
 
 // paneScreenTimeout bounds ONE frame read.
@@ -103,6 +106,106 @@ func (p *paneScreen) Screen(paneID string) (paneview.Frame, error) {
 		return paneview.Frame{}, err
 	}
 	return c.Screen(ctx, id)
+}
+
+// CaptureScreen implements transport.ScreenCaptureSource. The owning helper
+// reads the requested absolute rows, buffer identity and cursor under one
+// session-runtime lock; separately reading Screen and HistoryPage is not a
+// coherent capture.
+func (p *paneScreen) CaptureScreen(ctx context.Context, sessionID string, region *assistant.FrameRegion) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, paneScreenTimeout)
+	defer cancel()
+	client, id, err := p.owner(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var requested *proto.ScreenCaptureRange
+	if region != nil {
+		if region.Start < 0 || region.End < region.Start {
+			return nil, fmt.Errorf("app: invalid absolute screen range [%d,%d)", region.Start, region.End)
+		}
+		start, conversionErr := screenRowOffsetFromInt(region.Start)
+		if conversionErr != nil {
+			return nil, conversionErr
+		}
+		end, conversionErr := screenRowOffsetFromInt(region.End)
+		if conversionErr != nil {
+			return nil, conversionErr
+		}
+		requested = &proto.ScreenCaptureRange{Start: start, End: end}
+	}
+	capture, err := client.ScreenCapture(ctx, id, requested)
+	if err != nil {
+		return nil, err
+	}
+	for name, value := range map[string]uint64{
+		"floor": capture.Floor, "total": capture.Total, "cursor row": capture.CursorY,
+		"buffer instance": capture.Identity.Instance, "generation": capture.Identity.Generation,
+		"range start": capture.Start, "range end": capture.End,
+	} {
+		if value > sessionruntime.MaxScreenRowOffset {
+			return nil, fmt.Errorf("app: helper screen capture %s %d exceeds JSON safe-integer ceiling %d", name, value, sessionruntime.MaxScreenRowOffset)
+		}
+	}
+	frame := paneview.Frame{Cols: capture.Identity.Cols, Rows: len(capture.Rows), Lines: capture.Rows}
+	rows := make([]assistantScreenCaptureRow, len(capture.Rows))
+	for y := range capture.Rows {
+		rows[y] = assistantScreenCaptureRow{Kind: "text", Text: frame.Text(y)}
+	}
+	kind := "normal"
+	if capture.Identity.Kind == "alternate" {
+		kind = "alternate"
+	}
+	body := assistantScreenCaptureBody{
+		Floor: capture.Floor, Total: capture.Total, Rows: rows,
+		Cursor: &assistantScreenCaptureCursor{Line: capture.CursorY, Col: capture.CursorX},
+		Identity: &assistantScreenCaptureIdentity{
+			Buffer: assistantScreenCaptureBuffer{Kind: kind, Instance: capture.Identity.Instance},
+			Cols:   capture.Identity.Cols, Rows: capture.Identity.Rows, Generation: capture.Identity.Generation,
+		},
+		Range: &assistantScreenCaptureRange{Start: capture.Start, End: capture.End},
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("app: marshal backend screen capture: %w", err)
+	}
+	return encoded, nil
+}
+
+type assistantScreenCaptureBody struct {
+	Floor    uint64                          `json:"floor"`
+	Total    uint64                          `json:"total"`
+	Rows     []assistantScreenCaptureRow     `json:"rows"`
+	Cursor   *assistantScreenCaptureCursor   `json:"cursor"`
+	Identity *assistantScreenCaptureIdentity `json:"identity"`
+	Range    *assistantScreenCaptureRange    `json:"range"`
+}
+
+type assistantScreenCaptureRow struct {
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+type assistantScreenCaptureCursor struct {
+	Line uint64 `json:"line"`
+	Col  int    `json:"col"`
+}
+
+type assistantScreenCaptureBuffer struct {
+	Kind     string `json:"kind"`
+	Instance uint64 `json:"instance"`
+}
+
+type assistantScreenCaptureIdentity struct {
+	Buffer     assistantScreenCaptureBuffer `json:"buffer"`
+	Cols       int                          `json:"cols"`
+	Rows       int                          `json:"rows"`
+	Generation uint64                       `json:"generation"`
+}
+
+type assistantScreenCaptureRange struct {
+	Start uint64 `json:"start"`
+	End   uint64 `json:"end"`
 }
 
 // ResendScreen implements transport.ScreenResender: the helper that holds the
@@ -287,4 +390,11 @@ func (p paneReplay) Replay(ctx context.Context, header agentcapture.Header, chun
 		return nil, err
 	}
 	return frames, nil
+}
+
+func screenRowOffsetFromInt(value int) (uint64, error) {
+	if value < 0 {
+		return 0, fmt.Errorf("app: screen row offset is negative: %d", value)
+	}
+	return uint64(value), nil
 }

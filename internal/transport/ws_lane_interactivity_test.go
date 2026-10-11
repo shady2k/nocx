@@ -54,36 +54,14 @@ func TestLaneInteractivity_AwaitingTakeoverRefusesWritesAndAllowsReads(t *testin
 		t.Fatalf("broker pending = %d after the refusal, want 0 — no run request may exist", n)
 	}
 
-	// Reading keeps working: the readScreen request is minted and the
-	// renderer's frame answer comes back — the demotion keeps read rights.
-	readDone := make(chan error, 1)
-	var frame json.RawMessage
-	go func() {
-		var err error
-		frame, err = ws.RequestScreen(t.Context(), sid, nil)
-		readDone <- err
-	}()
-	raw := readNotification(t, conn, "agent.readScreenRequest", 5*time.Second)
-	var req struct {
-		RequestID string `json:"requestId"`
+	// Reading keeps working after the lane is demoted. The capture source is
+	// backend-owned and independent of the renderer connection.
+	source := &recordingScreenCapture{body: screenCaptureBody(t, 0, "vim is still here", "the human owns it")}
+	ws.screenCaptureSource = source
+	frame, err := ws.RequestScreen(t.Context(), sid, nil)
+	if err != nil {
+		t.Fatalf("RequestScreen = %v, want backend capture while demoted", err)
 	}
-	if err := json.Unmarshal(raw, &req); err != nil {
-		t.Fatalf("readScreenRequest decode: %v", err)
-	}
-	reply := jsonrpcCall(t, conn, "agent.readScreenResolved", readScreenFrameWire(t, req.RequestID, "vim is still here", "the human owns it"))
-	if isErrorResponse(t, reply) {
-		t.Fatalf("readScreenResolved refused: %s", reply)
-	}
-	select {
-	case err := <-readDone:
-		if err != nil {
-			t.Fatalf("RequestScreen = %v, want the frame — the agent keeps reading while demoted", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("RequestScreen never settled")
-	}
-	// A frame row is its text (the wire vocabulary) — join the rows to
-	// assert the READ carried the renderer's answer.
 	var body struct {
 		Rows []struct {
 			Text string `json:"text"`
@@ -93,11 +71,15 @@ func TestLaneInteractivity_AwaitingTakeoverRefusesWritesAndAllowsReads(t *testin
 		t.Fatalf("frame decode: %v", err)
 	}
 	var text strings.Builder
-	for _, r := range body.Rows {
-		text.WriteString(r.Text)
+	for _, row := range body.Rows {
+		text.WriteString(row.Text)
 	}
 	if !strings.Contains(text.String(), "the human owns it") {
-		t.Fatalf("RequestScreen frame text = %q, want the renderer's answer", text.String())
+		t.Fatalf("RequestScreen text = %q, want backend-owned screen text", text.String())
+	}
+	calls := source.snapshotCalls()
+	if len(calls) != 1 || calls[0].sessionID != sid {
+		t.Fatalf("capture calls = %+v, want one call for session %q", calls, sid)
 	}
 	// The TUI exits: the lane leaves awaiting-takeover, and runs are
 	// accepted again — the demotion is a transition, not a state the lane
@@ -113,7 +95,7 @@ func TestLaneInteractivity_AwaitingTakeoverRefusesWritesAndAllowsReads(t *testin
 		_, err := ws.RequestRun(t.Context(), sid, "ls")
 		runDone <- err
 	}()
-	raw = readNotification(t, conn, "agent.runRequest", 5*time.Second)
+	raw := readNotification(t, conn, "agent.runRequest", 5*time.Second)
 	var runReq struct {
 		RequestID string `json:"requestId"`
 	}

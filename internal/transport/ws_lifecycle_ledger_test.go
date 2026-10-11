@@ -294,9 +294,11 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	server := httptest.NewServer(http.HandlerFunc(provider.serve))
 	defer server.Close()
 
+	screenSource := &recordingScreenCapture{body: screenCaptureBody(t, 5, "live block output")}
 	h := newAskHarnessWithOpts(t, client,
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithLifecyclePublisher(pub),
+		WithScreenCaptureSource(screenSource),
 	)
 	pub.SetEmitter(h.ws)
 	h.createEndpointAt(server.URL)
@@ -366,26 +368,15 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 		t.Fatalf("first session.read = %+v, want no model session id and prompt id %q", first, promptID)
 	}
 
-	screenRaw := readNotification(t, h.conn, "agent.readScreenRequest", 10*time.Second)
-	var screen struct {
-		RequestID string `json:"requestId"`
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(screenRaw, &screen); err != nil {
-		t.Fatalf("agent.readScreenRequest: %v\nraw: %s", err, screenRaw)
-	}
-	if screen.SessionID != sid || screen.RequestID == "" {
-		t.Fatalf("screen request = %+v, want session %q and a request id", screen, sid)
-	}
-	if reply := jsonrpcCall(t, h.conn, "agent.readScreenResolved",
-		readScreenFrameWire(t, screen.RequestID, "live block output")); isErrorResponse(t, reply) {
-		t.Fatalf("agent.readScreenResolved: %s", reply)
-	}
-
 	select {
 	case <-provider.runningResult:
 	case <-time.After(10 * time.Second):
-		t.Fatal("fake model never received the running session.read result")
+		t.Fatalf("fake model never received the running session.read result: %v", provider.failure())
+	}
+
+	calls := screenSource.snapshotCalls()
+	if len(calls) != 1 || calls[0].sessionID != sid {
+		t.Fatalf("backend screen capture calls = %+v, want running session %q", calls, sid)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, domain, 3, lifecycleCompleteEvt(attemptID, 7, lifecycleFence(0x55))))
 	// Lifecycle completion now closes and records the attempt itself. The
@@ -412,7 +403,7 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	select {
 	case <-provider.finishedResult:
 	case <-time.After(10 * time.Second):
-		t.Fatal("fake model never received the completed session.read result")
+		t.Fatalf("fake model never received the completed session.read result: %v", provider.failure())
 	}
 	thirdCall := readNotification(t, h.conn, "agent.runToolCall", 10*time.Second)
 	var third struct {
@@ -482,7 +473,7 @@ func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Reques
 		p.mu.Unlock()
 		p.promptID <- learned
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":0,"count":20}`, learned))
+			`{"id":%q,"start":5,"count":1}`, learned))
 		return
 	}
 	learned := p.learned
@@ -497,7 +488,7 @@ func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Reques
 		close(p.runningResult)
 		<-p.releaseSecond
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"id":%q,"start":0,"count":20}`, learned))
+			`{"id":%q,"start":0,"count":1}`, learned))
 	case strings.Contains(tool, `"state":"exited"`) &&
 		strings.Contains(tool, `"exitCode":7`) &&
 		strings.Contains(tool, "finished block output"):

@@ -83,6 +83,44 @@ export interface SessionFrame {
     visible: boolean
   }
   /**
+   * The runtime-owned terminal state that determines how the client routes selection and paste and restores the latest title and working-directory report. It is captured with the same screen revision; the client does not parse PTY bytes to derive modes, buffer identity, title, or cwd.
+   */
+  state: {
+    /**
+     * The active terminal buffer at this revision.
+     */
+    bufferKind: 'normal' | 'alternate'
+    /**
+     * A decimal string identifying the active buffer instance. It is a string because the runtime counter is uint64 and JSON numbers are not exact across JavaScript's full range.
+     */
+    bufferInstance: string
+    /**
+     * Whether the running program has enabled DEC private mode 2004.
+     */
+    bracketedPaste: boolean
+    /**
+     * Whether the running program has enabled X10, button, or any-event mouse tracking.
+     */
+    mouseTracking: boolean
+    /**
+     * The latest program title. Null means no title has been reported; an empty string is an explicit clear. This is latest-value state, not replay of session.effect.
+     */
+    title: string | null
+    /**
+     * The latest syntactically valid OSC 7 file URI, decoded once by the backend. Null means no valid report has been received.
+     */
+    cwd: {
+      /**
+       * The URI authority decoded from the OSC 7 file URI.
+       */
+      host: string
+      /**
+       * The URI path decoded from the OSC 7 file URI.
+       */
+      path: string
+    } | null
+  }
+  /**
    * Every row of the active screen (Snapshot.Rows), in order, as the emulator holds it: the array is geometry.rows long, and each row's OWN explicit content is at most geometry.cols columns — a receiver pads a shorter row with the default style to reach cols, since a trailing run of default blanks is implied rather than sent.
    */
   rows: Row[]

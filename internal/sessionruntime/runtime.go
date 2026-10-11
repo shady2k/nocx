@@ -176,6 +176,11 @@ type Session struct {
 	geom     GeometryCommit
 	reported Geometry
 
+	// title and cwd are the latest validated terminal metadata reports. They
+	// are state for a full frame, not replayable effect deliveries.
+	title *string
+	cwd   *CwdReport
+
 	// The rendezvous is a SET of meetings keyed by nonce, not one slot. The
 	// authenticated channel and the PTY are ordered independently (ADR-0024
 	// decision 7, design §6.4), so two commands can legitimately be pending
@@ -596,7 +601,17 @@ func (s *Session) Snapshot() Snapshot {
 // holds s.mu when it runs the caller's check, and Snapshot would deadlock
 // taken from inside it.
 func (s *Session) snapshotLocked() Snapshot {
-	rows, cur, identity := s.screenStateLocked()
+	rows, cur, identity, modes := s.screenStateLocked()
+	var title *string
+	if s.title != nil {
+		value := *s.title
+		title = &value
+	}
+	var cwd *CwdReport
+	if s.cwd != nil {
+		value := *s.cwd
+		cwd = &value
+	}
 	return Snapshot{
 		Revision:          s.rev,
 		At:                s.inc,
@@ -609,6 +624,9 @@ func (s *Session) snapshotLocked() Snapshot {
 		Rows:              rows,
 		Cursor:            cur,
 		Identity:          identity,
+		Modes:             modes,
+		Title:             title,
+		Cwd:               cwd,
 	}
 }
 
@@ -623,16 +641,16 @@ func (s *Session) snapshotLocked() Snapshot {
 // a closed emulator: a caller comparing Cols/Rows against a token's would see
 // 0x0 and refuse `incomparable` rather than being handed a screen nobody
 // read.
-func (s *Session) screenStateLocked() ([]emulator.Row, emulator.Cursor, ScreenIdentity) {
+func (s *Session) screenStateLocked() ([]emulator.Row, emulator.Cursor, ScreenIdentity, emulator.Modes) {
 	geom, err := s.emulator.Geometry()
 	if err != nil {
-		return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}
+		return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}, emulator.Modes{}
 	}
 	rows := make([]emulator.Row, 0, geom.Rows)
 	for y := range geom.Rows {
 		row, rowErr := s.emulator.Row(y)
 		if rowErr != nil {
-			return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}
+			return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}, emulator.Modes{}
 		}
 		rows = append(rows, row)
 	}
@@ -643,13 +661,17 @@ func (s *Session) screenStateLocked() ([]emulator.Row, emulator.Cursor, ScreenId
 	scr, err := s.emulator.Screen()
 	alt := err == nil && scr == emulator.ScreenAlternate
 	s.observeBufferLocked(alt)
+	modes, err := s.emulator.Modes()
+	if err != nil {
+		return nil, emulator.Cursor{}, ScreenIdentity{At: s.inc}, emulator.Modes{}
+	}
 	return rows, cur, ScreenIdentity{
 		At:             s.inc,
 		AltScreen:      alt,
 		BufferInstance: s.bufferInstance,
 		Cols:           geom.Cols,
 		Rows:           geom.Rows,
-	}
+	}, modes
 }
 
 // observeBufferLocked advances bufferInstance the moment the active buffer
@@ -1284,6 +1306,18 @@ func (s *Session) Ingest(b []byte) error {
 				s.sightClearBoundaryLocked()
 				continue
 			}
+			// The emulator is the only VT parser. Its already-decoded effect
+			// payload becomes latest-value state so a later full frame can
+			// restore title and cwd without replaying session.effect.
+			switch e.Kind {
+			case emulator.EffectTitle:
+				title := string(e.Body)
+				s.title = &title
+			case emulator.EffectCwdReport:
+				if cwd, ok := decodeCwdReport(e.Body); ok {
+					s.cwd = &cwd
+				}
+			}
 			s.nextEffect++
 			effect := Effect{
 				ID:           s.nextEffect,
@@ -1294,6 +1328,9 @@ func (s *Session) Ingest(b []byte) error {
 				StreamOffset: e.StreamOffset,
 			}
 			if effect.Kind == EffectPromptBoundary {
+				// The full frame published by this ingest follows exactly one revision tick.
+				// Carry that lower bound; it does not authorize lifecycle state.
+				effect.ScreenRevision = uint64(s.rev + 1)
 				if sink, ok := s.replies.(PromptBoundarySink); ok {
 					if err := sink.PromptBoundary(effect); err != nil {
 						replyErr = err

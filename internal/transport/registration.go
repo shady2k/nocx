@@ -51,8 +51,7 @@ var ingressCriticalMethods = map[string]struct{}{
 	// under the ask stream — blocks on the answer, so an answer queued
 	// behind a full lane would deadlock the run. Same disposition as the
 	// two existing resolvers, for the same reason.
-	"agent.readScreenResolved": {},
-	"agent.runResolved":        {},
+	"agent.runResolved": {},
 	// The client host's resolution (nocx-uo1k6, design D3): the asking task
 	// — a dialog, a URL open, a banner, a window raise — blocks on the
 	// answer while holding a lane permit, so an answer queued behind a full

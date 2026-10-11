@@ -317,8 +317,9 @@ func TestPromptBoundaryIsDeliveredAsAnEmptyAtMostOnceObservation(t *testing.T) {
 	}
 	effects := c.Effects()
 	wantOffset := uint64(len("before\x1b]133;B\x07"))
-	if len(effects) != 1 || effects[0].Kind != EffectPromptBoundary || effects[0].ID == 0 || effects[0].At != s.Incarnation() || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 || effects[0].StreamOffset != wantOffset {
-		t.Fatalf("prompt boundary delivery = %#v", effects)
+	wantRevision := s.Snapshot().Revision
+	if len(effects) != 1 || effects[0].Kind != EffectPromptBoundary || effects[0].ID == 0 || effects[0].At != s.Incarnation() || len(effects[0].Title) != 0 || len(effects[0].Body) != 0 || effects[0].StreamOffset != wantOffset || effects[0].ScreenRevision != uint64(wantRevision) {
+		t.Fatalf("prompt boundary delivery = %#v, want screen revision %d", effects, wantRevision)
 	}
 	if again := c.Effects(); len(again) != 1 || again[0].ID != effects[0].ID {
 		t.Fatalf("consumer queue changed across passive reads: %#v", again)

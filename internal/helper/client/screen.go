@@ -59,6 +59,42 @@ func (c *Client) Screen(ctx context.Context, id HostSessionID) (paneview.Frame, 
 	return frame, nil
 }
 
+// ScreenCapture reads an absolute row range and its identity from one runtime
+// lock acquisition. Unlike Screen, it includes retained history so a caller can
+// preserve the exact [start,end) window it asked for.
+func (c *Client) ScreenCapture(ctx context.Context, id HostSessionID, region *proto.ScreenCaptureRange) (paneview.ScreenCapture, error) {
+	var result proto.ScreenCaptureResult
+	if err := c.Call(ctx, proto.ServiceSession, proto.OpScreenCapture, proto.ScreenCaptureParams{
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(id.Generation),
+			Session:    id.Session,
+		},
+		Range: region,
+	}, &result); err != nil {
+		return paneview.ScreenCapture{}, err
+	}
+	rows := make([][]paneview.Cell, len(result.Rows))
+	for y, row := range result.Rows {
+		cells := make([]paneview.Cell, len(row))
+		for x, cell := range row {
+			cells[x] = paneview.Cell{Text: cell.Text, Width: cell.Width}
+		}
+		rows[y] = cells
+	}
+	return paneview.ScreenCapture{
+		Floor: result.Floor, Start: result.Start, End: result.End, Total: result.Total,
+		Rows: rows, CursorX: result.CursorX, CursorY: result.CursorY,
+		CursorVisible: result.CursorVisible,
+		Identity: paneview.ScreenCaptureIdentity{
+			Kind: result.Identity.Kind, Instance: result.Identity.Instance,
+			Cols: result.Identity.Cols, Rows: result.Identity.Rows,
+			Generation: result.Identity.Generation,
+		},
+		Revision:     sessionruntime.Revision(result.Revision),
+		Completeness: completenessFromWire(result.Completeness),
+	}, nil
+}
+
 // ResendScreen asks a session's runtime to re-offer its latest frame. The
 // frame is not this call's answer: it arrives on the screen carrier, at the
 // observer OnScreenFrame registered, in order with every other frame

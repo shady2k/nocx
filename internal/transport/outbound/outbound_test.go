@@ -227,7 +227,7 @@ func TestWaitForRoomUnblocksWhenPumpDrains(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	waited := make(chan error, 1)
-	go func() { waited <- c.WaitForRoom(ctx) }()
+	go func() { waited <- c.WaitForRoom(ctx, 1) }()
 
 	select {
 	case err := <-waited:
@@ -252,7 +252,7 @@ func TestWaitForRoomHonorsContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	waited := make(chan error, 1)
-	go func() { waited <- c.WaitForRoom(ctx) }()
+	go func() { waited <- c.WaitForRoom(ctx, 1) }()
 	cancel()
 
 	select {

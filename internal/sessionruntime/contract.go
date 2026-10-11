@@ -495,7 +495,12 @@ type Effect struct {
 	// bytes from whatever the user ran, and nothing here interprets them.
 	Body []byte
 	// StreamOffset is the exact exclusive PTY byte offset for a prompt boundary.
+	// It orders the effect after those bytes are offered; it is not a client ack.
 	StreamOffset uint64
+	// ScreenRevision is the full-frame revision published after the same ingest
+	// that consumed an OSC 133 B prompt boundary. It is present only for that
+	// effect and is a non-authoritative lower bound for presentation ordering.
+	ScreenRevision uint64
 	// Ordered means the owner synchronously registered this boundary in the
 	// output stream before the bytes after it were published. Consumers that
 	// share that ordered stream must not emit a duplicate side-channel event.
@@ -959,6 +964,13 @@ type Runtime interface {
 	IngestState() IngestState
 }
 
+// CwdReport is the decoded host and path from a program's OSC 7 report.
+// It is session state, not a replay of the at-most-once effect that produced it.
+type CwdReport struct {
+	Host string `json:"host"`
+	Path string `json:"path"`
+}
+
 // Snapshot is one consistent read. Every field belongs to Revision, which is
 // what makes "the cards through R and the live frame at R, then the changes
 // after R" expressible at all.
@@ -988,6 +1000,14 @@ type Snapshot struct {
 	Rows []emulator.Row
 	// Cursor is the caret [Digest] folds in for an `input` target.
 	Cursor emulator.Cursor
+	// Modes is the emulator-owned routing state needed by the client for
+	// selection-vs-mouse input and guarded multi-line paste.
+	Modes emulator.Modes
+	// Title is the latest title report (including an explicit empty clear),
+	// nil until a program has reported one.
+	Title *string
+	// Cwd is the latest syntactically valid OSC 7 report, nil until one arrives.
+	Cwd *CwdReport
 	// Identity is what a target's [ScreenIdentity] is judged against: the
 	// buffer switching, a resize or an incarnation change since a token was
 	// minted is refused `incomparable` by comparing THIS rather than by

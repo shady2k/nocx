@@ -95,33 +95,40 @@ func RunLeaseDegradationFromContext(ctx context.Context) *RunLeaseDegradation {
 }
 
 // FrameRegion is an absolute buffer row span [Start, End) of a session's
-// screen. The renderer interprets it against ITS grid; the backend never
-// re-derives terminal geometry (AD-6). Nil means "the visible screen".
+// screen. The owning runtime interprets it against its current buffer and
+// returns the same range with the captured buffer identity. Nil means "the
+// visible screen".
 type FrameRegion struct {
 	Start int
 	End   int
 }
 
-// RendererRequester is the seam a renderer-executed tool (design §2.2,
-// §6.6 — Executes: InRenderer) asks the renderer through. The transport
-// adapts its request broker to this interface at the run: the broker mints
-// the request id, correlates the resolution over the same socket, and
-// returns the frame body as it crossed the wire, validated (bounded,
-// shape-checked) before the executor ever decodes it.
-//
-// The frame body is deliberately opaque here: the frame wire vocabulary
-// (cells, attributes, capture identity) is owned by the transport's
-// captureFrame validation, and this seam consumes it rather than recreating
-// it — the executor decodes only the fields its return contract needs
-// (design §4.4's window), never the full frame type.
-type RendererRequester interface {
-	// RequestScreen asks the renderer to capture sessionID's screen — the
-	// same frame shape the renderer pushes for agent.captureFrame, pulled —
-	// and returns the validated frame body (rows, cursor, capture identity).
+// ScreenCaptureSource reads a session's screen from its owning backend
+// runtime. The capture body stays opaque here: the helper publishes one
+// coherent frame, and the executor decodes only the fields its result contract
+// needs (including its absolute row range and buffer identity), never the full
+// frame type.
+type ScreenCaptureSource interface {
+	// RequestScreen reads sessionID's screen from its owning backend runtime
+	// and returns the capture body (rows, cursor, absolute range, identity).
 	// A session the run cannot read must be refused HERE or before: the
 	// capability check happens before this call, and a failed capture is a
 	// returned error, never a hang.
 	RequestScreen(ctx context.Context, sessionID string, region *FrameRegion) (json.RawMessage, error)
+}
+
+// SessionReadSources are the backend-owned sources used by the worker tool
+// endpoint's session.read executor. A nil member fails closed when that read
+// path is invoked; production composition supplies both from the transport.
+type SessionReadSources struct {
+	Sessions      SessionSource
+	ScreenCapture ScreenCaptureSource
+}
+
+// RendererRequester is the assistant's live-session command-submission seam.
+// Command submission remains renderer-orchestrated; it is independent of the
+// narrow backend-owned screen-capture source.
+type RendererRequester interface {
 	// RequestRun asks the renderer to submit command to sessionID's lane
 	// through the same submit path a person uses — the renderer's ordinary
 	// orchestration (block, ledger entry, attempt, output artifact, all

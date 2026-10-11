@@ -265,14 +265,17 @@ type AskParams struct {
 	// fails closed rather than acting without a record. The transport wires
 	// the real ledger when it mints grants; today no caller does.
 	AttemptLedger AttemptLedger
-	// Requester is the seam a renderer-executed tool asks the renderer
-	// through (design §2.2, §6.6 — Executes: InRenderer): the transport
-	// adapts its request broker to this interface, so readScreen's executor
-	// holds a broker request rather than touching the terminal domain.
-	// Nil with an InRenderer tool declared means the tool is executed
-	// honestly as an error — a declaration without its transport is a
-	// wiring gap, never a silent no-op.
+	// Requester is the seam for renderer-orchestrated command submission.
+	// It is separate from ScreenCapture because a screen read is answered by
+	// the owning runtime, not by asking a renderer to reconstruct it.
 	Requester RendererRequester
+	// ScreenCapture reads the run's own pane from its owning backend runtime.
+	// Nil means an own-screen read fails closed; descendant reads still use
+	// the helper-backed PaneReader carried by their capability.
+	ScreenCapture ScreenCaptureSource
+	// SessionSource reads the run's existing session items from the ledger.
+	// Nil means item reads and session.list fail closed.
+	SessionSource SessionSource
 	// Expansions asks ONE live shell what the safe expansions in a proposed
 	// command currently read as, so the approval question can show the
 	// expanded form beside the verbatim one (nocx-4h0m7.5). The query never

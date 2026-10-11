@@ -5,7 +5,7 @@
   "description": "One full screen of cells, as the session runtime already holds it — the shape the client will paint instead of parsing terminal bytes (nocx-zg3k3.2.1). Every name and semantic here is taken from the Go types the frame is read from: Snapshot (internal/sessionruntime/contract.go) for revision, rows, cursor and committed geometry, and emulator.Row, Cell, Style, Color, Cursor, Width (internal/emulator/emulator.go) for the cells themselves. A cell-shaped wire format already exists — contracts/helper/identities.schema.json $defs screenCell and screenFrame, the FROZEN coordinator-to-helper ABI — and it was considered and does not fit: it carries no style and no has-text fact, so a cell painted with a background and no text loses both; its rows carry no wrap/continuation, which is what lets a scrollback renderer join the physical lines of one logical line; and its width vocabulary is 0-2, while emulator.Width is a five-value enumeration whose spacer head the helper ABI has no spelling for. Extending a frozen ABI for a renderer need was the wrong direction, so this schema declares the renderer's own vocabulary once, from the same Go source the helper's was derived from. SHAPE (nocx-zg3k3.2.12, superseding nocx-zg3k3.2.6's per-column tuple): a row rides as its TEXT — the clusters in column order, the spacer after a wide cluster not repeated — a sparse list of the positions whose codepoint count or column footprint departs from the default (one codepoint, one column), and style runs measured in columns; a trailing run of ordinary default blank cells is not sent, implied by the row's own (shorter) length against the frame's geometry. Measured 2026-09-22 against a realistic dense screen (prompt, coloured output, truecolour banner, CJK wide clusters, ZWJ emoji, cell-fit-boxed glyph, inverse status bar) under the PRIOR per-column-tuple shape: with a per-cell style object a frame was 521,989 B at 80x24, 1,303,538 B at 120x40 and 2,713,770 B at 200x50 — over the 256 KiB lifecycle bound (internal/lifecycle/protocol.go MaxFrameBytes) at EVERY geometry and over the 1 MiB helper bound (internal/helper/proto/frame.go MaxFrameBytes) at 120x40 and 200x50; cells as named-field objects with per-row style runs still measured 444,433 B at 200x50; a [grapheme, width, hasText] positional tuple per column brought that to 35,967 / 81,124 / 152,937 B, comfortably under both bounds — but an 18-character row on that shape still stored at 542 B once trimmed, ~30x its own text, because a row still carried one entry per COLUMN (blanks included) and a style rode as a five-field named object (220 B for the all-default style alone) even where nothing needed one. This record's shape removes both costs: an 18-character plain row (no styling, no wide or combining cluster) now stores at the size internal/content/block_rows_encode_test.go measures, under 3x its own text, and internal/sessionruntime/frame_test.go's TestFrameSizeAtRealGeometry re-measures the three geometries under this shape. A style now rides as the bare integer 0 (the zero value, by far the common case) or a 5-element tuple [foreground, background, underlineColor, attributes, underline] with each colour packed into one integer (0 default, 1-256 a palette index plus one, 257+ a packed RGB triple); a row whose runs would be exactly one default-style run covering its whole explicit width omits `runs` entirely, and a row with no cluster departing from (one codepoint, one column) omits `marks` entirely — a receiver treats either absence as its stated default. This schema declares the draft-07 dialect because positional tuples are how draft-07 spells a fixed-shape array (items as a schema list, additionalItems: false) — the same declaration agent.dump.schema.json already carries — and the type generator (json-schema-to-typescript) emits tuple types only for that spelling.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["revision", "geometry", "cursor", "rows"],
+  "required": ["revision", "geometry", "cursor", "state", "rows"],
   "properties": {
     "revision": {
       "type": "integer",
@@ -64,6 +64,59 @@
         "visible": {
           "type": "boolean",
           "description": "Whether the program has left the caret visible at all (DECTCEM, mode 25)."
+        }
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bufferKind",
+        "bufferInstance",
+        "bracketedPaste",
+        "mouseTracking",
+        "title",
+        "cwd"
+      ],
+      "description": "The runtime-owned terminal state that determines how the client routes selection and paste and restores the latest title and working-directory report. It is captured with the same screen revision; the client does not parse PTY bytes to derive modes, buffer identity, title, or cwd.",
+      "properties": {
+        "bufferKind": {
+          "type": "string",
+          "enum": ["normal", "alternate"],
+          "description": "The active terminal buffer at this revision."
+        },
+        "bufferInstance": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "description": "A decimal string identifying the active buffer instance. It is a string because the runtime counter is uint64 and JSON numbers are not exact across JavaScript's full range."
+        },
+        "bracketedPaste": {
+          "type": "boolean",
+          "description": "Whether the running program has enabled DEC private mode 2004."
+        },
+        "mouseTracking": {
+          "type": "boolean",
+          "description": "Whether the running program has enabled X10, button, or any-event mouse tracking."
+        },
+        "title": {
+          "type": ["string", "null"],
+          "description": "The latest program title. Null means no title has been reported; an empty string is an explicit clear. This is latest-value state, not replay of session.effect."
+        },
+        "cwd": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["host", "path"],
+          "description": "The latest syntactically valid OSC 7 file URI, decoded once by the backend. Null means no valid report has been received.",
+          "properties": {
+            "host": {
+              "type": "string",
+              "description": "The URI authority decoded from the OSC 7 file URI."
+            },
+            "path": {
+              "type": "string",
+              "description": "The URI path decoded from the OSC 7 file URI."
+            }
+          }
         }
       }
     },

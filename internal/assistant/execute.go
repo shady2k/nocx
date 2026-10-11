@@ -100,6 +100,7 @@ type SkillSource interface {
 // wiring, exactly as the renderer requester is for InRenderer tools.
 type toolSeams struct {
 	sessions         SessionSource
+	screenCapture    ScreenCaptureSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
 	skills           SkillLibrary
@@ -912,19 +913,15 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 
 // executeSessionReadTool is session.read's InGo-executor-map entry — the
 // tool ENDPOINT's path (runDeclaredTool consults this map regardless of the
-// declaration's own Executes, unlike the kernel's dispatch switch). It has
-// no renderer requester of its own (toolSeams carries none: an external
-// tool-endpoint connection has no renderer attached), so the run's own pane
-// falls back to the same "no renderer requester is wired" refusal any other
-// requester-less caller already gets; a sessionId naming a descendant is
-// unaffected, since PaneReader travels on the capability itself rather than
-// through a requester.
+// declaration's own Executes, unlike the kernel's dispatch switch). The
+// session ledger and own-screen capture are explicit run seams; descendant
+// reads continue to use PaneReader on the narrowed capability.
 func executeSessionReadTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
 	reader, ok := cap.(*agenttools.SessionDescendantCapability)
 	if !ok {
 		return "", fmt.Errorf("session.read: capability is %T, not *agenttools.SessionDescendantCapability", cap)
 	}
-	return executeSessionRead(ctx, reader, seams.sessions, nil, args)
+	return executeSessionRead(ctx, reader, seams.sessions, seams.screenCapture, args)
 }
 
 // executeSessionKeysTool is session.keys' InGo-executor-map entry (design
@@ -1142,19 +1139,27 @@ type readScreenCursor struct {
 // consumed here in the minimal shape this tool's return needs.
 type readScreenIdent struct {
 	Buffer struct {
-		Kind string `json:"kind"`
+		Kind     string `json:"kind"`
+		Instance uint64 `json:"instance"`
 	} `json:"buffer"`
 	Cols       int `json:"cols"`
 	Rows       int `json:"rows"`
 	Generation int `json:"generation"`
 }
 
-// frameBodyWire is this tool's consumer view of the validated frame body the
-// requester returned (rows, cursor, identity). The frame wire vocabulary is
-// owned by the transport's captureFrame validation; this decode reads the
-// fields the window contract needs and never re-validates them.
+// frameBodyWire is this tool's consumer view of the coherent backend capture
+// returned by the requester (rows, cursor, identity, and absolute range). The
+// helper owns frame production; this decode reads only the fields the session.read
+// result needs and never recreates terminal interpretation in the coordinator.
+type frameRangeWire struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 type frameBodyWire struct {
-	Rows []struct {
+	Floor int `json:"floor"`
+	Total int `json:"total"`
+	Rows  []struct {
 		Kind string `json:"kind"`
 		Text string `json:"text"`
 	} `json:"rows"`
@@ -1164,16 +1169,14 @@ type frameBodyWire struct {
 	} `json:"cursor"`
 	Identity *struct {
 		Buffer struct {
-			Kind string `json:"kind"`
+			Kind     string `json:"kind"`
+			Instance uint64 `json:"instance"`
 		} `json:"buffer"`
 		Cols       int `json:"cols"`
 		Rows       int `json:"rows"`
 		Generation int `json:"generation"`
 	} `json:"identity"`
-	Range *struct {
-		Start int `json:"start"`
-		End   int `json:"end"`
-	} `json:"range"`
+	Range *frameRangeWire `json:"range"`
 }
 
 // ── run (design §4.1: the agent runs a command through the same submit

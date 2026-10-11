@@ -69,6 +69,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -86,7 +87,17 @@ type Frame struct {
 	Revision uint64        `json:"revision"`
 	Geometry frameGeometry `json:"geometry"`
 	Cursor   frameCursor   `json:"cursor"`
+	State    frameState    `json:"state"`
 	Rows     []frameRow    `json:"rows"`
+}
+
+type frameState struct {
+	BufferKind     string     `json:"bufferKind"`
+	BufferInstance string     `json:"bufferInstance"`
+	BracketedPaste bool       `json:"bracketedPaste"`
+	MouseTracking  bool       `json:"mouseTracking"`
+	Title          *string    `json:"title"`
+	Cwd            *CwdReport `json:"cwd"`
 }
 
 type frameGeometry struct {
@@ -135,7 +146,15 @@ func EncodeFrame(snap Snapshot) ([]byte, error) {
 			Revision:     uint64(snap.Geometry.Revision),
 		},
 		Cursor: frameCursor{X: snap.Cursor.X, Y: snap.Cursor.Y, Visible: snap.Cursor.Visible},
-		Rows:   make([]frameRow, 0, len(snap.Rows)),
+		State: frameState{
+			BufferKind:     frameBufferKind(snap.Identity.AltScreen),
+			BufferInstance: strconv.FormatUint(snap.Identity.BufferInstance, 10),
+			BracketedPaste: snap.Modes.BracketedPaste,
+			MouseTracking:  snap.Modes.MouseTracking,
+			Title:          snap.Title,
+			Cwd:            snap.Cwd,
+		},
+		Rows: make([]frameRow, 0, len(snap.Rows)),
 	}
 	for _, row := range snap.Rows {
 		f.Rows = append(f.Rows, encodeRow(row))
@@ -145,6 +164,13 @@ func EncodeFrame(snap Snapshot) ([]byte, error) {
 		return nil, fmt.Errorf("sessionruntime: marshal frame: %w", err)
 	}
 	return raw, nil
+}
+
+func frameBufferKind(alternate bool) string {
+	if alternate {
+		return "alternate"
+	}
+	return "normal"
 }
 
 // encodeRow renders one row in the text+marks+runs shape. Style runs are

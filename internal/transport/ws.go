@@ -73,6 +73,22 @@ type sessionRx struct {
 	pendingEffects           []pendingSessionEffect
 	outputGaps               []sessionOutputGapRecord
 	outputGapHistoryOverflow bool
+	// effectWake is a broadcast generation. Closing it wakes every parked pump
+	// when an effect arrives; the next loop snapshots the replacement channel.
+	effectWake chan struct{}
+	// screen offer state is per attached subscriber and coalesces to the
+	// newest required full-frame revision. A prompt effect cannot pass the
+	// outbound queue until that lower bound is offered first.
+	screenMu              sync.Mutex
+	screenOfferConn       *wsConn
+	screenOfferCtx        context.Context
+	screenOfferCancel     context.CancelFunc
+	screenOfferWake       chan struct{}
+	screenOfferedRevision uint64
+	screenOfferTarget     uint64
+	screenOfferFailure    uint64
+	screenOfferFrameBytes int
+	screenOfferRunning    bool
 	// inputStalled is true from the moment this session's write queue
 	// refuses a frame until it accepts one again. It exists to make the
 	// notification fire once per stall rather than once per keystroke:
@@ -84,11 +100,12 @@ type sessionRx struct {
 const maxPendingSessionEffects = 64
 
 type pendingSessionEffect struct {
-	conn         *wsConn
-	offset       uint64
-	waitForBytes bool
-	method       string
-	params       json.RawMessage
+	conn           *wsConn
+	offset         uint64
+	waitForBytes   bool
+	screenRevision uint64
+	method         string
+	params         json.RawMessage
 }
 
 const maxSessionOutputGapRecords = 128
@@ -121,6 +138,7 @@ func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *c
 	rx.deliveryOffset = 0
 	rx.pendingEffects = nil
 	rx.deliveryMu.Unlock()
+	rx.resetScreenOffer(wconn)
 	rx.mu.Unlock()
 	// The ring is told, because it has two consumers now and only one of
 	// them is allowed to free it on nobody's behalf (nocx-22k1c.1). This
@@ -151,6 +169,7 @@ func (rx *sessionRx) setSubscriberIfGapHistoryAvailable(wconn *wsConn, state *co
 	rx.pendingEffects = nil
 	rx.ring.setAttached(true)
 	rx.deliveryMu.Unlock()
+	rx.resetScreenOffer(wconn)
 	rx.mu.Unlock()
 	return prevConn, prevState, true
 }
@@ -186,6 +205,7 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 		rx.deliveryOffset = 0
 		rx.pendingEffects = nil
 		rx.deliveryMu.Unlock()
+		rx.resetScreenOffer(nil)
 		rx.mu.Unlock()
 		// THE MOMENT THE INTERVAL OPENS. From here until a subscriber is
 		// installed again, the ring's consumer is the recorder, and a writer
@@ -230,6 +250,19 @@ func (rx *sessionRx) recordOutputHole(lost uint64, reason string) {
 	})
 }
 
+func (rx *sessionRx) effectWakeSnapshot() <-chan struct{} {
+	rx.deliveryMu.Lock()
+	defer rx.deliveryMu.Unlock()
+	return rx.effectWake
+}
+
+func (rx *sessionRx) signalEffectWake() {
+	rx.deliveryMu.Lock()
+	close(rx.effectWake)
+	rx.effectWake = make(chan struct{})
+	rx.deliveryMu.Unlock()
+}
+
 func (rx *sessionRx) deliveryCursor(wconn *wsConn) (uint64, bool) {
 	rx.deliveryMu.Lock()
 	defer rx.deliveryMu.Unlock()
@@ -263,6 +296,19 @@ func (rx *sessionRx) enqueueDueEffectsLocked(wconn *wsConn, offset uint64) bool 
 		if effect.waitForBytes && effect.offset > offset {
 			return true
 		}
+		if effect.screenRevision > 0 {
+			_, _, offered, failed, _, _, ok := rx.screenOfferSnapshot(wconn)
+			if !ok || failed >= effect.screenRevision {
+				// A disconnected/replaced subscriber or an unofferable frame
+				// cancels the dependent observation. Never deliver it against
+				// an older accepted screen.
+				rx.pendingEffects = rx.pendingEffects[1:]
+				continue
+			}
+			if offered < effect.screenRevision {
+				return false
+			}
+		}
 		if err := wconn.TryNotify(effect.method, effect.params); err != nil {
 			return false
 		}
@@ -277,7 +323,7 @@ func (rx *sessionRx) enqueueDueEffects(wconn *wsConn, offset uint64) bool {
 	return rx.enqueueDueEffectsLocked(wconn, offset)
 }
 
-func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool, method string, params json.RawMessage) (accepted, coalesced bool) {
+func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool, screenRevision uint64, method string, params json.RawMessage) (accepted, coalesced bool) {
 	rx.deliveryMu.Lock()
 	if rx.deliveryConn != wconn {
 		rx.deliveryMu.Unlock()
@@ -316,11 +362,12 @@ func (rx *sessionRx) queueEffect(wconn *wsConn, offset uint64, waitForBytes bool
 		}
 	}
 	rx.pendingEffects = append(rx.pendingEffects, pendingSessionEffect{
-		conn: wconn, offset: offset, waitForBytes: waitForBytes, method: method, params: params,
+		conn: wconn, offset: offset, waitForBytes: waitForBytes, screenRevision: screenRevision, method: method, params: params,
 	})
 	rx.deliveryMu.Unlock()
 	// Wake a ring pump parked on an empty stream so it can flush an effect
 	// whose marker bytes were already queued before this event arrived.
+	rx.signalEffectWake()
 	rx.ring.wake()
 	return true, coalesced
 }
@@ -410,12 +457,12 @@ type WSServer struct {
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
 
-	// broker is the server→client request broker (nocx-e2j1z): the
-	// mechanism backend code asks the renderer through (readScreen — the
-	// first production request). Constructed in buildControlPlane with the
-	// server's own connection set and per-connection enqueue as its
-	// delivery seams; its resolution RPCs register on the read-loop ingress
-	// and its ConnectionLost signal fires in unregisterConn.
+	// broker is the server→client request broker (nocx-e2j1z): command runs
+	// and host requests ask the renderer through it. Constructed in
+	// buildControlPlane with the server's own connection set and
+	// per-connection enqueue as its delivery seams; its resolution RPCs
+	// register on the read-loop ingress and ConnectionLost fires in
+	// unregisterConn.
 	broker *Broker
 	// runLeaseCfg bounds one run execution (ADR-0020 decision 2 — the
 	// wall-clock deadline, the inactivity deadline, the output budget and
@@ -439,7 +486,7 @@ type WSServer struct {
 	// default of content.ResolvePolicy, overridden by the workspace grant
 	// source (nocx-mp2vd) when that lands.
 	// Named by the composition root. Unset, ask runs carry no grant and the
-	// model is offered no tools — the state before readScreen (see
+	// model is offered no tools — the state before assistant tools (see
 	// runGrantFor).
 	agentPolicy assistant.GlobalPolicy
 	// agentAccess is the durable record of which AGENT PROGRAMS a person has
@@ -507,6 +554,9 @@ type WSServer struct {
 	// screenResender asks for the frame a subscriber is owed the moment it is
 	// installed (screen.go). Nil sends nothing until the next revision.
 	screenResender ScreenResender
+	// screenCaptureSource reads assistant screens from the owning helper's
+	// runtime, independently of any attached renderer.
+	screenCaptureSource ScreenCaptureSource
 	// historyPager answers session.historyPage from the helper that holds a
 	// session's terminal (history_page.go). Nil leaves the method
 	// unregistered, exactly as an unwired store leaves session.output.
@@ -783,6 +833,9 @@ type WSServer struct {
 	// returns, cancelled or not — that is what releases the admission slot
 	// for the next connection.
 	probeSub control.Submission
+	// screenOfferSub owns retries for prompt-boundary frames. Its tasks are
+	// registered with inflight so server shutdown cancels and joins them.
+	screenOfferSub control.Submission
 	// dialogSub runs the dialog methods off the read loop under a bounded
 	// queue. It does NOT carry the native-picker capability: that is
 	// dialogAdmit, acquired on the task goroutine.
@@ -1952,6 +2005,9 @@ func (s *WSServer) buildControlPlane() {
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
 	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("agent-probe")}
+	// Screen offers can wait on outbound capacity and the helper frame carrier.
+	// Bound concurrent sessions and include each retry in Stop's inflight join.
+	s.screenOfferSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("screen-offer")}
 	// The wait bound is sized against the probe's OWN limit, not the domain
 	// default: a probe may run for assistant.ProbeTimeout, so a second probe
 	// has to be able to wait that long to queue behind it. A shorter bound
@@ -2017,7 +2073,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.signalSpecs()...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
-	specs = append(specs, s.brokerSpecs(immediate)...)
+	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
@@ -2371,7 +2427,7 @@ func (s *WSServer) getOrCreateRxAt(id session.ID, base uint64) *sessionRx {
 	if rx, ok := s.rx[id]; ok {
 		return rx
 	}
-	rx := &sessionRx{ring: newOutputRingAt(base)}
+	rx := &sessionRx{ring: newOutputRingAt(base), effectWake: make(chan struct{})}
 	s.rx[id] = rx
 	return rx
 }
@@ -2599,12 +2655,12 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 	}))
 }
 
+func notificationPayload(method string, params json.RawMessage) []byte {
+	return mustMarshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
 func (w *wsConn) TryNotify(method string, params json.RawMessage) error {
-	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-	}))
+	return w.out.TryEnqueue(websocket.TextMessage, notificationPayload(method, params))
 }
 
 // EnqueueOrderedNotify puts a non-droppable control notification in the same
@@ -2987,12 +3043,6 @@ func paramsBudgetForMethod(method string) int {
 	switch method {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
-	case "agent.readScreenResolved":
-		// A readScreen resolution carries a live frame — every cell of a
-		// screen with its attributes — bounded by the frame validation
-		// (rows ≤ 10k, cols ≤ 2k, 5M chars) and this wire budget, the
-		// document tier. The broker's own per-kind bound matches.
-		return budgetDocument
 	case "agent.runResolved":
 		// A run resolution carries a command's output window — text
 		// bounded by the renderer's maxRunOutputWindowChars clamp and this
@@ -3741,6 +3791,10 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 	rx.beginDelivery(wconn, pos)
 
 	for {
+		// Snapshot before checking the queue. If an effect is published after
+		// this point, the closed generation wakes every overlapping pump; if it
+		// was published earlier, the queue check below observes it.
+		wake := rx.effectWakeSnapshot()
 		// The displacement check comes FIRST, before any wait: a pump that
 		// has lost the session must not send the byte it is already holding.
 		if cur, _ := rx.getSubscriber(); cur != wconn {
@@ -3750,15 +3804,22 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		// Flush an eligible one before the next byte; if the queue is full,
 		// wait cancellably for room rather than letting later PTY bytes pass it.
 		if !rx.enqueueDueEffects(wconn, pos) {
-			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
-				return
+			if screenRevision, need := rx.dueEffectWait(wconn, pos); screenRevision > 0 {
+				s.ensureScreenOffer(session.IDFromBytes(sidBytes), rx, wconn, screenRevision)
+				if err := rx.waitScreenOffer(ctx, wconn, screenRevision); err != nil {
+					return
+				}
+			} else if need > 0 {
+				if werr := wconn.out.WaitForRoom(ctx, need); werr != nil {
+					return
+				}
 			}
 			continue
 		}
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
 		// ack on reattach, which counts as no bytes unacked.
-		if ring.waitForCredit(ctx, startOffset, pos, CreditLimit) {
+		if ring.waitForCreditOrWake(ctx, startOffset, pos, CreditLimit, wake) {
 			return
 		}
 
@@ -3812,7 +3873,7 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 					return
 				default:
 				}
-				if ring.waitForData(ctx, pos) {
+				if ring.waitForDataOrWake(ctx, pos, wake) {
 					return
 				}
 				continue
@@ -3835,8 +3896,15 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 		if !rx.enqueueDueEffectsLocked(wconn, pos) {
 			rx.deliveryMu.Unlock()
-			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
-				return
+			if screenRevision, need := rx.dueEffectWait(wconn, pos); screenRevision > 0 {
+				s.ensureScreenOffer(session.IDFromBytes(sidBytes), rx, wconn, screenRevision)
+				if err := rx.waitScreenOffer(ctx, wconn, screenRevision); err != nil {
+					return
+				}
+			} else if need > 0 {
+				if werr := wconn.out.WaitForRoom(ctx, need); werr != nil {
+					return
+				}
 			}
 			continue
 		}
@@ -3862,8 +3930,19 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		dueOK := err == nil && rx.enqueueDueEffectsLocked(wconn, pos)
 		rx.deliveryMu.Unlock()
 		if err != nil || !dueOK {
-			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
-				return
+			if screenRevision, need := rx.dueEffectWait(wconn, pos); screenRevision > 0 {
+				s.ensureScreenOffer(session.IDFromBytes(sidBytes), rx, wconn, screenRevision)
+				if waitErr := rx.waitScreenOffer(ctx, wconn, screenRevision); waitErr != nil {
+					return
+				}
+			} else if need > 0 {
+				if werr := wconn.out.WaitForRoom(ctx, need); werr != nil {
+					return
+				}
+			} else if err != nil {
+				if werr := wconn.out.WaitForRoom(ctx, len(f.Encode())); werr != nil {
+					return
+				}
 			}
 			continue
 		}

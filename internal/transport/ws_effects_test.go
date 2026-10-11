@@ -57,30 +57,33 @@ func TestPromptBoundaryIsQueuedBetweenBytesBeforeAndAfterItsOffset(t *testing.T)
 	// before the independent effect arrives. The suffix is made available only
 	// after that effect has been accepted into the same outbound queue.
 	prefixFrame := awaitCapturedFrames(t, sock, 1)[0]
+	if !ws.PublishScreenFrame(sid, 7, []byte(`{"revision":7}`)) {
+		t.Fatal("matching prompt screen was not accepted")
+	}
 	if !ws.PublishSessionEffect(sid, proto.EffectFrame{
 		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary,
-		StreamOffset: uint64(len(before)),
+		StreamOffset: uint64(len(before)), ScreenRevision: 7,
 	}) {
 		t.Fatal("prompt boundary was not accepted")
 	}
 	if err := rx.ring.write(after); err != nil {
 		t.Fatalf("write live suffix: %v", err)
 	}
-	frames := awaitCapturedFrames(t, sock, 3)
+	frames := awaitCapturedFrames(t, sock, 4)
 	if string(prefixFrame.Data) != string(frames[0].Data) {
 		t.Fatal("first queued prefix frame changed while collecting the complete order")
 	}
 	cancel()
 	<-pumpDone
 
-	if frames[0].MsgType != websocket.BinaryMessage || frames[1].MsgType != websocket.TextMessage || frames[2].MsgType != websocket.BinaryMessage {
-		t.Fatalf("outbound frame types = [%d %d %d], want data/effect/data", frames[0].MsgType, frames[1].MsgType, frames[2].MsgType)
+	if frames[0].MsgType != websocket.BinaryMessage || frames[1].MsgType != websocket.BinaryMessage || frames[2].MsgType != websocket.TextMessage || frames[3].MsgType != websocket.BinaryMessage {
+		t.Fatalf("outbound frame types = [%d %d %d %d], want data/screen/effect/data", frames[0].MsgType, frames[1].MsgType, frames[2].MsgType, frames[3].MsgType)
 	}
 	beforeFrame, err := DecodeFrame(frames[0].Data)
 	if err != nil {
 		t.Fatalf("decode prefix frame: %v", err)
 	}
-	afterFrame, err := DecodeFrame(frames[2].Data)
+	afterFrame, err := DecodeFrame(frames[3].Data)
 	if err != nil {
 		t.Fatalf("decode suffix frame: %v", err)
 	}
@@ -90,19 +93,70 @@ func TestPromptBoundaryIsQueuedBetweenBytesBeforeAndAfterItsOffset(t *testing.T)
 	var msg struct {
 		Method string `json:"method"`
 	}
-	if err := json.Unmarshal(frames[1].Data, &msg); err != nil || msg.Method != "session.effect" {
-		t.Fatalf("middle frame = %s, decode err=%v, want session.effect", frames[1].Data, err)
+	if err := json.Unmarshal(frames[2].Data, &msg); err != nil || msg.Method != "session.effect" {
+		t.Fatalf("effect frame = %s, decode err=%v, want session.effect", frames[2].Data, err)
 	}
+}
+
+func TestPromptBoundaryAtCreditWindowEndIsDeliveredWithoutAckOrMoreBytes(t *testing.T) {
+	ws, sid, sidBytes, wconn, sock := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	if err := rx.ring.write(make([]byte, CreditLimit)); err != nil {
+		t.Fatalf("fill credit window: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		ws.ringToConn(ctx, wconn, sidBytes, rx, 0)
+	}()
+
+	dataFrames := (CreditLimit + FairChunk - 1) / FairChunk
+	frames := awaitCapturedFrames(t, sock, dataFrames)
+	for i, frame := range frames {
+		if frame.MsgType != websocket.BinaryMessage {
+			t.Fatalf("frame %d before boundary = type %d, want binary data", i, frame.MsgType)
+		}
+	}
+	if !ws.PublishScreenFrame(sid, 7, []byte(`{"revision":7}`)) {
+		t.Fatal("matching prompt screen was not accepted")
+	}
+	if !ws.PublishSessionEffect(sid, proto.EffectFrame{
+		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary,
+		StreamOffset: uint64(CreditLimit), ScreenRevision: 7,
+	}) {
+		t.Fatal("prompt boundary was not accepted")
+	}
+
+	frames = awaitCapturedFrames(t, sock, dataFrames+2)
+	if frames[dataFrames].MsgType != websocket.BinaryMessage || frames[dataFrames+1].MsgType != websocket.TextMessage {
+		t.Fatalf("frames after full credit window = %d, %d; want screen data and prompt effect", frames[dataFrames].MsgType, frames[dataFrames+1].MsgType)
+	}
+	screen, err := DecodeFrame(frames[dataFrames].Data)
+	if err != nil || screen.MsgType != MsgTypeMetadata || string(screen.Payload) != `{"revision":7}` {
+		t.Fatalf("screen frame = %+v, decode err=%v; want the offered metadata snapshot", screen, err)
+	}
+	var effect struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(frames[dataFrames+1].Data, &effect); err != nil || effect.Method != "session.effect" {
+		t.Fatalf("prompt effect frame = %s, decode err=%v, want session.effect", frames[dataFrames+1].Data, err)
+	}
+
+	cancel()
+	<-pumpDone
 }
 
 func TestPromptBoundaryPendingForClosedSubscriberIsDiscarded(t *testing.T) {
 	ws, sid, sidBytes, wconn, sock := newScreenPublishFixture(t)
 	rx := ws.getRx(sid)
+	rx.noteScreenFrame(wconn, 7, 0, true)
 	if err := rx.ring.write([]byte("prefix and suffix")); err != nil {
 		t.Fatalf("write session ring: %v", err)
 	}
 	if !ws.PublishSessionEffect(sid, proto.EffectFrame{
-		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary, StreamOffset: 6,
+		Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary, StreamOffset: 6, ScreenRevision: 7,
 	}) {
 		t.Fatal("prompt boundary was not accepted")
 	}
@@ -129,16 +183,16 @@ func TestPromptBoundaryHasReservedSlotWhenQueueIsFullOfOrdinaryEffects(t *testin
 	rx := ws.getRx(sid)
 	params := json.RawMessage(`{}`)
 	for i := 0; i < maxPendingSessionEffects-1; i++ {
-		accepted, coalesced := rx.queueEffect(wconn, 0, false, "test.effect", params)
+		accepted, coalesced := rx.queueEffect(wconn, 0, false, 0, "test.effect", params)
 		if !accepted || coalesced {
 			t.Fatalf("ordinary effect %d: accepted=%v coalesced=%v", i, accepted, coalesced)
 		}
 	}
-	accepted, coalesced := rx.queueEffect(wconn, 100, true, "session.effect", params)
+	accepted, coalesced := rx.queueEffect(wconn, 100, true, 0, "session.effect", params)
 	if !accepted || coalesced {
 		t.Fatalf("reserved prompt boundary slot: accepted=%v coalesced=%v", accepted, coalesced)
 	}
-	if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", params); accepted {
+	if accepted, _ := rx.queueEffect(wconn, 0, false, 0, "test.effect", params); accepted {
 		t.Fatal("ordinary effect consumed the boundary's reserved slot")
 	}
 	rx.deliveryMu.Lock()
@@ -168,16 +222,16 @@ func TestPromptBoundaryCoalescingPreservesOrdinaryOrderAndHoldsSuffix(t *testing
 		return raw
 	}
 	for i := 0; i < maxPendingSessionEffects/2; i++ {
-		if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", ordinary(i)); !accepted {
+		if accepted, _ := rx.queueEffect(wconn, 0, false, 0, "test.effect", ordinary(i)); !accepted {
 			t.Fatalf("ordinary effect %d before old boundary was refused", i)
 		}
 	}
 	oldOffset := uint64(len(firstThroughB))
-	if accepted, coalesced := rx.queueEffect(wconn, oldOffset, true, "session.effect", json.RawMessage(`{"kind":"promptBoundary","effectId":"old"}`)); !accepted || coalesced {
+	if accepted, coalesced := rx.queueEffect(wconn, oldOffset, true, 0, "session.effect", json.RawMessage(`{"kind":"promptBoundary","effectId":"old"}`)); !accepted || coalesced {
 		t.Fatalf("old boundary: accepted=%v coalesced=%v", accepted, coalesced)
 	}
 	for i := maxPendingSessionEffects / 2; i < maxPendingSessionEffects-1; i++ {
-		if accepted, _ := rx.queueEffect(wconn, 0, false, "test.effect", ordinary(i)); !accepted {
+		if accepted, _ := rx.queueEffect(wconn, 0, false, 0, "test.effect", ordinary(i)); !accepted {
 			t.Fatalf("ordinary effect %d after old boundary was refused", i)
 		}
 	}
@@ -190,7 +244,7 @@ func TestPromptBoundaryCoalescingPreservesOrdinaryOrderAndHoldsSuffix(t *testing
 	if err != nil {
 		t.Fatalf("marshal latest boundary: %v", err)
 	}
-	accepted, coalesced := rx.queueEffect(wconn, uint64(len(prefix)), true, "session.effect", latestParams)
+	accepted, coalesced := rx.queueEffect(wconn, uint64(len(prefix)), true, 0, "session.effect", latestParams)
 	if !accepted || !coalesced {
 		t.Fatalf("newer boundary: accepted=%v coalesced=%v, want oldest-boundary replacement", accepted, coalesced)
 	}
@@ -315,8 +369,10 @@ func TestSessionEffect_OverTheWireConformsToContract(t *testing.T) {
 }
 
 func TestPromptBoundaryDTOAndRealSocketHaveNoPayload(t *testing.T) {
-	ws, sid, _, _, sock := newScreenPublishFixture(t)
-	if !ws.PublishSessionEffect(sid, proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary}) {
+	ws, sid, _, wconn, sock := newScreenPublishFixture(t)
+	rx := ws.getRx(sid)
+	rx.noteScreenFrame(wconn, 7, 0, true)
+	if !ws.PublishSessionEffect(sid, proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary, ScreenRevision: 7}) {
 		t.Fatal("prompt boundary was not published")
 	}
 	frames := awaitCapturedFrames(t, sock, 1)
@@ -335,7 +391,7 @@ func TestPromptBoundaryDTOAndRealSocketHaveNoPayload(t *testing.T) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		t.Fatal(err)
 	}
-	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.Generation != "2" || params.EffectID != "9" {
+	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.Generation != "2" || params.EffectID != "9" || params.ScreenRevision != 7 {
 		t.Fatalf("params = %+v", params)
 	}
 }
@@ -345,7 +401,10 @@ func TestPromptBoundary_OverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 	sid := openSessionOnConn(t, ws, conn, 1)
-	if !ws.PublishSessionEffect(session.ID(sid), proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary}) {
+	if !ws.PublishScreenFrame(session.ID(sid), 7, []byte(`{"revision":7}`)) {
+		t.Fatal("matching prompt screen was not accepted")
+	}
+	if !ws.PublishSessionEffect(session.ID(sid), proto.EffectFrame{Generation: 2, EffectID: 9, Kind: proto.EffectPromptBoundary, ScreenRevision: 7}) {
 		t.Fatal("event not accepted")
 	}
 	raw, err := awaitFrame(conn, time.Now().Add(wantWithin), func(raw []byte) bool {
@@ -368,7 +427,7 @@ func TestPromptBoundary_OverTheWireConformsToContract(t *testing.T) {
 	if err := json.Unmarshal(msg.Params, &params); err != nil {
 		t.Fatal(err)
 	}
-	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.SessionID != sid || params.Generation != "2" || params.EffectID != "9" {
+	if params.Kind != "promptBoundary" || params.Title != "" || params.Body != "" || params.SessionID != sid || params.Generation != "2" || params.EffectID != "9" || params.ScreenRevision != 7 {
 		t.Fatalf("wire params = %+v", params)
 	}
 }

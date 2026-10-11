@@ -1788,6 +1788,52 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
     }
   })
 
+  it('multi-line snippet policy uses the latest accepted backend mode, not the xterm parser mirror', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(false)
+      const frame = screenFrame(1, [])
+      frame.state.bracketedPaste = true
+      session.fireScreenFrame(frame)
+
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('multi-line snippet refusal uses the latest accepted backend mode even if xterm says it is enabled', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(true)
+      const frame = screenFrame(1, [])
+      frame.state.bracketedPaste = false
+      session.fireScreenFrame(frame)
+      const sentBefore = session.send.mock.calls.length
+
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'multi-line-no-bracketed-paste',
+      })
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
   it('a multi-line body is refused when the destination has no bracketed paste — before any resolution or write', async () => {
     const client = resolvingClient('line1\nhunter2')
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -1818,7 +1864,9 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
       const session = sessionOf(content)
       const renderer = rendererOf(content)
       editorOf(content).hide()
-      renderer.bracketedPasteActive.mockReturnValue(true)
+      const frame = screenFrame(1, [])
+      frame.state.bracketedPaste = true
+      session.fireScreenFrame(frame)
       const sentBefore = session.send.mock.calls.length
       await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
         ok: true,
@@ -1831,43 +1879,6 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
       expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
       const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
       expect(sent).toEqual(['line1\nhunter2'])
-    } finally {
-      teardown()
-    }
-  })
-
-  // nocx-8rtr.1. The bytes a program sent HAVE arrived — the wire carries
-  // them, measured in the stand — but renderer.write() is fire-and-forget
-  // and the parse is one pass behind. A synchronous read of the mode at the
-  // moment of the fire therefore answers about the terminal BEFORE the
-  // program's DECSET, and refuses a body the destination can honour.
-  //
-  // Measured on the real renderer (renderers/xterm.test.ts's own
-  // 'bracketed paste, read from the real parser' seam): immediately after
-  // write('\x1b[?2004h') the read is false, and after the parse it is true.
-  // So the fire must fence on the parse before it decides.
-  it('a multi-line body is delivered when the program enabled the mode and the parse is still one pass behind', async () => {
-    const client = resolvingClient('line1\nhunter2')
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      const renderer = rendererOf(content)
-      editorOf(content).hide()
-
-      // The terminal as it is at the instant of the fire: the DECSET is in
-      // the write queue, not yet in the parser. It becomes true only once
-      // the barrier the renderer already offers has settled.
-      let parsed = false
-      renderer.bracketedPasteActive.mockImplementation(() => parsed)
-      renderer.awaitWriteBarrier.mockImplementation(() => {
-        parsed = true
-        return Promise.resolve()
-      })
-
-      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
-        ok: true,
-        where: 'pty',
-      })
-      expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
     } finally {
       teardown()
     }
@@ -16858,7 +16869,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
 
   it('sends painted-grid pointer coordinates as session mouse intent', async () => {
     const client = makeClient()
-    const { tab, teardown } = await mountTerminal(
+    const { tab, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
       client,
@@ -16866,7 +16877,11 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
     try {
       tab.pane.classList.add('active')
       const session = client._sessions[0]
-      session.fireScreenFrame(screenFrame(1, ['pointer target']))
+      const renderer = rendererOf(content)
+      renderer.mouseReportingActive.mockReturnValue(false)
+      const frame = screenFrame(1, ['pointer target'])
+      frame.state.mouseTracking = true
+      session.fireScreenFrame(frame)
       const live = liveRegionOf(tab.pane)
       await vi.waitFor(() => expect(live.querySelector('.term-grid')).not.toBeNull())
       const surface = live.querySelector<HTMLElement>('.term-grid')!
@@ -16874,7 +16889,10 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       surface.getBoundingClientRect = () =>
         ({ left: 10, top: 20, right: 330, bottom: 84, width: 320, height: 64 }) as DOMRect
 
-      const pointer = (type: 'pointerdown' | 'pointerup', buttons: number): Event => {
+      const pointer = (
+        type: 'pointerdown' | 'pointermove' | 'pointerup',
+        buttons: number,
+      ): Event => {
         const event = new Event(type, { bubbles: true, cancelable: true })
         Object.defineProperties(event, {
           button: { value: 0 },
@@ -16885,6 +16903,10 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
         return event
       }
       surface.dispatchEvent(pointer('pointerdown', 1))
+      window.dispatchEvent(pointer('pointermove', 1))
+      // A program's accepted backend mode suppresses local selection even
+      // when the legacy xterm parser mirror says mouse tracking is off.
+      expect(surface.querySelector('.term-grid-selection')).toBeNull()
       surface.dispatchEvent(pointer('pointerup', 0))
       const wheel = new WheelEvent('wheel', {
         bubbles: true,

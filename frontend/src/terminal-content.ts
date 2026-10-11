@@ -4880,7 +4880,7 @@ export class TerminalContent extends BasePaneContent {
         surface: painterSurface,
         gestureRoot,
         surfaceId: this.pane.paneId,
-        mouseReportingActive: () => renderer.mouseReportingActive(),
+        mouseReportingActive: () => this._cellModel?.current()?.state.mouseTracking ?? false,
         focusInput: () => this._intentInput?.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {
@@ -7846,21 +7846,10 @@ export class TerminalContent extends BasePaneContent {
     if (owner === 'none') return { ok: false, reason: 'no-owner' }
     const renderer = this.renderer
     if (text.includes('\n')) {
-      // FENCE BEFORE DECIDING (nocx-8rtr.1). write() is fire-and-forget and
-      // the parse runs one pass behind it, so a synchronous read of the mode
-      // answers about the terminal as it was BEFORE the bytes the program
-      // just sent. A program that enables mode 2004 and then waits on stdin
-      // is exactly the case: its DECSET is in the queue at the moment the
-      // person fires, and the fire refused a body the destination could
-      // honour. Measured both ways — the wire carries the DECSET (an e2e
-      // probe recorded ON/off/ON), and the real renderer answers false
-      // immediately after write() and true after the parse.
-      //
-      // The barrier is the renderer's own, the same one a capture uses; this
-      // method is already async, so the wait costs the multi-line path one
-      // parse pass and the single-line path nothing.
-      await renderer?.awaitWriteBarrier()
-      if (!(renderer?.bracketedPasteActive() ?? false)) {
+      // Paste policy follows only a locally accepted backend frame. Its mode
+      // bits were captured with the same revision as the visible screen; a
+      // client parser mirror would be a second, potentially stale answer.
+      if (!(this._cellModel?.current()?.state.bracketedPaste ?? false)) {
         return { ok: false, reason: 'multi-line-no-bracketed-paste' }
       }
     }

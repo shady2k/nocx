@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -111,13 +110,12 @@ func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams
 // askHarness is a full transport env for the ask flow: real content store,
 // real vault, real profile store, scripted engine.
 type askHarness struct {
-	t            *testing.T
-	v            *vault.Vault
-	db           content.ContentDB
-	ws           *WSServer
-	conn         *websocket.Conn
-	logs         *synchronizedBuffer
-	fakeRequests atomic.Int64
+	t    *testing.T
+	v    *vault.Vault
+	db   content.ContentDB
+	ws   *WSServer
+	conn *websocket.Conn
+	logs *synchronizedBuffer
 }
 
 func newAskHarness(t *testing.T, client assistant.Client) *askHarness {

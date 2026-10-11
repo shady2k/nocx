@@ -34,6 +34,8 @@ import type { WorkersTabClosed } from './generated/workers.tabClosed'
 import type { Exit } from './generated/exit'
 import type { Pane as LayoutPane, Tab as LayoutTab } from './generated/layout.read'
 import type { DriverState } from './pane-observation'
+import { frameOf } from './painter/fixtures'
+import type { SessionFrame } from './generated/session.frame'
 import {
   BasePaneContent,
   SURFACE_TERMINAL,
@@ -59,6 +61,23 @@ vi.mock('./ui/toast', () => ({ showToast: vi.fn() }))
 async function getRendererMocks(): Promise<RendererMock[]> {
   const { XtermRenderer } = await import('./renderers/xterm')
   return vi.mocked(XtermRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
+}
+
+function fireFrameMetadata(
+  session: SessionFake,
+  revision: number,
+  metadata: Partial<Pick<SessionFrame['state'], 'title' | 'cwd'>>,
+): void {
+  const state: SessionFrame['state'] = {
+    bufferKind: 'normal',
+    bufferInstance: '1',
+    bracketedPaste: false,
+    mouseTracking: false,
+    title: metadata.title ?? null,
+    cwd: metadata.cwd ?? null,
+  }
+  const rows = Array.from({ length: 24 }, () => [])
+  session.fireScreenFrame(frameOf(revision, rows, undefined, { cols: 80, rows: 24 }, state))
 }
 
 // ── Second PaneContent implementation for mount-once proof ─────────────
@@ -444,8 +463,7 @@ describe('PaneManager', () => {
     })
 
     // The shell reports where it is. Same accessor, and now it is a claim.
-    const renderers = await getRendererMocks()
-    renderers[0]._fireCwd('', '/tmp')
+    fireFrameMetadata(client._sessions[0], 1, { cwd: { host: '', path: '/tmp' } })
     expect(manager.sessionWhere(sessionId)).toMatchObject({
       cwd: '/tmp',
       cwdVerified: true,
@@ -712,16 +730,15 @@ describe('PaneManager', () => {
     expect(titles[0].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
     expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
-    const renderers = await getRendererMocks()
-    expect(renderers.length).toBe(2)
+    expect(client._sessions).toHaveLength(2)
 
     // Fire title for first tab only
-    renderers[0]._fireTitle('~/project')
+    fireFrameMetadata(client._sessions[0], 1, { title: '~/project' })
     expect(titles[0].textContent).toBe('~/project')
     expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
     // Fire title for second tab only
-    renderers[1]._fireTitle('bash-3.2')
+    fireFrameMetadata(client._sessions[1], 1, { title: 'bash-3.2' })
     expect(titles[1].textContent).toBe('bash-3.2')
     expect(titles[0].textContent).toBe('~/project')
   })
@@ -729,25 +746,23 @@ describe('PaneManager', () => {
   // ── empty / whitespace title is ignored ──────────────────────────────
 
   it('falls back to the directory when the shell clears the title', async () => {
-    const { bar } = await mountPaneManager()
+    const { client, bar } = await mountPaneManager()
 
     await Promise.resolve()
-
-    const renderers = await getRendererMocks()
     const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Set a real title first.
-    renderers[0]._fireTitle('~/projects')
+    fireFrameMetadata(client._sessions[0], 1, { title: '~/projects' })
     expect(titleEl.textContent).toBe('~/projects')
 
     // A TUI clears the title on exit with an empty OSC 0/2. Neither blank the
     // tab nor keep the stale name — a plain shell must not stay labelled with
     // the program that just exited.
-    renderers[0]._fireTitle('')
+    fireFrameMetadata(client._sessions[0], 2, { title: '' })
     expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
-    renderers[0]._fireTitle('~/projects')
-    renderers[0]._fireTitle('   ')
+    fireFrameMetadata(client._sessions[0], 3, { title: '~/projects' })
+    fireFrameMetadata(client._sessions[0], 4, { title: '   ' })
     expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
   })
 
@@ -1137,64 +1152,58 @@ describe('PaneManager', () => {
   // ── OSC 7: cwd follows cd ───────────────────────────────────────────
 
   it('updates tab title when OSC 7 fires (cwd follows cd)', async () => {
-    const { bar } = await mountPaneManager()
+    const { client, bar } = await mountPaneManager()
 
     await Promise.resolve()
-
-    const renderers = await getRendererMocks()
     const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Initial title is the fixture directory label.
     expect(titleEl.textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
     // User does `cd /tmp` → shell emits OSC 7
-    renderers[0]._fireCwd('', '/tmp')
+    fireFrameMetadata(client._sessions[0], 1, { cwd: { host: '', path: '/tmp' } })
     expect(titleEl.textContent).toBe('tmp')
 
     // User does `cd /var/log`
-    renderers[0]._fireCwd('', '/var/log')
+    fireFrameMetadata(client._sessions[0], 2, { cwd: { host: '', path: '/var/log' } })
     expect(titleEl.textContent).toBe('var/log')
 
     // User goes to /var (single segment after root)
-    renderers[0]._fireCwd('', '/var')
+    fireFrameMetadata(client._sessions[0], 3, { cwd: { host: '', path: '/var' } })
     expect(titleEl.textContent).toBe('var')
   })
 
   it('updates tooltip when OSC 7 fires', async () => {
-    const { bar } = await mountPaneManager()
+    const { client, bar } = await mountPaneManager()
 
     await Promise.resolve()
-
-    const renderers = await getRendererMocks()
     const tabBtn = bar.querySelector('.nocx-tab')!
 
     // Initial tooltip includes the '(initial cwd)' marker (AD-5 surfacing).
     expect(tabBtn.getAttribute('title')).toContain('(initial cwd)')
 
     // OSC 7 fires → tooltip is just the path, no marker.
-    renderers[0]._fireCwd('', '/tmp')
+    fireFrameMetadata(client._sessions[0], 1, { cwd: { host: '', path: '/tmp' } })
     expect(tabBtn.getAttribute('title')).toBe('/tmp')
     expect(tabBtn.getAttribute('title')).not.toContain('(initial')
   })
 
   it('program title overrides cwd-based title, but cwd updates the fallback', async () => {
-    const { bar } = await mountPaneManager()
+    const { client, bar } = await mountPaneManager()
 
     await Promise.resolve()
-
-    const renderers = await getRendererMocks()
     const titleEl = bar.querySelector('.nocx-tab-title')!
 
     // Program sets a title (e.g. vim, htop).
-    renderers[0]._fireTitle('vim')
+    fireFrameMetadata(client._sessions[0], 1, { title: 'vim' })
     expect(titleEl.textContent).toBe('vim')
 
     // cwd changes — visible title stays 'vim' because program title wins.
-    renderers[0]._fireCwd('', '/etc')
+    fireFrameMetadata(client._sessions[0], 2, { cwd: { host: '', path: '/etc' } })
     expect(titleEl.textContent).toBe('vim')
 
     // Program exits, clears the title → fallback is the new cwd.
-    renderers[0]._fireTitle('')
+    fireFrameMetadata(client._sessions[0], 3, { title: '' })
     expect(titleEl.textContent).toBe('etc')
   })
 
@@ -1208,19 +1217,18 @@ describe('PaneManager', () => {
 
     await Promise.resolve()
 
-    const renderers = await getRendererMocks()
-    expect(renderers.length).toBe(2)
+    expect(client._sessions).toHaveLength(2)
 
     const titles = bar.querySelectorAll('.nocx-tab-title')
 
     // Fire cwd for first tab only.
-    renderers[0]._fireCwd('', '/tmp')
+    fireFrameMetadata(client._sessions[0], 1, { cwd: { host: '', path: '/tmp' } })
     expect(titles[0].textContent).toBe('tmp')
     // Second tab still has the fixture label.
     expect(titles[1].textContent).toBe(FIXTURE_DIRECTORY_LABEL)
 
     // Fire cwd for second tab only.
-    renderers[1]._fireCwd('', '/var/log')
+    fireFrameMetadata(client._sessions[1], 1, { cwd: { host: '', path: '/var/log' } })
     expect(titles[0].textContent).toBe('tmp')
     expect(titles[1].textContent).toBe('var/log')
   })
@@ -1241,8 +1249,7 @@ describe('PaneManager', () => {
     expect(tabBtns[1].getAttribute('title')).toContain('(initial cwd)')
 
     // First tab gets OSC 7.
-    const renderers = await getRendererMocks()
-    renderers[0]._fireCwd('', '/tmp')
+    fireFrameMetadata(client._sessions[0], 1, { cwd: { host: '', path: '/tmp' } })
 
     expect(tabBtns[0].getAttribute('title')).toBe('/tmp')
     // Second tab still has initial marker.

@@ -19,7 +19,8 @@
 // rerun.
 import { CommandLedger } from '../../command-ledger'
 import { LifecycleKernel } from '../../lifecycle/state'
-import { parseOsc133, parseOsc7 } from '../../renderers/xterm'
+import { parseOsc133 } from '../../command-marker'
+import { parseOsc7Fixture } from './osc7'
 import type { CorpusFrame } from './corpus'
 
 /** The nine security-sensitive projections, captured before and after each
@@ -107,7 +108,7 @@ export function assembleTodaySession(): SessionAssembly {
         return
       }
       case 'osc7': {
-        const parsed = parseOsc7(frame.payload)
+        const parsed = parseOsc7Fixture(frame.payload)
         if (parsed !== null) {
           cwd = parsed.path
           events.push('cwd')

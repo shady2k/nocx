@@ -1,5 +1,5 @@
-// DOM scrollback: xterm buffer → HTML serializer.
-// Iterates IBufferLine cells and maps 256-color + RGB + attributes into
+// DOM scrollback: terminal buffer → HTML serializer.
+// Iterates structural terminal line cells and maps 256-color + RGB + attributes into
 // inline styles. WHICH cells merge into a run, and what spacing that run
 // carries, is run-geometry's verdict (the one owner of run geometry,
 // nocx-zg3k3.7); this file walks the cells and draws the runs. Output is an
@@ -12,7 +12,7 @@
 // palette and the default foreground/background used for mode-0 (inherit)
 // cells — critical for correct inverse-video fallback.
 
-import type { IBufferLine, ITheme } from '@xterm/xterm'
+import type { TerminalBufferLine, TerminalTheme } from '../terminal-types'
 // TYPES ONLY, and taken from their owners rather than redeclared here:
 // FitFace is the face the measuring authority measures with, and its answer
 // has one shape; a second copy would drift from the first silently. No
@@ -32,7 +32,7 @@ export const SERIALIZER_VERSION = 1
 
 // ── Theme snapshot types ──────────────────────────────────────────────────
 
-/** 16-element ANSI palette tuple (indices 0–15). MUST match ITheme keys:
+/** 16-element ANSI palette tuple (indices 0–15). MUST match theme keys:
  *  black, red, green, yellow, blue, magenta, cyan, white,
  *  brightBlack, brightRed, brightGreen, brightYellow, brightBlue,
  *  brightMagenta, brightCyan, brightWhite. */
@@ -93,9 +93,9 @@ export const DEFAULT_SNAPSHOT: TerminalSnapshot = {
   defaultBg: '#1a1b26',
 }
 
-/** Convert xterm ITheme to a TerminalSnapshot.
- *  Every field in the palette maps to the corresponding ITheme key. */
-export function fromITheme(theme: ITheme): TerminalSnapshot {
+/** Convert a terminal theme to a TerminalSnapshot.
+ *  Every field in the palette maps to the corresponding theme key. */
+export function fromITheme(theme: TerminalTheme): TerminalSnapshot {
   const p = DEFAULT_SNAPSHOT.palette
   return {
     palette: [
@@ -236,11 +236,11 @@ export function attrsEqual(a: CellAttrs, b: CellAttrs): boolean {
 
 /**
  * Extract cell attributes from an xterm buffer cell.
- * Works with xterm.js 5.x IBufferLine / ICell interfaces.
+ * Works with any terminal line and cell satisfying the structural contract.
  */
 export function cellAttrs(
   snapshot: TerminalSnapshot,
-  line: IBufferLine,
+  line: TerminalBufferLine,
   cellIdx: number,
 ): CellAttrs {
   const cell = line.getCell(cellIdx)
@@ -349,8 +349,8 @@ interface Walked<A> {
  * to prevent.
  */
 function collectCellsOf<A>(
-  line: IBufferLine,
-  attrsOf: (line: IBufferLine, i: number) => A,
+  line: TerminalBufferLine,
+  attrsOf: (line: TerminalBufferLine, i: number) => A,
   escape: boolean,
   keepTrailingSpace: boolean,
 ): Walked<A> {
@@ -412,7 +412,7 @@ function faceOfAttrs(a: CellAttrs): FitFace {
 
 function collectRuns(
   snapshot: TerminalSnapshot,
-  line: IBufferLine,
+  line: TerminalBufferLine,
   metric: RunMetric | undefined,
   keepTrailingSpace = false,
 ): { runs: GeometryRun<CellAttrs>[]; cols: number } {
@@ -476,7 +476,7 @@ function emitRun(
  */
 export function serializeLine(
   snapshot: TerminalSnapshot,
-  line: IBufferLine | undefined,
+  line: TerminalBufferLine | undefined,
   metric?: RunMetric,
 ): string {
   if (!line) return '<span class="term-line"></span>'

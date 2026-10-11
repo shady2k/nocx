@@ -1,6 +1,6 @@
 /**
- * Theme adapter — resolves `--terminal-*` CSS custom properties into xterm's
- * `ITheme`, with atomic fallback to the built-in default when a required token
+ * Theme adapter — resolves `--terminal-*` CSS custom properties into the
+ * renderer's structural terminal theme, with atomic fallback to the built-in default when a required token
  * is missing. Also provides a module-level theme-change pub/sub so terminal
  * controllers can be notified without touching the PaneManager or the Solid tree.
  *
@@ -16,7 +16,7 @@
  * Until then every required property resolves to an empty string → the adapter
  * always falls back atomically. Every absent token is a finding.
  */
-import type { ITheme } from '@xterm/xterm'
+import type { TerminalTheme } from '../terminal-types'
 
 // ── Required CSS custom property names (ADR-0013 §2.6 — exhaustive) ──────
 
@@ -46,13 +46,13 @@ export const REQUIRED_TERMINAL_TOKENS = [
 
 export type TerminalToken = (typeof REQUIRED_TERMINAL_TOKENS)[number]
 
-// ── Built-in default ITheme (Tokyo Night palette) ───────────────────────
+// ── Built-in default theme (Tokyo Night palette) ───────────────────────
 // This is the atomic fallback when CSS token resolution fails. It is also
 // THE ONE PLACE that knows terminal colours — when `--terminal-*` tokens
 // are properly declared in a theme stylesheet this entire object becomes
 // semantically dead and can be removed.
 
-export const DEFAULT_TERMINAL_THEME: ITheme = {
+export const DEFAULT_TERMINAL_THEME: TerminalTheme = {
   background: '#1a1b26',
   foreground: '#c0caf5',
   cursor: '#c0caf5',
@@ -76,7 +76,7 @@ export const DEFAULT_TERMINAL_THEME: ITheme = {
   brightWhite: '#c0caf5',
 }
 
-// ── Adapter: CSS custom property → ITheme ───────────────────────────────
+// ── Adapter: CSS custom property → theme ───────────────────────────────
 
 /**
  * Resolve a single custom property from the root element.
@@ -87,10 +87,10 @@ export function resolveCssToken(name: string): string {
 }
 
 /**
- * Maps the 21 required terminal tokens to xterm's ITheme shape.
+ * Maps the 21 required terminal tokens to the terminal theme shape.
  * Every value may be empty — the caller should validate.
  */
-function cssTokensToITheme(): ITheme {
+function cssTokensToITheme(): TerminalTheme {
   return {
     background: resolveCssToken('--terminal-background'),
     foreground: resolveCssToken('--terminal-foreground'),
@@ -120,11 +120,11 @@ function cssTokensToITheme(): ITheme {
  * Resolve the theme from CSS. Returns undefined if ANY required token is
  * missing (empty string) — atomic fallback, never a half-applied palette.
  *
- * The check is on the canonical list, not on the ITheme keys, so a token
- * that is not part of ITheme (e.g. a future extended token) is not required
+ * The check is on the canonical list, not on theme keys, so a token
+ * that is not part of the theme (e.g. a future extended token) is not required
  * for the palette to be considered valid.
  */
-export function resolveValidatedITheme(): ITheme | undefined {
+export function resolveValidatedITheme(): TerminalTheme | undefined {
   // Fast path: are all required tokens non-empty?
   for (const token of REQUIRED_TERMINAL_TOKENS) {
     if (!resolveCssToken(token)) return undefined
@@ -136,19 +136,19 @@ export function resolveValidatedITheme(): ITheme | undefined {
  * Resolve the theme from CSS, falling back to the built-in default if any
  * required token is absent. Never returns undefined.
  */
-export function resolveIThemeOrFallback(): ITheme {
+export function resolveIThemeOrFallback(): TerminalTheme {
   return resolveValidatedITheme() ?? DEFAULT_TERMINAL_THEME
 }
 
 // ── Theme-change pub/sub (module-level) ─────────────────────────────────
 
-type ThemeSubscriber = (theme: ITheme) => void
+type ThemeSubscriber = (theme: TerminalTheme) => void
 
 const _subscribers = new Set<ThemeSubscriber>()
-let _currentTheme: ITheme = DEFAULT_TERMINAL_THEME
+let _currentTheme: TerminalTheme = DEFAULT_TERMINAL_THEME
 
 /** Returns the most recently resolved / accepted theme. */
-export function getCurrentTheme(): ITheme {
+export function getCurrentTheme(): TerminalTheme {
   return _currentTheme
 }
 
@@ -157,7 +157,7 @@ export function getCurrentTheme(): ITheme {
  * bootstrap resolver (before any terminal exists) and later when the Go
  * `ui.theme` setting arrives and differs from the bootstrap value.
  */
-export function setCurrentTheme(theme: ITheme): void {
+export function setCurrentTheme(theme: TerminalTheme): void {
   _currentTheme = theme
   for (const fn of _subscribers) fn(theme)
 }

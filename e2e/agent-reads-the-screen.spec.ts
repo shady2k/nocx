@@ -7,16 +7,10 @@
  * whole loop over the real socket: the model reads the session id out of the
  * system prompt, calls session.read with it, and the answer reaches the
  * block.
- * But in that test THE RENDERER IS THE TEST — it answers
- * agent.readScreenRequest with a frame it built itself, because a Go test
- * has no grid. So the one thing it cannot report is the one thing the epic's
- * sentence is about: that the frame a person's own pane produces is what the
- * assistant reads.
- *
- * That half is here. The grid is a real xterm on a real PTY, the frame is
- * minted by frontend/src/renderers/xterm.ts captureLiveFrame, and the marker
- * the answer names exists in exactly one place in this run — on that pane's
- * screen (AGENTS.md testing rules 1 and 2).
+ * The app's backend now captures the session runtime's screen directly; the
+ * renderer is not asked to mint or resolve a screen frame. This check proves
+ * the painted client model shows the same real-PTY output that the assistant's
+ * `session.read` tool result carries into the model response.
  *
  * THE ANSWER IS DERIVED, NOT SCRIPTED. The fake model's second response is a
  * function of the request body it is answering (fake-openai.ts StreamScript
@@ -44,13 +38,10 @@
  * - THE ASK MUST START AFTER ITS FIRST REPAINT. The job writes the marker and
  *   then OSC 9 on the same byte stream; notify.raise cannot precede the cells.
  *
- * The loop keeps repainting until the answer lands. This is the `top` case:
- * xterm always has a later write queued, so the renderer's capture fence must
- * be a WRITE BARRIER — everything queued before the request, nothing queued
- * after it. Waiting for the queue to empty never opens here; the barrier is
- * behind the repaint that was in flight when the ask arrived and opens on the
- * pass that parses it, however much has piled up behind it. That is why this
- * spec can spin the loop flat out without racing any bound.
+ * The loop keeps repainting until the answer lands. The assistant reads the
+ * owning session runtime's current snapshot; it does not ask the frontend to
+ * fence or parse a second byte stream. The painted model is checked below
+ * against the same marker while the loop is still active.
  *
  * Nothing here sleeps and nothing waits out a clock (AGENTS.md: "a test may
  * not depend on timing").
@@ -85,7 +76,7 @@ const nonce = Date.now().toString(36)
 
 /** The string that exists in exactly one place in this run: on that pane's
  *  screen. It is never typed into a question, so the only route by which it
- *  can reach the model is a frame the renderer captured. */
+ *  can reach the model is the backend's session.read result. */
 const MARKER = `NOCX-SCREEN-${nonce}`
 /** The OSC 9 body the background job writes AFTER the marker — the ordering
  *  signal, never a delay. */
@@ -139,19 +130,6 @@ test.afterAll(async () => {
   await fake?.stop()
 })
 
-/** One frame of the renderer's own answer to a readScreen request — the
- *  thing this spec exists to observe. */
-interface ResolvedRow {
-  kind?: string
-  text?: string
-}
-interface ResolvedFrame {
-  requestId?: string
-  outcome?: string
-  error?: string
-  rows?: ResolvedRow[]
-}
-
 interface AskRecord {
   sessionId: string
   attachedContent: unknown[]
@@ -160,7 +138,6 @@ interface AskRecord {
 interface SpecRecord {
   asks: AskRecord[]
   raised: string[]
-  resolved: ResolvedFrame[]
 }
 
 declare global {
@@ -170,7 +147,7 @@ declare global {
 }
 
 /**
- * Record the three frames this spec reads, off the app's OWN socket.
+ * Record the assistant ask and the OSC notification, off the app's OWN socket.
  *
  * Wrapping send rather than reading a transcript keeps it honest, exactly as
  * notification-osc.spec.ts records notify.raise: what is observed is the real
@@ -181,12 +158,10 @@ declare global {
  *   a scripted session.read must name (an invented one is refused for identity
  *   before the call can run — fake-openai.ts records why at length).
  * - notify.raise is the OSC 9 the background job writes after the marker.
- * - agent.readScreenResolved is the RENDERER'S FRAME. It is the evidence the
- *   Go test cannot produce.
  */
-async function recordFrames(page: Page): Promise<void> {
+async function recordAgentTraffic(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    window.__nocxScreenSpec = { asks: [], raised: [], resolved: [] }
+    window.__nocxScreenSpec = { asks: [], raised: [] }
     const send = WebSocket.prototype.send
     WebSocket.prototype.send = function (this: WebSocket, data: Parameters<typeof send>[0]) {
       if (typeof data === 'string') {
@@ -207,9 +182,6 @@ async function recordFrames(page: Page): Promise<void> {
           if (msg.method === 'notify.raise' && typeof msg.params?.body === 'string') {
             rec.raised.push(msg.params.body)
           }
-          if (msg.method === 'agent.readScreenResolved' && msg.params) {
-            rec.resolved.push(msg.params as ResolvedFrame)
-          }
         } catch {
           // Not JSON, or not ours. The data plane is binary and never lands
           // here.
@@ -221,12 +193,7 @@ async function recordFrames(page: Page): Promise<void> {
 }
 
 async function recorded(page: Page): Promise<SpecRecord> {
-  return page.evaluate(() => window.__nocxScreenSpec ?? { asks: [], raised: [], resolved: [] })
-}
-
-/** The frame's text as a person would read it: its rows, joined. */
-function frameText(frame: ResolvedFrame): string {
-  return (frame.rows ?? []).map((row) => row.text ?? '').join('\n')
+  return page.evaluate(() => window.__nocxScreenSpec ?? { asks: [], raised: [] })
 }
 
 async function openApp(page: Page): Promise<void> {
@@ -340,7 +307,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // already gone wrong, never an expectation about how fast the machine
     // is. (Inside the test, which is the only place Playwright accepts it.)
     test.setTimeout(120_000)
-    await recordFrames(page)
+    await recordAgentTraffic(page)
     await openApp(page)
     await configureAssistant(page)
     await backToTerminal(page)
@@ -380,9 +347,8 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
     await expect(page.locator(INPUT)).toBeFocused({ timeout: 10_000 })
 
-    // Release it. The marker is written first and the OSC 9 after it, on one
-    // byte stream through one parser, so the raise below cannot arrive
-    // before the cells it follows.
+    // Release it. The marker is written before OSC 9 in the same runtime
+    // ingest, so the notification cannot precede the screen revision it names.
     writeFileSync(flagPath, 'go\n')
     await expect
       .poll(async () => (await recorded(page)).raised.includes(SIGNAL), {
@@ -467,19 +433,29 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     await expect(title).not.toContainText(sessionId)
     await expect(title).toContainText(await page.locator(TITLE).first().innerText())
 
-    // 3. AND THE FRAME WAS THE REAL RENDERER'S — the half the Go test
-    //    (ws_agent_locates_itself_test.go) cannot report, because there the
-    //    renderer is the test. This is the app's own answer to the broker,
-    //    off its own socket: a frame outcome for this session, carrying the
-    //    marker in its rows.
-    const { resolved } = await recorded(page)
-    expect(resolved.length).toBe(1)
-    const frame = resolved[0]
-    expect(frame.outcome, frame.error ?? 'the renderer reported no error').toBe('frame')
-    expect(frame.requestId).toBeTruthy()
-    expect(frameText(frame)).toContain(MARKER)
-    // The capture answered while repainting continued; stop the fixture only
-    // after the renderer's frame has been observed.
+    // 3. The same runtime screen is locally accepted and painted as the
+    //    named grid. This is not an xterm capture or a test-built readScreen
+    //    reply: the model is fed by the backend's session.frame carrier.
+    const painted = await page.evaluate(() => {
+      const grid = document.querySelector<HTMLElement>(
+        '.pane.active [role="grid"][aria-label="Terminal output"]',
+      )
+      const screen = (
+        window as Window & {
+          __nocxPaneScreen?: () => { revision: number | null; rows: string[] } | null
+        }
+      ).__nocxPaneScreen?.()
+      return {
+        gridText: grid?.textContent ?? '',
+        revision: screen?.revision ?? null,
+        rows: screen?.rows ?? [],
+      }
+    })
+    expect(painted.revision).not.toBeNull()
+    expect(painted.gridText).toContain(MARKER)
+    expect(painted.rows.join('\n')).toContain(MARKER)
+    // The answer above is derived from the backend-owned session.read result;
+    // stop the fixture only after the visible model and read have both seen it.
     writeFileSync(stopPath, 'stop\n')
     await expect(
       page

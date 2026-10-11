@@ -35,6 +35,7 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
 import { styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -81,7 +82,6 @@ import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
 import type { AgentRunCompletion } from './run-command'
-import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
@@ -3240,10 +3240,9 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const client = makeClient()
     client.openSession.mockResolvedValue(session)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const renderer = rendererOf(content)
     try {
       expect(content.activeOrigin()?.cwdVerified).toBe(false)
-      renderer._fireCwd('host', '/srv/new/path')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: 'host', path: '/srv/new/path' } })
       const after = content.activeOrigin()
       expect(after?.cwd).toBe('/srv/new/path')
       expect(after?.cwdVerified).toBe(true)
@@ -3266,13 +3265,12 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       { hooks: { onActiveOriginChange } },
       client,
     )
-    const renderer = rendererOf(content)
     try {
       // The session open itself is an origin transition (null → origin).
       expect(onActiveOriginChange).toHaveBeenCalledTimes(1)
 
       // A verified OSC 7 cwd changes the answer.
-      renderer._fireCwd('host', '/srv/new/path')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: 'host', path: '/srv/new/path' } })
       expect(onActiveOriginChange).toHaveBeenCalledTimes(2)
       expect(content.activeOrigin()?.cwd).toBe('/srv/new/path')
 
@@ -3369,7 +3367,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     try {
       content.setVisible(true)
       // A verified cwd asks the source to open, exactly once.
-      rendererOf(content)._fireCwd('', '/home/nocx/project')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/home/nocx/project' } })
       expect(sessionHome.ensureCalls).toHaveLength(1)
       expect(sessionHome.ensureCalls[0]).toMatchObject({
         sessionId,
@@ -3428,7 +3426,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     try {
       content.setVisible(true)
-      rendererOf(content)._fireCwd('', '/repo')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/repo' } })
       branchSource.publish('main')
 
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -3478,7 +3476,6 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       client,
     )
     const handler = lifecycleHandler(client)
-    const renderer = rendererOf(content)
     const sessionId = sessionOf(content).sessionId
     try {
       content.setVisible(true)
@@ -3486,7 +3483,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       expect(branchSource.requests).toHaveLength(0)
 
       // A verified cwd triggers exactly one request.
-      renderer._fireCwd('', '/repo')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/repo' } })
       expect(branchSource.requests).toHaveLength(1)
       expect(branchSource.requests[0]).toMatchObject({
         sessionId,
@@ -3497,7 +3494,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
 
       // The SAME verified cwd reported again (an unrelated OSC 7 replay)
       // does not reset the debounce for nothing.
-      renderer._fireCwd('', '/repo')
+      fireFrameMetadata(sessionOf(content), 2, { cwd: { host: '', path: '/repo' } })
       expect(branchSource.requests).toHaveLength(1)
 
       // A settled command block asks again, unconditionally — a `git
@@ -3576,7 +3573,6 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       client,
     )
     const handler = lifecycleHandler(client)
-    const renderer = rendererOf(content)
     try {
       content.setVisible(true)
       // The local shell's own domain first.
@@ -3593,7 +3589,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
       })
       // A verified cwd reported on the nested domain — a path on the far
       // host, which this pane's own (local) session cannot answer for.
-      renderer._fireCwd('192.168.0.93', '/home/pi')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '192.168.0.93', path: '/home/pi' } })
       expect(branchSource.requests).toHaveLength(0)
       expect(partText(editorOf(content).root, 'branch')).toBeUndefined()
     } finally {
@@ -9172,7 +9168,6 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       client,
     )
     const handler = factHandler(client)
-    const renderer = rendererOf(content)
     const restoreScroll = stubScrolling()
     try {
       content.setVisible(true)
@@ -9182,7 +9177,7 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       expect(tab.title).toBe('herdr')
 
       // Absolute order: the program's own title outranks the command name.
-      renderer._fireTitle('herdr 2.0')
+      fireFrameMetadata(sessionOf(content), 1, { title: 'herdr 2.0' })
       expect(tab.title).toBe('herdr 2.0')
     } finally {
       restoreScroll()
@@ -9198,7 +9193,6 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       client,
     )
     const handler = factHandler(client)
-    const renderer = rendererOf(content)
     const restoreScroll = stubScrolling()
     try {
       content.setVisible(true)
@@ -9209,8 +9203,8 @@ describe('the running command names the tab (nocx-n8n82)', () => {
 
       // The program sets its own title and clears it on the way out —
       // an OSC 0/2 with an EMPTY string (tabs.ts documents the gesture).
-      renderer._fireTitle('herdr')
-      renderer._fireTitle('')
+      fireFrameMetadata(sessionOf(content), 1, { title: 'herdr' })
+      fireFrameMetadata(sessionOf(content), 2, { title: '' })
       // The command is still the running record: without the clear guard
       // the running-command source would resurrect 'herdr' right here.
       const ledger = (content as unknown as { ledger: CommandLedger }).ledger
@@ -9248,7 +9242,6 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       client,
     )
     const handler = factHandler(client)
-    const renderer = rendererOf(content)
     const restoreScroll = stubScrolling()
     try {
       content.setVisible(true)
@@ -9268,7 +9261,7 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       expect(onProgramTitleChange).toHaveBeenLastCalledWith('')
 
       // A program title is also a name of its own — same second line.
-      renderer._fireTitle('herdr')
+      fireFrameMetadata(sessionOf(content), 1, { title: 'herdr' })
       expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
       expect(onProgramTitleChange).toHaveBeenLastCalledWith('herdr')
     } finally {
@@ -9295,13 +9288,12 @@ describe('the running command names the tab (nocx-n8n82)', () => {
       client,
     )
     const handler = factHandler(client)
-    const renderer = rendererOf(content)
     const restoreScroll = stubScrolling()
     try {
       content.setVisible(true)
       // A program title is a name of its own, so the strip's second line is
       // the LOCATION line — which is where the strip names a machine.
-      renderer._fireTitle('herdr')
+      fireFrameMetadata(sessionOf(content), 1, { title: 'herdr' })
 
       // Local: the strip has nothing but the directory to show, and the
       // origin still names the machine, in words rather than a blank.
@@ -9706,21 +9698,20 @@ describe('the pane reports its directory (nocx-zkiv4)', () => {
       { hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) } },
       client,
     )
-    const renderer = rendererOf(content)
     try {
       // The session-open cwd is a provider's fallback, not a report: nothing
       // has been verified yet, so nothing may be stored (AD-5).
       expect(reported).toEqual([])
 
-      renderer._fireCwd('', '/repo/frontend')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/repo/frontend' } })
       expect(reported).toEqual(['/repo/frontend'])
 
       // A shell prints its prompt many times in one directory. The row is
       // written on CHANGE, or sitting still would cost a write per prompt.
-      renderer._fireCwd('', '/repo/frontend')
+      fireFrameMetadata(sessionOf(content), 2, { cwd: { host: '', path: '/repo/frontend' } })
       expect(reported).toEqual(['/repo/frontend'])
 
-      renderer._fireCwd('', '/repo/internal')
+      fireFrameMetadata(sessionOf(content), 3, { cwd: { host: '', path: '/repo/internal' } })
       expect(reported).toEqual(['/repo/frontend', '/repo/internal'])
     } finally {
       teardown()
@@ -9738,12 +9729,11 @@ describe('the pane reports its directory (nocx-zkiv4)', () => {
       },
       client,
     )
-    const renderer = rendererOf(content)
     try {
       // /home/pi on a Raspberry Pi is not /home/pi here. Storing it would
       // send the restored pane to a directory that does not exist on this
       // machine — or, worse, to a different one that does.
-      renderer._fireCwd('pi.local', '/home/pi')
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: 'pi.local', path: '/home/pi' } })
       expect(reported).toEqual([])
     } finally {
       teardown()
@@ -13731,40 +13721,7 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
     }
   })
 })
-describe('session.read serves the frame the question is about (nocx-7l4ex.3)', () => {
-  type ReadCall = { method: string; params: unknown }
-  type ReadRow = { kind: string; text: string }
-  type ReadResolution = {
-    requestId: string
-    outcome: string
-    rows?: ReadRow[]
-    cursor?: unknown
-    identity?: unknown
-    range?: unknown
-    error?: string
-  }
-  type ReadCallFunction = (method: string, params: unknown) => Promise<undefined>
-  type ReadDispatcher = {
-    handlers: Map<string, (params: unknown) => void>
-    calls: ReadCall[]
-    subscribe: (method: string, handler: (params: unknown) => void) => () => void
-    call: ReadCallFunction
-  }
-
-  function readDispatcher(): ReadDispatcher {
-    const handlers = new Map<string, (params: unknown) => void>()
-    const calls: ReadCall[] = []
-    const subscribe = (method: string, handler: (params: unknown) => void): (() => void) => {
-      handlers.set(method, handler)
-      return () => handlers.delete(method)
-    }
-    const call = vi.fn((method: string, params: unknown) => {
-      calls.push({ method, params })
-      return Promise.resolve(undefined)
-    })
-    return { handlers, calls, subscribe, call }
-  }
-
+describe('the summoned frame stays a local display pin', () => {
   function frame(text: string): CapturedFrame {
     return {
       rows: [
@@ -13789,12 +13746,6 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
         scrollbackCapLines: 10000,
       },
     }
-  }
-
-  function wireText(params: unknown): string {
-    const resolution = params as ReadResolution
-    const rows = resolution.rows ?? []
-    return rows.map((row) => row.text).join('\n')
   }
 
   function startRunning(client: ClientFake, command = 'top'): void {
@@ -13832,18 +13783,15 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
     await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
   }
 
-  function readCurrent(
-    dispatcher: ReadDispatcher,
-    content: TerminalContent,
-    requestId: string,
-  ): void {
-    mountReadScreenHandler(dispatcher as unknown as Dispatcher, (sessionId) =>
-      sessionId === content.sessionId() ? content : null,
-    )
-    dispatcher.handlers.get('agent.readScreenRequest')!({
-      requestId,
-      sessionId: content.sessionId(),
+  function dispatchSummon(content: TerminalContent): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
     })
+    gridOf(content).dispatchEvent(event)
+    return event
   }
 
   it('freezes an alternate-screen paint from row zero', async () => {
@@ -13867,45 +13815,6 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       expect(gridOf(content).querySelector('.nocx-freeze-frame')?.textContent).toMatch(
         /^top: load 1\.00/,
       )
-    } finally {
-      teardown()
-    }
-  })
-
-  it('returns the pinned frame for both reads in one question turn', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client)
-      const pinned = frame('top: load 1.00')
-      const renderer = rendererOf(content)
-      const capture = vi.fn().mockResolvedValue(pinned)
-      renderer.captureLiveFrame = capture
-      await summon(content)
-      expect(capture).toHaveBeenCalledWith(undefined)
-      capture.mockClear()
-
-      const dispatcher = readDispatcher()
-      readCurrent(dispatcher, content, 'read-1')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
-      readCurrent(dispatcher, content, 'read-2')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
-
-      const first = dispatcher.calls[0].params as ReadResolution
-      const second = dispatcher.calls[1].params as ReadResolution
-      expect(first).toMatchObject({ requestId: 'read-1', outcome: 'frame' })
-      expect(second).toMatchObject({ requestId: 'read-2', outcome: 'frame' })
-      expect(wireText(first)).toContain('top: load 1.00')
-      expect(second.rows).toEqual(first.rows)
-      expect(second.cursor).toEqual(first.cursor)
-      expect(second.identity).toEqual(first.identity)
-      expect(second.range).toEqual(first.range)
-      expect(capture).not.toHaveBeenCalled()
     } finally {
       teardown()
     }
@@ -13943,297 +13852,6 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       teardown()
     }
   })
-
-  it('answers a repainting top without waiting on the live capture fence', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client, 'top')
-      const pinned = frame('top: pinned while repainting')
-      const renderer = rendererOf(content)
-      const capture = vi.fn().mockResolvedValue(pinned)
-      renderer.captureLiveFrame = capture
-      await summon(content)
-
-      let liveCaptureStarted = false
-      const blockedCapture = vi.fn(
-        () =>
-          new Promise<CapturedFrame>(() => {
-            liveCaptureStarted = true
-          }),
-      )
-      renderer.captureLiveFrame = blockedCapture
-
-      await expect(content.captureLiveFrame()).resolves.toBe(pinned)
-      expect(liveCaptureStarted).toBe(false)
-      expect(blockedCapture).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps region reads live while the whole-screen read is pinned', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client)
-      const pinned = frame('pinned whole screen')
-      const renderer = rendererOf(content)
-      const capture = vi.fn().mockResolvedValue(pinned)
-      renderer.captureLiveFrame = capture
-      await summon(content)
-
-      const live = frame('live selected rows')
-      capture.mockResolvedValue(live)
-      const result = await content.captureLiveFrame({ start: 3, end: 5 })
-
-      expect(result).toBe(live)
-      expect(capture).toHaveBeenLastCalledWith({ start: 3, end: 5 })
-    } finally {
-      teardown()
-    }
-  })
-
-  it('keeps the renderer failed outcome when no frame can be produced', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client)
-      rendererOf(content).captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
-
-      const dispatcher = readDispatcher()
-      readCurrent(dispatcher, content, 'read-failed')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
-
-      expect(dispatcher.calls[0].params).toMatchObject({
-        requestId: 'read-failed',
-        outcome: 'failed',
-        error: 'capture refused',
-      })
-    } finally {
-      teardown()
-    }
-  })
-  it('keeps the read pin through Escape until the stopped ask turn terminalizes', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client)
-      const pinned = frame('pinned while the answer streams')
-      const live = frame('live after the answer ends')
-      const renderer = rendererOf(content)
-      const capture = vi.fn().mockResolvedValue(pinned)
-      renderer.captureLiveFrame = capture
-      client.dispatcher.call.mockImplementation((method: string) => {
-        if (method === 'agent.ask') {
-          return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
-        }
-        return Promise.resolve({
-          id: 'att-0',
-          domain: 'd1',
-          state: 'open',
-          command: '',
-          cwd: '',
-          host: '',
-          origin: 'app',
-          submitId: submitToken(client),
-          startedAt: '2026-08-08T12:00:00Z',
-        })
-      })
-
-      await summon(content)
-      capture.mockClear()
-      const ed = editorOf(content)
-      ed.insertText('why is this screen changing?')
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      await vi.waitFor(() =>
-        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
-          true,
-        ),
-      )
-
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
-      )
-      expect(content.pinnedFrame()).toBeNull()
-
-      const dispatcher = readDispatcher()
-      readCurrent(dispatcher, content, 'read-after-escape-1')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
-      readCurrent(dispatcher, content, 'read-after-escape-2')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
-      const first = dispatcher.calls[0].params as ReadResolution
-      const second = dispatcher.calls[1].params as ReadResolution
-      expect(wireText(first)).toContain('pinned while the answer streams')
-      expect(second.rows).toEqual(first.rows)
-      expect(capture).not.toHaveBeenCalled()
-
-      const runState = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'agent.runState',
-      )
-      expect(runState).toBeDefined()
-      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'cancelled' })
-
-      capture.mockResolvedValue(live)
-      readCurrent(dispatcher, content, 'read-after-turn')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(3))
-      expect(wireText(dispatcher.calls[2].params)).toContain('live after the answer ends')
-      expect(capture).toHaveBeenCalledTimes(1)
-    } finally {
-      teardown()
-    }
-  })
-  it('clears an unsettled turn pin when the next question starts without a summon', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      startRunning(client)
-      const pinned = frame('stale first-turn frame')
-      const live = frame('live second-turn frame')
-      const renderer = rendererOf(content)
-      const capture = vi.fn().mockResolvedValue(pinned)
-      renderer.captureLiveFrame = capture
-      let nextRun = 42
-      client.dispatcher.call.mockImplementation((method: string) => {
-        if (method === 'agent.status') {
-          return Promise.resolve({
-            endpointConfigured: true,
-            credential: 'resolvable',
-            lastProbe: null,
-            answering: { ready: true, reason: null, endpoint: 'openrouter', model: 'test-model' },
-          })
-        }
-        if (method === 'agent.ask') {
-          nextRun += 1
-          return Promise.resolve({
-            runId: nextRun,
-            entryId: `entry-${nextRun}`,
-            model: 'test-model',
-          })
-        }
-        return Promise.resolve({
-          id: 'att-0',
-          domain: 'd1',
-          state: 'open',
-          command: '',
-          cwd: '',
-          host: '',
-          origin: 'app',
-          startedAt: '2026-08-08T12:00:00Z',
-        })
-      })
-
-      await summon(content)
-      capture.mockClear()
-      const ed = editorOf(content)
-      ed.insertText('what is this first screen?')
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      await vi.waitFor(() =>
-        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
-          true,
-        ),
-      )
-
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
-      )
-      lifecycleHandler(client)({
-        lane: 'lane-1',
-        lifecycle: 'prompt_ready',
-        domain: 'd1',
-        epoch: 1,
-      })
-      ed.show()
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          ctrlKey: true,
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      ed.insertText('what is this second screen?')
-      viewOf(ed).contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      await vi.waitFor(() =>
-        expect(
-          client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.ask'),
-        ).toHaveLength(2),
-      )
-
-      capture.mockResolvedValue(live)
-      const dispatcher = readDispatcher()
-      readCurrent(dispatcher, content, 'read-second-turn')
-      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
-      expect(wireText(dispatcher.calls[0].params)).toContain('live second-turn frame')
-      expect(capture).toHaveBeenCalledTimes(1)
-    } finally {
-      teardown()
-    }
-  })
-})
-
-describe('summoning answers instead of vanishing (nocx-og42r)', () => {
-  function startRunning(contentClient: ClientFake): void {
-    const handler = lifecycleHandler(contentClient)
-    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-    handler({
-      lane: 'lane-1',
-      lifecycle: 'running',
-      domain: 'd1',
-      epoch: 1,
-      attempt: {
-        id: 'att-run',
-        state: 'open',
-        origin: 'app',
-        submitId: submitToken(contentClient),
-        command: 'htop',
-      },
-    })
-  }
-
-  function dispatchSummon(content: TerminalContent): KeyboardEvent {
-    const event = new KeyboardEvent('keydown', {
-      key: 'Enter',
-      ctrlKey: true,
-      bubbles: true,
-      cancelable: true,
-    })
-    const withScrollback = content as unknown as { scrollback: ScrollbackController }
-    const scrollback = withScrollback.scrollback
-    scrollback.xtermLiveContainer.dispatchEvent(event)
-    return event
-  }
 
   it('names the native latch in the alternate buffer and keeps the program untouched', async () => {
     const client = makeClient()
@@ -16526,48 +16144,26 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // A reclaimed pane is still named after where it is (nocx-07cf4)
 // ═══════════════════════════════════════════════════════════════════════════
-// A tab is named by its pane and a pane by its cwd, and for a session this
-// window OPENED the cwd arrives in the open ack. A RECLAIM carries no cwd —
-// `ipc.reclaimSession` passes '' on purpose, because a reclaim hands over the
-// session and never the pane's own facts — so the only statement of where a
-// reclaimed pane is, is the OSC 7 in the scrollback the claim recovered.
-//
-// That makes the SUBSCRIPTION ORDER load-bearing: `renderer.onCwd` installs
-// its OSC 7 parser handler at subscribe time and has no last-value replay, so
-// a sequence parsed before it is dispatched to nobody. Twelve e2e specs were
-// the only thing watching this, and only because they waited on a non-empty
-// tab title on their way to something else.
+// A tab is named by its pane and a pane by its cwd. A RECLAIM carries no cwd
+// in the open acknowledgement — `ipc.reclaimSession` passes '' on purpose —
+// so the backend-owned full-frame baseline must restore the latest OSC 7
+// report without parsing recovered PTY bytes in the renderer.
 describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () => {
   const RECLAIM_GRID = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
 
-  /** A pane that takes a live session back and whose recovered scrollback
-   *  carries an OSC 7.
-   *
-   *  The renderer mock is programmed BEFORE the mount, because that is when
-   *  the bytes are parsed: `awaitWriteBarrier` is exactly "xterm has finished
-   *  parsing everything written so far", and a reclaiming bind awaits it over
-   *  the recovered write (nocx-k6p18.6). Firing the report from inside the
-   *  barrier is therefore where the real OSC 7 comes out — and it is the one
-   *  moment a subscription installed after the bind has already missed. */
+  /** A reclaimed session has no cwd in its open acknowledgement. Its first
+   *  accepted frame carries the runtime's current metadata instead. */
   const reclaimingPaneReporting = async (cwd: string) => {
-    const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
-      const renderer = createRendererMock()
-      renderer.awaitWriteBarrier.mockImplementation(() => {
-        renderer._fireCwd('', cwd)
-        return Promise.resolve()
-      })
-      return renderer as unknown as InstanceType<typeof XtermRenderer>
-    })
-    // No cwd on the handle, which is what a reclaim actually looks like.
     const session = makeSession({
       cwd: '',
       recovered: { bytes: 32, gaps: [], size: RECLAIM_GRID },
       pendingData: 'the screen this window was away for',
     })
-    return mountTerminal(makeClipboard(), {
+    const mounted = await mountTerminal(makeClipboard(), {
       hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
     })
+    fireFrameMetadata(session, 1, { cwd: { host: '', path: cwd } })
+    return mounted
   }
 
   it('names the tab from the OSC 7 in the scrollback the claim recovered', async () => {
@@ -16800,8 +16396,27 @@ function screenFrame(
       ...geometry,
     },
     cursor: { x: 0, y: 0, visible: true },
+    state: {
+      bufferKind: 'normal',
+      bufferInstance: '1',
+      bracketedPaste: false,
+      mouseTracking: false,
+      title: null,
+      cwd: null,
+    },
     rows,
   }
+}
+
+function fireFrameMetadata(
+  session: SessionFake,
+  revision: number,
+  metadata: { title?: string; cwd?: { host: string; path: string } },
+): void {
+  const frame = screenFrame(revision, ['metadata'])
+  if (metadata.title !== undefined) frame.state.title = metadata.title
+  if (metadata.cwd !== undefined) frame.state.cwd = metadata.cwd
+  session.fireScreenFrame(frame)
 }
 
 function paneScreen(): PaneScreenReading | null {
@@ -16854,6 +16469,151 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       expect(paneScreen()).toBeNull()
     } finally {
       debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('restores program title and cwd only from an accepted backend frame', async () => {
+    const reported: string[] = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) },
+      },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session: SessionFake = client._sessions[0]
+      const accepted = screenFrame(3, ['restored screen'])
+      accepted.state.title = 'restored program title'
+      accepted.state.cwd = { host: '', path: '/repo/restored' }
+      session.fireScreenFrame(accepted)
+      await vi.waitFor(() => expect(tab.title).toBe('restored program title'))
+      expect(reported).toEqual(['/repo/restored'])
+
+      const stale = screenFrame(2, ['stale screen'])
+      stale.state.title = 'stale title'
+      stale.state.cwd = { host: '', path: '/repo/stale' }
+      session.fireScreenFrame(stale)
+      expect(tab.title).toBe('restored program title')
+      expect(reported).toEqual(['/repo/restored'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('drops a prompt boundary and settlement when its correlated screen frame was refused', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      const applySessionEffect = vi.spyOn(renderer, 'applySessionEffect')
+      const host = (content as unknown as { host: { contentSettled: () => void } }).host
+      const settled = vi.spyOn(host, 'contentSettled')
+      session.fireScreenFrame(screenFrame(3, ['accepted']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(3))
+
+      const refused = screenFrame(7, ['refused'])
+      refused.geometry.cols = 0
+      session.fireScreenFrame(refused)
+      expect(paneScreen()?.revision).toBe(3)
+
+      applySessionEffect.mockClear()
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '9',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+        screenRevision: 7,
+      })
+      expect(applySessionEffect).not.toHaveBeenCalled()
+      expect(settled).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('applies a prompt boundary only after its session model accepts the screen revision', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      const applySessionEffect = vi.spyOn(renderer, 'applySessionEffect')
+      const host = (content as unknown as { host: { contentSettled: () => void } }).host
+      const settled = vi.spyOn(host, 'contentSettled')
+      session.fireScreenFrame(screenFrame(7, ['accepted']))
+      await vi.waitFor(() => expect(paneScreen()?.revision).toBe(7))
+
+      applySessionEffect.mockClear()
+      settled.mockClear()
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '10',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+        screenRevision: 7,
+      })
+
+      expect(applySessionEffect).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'promptBoundary', screenRevision: 7 }),
+      )
+      expect(settled).toHaveBeenCalledOnce()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('handles a prompt boundary buffered before its listener is registered', async () => {
+    const client = makeClient()
+    const pendingSession = makeSession()
+    const pendingEffect: SessionEffect = {
+      sessionId: pendingSession.sessionId,
+      generation: '1',
+      effectId: '11',
+      kind: 'promptBoundary',
+      title: '',
+      body: '',
+      screenRevision: 1,
+    }
+    const delivered = vi.fn()
+    pendingSession.onEffect = vi.fn((cb: (effect: SessionEffect) => void) => {
+      delivered()
+      cb(pendingEffect)
+    })
+    client.openSession.mockImplementation(() => Promise.resolve(pendingSession))
+
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const applySessionEffect = vi.spyOn(rendererOf(content), 'applySessionEffect')
+    try {
+      expect(delivered).toHaveBeenCalledOnce()
+      expect(applySessionEffect).not.toHaveBeenCalled()
+    } finally {
       teardown()
     }
   })
@@ -17092,6 +16852,55 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       expect(live.textContent).not.toContain('BURST-MID-8')
     } finally {
       debug.mockRestore()
+      teardown()
+    }
+  })
+
+  it('sends painted-grid pointer coordinates as session mouse intent', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      tab.pane.classList.add('active')
+      const session = client._sessions[0]
+      session.fireScreenFrame(screenFrame(1, ['pointer target']))
+      const live = liveRegionOf(tab.pane)
+      await vi.waitFor(() => expect(live.querySelector('.term-grid')).not.toBeNull())
+      const surface = live.querySelector<HTMLElement>('.term-grid')!
+      await vi.waitFor(() => expect(surface.textContent).toContain('pointer target'))
+      surface.getBoundingClientRect = () =>
+        ({ left: 10, top: 20, right: 330, bottom: 84, width: 320, height: 64 }) as DOMRect
+
+      const pointer = (type: 'pointerdown' | 'pointerup', buttons: number): Event => {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperties(event, {
+          button: { value: 0 },
+          buttons: { value: buttons },
+          clientX: { value: 26 },
+          clientY: { value: 44 },
+        })
+        return event
+      }
+      surface.dispatchEvent(pointer('pointerdown', 1))
+      surface.dispatchEvent(pointer('pointerup', 0))
+      const wheel = new WheelEvent('wheel', {
+        bubbles: true,
+        clientX: 26,
+        clientY: 44,
+        deltaY: -1,
+      })
+      surface.dispatchEvent(wheel)
+
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(3))
+      expect(session.intent.mock.calls).toEqual([
+        ['mouse', 'press left 3 2'],
+        ['mouse', 'release left 3 2'],
+        ['mouse', 'press wheel-up 3 2'],
+      ])
+    } finally {
       teardown()
     }
   })

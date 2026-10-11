@@ -129,6 +129,7 @@ interface ModelRow {
 
 type FrameGeometry = SessionFrame['geometry']
 type FrameCursor = SessionFrame['cursor']
+type FrameState = SessionFrame['state']
 
 /** One immutable revision of the screen. A reader holding this reference
  *  observes this revision whole, however many frames are applied after
@@ -137,6 +138,7 @@ export interface ScreenSnapshot {
   readonly revision: number
   readonly geometry: FrameGeometry
   readonly cursor: FrameCursor
+  readonly state: FrameState
   readonly rows: readonly ModelRow[]
   rowAt(index: number): ModelRow | null
   cellAt(row: number, column: number): ModelCell | null
@@ -147,6 +149,7 @@ export interface ScreenSnapshot {
 export type FrameRefusal =
   | { readonly reason: 'stale-revision'; readonly revision: number; readonly current: number }
   | { readonly reason: 'malformed-geometry'; readonly detail: 'row-count' }
+  | { readonly reason: 'malformed-state' }
   | {
       readonly reason: 'malformed-row'
       readonly row: number
@@ -307,6 +310,22 @@ function refusalFor(frame: SessionFrame, currentRevision: number | null): FrameR
       }
     }
   }
+  const state = frame.state
+  if (
+    state === null ||
+    typeof state !== 'object' ||
+    (state.bufferKind !== 'normal' && state.bufferKind !== 'alternate') ||
+    !/^[1-9][0-9]*$/.test(state.bufferInstance) ||
+    typeof state.bracketedPaste !== 'boolean' ||
+    typeof state.mouseTracking !== 'boolean' ||
+    (state.title !== null && typeof state.title !== 'string') ||
+    (state.cwd !== null &&
+      (typeof state.cwd !== 'object' ||
+        typeof state.cwd.host !== 'string' ||
+        typeof state.cwd.path !== 'string'))
+  ) {
+    return { reason: 'malformed-state' }
+  }
   return null
 }
 
@@ -385,6 +404,7 @@ export function createCellModel(): CellModel {
       // from a caller mutating the frame object afterward.
       const geometry = Object.freeze({ ...frame.geometry })
       const cursor = Object.freeze({ ...frame.cursor })
+      const state: FrameState = Object.freeze({ ...frame.state })
       const rows: ModelRow[] = []
       for (let r = 0; r < frame.rows.length; r++) {
         rows.push(buildRow(r, frame.rows[r], geometry.cols))
@@ -394,6 +414,7 @@ export function createCellModel(): CellModel {
         revision: frame.revision,
         geometry,
         cursor,
+        state,
         rows,
         rowAt(index: number): ModelRow | null {
           return index >= 0 && index < rows.length ? rows[index] : null

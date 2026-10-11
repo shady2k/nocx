@@ -1,31 +1,13 @@
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
 // write PTY output in, emit user input out, and report its grid size.
-import type { ITheme } from '@xterm/xterm'
+import type { TerminalBufferLine, TerminalTheme } from '../terminal-types'
 import type { CapturedFrame } from '../frame/types'
 import type { OscNotification } from '../osc-notification'
 import type { SessionEffect } from '../generated/session.effect'
 
 export type DataCallback = (data: string) => void
 export type ResizeCallback = (cols: number, rows: number) => void
-
-// onTitle fires when the shell emits OSC 0 or OSC 2 (tab/window title).
-// The title is untrusted shell output — the caller must set it via
-// textContent, never innerHTML, and truncate with CSS, never by cutting
-// the string.
-export type TitleCallback = (title: string) => void
-
-// CwdEvent carries the percent-decoded OSC 7 payload (AD-5).
-// host is empty for local shells; path is an absolute filesystem path.
-export interface CwdEvent {
-  host: string
-  path: string
-}
-
-// CwdCallback fires when the shell emits OSC 7 (current working directory).
-// Per AD-6, the VT frontend parses OSC 7 via parser.registerOscHandler and
-// surfaces it as an event — the backend never sniffs the byte stream.
-export type CwdCallback = (event: CwdEvent) => void
 
 // CommandMarker carries an OSC 133 command boundary marker.
 // A = prompt start, B = prompt end, C = command output start,
@@ -142,10 +124,6 @@ export interface TerminalRenderer {
 
   onData(cb: DataCallback): void
   onResize(cb: ResizeCallback): void
-  // Register a callback for shell-originated title changes (OSC 0/2).
-  // The fallback title is set by the tab bar.
-  onTitle(cb: TitleCallback): void
-
   // onBufferChange fires whenever the active screen buffer changes (normal ↔
   // alternate).
   //
@@ -156,12 +134,6 @@ export interface TerminalRenderer {
   // exist (each tab has its own). onBufferChange is a first-class xterm.js
   // API that fires reliably regardless of how the getter chain resolves.
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void
-
-  // onCwd registers a callback that fires when the shell emits OSC 7
-  // (current working directory). The VT frontend parses the OSC sequence
-  // and percent-decodes host + path; the caller updates the tab title and
-  // tooltip.
-  onCwd(cb: CwdCallback): void
 
   // onCommandMarker registers a callback that fires when the shell emits
   // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
@@ -241,7 +213,7 @@ export interface TerminalRenderer {
    *
    * Belongs to the imperative terminal controller, not to a Solid effect.
    */
-  applyTheme(theme: ITheme): void
+  applyTheme(theme: TerminalTheme): void
 
   /** When readOnly, the terminal ignores keyboard input but text selection
    *  still works. Used when the DOM editor owns input at a prompt. */
@@ -390,7 +362,7 @@ export interface TerminalRenderer {
    * the given absolute index. The returned object satisfies xterm's
    * IBufferLine interface for length, getCell(), isWrapped.
    */
-  getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined
+  getBufferLine(line: number): TerminalBufferLine | undefined
   /** Absolute buffer line of the cursor — the line the next write lands on. */
   cursorLine(): number
   /** Column of the cursor — the column the next write lands on. */

@@ -62,11 +62,16 @@ describe('session.frame contract parity', () => {
   // Cursor — not copied out of the schema. If the generator's naming and this
   // spelling ever disagree, tsc fails here first.
   it('the generated type names exactly the fields the schema requires', () => {
-    expectTypeOf<keyof SessionFrame>().toEqualTypeOf<'revision' | 'geometry' | 'cursor' | 'rows'>()
+    expectTypeOf<keyof SessionFrame>().toEqualTypeOf<
+      'revision' | 'geometry' | 'cursor' | 'state' | 'rows'
+    >()
     expectTypeOf<keyof SessionFrame['geometry']>().toEqualTypeOf<
       'cols' | 'rows' | 'cellWidthPx' | 'cellHeightPx' | 'revision'
     >()
     expectTypeOf<keyof SessionFrame['cursor']>().toEqualTypeOf<'x' | 'y' | 'visible'>()
+    expectTypeOf<keyof SessionFrame['state']>().toEqualTypeOf<
+      'bufferKind' | 'bufferInstance' | 'bracketedPaste' | 'mouseTracking' | 'title' | 'cwd'
+    >()
     expectTypeOf<keyof Row>().toEqualTypeOf<'text' | 'marks' | 'runs' | 'wrap' | 'continuation'>()
     // The mark is the positional tuple [position, codepoints, width] and the
     // run the positional tuple [style, length] — the wire shape brought to
@@ -91,10 +96,18 @@ describe('session.frame contract parity', () => {
       revision: 7,
       geometry: { cols: 80, rows: 24, cellWidthPx: 9, cellHeightPx: 18, revision: 2 },
       cursor: { x: 0, y: 0, visible: true },
+      state: {
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        bracketedPaste: false,
+        mouseTracking: false,
+        title: null,
+        cwd: null,
+      },
       rows: [row],
     }
 
-    expect(requiredOf(schema)).toEqual(['revision', 'geometry', 'cursor', 'rows'].sort())
+    expect(requiredOf(schema)).toEqual(['revision', 'geometry', 'cursor', 'state', 'rows'].sort())
     expect(keysOf(frame)).toEqual(requiredOf(schema))
     expect(keysOf(frame.geometry)).toEqual(requiredOf(schema.properties!.geometry))
     expect(keysOf(frame.cursor)).toEqual(requiredOf(schema.properties!.cursor))

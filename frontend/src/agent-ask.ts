@@ -32,7 +32,6 @@ export interface AgentAskSeams {
   /** Called only after the backend accepts the turn, so a speculative
    *  overlay can change presentation without hiding itself on refusal. */
   onTurnAccepted?: (askId: string) => void
-  onTurnStart?: (askId: string) => void
   onTurnEnd?: (askId: string) => void
   onNoEndpoint?: () => void
   /** Open the page where standing answers are managed — the receipt's second
@@ -130,7 +129,6 @@ export class AgentInputTarget implements InputTarget {
       isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
     }
     const handle = this.seams.openAnswer(doc, cwd, running)
-    this.seams.onTurnStart?.(askId)
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)
       .catch((err: unknown) => {

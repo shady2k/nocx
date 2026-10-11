@@ -818,6 +818,9 @@ export class TerminalContent extends BasePaneContent {
   // have. Everything else here still uses it through the interface's methods.
   private renderer: XtermRenderer | null = null
   private session: SessionHandle | null = null
+  private _metadataSessionId: string | null = null
+  private _frameTitle: string | undefined
+  private _frameCwdPath: string | undefined
   /** Control-plane calls carry user intent in order. Adjacent committed-text
    *  events coalesce while queued, so fast typing does not flood the bounded
    *  executor; intervening keys and other intent kinds remain ordering fences. */
@@ -873,8 +876,6 @@ export class TerminalContent extends BasePaneContent {
    *  This is distinct from the display pin: Escape ends the display
    *  immediately, while the read pin ends at the stopped turn's existing
    *  terminal seam. */
-  private _pendingReadFrame: CapturedFrame | null = null
-  private _readPinnedFrame: { askId: string; frame: CapturedFrame } | null = null
   private _freezeFrameView: HTMLElement | null = null
   /** Inline position is temporarily set because alternate/fullscreen live
    *  containers do not otherwise establish the frame view's containing block. */
@@ -2648,6 +2649,16 @@ export class TerminalContent extends BasePaneContent {
       // corner.
       const intentInput = new IntentInput({
         emit: (intent) => this.onSessionIntent(intent),
+        // The pointer's cell is the painter's mapping, not a second geometry
+        // calculation in the input element. A frame may arrive between event
+        // delivery and handling, so read the currently installed mapping.
+        surface: this.scrollback.scrollbackArea,
+        cellAt: (clientX, clientY) => {
+          const mapping = this._painter?.mapping()
+          const rect = painterSurface.getBoundingClientRect()
+          const cell = mapping?.pixelToCell(clientX - rect.left, clientY - rect.top)
+          return cell === null || cell === undefined ? null : { x: cell.col + 1, y: cell.row + 1 }
+        },
         // THE CHORD IS THE PANE'S, not the program's: consumed before it
         // becomes an intent, and handed to the ONE opener every keyboard
         // boundary answers through (design §10.1, AD-8) — the same
@@ -2943,9 +2954,7 @@ export class TerminalContent extends BasePaneContent {
           this._discardRefusedSummonedAnswer()
           showToast({ level: 'warning', message })
         },
-        onTurnStart: (askId) => this.bindReadTurn(askId),
-        onTurnEnd: (askId) => {
-          this.endReadTurn(askId)
+        onTurnEnd: () => {
           if (!this._summoned) this.clearAutomaticFrozenFrame()
         },
         // The typed readiness fact behind a refusal (agent.status), so the
@@ -4003,54 +4012,9 @@ export class TerminalContent extends BasePaneContent {
       // the import that would create a path. The backend routes facts to
       // this session's lane; the kernel adopts the first lane and rejects
       // the rest.
-      // SUBSCRIBED BEFORE THE BIND, because the bind is what delivers the
-      // bytes these two read. `onCwd` installs an OSC 7 parser handler and
-      // `onTitle` an OSC 0/2 listener at SUBSCRIBE time, so a sequence xterm
-      // has already parsed is dispatched to nobody and is gone — neither has
-      // a last-value replay behind it.
-      //
-      // For a pane that OPENS its own session the old order never showed:
-      // xterm parses asynchronously, so the shell's first prompt was still
-      // queued while these lines ran and the handlers won the race. A
-      // RECLAIMED session made that race deterministic and lost it. Its
-      // recovered recording is written during the bind, and since
-      // nocx-k6p18.6 the bind AWAITS `awaitWriteBarrier()` over exactly those
-      // bytes — so by the time it returned, the OSC 7 and OSC 0/2 the
-      // replayed scrollback carries had been parsed and discarded. The pane
-      // then kept the reclaim's lane seed, whose cwd is '' by design (ipc.ts
-      // `reclaimSession`: a reclaim carries the session, never the pane's
-      // own facts), `directoryLabel('')` is '', and every reclaimed tab drew
-      // an empty title (nocx-07cf4).
-      //
-      // Registered ONCE, here, and not inside the bind: a rebind reuses this
-      // renderer and a second registration would report one OSC 7 twice.
-      // `this.env` is null until the first open, which both bodies already
-      // tolerate — nothing writes to this renderer before a session exists.
-      renderer.onTitle((title: string) => {
-        // An OSC 0/2 title is attributed to the ACTIVE domain (the stream
-        // has no writer identity; the domain that was active when the bytes
-        // arrived is the only honest attribution) and the projection's
-        // change callback re-composes the tab title.
-        const t = title.trim()
-        // A TUI clears its title on the way out by emitting OSC 0/2 with
-        // an EMPTY string (tabs.ts). xterm fires onTitle only on a CHANGE,
-        // so an empty delivery is exactly such a clear: remember the
-        // record that was running when it arrived, and the
-        // running-command title source will not resurrect the name the
-        // program just cleared.
-        if (t === '') {
-          this._clearedCommandId = this.latestRunningRecord()?.id ?? null
-        }
-        this.env?.recordTitle(t)
-      })
-      renderer.onCwd(({ path }) => {
-        // An OSC 7 report is the shell's verified claim of where it is:
-        // the one cwd the composition layer may hand to files.open (D2).
-        // Scoped to the ACTIVE domain — a child's report never touches the
-        // parent's record, and the parent's values return only on the
-        // parent's authenticated activation (bead nocx-u7uh.11).
-        this.env?.recordCwd(path)
-      })
+      // Title and cwd are restored only from backend-owned full-frame state.
+      // The at-most-once effect channel is not a replay source, and this pane
+      // never parses terminal bytes to reconstruct either value.
 
       // The session and everything hanging off it. Extracted so it can run
       // again: a reconnect rebuilds exactly this and nothing above it.
@@ -4667,6 +4631,7 @@ export class TerminalContent extends BasePaneContent {
     this._recoveryNoticeDismissedForSession = false
     this._liveOutputGaps = []
     this.session = session
+    this._resetFrameMetadataSession(session.sessionId)
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
     // bind. A rebind replaces both with the new session's — a new session
@@ -4835,11 +4800,36 @@ export class TerminalContent extends BasePaneContent {
     // prompt marker — see SETTLE_BACKSTOP_MS.
     this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
+    // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
+    // the bind is where a pane gains the session whose screen the frames
+    // describe, and every attach is owed a baseline full snapshot, so a
+    // fresh model misses nothing and a backend restart's revision reset
+    // needs no special case. The reader joins the test seam under the
+    // session id the pane publishes; nothing paints from the model — xterm
+    // keeps the byte path exactly as it was.
+    const cellModel = createCellModel()
+    this._cellModel = cellModel
+
     session.onEffect((effect) => {
+      if (
+        this.session !== session ||
+        this._cellModel !== cellModel ||
+        effect.sessionId !== session.sessionId
+      )
+        return
       // OSC 133 B is an at-most-once observation from the backend's sole
       // terminal parser. It settles conventional startup and closes Ask's
       // prompt redraw interval; it never mutates authenticated lifecycle state.
       if (effect.kind === 'promptBoundary') {
+        const acceptedScreenRevision = cellModel.current()?.revision ?? 0
+        if (effect.screenRevision !== undefined && acceptedScreenRevision < effect.screenRevision) {
+          log.debug('nocx: prompt boundary dropped before its screen revision was accepted', {
+            pane: this.pane.paneId,
+            required: effect.screenRevision,
+            accepted: acceptedScreenRevision,
+          })
+          return
+        }
         if (!this._awaitsIntegration) this._settle()
         const epoch = this._screenHandbackEpoch
         this._screenHandbackAwaitingBoundary = true
@@ -4880,15 +4870,6 @@ export class TerminalContent extends BasePaneContent {
         if (Date.now() >= this.echoUntil) host.requestAttention()
       }
     })
-    // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
-    // the bind is where a pane gains the session whose screen the frames
-    // describe, and every attach is owed a baseline full snapshot, so a
-    // fresh model misses nothing and a backend restart's revision reset
-    // needs no special case. The reader joins the test seam under the
-    // session id the pane publishes; nothing paints from the model — xterm
-    // keeps the byte path exactly as it was.
-    const cellModel = createCellModel()
-    this._cellModel = cellModel
     const painter = this._painter
     const painterSurface = this._painterSurface
     const gestureRoot = this.scrollback?.scrollbackArea
@@ -4900,7 +4881,7 @@ export class TerminalContent extends BasePaneContent {
         gestureRoot,
         surfaceId: this.pane.paneId,
         mouseReportingActive: () => renderer.mouseReportingActive(),
-        focusInput: () => renderer.focus(),
+        focusInput: () => this._intentInput?.focus(),
         copy: (text) => {
           if (shouldCopy(text)) {
             this.clipboard.writeText(text).catch((e) => {
@@ -4913,8 +4894,8 @@ export class TerminalContent extends BasePaneContent {
     installPaneScreenSeam()
     paneScreenReaders.set(session.sessionId, () => readPaneScreen(cellModel, this._lastReport))
     session.onScreenFrame((frame: SessionFrame) => {
-      const model = this._cellModel
-      if (model === null) return
+      if (this.session !== session || this._cellModel !== cellModel) return
+      const model = cellModel
       try {
         const result = model.apply(frame)
         if (!result.ok) {
@@ -4923,6 +4904,11 @@ export class TerminalContent extends BasePaneContent {
             refusal: result.refusal,
           })
         } else {
+          // Latest-value metadata is consumed only with an accepted frame:
+          // its title/cwd and cell rows belong to the same backend revision.
+          this._resetFrameMetadataSession(session.sessionId)
+          if (frame.state.title !== null) this._applyTerminalTitle(frame.state.title)
+          if (frame.state.cwd !== null) this._applyTerminalCwd(frame.state.cwd.path)
           // THE PAINTER'S ONLY FEED: one accepted revision joins the
           // animation-frame batch. A refused frame changes nothing, here
           // as in the model — the installed revision stays what is painted.
@@ -6489,45 +6475,46 @@ export class TerminalContent extends BasePaneContent {
     return this.session?.sessionId ?? ''
   }
 
-  /** Capture this session's live frame (the readScreen pull): the renderer
-   *  produces the frame because it owns the grid (AD-6). A whole-screen read
-   *  in an active ask turn returns that turn's frame, even if its summoned
-   *  editor has since been dismissed; before the ask is submitted, the
-   *  display pin is the equivalent fallback. Neither path waits on the live
-   *  capture fence or describes a later repaint. Region reads remain live so
-   *  their requested bounds keep their existing meaning. Rejects with
-   *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
+  /** Capture the current renderer frame for the visible Ask overlay. Agent screen
+   *  reads are backend-owned; this method is only for the local frozen view. */
   captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
-    if (region === undefined) {
-      if (this._readPinnedFrame !== null) return Promise.resolve(this._readPinnedFrame.frame)
-      if (this._pinnedFrame !== null) return Promise.resolve(this._pinnedFrame)
-    }
     if (!this.renderer) return Promise.reject(new CaptureAbortedError())
     return this.renderer.captureLiveFrame(region)
   }
 
-  /** The frame displayed by the active summoned editor, or null otherwise.
-   *  This display seam ends with the overlay; the read-turn pin is separate so
-   *  an in-flight read keeps its turn identity until Stop terminalizes it. */
+  /** The frame displayed by the active summoned editor, or null otherwise. */
   pinnedFrame(): CapturedFrame | null {
     return this._pinnedFrame
   }
-  private bindReadTurn(askId: string): void {
-    const frame = this._pendingReadFrame
-    this._pendingReadFrame = null
-    this._readPinnedFrame = frame === null ? null : { askId, frame }
-  }
-
-  private endReadTurn(askId: string): void {
-    if (this._readPinnedFrame?.askId === askId) this._readPinnedFrame = null
-  }
-
   /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
    *  ADR-0020 decision 3): the renderer observed the buffer change, the
    *  backend decides the awaiting-takeover transition from it. Fire-and-
    *  forget — the backend treats a refused report (a stale session, a
    *  closed lane) as nothing to transition; a lost report costs only a
    *  delayed transition, and the next change re-reports. */
+  private _resetFrameMetadataSession(sessionId: string): void {
+    if (this._metadataSessionId === sessionId) return
+    this._metadataSessionId = sessionId
+    this._frameTitle = undefined
+    this._frameCwdPath = undefined
+  }
+
+  private _applyTerminalTitle(title: string): void {
+    const trimmed = title.trim()
+    if (trimmed === this._frameTitle) return
+    this._frameTitle = trimmed
+    if (trimmed === '') {
+      this._clearedCommandId = this.latestRunningRecord()?.id ?? null
+    }
+    this.env?.recordTitle(trimmed)
+  }
+
+  private _applyTerminalCwd(path: string): void {
+    if (path === this._frameCwdPath) return
+    this._frameCwdPath = path
+    this.env?.recordCwd(path)
+  }
+
   private reportLaneBufferKind(bufferKind: 'normal' | 'alternate'): void {
     const sid = this.session?.sessionId
     if (!sid) return
@@ -6993,7 +6980,6 @@ export class TerminalContent extends BasePaneContent {
         return
       this._automaticFrameOwner = owner
       this._pinnedFrame = frame
-      this._pendingReadFrame = frame
       this._summonedCommand = owner
       this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
     } catch {
@@ -7008,7 +6994,6 @@ export class TerminalContent extends BasePaneContent {
     if (this._summoned) return
     this._pinnedFrame = null
     this._automaticFrameOwner = null
-    this._pendingReadFrame = null
     this._summonedCommand = null
     this.grantController?.setAutomaticBlock(null)
   }
@@ -7098,7 +7083,6 @@ export class TerminalContent extends BasePaneContent {
       frameHost.style.position = 'relative'
       frameHost.appendChild(view)
       this._pinnedFrame = frame
-      this._pendingReadFrame = frame
       this._freezeFrameView = view
 
       const marker = createFreezeMarker()
@@ -7557,7 +7541,6 @@ export class TerminalContent extends BasePaneContent {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
-    this._pendingReadFrame = null
     this.grantController?.setAutomaticBlock(null)
     this._clearFreezePresentation()
     if (discardAnswers) {
@@ -8308,8 +8291,6 @@ export class TerminalContent extends BasePaneContent {
     this._historyRecordedUnsub = null
     this._homeUnsub = null
     this.branchSource?.dispose()
-    this._pendingReadFrame = null
-    this._readPinnedFrame = null
     this._mounted = false
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)

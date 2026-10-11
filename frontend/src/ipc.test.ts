@@ -2582,8 +2582,8 @@ describe('session.effect notification', () => {
     const { session, ws } = await connectedSession()
     const received: SessionEffect[] = []
     session.onEffect((value) => received.push(value))
-    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
-    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    ws.deliverText(effect({ kind: 'promptBoundary', screenRevision: 7, title: '', body: '' }))
+    ws.deliverText(effect({ kind: 'promptBoundary', screenRevision: 7, title: '', body: '' }))
     expect(received).toEqual([
       {
         sessionId: SID,
@@ -2592,8 +2592,26 @@ describe('session.effect notification', () => {
         kind: 'promptBoundary',
         title: '',
         body: '',
+        screenRevision: 7,
       },
     ])
+  })
+
+  it('requires a safe screen revision only on promptBoundary', async () => {
+    const { session, ws } = await connectedSession()
+    const received: SessionEffect[] = []
+    session.onEffect((value) => received.push(value))
+    ws.deliverText(effect({ kind: 'promptBoundary', title: '', body: '' }))
+    ws.deliverText(
+      effect({
+        kind: 'promptBoundary',
+        screenRevision: Number.MAX_SAFE_INTEGER + 1,
+        title: '',
+        body: '',
+      }),
+    )
+    ws.deliverText(effect({ kind: 'notification', screenRevision: 1 }))
+    expect(received).toEqual([])
   })
 
   it('delivers a nonce-free recovery effect by episode id and refuses nonce fields', async () => {

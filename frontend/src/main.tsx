@@ -55,7 +55,6 @@ import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connec
 import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
-import { mountReadScreenHandler } from './read-screen'
 import { mountClientHost } from './client-host'
 import type { ApprovalFacts } from './client-host'
 import { mountRunCommandHandler } from './run-command'
@@ -654,13 +653,6 @@ function main(): void {
   // fact on screen names the one page that manages it.
   tm.onManagePermissions = () => openSettingsPane().openPage('policy')
   tm.onActivity = reportActivity
-
-  // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
-  // The broker's pull: the backend asks the renderer to produce a session's
-  // frame (the readScreen tool). The handler resolves the session to the
-  // pane that owns its grid; a request for a session no pane holds is
-  // answered failed, honestly — never a hang.
-  mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer

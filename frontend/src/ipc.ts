@@ -1031,6 +1031,15 @@ export class WSClient {
       }
       if (typeof title !== 'string' || typeof body !== 'string') return
       const episodeId = raw.episodeId
+      const screenRevision = raw.screenRevision
+      if (kind === 'promptBoundary') {
+        if (
+          typeof screenRevision !== 'number' ||
+          !Number.isSafeInteger(screenRevision) ||
+          screenRevision < 1
+        )
+          return
+      } else if (screenRevision !== undefined) return
       if (raw.fence !== undefined || raw.nonce !== undefined || raw.recoveryNonce !== undefined)
         return
       if (kind === 'recovery') {
@@ -1053,6 +1062,7 @@ export class WSClient {
         title,
         body,
         ...(typeof episodeId === 'string' ? { episodeId } : {}),
+        ...(typeof screenRevision === 'number' ? { screenRevision } : {}),
       }
       if (state.effectCallback) state.effectCallback(effect)
       else state.pendingEffects.push(effect)

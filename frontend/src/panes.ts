@@ -2649,9 +2649,9 @@ export class PaneManager {
     return this.findBySession(LOCAL_BACKEND_ID, sessionId) ?? null
   }
 
-  /** The terminal content whose session matches, when any pane holds it —
-   *  the readScreen pull's lookup (nocx-ljfwz): the renderer answers a
-   *  screen request only for the pane that owns the session's grid. */
+  /** The terminal content whose session matches, when any pane holds it.
+   *  sessionWhere uses this to read the active origin and host label from
+   *  the same pane that owns the session. */
   terminalContentForSession(sessionId: string): TerminalContent | null {
     const content = this.paneForSession(sessionId)?.content
     return content instanceof TerminalContent ? content : null

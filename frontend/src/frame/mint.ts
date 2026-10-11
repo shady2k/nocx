@@ -9,7 +9,7 @@
 // attribute extraction — and the theme snapshot is captured by the caller at
 // mint time, exactly as a block freeze captures its own.
 
-import type { IBufferLine } from '@xterm/xterm'
+import type { TerminalBufferLine } from '../terminal-types'
 import { cellAttrs, emptyAttrs, type TerminalSnapshot } from '../scrollback/serializer'
 import type { CapturedFrame, CaptureIdentity } from './types'
 
@@ -17,7 +17,7 @@ import type { CapturedFrame, CaptureIdentity } from './types'
  *  cursor and the theme snapshot. One mint reads ONE settled state — the
  *  caller fences with CaptureIdentityTracker.awaitSettled() first. */
 export interface LiveFrameSeam {
-  getLine(y: number): IBufferLine | undefined
+  getLine(y: number): TerminalBufferLine | undefined
   cursor: { line: number; col: number }
   snapshot: TerminalSnapshot
 }

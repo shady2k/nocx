@@ -11,19 +11,18 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type {
-  CommandMarker,
   LinkPolicy,
   CommandMarkerCallback,
   CommandMarkerEvent,
-  CwdCallback,
   DataCallback,
   MarkerAdapter,
   NotificationRequestCallback,
   ResizeCallback,
-  TitleCallback,
   TerminalRenderer,
 } from './types'
+import { parseOsc133 } from '../command-marker'
 import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
+
 import { WORD_SEPARATORS } from '../word-selection'
 import { CommandSnapshotStore } from '../command-snapshot'
 import {
@@ -157,90 +156,6 @@ function isLinuxWebKit(): boolean {
 // OSC 7 format: ESC ] 7 ; file://host/path ST
 // xterm.js parser.registerOscHandler(7, handler) gives us the string
 // after the ';', i.e. 'file://host/path'. Percent-decode per RFC 3986.
-const OSC7_PREFIX = 'file://'
-
-/**
- * Parses an OSC 7 payload into {host, path}. Returns null when the payload
- * does not start with 'file://' or percent-decoding fails.
- */
-export function parseOsc7(payload: string): { host: string; path: string } | null {
-  if (!payload.startsWith(OSC7_PREFIX)) return null
-  const uri = payload.slice(OSC7_PREFIX.length)
-
-  // Split at the first '/' after the authority section.
-  // file://host/path  → host, /path
-  // file:///path      → '',  /path
-  const slashIdx = uri.indexOf('/')
-  if (slashIdx === -1) return null
-
-  const rawHost = uri.slice(0, slashIdx)
-  const rawPath = uri.slice(slashIdx)
-
-  try {
-    const host = decodeURIComponent(rawHost)
-    const path = decodeURIComponent(rawPath)
-    return { host, path }
-  } catch {
-    // decodeURIComponent throws on malformed percent-encoding (e.g. '%ZZ').
-    return null
-  }
-}
-
-/**
- * Parses an OSC 133 payload into a CommandMarker. Returns null for invalid
- * or unrecognized payloads.
- *
- * Format: 'A' | 'B' | 'C' | 'D' | 'D;<exitcode>', optionally followed by
- * `;key=value` parameters — the parameter form OSC 133 already permits. A
- * `nocx_env=<id>` parameter tags the marker (spec §5.2); an untagged marker
- * keeps driving block boundaries exactly as before. A tag that is present
- * but malformed makes the whole marker invalid (never guessed at), while an
- * absent tag and unknown well-formed keys are tolerated.
- */
-const OSC133_TAG_KEY = 'nocx_env'
-const OSC133_TAG_VALUE_RE = /^[A-Za-z0-9._-]{1,64}$/
-
-export function parseOsc133(payload: string): CommandMarker | null {
-  if (payload.length === 0) return null
-  const kind = payload[0] as CommandMarker['kind']
-  if (kind !== 'A' && kind !== 'B' && kind !== 'C' && kind !== 'D') return null
-
-  const marker: CommandMarker = { kind }
-  if (payload.length === 1) return marker
-  if (payload[1] !== ';') return marker // bare kind with trailing junk: unchanged
-
-  // Everything after the kind is `;`-separated parameters. D's first
-  // parameter is the positional exit code UNLESS it is itself a key=value
-  // property (`D;nocx_env=id` has no exit code).
-  const params = payload.slice(2).split(';')
-  let i = 0
-  if (kind === 'D' && params.length > 0 && params[0] !== '' && params[0].indexOf('=') === -1) {
-    const codeStr = params[0]
-    i = 1
-    // Strict: reject negatives or out-of-range exit codes, keeping the
-    // marker itself.
-    if (/^\d+$/.test(codeStr)) {
-      const code = parseInt(codeStr, 10)
-      if (code >= 0 && code <= 255) marker.exitCode = code
-    }
-  }
-  for (; i < params.length; i++) {
-    const param = params[i]
-    if (param === '') continue // empty parameter: tolerated (legacy `A;`)
-    const eq = param.indexOf('=')
-    if (eq === -1) return null // not key=value: malformed
-    const key = param.slice(0, eq)
-    const value = param.slice(eq + 1)
-    if (key === OSC133_TAG_KEY) {
-      if (!OSC133_TAG_VALUE_RE.test(value)) return null
-      marker.nocxEnv = value
-    }
-    // Well-formed unknown keys are ignored: foreign parameter forms must
-    // not break block boundaries.
-  }
-  return marker
-}
-
 // Recovery markers are matched in the helper, where the private nonce stays
 // backend-side. The renderer receives only a nonce-free episode effect and
 // lifecycle state. The command fence the shell writes here (NOCX_FENCE) is
@@ -303,8 +218,6 @@ export class XtermRenderer implements TerminalRenderer {
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
   private notificationSubs: NotificationRequestCallback[] = []
-  private titleSubs: TitleCallback[] = []
-  private cwdSubs: CwdCallback[] = []
   private bellSubs: BellCallback[] = []
   private clipboardSubs: ClipboardWriteCallback[] = []
   private scrollSubs: Array<(viewportY: number) => void> = []
@@ -922,15 +835,6 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  onTitle(cb: TitleCallback): void {
-    this.titleSubs.push(cb)
-    // Title is presentation metadata. Until xterm's cutover (.8), its parser
-    // also reconstructs this value from replayed session.output; the
-    // at-most-once session.effect route cannot restore an event from before
-    // this renderer attached.
-    this.term?.onTitleChange((title) => cb(title))
-  }
-
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
     this.bufferChangeSubs.push(cb)
     this._ensureBufferChange()
@@ -943,18 +847,6 @@ export class XtermRenderer implements TerminalRenderer {
     if (this.bufferChangeDisposable || !t) return
     this.bufferChangeDisposable = t.buffer.onBufferChange((buf) => {
       for (const sub of this.bufferChangeSubs) sub(buf.type)
-    })
-  }
-
-  onCwd(cb: CwdCallback): void {
-    this.cwdSubs.push(cb)
-    // Like title, cwd must be reconstructed from replayed session.output
-    // while xterm remains this renderer's OSC parser. The session.effect path
-    // is at-most-once and cannot restore a report produced before attach.
-    this.term?.parser.registerOscHandler(7, (data: string) => {
-      const parsed = parseOsc7(data)
-      if (parsed) cb({ host: parsed.host, path: parsed.path })
-      return false // let xterm.js also handle it (default render is no-op)
     })
   }
 
@@ -1011,16 +903,6 @@ export class XtermRenderer implements TerminalRenderer {
           for (const sub of this.clipboardSubs) sub(effect.body)
         }
         break
-      case 'title':
-        for (const sub of this.titleSubs) sub(effect.body)
-        break
-      case 'cwd': {
-        const cwd = parseOsc7(effect.body)
-        if (cwd) {
-          for (const sub of this.cwdSubs) sub(cwd)
-        }
-        break
-      }
       case 'recovery':
         // Recovery completion is decided by lifecycle.changed's durable
         // episode state, never by rendering or by a terminal-byte parser.
@@ -1265,8 +1147,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
     this.notificationSubs = []
-    this.titleSubs = []
-    this.cwdSubs = []
     this.bellSubs = []
     this.clipboardSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {

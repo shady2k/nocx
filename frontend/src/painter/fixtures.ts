@@ -142,6 +142,14 @@ export function frameOf(
   rowsSpec: CellSpec[][],
   cursor: SessionFrame['cursor'] = { x: 0, y: 0, visible: false },
   geometry: Partial<SessionFrame['geometry']> = {},
+  state: SessionFrame['state'] = {
+    bufferKind: 'normal',
+    bufferInstance: '1',
+    bracketedPaste: false,
+    mouseTracking: false,
+    title: null,
+    cwd: null,
+  },
 ): SessionFrame {
   return {
     revision,
@@ -154,6 +162,7 @@ export function frameOf(
       ...geometry,
     },
     cursor,
+    state,
     rows: rowsSpec.map((cells) => wireRowOf(cells)),
   }
 }

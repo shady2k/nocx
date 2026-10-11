@@ -4,7 +4,7 @@
 // subtle background tint on hover/select.
 
 import type { CommandSnapshotStore } from '../command-snapshot'
-import type { IBufferLine } from '@xterm/xterm'
+import type { TerminalBufferLine } from '../terminal-types'
 import { paintUnreadableRows, type StoredBlockRows } from './block-rows'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
@@ -693,8 +693,8 @@ export interface BlockRecord {
   el: HTMLElement
 }
 
-/** Line accessor function — matches xterm's IBufferLine.getLine(). */
-export type GetLineFn = (y: number) => IBufferLine | undefined
+/** Line accessor function for structural terminal buffer lines. */
+export type GetLineFn = (y: number) => TerminalBufferLine | undefined
 
 // ── DOM helpers ────────────────────────────────────────────────────────────
 

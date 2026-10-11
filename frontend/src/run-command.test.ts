@@ -6,8 +6,8 @@ import type { Dispatcher } from './dispatcher'
 // (agent.runRequest), the renderer submits the command through the SAME
 // submit path a person uses — block, ledger entry, attempt, artifact — and
 // answers (agent.runResolved) with the completed run body. These tests
-// mirror read-screen.test.ts: the handler mounts on the dispatcher, routes
-// by session, and answers honestly when the content cannot submit.
+// verify the renderer-initiated request seam: it routes by session and answers
+// honestly when the content cannot submit.
 
 function scriptedDispatcher() {
   const handlers = new Map<string, (params: unknown) => void>()

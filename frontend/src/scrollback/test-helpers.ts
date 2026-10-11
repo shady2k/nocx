@@ -1,8 +1,7 @@
-// Test helper: minimal xterm IBufferLine/Cell mock for serializer tests.
-// Implements enough of the xterm interface for the serializer's cellAttrs
-// and serializeLine functions.
+// Test helper: minimal terminal line/cell fixture for serializer tests.
+// Implements the structural contract needed by cellAttrs and serializeLine.
 
-import type { IBufferLine, IBufferCell } from '@xterm/xterm'
+import type { TerminalBufferLine, TerminalCell } from '../terminal-types'
 
 interface MockCellData {
   chars: string
@@ -48,8 +47,8 @@ export const XTERM_CM_P16 = 0x01000000
 export const XTERM_CM_P256 = 0x02000000
 export const XTERM_CM_RGB = 0x03000000
 
-/** Create a mock IBufferCell from MockCellData. */
-function toBufferCell(d: MockCellData): IBufferCell {
+/** Create a mock TerminalCell from MockCellData. */
+function toBufferCell(d: MockCellData) {
   return {
     getChars: () => d.chars,
     getWidth: () => d.width,
@@ -80,9 +79,9 @@ function toBufferCell(d: MockCellData): IBufferCell {
 }
 
 /**
- * Minimal IBufferLine mock.
+ * Minimal TerminalBufferLine mock.
  */
-export class BufferLine implements IBufferLine {
+export class BufferLine implements TerminalBufferLine {
   private _cells: MockCellData[]
   readonly isWrapped: boolean
   readonly length: number
@@ -97,7 +96,7 @@ export class BufferLine implements IBufferLine {
     this.length = this._cells.length
   }
 
-  getCell(x: number): IBufferCell | undefined {
+  getCell(x: number): TerminalCell | undefined {
     if (x < 0 || x >= this._cells.length) return undefined
     return toBufferCell(this._cells[x])
   }

@@ -13,10 +13,8 @@ import type { SessionEffect } from '../generated/session.effect'
 import type { SessionOutputGap } from '../generated/session.outputGap'
 import type {
   CommandMarkerCallback,
-  CwdCallback,
   DataCallback,
   ResizeCallback,
-  TitleCallback,
   TerminalRenderer,
 } from '../renderers/types'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -165,6 +163,7 @@ export interface RendererMock extends TerminalRenderer {
   /** The mock's bracketed-paste-mode answer is a spy: tests flip mode 2004
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
+  mouseReportingActive: Mock<() => boolean>
   awaitWriteBarrier: Mock<() => Promise<void>>
   hasUnsettledWrite: Mock<() => boolean>
   /** The snippet-palette chord handler — stored, so a test can fire it the
@@ -176,8 +175,6 @@ export interface RendererMock extends TerminalRenderer {
   _cbs: {
     onData?: DataCallback
     onResize?: ResizeCallback
-    onTitle?: TitleCallback
-    onCwd?: CwdCallback
     onCommandMarker?: CommandMarkerCallback
     onBell?: () => void
     // The real renderer fans out to a list; the mock mirrors it so a
@@ -188,8 +185,6 @@ export interface RendererMock extends TerminalRenderer {
     onWriteParsed?: () => void
   }
   _fireBufferChange(type: 'normal' | 'alternate'): void
-  _fireTitle(title: string): void
-  _fireCwd(host: string, path: string): void
   _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]): void
   /** Fire a parse settle — xterm's onWriteParsed, the event the live region
    *  measures the grid on. */
@@ -230,12 +225,6 @@ export function createRendererMock(): RendererMock {
     onResize: vi.fn((cb: ResizeCallback) => {
       cbs.onResize = cb
     }),
-    onTitle: vi.fn((cb: TitleCallback) => {
-      cbs.onTitle = cb
-    }),
-    onCwd: vi.fn((cb: CwdCallback) => {
-      cbs.onCwd = cb
-    }),
     onCommandMarker: vi.fn((cb: CommandMarkerCallback) => {
       cbs.onCommandMarker = cb
     }),
@@ -265,12 +254,6 @@ export function createRendererMock(): RendererMock {
         case 'clipboard':
           if (effect.body !== '') cbs.onClipboardWrite?.(effect.body)
           break
-        case 'title':
-          cbs.onTitle?.(effect.body)
-          break
-        case 'cwd':
-          cbs.onCwd?.({ host: '', path: effect.body })
-          break
         case 'notification':
           break
       }
@@ -291,6 +274,9 @@ export function createRendererMock(): RendererMock {
     // Mode 2004 off by default — a test that wants bracketed paste on
     // flips it with mockReturnValue(true) on this same vi.fn.
     bracketedPasteActive: vi.fn(() => false),
+    // A normal fixture has no terminal mouse mode enabled; pointer-intent
+    // acceptance tests can turn this on to protect application-owned clicks.
+    mouseReportingActive: vi.fn(() => false),
     // The parse fence the real renderer offers. Settled by default: a test
     // about the mode alone must not have to know this exists, and one about
     // the ORDER (nocx-8rtr.1 — write() is fire-and-forget, so a synchronous
@@ -356,12 +342,6 @@ export function createRendererMock(): RendererMock {
     },
     _fireWriteParsed() {
       cbs.onWriteParsed?.()
-    },
-    _fireTitle(title: string) {
-      cbs.onTitle?.(title)
-    },
-    _fireCwd(host: string, path: string) {
-      cbs.onCwd?.({ host, path })
     },
     _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]) {
       cbs.onCommandMarker?.(marker)

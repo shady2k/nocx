@@ -88,7 +88,7 @@ describe('Rule 9 dependency direction — negative fixtures fire', () => {
     // Negative control: the mechanism is scoped, not blanket. A renderer file
     // importing only renderer-internal modules stays silent…
     const clean = linter.verify(
-      "import { parseOsc7 } from './xterm'\nexport const x = parseOsc7",
+      "import { XtermRenderer } from './xterm'\nexport const x = XtermRenderer",
       boundaryBlocks as Linter.FlatConfig[],
       { filename: resolve(FRONTEND_ROOT, 'src/renderers/xterm.ts') },
     )

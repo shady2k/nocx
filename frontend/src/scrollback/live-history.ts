@@ -723,6 +723,14 @@ export class LiveHistorySurface {
       revision: 1,
       geometry: { cols, rows: doc.rows.length, cellWidthPx: 1, cellHeightPx: 1, revision: 1 },
       cursor: { x: 0, y: 0, visible: false },
+      state: {
+        bufferKind: 'normal' as const,
+        bufferInstance: '1',
+        bracketedPaste: false,
+        mouseTracking: false,
+        title: null,
+        cwd: null,
+      },
       rows: doc.rows,
     }
     const result = createCellModel().apply(frame)

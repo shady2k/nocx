@@ -10,7 +10,7 @@
 // and not `CellAttrs`, whose fg/bg are already resolved against a
 // TerminalSnapshot. That resolution belongs to the HTML path and must not
 // happen on this one.
-import type { IBufferLine } from '@xterm/xterm'
+import type { TerminalBufferLine } from '../terminal-types'
 
 /** A cell colour as xterm reports it: a palette index (mode 1) or a packed
  *  0xRRGGBB (mode 2). Null is not a third mode — it is the terminal's own
@@ -74,7 +74,7 @@ function colorOf(color: number, rawMode: number): SGRColor | null {
 
 /** The raw SGR attributes of one cell. A cell that is not there is the empty
  *  set, which is what the walk needs at the end of a short line. */
-export function cellSGRAttrs(line: IBufferLine, cellIdx: number): SGRAttrs {
+export function cellSGRAttrs(line: TerminalBufferLine, cellIdx: number): SGRAttrs {
   const cell = line.getCell(cellIdx)
   if (!cell) return emptySGR()
   return {

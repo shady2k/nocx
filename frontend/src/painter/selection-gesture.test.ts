@@ -9,12 +9,16 @@ import { paintStoredRows, type StoredBlockRows } from '../scrollback/block-rows'
 import { wireRowOf } from './fixtures'
 
 describe('live selection gesture', () => {
-  it('copies cells from the pointerdown revision when frames advance during a drag', () => {
+  it('returns keyboard focus to live input and copies the pointerdown revision during repaint', () => {
     const model = createCellModel()
     const root = document.createElement('div')
     const surface = document.createElement('div')
     root.append(surface)
     document.body.append(root)
+    const input = document.createElement('textarea')
+    const otherInput = document.createElement('input')
+    root.append(input, otherInput)
+    otherInput.focus()
     const first = frameOf(
       1,
       [
@@ -44,6 +48,7 @@ describe('live selection gesture', () => {
       toJSON: () => ({}),
     })
     const copy = vi.fn()
+    let reporting = false
     const gesture = installLiveSelectionGesture({
       model,
       painter,
@@ -51,10 +56,15 @@ describe('live selection gesture', () => {
       gestureRoot: root,
       surfaceId: 'live',
       copy,
+      focusInput: () => input.focus(),
+      mouseReportingActive: () => reporting,
     })
     const event = (type: string, x: number) =>
-      new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: 5 })
-    root.dispatchEvent(event('pointerdown', 8))
+      new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: 5 })
+    const down = event('pointerdown', 8)
+    root.dispatchEvent(down)
+    expect(down.defaultPrevented).toBe(true)
+    expect(document.activeElement).toBe(input)
     const next = frameOf(
       2,
       [
@@ -74,7 +84,18 @@ describe('live selection gesture', () => {
     expect(surface.querySelector('.term-grid-selection')).not.toBeNull()
     window.dispatchEvent(event('pointerup', 24))
     expect(copy).toHaveBeenCalledWith('漢b')
+    reporting = true
+    otherInput.focus()
+    const reportedDown = event('pointerdown', 8)
+    root.dispatchEvent(reportedDown)
+    expect(reportedDown.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(otherInput)
     gesture.dispose()
+    reporting = false
+    const disposedDown = event('pointerdown', 8)
+    root.dispatchEvent(disposedDown)
+    expect(disposedDown.defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(otherInput)
     painter.dispose()
     root.remove()
   })
@@ -191,6 +212,10 @@ describe('live selection gesture', () => {
     expect(surface.querySelector('.term-grid-row')?.textContent).toBe('zzzz')
     gesture.dispose()
 
+    const input = document.createElement('textarea')
+    const cardInput = document.createElement('input')
+    root.append(input, cardInput)
+    cardInput.focus()
     // Reverse the drag. Display ordering, not drag direction, defines copy.
     const reverseCopy = vi.fn()
     const reverse = installLiveSelectionGesture({
@@ -200,9 +225,12 @@ describe('live selection gesture', () => {
       gestureRoot: root,
       surfaceId: 'live',
       copy: reverseCopy,
+      focusInput: () => input.focus(),
     })
     event('pointerdown', cardRow, 8, 35)
+    expect(document.activeElement).toBe(cardInput)
     event('pointermove', surface, 1, 5)
+    expect(document.activeElement).toBe(input)
     event('pointerup', surface, 1, 5)
     expect(reverseCopy).toHaveBeenCalledWith('漢b\nc\nz')
     reverse.dispose()

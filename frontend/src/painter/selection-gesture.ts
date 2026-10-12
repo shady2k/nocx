@@ -19,7 +19,7 @@ export interface LiveSelectionGestureOptions {
   readonly surfaceId: string
   /** The input renderer owns mouse reporting; selection must not consume its clicks. */
   readonly mouseReportingActive?: () => boolean
-  /** Return keyboard input to xterm when a joined gesture reaches live output. */
+  /** Return keyboard input to its owner when a gesture reaches live output. */
   readonly focusInput?: () => void
   readonly copy: (text: string) => void
 }
@@ -167,7 +167,12 @@ export function installLiveSelectionGesture(
     // Card-only selection uses the browser's native text selection and its
     // existing copy-on-select listener. Keep that path intact. A drag from a
     // card into the live grid is still joined by the handlers below.
-    if (point.kind === 'live') event.preventDefault()
+    if (point.kind === 'live') {
+      // Suppressing pointerdown also suppresses compatibility mousedown,
+      // so the pane's mouse focus path will not run for this click.
+      event.preventDefault()
+      opts.focusInput?.()
+    }
   }
 
   const copyAcross = (a: Endpoint, b: Endpoint): string | null => {

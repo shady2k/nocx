@@ -313,14 +313,11 @@ export interface TerminalRenderer {
   readonly cellWidth: number
 
   /**
-   * The cell the renderer rasterises at, in DEVICE pixels — the integer
-   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
-   * Viewport divides exactly this way). The committed cell metric travels
-   * in this unit (review round 1, nocx-zg3k3.2.9): device pixels are where
-   * the cell is an integer without rounding anything, and a program asking
-   * its size gets physical pixels, as native terminals report on
-   * high-density screens. Null while the renderer cannot measure — the
-   * same honest degrade as cellWidth's 0.
+   * The measured cell advance in DEVICE pixels. WebGL uses an integer cell;
+   * the DOM renderer can keep fractional widths. Size reports round the
+   * whole grid extent, never individual cells, to the wire's integer pixels.
+   * Null while the renderer cannot measure — the same honest degrade as
+   * cellWidth's 0.
    */
   deviceCellDims(): { width: number; height: number } | null
 

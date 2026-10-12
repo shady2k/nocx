@@ -1,4 +1,5 @@
 import { clickIntoEditor, expect, promptReady, test } from './harness'
+import type { Page } from './harness'
 
 type EffectRecord = {
   effects: number
@@ -17,21 +18,21 @@ declare global {
 const GRID = '.pane.active .xterm-live-container'
 const INTENT_INPUT = '.pane.active .ui-terminal-input'
 
-async function command(page: import('./harness').Page, source: string): Promise<void> {
+async function command(page: Page, source: string): Promise<void> {
   await promptReady(page)
   await clickIntoEditor(page)
   await page.keyboard.type(source)
   await page.keyboard.press('Enter')
 }
 
-async function focusLiveGrid(page: import('./harness').Page): Promise<void> {
+async function focusLiveGrid(page: Page): Promise<void> {
   // A person clicks the visible terminal. Its own focus path gives the real
   // input element the keyboard; the test never calls the intent encoder.
   await page.locator(GRID).click()
   await expect(page.locator(INTENT_INPUT)).toBeFocused()
 }
 
-async function outputContains(page: import('./harness').Page, text: string): Promise<void> {
+async function outputContains(page: Page, text: string): Promise<void> {
   await expect(page.locator(GRID)).toContainText(text, { timeout: 15_000 })
 }
 
@@ -39,7 +40,7 @@ async function outputContains(page: import('./harness').Page, text: string): Pro
 // runtime sees their committed text only through the ordinary WebSocket
 // session.intent route. Chromium has no hardware IME, so its native event
 // sequence is represented explicitly, including the provisional input event.
-async function compose(page: import('./harness').Page, committed: string): Promise<void> {
+async function compose(page: Page, committed: string): Promise<void> {
   await page.locator(INTENT_INPUT).evaluate((node, value) => {
     const input = node as HTMLTextAreaElement
     input.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true }))
@@ -56,10 +57,7 @@ async function compose(page: import('./harness').Page, committed: string): Promi
   }, committed)
 }
 
-async function cancelComposition(
-  page: import('./harness').Page,
-  provisional: string,
-): Promise<void> {
+async function cancelComposition(page: Page, provisional: string): Promise<void> {
   await page.locator(INTENT_INPUT).evaluate((node, value) => {
     const input = node as HTMLTextAreaElement
     input.dispatchEvent(new CompositionEvent('compositionstart', { data: '', bubbles: true }))
@@ -76,7 +74,7 @@ async function cancelComposition(
   }, provisional)
 }
 
-async function recordAndReplayEffects(page: import('./harness').Page): Promise<void> {
+async function recordAndReplayEffects(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const state: EffectRecord = {
       effects: 0,
@@ -274,4 +272,35 @@ test('browser input crosses the session transport once and replayed effects stay
   await expect
     .poll(() => page.evaluate(() => window.__intentAcceptance?.replayedFrames ?? 0))
     .toBeGreaterThan(0)
+})
+
+test.describe('fractionally scaled live terminal', () => {
+  test.use({ deviceScaleFactor: 1.25 })
+
+  test('the bottom row fits and clicking live output returns keyboard input from Files', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await command(
+      page,
+      'printf \'\\033[H\\033[2J\'; read rows cols < <(stty size); printf \'\\033[%s;1HLINUX-BOTTOM-%sx%s\' "$rows" "$rows" "$cols"; IFS= read -r value; printf \'\\033[2;1HLINUX-INPUT=<%s>\\n\' "$value"',
+    )
+    const picture = page.locator(`${GRID} .term-grid`)
+    const bottom = picture.locator('.term-grid-row').filter({ hasText: 'LINUX-BOTTOM-' })
+    await expect(bottom).toBeVisible()
+    const rowBox = await bottom.boundingBox()
+    const clipBox = await page.locator(`${GRID} .xterm-live-viewport`).boundingBox()
+    expect(rowBox).not.toBeNull()
+    expect(clipBox).not.toBeNull()
+    expect(rowBox!.y).toBeGreaterThanOrEqual(clipBox!.y)
+    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(clipBox!.y + clipBox!.height + 0.5)
+
+    await page.getByRole('searchbox', { name: 'Filter files by name' }).click()
+    await page.locator(`${GRID} .xterm-live-viewport`).click({ position: { x: 80, y: 10 } })
+    await expect(page.locator(INTENT_INPUT)).toBeFocused()
+    await page.keyboard.type('after-live-selection')
+    await page.keyboard.press('Enter')
+    await expect(picture).toContainText('LINUX-INPUT=<after-live-selection>')
+    await promptReady(page)
+  })
 })

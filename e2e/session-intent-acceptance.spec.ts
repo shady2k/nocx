@@ -286,14 +286,29 @@ test.describe('fractionally scaled live terminal', () => {
       'printf \'\\033[H\\033[2J\'; read rows cols < <(stty size); printf \'\\033[%s;1HLINUX-BOTTOM-%sx%s\' "$rows" "$rows" "$cols"; IFS= read -r value; printf \'\\033[2;1HLINUX-INPUT=<%s>\\n\' "$value"',
     )
     const picture = page.locator(`${GRID} .term-grid`)
-    const bottom = picture.locator('.term-grid-row').filter({ hasText: 'LINUX-BOTTOM-' })
+    // The shell echoes the source command before the probe clears it.
+    const bottom = picture
+      .locator('.term-grid-row')
+      .filter({ hasText: /^LINUX-BOTTOM-\d+x\d+\s*$/ })
     await expect(bottom).toBeVisible()
-    const rowBox = await bottom.boundingBox()
-    const clipBox = await page.locator(`${GRID} .xterm-live-viewport`).boundingBox()
-    expect(rowBox).not.toBeNull()
-    expect(clipBox).not.toBeNull()
-    expect(rowBox!.y).toBeGreaterThanOrEqual(clipBox!.y)
-    expect(rowBox!.y + rowBox!.height).toBeLessThanOrEqual(clipBox!.y + clipBox!.height + 0.5)
+    // Resolve both boxes in one DOM turn, without retaining a row across paints.
+    const bounds = await bottom.evaluateAll((rows, clipSelector) => {
+      const row = rows[0]
+      const clip = document.querySelector(clipSelector)
+      if (rows.length !== 1 || !row || !clip) {
+        throw new Error('Expected the printed bottom row and its live viewport')
+      }
+      const rowBox = row.getBoundingClientRect()
+      const clipBox = clip.getBoundingClientRect()
+      return {
+        rowTop: rowBox.top,
+        rowBottom: rowBox.bottom,
+        clipTop: clipBox.top,
+        clipBottom: clipBox.bottom,
+      }
+    }, `${GRID} .xterm-live-viewport`)
+    expect(bounds.rowTop).toBeGreaterThanOrEqual(bounds.clipTop)
+    expect(bounds.rowBottom).toBeLessThanOrEqual(bounds.clipBottom + 0.5)
 
     await page.getByRole('searchbox', { name: 'Filter files by name' }).click()
     await page.locator(`${GRID} .xterm-live-viewport`).click({ position: { x: 80, y: 10 } })

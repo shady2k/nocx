@@ -5915,11 +5915,11 @@ export class TerminalContent extends BasePaneContent {
   private _pastRetryPending = false
 
   /**
-   * Draw what this pane printed before the application closed.
+   * Draw the blocks this pane's ledger holds.
    *
-   * NOTHING HERE IS LIVE and nothing may suggest otherwise (ADR-0019 §3):
-   * the blocks are marked restored, they sit above an explicit boundary, and
-   * the shell below them is a new one that has never seen them.
+   * The blocks are restored records, not live blocks. Their boundary depends
+   * on the session handle: a reclaimed handle names the same live shell that
+   * produced them, while a fresh open starts a new shell (ADR-0019 §3).
    *
    * A failure costs the past and never the pane. The store being unreachable
    * is reported once, by the surface that already reports a degraded history,
@@ -6186,7 +6186,12 @@ export class TerminalContent extends BasePaneContent {
         ),
       )
     }
-    this.scrollback.restorePast(els)
+    this.scrollback.restorePast(els, {
+      // A reclaimed handle proves the shell that produced these blocks is
+      // still the shell below them. Only a newly opened shell needs the
+      // previous-session boundary.
+      previousSession: this.session === null || this.session.recovered === null,
+    })
     this.applyReplayCompletions(blocks)
   }
 

@@ -2217,16 +2217,17 @@ export class BlockManager {
 
   /**
    * Draw blocks the STORE holds ABOVE everything the live session has, and
-   * mark where the past ends (nocx-m3fqk).
+   * mark where the past ends when it belongs to a previous session
+   * (nocx-m3fqk).
    *
    * Inserted before the first child rather than appended, so restored blocks
    * keep the order they are given and a session that has already printed
    * something does not find its past underneath its present.
    *
-   * The boundary is an element of its own rather than a class on the last
-   * restored block: ADR-0019 §3 asks for the difference to be VISIBLE, and a
-   * line saying where the previous session ended is what a person reads — a
-   * block that merely looks a little different is not an answer to "is this
+   * When needed, the boundary is an element of its own rather than a class on
+   * the last restored block: ADR-0019 §3 asks for the difference to be VISIBLE,
+   * and a line saying where the previous session ended is what a person reads
+   * — a block that merely looks a little different is not an answer to "is this
    * shell still running".
    *
    * It lives HERE, beside the live blocks, because one container may have
@@ -2235,10 +2236,11 @@ export class BlockManager {
    * keeps the scroll decision, which is about the view and not about the
    * blocks.
    */
-  restorePast(blocks: HTMLElement[]): void {
+  restorePast(blocks: HTMLElement[], { previousSession = true } = {}): void {
     if (blocks.length === 0) return
     const anchor = this._scrollbackInner.firstChild
     for (const el of blocks) this._own(el, anchor)
+    if (!previousSession) return
     const boundary = document.createElement('div')
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.restoreBoundary = 'true'

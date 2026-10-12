@@ -5,13 +5,12 @@
  * rows that scrolled away included, in order, first and last, with no notice
  * that rows are missing.
  *
- * Both halves of that sentence existed and were watched apart:
- * e2e/unwatched-block.spec.ts proves a command whose output arrived with no
- * window open is whole in the next window, and e2e/restore.spec.ts proves a
- * watched one-line echo comes back after backend.restart(). Nothing checked
- * them together, with output longer than one screen — the case that can
- * actually lose rows, because the card must then be fed from the store's
- * rows artifact rather than from anything a live process remembers.
+ * e2e/unwatched-block.spec.ts proves a fresh client can reattach to a live
+ * session and read the whole block without a previous-session boundary. This
+ * spec covers the same read across backend.restart(), where the helper may
+ * still hold the live shell, and a paired case that really ends that shell
+ * before reopening the pane. The long case checks rows that scrolled away,
+ * which must come from the store's rows artifact rather than a live buffer.
  *
  * WHY A WINDOW TYPES THE COMMAND. The ordinary way a person starts a command
  * is typing it, and the property the criterion guards is that the body is
@@ -20,12 +19,11 @@
  * browser CONTEXT is closed and the backend reports the session unattached,
  * so the first renderer is gone before the first output byte exists.
  *
- * WHY THE RESTART. Sealing proves the store took the output; the restart is
- * what turns the second window's card into a read of what a PREVIOUS PROCESS
- * wrote. The client that reads it back shares nothing with the process that
- * captured the rows but the disposable home on disk — if the whole output
- * reached the screen only because the writer was still alive, this is the
- * test that notices.
+ * WHY THE RESTART. Sealing proves the store took the output. The coordinator
+ * restart makes the next renderer reconstruct the block from the store, while
+ * the helper may re-adopt the same live shell. The ended-shell variant closes
+ * that shell first, so it separately proves the boundary appears only for a
+ * genuinely new shell.
  *
  * NOTHING HERE WAITS ON A DURATION. The shell's wait is on the flag file;
  * the test's waits are on the backend's own statements (the session is
@@ -64,6 +62,7 @@ const MARKER_COUNT = 200
 interface LiveSession {
   sessionId: string
   attached: boolean
+  replayFrom: number
 }
 
 interface LedgerEntry {
@@ -82,6 +81,23 @@ async function ask<T>(ep: BackendEndpoint, method: string, params: unknown): Pro
   const wire = await openControlPlane(ep.port, ep.token)
   try {
     return (await wire.call(method, params)) as T
+  } finally {
+    wire.close()
+  }
+}
+
+/** End an unattached shell without deleting its pane from the saved layout. */
+async function endUnattachedShell(ep: BackendEndpoint): Promise<void> {
+  const { sessions } = await ask<{ sessions: LiveSession[] }>(ep, 'sessions.live', {})
+  const session = sessions.find((candidate) => !candidate.attached)
+  if (!session) throw new Error('the test expected one unattached shell to end')
+
+  // `close` is scoped to sessions owned by this control-plane connection.
+  // Attach the already-unattached session on this socket, then end it there.
+  const wire = await openControlPlane(ep.port, ep.token)
+  try {
+    await wire.call('attach', { sessionId: session.sessionId, offset: session.replayFrom })
+    await wire.call('close', { sessionId: session.sessionId })
   } finally {
     wire.close()
   }
@@ -125,9 +141,9 @@ test.describe('a command nobody watched still has its output after a restart', (
 
   /**
    * The whole scenario, for a command that prints `markers` and nothing
-   * else. Both tests below run this one shape — one with two hundred lines,
-   * one with a single `echo` — so the short case is exercised by the same
-   * steps and not by a shortcut of its own.
+   * else. The usual path leaves the helper session alive across coordinator
+   * restart; the ended-shell path explicitly closes it while no renderer is
+   * attached, without removing its pane from the saved layout.
    */
   async function unwatchedPrintRestartRead(
     browser: Browser,
@@ -135,6 +151,7 @@ test.describe('a command nobody watched still has its output after a restart', (
     flag: string,
     command: string,
     markers: string[],
+    endShellBeforeRestart = false,
   ): Promise<void> {
     const ep1 = await backend.start()
 
@@ -173,7 +190,16 @@ test.describe('a command nobody watched still has its output after a restart', (
     const artifact = (await rowsArtifact(ep1, entry.id))!
     expect(artifact.truncated).toBeNull()
 
-    // ── the restart: the process that captured the rows is gone ───────────
+    if (endShellBeforeRestart) {
+      await endUnattachedShell(ep1)
+      await expect
+        .poll(
+          async () => (await ask<{ sessions: LiveSession[] }>(ep1, 'sessions.live', {})).sessions,
+        )
+        .toEqual([])
+    }
+
+    // ── the restart: the renderer goes away; the helper session may or may not ─
     const ep2 = await backend.restart()
     // Precondition, not the claim: the new process serves the same ledger.
     // Without it, "the card never appeared" could not tell the store losing
@@ -190,12 +216,12 @@ test.describe('a command nobody watched still has its output after a restart', (
       `.pane.active .cmd-block[data-entry-id="${entry.id}"][data-restored="true"]`,
     )
     await expect(block).toBeVisible({ timeout: 60_000 })
-    // The card is finished, and the rule under it says the shell below is a
-    // new one (ADR-0019 §3).
+    // The card is finished. A live helper shell was reattached above it, so
+    // the boundary is absent unless this test explicitly ended that shell.
     await expect(block).not.toHaveClass(/\bcmd-block-running\b/)
-    await expect(second.locator('.pane.active [data-restore-boundary="true"]')).toBeVisible({
-      timeout: 30_000,
-    })
+    const boundary = second.locator('.pane.active [data-restore-boundary="true"]')
+    if (endShellBeforeRestart) await expect(boundary).toBeVisible({ timeout: 30_000 })
+    else await expect(boundary).toHaveCount(0)
     // Every line, in order, first and last included: the card's own output
     // region read back against what the command printed. The poll is what
     // waits for the paint — a restored card is visible before its artifact
@@ -231,7 +257,7 @@ test.describe('a command nobody watched still has its output after a restart', (
     await unwatchedPrintRestartRead(browser, nonce, flag, command, markers)
   })
 
-  test('a one-line command from the same unwatched run restores the same way', async ({
+  test('a one-line command from the same unwatched run restores without a boundary on reattach', async ({
     browser,
   }) => {
     test.setTimeout(180_000)
@@ -241,5 +267,15 @@ test.describe('a command nobody watched still has its output after a restart', (
     const command = `while [ ! -e '${flag}' ]; do sleep 0.1; done; echo UNWATCHED-${nonce}-001`
 
     await unwatchedPrintRestartRead(browser, nonce, flag, command, markers)
+  })
+
+  test('a genuinely ended shell leaves the previous-session boundary', async ({ browser }) => {
+    test.setTimeout(180_000)
+    const nonce = Date.now().toString(36)
+    const markers = [`UNWATCHED-${nonce}-001`]
+    const flag = join(mkdtempSync(join(tmpdir(), 'nocx-unwatched-restore-flag-')), 'go')
+    const command = `while [ ! -e '${flag}' ]; do sleep 0.1; done; echo UNWATCHED-${nonce}-001`
+
+    await unwatchedPrintRestartRead(browser, nonce, flag, command, markers, true)
   })
 })

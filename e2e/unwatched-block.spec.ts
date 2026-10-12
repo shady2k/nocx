@@ -181,6 +181,7 @@ test.describe('a command nobody watched still has its output', () => {
       ) ?? []
     expect(shown).toEqual(markers)
     await expect(block.locator('[data-output-incomplete]')).toHaveCount(0)
+    await expect(second.locator('.pane.active [data-restore-boundary="true"]')).toHaveCount(0)
 
     await second.context().close()
   })

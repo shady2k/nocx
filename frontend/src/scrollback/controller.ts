@@ -584,22 +584,22 @@ export class ScrollbackController {
   }
 
   /**
-   * Draw the pane's past, and land the view where a terminal always lands.
+   * Draw the pane's recorded blocks, and land the view where a terminal always lands.
    *
-   * The blocks and the boundary go in through the MANAGER (nocx-0zb1m):
-   * putting them in here made a second owner of this container's children,
-   * and `clear` — which asks the manager — could not see half the
+   * The blocks and any previous-session boundary go in through the MANAGER
+   * (nocx-0zb1m): putting them in here made a second owner of this container's
+   * children, and `clear` — which asks the manager — could not see half the
    * scrollback. What is left here is the part that is genuinely the
    * controller's, because it is about the VIEW rather than about the blocks.
    */
-  restorePast(blocks: HTMLElement[]): void {
+  restorePast(blocks: HTMLElement[], options?: { previousSession?: boolean }): void {
     if (blocks.length === 0) return
-    this._blockManager.restorePast(blocks)
+    this._blockManager.restorePast(blocks, options)
     // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
     // you. The insert goes ABOVE everything, so the scroller keeps the
     // offset it had — 0, on a pane that has just been built — and the person
-    // arrives at the oldest command of the previous session with the prompt
-    // they were about to type at somewhere below the fold.
+    // arrives at the oldest restored block with the prompt they were about to
+    // type at somewhere below the fold.
     //
     // UNCONDITIONAL, not `scrollToBottom()`'s follow-guard: the guard asks
     // whether the person scrolled away from the live end, and nobody has

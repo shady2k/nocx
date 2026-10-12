@@ -939,6 +939,17 @@ describe('BlockManager', () => {
     expect(inner.querySelector('.scrollback-restore-boundary')).toBeNull()
   })
 
+  it('restoring blocks from the still-live session does not label them previous', () => {
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    block.dataset.restored = 'true'
+
+    manager.restorePast([block], { previousSession: false })
+
+    expect(inner.querySelector('[data-restored="true"]')).toBe(block)
+    expect(inner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+
   it('completeRestoredBlock settles only the matching restored command and keeps its duration', () => {
     const restored = createCommandBlock(
       'command',

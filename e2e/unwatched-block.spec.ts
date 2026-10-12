@@ -27,7 +27,7 @@
  * WHY THIS SPEC OWNS ITS BACKEND. The fresh client restores every tab the
  * backend holds, and on the shared stand that would be every other spec's.
  */
-import { expect, type Browser, type Page } from '@playwright/test'
+import { expect, type Browser, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -48,6 +48,7 @@ import { readStand } from './stand'
 const test = base
 
 const MARKER_COUNT = 300
+const COMMAND_SLEEP_SECONDS = 2
 
 interface LiveSession {
   sessionId: string
@@ -82,6 +83,14 @@ async function freshClient(browser: Browser, ep: BackendEndpoint): Promise<Page>
   await bindEndpoint(page, ep)
   await page.goto('/')
   return page
+}
+
+/** The exact duration remains on the header chip's title after it is rounded for display. */
+async function expectDurationAtLeast(block: Locator, minimumMs: number): Promise<void> {
+  const duration = block.locator('.ui-meta[data-column="duration"]')
+  await expect(duration).toBeVisible()
+  const title = await duration.getAttribute('title')
+  expect(Number.parseInt(title ?? '', 10)).toBeGreaterThanOrEqual(minimumMs)
 }
 
 /** The ledger entry for exactly this command line, once the backend has one. */
@@ -126,6 +135,7 @@ test.describe('a command nobody watched still has its output', () => {
     // POSIX sh: the pane runs the host's login shell, bash or zsh.
     const command =
       `while [ ! -e '${flag}' ]; do sleep 0.1; done; ` +
+      `sleep ${COMMAND_SLEEP_SECONDS}; ` +
       `i=1; while [ "$i" -le ${MARKER_COUNT} ]; do printf 'UNWATCHED-${nonce}-%03d\\n' "$i"; i=$((i+1)); done`
 
     // ── a window types the command, and it starts ─────────────────────────
@@ -182,6 +192,22 @@ test.describe('a command nobody watched still has its output', () => {
     expect(shown).toEqual(markers)
     await expect(block.locator('[data-output-incomplete]')).toHaveCount(0)
     await expect(second.locator('.pane.active [data-restore-boundary="true"]')).toHaveCount(0)
+    await expectDurationAtLeast(block, COMMAND_SLEEP_SECONDS * 1000)
+
+    // The same duration is visible when a window watches the command finish.
+    const watchedCommand = `sleep ${COMMAND_SLEEP_SECONDS}; echo WATCHED-${nonce}`
+    await clickIntoEditor(second)
+    await second.keyboard.type(watchedCommand)
+    await second.keyboard.press('Enter')
+    await expect.poll(() => entryFor(ep, watchedCommand), { timeout: 30_000 }).toBeTruthy()
+    const watchedEntry = (await entryFor(ep, watchedCommand))!
+    const watchedBlock = second.locator(
+      `.pane.active .cmd-block[data-entry-id="${watchedEntry.id}"]`,
+    )
+    await expect(watchedBlock).toBeVisible()
+    await expect(watchedBlock).toHaveClass(/\bcmd-block-running\b/)
+    await expect(watchedBlock).not.toHaveClass(/\bcmd-block-running\b/)
+    await expectDurationAtLeast(watchedBlock, COMMAND_SLEEP_SECONDS * 1000)
 
     await second.context().close()
   })

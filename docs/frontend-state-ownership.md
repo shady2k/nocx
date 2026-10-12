@@ -12,33 +12,33 @@ ADR-0012 §2 (authority chain: Go → framework‑neutral .ts → Solid signals 
 23 rows, one per piece of frontend state. Every row is verified against the code;
 none are speculative.
 
-| State                                    | Owner                                                                     | Authority                                                            | Persistence                                                                     | Lifetime      |
-| ---------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------- |
-| Tab list                                 | `TabManager` (`tabs.ts:265`, `tabs: Tab[]`)                               | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
-| Active tab                               | `PaneManager` (`panes.ts:550`, `activePane`)                              | Frontend (PaneManager) — one activation, decided at boot             | UI-state document (`activeTab`, a durable pane id) — ADR-0048                   | Process       |
-| Tab MRU order                            | `TabManager` (`tabs.ts:278`, `recentTabIds`)                              | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
-| Tab placement (`tab.placement`)          | **Go** `settings.Registry` (`internal/settings/settings.go:470`)          | Go backend — `ProfileClient.getSnapshot()` + live `SettingsObserver` | Go settings doc                                                                 | Process       |
-| Per-tab title                            | `Tab` (`tabs.ts:41-42`, `_title` / `_programTitle`)                       | Frontend — set via `TabHost.setTitle()` from terminal OSC            | Not persisted                                                                   | Tab           |
-| Per-tab activity flag                    | `Tab` (`tabs.ts:43`, `_hasActivity`)                                      | Frontend — `Tab.requestAttention()` / `markActivity()`               | Not persisted                                                                   | Tab           |
-| Per-tab agent status                     | `Tab` (`tabs.ts:44`, `_agentStatus`)                                      | Frontend — `detectAgentStatus()` from title text                     | Not persisted                                                                   | Tab           |
-| Per-tab tooltip                          | `Tab` (`tabs.ts:45`, `_tooltip`)                                          | Frontend — `TerminalContent` via cwd/SSH info callback               | Not persisted                                                                   | Tab           |
-| Tab pane geometry (viewport)             | `Tab` (`tabs.ts:49-50`, `_viewportObserver`, `_latestViewport`)           | Frontend — `ResizeObserver` on pane element                          | Not persisted                                                                   | Tab           |
-| Active sidebar view                      | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:29`)         | Frontend — icon click                                                | **One versioned localStorage record** (§3)                                      | Process       |
-| Sidebar collapsed                        | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:27`)         | Frontend — icon click, Ctrl/Cmd+B                                    | **One versioned localStorage record** (§3)                                      | Process       |
-| Selected theme                           | **Go setting `ui.theme`** (decided — §3)                                  | Go backend                                                           | Go settings doc, plus a bootstrap **cache** in the local record (ADR-0013 §8.1) | Process       |
-| Accepted settings values                 | `settings.tsx:84` (`createStore`) + `settings-domain.ts` `SettingsMirror` | Go backend — validated via `AcceptedSnapshot` revision gate          | Go settings doc                                                                 | Process       |
-| Settings revision                        | `settings.tsx:88` (`createSignal`)                                        | Go backend — monotonic counter in `settings.Registry`                | Go settings doc                                                                 | Process       |
-| Settings draft values                    | `settings.tsx:85` (`createStore`)                                         | Frontend — unsaved edits                                             | Not persisted                                                                   | Draft         |
-| Settings validation errors               | `settings.tsx:87` (`createStore`)                                         | Frontend — local validation                                          | Not persisted                                                                   | Draft         |
-| Settings search query                    | `settings.tsx:91` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
-| Settings modified-only filter            | `settings.tsx:92` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
-| Settings section filter                  | `settings.tsx:93` (`createSignal`)                                        | Frontend                                                             | Not persisted                                                                   | Surface mount |
-| Profile/group/credential lists           | `connections.tsx:62-64` (3 `createSignal`)                                | Go backend — `ProfileClient` RPC calls                               | Go settings doc                                                                 | Surface mount |
-| Connection selection / editing           | `connections.tsx:67-69` (3 `createSignal`)                                | Frontend — UI state                                                  | Not persisted                                                                   | Draft         |
-| Connection form error                    | `connections.tsx:486` (`createSignal`)                                    | Frontend                                                             | Not persisted                                                                   | Draft         |
-| Export-section state (25 `createSignal`) | `export-section.tsx` (25 `createSignal`)                                  | Frontend — per-section UI state                                      | Not persisted                                                                   | Surface mount |
-| Clipboard banner shown                   | `ClipboardBannerImpl._shown` (`banner.tsx`)                               | Frontend — promise-based `show()` flow                               | Not persisted                                                                   | Process       |
-| **Terminal render state**                | **xterm.js** (AD-6)                                                       | **Out — must never appear in the store**                             | N/A                                                                             | N/A           |
+| State                                    | Owner                                                                       | Authority                                                            | Persistence                                                                     | Lifetime      |
+| ---------------------------------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------- |
+| Tab list                                 | `TabManager` (`tabs.ts:265`, `tabs: Tab[]`)                                 | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
+| Active tab                               | `PaneManager` (`panes.ts:550`, `activePane`)                                | Frontend (PaneManager) — one activation, decided at boot             | UI-state document (`activeTab`, a durable pane id) — ADR-0048                   | Process       |
+| Tab MRU order                            | `TabManager` (`tabs.ts:278`, `recentTabIds`)                                | Frontend (TabManager)                                                | Not persisted                                                                   | Process       |
+| Tab placement (`tab.placement`)          | **Go** `settings.Registry` (`internal/settings/settings.go:470`)            | Go backend — `ProfileClient.getSnapshot()` + live `SettingsObserver` | Go settings doc                                                                 | Process       |
+| Per-tab title                            | `Tab` (`tabs.ts:41-42`, `_title` / `_programTitle`)                         | Frontend — set via `TabHost.setTitle()` from terminal OSC            | Not persisted                                                                   | Tab           |
+| Per-tab activity flag                    | `Tab` (`tabs.ts:43`, `_hasActivity`)                                        | Frontend — `Tab.requestAttention()` / `markActivity()`               | Not persisted                                                                   | Tab           |
+| Per-tab agent status                     | `Tab` (`tabs.ts:44`, `_agentStatus`)                                        | Frontend — `detectAgentStatus()` from title text                     | Not persisted                                                                   | Tab           |
+| Per-tab tooltip                          | `Tab` (`tabs.ts:45`, `_tooltip`)                                            | Frontend — `TerminalContent` via cwd/SSH info callback               | Not persisted                                                                   | Tab           |
+| Tab pane geometry (viewport)             | `Tab` (`tabs.ts:49-50`, `_viewportObserver`, `_latestViewport`)             | Frontend — `ResizeObserver` on pane element                          | Not persisted                                                                   | Tab           |
+| Active sidebar view                      | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:29`)           | Frontend — icon click                                                | **One versioned localStorage record** (§3)                                      | Process       |
+| Sidebar collapsed                        | `SidebarSolid` → `sidebar` slice of store (`sidebar-model.ts:27`)           | Frontend — icon click, Ctrl/Cmd+B                                    | **One versioned localStorage record** (§3)                                      | Process       |
+| Selected theme                           | **Go setting `ui.theme`** (decided — §3)                                    | Go backend                                                           | Go settings doc, plus a bootstrap **cache** in the local record (ADR-0013 §8.1) | Process       |
+| Accepted settings values                 | `settings.tsx:84` (`createStore`) + `settings-domain.ts` `SettingsMirror`   | Go backend — validated via `AcceptedSnapshot` revision gate          | Go settings doc                                                                 | Process       |
+| Settings revision                        | `settings.tsx:88` (`createSignal`)                                          | Go backend — monotonic counter in `settings.Registry`                | Go settings doc                                                                 | Process       |
+| Settings draft values                    | `settings.tsx:85` (`createStore`)                                           | Frontend — unsaved edits                                             | Not persisted                                                                   | Draft         |
+| Settings validation errors               | `settings.tsx:87` (`createStore`)                                           | Frontend — local validation                                          | Not persisted                                                                   | Draft         |
+| Settings search query                    | `settings.tsx:91` (`createSignal`)                                          | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Settings modified-only filter            | `settings.tsx:92` (`createSignal`)                                          | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Settings section filter                  | `settings.tsx:93` (`createSignal`)                                          | Frontend                                                             | Not persisted                                                                   | Surface mount |
+| Profile/group/credential lists           | `connections.tsx:62-64` (3 `createSignal`)                                  | Go backend — `ProfileClient` RPC calls                               | Go settings doc                                                                 | Surface mount |
+| Connection selection / editing           | `connections.tsx:67-69` (3 `createSignal`)                                  | Frontend — UI state                                                  | Not persisted                                                                   | Draft         |
+| Connection form error                    | `connections.tsx:486` (`createSignal`)                                      | Frontend                                                             | Not persisted                                                                   | Draft         |
+| Export-section state (25 `createSignal`) | `export-section.tsx` (25 `createSignal`)                                    | Frontend — per-section UI state                                      | Not persisted                                                                   | Surface mount |
+| Clipboard banner shown                   | `ClipboardBannerImpl._shown` (`banner.tsx`)                                 | Frontend — promise-based `show()` flow                               | Not persisted                                                                   | Process       |
+| **Terminal render state**                | **Backend session runtime** (ADR-0066/0072); frontend `CellModel` is a view | **Out — must never appear in the shared UI store**                   | Runtime-owned screen                                                            | Session       |
 
 **Notes on what the brief did not list:**
 
@@ -422,15 +422,16 @@ the store instead of the `Tab` object. This is a clean change — the store is
 shared, the strip is Solid, and reading reactive state instead of imperative
 getters is the point. No terminal boundary crossed.
 
-### Explicitly out (AD-6 — must not move)
+### Explicitly out (ADR-0066/0072 — must not move into the shared UI store)
 
-- **Terminal render state** (xterm.js grid, scrollback, selection, per-cell data).
-  AD-6 is binding: the VT frontend owns this. It must never appear in the store.
-- **Terminal pane geometry** (`_latestViewport` on `Tab`). Crosses the AD-6
-  seam through `viewportChanged()` — a typed imperative method, not reactive
-  state.
-- **Shell/cwd/OSC events.** Consumed frontend-side only, never expressed as
-  store state (ADR-0012 Data Flow diagram).
+- **Terminal render state.** The backend session runtime owns the screen and
+  modes. The pane's `CellModel` and painter consume its committed frames;
+  selection stays local to the pane.
+- **Terminal pane geometry** crosses `viewportChanged()` as a typed
+  imperative method. The frontend reports measurements; the backend commits
+  the session's effective geometry.
+- **Shell/cwd/lifecycle facts** retain their existing session-owned routes,
+  not a second authority in the shared UI store.
 
 ---
 
@@ -472,3 +473,32 @@ if (!target.isConnected || !this._active) return
 The `active` CSS class remains on the pane for presentation (styling the active
 pane). The keyboard handler reads the explicit flag, not the CSS class. A unit
 test asserts the handler is inert for a non-active `TerminalContent` instance.
+
+## 7. Live grid sizing and keyboard ownership
+
+`ScrollbackController` owns the running output's available space. Its held
+`runningLiveCap` is the **outer** box: scroller height minus the running
+header. `runningLiveContentCap` also subtracts the computed body padding,
+including trailing space. Both the cell clip and `TerminalContent`'s grid
+fit use this content ceiling. Fitting to the outer box clips a tall inline
+TUI's last rows (`nocx-zg3k3.14.11`).
+
+At the prompt, the existing off-flow header prediction also includes the
+future running body's padding, measured by the controller on an off-flow
+clone in the same container. Enter does not introduce a late grid shrink.
+The outer cap remains held through output/header-duration updates and is
+invalidated only by mode entry or a real pane resize. Fullscreen and
+unstructured modes keep their pane-fill sizing.
+
+The renderer reports device-pixel cell advances. A DOM-rendered cell can
+have a fractional width at Linux fractional scaling; WebGL cells can be
+integral. `_reportedSize` rounds **whole grid extents** for the integer
+`xpixel`/`ypixel` wire fields at open, attach and resize. Rounding each cell
+would accumulate error across columns; sending fractions rejects the RPC.
+
+Live-cell selection explicitly returns keyboard focus through
+`takeKeyboardToGrid` to `IntentInput`, not xterm's hidden textarea. A
+prevented `pointerdown` suppresses the compatibility `mousedown`, so the
+selection gesture cannot rely on the pane's mouse focus handler. Card-only
+selection retains native handling; card-to-live selection returns focus to
+the same input owner; DEC mouse reporting bypasses selection suppression.

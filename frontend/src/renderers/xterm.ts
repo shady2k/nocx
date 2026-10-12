@@ -695,14 +695,11 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /**
-   * The cell this renderer rasterises at, in DEVICE pixels — the integer
-   * cell xterm builds its CSS cell FROM (css = device / dpr; xterm's own
-   * Viewport divides exactly this way). The committed cell metric travels
-   * in this unit (review round 1, nocx-zg3k3.2.9): it is the one where the
-   * cell is an integer without rounding anything, so the frame's metric
-   * and the cells the GPU actually drew never disagree by a rounding step.
-   * Null while the render service cannot measure — the same honest
-   * degrade as cellWidth's 0, never a guess.
+   * The measured cell advance in DEVICE pixels. Unlike WebGL, xterm's DOM
+   * renderer retains fractional character widths at fractional scale/font
+   * metrics. The caller rounds the whole grid extent for TIOCSWINSZ; rounding
+   * here would accumulate one rounding error per column.
+   * Null while the render service cannot measure, never a guessed metric.
    */
   deviceCellDims(): { width: number; height: number } | null {
     const t = this.term

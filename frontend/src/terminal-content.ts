@@ -4900,7 +4900,7 @@ export class TerminalContent extends BasePaneContent {
         gestureRoot,
         surfaceId: this.pane.paneId,
         mouseReportingActive: () => renderer.mouseReportingActive(),
-        focusInput: () => renderer.focus(),
+        focusInput: () => this.takeKeyboardToGrid(),
         copy: (text) => {
           if (shouldCopy(text)) {
             this.clipboard.writeText(text).catch((e) => {
@@ -5330,10 +5330,10 @@ export class TerminalContent extends BasePaneContent {
    * area in DEVICE pixels, cols × the renderer's device cell
    * (TIOCSWINSZ's ws_xpixel/ws_ypixel; internal/session/size.go states the
    * unit, the helper's cellGeometry decodes it, and nothing else converts).
-   * DEVICE pixels because xterm builds its CSS cell FROM an integer device
-   * cell — it is the unit where the metric is exact, and the one a
-   * rounding step cannot drift (review round 1). One shape at every door —
-   * open, attach, resize (SessionSize).
+   * DEVICE pixels preserve the measured cell's advance. WebGL cells are
+   * integral; the DOM renderer can report a fractional device width.
+   * Round the WHOLE extent to the wire's integer pixels, never each cell.
+   * One shape at every door — open, attach, resize (SessionSize).
    *
    * The renderer is a parameter because the OPEN reports before this
    * window's renderer field exists: _bindSession runs while `renderer` is
@@ -5358,8 +5358,8 @@ export class TerminalContent extends BasePaneContent {
     const report = {
       cols: this.cols,
       rows: this.rows,
-      xpixel: dims !== null ? this.cols * dims.width : 0,
-      ypixel: dims !== null ? this.rows * dims.height : 0,
+      xpixel: dims !== null ? Math.round(this.cols * dims.width) : 0,
+      ypixel: dims !== null ? Math.round(this.rows * dims.height) : 0,
     }
     this._lastReport = report
     return report
@@ -5429,7 +5429,7 @@ export class TerminalContent extends BasePaneContent {
       // own bytes are inside (nocx-2v80t.3.50): the height a command runs
       // at was settled at the prompt, and a real pane resize takes
       // viewportChanged, which never runs through here.
-      const cap = sb.runningLiveCap
+      const cap = sb.runningLiveContentCap
       const last = this.lastFitGeometry
       if (cap !== null && last && last.height <= cap) return
     }
@@ -5501,12 +5501,10 @@ export class TerminalContent extends BasePaneContent {
   /**
    * The height the grid is fitted to (nocx-2v80t.3.46).
    *
-   * While a command runs it is the live region's CAP, not the bare scroller:
-   * setLiveHeight clamps the live box to scroller minus the running block's
-   * header, and a grid fitted to the full scroller is taller than the box
-   * that displays it — its last rows are clipped by the box's overflow and
-   * nothing scrolls them, so the bottom of a tall inline TUI (its composer)
-   * is unreachable (nocx-zn4d).
+   * While a command runs it is the live region's CONTENT CAP: the scroller
+   * minus the running header and body padding. Fitting to the outer box
+   * leaves the last cells below the inner clip, so the bottom of a tall
+   * inline TUI (its composer) is unreachable (nocx-zg3k3.14.11).
    *
    * AT THE PROMPT IT IS THE HEIGHT A COMMAND TYPED NOW WILL RUN AT. The
    * grid is not on screen there (the live region is `height: 0`), and
@@ -5531,10 +5529,10 @@ export class TerminalContent extends BasePaneContent {
   ): number {
     const scroller = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
     const sb = this.scrollback
-    if (!sb || !area || area.clientHeight <= 0) return sb?.runningLiveCap ?? scroller
+    if (!sb || !area || area.clientHeight <= 0) return sb?.runningLiveContentCap ?? scroller
     const mode = sb.mode
     if (mode !== 'running' && mode !== 'idle') return scroller
-    const cap = sb.runningLiveCap
+    const cap = sb.runningLiveContentCap
     if (cap !== null) {
       this._runningChromePx = this._terminalAreaPx(area) - cap
       return cap
@@ -5626,7 +5624,7 @@ export class TerminalContent extends BasePaneContent {
     )
     const headerPx = this._offFlowHeightPx(probe, sb.scrollbackInner)
     if (headerPx === null) return null
-    return this._terminalAreaPx(area) - barPx - headerPx
+    return Math.max(0, this._terminalAreaPx(area) - barPx - headerPx - sb.runningBodyPaddingPx)
   }
 
   /**

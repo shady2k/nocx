@@ -371,11 +371,9 @@ export class ScrollbackController {
   }
 
   /**
-   * Maximum space available to running output: the scroller's client height
-   * less the running block's header, which share the viewport (nocx-6w4z).
-   * The measured content grows only up to this ceiling, and the grid is fitted
-   * to the same cap so tall inline TUIs keep their last rows reachable
-   * (nocx-zn4d). Null outside `running` or while unmeasurable.
+   * Maximum OUTER space available to running output: the scroller's client
+   * height less the running block's header. Cells fit to runningLiveContentCap,
+   * which excludes the body's padding. Null outside running or before layout.
    */
   /** The running cap while it is held; `undefined` means "measure it". */
   private _runningCap: number | undefined = undefined
@@ -401,6 +399,27 @@ export class ScrollbackController {
     if (max <= 0) return null
     this._runningCap = max
     return max
+  }
+
+  /** The cell clip and the fitted grid share this ceiling, not the outer box. */
+  get runningLiveContentCap(): number | null {
+    const cap = this.runningLiveCap
+    return cap === null ? null : Math.max(0, cap - this._bodyPaddingPx())
+  }
+
+  /** Measure the future running body's padding without changing visible layout. */
+  get runningBodyPaddingPx(): number {
+    if (this._mode === 'running') return this._bodyPaddingPx()
+    const probe = this.xtermLiveContainer.cloneNode(false) as HTMLElement
+    probe.className = 'xterm-live-container live-running'
+    probe.style.position = 'absolute'
+    probe.style.visibility = 'hidden'
+    this.scrollbackInner.appendChild(probe)
+    try {
+      return this._bodyPaddingPx(probe)
+    } finally {
+      probe.remove()
+    }
   }
 
   /** Forget the held cap: the pane changed size, so the ceiling really did
@@ -448,7 +467,7 @@ export class ScrollbackController {
     if (px === 0 && this.xtermLiveContainer.querySelector(':scope > .cmd-answer-typing') !== null) {
       return
     }
-    const max = this.runningLiveCap
+    const max = this.runningLiveContentCap
     if (max === null) return
     const pad = this._bodyPaddingPx()
     // Two subtractions, and both are what makes the running region the same
@@ -457,7 +476,7 @@ export class ScrollbackController {
     // so the flow box must not reserve it. The padding: the block body has
     // it, this region is that body while the command runs, and the cap is a
     // ceiling on the whole box rather than on the rows inside it.
-    const content = Math.min(Math.max(0, px - this._echoShiftPx()), Math.max(0, max - pad))
+    const content = Math.min(Math.max(0, px - this._echoShiftPx()), max)
     const box = `${content + pad}px`
     // Keep the block's bottom at the bottom of the view — but only on the
     // frames where the box actually CHANGED SIZE. This runs on every chunk of
@@ -480,8 +499,8 @@ export class ScrollbackController {
    *  stays the one place the number lives (`--cmd-output-pad-*`). Zero
    *  wherever there is no layout to read (jsdom), which is the same answer
    *  the class's own fallback gives. */
-  private _bodyPaddingPx(): number {
-    const cs = getComputedStyle(this.xtermLiveContainer)
+  private _bodyPaddingPx(el: HTMLElement = this.xtermLiveContainer): number {
+    const cs = getComputedStyle(el)
     const top = parseFloat(cs.paddingTop)
     const bottom = parseFloat(cs.paddingBottom)
     return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)

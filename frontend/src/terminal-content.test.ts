@@ -87,6 +87,7 @@ import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import type { TerminalRenderer } from './renderers/types'
+import { XtermRenderer } from './renderers/xterm'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
@@ -6447,9 +6448,13 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
+  it('fits a tall running TUI inside the padded live clip (nocx-zg3k3.14.11)', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     const renderer = rendererOf(content)
@@ -6475,16 +6480,14 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         expect.objectContaining({ width: 800, height: 400 }),
       )
 
-      // A real scroller height, and a running block header that occupies
-      // part of it: grid and live box share the scroller, so the grid must
-      // be fitted to scroller MINUS header — the same cap setLiveHeight
-      // clamps the box to. A taller grid's last rows sit outside the box
-      // (overflow: hidden) and are unreachable: the omp report, where the
-      // composer at the bottom of the program could not be scrolled to.
+      // The grid shares the scroller with the header AND body padding.
+      // Its last row must fit inside the content clip, not the outer box.
       Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
         value: 300,
         configurable: true,
       })
+      withScrollback.scrollback.xtermLiveContainer.style.paddingTop = '2px'
+      withScrollback.scrollback.xtermLiveContainer.style.paddingBottom = '22px'
       // A real browser gives the header its final, wrapped height the
       // instant it exists (the command text is already in the DOM) — the
       // prompt's geometry prediction measures it there, on an off-flow
@@ -6519,16 +6522,14 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
 
-      // Output taller than the pane: the box is capped at scroller minus
-      // header (276) and the grid must be fitted to the SAME 276 — not the
-      // bare scroller, which would leave the last rows clipped and
-      // unscrollable inside the box.
+      // The outer box has 276px, but only 252px can display cells.
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(1000)
       client._sessions[0].fireData('repaint')
       renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(withScrollback.scrollback.xtermLiveViewport.style.height).toBe('252px')
       expect(fitViewport).toHaveBeenLastCalledWith(
-        expect.objectContaining({ width: 800, height: 276 }),
+        expect.objectContaining({ width: 800, height: 252 }),
       )
     } finally {
       globalThis.requestAnimationFrame = raf
@@ -16924,6 +16925,42 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
     }
   })
 
+  it('reports fractional DOM cell extents as whole grid pixels at open and resize', async () => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
+      const renderer = createRendererMock()
+      vi.spyOn(renderer, 'deviceCellDims').mockReturnValue({
+        width: 10.4999542236328125,
+        height: 28,
+      })
+      return renderer as unknown as InstanceType<typeof XtermRenderer>
+    })
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    try {
+      tab.pane.classList.add('active')
+      await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
+      expect(paneScreen()?.reported).toEqual({
+        cols: 80,
+        rows: 24,
+        xpixel: 840,
+        ypixel: 672,
+      })
+      const renderer = rendererOf(content)
+      renderer._fireResize(110, 29)
+      await vi.waitFor(() =>
+        expect(sessionOf(content).sendResize).toHaveBeenCalledWith({
+          cols: 110,
+          rows: 29,
+          xpixel: 1155,
+          ypixel: 812,
+        }),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('a document that is not a frame at all is dropped without throwing out of the handler', async () => {
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
     const client = makeClient()
@@ -17129,6 +17166,10 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       processBar: HTMLElement
     }
     const sb = inner.scrollback
+    const runningPadding = document.createElement('style')
+    runningPadding.textContent =
+      '.xterm-live-container.live-running { padding-top: 2px; padding-bottom: 22px; }'
+    document.head.appendChild(runningPadding)
     let pane = 676
     const composerShown = (): boolean =>
       inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
@@ -17170,6 +17211,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
       globalThis.requestAnimationFrame = raf
+      runningPadding.remove()
       mounted.teardown()
     }
 
@@ -17325,6 +17367,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       await paneWithLayout()
     try {
       typeCommand('printf 1')
+      expect(fits()[fits().length - 1]?.height).toBe(676 - BAR - HEADER - 24)
       const before = fits().length
       const id = submitCommand('printf 1')
       finishCommand(id)

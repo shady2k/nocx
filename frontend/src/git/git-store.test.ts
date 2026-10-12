@@ -155,15 +155,10 @@ function makeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
   }
 }
 
-/** The service seam is typed as an interface of METHODS; asserting
- *  `expect(mockHandle(services, 'open'))` would pass an unbound method to expect and trip
- *  @typescript-eslint/unbound-method. Tests reach the mock through this
- *  handle instead — one cast, one place. */
-function mockHandle<K extends keyof GitPanelServices>(
-  services: GitPanelServices,
-  key: K,
-): ReturnType<typeof vi.fn> {
-  return services[key] as unknown as ReturnType<typeof vi.fn>
+/** The service seam is typed as methods; this helper gives callers the mock
+ *  API without passing an unbound method to an assertion. */
+function mockHandle<K extends keyof GitPanelServices>(services: GitPanelServices, key: K) {
+  return vi.mocked(services[key])
 }
 
 /** Drain the microtask queue until the store's promise chains settle. */
@@ -280,7 +275,7 @@ describe('the eight states', () => {
   it('notARepository: git.open said so, and the old binding is closed', async () => {
     const { store, services } = await openStore()
     expect(store.state()).toBe('ready')
-    ;(services.open as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+    mockHandle(services, 'open').mockResolvedValueOnce({
       state: 'notARepository',
     })
     store.rescope(NEW_CWD_ORIGIN)
@@ -410,10 +405,10 @@ describe('race 1 — two opens racing on a tab switch', () => {
 describe('race 2 — a poll issued before a mutation lands after it (the epoch)', () => {
   it('the pre-mutation poll cannot repaint the post-mutation state', async () => {
     const { store, services } = await openStore()
-    const poll = deferred<{ status: Status }>()
+    const poll = deferred<GitStatusResult>()
     const mutation = deferred<{ status: Status }>()
-    ;(services.status as ReturnType<typeof vi.fn>).mockImplementationOnce(() => poll.promise)
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => mutation.promise)
+    mockHandle(services, 'status').mockImplementationOnce(() => poll.promise)
+    mockHandle(services, 'stage').mockImplementationOnce(() => mutation.promise)
 
     store.refresh() // the poll — epoch N
     store.stage(['a.txt']) // the mutation — epoch N+1
@@ -440,7 +435,7 @@ describe('race 3 — the mutation lane (D18)', () => {
   it('refuses a second concurrent mutation: stage while a stage is in flight is a no-op', async () => {
     const { store, services } = await openStore()
     const first = deferred<{ status: Status }>()
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => first.promise)
+    mockHandle(services, 'stage').mockImplementationOnce(() => first.promise)
 
     store.stage(['a.txt'])
     expect(store.mutationInFlight()).toBe(true)
@@ -665,7 +660,7 @@ describe('polling is coalesced by repository identity (D23)', () => {
     const status = mockHandle(services, 'status')
     const slow = deferred<GitStatusResult>()
     status.mockClear()
-    ;(services.status as ReturnType<typeof vi.fn>).mockImplementationOnce(() => slow.promise)
+    mockHandle(services, 'status').mockImplementationOnce(() => slow.promise)
 
     store.rescope(SSH_ORIGIN)
     await settle()
@@ -844,7 +839,7 @@ describe('polling', () => {
     const { store, services } = await openStore(undefined, { pollIntervalMs: 5000 })
     const status = mockHandle(services, 'status')
     const mutation = deferred<{ status: Status }>()
-    ;(services.stage as ReturnType<typeof vi.fn>).mockImplementationOnce(() => mutation.promise)
+    mockHandle(services, 'stage').mockImplementationOnce(() => mutation.promise)
 
     store.setVisible(true)
     status.mockClear()
@@ -1018,7 +1013,7 @@ describe('the commit form', () => {
   it('the form belongs to one repository: a re-bind discards the previous draft', async () => {
     const { store, services } = await openStore()
     store.setCommitSubject('draft')
-    ;(services.open as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+    mockHandle(services, 'open').mockResolvedValueOnce(
       openOk({ bindingId: 'b2', toplevel: '/home/dev/other' }),
     )
     store.rescope(OTHER_ORIGIN)
@@ -1032,8 +1027,7 @@ describe('the commit form', () => {
 describe('git.changed and dispose', () => {
   it('a session-close notification for our binding drops the panel to noPane', async () => {
     const { store, services } = await openStore()
-    const handler = (services.subscribeGitChanged as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as (p: { bindingId: string; reason: 'sessionClosed' }) => void
+    const handler = mockHandle(services, 'subscribeGitChanged').mock.calls[0][0]
     handler({ bindingId: 'b1', reason: 'sessionClosed' })
     expect(store.state()).toBe('noPane')
     expect(store.binding()).toBeNull()
@@ -1041,8 +1035,7 @@ describe('git.changed and dispose', () => {
 
   it('a notification for a DIFFERENT binding is ignored', async () => {
     const { store, services } = await openStore()
-    const handler = (services.subscribeGitChanged as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as (p: { bindingId: string; reason: 'sessionClosed' }) => void
+    const handler = mockHandle(services, 'subscribeGitChanged').mock.calls[0][0]
     handler({ bindingId: 'someone-elses', reason: 'sessionClosed' })
     expect(store.state()).toBe('ready')
   })

@@ -28,7 +28,7 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
     it(`matches <Button> for ${JSON.stringify(c)}`, () => {
       const { container } = render(() => (
         <Button
-          onClick={vi.fn()}
+          onClick={vi.fn<(event: MouseEvent) => void>()}
           variant={c.variant}
           size={c.size}
           truncate={c.truncate}
@@ -41,7 +41,7 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
         </Button>
       ))
       const solid = container.querySelector('button')!
-      const vanilla = createButton({ ...c, onClick: vi.fn() })
+      const vanilla = createButton({ ...c, onClick: vi.fn<(event: MouseEvent) => void>() })
       assertSameShape(vanilla, solid)
     })
   }
@@ -52,11 +52,11 @@ describe('createButton is the Button, emitted without Solid (spec §6.2)', () =>
       variant: 'ghost',
       size: 'sm',
       truncate: true,
-      onClick: vi.fn(),
+      onClick: vi.fn<(event: MouseEvent) => void>(),
     })
     vanilla.dataset.extra = 'drift'
     const { container } = render(() => (
-      <Button onClick={vi.fn()} variant="ghost" size="sm" truncate>
+      <Button onClick={vi.fn<(event: MouseEvent) => void>()} variant="ghost" size="sm" truncate>
         x
       </Button>
     ))

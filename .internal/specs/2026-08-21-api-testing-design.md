@@ -558,12 +558,18 @@ Within the handle, four rules, each with a test:
 - A relative path containing `..`, an absolute path, or a path escaping the root after
   symlink resolution is refused. Refused, not clamped: a silently rewritten path is a
   surface that reports success for something it did not do.
-- Request and environment files are opened **without following symlinks**. A collection
-  from a pull request may not read `~/.ssh/id_ed25519` by pointing a request file at it.
+- Request and environment files are opened **without following symlinks**, including
+  parent directory components. Environment enumeration validates `environments/`
+  before listing it, not only each returned leaf. A collection from a pull request
+  may not read another directory by planting a linked parent.
 - Writing never follows a symlink either. `internal/storage/document.go:159` already
   refuses exactly this — the existing answer, not a new one.
 - The root may be replaced between open and read. The handle is re-validated per operation
   rather than trusted from open time; the failure is reported, not papered over.
+
+The current component checks run before path-based I/O; they reject static links but
+do not claim to exclude concurrent replacement between checking and opening.
+Descriptor-rooted race hardening is tracked separately in `nocx-hdx8f`.
 
 ## 14. Testing
 

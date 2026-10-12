@@ -141,6 +141,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0080 | [An authenticated event defers a settle, it does not take it](0080-an-authenticated-event-defers-a-settle-it-does-not-take-it.md) | Accepted (2026-10-05; the owner's decision on nocx-n5ent; supersedes case 3 of ADR-0074 — a completion for another nonce defers the settle instead of taking it) |
 | 0081 | [Recovery and prompt boundaries are backend-owned, non-authoritative effects](0081-recovery-and-prompt-boundaries-are-backend-owned-non-authoritative-effects.md) | Accepted (2026-10-07; the owner's decision on nocx-zg3k3.17/.18; supplements ADR-0066 and supersedes only ADR-0024 decision 8's renderer-visible nonce mechanism) |
 | 0082 | [The work tracker has one assignment coordinator](0082-the-work-tracker-has-one-assignment-coordinator.md) | Accepted (2026-10-09; owner's workflow decision on nocx-q8yjf.22; no application invariants changed) |
+| 0083 | [The frontend test runner retires the vulnerable worker pool](0083-the-frontend-test-runner-retires-the-vulnerable-worker-pool.md) | Accepted for this implementation (2026-10-12; owner's dependency-security decision on nocx-l3pk; PR acceptance pending) |
 
 ## Adding one
 

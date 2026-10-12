@@ -7,6 +7,7 @@ package apicoll
 // that a per-request route is inexpressible, not merely absent from the UI.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -275,6 +276,26 @@ func TestListEnvironments_NoEnvironmentsFolder(t *testing.T) {
 	}
 	if len(envs) != 0 || len(bad) != 0 {
 		t.Errorf("got %+v / %+v, want both empty", envs, bad)
+	}
+}
+
+func TestListEnvironments_RefusesSymlinkedDirectory(t *testing.T) {
+	svc, h, root := newEnvCollection(t)
+	outside := t.TempDir()
+	envFile := filepath.Join(outside, "outside.json")
+	if err := os.WriteFile(envFile, []byte(`{"name":"outside","route":{"kind":"direct"}}`), 0o600); err != nil {
+		t.Fatalf("write outside environment: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "environments")); err != nil {
+		t.Fatalf("symlink environments directory: %v", err)
+	}
+
+	envs, _, err := svc.ListEnvironments(h)
+	if !errors.Is(err, ErrPathOutsideCollection) {
+		t.Fatalf("ListEnvironments through a symlinked directory = %v, want ErrPathOutsideCollection", err)
+	}
+	if len(envs) != 0 {
+		t.Fatalf("environments = %+v, want no names from outside the collection", envs)
 	}
 }
 

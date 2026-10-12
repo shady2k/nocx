@@ -231,10 +231,10 @@ describe('Button truncate (nocx-9bpeq.7)', () => {
   it('yields to its row: data-truncate is set only when asked', () => {
     const { container } = render(() => (
       <>
-        <Button onClick={vi.fn()} size="sm" truncate>
+        <Button onClick={vi.fn<(event: MouseEvent) => void>()} size="sm" truncate>
           long
         </Button>
-        <Button onClick={vi.fn()} size="sm">
+        <Button onClick={vi.fn<(event: MouseEvent) => void>()} size="sm">
           short
         </Button>
       </>

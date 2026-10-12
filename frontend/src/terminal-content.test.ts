@@ -79,6 +79,7 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
+import type { SessionIntentResult } from './generated/session.intent'
 import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
 import type { AgentRunCompletion } from './run-command'
 import { mountReadScreenHandler } from './read-screen'
@@ -136,10 +137,16 @@ vi.mock('./ui/toast', () => ({
  * command's exit status to another command's row (nocx-td6d4.10).
  */
 function submitToken(client: ClientFake): string {
-  const calls = client.dispatcher.call.mock.calls as Array<[string, Record<string, unknown>?]>
+  const calls = client.dispatcher.call.mock.calls
   for (let i = calls.length - 1; i >= 0; i--) {
     const [method, params] = calls[i]
-    if (method === 'lifecycle.submitAttempt' && typeof params?.submitId === 'string') {
+    if (
+      method === 'lifecycle.submitAttempt' &&
+      typeof params === 'object' &&
+      params !== null &&
+      'submitId' in params &&
+      typeof params.submitId === 'string'
+    ) {
       return params.submitId
     }
   }
@@ -4593,9 +4600,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const RealXterm = (raw as { XtermRenderer: new () => TerminalRenderer }).XtermRenderer
     const realRenderer = new RealXterm()
     const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(
-      () => realRenderer as unknown as InstanceType<typeof XtermRenderer>,
-    )
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
+      return realRenderer as unknown as InstanceType<typeof XtermRenderer>
+    })
     const { ed, view, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -5907,8 +5914,8 @@ describe('the projections consume the kernel through the composition root (ADR-0
     const { content, teardown } = await mountTerminal(makeClipboard())
     try {
       const session = sessionOf(content)
-      let finishFirst!: (result: unknown) => void
-      const first = new Promise<unknown>((resolve) => {
+      let finishFirst!: (result: SessionIntentResult) => void
+      const first = new Promise<SessionIntentResult>((resolve) => {
         finishFirst = resolve
       })
       session.intent.mockImplementationOnce(() => first)
@@ -5917,7 +5924,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(1))
       expect(session.intent.mock.calls).toEqual([['text', 'a']])
 
-      finishFirst({ state: 'executed' })
+      finishFirst({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledTimes(3))
       expect(session.intent.mock.calls).toEqual([
         ['text', 'a'],
@@ -7778,7 +7785,7 @@ describe('shell submit input intent ordering (nocx-zg3k3.3.1)', () => {
     const pasteGate = new Promise<void>((resolve) => {
       releasePaste = resolve
     })
-    const result = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
+    const result: SessionIntentResult = { state: 'executed', bytesWritten: 1, fenceAfter: 0 }
     const delivered: Array<[string, string]> = []
     session.intent.mockImplementation((kind: string, payload: string) => {
       delivered.push([kind, payload])
@@ -10653,10 +10660,8 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     // is ordinary (AD-9), so "could not ask" must not be recorded as
     // "there was nothing".
     const client = storeWith([entry()], 'output')
-    const live = client.call.getMockImplementation()! as (
-      method: string,
-      params?: unknown,
-    ) => Promise<unknown>
+    const live = client.call.getMockImplementation()
+    if (!live) throw new Error('storeWith must install the initial call handler')
     client.call.mockImplementation((method: string, params?: unknown) => {
       if (method === 'ledger.query') return Promise.reject(new Error('socket is reconnecting'))
       return live(method, params)
@@ -16554,7 +16559,7 @@ describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () =>
    *  moment a subscription installed after the bind has already missed. */
   const reclaimingPaneReporting = async (cwd: string) => {
     const { XtermRenderer } = await import('./renderers/xterm')
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         renderer._fireCwd('', cwd)
@@ -16613,7 +16618,7 @@ describe('a reclaimed pane shows the work that never stopped (nocx-ht15k)', () =
     // before the mount because that is when it is awaited.
     const { XtermRenderer } = await import('./renderers/xterm')
     let replayed = false
-    vi.mocked(XtermRenderer).mockImplementationOnce(() => {
+    vi.mocked(XtermRenderer).mockImplementationOnce(function () {
       const renderer = createRendererMock()
       renderer.awaitWriteBarrier.mockImplementation(() => {
         if (!replayed) {
@@ -16691,7 +16696,7 @@ describe('replayed completion restores a durable block outcome (nocx-gm21o)', ()
       resolveQuery = resolve
     })
     const client = makeClient({
-      call: vi.fn((method: string) => {
+      call: vi.fn<WSClient['call']>().mockImplementation((method) => {
         if (method === 'ledger.query') return queryPending
         if (method === 'ledger.get') {
           return Promise.resolve({

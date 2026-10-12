@@ -14,15 +14,19 @@
  * resolve, and an unchecked read is not an assertion.
  */
 import { fireEvent, screen, waitFor } from '@solidjs/testing-library'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mountSnippetAskDialog, type SnippetAskDialogHandle } from './snippet-ask-dialog'
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
+import {
+  mountSnippetAskDialog,
+  type SnippetAskDialogDeps,
+  type SnippetAskDialogHandle,
+} from './snippet-ask-dialog'
 import type { Snippet } from './snippets-store'
 
 const snippet = (body: string): Snippet => ({ id: 'i', title: 'T', body })
 
 let open: SnippetAskDialogHandle | null = null
 
-const mount = (fire: ReturnType<typeof vi.fn>): SnippetAskDialogHandle => {
+const mount = (fire: Mock<SnippetAskDialogDeps['fire']>): SnippetAskDialogHandle => {
   const host = document.createElement('div')
   document.body.append(host)
   const handle = mountSnippetAskDialog(host, { fire, onDelivered: () => {} })
@@ -49,8 +53,8 @@ const tick = (name: string): HTMLInputElement | null => {
   return null
 }
 
-const answersOf = (fire: ReturnType<typeof vi.fn>): ReadonlyMap<string, string> =>
-  fire.mock.calls[0][1] as ReadonlyMap<string, string>
+const answersOf = (fire: Mock<SnippetAskDialogDeps['fire']>): ReadonlyMap<string, string> =>
+  fire.mock.calls[0][1]
 
 const insert = (): void => {
   const button = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Insert')

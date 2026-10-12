@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
@@ -66,10 +68,15 @@ func TestStartShutdown(t *testing.T) {
 		t.Fatalf("Start() returned error: %v", err)
 	}
 	if a.Transport.Port() == 0 {
-		t.Fatal("Transport.Port() == 0 after Start")
+		t.Fatal("transport port is zero after Start")
 	}
-
+	if _, err := a.sessionReconciler.SweepStale(ctx, time.Hour); err != nil {
+		t.Fatalf("durable store unavailable before shutdown: %v", err)
+	}
 	a.Shutdown(ctx)
+	if _, err := a.sessionReconciler.SweepStale(ctx, time.Hour); !errors.Is(err, content.ErrClosed) {
+		t.Fatalf("durable store write after shutdown = %v, want content.ErrClosed", err)
+	}
 }
 
 func TestWSPortBeforeStart(t *testing.T) {

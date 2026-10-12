@@ -924,6 +924,9 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+	// sessionRecorders.Add shares the stopped fence under ringsMu; the group
+	// outlives rx removal so Stop drains recorders for ended sessions too.
+	sessionRecorders sync.WaitGroup
 	// closeRequested holds the session ids whose end the user asked for:
 	// written by the "close" handler before the registry close, read and
 	// cleared by monitorExit when that close produces the exit. It is the
@@ -2270,9 +2273,9 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// Cancellation makes cooperative tasks return promptly; waitDrained
 	// bounds the wait at controlDrainTimeout (the documented maximum, see
 	// ws_control.go) and ABANDONS whatever ignores cancellation — the
-	// forced-abandonment policy for work outside a commit interval. Stop
-	// therefore terminates within the documented maximum against any
-	// dependency, cooperative or not.
+	// forced-abandonment policy for work outside a commit interval. Session
+	// output recorders are commit intervals: Stop joins them below without
+	// this timeout so accepted final output is durable before return.
 	// End the pane-observation coalescer with the server, not with whatever
 	// context happened to start it — and WAIT for it, so a returned Stop
 	// means no sweep is still running.
@@ -2325,6 +2328,11 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	if s.captures != nil {
 		s.captures.DestroyAll()
 	}
+	// Recorder admission was fenced by stopped under ringsMu. Closed rings
+	// leave their buffered tail available, which each admitted recorder
+	// appends before it exits; this group includes recorders whose rx was
+	// removed before shutdown.
+	s.sessionRecorders.Wait()
 
 	return shutdownErr
 }
@@ -3648,46 +3656,32 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 
 // --- session / ring plumbing ----------------------------------------------
 
-// pumpToRing reads PTY output and writes it into the replay ring.
-// Uses background context so the pump outlives any single WebSocket
-// connection (AD-9). Blocks on ring.write when the ring is full and
-// nothing has been acked — that is the AD-10 backpressure seam.
+// pumpToRing admits and starts the connection-independent output consumers.
+// Admission is synchronous; the recorder and session read pump run independently.
+// Background context preserves AD-9, and ring.write retains AD-10 backpressure.
 func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *outputRing) {
-	// The grid is fed HERE, on the backend's own read path, and deliberately
-	// not on the subscriber path: this goroutine is started per session and
-	// lives connection-independently, so "closing the frontend does not stop
-	// it being fed" is a property of the placement rather than a promise
-	// (nocx-szb40.2). An unenrolled session drops the bytes at a map lookup.
-	// The recorder is started HERE, beside the pump and for the same reason
-	// the grid is fed here: this call is per session and connection-
-	// independent, so "the recording does not stop when the window closes"
-	// is a property of the placement rather than a promise (nocx-22k1c.1).
-	// It is the consumer that keeps ring.write from blocking with nobody
-	// attached, so it has to exist before the first byte, not after the
-	// first attach. It ends itself when the ring closes.
-	go s.recordSessionOutput(ctx, sess.ID(), ring)
+	s.ringsMu.Lock()
+	if s.stopped {
+		s.ringsMu.Unlock()
+		return
+	}
+	sid := sess.ID()
+	if s.sessionRecorder != nil {
+		s.sessionRecorders.Add(1)
+		go func(ctx context.Context, sid session.ID, ring *outputRing) {
+			defer s.sessionRecorders.Done()
+			s.recordSessionOutput(ctx, sid, ring)
+		}(ctx, sid, ring)
+	}
+	s.ringsMu.Unlock()
 
 	// The bytes go to the recording and to nothing else: a frame is read from
 	// the runtime that owns the terminal (ADR-0066), never derived here from a
 	// stream whose middle the helper's bounded window may have reclaimed.
-	err := sess.StartOutput(ctx, func(data []byte) error {
+	if err := sess.StartOutput(ctx, func(data []byte) error {
 		return ring.write(data)
-	})
-	// THE INTERVAL'S SECOND END IS NOT HERE, and it was, which made it no end
-	// at all. StartOutput installs the handler and starts the read pump on a
-	// goroutine of its own — it does NOT block until the output is over — so a
-	// withdrawal on this line ran the instant the session opened, racing the
-	// enrolment it was meant to outlive, and nothing closed the interval when
-	// the session actually ended. The comment that used to sit here reasoned
-	// about a blocking call that is not one.
-	//
-	// The close now lives in monitorExit, which waits on sess.Done() and is
-	// the session's teardown owner, started exactly once per session. Found by
-	// the test that asserts the END rather than the start (nocx-szb40.5) —
-	// the shape AGENTS.md names: an invariant with a start and no named
-	// closing event buys a test that guards only the start.
-	if err != nil {
-		s.log.Debug("session output ended", "session_id", string(sess.ID()), "error", err)
+	}); err != nil {
+		s.log.Debug("session output ended", "session_id", string(sid), "error", err)
 	}
 }
 

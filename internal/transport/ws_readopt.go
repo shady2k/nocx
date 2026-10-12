@@ -122,7 +122,7 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	// (AD-9) — and on this path outlive the coordinator too, which is the whole
 	// point. Closing event: session teardown, in monitorExit below, which waits
 	// on the session's Done and ends the read pump StartOutput started.
-	go s.pumpToRing(context.Background(), hosted.Session, rx.ring)
+	s.pumpToRing(context.Background(), hosted.Session, rx.ring)
 	rx.monitorOnce.Do(func() {
 		go s.monitorExit(rx, hosted.Session)
 	})

@@ -813,7 +813,7 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 				rx.recordOutputHole(lost, sessionOutputHoleReason(reason))
 			})
 		}
-		go s.pumpToRing(context.Background(), opened.Session, rx.ring)
+		s.pumpToRing(context.Background(), opened.Session, rx.ring)
 		rx.monitorOnce.Do(func() {
 			go s.monitorExit(rx, opened.Session)
 		})

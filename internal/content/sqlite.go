@@ -498,7 +498,15 @@ func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logg
 // stopped by a revoked answer has a reason of its own (nocx-4yjwk.7); 19
 // added the worker_checkouts table, the durable half of the checkouts
 // workers.spawn's worktree ask creates (nocx-xn63t.1.4).
-const schemaVersion = 21
+// 20 widened artifacts.media_type for row blocks, 21 added clear_boundaries,
+// and 22 adds entries_by_ended_at for the exact no-evictions history horizon
+// (ADR-0084).
+const schemaVersion = 22
+
+// schema22EntriesByEndedAtIndexDDL is the one index definition introduced by
+// the 21→22 edge. Keep it immutable: a future schema gets its own DDL and rung
+// rather than silently changing the shape this migration promised.
+const schema22EntriesByEndedAtIndexDDL = `CREATE INDEX IF NOT EXISTS entries_by_ended_at ON entries(ended_at);`
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -1143,7 +1151,7 @@ CREATE TABLE IF NOT EXISTS clear_boundaries (
 -- matters to an ordinary read, exactly the access pattern entries_by_pane
 -- already serves.
 CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL;
-`
+` + "\n" + schema22EntriesByEndedAtIndexDDL
 
 // keyedURI is the ONE file-creating path (canary rule): every file this
 // package creates must be created through the adiantum VFS with the key in

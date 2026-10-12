@@ -128,6 +128,8 @@ type App struct {
 	// noteCloser closes the notes database on shutdown; nil when the store
 	// never opened.
 	noteCloser interface{ Close() error }
+	// contentCloser owns the encrypted store after New opens it.
+	contentCloser interface{ Close() error }
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
@@ -2740,6 +2742,7 @@ func New(opts ...Option) (*App, error) {
 		skills:                  skills,
 		vaultCloser:             v,
 		noteCloser:              noteCloser,
+		contentCloser:           contentDB,
 		discoverySched:          discoverySched,
 		gitFactory:              gitFactory,
 		workerCheckouts:         checkouts,
@@ -3389,6 +3392,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	// for a new watch once the transport and the sessions are gone.
 	if a.procs != nil {
 		_ = a.procs.Close()
+	}
+	// After transport recorders and other app-owned store users have stopped.
+	if a.contentCloser != nil {
+		if err := a.contentCloser.Close(); err != nil {
+			a.Logger.Error("content database shutdown error", "error", err)
+		}
 	}
 	// The UI-state document last of the writers: its debounce means the very
 	// last drag of the session may still be pending, and Close is what turns

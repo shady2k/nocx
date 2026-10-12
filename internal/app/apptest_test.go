@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -9,8 +10,9 @@ import (
 
 // newTestApp builds the composition root the way a test must build it: with
 // the OS keystore out of reach, and the backend log inside the test's own
-// temporary directory.
-//
+// temporary directory. The fixture owns teardown too; an explicit restart
+// may stop it sooner.
+
 // It exists because saying nothing used to mean "reach the developer's login
 // keychain". app.New probes the vault's system provider at every start, and a
 // probe is a real keyring.Set — on macOS that is a modal dialog belonging to
@@ -50,7 +52,15 @@ func newTestApp(t *testing.T, opts ...Option) (*App, error) {
 		withoutLocalHelperInstall(),
 		WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")),
 	}
-	return New(append(defaults, opts...)...)
+	a, err := New(append(defaults, opts...)...)
+	if err == nil {
+		t.Cleanup(func() {
+			if !a.lifecycleStopping.Load() {
+				a.Shutdown(context.Background())
+			}
+		})
+	}
+	return a, err
 }
 
 // withoutSystemKeystore builds the vault's system provider over a keyring

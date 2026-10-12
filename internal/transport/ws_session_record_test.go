@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -635,5 +636,98 @@ func TestSessionRecording_TheLoopEndsWhenTheSessionDoes(t *testing.T) {
 	case <-done:
 	case <-time.After(wantWithin):
 		t.Fatal("the recorder outlived the session it was recording")
+	}
+}
+
+type heldShutdownRecorder struct {
+	*fakeRecorder
+	entered     chan struct{}
+	enteredOnce sync.Once
+	release     chan struct{}
+}
+
+func (r *heldShutdownRecorder) Append(ctx context.Context, in content.SessionOutputAppend) (content.SessionOutputResult, error) {
+	r.enteredOnce.Do(func() { close(r.entered) })
+	<-r.release
+	return r.fakeRecorder.Append(ctx, in)
+}
+
+func TestSessionRecording_StopDrainsFinalOutputAfterRxRemoval(t *testing.T) {
+	for _, removeRx := range []bool{false, true} {
+		name := "live rx"
+		if removeRx {
+			name = "removed rx"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rec := &heldShutdownRecorder{
+					fakeRecorder: newFakeRecorder(),
+					entered:      make(chan struct{}),
+					release:      make(chan struct{}),
+				}
+				logger := log.NewSlogAdapter(nil)
+				reg := newRegWithStub(logger)
+				ws := NewWSServer(logger, reg, WithSessionOutputRecorder(rec))
+				sess, err := reg.Open(context.Background(), session.Config{
+					Kind: session.KindLocal, Cols: 80, Rows: 24,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rx := ws.getOrCreateRx(sess.ID())
+				if rx == nil {
+					t.Fatal("failed to create the session ring")
+				}
+				ws.pumpToRing(context.Background(), sess, rx.ring)
+				tail := []byte("the final output before shutdown")
+				if err := rx.ring.write(tail); err != nil {
+					t.Fatalf("write final output: %v", err)
+				}
+				synctest.Wait()
+				select {
+				case <-rec.entered:
+				default:
+					t.Fatal("recorder did not reach its held append")
+				}
+				if removeRx {
+					rx.ring.close()
+					if ws.removeRx(sess.ID()) != rx {
+						t.Fatal("removeRx did not remove the session ring")
+					}
+				}
+
+				stopped := make(chan error, 1)
+				go func() { stopped <- ws.Stop(context.Background()) }()
+				synctest.Wait()
+				select {
+				case err := <-stopped:
+					t.Fatalf("Stop returned while final output append was held: %v", err)
+				default:
+				}
+				close(rec.release)
+				synctest.Wait()
+				if err := <-stopped; err != nil {
+					t.Fatalf("Stop: %v", err)
+				}
+				if got := rec.recorded(); !bytes.Equal(got, tail) {
+					t.Fatalf("recorded shutdown tail = %q, want %q", got, tail)
+				}
+				rx.ring.mu.Lock()
+				recording := rx.ring.recording
+				rx.ring.mu.Unlock()
+				if recording {
+					t.Fatal("Stop returned before the recorder finalized the ring")
+				}
+				lateRing := newOutputRing()
+				if err := lateRing.write([]byte("must not be admitted")); err != nil {
+					t.Fatalf("write after Stop: %v", err)
+				}
+				ws.pumpToRing(context.Background(), sess, lateRing)
+				synctest.Wait()
+				if got := rec.appendCount(); got != 1 {
+					t.Fatalf("recorder appends after Stop = %d, want only the admitted final append", got)
+				}
+			})
+		})
 	}
 }

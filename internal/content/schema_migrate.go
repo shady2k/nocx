@@ -43,13 +43,17 @@ package content
 //
 // WHAT A STEP MUST DO, AND WHAT IT MUST NOT BOTHER WITH. Open applies
 // `schemaV1` — every statement of it `IF NOT EXISTS` — immediately after this
-// walk, so a new TABLE and a new INDEX arrive by themselves and a step that
-// wrote them again would be a second copy of the same DDL, which is the
-// duplicate-owner defect AGENTS.md spends a section on. A step exists for
-// exactly what `IF NOT EXISTS` cannot express: a new COLUMN in a table that
-// already exists, a changed CHECK or constraint (SQLite cannot ALTER one, so
-// the table is rebuilt and its rows copied), a dropped or reshaped index, and
-// any backfill of data.
+// walk, so a new TABLE or ordinary INDEX arrives there and needs no second
+// DDL owner. The narrow exception is an index whose addition is part of a
+// version edge's atomic contract: `schemaV1` runs after the ladder (Open has
+// no outer transaction), so putting that index only there could leave a
+// schema-22 stamp committed without the query-plan shape the edge promises.
+// `schema22EntriesByEndedAtIndexDDL` is shared by fresh-schema creation and
+// the 21→22 transactional rung, keeping the definition singular while making
+// the stamp and index commit together. A step otherwise exists for exactly
+// what `IF NOT EXISTS` cannot express: a new COLUMN in an existing table, a
+// changed CHECK or constraint, a dropped or reshaped index, and a data
+// backfill.
 //
 // ONE COUNTER, FOR ONE FILE — THE GRANULARITY, DECIDED (nocx-lmb6v.3,
 // nocx-lmb6v.5). content.db holds three subsystems' state: the ledger, the
@@ -159,6 +163,7 @@ var schemaLadder = []migrationStep{
 	{from: 18, to: 19, apply: migrateAddWorkerCheckouts18to19, schemaDigest: "49f7ad77e616551bb1357970dd573a03d11ba29de0cd0cbfda52ce2ea4cd0ac1"},
 	{from: 19, to: 20, apply: migrateBlockRowsMediaTypes19to20, schemaDigest: "149d516a467ac06f2dabb4222634c668024edb9a672300def32f480631dd2dea"},
 	{from: 20, to: 21, apply: migrateAddClearBoundaries20to21, schemaDigest: "15fb847b32570357ccac15333107a761c38b3d8cc08481e2998de8f07577d4bc"},
+	{from: 21, to: 22, apply: migrateAddEntriesByEndedAt21to22, schemaDigest: "2187c4e3d03e421e2f9b305dd6fcea7d1cb559ce49caffe04118c0a7c4a7f27d"},
 }
 
 // validateLadder validates the shipped ladder against the current schema.
@@ -327,6 +332,10 @@ var schemaShapeDigests = map[int]string{
 	// the tree where `const schemaVersion` held 20. 21 adds clear_boundaries
 	// on top of exactly that shape (nocx-2v80t.3.17).
 	20: "cbf78b0cf92ee5ef3543e35af94ff5fbf83ee31394403d08e07a85e529a84aad",
+	// 21 is pinned in the commit that dethrones it: the exact schemaV1 at
+	// f28f066623773b8d207cc4303e5ded83d09f0d17, frozen as testdata/schema_v21.sql.
+	// Schema 22 adds the entries_by_ended_at index on top of this released shape.
+	21: "2dea93020d4274a210e4ba2cce5f5b7c19d5ece098daf7f09fc766c6c28b148b",
 }
 
 var historicalSchemaObjectNames = map[int]map[string]struct{}{
@@ -337,6 +346,7 @@ var historicalSchemaObjectNames = map[int]map[string]struct{}{
 	18: schema18ObjectNames(),
 	19: schema19ObjectNames(),
 	20: schema20ObjectNames(),
+	21: schema21ObjectNames(),
 }
 
 func schema14ObjectNames() map[string]struct{} {
@@ -438,6 +448,17 @@ func schema19ObjectNames() map[string]struct{} {
 // edge keeps (17→18 is the other example, schema18ObjectNames above).
 func schema20ObjectNames() map[string]struct{} {
 	return schema19ObjectNames()
+}
+
+// schema21ObjectNames is schema20's set plus clear_boundaries and its two
+// SQLite-owned indexes. The 21→22 migration changes only the catalog by
+// adding entries_by_ended_at; its historical input shape is pinned here.
+func schema21ObjectNames() map[string]struct{} {
+	result := schema20ObjectNames()
+	result["table:clear_boundaries"] = struct{}{}
+	result["index:sqlite_autoindex_clear_boundaries_1"] = struct{}{}
+	result["index:clear_boundaries_by_pane"] = struct{}{}
+	return result
 }
 
 type sqliteSchemaObject struct {
@@ -923,6 +944,16 @@ func migrateAddClearBoundaries20to21(ctx context.Context, tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS clear_boundaries_by_pane ON clear_boundaries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL`,
 	); err != nil {
 		return fmt.Errorf("add clear_boundaries_by_pane index: %w", err)
+	}
+	return nil
+}
+
+// migrateAddEntriesByEndedAt21to22 adds the measured full-scan accelerator
+// within the same transaction as the schema stamp. Fresh databases use this
+// exact DDL through schemaV1; the 21→22 edge makes it durable atomically.
+func migrateAddEntriesByEndedAt21to22(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schema22EntriesByEndedAtIndexDDL); err != nil {
+		return fmt.Errorf("add entries_by_ended_at index: %w", err)
 	}
 	return nil
 }

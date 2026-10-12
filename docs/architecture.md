@@ -217,6 +217,14 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 **DI / replaceability.** Modules depend only on abstractions; the composition root is the one place concrete implementations are chosen and wired. Swapping SSH backends, transports, or loggers is a one-line change at the root, and every module is independently testable via injected fakes.
 
+**Shutdown ownership.** The composition root closes the encrypted content store
+after transport shutdown has joined every admitted session-output recorder,
+including recorders whose ring was removed from the live map. Other background
+owners retain their existing stop/cancel paths; this is not a universal join
+guarantee. Closing the store drains its writer and releases the SQLite connection,
+rather than delegating that ownership to process exit. App test fixtures own the
+same teardown, including roots that were constructed but never started.
+
 **Quality gates & CI.** Enforced from commit #1: both Go and TypeScript are gated the same way — format, lint, and test. Go uses `golangci-lint` and `gofumpt`; the frontend is held to the same bar. The per-commit gate is the `.githooks/pre-commit` hook, and since `nocx-hzsiv` it is a **static** gate — format, lint, types, ratchets, contracts, no test runner and no container. The tests are `make ci`'s and CI's; GitHub Actions (`ci.yml`) runs on every pull request to `main` and on manual dispatch, and is _called_ by `release.yml` on a version tag so a release gates on a green suite. The `pull_request` trigger is the mechanical enforcement of **no merge without green** on `main` (nocx-q36): the pre-commit hook and `make ci` give the identical checks as fast local feedback, but a hook is bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh checkout may skip, so for anything arriving through a pull request CI is the gate that cannot be side-stepped. Be precise about the shape of that claim: there is deliberately **no `push: [main]` trigger**, so a direct push to `main` is ungated. Work reaches `main` through a pull request as a rule, and the owner keeps the exception for themselves — the trigger list is that policy written down, not an oversight to be closed. What protects a _release_ is separate and unconditional: `release.yml` calls `ci.yml` on the tagged commit, so the suite is green on the exact commit being shipped however it got to `main`. `ci.yml` no longer has its own tag trigger — with `release.yml` calling it, keeping one would run the whole suite twice per release. Tests are mandatory (TDD) for every language.
 
 **Logging / observability.** Structured logging via Go `log/slog`, context-propagated, behind a swappable logging interface. Metrics and tracing seams are designed-for but not built (YAGNI). The frontend logs to the browser console and those logs are forwardable to the backend.

@@ -206,16 +206,12 @@ import (
 // 85659 — the new launch helpers are present in the published script bytes,
 // while the filesystem-call count remains 63.
 //
-// AND AGAIN by 52 bytes when the bash and zsh prompts learned to erase below
-// the cursor before their A marker (nocx-zg3k3.23): 86535, calls unchanged.
-//
-// REPORT-p3-measure.md, which the failure messages below tell you to update
-// alongside these constants, HAS NEVER EXISTED in this repository — checked
-// across every ref. Whoever restores it, or removes the instruction, owns
-// nocx-uxuwu.
+// AND THEY SHRANK by 518 bytes when the redundant waiting question was removed
+// from both wrapper scripts (nocx-xn63t.4.2): 86017, calls unchanged at 63.
+// The updated report records the measured maximum and the reason for this move.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 86535
+	measuredMaxPublishBytes = 86017
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

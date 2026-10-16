@@ -280,7 +280,7 @@ test('a silently dead ssh connection is offered a way back, and the reconnect ke
     // A working shell at the same endpoint: the prompt returns and a command
     // runs on it.
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 60_000 })
-    await runCommand(page, 'echo after-the-reconnect')
+    await runCommand(page, 'echo back')
 
     // And the whole point of doing it this way: the dead session's work is
     // still readable, with a divider saying where it ended.

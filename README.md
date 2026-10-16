@@ -64,14 +64,22 @@ Then open nocx normally. This is required only the first time — later in-app u
 
 ## Install (Linux)
 
-Download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
+Install the latest release for x86_64 Linux into your user account:
+
+```bash
+curl -fsSL https://nocx.dev/install.sh | sh
+```
+
+The installer verifies the release manifest signature and the AppImage before installing. OpenSSL 3+ is required; the script explains how to install it if it is missing or too old. It writes to `~/.local/bin` and needs no root access (see [ADR-0087](docs/decisions/0087-linux-user-installs-use-the-signed-release-manifest.md)).
+
+For a manual install, download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
 
 ```bash
 chmod +x nocx-*-linux-amd64.AppImage
 ./nocx-*-linux-amd64.AppImage
 ```
 
-No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
+The AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
 
 ### Support envelope
 

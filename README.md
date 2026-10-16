@@ -8,17 +8,18 @@ network it touches is the network you point it at.
 
 **[shady2k.github.io/nocx](https://shady2k.github.io/nocx/)** — what it does, and how to install it.
 
-**Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
+**Stack:** Go backend (PTY, SSH, session, transport) + client-painted cell renderer +
 Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
-**Status:** `v0.3.0`, early release, no formal support. macOS (universal) and
-Linux (x86_64 AppImage). Tabs and workspaces, session restore, the sidebar
-(Files, Git, Ports, Notes, Operations), encrypted command history, the vault,
-snippets, file transfer between machines, an API client, and an assistant that
-runs things all ship — see
-[the v0.3.0 notes](docs/release-notes/v0.3.0.md) for what each one does, and
-[the v0.2.0 notes](docs/release-notes/v0.2.0.md) for what came before.
+**Status:** `v0.6.0`, early release, no formal support. macOS (universal) and
+Linux (x86_64 AppImage). 0.6 adds a backend-painted cell renderer and agent
+work orchestrated in nocx panes, with herdr no longer needed. Tabs and workspaces,
+session restore, the sidebar (Files, Git, Ports, Notes, Operations), encrypted
+command history, the vault, snippets, file transfer between machines, an API
+client, and an assistant that runs things also ship — see the
+[0.6.0 release notes](docs/release-notes/v0.6.0.md) for details, and the
+[0.3.0 notes](docs/release-notes/v0.3.0.md) for earlier changes.
 
 > An earlier version of this line said SSH, tabs and cwd were "under active
 > development" long after they shipped. It is named rather than quietly
@@ -35,24 +36,21 @@ editor at the prompt, an API client whose collections are files in a folder you
 own, and an assistant that acts inside the same scrollback — without an account
 or a cloud service of ours.
 
-Everything in that list ships as of `v0.3.0`; the vault, the blocks and the
-completions carried a "(later)" here for two releases after they landed.
+Everything in that list ships in `v0.6.0`. The terminal is painted from the backend cell model; nocx also coordinates agents in panes without requiring herdr.
 
 ## Install (macOS)
 
-Download the `.dmg` from the [Releases page](https://github.com/shady2k/nocx/releases) and drag **nocx** into Applications. A Homebrew cask is planned in our own third-party tap; it is not available until that tap is published.
-
-### Homebrew (planned)
-
-Once the tap is published, it will install the same release app:
+Install the cask from our third-party tap:
 
 ```bash
 brew install --cask shady2k/nocx/nocx
 ```
 
-The planned cask will remove `com.apple.quarantine` from `/Applications/nocx.app` after installation. This is an explicit trust choice: the tap clears macOS quarantine, just as the manual command below does. Read the tap README before installing.
+The cask removes `com.apple.quarantine` from `/Applications/nocx.app` after installation. This is an explicit trust choice: the tap clears macOS quarantine, just as the manual command below does. Read the [tap README](https://github.com/shady2k/homebrew-nocx) before installing.
 
 ### Direct download
+
+Alternatively, download the `.dmg` from the [Releases page](https://github.com/shady2k/nocx/releases) and drag **nocx** into Applications. Direct downloads still need the manual quarantine step below.
 
 There is no Apple Developer ID, so the build is unsigned and not notarized. macOS quarantines a downloaded app; clear that once, on first install:
 
@@ -66,14 +64,22 @@ Then open nocx normally. This is required only the first time — later in-app u
 
 ## Install (Linux)
 
-Download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
+Install the latest release for x86_64 Linux into your user account:
+
+```bash
+curl -fsSL https://nocx.dev/install.sh | sh
+```
+
+The installer verifies the release manifest signature and the AppImage before installing. OpenSSL 3+ is required; the script explains how to install it if it is missing or too old. It writes to `~/.local/bin` and needs no root access (see [ADR-0087](docs/decisions/0087-linux-user-installs-use-the-signed-release-manifest.md)).
+
+For a manual install, download the `.AppImage` from the [Releases page](https://github.com/shady2k/nocx/releases), make it executable, and run it:
 
 ```bash
 chmod +x nocx-*-linux-amd64.AppImage
 ./nocx-*-linux-amd64.AppImage
 ```
 
-No package manager or root access needed — the AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
+The AppImage is a single self-contained file. In-app updates replace it in place (see [ADR-0007](docs/decisions/0007-cross-platform-auto-update.md)).
 
 ### Support envelope
 
@@ -399,9 +405,9 @@ internal/               — Go backend
   shellintegration/       OSC 7/133 substrate
   transport/              WebSocket server
 
-frontend/               — TypeScript frontend (xterm.js + Wails)
+frontend/               — TypeScript frontend (cell renderer + Wails)
   src/
-    renderers/            xterm.js
+    renderers/            cell renderer
     tabs.ts               tab manager + WS client
     ipc.ts                WebSocket protocol
     main.ts               app entry
@@ -456,11 +462,6 @@ hangs there while the MCP tools answer it fine.
 
 TBD. Dependencies are MIT and Apache 2.0 — preserve their copyright notices:
 
-- `@xterm/xterm` — MIT, copyright:
-  - © 2017–2019 The xterm.js authors
-  - © 2014–2016 SourceLair Private Company
-  - © 2012–2013 Christopher Jeffrey
-- `@xterm/addon-*` — MIT, © The xterm.js authors (each addon LICENSE repeats its own line)
 - `vite` — MIT, © 2019–present VoidZero Inc. and Vite contributors (devDependency, build-time only)
 
 The helper links `libghostty-vt` statically, and it brings licences no list

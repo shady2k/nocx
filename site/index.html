@@ -3,513 +3,645 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>nocx — a local terminal that keeps your working context</title>
+    <meta name="theme-color" content="#f4f5ef" />
     <meta
       name="description"
-      content="A local terminal that keeps your working context: tabs, their output, notes and secret references survive a restart. macOS and Linux, no account, no cloud service of its own, no product telemetry."
+      content="A local-first terminal that keeps tabs, output, notes and secret references across restarts."
     />
-    <link rel="icon" href="./assets/icon-96.png" />
-    <link rel="apple-touch-icon" href="./assets/icon-256.png" />
+    <title>nocx — Your context. Right where it belongs.</title>
+    <link rel="icon" href="./assets/nocx-redesign-icon.png" />
+    <link rel="stylesheet" href="./assets/redesign-fonts/fonts.css" />
     <link rel="stylesheet" href="./style.css" />
-    <link rel="alternate" hreflang="en" href="https://shady2k.github.io/nocx/" />
-    <link rel="alternate" hreflang="ru" href="https://shady2k.github.io/nocx/ru/" />
-    <link rel="alternate" hreflang="x-default" href="https://shady2k.github.io/nocx/" />
-    <script>
-      /* Locale routing, and the only place it can live: GitHub Pages serves
-       * static files, so there is no server to read Accept-Language. It runs
-       * before paint, only on this page — the Russian page never redirects, so
-       * the two can never bounce a visitor between them.
-       *
-       * A person's explicit choice always wins over their browser's setting.
-       * The switcher links carry ?lang=, which is recorded and honoured on
-       * every later visit; without one, a Russian-preferring browser is sent
-       * to ./ru/ once. With JavaScript off, nobody is redirected and the
-       * switcher in the footer still works. */
-      ;(function () {
-        try {
-          var chosen = new URLSearchParams(location.search).get('lang')
-          if (chosen) localStorage.setItem('nocx-lang', chosen)
-          var pref = chosen || localStorage.getItem('nocx-lang')
-          if (pref) {
-            if (pref === 'ru') location.replace('./ru/')
-            return
-          }
-          var langs = navigator.languages || [navigator.language || '']
-          for (var i = 0; i < langs.length; i++) {
-            if (/^ru\b/i.test(langs[i])) {
-              location.replace('./ru/')
-              return
-            }
-          }
-        } catch (e) {
-          /* Private mode can refuse localStorage. English is the fallback. */
-        }
-      })()
-    </script>
+    <script src="./app.js" defer></script>
   </head>
-
   <body>
-    <main>
-      <div class="wrap hero">
-        <div class="hero__grid">
-          <div>
-            <p class="mark">
-              <img src="./assets/icon-96.png" alt="" />
-              <span>nocx</span>
-            </p>
-
-            <h1>A terminal that keeps your working context</h1>
-
-            <p class="lede">
-              Tabs, the output they printed, your notes and your secret references are all still
-              there after a restart.
-            </p>
-
-            <div class="cta-row">
-              <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
-                ><span data-version>Download v0.3.0</span></a
-              >
-              <a class="cta cta--quiet" href="https://github.com/shady2k/nocx">Source on GitHub</a>
-            </div>
-
-            <p class="spec">
-              macOS universal <span class="dim">·</span> Linux x86_64 AppImage, glibc 2.35+<br />
-              MIT <span class="dim">·</span> <b data-version>v0.3.0</b>, released
-              <span data-released>2026-08-28</span> <span class="dim">·</span> early release, no
-              formal support
-            </p>
-
-            <p class="warn">
-              The macOS build is ad-hoc signed and not notarized — there is no Apple Developer ID —
-              so the first launch needs one Terminal command. It is in
-              <a href="#install">Install</a>, in full, before you download anything.
-            </p>
+    <div class="wrap">
+      <header class="nav">
+        <a class="brand" href="#" aria-label="nocx"
+          ><span class="brand-symbol" aria-hidden="true">›_</span>nocx</a
+        >
+        <nav class="navlinks" aria-label="Main navigation">
+          <a href="#features">Features</a><a href="#privacy">Privacy</a
+          ><a href="#install">Install</a>
+        </nav>
+        <div class="nav-right">
+          <a class="lang" href="./ru/" aria-label="Русский">EN / RU</a
+          ><a class="nav-download" href="#install">Download<span class="arrow">↓</span></a>
+        </div>
+      </header>
+      <main>
+        <section class="hero">
+          <div class="hero-top">
+            <p class="eyebrow"><span class="dot"></span>Local-first terminal · macOS + Linux</p>
+            <a class="release" href="https://github.com/shady2k/nocx/releases/latest"
+              >v0.6.0<span>MIT · 0.6 ↗</span></a
+            >
           </div>
-
-          <div>
-            <div class="transcript">
-              <div class="transcript__kind">
-                <span>Shell transcript</span>
-                <span>exit 0</span>
+          <div class="hero-grid">
+            <h1>Your context.<br /><span>Right where it belongs.</span></h1>
+            <div>
+              <p class="hero-desc">
+                A terminal that keeps your working context. Tabs, command output, notes and secret
+                references stay with you after a restart. In 0.6, nocx paints backend cells and runs
+                coordinator/worker orchestration in nocx panes without herdr.
+              </p>
+              <div class="hero-actions">
+                <a class="button" href="#install">Try nocx<span>↓</span></a
+                ><a class="textlink" href="https://github.com/shady2k/nocx"
+                  >Source code<span class="arrow">↗</span></a
+                >
               </div>
-              <pre
-                class="transcript__body"
-              ><span class="cwd">nocx</span> <span class="dim">main</span>
-<span class="cwd">❯</span> <b>git log --oneline -3</b>
-8422d6f8 Merge pull request #115 from shady2k/fix/resize-vertical-oscillation
-165b2f51 chore(beads): close nocx-uus3o
-b6f066f4 Merge remote-tracking branch 'origin/main' into pr-115
-
-<span class="cwd">❯</span> <b>go test ./internal/session/ ./internal/settings/</b>
-<span class="ok">ok</span>    github.com/shady2k/nocx/internal/session   0.155s
-<span class="ok">ok</span>    github.com/shady2k/nocx/internal/settings  0.006s
-
-<span class="cwd">❯</span> <span class="caret"></span></pre>
-            </div>
-            <p class="transcript__note">
-              Real output, captured from this repository — text on this page, not a screenshot of
-              the app. Run the two commands yourself and you get the same thing.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <section class="wrap" id="resume">
-        <p class="eyebrow">01 — Restore</p>
-        <h2>Close it. Open it. Keep working.</h2>
-        <p class="lede">
-          A restart used to cost you everything on screen. Here is exactly what survives one, and
-          the one thing that does not.
-        </p>
-
-        <div class="states">
-          <div class="states__head">
-            <span>What</span><span>Before you close</span><span></span><span>After you open</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Your tabs</span><span>open</span><span class="to">→</span
-            ><span class="after">restored</span>
-          </div>
-          <div class="states__row">
-            <span class="what">The output they printed</span><span>on screen</span
-            ><span class="to">→</span><span class="after">still readable</span>
-          </div>
-          <div class="states__row">
-            <span class="what">The tab you were on</span><span>in front</span
-            ><span class="to">→</span><span class="after">where you land</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Window size, sidebar width, open panel</span
-            ><span>as you left them</span><span class="to">→</span
-            ><span class="after">as you left them</span>
-          </div>
-          <div class="states__row states__row--not">
-            <span class="what">A program that was mid-run</span><span>running</span
-            ><span class="to">→</span><span class="after">not resumed</span>
-          </div>
-        </div>
-
-        <p class="transcript__note">
-          The last row is the honest one: what a program printed comes back, the program itself does
-          not. Prefer a clean start? One switch in Settings turns the whole thing off.
-        </p>
-      </section>
-
-      <section class="wrap" id="workspace">
-        <p class="eyebrow">02 — Workspace</p>
-        <h2>Five panels, about the machine your tab is on</h2>
-        <p class="lede">
-          Tabs group into named, coloured workspaces. The sidebar follows whichever tab is in front,
-          so the context on the left is the context you are typing into.
-        </p>
-
-        <dl class="matrix">
-          <div class="matrix__row">
-            <dt>FILES</dt>
-            <dd>
-              the directory the tab is in, and it follows — <code>cd</code>
-              somewhere and the tree moves, with no click and no tab switch
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>GIT</dt>
-            <dd>
-              changed files with line counts · stage · unstage · commit · log — and it refuses what
-              git refuses, visibly
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>PORTS</dt>
-            <dd>what something in the tab is listening on, and the tunnels you forwarded</dd>
-          </div>
-          <div class="matrix__row">
-            <dt>OPERATIONS</dt>
-            <dd>
-              files going to and from the machine that tab is on — drop one on the terminal, or use
-              the Files tree's menu · each transfer cancellable on its own · aggregate progress
-              stays on the activity bar with the sidebar collapsed
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>NOTES</dt>
-            <dd>
-              opens as a tab · saves as you pause · found later by any word inside it, not only its
-              title
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>HISTORY</dt>
-            <dd>
-              encrypted on disk · survives a restart · bounded by retention in days, a disk ceiling
-              and a per-command output cap
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section class="wrap" id="secrets">
-        <p class="eyebrow">03 — Secrets</p>
-        <h2>A reference where the key used to be</h2>
-        <p class="lede">
-          Run a command with a key in it and the block offers to store it. What changes is nocx's
-          own record of that command:
-        </p>
-
-        <dl class="flow">
-          <div class="flow__row">
-            <dt>you type</dt>
-            <dd>TOKEN=&lt;value&gt; ./deploy.sh</dd>
-          </div>
-          <div class="flow__step">↓ &nbsp;save to vault</div>
-          <div class="flow__row">
-            <dt>nocx's record</dt>
-            <dd>TOKEN=<span class="cwd">[vault reference]</span> ./deploy.sh</dd>
-          </div>
-          <div class="flow__row">
-            <dt>the vault</dt>
-            <dd><span class="dim">encrypted value</span></dd>
-          </div>
-          <div class="flow__step">↓ &nbsp;recall the command, unlock</div>
-          <div class="flow__row">
-            <dt>on run</dt>
-            <dd><span class="ok">reference resolved</span></dd>
-          </div>
-        </dl>
-
-        <p class="transcript__note">
-          That is a claim about nocx's record of the command, and nothing wider. Connection
-          passwords and key passphrases live in the same vault.
-        </p>
-      </section>
-
-      <section class="wrap" id="ask">
-        <p class="eyebrow">04 — Ask</p>
-        <h2>It acts in the scrollback, and every step is a row you can read</h2>
-        <p class="lede">
-          A switch beside the prompt sends the line to the assistant instead of the shell. A turn
-          arrives as one entry with everything under it in the order it happened: the prose it
-          wrote, the tools it called, the commands it ran. Scroll back through it later and you are
-          reading what took place, not a summary of it. Restart, and it comes back off disk the same
-          way.
-        </p>
-
-        <div class="cols">
-          <div>
-            <h3>You mark</h3>
-            <p>
-              Nothing attaches itself. A selection offers to be marked; so does one item in the
-              block menu. What is marked is a count on one chip you can open, dismiss from, and
-              scroll to. The question names those blocks and inlines none of their text.
-            </p>
-          </div>
-          <div>
-            <h3>You approve</h3>
-            <p>
-              A proposal to run something reads as a sentence — the command verbatim, the machine it
-              would land on, the tab it would land in. Your answer has a width: once, this session,
-              or always, and each control says what it covers next to itself.
-            </p>
-          </div>
-          <div>
-            <h3>You stop</h3>
-            <p>
-              Stop is on the live turn, where a command's Stop already is. The prose that arrived
-              stays, the turn is marked stopped by you, and the next question works.
-            </p>
-          </div>
-        </div>
-
-        <p class="lede" style="margin-top: 1.6rem">
-          While a command is running, ⌘/Ctrl+Enter opens the question box over it — including over a
-          full-screen program that owns the whole grid. The screen holds one frame while the box is
-          open and the program is never told: no resize, no signal, and the frame the assistant
-          reads is the frame you are looking at. Escape gives every key back.
-        </p>
-
-        <p class="warn">
-          nocx ships an integration, not a model — you configure the endpoint, and retention is your
-          provider's. A standing yes is saved over the exact command you were shown, never over a
-          class of them, and a rule can never be broader than the window that offered it. Settings
-          shows the instructions nocx gives the assistant, unresolved, and a finished turn can show
-          what was sent and what came back, verbatim. Over plain http nocx reaches loopback and
-          private addresses only, checking the address it actually resolved and connected to on
-          every request and every redirect; credentials are dropped on any change of scheme, host or
-          port.
-        </p>
-      </section>
-
-      <section class="wrap" id="api">
-        <p class="eyebrow">05 — API</p>
-        <h2>An API client whose collections are files in a folder you own</h2>
-        <p class="lede">
-          Open a Postman export — a <code>.json</code> or a whole <code>.zip</code> — and it becomes
-          ordinary JSON files, one per request. Edit in a form, press Send, read the response. Two
-          people editing two requests conflict in two files. No account, no cloud, nothing to sign
-          into.
-        </p>
-
-        <div class="cols">
-          <div>
-            <h3>Where it goes</h3>
-            <p>
-              A request leaves this machine, or leaves from inside an SSH connection you already
-              have open. An environment carries both the address and the route to it, so a
-              production request cannot go around its bastion by the two drifting apart.
-            </p>
-          </div>
-          <div>
-            <h3>What it resolves</h3>
-            <p>
-              Variables at three levels — request, folder, environment — edited where you are
-              standing. A request's Variables tab shows the whole scope it will send under, and says
-              which level answered each name.
-            </p>
-          </div>
-          <div>
-            <h3>What the file holds</h3>
-            <p>
-              A credential goes in any field — a header, the URL, the body, Auth — through a lock on
-              the field itself. The file keeps an opaque handle: not the value, and not the name you
-              chose for it.
-            </p>
-          </div>
-        </div>
-
-        <p class="warn">
-          So a collection you accepted from a pull request cannot reach the password behind an SSH
-          profile, and importing somebody else's export never mints a secret out of what it happened
-          to carry. Responses are read up to 2 MiB; bytes matching a stored secret are removed
-          before the response reaches the window, and a badge says which one was there.
-        </p>
-      </section>
-
-      <section class="wrap" id="edit">
-        <p class="eyebrow">06 — The prompt</p>
-        <h2>The command line is an editor</h2>
-        <p class="lede">
-          Built on CodeMirror 6: shell syntax highlighted as you type, commands and paths completed
-          on Tab, the top candidate offered as ghost text.
-        </p>
-
-        <div class="cols cols--two">
-          <div>
-            <h3>Completion</h3>
-            <ul>
-              <li>Tab completes commands and paths</li>
-              <li>directories complete with a trailing slash</li>
-              <li>Tab again walks into them</li>
-              <li>Right accepts the ghost text</li>
-              <li>nothing matches → the panel says so</li>
-            </ul>
-          </div>
-          <div>
-            <h3>Snippets</h3>
-            <ul>
-              <li>save a phrase once, fire it anywhere</li>
-              <li>reaches a program mid-read on stdin</li>
-              <li>
-                multi-line refused without bracketed paste, rather than pasted line by line into
-                something that cannot take it
-              </li>
-            </ul>
-          </div>
-        </div>
-      </section>
-
-      <section class="wrap" id="boundaries">
-        <p class="eyebrow">07 — Boundaries</p>
-        <h2>What it takes in, and what it never builds around you</h2>
-
-        <div class="cols cols--two">
-          <div>
-            <h3>Imports your hosts</h3>
-            <ul>
-              <li>~/.ssh/config</li>
-              <li>a Tabby export</li>
-              <li>passwords and key passphrases → the vault</li>
-            </ul>
-            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
-              A connection references a secret rather than carrying one.
-            </p>
-          </div>
-          <div>
-            <h3>Not part of nocx</h3>
-            <ul>
-              <li>an account — nothing to sign up for</li>
-              <li>a cloud service of its own</li>
-              <li>product telemetry</li>
-              <li>cloud sync</li>
-            </ul>
-            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
-              The network it touches is the network you point it at: your hosts, the assistant
-              endpoint you configured, and a check for its own updates. There is no analytics on
-              this page either — GitHub keeps ordinary server logs for it and for downloads, which
-              is theirs.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <div class="zone">
-        <section class="wrap" id="install">
-          <p class="eyebrow">Install — early release</p>
-          <h2>What will happen when you open it</h2>
-
-          <div class="cols cols--two">
-            <div>
-              <h3>macOS · universal .dmg</h3>
-              <p style="margin-bottom: 1rem">
-                Open the <code>.dmg</code>, drag nocx into Applications. There is no Apple Developer
-                ID, so the build is ad-hoc signed rather than signed by an identity Apple can
-                attest, and it is not notarized — macOS quarantines it on download. Clear that once:
-              </p>
-              <pre
-                class="cmd"
-              ><code>xattr -dr com.apple.quarantine /Applications/nocx.app</code></pre>
-              <p>
-                Then open it normally; later in-app updates do not re-quarantine it. The reasoning
-                is in
-                <a
-                  href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
-                  >ADR-0003</a
-                >.
-              </p>
-            </div>
-            <div>
-              <h3>Linux · x86_64 AppImage</h3>
-              <pre class="cmd"><code>chmod +x nocx-*-linux-amd64.AppImage
-./nocx-*-linux-amd64.AppImage</code></pre>
-              <p>
-                It bundles its own GTK 3 and WebKitGTK, and links against glibc 2.35 — the floor set
-                by building on Ubuntu 22.04. That covers Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL
-                9+ and Arch. It is not "runs everywhere": if it will not start and
-                <code>ldd --version</code> reports a glibc below 2.35, your distribution is under
-                the floor.
-              </p>
+              <p class="platform">macOS universal · Linux x86_64 · MIT</p>
             </div>
           </div>
-
-          <p class="warn">
-            Updates: nocx verifies its update manifest with an embedded Ed25519 public key. That
-            protects the integrity of its own update channel — it is not an Apple attestation, and
-            the app is neither Developer ID signed nor notarized. Recovery commands are in the
-            <a href="https://github.com/shady2k/nocx#rollback-procedures">README</a>.
-          </p>
-        </section>
-
-        <section class="wrap" id="built">
-          <p class="eyebrow">Built with</p>
-          <dl class="passport">
-            <div>
-              <dt>Backend</dt>
-              <dd>Go — PTY, SSH, session, transport, settings</dd>
-            </div>
-            <div>
-              <dt>Terminal</dt>
-              <dd>xterm.js on WebGL</dd>
-            </div>
-            <div>
-              <dt>Prompt</dt>
-              <dd>CodeMirror 6</dd>
-            </div>
-            <div>
-              <dt>UI</dt>
-              <dd>SolidJS</dd>
-            </div>
-            <div>
-              <dt>Shell</dt>
-              <dd>Wails v3</dd>
-            </div>
-            <div>
-              <dt>Transport</dt>
-              <dd>one WebSocket — binary data plane, JSON-RPC 2.0 control plane</dd>
-            </div>
-          </dl>
-
-          <div class="cta-row" style="margin-top: 2.5rem">
-            <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
-              ><span data-version>Download v0.3.0</span></a
+          <figure class="real-product">
+            <div
+              class="model-scroll"
+              tabindex="0"
+              aria-label="nocx model. Scroll horizontally on narrow screens"
             >
-            <a
-              class="cta cta--quiet"
-              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
-              >Read what changed</a
+              <div class="nocx-model">
+                <div class="model-tabs">
+                  <div class="model-system">
+                    <i></i><i></i><i></i
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                      >
+                        <path d="m3 8 9-5 9 5-9 5zM3 12l9 5 9-5M3 16l9 5 9-5" /></svg
+                    ></span>
+                  </div>
+                  <button class="model-tab selected" data-demo-tab="0">
+                    <span>1</span> vm-demo: nocx <b>×</b></button
+                  ><button class="model-tab" data-demo-tab="1">
+                    <span>2</span> /workspace/demo</button
+                  ><button class="model-tab" data-demo-tab="2">
+                    <span>3</span> <i class="amber-dot"></i> demo-host</button
+                  ><span class="model-new" aria-hidden="true">＋ &nbsp;⌄</span>
+                </div>
+                <div class="model-context">
+                  <span id="model-context-name">vm-demo: nocx &nbsp; ~</span
+                  ><span
+                    >▦ &nbsp; Keyboard → <span id="model-keyboard-name">vm-demo: nocx</span></span
+                  >
+                </div>
+                <div class="model-body">
+                  <div class="model-tui">
+                    <aside class="model-spaces">
+                      <div class="model-side-title">spaces</div>
+                      <div class="space-group">
+                        <div class="space-selected">
+                          <span class="status-ring"></span><strong>demo</strong
+                          ><span class="chevron">▾</span>
+                          <div class="branch">main <span>↓3</span></div>
+                        </div>
+                        <div class="space-tree">
+                          ├ · feature-tabs<br />├ · session-restore<br />└
+                          <span class="amber-dot"></span> release-notes
+                        </div>
+                      </div>
+                      <div class="space-group">
+                        <div>
+                          <span class="tree-dot">·</span> documentation
+                          <span class="chevron">▾</span>
+                        </div>
+                        <div class="space-branch">main</div>
+                        <div class="space-tree">└ · getting-started</div>
+                      </div>
+                      <div class="space-group">
+                        <div><span class="tree-dot">·</span> examples</div>
+                        <div class="space-branch">main</div>
+                      </div>
+                      <div class="space-group">
+                        <div><span class="tree-dot">·</span> playground</div>
+                        <div class="space-branch">feature/api</div>
+                      </div>
+                      <div class="space-new">
+                        new <span><i></i> menu</span>
+                      </div>
+                      <div class="model-side-title agents-title">agents <span>grouped</span></div>
+                      <div class="agent-row agent-selected">
+                        <span class="status-ring"></span><strong>demo</strong
+                        ><span class="agent-secondary"> · claude</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="cyan-dot"></span><strong>documentation</strong
+                        ><span class="agent-secondary"> · 1</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="cyan-dot"></span><strong>examples</strong
+                        ><span class="agent-secondary"> · 1</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="amber-dot"></span><strong>release-notes</strong>
+                        <div>demo-agent</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="status-ring"></span><strong>review</strong>
+                        <div>demo-agent</div>
+                      </div>
+                    </aside>
+                    <div class="model-cli">
+                      <div class="cli-tabs">
+                        <span class="active">claude</span><span>2</span><span>3</span><span>4</span
+                        ><span>+</span>
+                      </div>
+                      <div class="cli-transcript" id="cli-transcript">
+                        <div class="cli-demo-tag">DEMO SESSION</div>
+                        <div class="cli-content">
+                          <p><strong>Your working context, in one window.</strong></p>
+                          <ol>
+                            <li>
+                              <strong>Tabs and connections.</strong> Your local shell and SSH
+                              sessions side by side.
+                            </li>
+                            <li>
+                              <strong>Files.</strong> The tree on the right follows the active tab’s
+                              directory.
+                            </li>
+                            <li>
+                              <strong>History.</strong> Printed output is available after a restart.
+                            </li>
+                          </ol>
+                          <p class="cli-paragraph">Demo project:</p>
+                          <div class="cli-lines">– README.md<br />– examples/<br />– docs/</div>
+                          <p class="cli-paragraph"><strong>Pick up where you left off.</strong></p>
+                          <p>Commands, notes and files stay in the context of your work.</p>
+                          <p class="cli-muted cli-paragraph">
+                            This is an interface model with example content.<br />No commands are
+                            executed here.
+                          </p>
+                        </div>
+                      </div>
+                      <div class="cli-prompt">
+                        <span>›</span><span class="cli-input-text">Continue working</span
+                        ><span class="cli-caret"></span>
+                      </div>
+                      <div class="cli-footer">
+                        <span class="cli-yellow">▸▸ demo mode</span
+                        ><span class="cli-cyan">· 3 tabs</span><span class="cli-dim">· local</span
+                        ><span class="demo-pet" aria-hidden="true">▰</span>
+                      </div>
+                    </div>
+                  </div>
+                  <aside class="model-files">
+                    <div class="files-heading">FILES <span>⟳</span></div>
+                    <label class="model-filter-label"
+                      ><span class="sr-only">Filter demo files</span
+                      ><input
+                        class="model-filter"
+                        placeholder="Filter by name..."
+                        id="demo-filter"
+                        autocomplete="off"
+                    /></label>
+                    <div class="files-tree" id="demo-files">
+                      <div class="file-tree-row">
+                        › <span class="folder-icon"></span> Applications
+                      </div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> Library</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> System</div>
+                      <div class="file-tree-row">⌄ <span class="folder-icon"></span> workspace</div>
+                      <div class="file-tree-row level-1">
+                        ⌄ <span class="folder-icon"></span> demo
+                      </div>
+                      <div class="file-tree-row level-2 selected-file">
+                        ⌄ <span class="folder-icon"></span> docs
+                      </div>
+                      <div class="file-tree-row level-3">
+                        <span class="file-icon"></span> guide.md
+                      </div>
+                      <div class="file-tree-row level-2">
+                        › <span class="folder-icon"></span> examples
+                      </div>
+                      <div class="file-tree-row level-2">
+                        › <span class="folder-icon"></span> src
+                      </div>
+                      <div class="file-tree-row level-2">
+                        <span class="file-icon"></span> README.md
+                      </div>
+                      <div class="file-tree-row level-2">
+                        <span class="file-icon"></span> go.mod
+                      </div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> bin</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> dev</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> etc</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> home</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> tmp</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> usr</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> var</div>
+                    </div>
+                    <p class="no-files" id="no-files" hidden>No matches</p>
+                  </aside>
+                  <aside class="model-rail" aria-hidden="true">
+                    <span class="active"
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M3 7h6l2 2h10v11H3zM3 7V4h6l2 3" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path
+                          d="M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-6 6v4m0-4a6 6 0 0 1-6-6z"
+                        /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <circle cx="6" cy="5" r="2" />
+                        <circle cx="18" cy="6" r="2" />
+                        <circle cx="6" cy="19" r="2" />
+                        <path d="M6 7v10m0-3c8 0 12-2 12-6" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M4 3h16v14h-6l-4 4v-4H4z" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M4 18h16l-2-4V9a6 6 0 0 0-12 0v5zM10 21h4" /></svg></span
+                    ><span class="rail-bottom"
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M3 7h17m-4-4 4 4-4 4M21 17H4m4-4-4 4 4 4" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <circle cx="12" cy="12" r="4" />
+                        <path
+                          d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 2 3h4l2-3 3-1 2-3-2-2 1-3-3-2-2-3z"
+                        /></svg
+                    ></span>
+                  </aside>
+                </div>
+              </div>
+            </div>
+            <figcaption class="product-caption">
+              <span>A static HTML model of nocx. Demo data; no commands are executed.</span
+              ><span>Try the tabs and the file filter.</span>
+            </figcaption>
+          </figure>
+          <div class="proofbar">
+            <span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >No account</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >No product telemetry</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Open source</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Your data stays local</span
             >
           </div>
         </section>
+        <section class="section" id="features">
+          <p class="eyebrow">01 / Close at hand</p>
+          <div class="section-heading">
+            <h2>One tab.<br />All its context.</h2>
+            <p>
+              Local or over SSH, the sidebar follows your active tab. Files, Git, ports and
+              transfers belong to the machine you are working on.
+            </p>
+          </div>
+          <div class="explorer">
+            <div class="features">
+              <div class="feature-buttons" aria-label="Features">
+                <button
+                  class="feature-button"
+                  id="feature-0"
+                  aria-selected="true"
+                  data-feature-static="0"
+                >
+                  <span class="n">01</span><strong>Files</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-1"
+                  aria-selected="false"
+                  data-feature-static="1"
+                >
+                  <span class="n">02</span><strong>Git</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-2"
+                  aria-selected="false"
+                  data-feature-static="2"
+                >
+                  <span class="n">03</span><strong>Ports</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-3"
+                  aria-selected="false"
+                  data-feature-static="3"
+                >
+                  <span class="n">04</span><strong>Transfers</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-4"
+                  aria-selected="false"
+                  data-feature-static="4"
+                >
+                  <span class="n">05</span><strong>Notes</strong
+                  ><span class="feature-arrow">↗</span>
+                </button>
+              </div>
+              <p class="feature-copy" id="feature-copy">
+                Run cd and the file tree moves with you. No extra clicks or switching windows to
+                find the directory you are already in.
+              </p>
+            </div>
+            <div
+              class="feature-visual"
+              id="feature-panel"
+              role="tabpanel"
+              aria-labelledby="feature-0"
+            ></div>
+          </div>
+        </section>
+        <section class="section restore">
+          <div>
+            <p class="eyebrow">02 / Pick up where you left off</p>
+            <h2>Close it. Open it.<br />Keep working.</h2>
+            <p class="section-copy">
+              Your day should not start with rebuilding your windows. nocx restores your tabs, their
+              printed output and your interface layout.
+            </p>
+          </div>
+          <div>
+            <div class="restore-list">
+              <div class="restore-row"><span>Open tabs</span><span>✓ &nbsp; restored</span></div>
+              <div class="restore-row">
+                <span>Command output</span><span>✓ &nbsp; readable again</span>
+              </div>
+              <div class="restore-row"><span>Active tab</span><span>✓ &nbsp; same place</span></div>
+              <div class="restore-row">
+                <span>Window and sidebar</span><span>✓ &nbsp; as you left them</span>
+              </div>
+              <div class="restore-row excluded">
+                <span>Running processes</span><span>— &nbsp; not resumed</span>
+              </div>
+            </div>
+            <p class="aside-note">
+              The output comes back, not the running program. You can disable restoration in
+              Settings.
+            </p>
+          </div>
+        </section>
+      </main>
+    </div>
+    <section class="privacy" id="privacy">
+      <div class="wrap">
+        <p class="eyebrow">03 / Local by design</p>
+        <div class="privacy-grid">
+          <div>
+            <h2>Your secret<br />stays a secret.</h2>
+            <p>
+              Save a key to the encrypted vault. The command in nocx keeps a reference that resolves
+              when you recall it and unlock the vault.
+            </p>
+          </div>
+          <div class="vault">
+            <div class="vault-label">You typed</div>
+            <div class="vault-code">TOKEN=&lt;value&gt; ./deploy.sh</div>
+            <div class="vault-divider">↓</div>
+            <div class="vault-label">nocx keeps</div>
+            <div class="vault-code">TOKEN=<span>[vault reference]</span> ./deploy.sh</div>
+            <div class="vault-foot">
+              Connection passwords and key passphrases live in the same vault.
+            </div>
+          </div>
+        </div>
+        <div class="privacy-bottom">
+          <span>↳ &nbsp; No cloud service of its own</span><span>↳ &nbsp; No cloud sync</span
+          ><span>↳ &nbsp; Encrypted history</span>
+        </div>
       </div>
-
-      <footer class="wrap">
+    </section>
+    <div class="wrap">
+      <section class="section">
+        <p class="eyebrow">04 / Fewer context switches</p>
+        <div class="tools-grid">
+          <article class="tool">
+            <h2>An assistant where<br />the work happens.</h2>
+            <p>
+              Ask right in the scrollback. Text, tools and commands stay together in one entry, with
+              every step readable after a restart.
+            </p>
+            <div class="tool-graphic">
+              <div class="small">UNDER YOUR CONTROL</div>
+              You select context → approve → stop<br /><span class="approval"
+                >Exact command · machine · tab</span
+              >
+            </div>
+            <p class="tool-note">
+              You configure the model endpoint. Data retention is your provider’s policy.
+            </p>
+          </article>
+          <article class="tool">
+            <h2>An API client.<br />Your ordinary files.</h2>
+            <p>
+              Import a Postman collection. Each request becomes a separate JSON file in your own
+              folder. Send locally or through an open SSH connection.
+            </p>
+            <div class="tool-graphic">
+              <div class="small">COLLECTION /</div>
+              ├── health.json<br />├── users.json<br />└── environments/
+            </div>
+            <p class="tool-note">
+              Request, folder and environment variables. Secrets in fields are stored as opaque
+              references.
+            </p>
+          </article>
+        </div>
+        <div class="prompt-strip">
+          <div>
+            <h3>A prompt that is an editor.</h3>
+            <p>
+              CodeMirror 6, syntax highlighting, command and path completion, and saved snippets.
+            </p>
+          </div>
+          <div class="prompt-demo">
+            ❯ &nbsp; cd internal/<span class="ghost">session/</span><span class="key">Tab ↹</span>
+          </div>
+        </div>
+      </section>
+      <section class="install" id="install">
+        <div class="install-grid">
+          <div>
+            <p class="eyebrow">05 / Get started</p>
+            <h2>Your next<br />terminal.</h2>
+            <p class="section-copy">
+              No sign-up. Download nocx for your system and keep working with your existing hosts.
+            </p>
+            <p class="version">v0.6.0 · MIT</p>
+            <p class="aside-note">Early release. No formal support.</p>
+          </div>
+          <div class="installer">
+            <div class="os-switch" role="tablist" aria-label="Operating system">
+              <a href="#install-panel" class="os-tab">macOS</a
+              ><a href="#linux-install-panel" class="os-tab">Linux</a>
+            </div>
+            <div id="install-panel" class="install-content">
+              <h3>macOS · Homebrew</h3>
+              <p>
+                Install the cask from the third-party tap. It clears macOS quarantine after
+                installation. Read the tap README before installing.
+              </p>
+              <div class="command-copy"><code>brew install --cask shady2k/nocx/nocx</code></div>
+              <p>Direct GitHub downloads still need the manual quarantine step in the README.</p>
+              <a class="button" href="https://github.com/shady2k/nocx/releases/latest"
+                >Open release<span>↗</span></a
+              >
+            </div>
+            <div id="linux-install-panel" class="install-content">
+              <h3>Linux · x86_64</h3>
+              <p>
+                Install with the nocx installer, which supports x86_64 Linux. It refuses macOS and
+                unsupported architectures; macOS users should use Homebrew.
+              </p>
+              <div class="command-copy">
+                <code>curl -fsSL https://nocx.dev/install.sh | sh</code>
+              </div>
+              <p>Or install manually from the AppImage:</p>
+              <div class="command-copy">
+                <code>chmod +x nocx-*-linux-amd64.AppImage<br />./nocx-*-linux-amd64.AppImage</code>
+              </div>
+              <p>x86_64, glibc 2.35+. Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+ and Arch.</p>
+              <a class="button" href="https://github.com/shady2k/nocx/releases/latest"
+                >Open release<span>↗</span></a
+              >
+            </div>
+          </div>
+        </div>
+        <p class="install-note">
+          Updates use an Ed25519-signed manifest. This checks integrity; it is not Apple
+          notarization.
+          <a
+            href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
+            >Why this approach ↗</a
+          >
+          &nbsp;
+          <a href="https://github.com/shady2k/nocx#rollback-procedures">Rollback instructions ↗</a>
+        </p>
+      </section>
+      <section class="faq">
+        <h3>Before your first launch</h3>
+        <div>
+          <details>
+            <summary>Can I bring my SSH connections?</summary>
+            <p>
+              Yes. nocx imports ~/.ssh/config and Tabby exports. Passwords and key passphrases stay
+              in the vault; a connection references the secret.
+            </p>
+          </details>
+          <details>
+            <summary>What leaves my machine?</summary>
+            <p>
+              nocx connects to your hosts, your configured assistant endpoint and its own update
+              checks. It has no cloud service of its own, product telemetry or cloud sync.
+            </p>
+          </details>
+          <details>
+            <summary>What is it built with?</summary>
+            <p>
+              Go for PTY, SSH and sessions; a backend-painted cell renderer for the terminal;
+              CodeMirror 6 for input; SolidJS for the interface; Wails v3 for the desktop shell.
+            </p>
+          </details>
+          <details>
+            <summary>Does the API client have limits?</summary>
+            <p>
+              Responses are read up to 2 MiB. Bytes matching a stored secret are removed before
+              display. A collection cannot access the password behind an SSH profile.
+            </p>
+          </details>
+        </div>
+      </section>
+      <footer>
+        <div class="footer">
+          <div class="footer-brand">
+            <a class="brand" href="#" aria-label="nocx"
+              ><span class="brand-symbol" aria-hidden="true">›_</span>nocx</a
+            ><small>Local by design.</small>
+          </div>
+          <nav class="footer-links" aria-label="Project links">
+            <a href="https://github.com/shady2k/nocx">GitHub ↗</a
+            ><a href="https://github.com/shady2k/nocx/releases/latest">Releases ↗</a
+            ><a href="https://nocx.dev/?lang=en">Current site ↗</a>
+          </nav>
+        </div>
         <p>
-          nocx is MIT licensed ·
-          <a href="https://github.com/shady2k/nocx">Source</a> ·
-          <a href="https://github.com/shady2k/nocx/releases">Releases</a> ·
-          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
-            >v0.3.0 notes</a
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.6.0.md"
+            >Read the v0.6.0 release notes</a
           >
         </p>
-        <p>English · <a href="./ru/?lang=ru">Русский</a></p>
       </footer>
-    </main>
+    </div>
   </body>
 </html>

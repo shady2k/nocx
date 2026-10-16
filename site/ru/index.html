@@ -3,487 +3,661 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>nocx — локальный терминал, который помнит рабочий контекст</title>
+    <meta name="theme-color" content="#f4f5ef" />
     <meta
       name="description"
-      content="Локальный терминал, который помнит рабочий контекст: вкладки, их вывод, заметки и ссылки на секреты переживают перезапуск. macOS и Linux, без аккаунта, без собственного облака, без телеметрии."
+      content="Локальный терминал, который сохраняет вкладки, вывод, заметки и ссылки на секреты после перезапуска."
     />
-    <link rel="icon" href="../assets/icon-96.png" />
-    <link rel="apple-touch-icon" href="../assets/icon-256.png" />
+    <title>nocx — Ваш контекст. На своём месте.</title>
+    <link rel="icon" href="../assets/nocx-redesign-icon.png" />
+    <link rel="stylesheet" href="../assets/redesign-fonts/fonts.css" />
     <link rel="stylesheet" href="../style.css" />
-    <link rel="alternate" hreflang="en" href="https://shady2k.github.io/nocx/" />
-    <link rel="alternate" hreflang="ru" href="https://shady2k.github.io/nocx/ru/" />
-    <link rel="alternate" hreflang="x-default" href="https://shady2k.github.io/nocx/" />
-    <!-- Эта страница ничего не перенаправляет. Маршрутизация по локали живёт
-         только на английской: две страницы, каждая со своим редиректом, рано
-         или поздно перебрасывают посетителя между собой. -->
+    <script src="../app.js" defer></script>
   </head>
-
   <body>
-    <main>
-      <div class="wrap hero">
-        <div class="hero__grid">
-          <div>
-            <p class="mark">
-              <img src="../assets/icon-96.png" alt="" />
-              <span>nocx</span>
-            </p>
-
-            <h1>Терминал, который помнит рабочий контекст</h1>
-
-            <p class="lede">
-              Вкладки, напечатанный ими вывод, заметки и ссылки на секреты — всё на месте после
-              перезапуска.
-            </p>
-
-            <div class="cta-row">
-              <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
-                ><span data-version>Скачать v0.3.0</span></a
-              >
-              <a class="cta cta--quiet" href="https://github.com/shady2k/nocx"
-                >Исходники на GitHub</a
-              >
-            </div>
-
-            <p class="spec">
-              macOS universal <span class="dim">·</span> Linux x86_64 AppImage, glibc 2.35+<br />
-              MIT <span class="dim">·</span> <b data-version>v0.3.0</b>, выпущен
-              <span data-released>2026-08-28</span> <span class="dim">·</span> ранний релиз, без
-              формальной поддержки
-            </p>
-
-            <p class="warn">
-              Сборка для macOS подписана ad-hoc и не нотаризована — Apple Developer ID у проекта
-              нет, — поэтому первый запуск требует одной команды в терминале. Она целиком в разделе
-              <a href="#install">Установка</a>, до того как вы что-либо скачаете.
-            </p>
+    <div class="wrap">
+      <header class="nav">
+        <a class="brand" href="#" aria-label="nocx"
+          ><span class="brand-symbol" aria-hidden="true">›_</span>nocx</a
+        >
+        <nav class="navlinks" aria-label="Основная навигация">
+          <a href="#features">Возможности</a><a href="#privacy">Приватность</a
+          ><a href="#install">Установка</a>
+        </nav>
+        <div class="nav-right">
+          <a class="lang" href="../?lang=en" aria-label="English">RU / EN</a
+          ><a class="nav-download" href="#install">Скачать<span class="arrow">↓</span></a>
+        </div>
+      </header>
+      <main>
+        <section class="hero">
+          <div class="hero-top">
+            <p class="eyebrow"><span class="dot"></span>Локальный терминал · macOS + Linux</p>
+            <a class="release" href="https://github.com/shady2k/nocx/releases/latest"
+              >v0.6.0<span>MIT · 0.6 ↗</span></a
+            >
           </div>
-
-          <div>
-            <div class="transcript">
-              <div class="transcript__kind">
-                <span>Транскрипт оболочки</span>
-                <span>exit 0</span>
+          <div class="hero-grid">
+            <h1>Ваш контекст.<br /><span>На своём месте.</span></h1>
+            <div>
+              <p class="hero-desc">
+                Терминал, который помнит рабочий контекст. Вкладки, вывод команд, заметки и ссылки
+                на секреты остаются с вами после перезапуска. В версии 0.6 nocx рисует ячейки
+                бэкенда и управляет координатором и воркерами во вкладках без herdr.
+              </p>
+              <div class="hero-actions">
+                <a class="button" href="#install">Попробовать nocx<span>↓</span></a
+                ><a class="textlink" href="https://github.com/shady2k/nocx"
+                  >Исходный код<span class="arrow">↗</span></a
+                >
               </div>
-              <pre
-                class="transcript__body"
-              ><span class="cwd">nocx</span> <span class="dim">main</span>
-<span class="cwd">❯</span> <b>git log --oneline -3</b>
-8422d6f8 Merge pull request #115 from shady2k/fix/resize-vertical-oscillation
-165b2f51 chore(beads): close nocx-uus3o
-b6f066f4 Merge remote-tracking branch 'origin/main' into pr-115
-
-<span class="cwd">❯</span> <b>go test ./internal/session/ ./internal/settings/</b>
-<span class="ok">ok</span>    github.com/shady2k/nocx/internal/session   0.155s
-<span class="ok">ok</span>    github.com/shady2k/nocx/internal/settings  0.006s
-
-<span class="cwd">❯</span> <span class="caret"></span></pre>
-            </div>
-            <p class="transcript__note">
-              Настоящий вывод, снятый из этого репозитория, — текст на странице, а не скриншот
-              приложения. Он на английском, потому что таков настоящий вывод: перевести его значило
-              бы его подделать. Запустите обе команды сами и получите то же самое.
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <section class="wrap" id="resume">
-        <p class="eyebrow">01 — Восстановление</p>
-        <h2>Закрыл. Открыл. Работаешь дальше.</h2>
-        <p class="lede">
-          Раньше перезапуск стоил всего, что было на экране. Вот что именно его переживает — и
-          единственное, что нет.
-        </p>
-
-        <div class="states">
-          <div class="states__head">
-            <span>Что</span><span>До закрытия</span><span></span><span>После открытия</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Ваши вкладки</span><span>открыты</span><span class="to">→</span
-            ><span class="after">восстановлены</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Напечатанный ими вывод</span><span>на экране</span
-            ><span class="to">→</span><span class="after">по-прежнему читается</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Вкладка, на которой вы были</span><span>впереди</span
-            ><span class="to">→</span><span class="after">на неё и попадаете</span>
-          </div>
-          <div class="states__row">
-            <span class="what">Размер окна, ширина сайдбара, открытая панель</span
-            ><span>как оставили</span><span class="to">→</span
-            ><span class="after">как оставили</span>
-          </div>
-          <div class="states__row states__row--not">
-            <span class="what">Программа, работавшая в этот момент</span><span>выполняется</span
-            ><span class="to">→</span><span class="after">не возобновляется</span>
-          </div>
-        </div>
-
-        <p class="transcript__note">
-          Последняя строка — самая честная: возвращается то, что программа напечатала, а не сама
-          программа. Хотите начинать с чистого листа? Один переключатель в настройках выключает всё
-          это.
-        </p>
-      </section>
-
-      <section class="wrap" id="workspace">
-        <p class="eyebrow">02 — Рабочее пространство</p>
-        <h2>Пять панелей — о машине, на которой ваша вкладка</h2>
-        <p class="lede">
-          Вкладки группируются в именованные цветные воркспейсы. Сайдбар следует за активной
-          вкладкой, так что контекст слева — это тот же контекст, в который вы печатаете.
-        </p>
-
-        <dl class="matrix">
-          <div class="matrix__row">
-            <dt>FILES</dt>
-            <dd>
-              каталог, в котором вкладка, и он следует за ней — сделайте
-              <code>cd</code>, и дерево переедет само, без клика и без переключения вкладок
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>GIT</dt>
-            <dd>
-              изменённые файлы со счётчиками строк · stage · unstage · коммит · лог — и отказывает
-              там же, где отказывает git, не молча
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>PORTS</dt>
-            <dd>что во вкладке слушает порт, и какие туннели вы пробросили</dd>
-          </div>
-          <div class="matrix__row">
-            <dt>OPERATIONS</dt>
-            <dd>
-              файлы, идущие на машину этой вкладки и обратно — бросьте файл на терминал или возьмите
-              пункт меню в дереве Files · каждую передачу можно отменить отдельно · суммарный
-              прогресс остаётся на панели активности со свёрнутым сайдбаром
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>NOTES</dt>
-            <dd>
-              открывается вкладкой · сохраняется, пока вы думаете · находится потом по любому слову
-              внутри, а не только по заголовку
-            </dd>
-          </div>
-          <div class="matrix__row">
-            <dt>HISTORY</dt>
-            <dd>
-              зашифрована на диске · переживает перезапуск · ограничена сроком хранения, потолком по
-              диску и лимитом вывода на команду
-            </dd>
-          </div>
-        </dl>
-      </section>
-
-      <section class="wrap" id="secrets">
-        <p class="eyebrow">03 — Секреты</p>
-        <h2>Ссылка там, где был ключ</h2>
-        <p class="lede">
-          Запустите команду с ключом внутри, и блок предложит его сохранить. Меняется при этом
-          собственная запись nocx об этой команде:
-        </p>
-
-        <dl class="flow">
-          <div class="flow__row">
-            <dt>вы набрали</dt>
-            <dd>TOKEN=&lt;значение&gt; ./deploy.sh</dd>
-          </div>
-          <div class="flow__step">↓ &nbsp;сохранить в vault</div>
-          <div class="flow__row">
-            <dt>запись nocx</dt>
-            <dd>TOKEN=<span class="cwd">[ссылка на vault]</span> ./deploy.sh</dd>
-          </div>
-          <div class="flow__row">
-            <dt>vault</dt>
-            <dd><span class="dim">зашифрованное значение</span></dd>
-          </div>
-          <div class="flow__step">↓ &nbsp;вызвать команду, разблокировать</div>
-          <div class="flow__row">
-            <dt>при запуске</dt>
-            <dd><span class="ok">ссылка разрешена</span></dd>
-          </div>
-        </dl>
-
-        <p class="transcript__note">
-          Это утверждение о записи nocx об этой команде и ни о чём шире. Пароли подключений и
-          парольные фразы ключей живут в том же хранилище.
-        </p>
-      </section>
-
-      <section class="wrap" id="ask">
-        <p class="eyebrow">04 — Вопрос</p>
-        <h2>Он действует в скроллбэке, и каждый шаг — строка, которую видно</h2>
-        <p class="lede">
-          Переключатель рядом с промптом отправляет строку ассистенту вместо оболочки. Ход приходит
-          одной записью, внутри которой всё в том порядке, в каком происходило: написанный текст,
-          вызванные инструменты, запущенные команды. Прокрутите его потом — вы читаете то, что
-          произошло, а не пересказ. После перезапуска он поднимается с диска таким же.
-        </p>
-
-        <div class="cols">
-          <div>
-            <h3>Вы отмечаете</h3>
-            <p>
-              Ничего не прикладывается само. Выделение предлагает отметить блок; то же делает один
-              пункт в меню блока. Отмеченное — это счётчик на одном чипе: его можно открыть, снять
-              отметку построчно и перейти к любому блоку. Вопрос называет эти блоки и не вставляет
-              их текст.
-            </p>
-          </div>
-          <div>
-            <h3>Вы разрешаете</h3>
-            <p>
-              Предложение что-то запустить читается предложением: команда дословно, машина, на
-              которую она пойдёт, и вкладка, в которой это случится. У ответа есть ширина — один
-              раз, эта сессия или всегда, — и каждая кнопка сама говорит, что покрывает.
-            </p>
-          </div>
-          <div>
-            <h3>Вы останавливаете</h3>
-            <p>
-              Stop стоит на живом ходе, там же, где Stop у команды. Пришедший текст остаётся, ход
-              помечается остановленным вами, следующий вопрос работает.
-            </p>
-          </div>
-        </div>
-
-        <p class="lede" style="margin-top: 1.6rem">
-          Пока команда выполняется, ⌘/Ctrl+Enter открывает окно вопроса поверх неё — в том числе
-          поверх полноэкранной программы, занявшей весь грид. Экран держит один кадр, пока окно
-          открыто, и программе об этом не сообщают: ни ресайза, ни сигнала, — а ассистент читает тот
-          самый кадр, который видите вы. Escape возвращает программе все клавиши.
-        </p>
-
-        <p class="warn">
-          nocx поставляет интеграцию, а не модель: endpoint настраиваете вы, и политика хранения —
-          вашего провайдера. Постоянное «да» сохраняется над той самой командой, которую вам
-          показали, а не над их классом, и правило не может оказаться шире окна, которое его
-          предложило. В настройках видно инструкции, которые nocx даёт ассистенту, без подстановок,
-          а завершённый ход умеет показать дословно, что было отправлено и что пришло в ответ. По
-          обычному http nocx ходит исключительно на loopback и приватные адреса, проверяя тот адрес,
-          который реально разрешил и с которым соединился, на каждом запросе и каждом редиректе;
-          учётные данные не переживают смену схемы, хоста или порта.
-        </p>
-      </section>
-
-      <section class="wrap" id="api">
-        <p class="eyebrow">05 — API</p>
-        <h2>API-клиент, у которого коллекция — файлы в вашей же папке</h2>
-        <p class="lede">
-          Откройте экспорт из Postman — <code>.json</code> или целиком <code>.zip</code> — и он
-          станет обычными JSON-файлами, по одному на запрос. Правьте в форме, нажмите Send, читайте
-          ответ. Двое, правящих два запроса, конфликтуют в двух файлах. Без аккаунта, без облака,
-          без входа куда бы то ни было.
-        </p>
-
-        <div class="cols">
-          <div>
-            <h3>Куда он идёт</h3>
-            <p>
-              Запрос уходит с этой машины — или изнутри SSH-соединения, которое у вас уже открыто.
-              Окружение несёт и адрес, и маршрут к нему, так что боевой запрос не обойдёт свой
-              бастион из-за того, что эти двое разъехались.
-            </p>
-          </div>
-          <div>
-            <h3>Что он подставляет</h3>
-            <p>
-              Переменные на трёх уровнях — запрос, папка, окружение, — и правятся там, где вы
-              стоите. Вкладка Variables показывает всю область, под которой запрос уйдёт, и говорит,
-              какой уровень ответил за каждое имя.
-            </p>
-          </div>
-          <div>
-            <h3>Что лежит в файле</h3>
-            <p>
-              Секрет кладётся в любое поле — заголовок, URL, тело, Auth — через замок на самом поле.
-              В файле остаётся непрозрачный идентификатор: ни значения, ни имени, которое вы
-              придумали.
-            </p>
-          </div>
-        </div>
-
-        <p class="warn">
-          Поэтому коллекция, принятая из чужого пул-реквеста, не дотянется до пароля за
-          SSH-профилем, а импорт чужого экспорта не заводит секрет из того, что в нём случайно
-          оказалось. Ответ читается до 2 MiB; байты, совпавшие с хранимым секретом, удаляются до
-          того, как ответ доедет до окна, а бейдж говорит, что там было.
-        </p>
-      </section>
-
-      <section class="wrap" id="edit">
-        <p class="eyebrow">06 — Строка ввода</p>
-        <h2>Командная строка — это редактор</h2>
-        <p class="lede">
-          Построена на CodeMirror 6: подсветка синтаксиса оболочки по мере набора, дополнение команд
-          и путей по Tab, лучший кандидат — призрачным текстом.
-        </p>
-
-        <div class="cols cols--two">
-          <div>
-            <h3>Дополнение</h3>
-            <ul>
-              <li>Tab дополняет команды и пути</li>
-              <li>каталоги дополняются со слэшем на конце</li>
-              <li>ещё один Tab заходит внутрь</li>
-              <li>Right принимает призрачный текст</li>
-              <li>ничего не подошло → панель так и говорит</li>
-            </ul>
-          </div>
-          <div>
-            <h3>Сниппеты</h3>
-            <ul>
-              <li>сохраните фразу один раз, отправляйте куда угодно</li>
-              <li>долетает до программы, читающей stdin прямо сейчас</li>
-              <li>
-                многострочное тело отвергается, если программа не включила bracketed paste, — вместо
-                построчной вставки в то, что этого не переживёт
-              </li>
-            </ul>
-          </div>
-        </div>
-      </section>
-
-      <section class="wrap" id="boundaries">
-        <p class="eyebrow">07 — Границы</p>
-        <h2>Что он принимает — и чего никогда не строит вокруг вас</h2>
-
-        <div class="cols cols--two">
-          <div>
-            <h3>Импортирует ваши хосты</h3>
-            <ul>
-              <li>~/.ssh/config</li>
-              <li>экспорт из Tabby</li>
-              <li>пароли и парольные фразы ключей → в vault</li>
-            </ul>
-            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
-              Подключение ссылается на секрет, а не несёт его в себе.
-            </p>
-          </div>
-          <div>
-            <h3>Не является частью nocx</h3>
-            <ul>
-              <li>аккаунт — регистрироваться негде</li>
-              <li>собственный облачный сервис</li>
-              <li>продуктовая телеметрия</li>
-              <li>облачная синхронизация</li>
-            </ul>
-            <p class="lede" style="margin: 0.9rem 0 0; font-size: 0.9375rem">
-              Сеть, которой он касается, — это сеть, на которую вы его направили: ваши хосты,
-              настроенный вами endpoint ассистента и проверка собственных обновлений. Аналитики на
-              этой странице тоже нет — GitHub ведёт для неё и для загрузок обычные серверные логи, и
-              они его.
-            </p>
-          </div>
-        </div>
-      </section>
-
-      <div class="zone">
-        <section class="wrap" id="install">
-          <p class="eyebrow">Установка — ранний релиз</p>
-          <h2>Что произойдёт, когда вы его откроете</h2>
-
-          <div class="cols cols--two">
-            <div>
-              <h3>macOS · universal .dmg</h3>
-              <p style="margin-bottom: 1rem">
-                Откройте <code>.dmg</code>, перетащите nocx в Applications. Apple Developer ID у
-                проекта нет, поэтому сборка подписана ad-hoc, а не удостоверенной Apple личностью, и
-                не нотаризована — macOS ставит её в карантин при скачивании. Снимите его один раз:
-              </p>
-              <pre
-                class="cmd"
-              ><code>xattr -dr com.apple.quarantine /Applications/nocx.app</code></pre>
-              <p>
-                Дальше открывайте как обычно; последующие обновления из приложения карантин не
-                возвращают. Обоснование — в
-                <a
-                  href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
-                  >ADR-0003</a
-                >.
-              </p>
-            </div>
-            <div>
-              <h3>Linux · x86_64 AppImage</h3>
-              <pre class="cmd"><code>chmod +x nocx-*-linux-amd64.AppImage
-./nocx-*-linux-amd64.AppImage</code></pre>
-              <p>
-                Он несёт в себе GTK 3 и WebKitGTK и линкуется с glibc 2.35 — порог задан сборкой на
-                Ubuntu 22.04. Это покрывает Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+ и Arch.
-                Это не «работает везде»: если он не стартует, а <code>ldd --version</code>
-                показывает glibc ниже 2.35, ваш дистрибутив под порогом.
-              </p>
+              <p class="platform">macOS universal · Linux x86_64 · MIT</p>
             </div>
           </div>
-
-          <p class="warn">
-            Обновления: nocx проверяет манифест обновления встроенным публичным ключом Ed25519. Это
-            защищает целостность собственного канала обновлений — но это не удостоверение Apple, и
-            сборка не подписана Developer ID и не нотаризована. Команды восстановления — в
-            <a href="https://github.com/shady2k/nocx#rollback-procedures">README</a>.
-          </p>
-        </section>
-
-        <section class="wrap" id="built">
-          <p class="eyebrow">Из чего собран</p>
-          <dl class="passport">
-            <div>
-              <dt>Бэкенд</dt>
-              <dd>Go — PTY, SSH, сессии, транспорт, настройки</dd>
-            </div>
-            <div>
-              <dt>Терминал</dt>
-              <dd>xterm.js на WebGL</dd>
-            </div>
-            <div>
-              <dt>Строка ввода</dt>
-              <dd>CodeMirror 6</dd>
-            </div>
-            <div>
-              <dt>Интерфейс</dt>
-              <dd>SolidJS</dd>
-            </div>
-            <div>
-              <dt>Оболочка</dt>
-              <dd>Wails v3</dd>
-            </div>
-            <div>
-              <dt>Транспорт</dt>
-              <dd>один WebSocket — бинарный канал данных, управляющий JSON-RPC 2.0</dd>
-            </div>
-          </dl>
-
-          <div class="cta-row" style="margin-top: 2.5rem">
-            <a class="cta" href="https://github.com/shady2k/nocx/releases/latest"
-              ><span data-version>Скачать v0.3.0</span></a
+          <figure class="real-product">
+            <div
+              class="model-scroll"
+              tabindex="0"
+              aria-label="Модель nocx. На узком экране прокручивается по горизонтали"
             >
-            <a
-              class="cta cta--quiet"
-              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
-              >Что изменилось</a
+              <div class="nocx-model">
+                <div class="model-tabs">
+                  <div class="model-system">
+                    <i></i><i></i><i></i
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                      >
+                        <path d="m3 8 9-5 9 5-9 5zM3 12l9 5 9-5M3 16l9 5 9-5" /></svg
+                    ></span>
+                  </div>
+                  <button class="model-tab selected" data-demo-tab="0">
+                    <span>1</span> vm-demo: nocx <b>×</b></button
+                  ><button class="model-tab" data-demo-tab="1">
+                    <span>2</span> /workspace/demo</button
+                  ><button class="model-tab" data-demo-tab="2">
+                    <span>3</span> <i class="amber-dot"></i> demo-host</button
+                  ><span class="model-new" aria-hidden="true">＋ &nbsp;⌄</span>
+                </div>
+                <div class="model-context">
+                  <span id="model-context-name">vm-demo: nocx &nbsp; ~</span
+                  ><span
+                    >▦ &nbsp; Keyboard → <span id="model-keyboard-name">vm-demo: nocx</span></span
+                  >
+                </div>
+                <div class="model-body">
+                  <div class="model-tui">
+                    <aside class="model-spaces">
+                      <div class="model-side-title">spaces</div>
+                      <div class="space-group">
+                        <div class="space-selected">
+                          <span class="status-ring"></span><strong>demo</strong
+                          ><span class="chevron">▾</span>
+                          <div class="branch">main <span>↓3</span></div>
+                        </div>
+                        <div class="space-tree">
+                          ├ · feature-tabs<br />├ · session-restore<br />└
+                          <span class="amber-dot"></span> release-notes
+                        </div>
+                      </div>
+                      <div class="space-group">
+                        <div>
+                          <span class="tree-dot">·</span> documentation
+                          <span class="chevron">▾</span>
+                        </div>
+                        <div class="space-branch">main</div>
+                        <div class="space-tree">└ · getting-started</div>
+                      </div>
+                      <div class="space-group">
+                        <div><span class="tree-dot">·</span> examples</div>
+                        <div class="space-branch">main</div>
+                      </div>
+                      <div class="space-group">
+                        <div><span class="tree-dot">·</span> playground</div>
+                        <div class="space-branch">feature/api</div>
+                      </div>
+                      <div class="space-new">
+                        new <span><i></i> menu</span>
+                      </div>
+                      <div class="model-side-title agents-title">agents <span>grouped</span></div>
+                      <div class="agent-row agent-selected">
+                        <span class="status-ring"></span><strong>demo</strong
+                        ><span class="agent-secondary"> · claude</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="cyan-dot"></span><strong>documentation</strong
+                        ><span class="agent-secondary"> · 1</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="cyan-dot"></span><strong>examples</strong
+                        ><span class="agent-secondary"> · 1</span>
+                        <div>claude</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="amber-dot"></span><strong>release-notes</strong>
+                        <div>demo-agent</div>
+                      </div>
+                      <div class="agent-row">
+                        <span class="status-ring"></span><strong>review</strong>
+                        <div>demo-agent</div>
+                      </div>
+                    </aside>
+                    <div class="model-cli">
+                      <div class="cli-tabs">
+                        <span class="active">claude</span><span>2</span><span>3</span><span>4</span
+                        ><span>+</span>
+                      </div>
+                      <div class="cli-transcript" id="cli-transcript">
+                        <div class="cli-demo-tag">ДЕМОНСТРАЦИОННАЯ СЕССИЯ</div>
+                        <div class="cli-content">
+                          <p><strong>Рабочий контекст — в одном окне.</strong></p>
+                          <ol>
+                            <li>
+                              <strong>Вкладки и подключения.</strong> Локальная оболочка и
+                              SSH-сессии рядом.
+                            </li>
+                            <li>
+                              <strong>Файлы.</strong> Дерево справа показывает каталог активной
+                              вкладки.
+                            </li>
+                            <li>
+                              <strong>История.</strong> Вывод остаётся доступным после перезапуска.
+                            </li>
+                          </ol>
+                          <p class="cli-paragraph">Демонстрационный проект:</p>
+                          <div class="cli-lines">– README.md<br />– examples/<br />– docs/</div>
+                          <p class="cli-paragraph">
+                            <strong>Продолжайте там, где остановились.</strong>
+                          </p>
+                          <p>Команды, заметки и файлы остаются в контексте вашей работы.</p>
+                          <p class="cli-muted cli-paragraph">
+                            Это модель интерфейса с примером содержимого.<br />Никакие команды здесь
+                            не выполняются.
+                          </p>
+                        </div>
+                      </div>
+                      <div class="cli-prompt">
+                        <span>›</span><span class="cli-input-text">Продолжить работу</span
+                        ><span class="cli-caret"></span>
+                      </div>
+                      <div class="cli-footer">
+                        <span class="cli-yellow">▸▸ demo mode</span
+                        ><span class="cli-cyan">· 3 tabs</span><span class="cli-dim">· local</span
+                        ><span class="demo-pet" aria-hidden="true">▰</span>
+                      </div>
+                    </div>
+                  </div>
+                  <aside class="model-files">
+                    <div class="files-heading">FILES <span>⟳</span></div>
+                    <label class="model-filter-label"
+                      ><span class="sr-only">Фильтр демо-файлов</span
+                      ><input
+                        class="model-filter"
+                        placeholder="Filter by name..."
+                        id="demo-filter"
+                        autocomplete="off"
+                    /></label>
+                    <div class="files-tree" id="demo-files">
+                      <div class="file-tree-row">
+                        › <span class="folder-icon"></span> Applications
+                      </div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> Library</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> System</div>
+                      <div class="file-tree-row">⌄ <span class="folder-icon"></span> workspace</div>
+                      <div class="file-tree-row level-1">
+                        ⌄ <span class="folder-icon"></span> demo
+                      </div>
+                      <div class="file-tree-row level-2 selected-file">
+                        ⌄ <span class="folder-icon"></span> docs
+                      </div>
+                      <div class="file-tree-row level-3">
+                        <span class="file-icon"></span> guide.md
+                      </div>
+                      <div class="file-tree-row level-2">
+                        › <span class="folder-icon"></span> examples
+                      </div>
+                      <div class="file-tree-row level-2">
+                        › <span class="folder-icon"></span> src
+                      </div>
+                      <div class="file-tree-row level-2">
+                        <span class="file-icon"></span> README.md
+                      </div>
+                      <div class="file-tree-row level-2">
+                        <span class="file-icon"></span> go.mod
+                      </div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> bin</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> dev</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> etc</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> home</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> tmp</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> usr</div>
+                      <div class="file-tree-row">› <span class="folder-icon"></span> var</div>
+                    </div>
+                    <p class="no-files" id="no-files" hidden>Совпадений нет</p>
+                  </aside>
+                  <aside class="model-rail" aria-hidden="true">
+                    <span class="active"
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M3 7h6l2 2h10v11H3zM3 7V4h6l2 3" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path
+                          d="M8 3v5m8-5v5M6 8h12v4a6 6 0 0 1-6 6v4m0-4a6 6 0 0 1-6-6z"
+                        /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <circle cx="6" cy="5" r="2" />
+                        <circle cx="18" cy="6" r="2" />
+                        <circle cx="6" cy="19" r="2" />
+                        <path d="M6 7v10m0-3c8 0 12-2 12-6" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M4 3h16v14h-6l-4 4v-4H4z" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M7 3v18m-4-4 4 4 4-4M17 21V3m-4 4 4-4 4 4" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M4 18h16l-2-4V9a6 6 0 0 0-12 0v5zM10 21h4" /></svg></span
+                    ><span class="rail-bottom"
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <path d="M3 7h17m-4-4 4 4-4 4M21 17H4m4-4-4 4 4 4" /></svg></span
+                    ><span
+                      ><svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="1.5"
+                        stroke-linejoin="round"
+                        stroke-linecap="round"
+                      >
+                        <circle cx="12" cy="12" r="4" />
+                        <path
+                          d="m9 3-1 3-3 1-2 3 2 2-1 3 3 2 2 3h4l2-3 3-1 2-3-2-2 1-3-3-2-2-3z"
+                        /></svg
+                    ></span>
+                  </aside>
+                </div>
+              </div>
+            </div>
+            <figcaption class="product-caption">
+              <span
+                >Статическая HTML-модель nocx. Демонстрационные данные; команды не
+                выполняются.</span
+              ><span>Вкладки и фильтр файлов можно попробовать.</span>
+            </figcaption>
+          </figure>
+          <div class="proofbar">
+            <span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Без аккаунта</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Без продуктовой телеметрии</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Открытый исходный код</span
+            ><span
+              ><svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="m3 8 3 3 7-7" stroke="currentColor" stroke-width="1.3" /></svg
+              >Ваши данные — локально</span
             >
           </div>
         </section>
+        <section class="section" id="features">
+          <p class="eyebrow">01 / Всё под рукой</p>
+          <div class="section-heading">
+            <h2>Одна вкладка.<br />Весь её контекст.</h2>
+            <p>
+              Локально или по SSH — боковая панель следует за активной вкладкой. Файлы, Git, порты и
+              передачи относятся к той машине, на которой вы работаете.
+            </p>
+          </div>
+          <div class="explorer">
+            <div class="features">
+              <div class="feature-buttons" aria-label="Возможности">
+                <button
+                  class="feature-button"
+                  id="feature-0"
+                  aria-selected="true"
+                  data-feature-static="0"
+                >
+                  <span class="n">01</span><strong>Файлы</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-1"
+                  aria-selected="false"
+                  data-feature-static="1"
+                >
+                  <span class="n">02</span><strong>Git</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-2"
+                  aria-selected="false"
+                  data-feature-static="2"
+                >
+                  <span class="n">03</span><strong>Порты</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-3"
+                  aria-selected="false"
+                  data-feature-static="3"
+                >
+                  <span class="n">04</span><strong>Передачи</strong
+                  ><span class="feature-arrow">↗</span></button
+                ><button
+                  class="feature-button"
+                  id="feature-4"
+                  aria-selected="false"
+                  data-feature-static="4"
+                >
+                  <span class="n">05</span><strong>Заметки</strong
+                  ><span class="feature-arrow">↗</span>
+                </button>
+              </div>
+              <p class="feature-copy" id="feature-copy">
+                Сделайте cd — дерево файлов само перейдёт в новый каталог. Никаких лишних кликов и
+                переключений между окнами.
+              </p>
+            </div>
+            <div
+              class="feature-visual"
+              id="feature-panel"
+              role="tabpanel"
+              aria-labelledby="feature-0"
+            ></div>
+          </div>
+        </section>
+        <section class="section restore">
+          <div>
+            <p class="eyebrow">02 / Продолжайте с того же места</p>
+            <h2>Закрыл. Открыл.<br />Работаешь дальше.</h2>
+            <p class="section-copy">
+              Рабочий день не начинается с восстановления окон. nocx возвращает вкладки,
+              напечатанный вывод и расположение интерфейса.
+            </p>
+          </div>
+          <div>
+            <div class="restore-list">
+              <div class="restore-row">
+                <span>Открытые вкладки</span><span>✓ &nbsp; восстановлены</span>
+              </div>
+              <div class="restore-row">
+                <span>Вывод команд</span><span>✓ &nbsp; снова читается</span>
+              </div>
+              <div class="restore-row">
+                <span>Активная вкладка</span><span>✓ &nbsp; на том же месте</span>
+              </div>
+              <div class="restore-row">
+                <span>Размер окна и сайдбар</span><span>✓ &nbsp; как вы оставили</span>
+              </div>
+              <div class="restore-row excluded">
+                <span>Работающие процессы</span><span>— &nbsp; не возобновляются</span>
+              </div>
+            </div>
+            <p class="aside-note">
+              Возвращается вывод программы, а не сама программа. Восстановление можно отключить в
+              настройках.
+            </p>
+          </div>
+        </section>
+      </main>
+    </div>
+    <section class="privacy" id="privacy">
+      <div class="wrap">
+        <p class="eyebrow">03 / Локально — по устройству</p>
+        <div class="privacy-grid">
+          <div>
+            <h2>Секрет остаётся<br />секретом.</h2>
+            <p>
+              Сохраните ключ в зашифрованное хранилище. В записи команды nocx останется ссылка,
+              которая разрешится при следующем запуске после разблокировки.
+            </p>
+          </div>
+          <div class="vault">
+            <div class="vault-label">Вы набрали</div>
+            <div class="vault-code">TOKEN=&lt;value&gt; ./deploy.sh</div>
+            <div class="vault-divider">↓</div>
+            <div class="vault-label">nocx сохраняет</div>
+            <div class="vault-code">TOKEN=<span>[ссылка на vault]</span> ./deploy.sh</div>
+            <div class="vault-foot">
+              Пароли подключений и парольные фразы ключей — в том же vault.
+            </div>
+          </div>
+        </div>
+        <div class="privacy-bottom">
+          <span>↳ &nbsp; Без собственного облака</span
+          ><span>↳ &nbsp; Без облачной синхронизации</span
+          ><span>↳ &nbsp; Зашифрованная история</span>
+        </div>
       </div>
-
-      <footer class="wrap">
-        <p>
-          nocx под лицензией MIT ·
-          <a href="https://github.com/shady2k/nocx">Исходники</a> ·
-          <a href="https://github.com/shady2k/nocx/releases">Релизы</a> ·
-          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
-            >Заметки к v0.3.0</a
+    </section>
+    <div class="wrap">
+      <section class="section">
+        <p class="eyebrow">04 / Меньше переключений</p>
+        <div class="tools-grid">
+          <article class="tool">
+            <h2>Ассистент там,<br />где идёт работа.</h2>
+            <p>
+              Задайте вопрос прямо в скроллбэке. Текст, инструменты и команды остаются в одной
+              записи — каждый шаг можно прочитать и после перезапуска.
+            </p>
+            <div class="tool-graphic">
+              <div class="small">ПОД ВАШИМ КОНТРОЛЕМ</div>
+              Вы выбираете контекст → разрешаете → останавливаете<br /><span class="approval"
+                >Команда · машина · вкладка</span
+              >
+            </div>
+            <p class="tool-note">
+              Вы настраиваете endpoint модели. Политика хранения данных зависит от вашего
+              провайдера.
+            </p>
+          </article>
+          <article class="tool">
+            <h2>API-клиент.<br />Ваши обычные файлы.</h2>
+            <p>
+              Импортируйте коллекцию Postman. Каждый запрос станет отдельным JSON-файлом в вашей
+              папке. Запускайте запросы локально или через открытое SSH-соединение.
+            </p>
+            <div class="tool-graphic">
+              <div class="small">COLLECTION /</div>
+              ├── health.json<br />├── users.json<br />└── environments/
+            </div>
+            <p class="tool-note">
+              Переменные запроса, папки и окружения. Секреты в полях хранятся как непрозрачные
+              ссылки.
+            </p>
+          </article>
+        </div>
+        <div class="prompt-strip">
+          <div>
+            <h3>Промпт, в котором удобно писать.</h3>
+            <p>
+              CodeMirror 6, подсветка синтаксиса, дополнение команд и путей, сохранённые сниппеты.
+            </p>
+          </div>
+          <div class="prompt-demo">
+            ❯ &nbsp; cd internal/<span class="ghost">session/</span><span class="key">Tab ↹</span>
+          </div>
+        </div>
+      </section>
+      <section class="install" id="install">
+        <div class="install-grid">
+          <div>
+            <p class="eyebrow">05 / Начать работу</p>
+            <h2>Ваш следующий<br />терминал.</h2>
+            <p class="section-copy">
+              Без регистрации. Скачайте nocx для своей системы и продолжайте с привычными хостами.
+            </p>
+            <p class="version">v0.6.0 · MIT</p>
+            <p class="aside-note">Ранний релиз, без формальной поддержки.</p>
+          </div>
+          <div class="installer">
+            <div class="os-switch" role="tablist" aria-label="Операционная система">
+              <a href="#install-panel" class="os-tab">macOS</a
+              ><a href="#linux-install-panel" class="os-tab">Linux</a>
+            </div>
+            <div id="install-panel" class="install-content">
+              <h3>macOS · Homebrew</h3>
+              <p>
+                Установите cask из стороннего tap. После установки он снимает карантин macOS. Перед
+                установкой прочитайте README tap.
+              </p>
+              <div class="command-copy"><code>brew install --cask shady2k/nocx/nocx</code></div>
+              <p>
+                При прямой загрузке с GitHub карантин нужно снять вручную — инструкции есть в
+                README.
+              </p>
+              <a class="button" href="https://github.com/shady2k/nocx/releases/latest"
+                >Открыть релиз<span>↗</span></a
+              >
+            </div>
+            <div id="linux-install-panel" class="install-content">
+              <h3>Linux · x86_64</h3>
+              <p>
+                Установщик nocx поддерживает Linux x86_64. Он откажет на macOS и неподдерживаемых
+                архитектурах; для macOS используйте Homebrew.
+              </p>
+              <div class="command-copy">
+                <code>curl -fsSL https://nocx.dev/install.sh | sh</code>
+              </div>
+              <p>Или установите AppImage вручную:</p>
+              <div class="command-copy">
+                <code>chmod +x nocx-*-linux-amd64.AppImage<br />./nocx-*-linux-amd64.AppImage</code>
+              </div>
+              <p>x86_64, glibc 2.35+. Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+ и Arch.</p>
+              <a class="button" href="https://github.com/shady2k/nocx/releases/latest"
+                >Открыть релиз<span>↗</span></a
+              >
+            </div>
+          </div>
+        </div>
+        <p class="install-note">
+          Обновления проверяются по подписанному Ed25519 манифесту. Это проверка целостности, а не
+          Apple-нотаризация.
+          <a
+            href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
+            >Почему так ↗</a
+          >
+          &nbsp;
+          <a href="https://github.com/shady2k/nocx#rollback-procedures"
+            >Как откатить обновление ↗</a
           >
         </p>
-        <p><a href="../?lang=en">English</a> · Русский</p>
+      </section>
+      <section class="faq">
+        <h3>До первого запуска</h3>
+        <div>
+          <details>
+            <summary>Можно перенести SSH-подключения?</summary>
+            <p>
+              Да. nocx импортирует ~/.ssh/config и экспорт из Tabby. Пароли и парольные фразы ключей
+              хранятся в vault; подключение ссылается на секрет.
+            </p>
+          </details>
+          <details>
+            <summary>Какие данные уходят в сеть?</summary>
+            <p>
+              nocx обращается к вашим хостам, endpoint ассистента, который вы настроили, и проверяет
+              собственные обновления. У продукта нет собственного облачного сервиса, продуктовой
+              телеметрии или облачной синхронизации.
+            </p>
+          </details>
+          <details>
+            <summary>Что внутри?</summary>
+            <p>
+              Go для PTY, SSH и сессий; отрисовка ячеек по экранной модели бэкенда; CodeMirror 6 для
+              ввода; SolidJS для интерфейса; Wails v3 для настольной оболочки.
+            </p>
+          </details>
+          <details>
+            <summary>Есть ли ограничения у API-клиента?</summary>
+            <p>
+              Ответ читается до 2 MiB. Байты, совпавшие с сохранённым секретом, удаляются до показа
+              ответа. Коллекция не получает доступ к паролю за SSH-профилем.
+            </p>
+          </details>
+        </div>
+      </section>
+      <footer>
+        <div class="footer">
+          <div class="footer-brand">
+            <a class="brand" href="#" aria-label="nocx"
+              ><span class="brand-symbol" aria-hidden="true">›_</span>nocx</a
+            ><small>Локальный по устройству.</small>
+          </div>
+          <nav class="footer-links" aria-label="Ссылки проекта">
+            <a href="https://github.com/shady2k/nocx">GitHub ↗</a
+            ><a href="https://github.com/shady2k/nocx/releases/latest">Релизы ↗</a
+            ><a href="https://nocx.dev/ru/">Текущий сайт ↗</a>
+          </nav>
+        </div>
+        <p>
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.6.0.md"
+            >Заметки к выпуску v0.6.0</a
+          >
+        </p>
       </footer>
-    </main>
+    </div>
   </body>
 </html>

@@ -241,8 +241,11 @@ func raiseQuestion(t *testing.T, start nestedParentStarter, configure func(*nest
 		t.Fatalf("type claude: %v", err)
 	}
 	waitForEvent(t, k, "agent_enrol")
-	// The pane says what it is waiting for and how to stop waiting.
-	waitForOutput(t, s, "Ctrl+C")
+	// The consent dialog already asks the question, so the terminal does not
+	// repeat that instruction.
+	if out := s.output(); strings.Contains(out, "answer it in nocx") {
+		t.Fatalf("the terminal repeated the consent question; output=%q", out)
+	}
 	return k, s, flag
 }
 

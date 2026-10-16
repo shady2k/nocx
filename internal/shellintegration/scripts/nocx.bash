@@ -885,7 +885,7 @@ __nocx_agent_await_answer() {
 # question that closes with a sentence was never answered, and is not raised
 # again.
 __nocx_agent_enrol() {
-    local __agent="$1" __told=0 __rc __ticket_field
+    local __agent="$1" __rc __ticket_field
     __ticket_field=
     if [[ -n "${__nocx_agent_launch_ticket:-}" ]]; then
         __ticket_field=',"ticket":"'"$__nocx_agent_launch_ticket"'"'
@@ -899,11 +899,6 @@ __nocx_agent_enrol() {
         __nocx_lc_read_agent_answer "$__nocx_agent_rid" || return 1
         (( __nocx_agent_enrolled == 1 )) && return 0
         (( __nocx_agent_pending == 1 )) || return 1
-        if (( ! __told )); then
-            builtin printf 'nocx: %s — answer it in nocx to start %s, or press Ctrl+C to cancel\n' \
-                "${__nocx_agent_reason:-nocx is asking a question}" "$__agent" >&2
-            __told=1
-        fi
         __nocx_agent_await_answer "$__nocx_agent_rid"
         __rc=$?
         (( __rc == 0 )) || return $__rc

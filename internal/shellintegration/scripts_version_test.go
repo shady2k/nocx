@@ -243,6 +243,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// channel and execute its cached command, arguments and environment.
 		"58": "315010cd82fa6dc3d9bd4cda80293a548981d10a393fb5411d88c6d6cd9b8c11",
 		"59": "52c8748122742974e702beb6c91d31838df1ab2c147dd429304161b0950302fd",
+		"60": "c843837f4697a202e654c2a31e1f60369e86d059ba7b92225a521a3fc4e8bc4c",
 	}
 
 	h := sha256.New()

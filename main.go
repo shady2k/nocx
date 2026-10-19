@@ -36,6 +36,11 @@ var assets embed.FS
 // manager.
 const mainWindowName = "main"
 
+// appName is what the OS and the menu bar call this application. It is one
+// constant because two spellings of it show up in one place a person looks at:
+// the bundle-less Wails name and the title of the application menu.
+const appName = "nocx"
+
 // launchTimeout bounds the whole find-or-raise-the-coordinator sequence,
 // including a spawn and its readiness wait. It is the outer bound on how
 // long a window can sit blank before it either has a backend or says why it
@@ -60,12 +65,18 @@ func main() {
 
 	wailsApp := &WailsApp{logger: logger}
 
+	// WHO DECIDES A QUIT, AND WHO OWNS THE KEYS THAT ASK FOR ONE. See
+	// [quitSeam]: the menu bar's item and the Cmd+Q chord are two keys to one
+	// decision, and the chord is claimed by the window rather than inherited
+	// from a menu nobody here wrote.
+	quit := &quitSeam{logger: logger}
+
 	// The Wails v3 shell. The window is created before Run; on Linux the
 	// platform defers actually loading the webview until activation inside
 	// Run, which happens after ServiceStartup. The frontend's first
 	// ResolveBackend binding call therefore sees the held startup outcome.
 	shell := application.New(application.Options{
-		Name:        "nocx",
+		Name:        appName,
 		Description: "A local-first, Warp-style terminal",
 		Assets: application.AssetOptions{
 			// Bundled, not plain: it serves /wails/runtime.js, which the v3
@@ -80,6 +91,21 @@ func main() {
 		},
 		OnShutdown: wailsApp.shutdown,
 	})
+
+	// The quit ends in Wails' own Quit, which is the path AppKit's terminate
+	// takes too (OnShutdown above, then the process).
+	quit.quit = shell.Quit
+
+	// THE MENU BAR IS OURS NOW, because the item a person reads there has to be
+	// the one this app decided on — on macOS, which is the only platform where
+	// this application shows a menu bar (no window here sets
+	// WebviewWindowOptions.UseApplicationMenu). Setting it here and not inside
+	// Run is the supported order: Menu.Set stores the menu and Wails installs
+	// it once the application is running (macosApp.setApplicationMenu), which
+	// is also the only moment AppKit accepts a main menu.
+	if runtime.GOOS == "darwin" {
+		shell.Menu.Set(quit.menu(appName))
+	}
 
 	// THE SIZE THE WINDOW OPENS AT. Wails wants it before there is a window.
 	// The saved geometry lives in the UI-state document, which the
@@ -99,6 +125,13 @@ func main() {
 		MinWidth:                   uistate.MinWindowWidth,
 		MinHeight:                  uistate.MinWindowHeight,
 		DefaultContextMenuDisabled: true,
+		// THE QUIT CHORD IS CLAIMED BY THE WINDOW, not by the page and not by
+		// the menu bar alone (nocx-1ebrs.13). Wails hands this map to
+		// -[WebviewWindow performKeyEquivalent:], which runs before the
+		// responder chain — i.e. before a WKWebView can answer the chord
+		// itself, which is exactly how Cmd+Q went missing while the menu's
+		// Quit item worked. See [quitSeam.keyBindings].
+		KeyBindings: quit.keyBindings(runtime.GOOS),
 		// DevTools/Inspector, opened on startup when NOCX_DEVTOOLS=1.
 		//
 		// There is no other way into a console here, and that is deliberate on
@@ -670,6 +703,136 @@ func (w *WailsApp) shutdown() {
 	// ends itself after a grace period, which is nocx-server's decision and
 	// not a window's.
 	w.logger.Info("nocx window shutting down")
+}
+
+// ── quitting ──────────────────────────────────────────────────────────────
+
+// THE QUIT KEY IS THE WINDOW'S, NOT THE MENU BAR'S AND NOT THE PAGE'S.
+//
+// Measured on the v0.6.0 clean-Mac pass (nocx-1ebrs.13): choosing
+// nocx > Quit nocx ended the process, and pressing Cmd+Q with the command
+// editor focused did nothing. nocx wrote no menu at all, so the item in the
+// menu bar was AppKit's, and a WKWebView in the key window answers a
+// modifier-key chord before the main menu's key equivalent is consulted — the
+// "the item works, its shortcut does not" signature.
+//
+// So the chord is claimed HERE, by the window, through the one hook that runs
+// before the webview sees the key (Wails' -[WebviewWindow
+// performKeyEquivalent:] consults the window's KeyBindings and consumes the
+// event when one matches), and the menu item is written here too, so that the
+// accelerator a person reads in the menu bar is a decision this application
+// made rather than one AppKit synthesised. Both routes end in
+// [quitSeam.request]: one behaviour, two keys.
+//
+// FOCUS IS NOT PART OF THE QUESTION, and that is the property the fix buys. A
+// window key equivalent is claimed before the responder chain runs, so it does
+// not matter what holds the keyboard — the pane's input element, the command
+// editor, a sidebar row, or nothing. Nothing in the renderer claims meta+q
+// either (grep `metaKey` across frontend/src finds the save, copy, paste,
+// sidebar, snippet and ask chords, and none for `q`), so there is no second
+// surface the chord could reach first.
+//
+// AND THE DAEMON IS NOT ASKED. Sessions — including one whose shell
+// integration never sent its hello — live in nocx-server. This window holds no
+// session state, so no session can hold a quit open: [quitSeam.request] makes
+// the decision and calls Quit, and the only thing a quit runs in this process
+// is [WailsApp.shutdown], which logs.
+
+// quitChord is the accelerator that quits nocx.
+//
+// ITS SPELLING IS THE WINDOW'S, NOT THE MENU BAR'S. Wails compares the
+// accelerator it parses out of a registered binding against the one it parses
+// out of the NSEvent, and the darwin window builds that event string itself as
+// lower-case modifiers joined to the key ("cmd+q"). Both spellings canonicalise
+// to Cmd+Q, and writing the event side's own spelling is what keeps this one
+// string instead of two that have to stay in step.
+const quitChord = "cmd+q"
+
+// quitCause names the key a quit came from. It exists for the log: a line that
+// says only "quitting" cannot tell a working chord from a working menu item,
+// which is the difference this defect turned on.
+type quitCause string
+
+const (
+	quitFromMenu  quitCause = "menu"
+	quitFromChord quitCause = "chord"
+)
+
+// quitSeam is the one place a quit is decided.
+type quitSeam struct {
+	logger *slog.Logger
+
+	// quit ends the application: the Wails Quit, wired in main. It is a field
+	// so a test can stand on the decision instead of on the process.
+	quit func()
+}
+
+// request takes the decision, says who asked, and performs it.
+func (q *quitSeam) request(cause quitCause) {
+	q.logger.Info("nocx quitting", "cause", string(cause))
+	q.quit()
+}
+
+// keyBindings is the window's claim on the quit chord, in the shape
+// WebviewWindowOptions.KeyBindings takes. goos is passed rather than read for
+// the same reason [serverbin.Target] takes it: a rule that differs per platform
+// is a rule a test has to be able to state for the platform it is not on.
+//
+// NIL OFF macOS. Cmd+Q is a Mac convention and what it means to a person is
+// this application's decision. Ctrl+Q is not: it is XON, a key a person sends
+// to the PROGRAM in the pane to resume output it paused, and a platform whose
+// menu bar does not show this chord must not take that key from the terminal.
+func (q *quitSeam) keyBindings(goos string) map[string]func(application.Window) {
+	if goos != "darwin" {
+		return nil
+	}
+	return map[string]func(application.Window){
+		quitChord: func(application.Window) { q.request(quitFromChord) },
+	}
+}
+
+// menu is the menu bar nocx shows on macOS.
+//
+// THE APPLICATION MENU IS WRITTEN HERE, and the other five are the platform's.
+// That split is the whole decision: Wails' own application menu carries a Quit
+// ROLE item, whose click AppKit sends as `terminate:` — the item that worked
+// during this defect, and the one an application cannot log, test or label for
+// itself. Everything else in the bar (File's Close, Edit's Copy and Paste
+// through the responder chain, View's zoom and full screen, the window list,
+// Help) is a question Wails already answers, and a second copy of it here
+// would be a second answer.
+func (q *quitSeam) menu(name string) *application.Menu {
+	menu := application.NewMenu()
+
+	appMenu := menu.AddSubmenu(name)
+	appMenu.AddRole(application.About)
+	appMenu.AddSeparator()
+	appMenu.AddRole(application.ServicesMenu)
+	appMenu.AddSeparator()
+	appMenu.AddRole(application.Hide)
+	appMenu.AddRole(application.HideOthers)
+	appMenu.AddRole(application.UnHide)
+	appMenu.AddSeparator()
+	q.addQuitItem(appMenu, name)
+
+	menu.AddRole(application.FileMenu)
+	menu.AddRole(application.EditMenu)
+	menu.AddRole(application.ViewMenu)
+	menu.AddRole(application.WindowMenu)
+	menu.AddRole(application.HelpMenu)
+	return menu
+}
+
+// addQuitItem writes the item a person reads as "Quit nocx" and adds it to m.
+//
+// It is a plain item and not [application.Role]'s Quit on purpose: a role item
+// carries the platform's own action, so a click on it never reaches this
+// process' decision. This one calls [quitSeam.request], the same decision the
+// chord calls.
+func (q *quitSeam) addQuitItem(m *application.Menu, name string) *application.MenuItem {
+	return m.Add("Quit " + name).
+		SetAccelerator(quitChord).
+		OnClick(func(*application.Context) { q.request(quitFromMenu) })
 }
 
 // ── the client host: what this window IMPLEMENTS for the coordinator ──────

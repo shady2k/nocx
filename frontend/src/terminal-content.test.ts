@@ -18809,3 +18809,96 @@ describe('runtime clipboard effects keep the existing permission gate', () => {
     }
   })
 })
+
+// ── the copy chord leaves plain Ctrl+C to the interrupt (nocx-1ebrs.19.1) ──
+//
+// THE OWNER'S DECISION, 2026-10-20: Cmd+C over a visible live-grid selection
+// copies it, and with nothing selected the chord keeps today's meaning. CTRL+C
+// IS NOT THAT CHORD. It stays the interrupt whether or not a selection is on
+// screen, because a person who pressed Ctrl+C mid-command asked to STOP
+// something — and the decision's own sentence about Cmd+C, read the other way
+// round, is what makes this the answer rather than a preference.
+//
+// WHAT THIS GUARDS IS ONE LINE. The chord is claimed in the capture phase, so
+// it answers before both `_globalKeydown`'s interrupt and the program's input,
+// and its first statement is a modifier test. One `|| event.ctrlKey` added to
+// that test would take the interrupt away from every pane that happens to hold
+// a selection: the key would be swallowed before it ever became an intent, and
+// nothing else in this suite would notice, because every other part of the
+// chord would go on working exactly as it does.
+describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
+  it('with a settled live-grid selection, Ctrl+C still reaches the program', async () => {
+    const clipboard = makeClipboard()
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(clipboard, { attachToDocument: true }, client)
+    try {
+      tab.pane.classList.add('active')
+      const session: SessionFake = client._sessions[0]
+      const frame = screenFrame(1, ['selectable text'])
+      frame.state.mouseTracking = false
+      session.fireScreenFrame(frame)
+      const live = tab.pane.querySelector<HTMLElement>('.terminal-live-container')!
+      await vi.waitFor(() => expect(live.querySelector('.term-grid')).not.toBeNull())
+      const surface = live.querySelector<HTMLElement>('.term-grid')!
+      await vi.waitFor(() => expect(surface.textContent).toContain('selectable text'))
+      // One cell is 8 x 16 in this frame; the top-left of the grid is 10,20.
+      surface.getBoundingClientRect = () =>
+        ({ left: 10, top: 20, right: 330, bottom: 84, width: 320, height: 64 }) as DOMRect
+
+      const pointer = (
+        type: 'pointerdown' | 'pointermove' | 'pointerup',
+        buttons: number,
+        clientX: number,
+      ): Event => {
+        const event = new Event(type, { bubbles: true, cancelable: true })
+        Object.defineProperties(event, {
+          button: { value: 0 },
+          buttons: { value: buttons },
+          clientX: { value: clientX },
+          // Row 0 of the painted grid: (24 - 20) / 16 rounds into it.
+          clientY: { value: 24 },
+        })
+        return event
+      }
+      // A REAL DRAG, RELEASED, ACROSS CELLS THE TEXT IS ON. Pressing and
+      // releasing on one cell is a click and copies nothing, so the pointer
+      // moves two columns before it lifts: cols 2..4 of "selectable text" are
+      // "lec". Copy-on-select has written it at the release, which is the
+      // state the chord could wrongly answer.
+      surface.dispatchEvent(pointer('pointerdown', 1, 26))
+      window.dispatchEvent(pointer('pointermove', 1, 42))
+      surface.dispatchEvent(pointer('pointerup', 0, 42))
+      expect(surface.querySelector('.term-grid-selection')).not.toBeNull()
+      const atRelease = clipboard.writeText.mock.calls.length
+      expect(atRelease, 'copy-on-select wrote nothing at the release').toBeGreaterThan(0)
+
+      session.intent.mockClear()
+      const input = tab.pane.querySelector<HTMLTextAreaElement>('.ui-terminal-input')
+      expect(input, 'the pane has no input element to press Ctrl+C on').not.toBeNull()
+      // `code` IS THE KEY IDENTITY the encoder reads (intent-input's table is
+      // keyed by the physical key, not by `key`); a synthetic event without it
+      // produces no intent at all, whatever the pane decides about the chord.
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          code: 'KeyC',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      // THE INTERRUPT'S OWN SPELLING, produced by the input element's encoder:
+      // the key was not swallowed on its way there.
+      await vi.waitFor(() => expect(session.intent.mock.calls).toEqual([['key', 'Ctrl+c']]))
+      // AND NOTHING WAS COPIED A SECOND TIME — the chord never ran.
+      expect(clipboard.writeText.mock.calls.length).toBe(atRelease)
+      // AND THE HIGHLIGHT IS OVER, because a key was SENT to the program
+      // (nocx-1ebrs.19's lifetime rule). The same fact from the other side: if
+      // the chord had taken this key, nothing would have been sent.
+      expect(surface.querySelector('.term-grid-selection')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})

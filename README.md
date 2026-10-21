@@ -392,6 +392,12 @@ what enforces **no merge without green** on `main`: the pre-commit hook and
 bypassable with `--no-verify` and `make connect` is a per-clone step a fresh
 checkout may skip.
 
+Running-command browser checks wait for the command's actual painted rows before
+measuring geometry. A minimum pixel height or a tab title is not proof that output
+has arrived. Before releasing a command blocked on terminal input, focus the live
+grid and assert the terminal input owns focus; the editor and terminal are distinct
+input owners.
+
 ## Task tracking — beads (br)
 
 The executable backlog lives in beads, not markdown, and in `.beads/issues.jsonl`,

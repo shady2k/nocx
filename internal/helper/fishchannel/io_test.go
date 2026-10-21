@@ -5,52 +5,110 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"golang.org/x/sys/unix"
 )
 
 func TestSocketWriteBackpressureDeadlineAndCancellation(t *testing.T) {
-	socket, _ := socketPair(t)
-	fd := int(socket.Fd())
-	// Fill the shared stream without changing its flags.
-	buf := make([]byte, 4096)
-	for {
-		_, err := unix.SendmsgN(fd, buf, nil, nil, unix.MSG_DONTWAIT)
-		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
-			break
-		}
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, cancel := range []bool{false, true} {
+	const childMode = "NOCX_FISHCHANNEL_BACKPRESSURE_CASE"
+	if mode := os.Getenv(childMode); mode != "" {
 		ctx, stop := context.WithCancel(context.Background())
+		defer stop()
 		op, err := newOperation(ctx)
 		if err != nil {
-			stop()
 			t.Fatal(err)
 		}
+		defer op.close()
 		op.deadline = time.Now().Add(50 * time.Millisecond)
-		if cancel {
-			op.deadline = time.Now().Add(5 * time.Second)
-			time.AfterFunc(20*time.Millisecond, stop)
-		}
-		start := time.Now()
-		_, err = (&socketIO{op: op, fd: fd}).Write([]byte("must-not-replay"))
-		op.close()
-		stop()
 		want := errTimeout
-		if cancel {
+		if mode == "cancel" {
+			op.deadline = time.Now().Add(5 * time.Second)
+			timer := time.AfterFunc(20*time.Millisecond, stop)
+			defer timer.Stop()
 			want = context.Canceled
 		}
+		body := []byte(`"` + strings.Repeat("x", lifecycle.MaxFrameBytes-2) + `"`)
+		start := time.Now()
+		err = writeSocketFrame(op, 3, body)
 		if !errors.Is(err, want) || time.Since(start) > time.Second {
 			t.Fatalf("stalled write = %v; want bounded %v", err, want)
 		}
+		return
+	}
+	for _, mode := range []string{"deadline", "cancel"} {
+		t.Run(mode, func(t *testing.T) {
+			socket, peer := socketPair(t)
+			fd := int(socket.Fd())
+			// The fixture exclusively owns this description until handoff.
+			// Darwin's MSG_DONTWAIT does not bound a blocking socket send.
+			if err := unix.SetNonblock(fd, true); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 4096)
+			filled := 0
+			for {
+				n, err := unix.Write(fd, buf)
+				if n > 0 {
+					filled += n
+				}
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+				if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+					break
+				}
+				if err != nil || n == 0 {
+					t.Fatalf("fill socket: n=%d err=%v", n, err)
+				}
+			}
+			if err := unix.SetNonblock(fd, false); err != nil {
+				t.Fatal(err)
+			}
+			flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Contain a blocking-write regression in its own process rather
+			// than stranding the package until go test's ten-minute panic.
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSocketWriteBackpressureDeadlineAndCancellation$") // #nosec G204 -- this test binary, fixed fixture selection.
+			cmd.Env = append(os.Environ(), childMode+"="+mode)
+			cmd.ExtraFiles = []*os.File{socket}
+			if output, childErr := cmd.CombinedOutput(); childErr != nil {
+				t.Fatalf("bounded write child: %v (context: %v)\n%s", childErr, ctx.Err(), output)
+			}
+			after, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+			if err != nil || after != flags {
+				t.Fatalf("shared flags changed: before=%d after=%d err=%v", flags, after, err)
+			}
+			drained := 0
+			for {
+				n, _, err := unix.Recvfrom(int(peer.Fd()), buf, unix.MSG_DONTWAIT)
+				if n > 0 {
+					drained += n
+				}
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+				if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EWOULDBLOCK) {
+					break
+				}
+				if err != nil || n == 0 {
+					t.Fatalf("drain surviving stream: n=%d err=%v", n, err)
+				}
+			}
+			if drained != filled {
+				t.Fatalf("failed write changed queued bytes: filled=%d drained=%d", filled, drained)
+			}
+		})
 	}
 }
 
@@ -180,5 +238,26 @@ func TestRunRejectsNonSocketBeforeReadingInput(t *testing.T) {
 	var buf [6]byte
 	if _, err := io.ReadFull(input, buf[:]); err != nil || string(buf[:]) != "secret" {
 		t.Fatal("bad channel consumed stdin")
+	}
+}
+
+func TestSendClosedPeerKeepsDiagnosticsPrivateAndDescriptionAlive(t *testing.T) {
+	socket, peer := socketPair(t)
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fd := int(socket.Fd())
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := startChild(t, socket, strings.NewReader("/secret\x00string\x00must-not-print\x00"), "send", "--fd", "3")
+	c.wait(t, 1)
+	if c.out.Len() != 0 || c.err.String() != errTransport.Error() {
+		t.Fatalf("unexpected transport diagnostic: stdout=%q stderr=%q", c.out.String(), c.err.String())
+	}
+	after, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil || after != flags {
+		t.Fatalf("failed send changed shared description: before=%d after=%d err=%v", flags, after, err)
 	}
 }

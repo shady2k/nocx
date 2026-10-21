@@ -138,6 +138,8 @@ func (s *socketIO) Read(p []byte) (int, error) {
 	}
 }
 
+// Write requires per-call nonblocking sends or an already nonblocking
+// description. Darwin's frame dispatcher enforces the latter (ADR-0097).
 func (s *socketIO) Write(p []byte) (int, error) {
 	for {
 		if err := s.op.check(); err != nil {

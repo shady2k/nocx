@@ -101,7 +101,7 @@ func Run(ctx context.Context, args []string, stdin, stdout *os.File) (exitCode i
 			var body []byte
 			body, e = triplesToJSON(input)
 			if e == nil {
-				_, e = lifecyclecodec.WriteRawFrame(&socketIO{op: op, fd: o.fd}, body)
+				e = writeSocketFrame(op, o.fd, body)
 			}
 		}
 	} else {

@@ -359,7 +359,7 @@ function __nocx_agent_stage
         begin
             builtin printf '{"mcpServers":{"nocx":{"type":"stdio","command":%s,"args":["mcp","--socket",%s]' "$helper_json" "$socket_json"
             if test -n "$token_json"
-                builtin printf ',"env":{"NOCX_AGENT_TOKEN":%s}' "$token_json"
+                builtin printf ',"env":{"@NOCX_AGENT_TOKEN_ENV@":%s}' "$token_json"
             end
             builtin printf '}}}\n'
         end > "$dir/mcp.json"; or return 1

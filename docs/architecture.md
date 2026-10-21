@@ -84,6 +84,11 @@ Raw terminal bytes and raw marker sequences never cross the WebSocket as text. T
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
 | `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
 
+The pure `toolendpoint/panebind` contract owns the tool bearer's wire format and
+private MCP environment name. Shell staging renders that name into the private
+launch configuration; `mcpstdio` reads it without depending on shell-launch
+composition, preserving the bridge's no-child-process boundary.
+
 **Frontend**:
 
 | Module     | SRP responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |

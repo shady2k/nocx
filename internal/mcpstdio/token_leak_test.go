@@ -36,7 +36,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
@@ -114,7 +113,7 @@ const oneToolCatalogue = `{"tools":[{"name":"alpha.run","summary":"run alpha","p
 // session with it, and the text it wrote for a person to read does not contain
 // it.
 func TestTheBridgesLogsNeverCarryTheBearer(t *testing.T) {
-	t.Setenv(shellintegration.AgentToolTokenEnvVar, testBearer)
+	t.Setenv(panebind.TokenEnvVar, testBearer)
 
 	logs := &lockedLogs{}
 	saw := make(chan string, 4)

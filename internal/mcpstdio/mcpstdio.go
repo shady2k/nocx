@@ -19,7 +19,6 @@ import (
 	"time"
 
 	nocxlog "github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
@@ -126,7 +125,7 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer, socket string
 	// nowhere else (nocx-50w7p.16). The agent's MCP client passes it from the
 	// staged config, so it is this process alone that holds it — never a
 	// sibling, never a child, never a log line.
-	server, err := New(Config{Socket: socket, Token: os.Getenv(shellintegration.AgentToolTokenEnvVar), Logger: logger})
+	server, err := New(Config{Socket: socket, Token: os.Getenv(panebind.TokenEnvVar), Logger: logger})
 	if err != nil {
 		return err
 	}

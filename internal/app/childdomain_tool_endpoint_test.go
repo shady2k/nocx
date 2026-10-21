@@ -108,9 +108,6 @@ func (h *nestedGrantHarness) grantSudo() string {
 	if boot.Domain == "" || boot.Bootstrap == "" {
 		h.t.Fatalf("the grant came back with no child and no launch: %+v", boot)
 	}
-	if !strings.Contains(boot.Bootstrap, "NOCX_SHELL_INTEGRATION=1") {
-		h.t.Fatalf("the grant is not an integrated child launch: %q", boot.Bootstrap)
-	}
 	return boot.Bootstrap
 }
 

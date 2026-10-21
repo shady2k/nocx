@@ -824,7 +824,7 @@ __nocx_agent_stage() {
         __token_json="$__nocx_lc_json_escaped"
         __env_json=
         if [[ -n "$__token_json" ]]; then
-            __env_json=",\"env\":{\"NOCX_AGENT_TOKEN\":\"$__token_json\"}"
+            __env_json=",\"env\":{\"@NOCX_AGENT_TOKEN_ENV@\":\"$__token_json\"}"
         fi
         printf '{"mcpServers":{"nocx":{"type":"stdio","command":"%s","args":["mcp","--socket","%s"]%s}}}\n' \
             "$__helper_json" "$__socket_json" "$__env_json" > "$__config" || exit 1

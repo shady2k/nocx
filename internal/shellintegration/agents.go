@@ -37,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/shady2k/nocx/internal/agentrecord"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // shippedAgentNames is this build's own agent set, from the package that owns
@@ -125,6 +126,7 @@ func renderScript(raw string, names []string, delivery Delivery) string {
 		}
 		out = strings.ReplaceAll(out, "# @NOCX_FISH_DELIVERY@", "builtin set --global __nocx_agent_delivery_local "+local)
 		out = strings.ReplaceAll(out, agentBlockMarker, agentWrappers(names, ShellFish))
+		out = strings.ReplaceAll(out, "@NOCX_AGENT_TOKEN_ENV@", panebind.TokenEnvVar)
 		return stripShellComments(out, ShellFish)
 	}
 	surface := toolSurfaceLocal
@@ -145,6 +147,7 @@ func renderScript(raw string, names []string, delivery Delivery) string {
 		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "__nocx_agent_launch_cancel")
 	}
 	out = strings.ReplaceAll(out, toolSurfaceMarker, surface)
+	out = strings.ReplaceAll(out, "@NOCX_AGENT_TOKEN_ENV@", panebind.TokenEnvVar)
 	return stripShellComments(out, ShellBash)
 }
 

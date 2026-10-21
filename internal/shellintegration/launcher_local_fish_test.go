@@ -23,10 +23,20 @@ import (
 )
 
 // The fixture executes the real helper adapter in a child, not a mock codec.
-// Its private environment marker is removed before any configured target exec.
+// Its private environment markers are removed before any configured target exec.
 func TestMain(m *testing.M) {
 	if os.Getenv("NOCX_TEST_FISH_ADAPTER") == "1" {
 		_ = os.Unsetenv("NOCX_TEST_FISH_ADAPTER")
+		// GORACE is parsed before TestMain. Disable only the fixture binary's
+		// artificial exit sleep, then restore the caller's exact environment.
+		if original, restore := os.LookupEnv("NOCX_TEST_FISH_ADAPTER_GORACE"); restore {
+			_ = os.Unsetenv("NOCX_TEST_FISH_ADAPTER_GORACE")
+			if value, present := strings.CutPrefix(original, "x"); present {
+				_ = os.Setenv("GORACE", value)
+			} else {
+				_ = os.Unsetenv("GORACE")
+			}
+		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		args := os.Args[1:]
 		code := 2
@@ -77,7 +87,11 @@ func nativeFishFixture(t *testing.T, config string) (string, string, LaunchOptio
 		t.Fatal(err)
 	}
 	helper := filepath.Join(t.TempDir(), "helper")
-	body := "#!/bin/sh\nNOCX_TEST_FISH_ADAPTER=1 exec " + ShellQuote(testBinary) + " \"$@\"\n"
+	// Each successful -race adapter exit otherwise sleeps for one second.
+	// A configured invocation needs eight such exits before its completion,
+	// unlike the shipped helper. Keep race reporting and all caller options;
+	// only the child runtime's shutdown delay changes, never the target env.
+	body := "#!/bin/sh\nNOCX_TEST_FISH_ADAPTER_GORACE=\"${GORACE+x}${GORACE-}\" GORACE=\"${GORACE-} atexit_sleep_ms=0\" NOCX_TEST_FISH_ADAPTER=1 exec " + ShellQuote(testBinary) + " \"$@\"\n"
 	if writeErr := os.WriteFile(helper, []byte(body), 0o700); writeErr != nil { //nolint:gosec // executable test adapter, owned by t.TempDir
 		t.Fatal(writeErr)
 	}
@@ -436,6 +450,9 @@ function fish_prompt; printf 'NATIVE_FISH> '; end
 `)
 	opts.Agents = []string{"fish-agent", "math", "status", "fish_prompt", "prompt_pwd", "ssh", "__nocx_lc_send"}
 	opts.AgentToolToken = strings.Repeat("ab", 32)
+	// A deterministic fixture regression: inherited race options must neither
+	// delay every adapter shutdown nor be overwritten in the real target.
+	opts.EnvOverrides = append(opts.EnvOverrides, "GORACE=atexit_sleep_ms=20000")
 	result := filepath.Join(home, "agent-result")
 	program := `IFS= read -r value || exit 61
 [ "$value" = AGENT_INPUT ] || exit 62
@@ -443,7 +460,8 @@ function fish_prompt; printf 'NATIVE_FISH> '; end
 [ "$status" = reserved-name ] || exit 64
 [ "$__nocx_agent_exec_argv" = configured-value ] || exit 65
 [ "$1" = "arg's space" ] || exit 66
-[ -z "${__nocx_cap+x}${__nocx_recovery+x}${__nocx_agent_token+x}" ] || exit 67
+[ -z "${__nocx_cap+x}${__nocx_recovery+x}${__nocx_agent_token+x}${NOCX_TEST_FISH_ADAPTER+x}${NOCX_TEST_FISH_ADAPTER_GORACE+x}" ] || exit 67
+[ "$GORACE" = atexit_sleep_ms=20000 ] || exit 68
 printf 'REAL_AGENT:%s\n' "$value" > "$RESULT"
 exit 17`
 	payload, err := EncodeAgentLaunchPayload([]string{"/bin/sh", "-c", program, "configured-agent"}, []string{

@@ -142,6 +142,36 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     )
     await expect.poll(async () => liveRows(), { timeout: 20_000 }).toContain(`DONE-${nonce}`)
 
+    // A raw shell owns the pane before it has any integrated command blocks.
+    // Its painted text must still use the cell width committed by the backend;
+    // a correctly resized PTY alone does not prove the glyphs use that pitch.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const geometry = window.__nocxPaneScreen?.()?.geometry
+            const row = document.querySelector('.pane.active .terminal-live-grid .term-grid-row')
+            const stack = document.querySelector('.pane.active .scrollback-inner')
+            if (!stack?.classList.contains('inner-fullscreen-mode')) return Infinity
+            const published = parseFloat(
+              getComputedStyle(stack).getPropertyValue('--term-cell-width'),
+            )
+            if (!Number.isFinite(published) || published <= 0) return Infinity
+            if (!geometry || geometry.cellWidthPx <= 0 || !row) return Infinity
+            const range = document.createRange()
+            range.selectNodeContents(row)
+            const painted = range.getBoundingClientRect().width
+            const cellWidth = geometry.cellWidthPx / devicePixelRatio
+            const committed = geometry.cols * cellWidth
+            return Math.max(Math.abs(painted - committed), Math.abs(published - cellWidth))
+          }),
+        {
+          timeout: 20_000,
+          message: 'the markerless shell is painted at a different pitch from its committed grid',
+        },
+      )
+      .toBeLessThanOrEqual(1)
+
     // Readiness on the REAL op: rows have actually departed. The floor the
     // backend names is where the surface's oldest page must land — the
     // emulator's own word on how far its history reaches, whatever the

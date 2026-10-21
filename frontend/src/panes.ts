@@ -536,7 +536,11 @@ export class Pane implements PaneHost {
     if (this._mountStarted) return
     this._mountStarted = true
     log.info('nocx: Pane.start() called', { id: this.id })
-    await this.content.mount(this.pane, this, this._mountAbort.signal)
+    const mounting = this.content.mount(this.pane, this, this._mountAbort.signal)
+    // A terminal can open its PTY during async mount. Deliver the box now,
+    // after mount starts but before that open, without waiting on an observer.
+    this._deliverViewport()
+    await mounting
     // B.5: replay the latest buffered viewport, or measure now if none yet.
     if (this._latestViewport) {
       this.content.viewportChanged(this._latestViewport)

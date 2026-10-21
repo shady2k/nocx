@@ -746,14 +746,14 @@
    which made it a list every future child of this stack had to be added to. The
    restore boundary (nocx-m3fqk) was the first one that arrived afterwards and
    nobody added it, so PREVIOUS SESSION and its rule stayed painted over htop
-   and over every agent TUI (nocx-nkwm2). One kind of child has a reason to
-   survive here and it is named; a fourth kind is hidden by default, which is the
-   direction this rule can afford to be wrong in.
+   and over every agent TUI (nocx-nkwm2). Other visible content is hidden by
+   default. The invisible cell-metric probe must remain measurable: hiding it
+   leaves the painter on natural font advances instead of the committed grid.
 
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
-.scrollback-inner.inner-fullscreen-mode > *:not(.terminal-live-container) {
+.scrollback-inner.inner-fullscreen-mode > :not(.terminal-live-container):not(.cell-metric-probe) {
   display: none;
 }
 

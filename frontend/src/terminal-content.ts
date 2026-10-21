@@ -206,7 +206,7 @@ import { createMapping } from './painter/mapping'
 import { installLiveSelectionGesture, type LiveSelectionGesture } from './painter/selection-gesture'
 import { createCellFit, type CellFit } from './scrollback/cell-fit'
 import { devicePxToCssPx, displayDpr } from './painter/committed-metric'
-import { measureNaturalAdvance } from './scrollback/cell-metric'
+import { measureNaturalAdvance, measureNaturalLineHeight } from './scrollback/cell-metric'
 
 // ── The pane's screen-plane test seam (nocx-zg3k3.2.8) ─────────────────────
 // An e2e spec reads the ACTIVE pane's cell model through
@@ -2505,6 +2505,11 @@ export class TerminalContent extends BasePaneContent {
     const adopted = await this.adoptLiveSession()
     if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    // AD-1: the shell must start in the measured grid, before it can print.
+    // Adopted sessions keep their accepted geometry until this pane fits them.
+    if (this._latestViewport) {
+      this.fitUsableViewport(this.usableViewport(this._latestViewport))
+    }
     if (!this.sshOpts) {
       return this.client.openSession(this._reportedSize(), anchor)
     }
@@ -5143,25 +5148,15 @@ export class TerminalContent extends BasePaneContent {
     deviceCellHeight: number
   } | null {
     const geometry = this._cellModel?.current()?.geometry
-    if (!geometry) return null
     const dpr = displayDpr()
-    // THE PAINTER'S OWN ROWS are the measurement of last resort (nocx-1ebrs
-    // .42): they exist in every mode — the fullscreen rule hides every direct
-    // child of the stack but the live container, and the rows are inside it —
-    // and a row is exactly `geometry.cols` cells wide, so the cell width is a
-    // division off a real box rather than a guess. Needed by the restored
-    // full-screen pane: its first accepted frame carries no pixel metrics
-    // (the session it came back from was detached and returned to the
-    // backend's default size, which is a grid and no pixels), and the probe
-    // the natural-advance path measures is one of the children the fullscreen
-    // rule has hidden — with both sources dead, every fit bailed on missing
-    // metrics and a reclaimed tab stayed at the size the backend had dropped
-    // it to, about half the pane it was restored into.
+    // Accepted pixels remain authoritative. Before the first frame, measure
+    // the same font probe the painter uses, not a default grid that would
+    // resize the shell after its startup output has already been printed.
     const firstRow = this._painterSurface?.querySelector<HTMLElement>('.term-grid-row')
     const rowHeight = firstRow?.getBoundingClientRect().height
     const rowWidth = firstRow?.getBoundingClientRect().width
-    // Preserve the established accepted-frame path exactly. Only a frame
-    // whose pixel dimensions are still zero needs a first client report.
+    const acceptedCellWidth = geometry?.cellWidthPx ?? 0
+    const acceptedCellHeight = geometry?.cellHeightPx ?? 0
     const measurementHost = this.scrollback?.scrollbackInner
     // The accepted frame remains the source metric. If the local display
     // scale changed since a matching report produced it, convert its device
@@ -5169,25 +5164,31 @@ export class TerminalContent extends BasePaneContent {
     const acceptedDpr = this._acceptedGeometryDpr ?? dpr
     const committedScale = dpr / acceptedDpr
     const measuredAdvance =
-      measurementHost && geometry.cellWidthPx <= 0 ? measureNaturalAdvance(measurementHost) : 0
+      measurementHost && acceptedCellWidth <= 0 ? measureNaturalAdvance(measurementHost) : 0
     const naturalCellWidth =
       measuredAdvance > 0
         ? measuredAdvance
-        : rowWidth !== undefined && rowWidth > 0 && geometry.cols > 0
+        : rowWidth !== undefined && rowWidth > 0 && geometry && geometry.cols > 0
           ? rowWidth / geometry.cols
           : 0
     const deviceCellWidth =
-      geometry.cellWidthPx > 0
-        ? Math.ceil(geometry.cellWidthPx * committedScale)
+      acceptedCellWidth > 0
+        ? Math.ceil(acceptedCellWidth * committedScale)
         : naturalCellWidth > 0
           ? Math.ceil(naturalCellWidth * dpr)
           : 0
-    const deviceCellHeight =
-      geometry.cellHeightPx > 0
-        ? Math.ceil(geometry.cellHeightPx * committedScale)
+    const naturalLineHeight =
+      acceptedCellHeight > 0
+        ? 0
         : rowHeight && rowHeight > 0
-          ? Math.ceil(rowHeight * dpr)
-          : 0
+          ? rowHeight
+          : measurementHost
+            ? measureNaturalLineHeight(measurementHost)
+            : 0
+    const deviceCellHeight =
+      acceptedCellHeight > 0
+        ? Math.ceil(acceptedCellHeight * committedScale)
+        : Math.ceil(naturalLineHeight * dpr)
     if (deviceCellWidth <= 0 || deviceCellHeight <= 0) return null
     return {
       cellWidth: devicePxToCssPx(deviceCellWidth, dpr),
@@ -5539,9 +5540,8 @@ export class TerminalContent extends BasePaneContent {
    * so the two never disagree.
    */
   private fitUsableViewport(usable: ContentViewport): void {
-    const snapshot = this._cellModel?.current()
     const metrics = this.liveCellMetrics()
-    if (!snapshot || !metrics || usable.width <= 0 || usable.height <= 0) return
+    if (!metrics || usable.width <= 0 || usable.height <= 0) return
     const cols = Math.max(1, Math.floor(usable.width / metrics.cellWidth))
     const rows = Math.max(1, Math.floor(usable.height / metrics.cellHeight))
     this.lastLocalGridSize = { cols, rows }
@@ -5564,7 +5564,7 @@ export class TerminalContent extends BasePaneContent {
     if (!sameSize || !sameMetric) {
       this.cols = cols
       this.rows = rows
-      this._scheduleResizeReport()
+      if (this.session) this._scheduleResizeReport()
     }
   }
 

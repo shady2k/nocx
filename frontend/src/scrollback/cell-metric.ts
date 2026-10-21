@@ -73,6 +73,13 @@ export function measureNaturalAdvance(container: HTMLElement): number {
   return rect.width / len
 }
 
+/** The declared terminal line box, before any accepted frame can supply its
+ *  device-pixel pitch. Glyph ink height is not a line box. */
+export function measureNaturalLineHeight(container: HTMLElement): number {
+  const height = Number.parseFloat(getComputedStyle(ensureProbe(container)).lineHeight)
+  return Number.isFinite(height) && height > 0 ? height : 0
+}
+
 function ensureProbe(container: HTMLElement): HTMLElement {
   const existing = container.querySelector<HTMLElement>(`.${PROBE_CLASS}`)
   if (existing) return existing

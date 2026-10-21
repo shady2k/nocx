@@ -70,7 +70,7 @@ import type { ConnectionCondition } from './connection-condition'
 import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
-import { SURFACE_TERMINAL } from './pane-content'
+import { SURFACE_TERMINAL, type ContentViewport } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
@@ -284,6 +284,8 @@ interface MountOpts {
    *  between Pane.start() and the renderer being built, so the show lands
    *  on a pane with no scrollback and no second show ever comes. */
   visibleBeforeMount?: boolean
+  /** The pane's real box, measured by its presentation host during mount. */
+  viewportBeforeMount?: ContentViewport
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -331,6 +333,12 @@ async function mountTerminal(
   paneParent.append(tab.pane)
   if (opts.attachToDocument) document.body.append(paneParent)
   if (opts.visibleBeforeMount) content.setVisible(true)
+  if (opts.viewportBeforeMount) {
+    const { width, height } = opts.viewportBeforeMount
+    Object.defineProperty(tab.pane, 'getBoundingClientRect', {
+      value: () => ({ width, height }) as DOMRect,
+    })
+  }
   await tab.start()
   await expect(content.ready).resolves.toBe(opts.expectedReady ?? true)
 
@@ -434,6 +442,42 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       vi.unstubAllGlobals()
       teardown()
       vi.useRealTimers()
+    }
+  })
+
+  it('opens a fresh shell at its measured pane size before any screen frame exists', async () => {
+    const style = document.createElement('style')
+    style.textContent = '.cell-metric-probe { line-height: 16px; }'
+    document.head.append(style)
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains('cell-metric-probe')) {
+          // Glyph ink must not replace the declared 16px terminal line box.
+          return { width: 64 * 8, height: 12 } as DOMRect
+        }
+        return Element.prototype.getBoundingClientRect.call(this)
+      })
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        viewportBeforeMount: { width: 960, height: 640 },
+      },
+      client,
+    )
+    try {
+      expect(client.openSession.mock.calls[0][0]).toEqual({
+        cols: 120,
+        rows: 40,
+        xpixel: 960,
+        ypixel: 640,
+      })
+    } finally {
+      teardown()
+      rectSpy.mockRestore()
+      style.remove()
     }
   })
 

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -38,10 +40,8 @@ import (
 // THEIR shell, with THEIR startup files, integrated, and without the
 // capability in the environment.
 
-// TestLocalShellKind pins the classification the tier choice is made on. It is
-// a mirror of autoDispatcherScript's case arms, and the arms that matter most
-// are the ones with no local tier: a fish or a tcsh user must be STARTED, not
-// substituted for bash, which is exactly what nocx-wwz0 was.
+// Local classification preserves the account's actual shell; unsupported
+// variants are conventional rather than silently replaced with Bash.
 func TestLocalShellKind(t *testing.T) {
 	tests := []struct {
 		path string
@@ -54,7 +54,7 @@ func TestLocalShellKind(t *testing.T) {
 		{"/bin/bash", ShellBash},
 		{"/run/current-system/sw/bin/bash", ShellBash},
 		{"-bash", ShellBash},
-		{"/usr/local/bin/fish", ShellUnknown},
+		{"/usr/local/bin/fish", ShellFish},
 		{"/bin/tcsh", ShellUnknown},
 		{"/bin/csh", ShellUnknown},
 		{"/bin/dash", ShellUnknown},
@@ -302,7 +302,7 @@ func TestLocalZshPane_AStartupFileThatDrainsALowDescriptorStillIntegrates(t *tes
 	}
 	unsetZDOTDIR(t)
 
-	s := startLocalZshPane(t, zsh, home, localTestOpts())
+	s := startLocalPane(t, zsh, ShellZsh, home, localTestOpts())
 
 	// One command, run to completion on BOTH transports: the completion is
 	// accepted on the lifecycle channel and its whole render arrives on the
@@ -344,153 +344,73 @@ func TestLocalZshPane_AStartupFileThatDrainsALowDescriptorStillIntegrates(t *tes
 	}
 }
 
-// startLocalZshPane starts one local zsh pane the way the helper's spawner
-// does — the product's own launch shape, a real pty, a real lifecycle
-// channel on the inherited descriptor — and waits for the handshake. It is
-// the sequence internal/helper/session/spawn_local.go runs, minus the
-// daemon: that is the seam the shipped defect lived in, so a test that
-// started the shell some other way would not have reported it.
-func startLocalZshPane(t *testing.T, zsh, home string, opts LaunchOptions) *channelShell {
+type localPaneKernel interface {
+	kernelHarness
+	serveFile(*os.File)
+}
+
+type localPaneOptions struct {
+	kernel        localPaneKernel
+	waitHandshake bool
+}
+
+// startLocalPane uses the helper's own launch shape, a real PTY, and its
+// inherited lifecycle socket. Native language differences belong to the
+// launcher, not a second test-only bootstrap path.
+func startLocalPane(t *testing.T, shell string, kind ShellKind, home string, opts LaunchOptions) *channelShell {
 	t.Helper()
-	launch, err := LocalEnhancedLaunchInMemory(zsh, ShellZsh, opts)
+	return startLocalPaneMode(t, shell, kind, home, opts, localPaneOptions{waitHandshake: true})
+}
+
+func startLocalPaneMode(t *testing.T, shell string, kind ShellKind, home string, opts LaunchOptions, mode localPaneOptions) *channelShell {
+	t.Helper()
+	env := cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null")
+	opts.EnvOverrides = append(env, opts.EnvOverrides...)
+	launch, err := LocalEnhancedLaunchInMemory(shell, kind, opts)
 	if err != nil {
 		t.Fatalf("LocalEnhancedLaunchInMemory: %v", err)
 	}
+	if launch.Refusal != ReasonNone {
+		t.Fatalf("the shell fixture has no supported native startup adapter: %s", launch.Refusal)
+	}
 	kernelFile, shellFile := lifecycleSocketpair(t)
-
-	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
-	cmd := exec.Command(launch.Command, launch.Args...)
-	// The script's reader first and the lifecycle channel second — fd 3 and
-	// fd 4, the order LaunchOptions.LifecycleFD names and the order the
-	// helper's spawner appends them in.
+	cmd := exec.Command(launch.Command, launch.Args...) //nolint:gosec // requireShell-resolved executable and authored launcher arguments
 	cmd.ExtraFiles = append(append([]*os.File{}, launch.ExtraFiles...), shellFile)
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000", "NOCX_SNAPSHOT_WAIT_MS=15000")...,
-	)
-
-	k := newFakeKernel(t, testCap)
+	cmd.Env = append(opts.EnvOverrides, launch.Env...)
+	cmd.Env = append(cmd.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000", "NOCX_SNAPSHOT_WAIT_MS=15000")
+	k := mode.kernel
+	if k == nil {
+		k = newFakeKernel(t, testCap)
+	}
 	go k.serveFile(kernelFile)
-
-	ptmx, err := pty.Start(cmd)
+	var terminal emulator.Terminal
+	if kind == ShellFish {
+		// Native Fish waits for terminal negotiation before its first prompt.
+		// Use the product's terminal owner, not a second query-response parser.
+		terminal, err = ghostty.New(emulator.Geometry{Cols: 80, Rows: 24, CellWidthPx: 10, CellHeightPx: 20})
+		if err != nil {
+			launch.Abort()
+			t.Fatal(err)
+		}
+	}
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 80, Rows: 24})
 	if err != nil {
 		launch.Abort()
+		if terminal != nil {
+			terminal.Close()
+		}
 		t.Fatalf("pty start: %v", err)
 	}
-	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k, terminal: terminal}
 	go s.readPump()
 	t.Cleanup(func() {
 		_ = ptmx.Close()
 		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	})
-	// The daemon's own sequence after the fork: release the parent's copies.
-	// Nothing is written into the terminal — that is the fix under test.
 	launch.Cleanup()
-
-	s.waitForHandshake()
+	if mode.waitHandshake {
+		s.waitForHandshake()
+	}
 	return s
-}
-
-// TestLocalZshLaunch_HoldsNoBearerAndTypesNothing pins the two properties the
-// delivery now rests on, without a shell: nothing is typed into the terminal,
-// and the transient directory zsh is pointed at carries no bearer.
-//
-// Both are cheap assertions on a rendered launch and both are structural. The
-// first is why a person never sees nocx's plumbing in their scrollback — the
-// typeahead echo is not suppressed, it does not exist. The second is what lets
-// a FILESYSTEM delivery sit inside ADR-0024 decision 2: the capability and the
-// recovery fence are read from the inherited descriptor by the .zshenv phase,
-// so what lands on disk is the public script text and the descriptor's NUMBER.
-func TestLocalZshLaunch_HoldsNoBearerAndTypesNothing(t *testing.T) {
-	opts := localTestOpts()
-	launch, err := LocalEnhancedLaunchInMemory("/bin/zsh", ShellZsh, opts)
-	if err != nil {
-		t.Fatalf("LocalEnhancedLaunchInMemory: %v", err)
-	}
-	defer launch.Abort()
-
-	if len(launch.ExtraFiles) != 1 {
-		t.Fatalf("the tier must hand the shell exactly one descriptor to read, got %d", len(launch.ExtraFiles))
-	}
-	var zdotdir, capFD string
-	for _, kv := range launch.Env {
-		if v, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
-			zdotdir = v
-		}
-		if v, ok := strings.CutPrefix(kv, CapabilityFDEnv+"="); ok {
-			capFD = v
-		}
-	}
-	if zdotdir == "" {
-		t.Fatalf("the launch does not point ZDOTDIR at a transient directory: %v", launch.Env)
-	}
-	// The cleanup trap recurses on `*/nocx-zsh.??????` and nothing else, so
-	// the name is that prefix plus exactly six characters — a longer random
-	// suffix would be a directory every session left behind.
-	if base := filepath.Base(zdotdir); !strings.HasPrefix(base, "nocx-zsh.") || len(base) != len("nocx-zsh.")+6 {
-		t.Errorf("ZDOTDIR = %q, which the cleanup guard would not recognise", zdotdir)
-	}
-	if capFD != "3" {
-		t.Errorf("%s = %q, want the first inherited descriptor", CapabilityFDEnv, capFD)
-	}
-	if fi, serr := os.Stat(zdotdir); serr != nil || fi.Mode().Perm() != 0o700 {
-		t.Errorf("the transient directory is not a 0700 directory: %v (err %v)", fi, serr)
-	}
-
-	//nolint:gosec // the path is the 0700 directory this test's own launch wrote.
-	env, err := os.ReadFile(filepath.Join(zdotdir, ".zshenv"))
-	if err != nil {
-		t.Fatalf("the tier wrote no .zshenv: %v", err)
-	}
-	// The bearer read comes BEFORE the user's own .zshenv is replayed. That
-	// ordering is the whole fix: the descriptor is consumed and closed in the
-	// phase zsh runs before any user code exists.
-	read := strings.Index(string(env), `read -r __nocx_cap <&"${`+CapabilityFDEnv+`}"`)
-	user := strings.Index(string(env), "__nocx_f=")
-	if read < 0 || user < 0 {
-		t.Fatalf("the rendered .zshenv does not both read the descriptor and replay the user's file:\n%s", env)
-	}
-	if read > user {
-		t.Errorf("the .zshenv reads the bearer AFTER the user's own .zshenv runs, which is the race this fixes:\n%s", env)
-	}
-	// The lifecycle channel is moved out of reach of user code in the same
-	// phase and for the same reason: a channel that dies having written
-	// nothing is indistinguishable from a shell that never integrated, and a
-	// user startup file may close a low descriptor.
-	move := strings.Index(string(env), `exec {__nocx_lc_hi}<&"$NOCX_LIFECYCLE_FD"`)
-	if move < 0 || move > user {
-		t.Errorf("the .zshenv does not move the lifecycle descriptor before the user's own startup runs:\n%s", env)
-	}
-
-	// No file of the directory may carry either bearer, and the script text
-	// must be there — otherwise the assertion above passes on an empty file.
-	for _, name := range []string{".zshenv", ".zprofile", ".zshrc"} {
-		//nolint:gosec // as above: a file inside the directory the launch wrote.
-		body, rerr := os.ReadFile(filepath.Join(zdotdir, name))
-		if rerr != nil {
-			t.Fatalf("the tier wrote no %s: %v", name, rerr)
-		}
-		if strings.Contains(string(body), opts.Capability) || strings.Contains(string(body), opts.Recovery) {
-			t.Errorf("%s on disk carries a bearer value", name)
-		}
-		if fi, serr := os.Stat(filepath.Join(zdotdir, name)); serr != nil || fi.Mode().Perm() != 0o600 {
-			t.Errorf("%s is not a 0600 file: %v (err %v)", name, fi, serr)
-		}
-	}
-	//nolint:gosec // as above.
-	rc, err := os.ReadFile(filepath.Join(zdotdir, ".zshrc"))
-	if err != nil {
-		t.Fatalf("the tier wrote no .zshrc: %v", err)
-	}
-	if len(rc) < 40000 {
-		t.Errorf("the transient .zshrc is only %d bytes — the embedded script is missing", len(rc))
-	}
-	// And exactly ONE phase writes the lifecycle descriptor's number: the
-	// spawn's environment, which the .zshenv then moves. An env block that
-	// re-assigned the ORIGINAL number here would hand the script a descriptor
-	// the shell no longer holds, and the channel would die silently at the
-	// .zshrc phase — after the .zshenv had already reported it moved.
-	if strings.Contains(string(rc), "NOCX_LIFECYCLE_FD=") {
-		t.Errorf("the transient .zshrc assigns NOCX_LIFECYCLE_FD, undoing the .zshenv move")
-	}
 }

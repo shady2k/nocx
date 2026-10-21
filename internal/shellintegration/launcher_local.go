@@ -28,10 +28,9 @@ import (
 // which is what makes the local channel live rather than the installed
 // generation's stale one.
 //
-// It is one of two local tiers. zsh has LocalZshRcfile beside it since
-// nocx-wwz0; the posix tier is still remote-only, so a login shell that is
-// neither bash nor zsh is started conventionally with ReasonUnsupportedShell
-// (LocalEnhancedLaunch).
+// Bash and Zsh also have the coordinator launch form. Native Fish uses the
+// helper-hosted adapter, whose binary I/O client is part of the same helper;
+// the POSIX tier remains remote-only.
 func LocalBashRcfile(opts LaunchOptions) (string, error) {
 	if !opts.Enhanced || opts.SessionID == "" {
 		return "", fmt.Errorf("shellintegration: local lifecycle bootstrap requires an enhanced session with a session id")
@@ -55,19 +54,10 @@ func localScript(raw string, opts LaunchOptions) string {
 // local pane from the set this BUILD carries.
 func rawScript(raw string) string { return renderScript(raw, shippedAgentNames(), DeliveryLocal) }
 
-// LocalShellKind classifies a login shell PATH into the local tier that starts
-// it. It is the Go-side mirror of the remote dispatcher's case arms
-// (autoDispatcherScript in launcher_auto.go), which is the codebase's existing
-// answer to "given a shell's name, which tier is it": basename, leading `-`
-// stripped (login(1) hands a login shell an argv[0] of "-zsh"), then an exact
-// name match. Kept as a mirror rather than a second vocabulary — the dispatcher
-// runs on the far host, where only a shell can ask the question, and this runs
-// here, where only Go can; they must not disagree about what "zsh" is.
-//
-// ShellUnknown is the honest answer for fish, csh, tcsh, dash and anything
-// else: the POSIX tier exists remotely but has no local launch semantics yet
-// (nocx-k28e), so locally ShellUnknown means "start it, integrate nothing, and
-// say so" rather than "substitute bash", which is the defect nocx-wwz0 is.
+// LocalShellKind classifies the account's actual shell, never a substitute.
+// Fish is a helper-hosted native tier; recognizing it here does not claim the
+// helper-less remote dispatcher's TCP transport. Other shells remain ordinary
+// terminals rather than being replaced with Bash.
 func LocalShellKind(path string) ShellKind {
 	name := strings.TrimPrefix(filepath.Base(path), "-")
 	switch name {
@@ -75,6 +65,8 @@ func LocalShellKind(path string) ShellKind {
 		return ShellBash
 	case "zsh":
 		return ShellZsh
+	case "fish":
+		return ShellFish
 	default:
 		return ShellUnknown
 	}
@@ -100,6 +92,9 @@ type LocalLaunch struct {
 	ExtraFiles []*os.File
 	Cleanup    func()
 	Abort      func()
+	// Refusal keeps an unsupported native startup layout conventional, without
+	// passing it a credential pipe, lifecycle socket or activation marker.
+	Refusal RefusalReason
 }
 
 // LocalEnhancedLaunchInMemory builds the helper's launch shape. Unlike the
@@ -127,6 +122,8 @@ func LocalEnhancedLaunchInMemory(shellPath string, kind ShellKind, opts LaunchOp
 			return LocalLaunch{}, err
 		}
 		return pipeLaunch(shellPath, []string{"--rcfile", "/dev/fd/3", "-i"}, nil, rc)
+	case ShellFish:
+		return localFishLaunch(shellPath, opts)
 	case ShellZsh:
 		// A TRANSIENT ZDOTDIR, and no line typed into the terminal (nocx-1ebrs.8).
 		//

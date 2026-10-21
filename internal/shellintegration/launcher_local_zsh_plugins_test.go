@@ -181,7 +181,7 @@ func TestLocalZshPane_ThePluginStackIntegratesInEitherOrder(t *testing.T) {
 			home := writePluginFixtureHome(t, tc.file, tc.order)
 			unsetZDOTDIR(t)
 
-			s := startLocalZshPane(t, zsh, home, localTestOpts())
+			s := startLocalPane(t, zsh, ShellZsh, home, localTestOpts())
 
 			// The fixture really is the case this test names.
 			s.run(`echo "PLUGIN_ORDER_DONE"`)

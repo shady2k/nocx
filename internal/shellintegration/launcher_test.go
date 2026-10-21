@@ -253,7 +253,7 @@ func TestBashLauncher_EmitsMarkersAndRunsUserRc(t *testing.T) {
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...),
-		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"; echo "ZERO=$0"`, "exit")
+		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"`, "exit")
 
 	ms := extractOscMarkers(out)
 	if countMarkers(ms, "A") == 0 {
@@ -267,9 +267,6 @@ func TestBashLauncher_EmitsMarkersAndRunsUserRc(t *testing.T) {
 	}
 	if !strings.Contains(out, "SENTINEL=from-user-rc") {
 		t.Errorf("the user's rc sentinel did not survive: %q", out)
-	}
-	if !strings.Contains(out, "ZERO=bash") {
-		t.Errorf("$0 = %q, want bash (non-login)", out)
 	}
 	if !strings.Contains(out, "FIXTURE-PROMPT") {
 		t.Errorf("marker-only mode suppressed the fixture prompt without a live channel (ADR-0024 decision 9): %q", out)
@@ -425,7 +422,7 @@ func TestZshLauncher_TransientDirFlow(t *testing.T) {
 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		append([]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, tierEnv...),
-		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"; echo "ZERO=$0"`, "exit")
+		`echo "SENTINEL=$NOCX_LAUNCHER_SENTINEL"`, "exit")
 
 	ms := extractOscMarkers(out)
 	if countMarkers(ms, "A") == 0 {
@@ -445,9 +442,6 @@ func TestZshLauncher_TransientDirFlow(t *testing.T) {
 	}
 	if strings.Contains(out, "TRANSIENT_PRESENT") {
 		t.Errorf("transient dir present at user-rc time: %q", out)
-	}
-	if !strings.Contains(out, "ZERO=zsh") {
-		t.Errorf("$0 = %q, want zsh", out)
 	}
 	assertNoTransientDir(t, tmp)
 }

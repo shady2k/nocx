@@ -329,7 +329,6 @@ export class LifecycleKernel {
         }
         if (cur.kind === 'running') {
           if (cur.domain.id !== fact.domain) return null
-          if (cur.attempt.state !== 'completed') return null // prompt over an open attempt
         }
         if (cur.kind === 'desynchronized' && cur.domain.id !== fact.domain) return null
         if (cur.kind === 'desynchronized') {
@@ -340,19 +339,15 @@ export class LifecycleKernel {
           // invalid restoring fact changes nothing.
           const domain = this.resolveDomain(fact, false)
           if (domain === null) return null
-          // The kernel reconciled the domain's open attempts while applying
-          // the snapshot — anything it did not name active or completed
-          // became unknown there, and a prompt_ready fact carries no
-          // attempt (derive publishes only the lane's current attempt).
-          // Mirror the reconciliation BEFORE the open-attempt guard, or the
-          // restoring fact is rejected as "prompt over an open attempt" and
-          // the lane stays desynchronized forever while the kernel is
-          // Established+PromptReady.
+          // Only snapshot reconciliation abandons attempts the backend could
+          // not recover. Ordinary readiness leaves a pending submit open so
+          // its delayed authenticated start can still attach to it.
           this.unknownAttemptsOf(fact.domain!)
-          if (this.openAttemptOf(fact.domain!) !== null) return null
           return { kind: 'prompt_ready', domain, [authorityBrand]: true }
         }
-        if (this.openAttemptOf(fact.domain!) !== null) return null // prompt over an open attempt
+        // The backend owns input readiness independently of attempt settlement.
+        // A cancelled parser line can be ready while its unstarted app attempt
+        // remains open; retaining that record must not hide the composer.
         const domain = this.resolveDomain(fact, true)
         if (domain === null) return null
         return { kind: 'prompt_ready', domain, [authorityBrand]: true }
@@ -547,13 +542,6 @@ export class LifecycleKernel {
       // the latest.
       signalDelivery: deliveryOf(fact) ?? attempt.signalDelivery,
     }
-  }
-
-  private openAttemptOf(domainId: string): ExecutionAttempt | null {
-    for (const att of this._attempts.values()) {
-      if (att.domain.id === domainId && att.state === 'open') return att
-    }
-    return null
   }
 
   private unknownAttemptsOf(domainId: string): void {

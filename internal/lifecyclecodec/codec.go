@@ -45,9 +45,9 @@ import (
 // transport afterwards.
 var ErrScanBudgetExhausted = errors.New("lifecyclecodec: scan budget exhausted")
 
-// ErrFrameTooLarge reports an Encode call whose frame exceeds max_frame.
-// Decoding never returns it: an oversize prefix is garbage that the decoder
-// scans past (and it is rejected before any allocation).
+// ErrFrameTooLarge reports an Encode or raw framing operation whose frame
+// exceeds max_frame. The scanning Decoder never returns it: an oversize
+// prefix is garbage that it scans past, rejected before any body allocation.
 var ErrFrameTooLarge = errors.New("lifecyclecodec: frame exceeds max_frame")
 
 // errFraming marks a frame attempt that failed to parse. It is internal: the
@@ -664,19 +664,7 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(body) > lifecycle.MaxFrameBytes {
-		return 0, ErrFrameTooLarge
-	}
-	// One Write for the whole frame: a lifecycle descriptor can have a second
-	// writer (a nested child holds a dup of its parent's), and a frame split
-	// across two writes lets the other writer's frame land between its length
-	// and its body, which costs the reader its framing for good.
-	frame := make([]byte, 4, 4+len(body))
-	// #nosec G115 -- len(body) is checked against MaxFrameBytes (64 KiB)
-	// above, far below the uint32 ceiling; the frame length is the JSON
-	// byte count by contract.
-	binary.BigEndian.PutUint32(frame, uint32(len(body)))
-	return w.Write(append(frame, body...))
+	return WriteRawFrame(w, body)
 }
 
 func derefInt(p *int) int {

@@ -254,6 +254,17 @@ where to get it, because the commit-message hook resolves tasks through `br`.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
+**Native Fish.** Helper-hosted Fish preserves its normal configuration order,
+universal variables, history and prompt functions; it does not run through Bash.
+The verified startup prelude is Fish 4.9.3's
+([ADR-0096](docs/decisions/0096-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md)).
+An unverified prelude remains a conventional terminal with a visible integration
+refusal. Fish without a helper on a remote host is not claimed as enhanced support.
+The existing login-shell resolver selects a valid account-database shell before
+`$SHELL`; exporting `SHELL=fish` does not override that record. Configured agent
+commands cannot replace native Fish builtins, functions or autoload names: a
+collision is reported and that agent record must be renamed.
+
 The pre-commit hook runs on every `git commit` and enforces **static** checks
 only — nothing below is executed, only read (`nocx-hzsiv`):
 
@@ -310,18 +321,23 @@ All four frontend gates FAIL with an actionable message if `node_modules` is abs
 
 Run locally without committing: `make ci` (close mirror of CI — runs the same static analysis and tests, but validates against your existing `node_modules` rather than reinstalling).
 
-**Shell integration tests need dash, zsh and three zsh plugins.**
-`internal/shellintegration` drives the real bash/zsh/posix launchers on real
-ptys. The dash and zsh launcher tests **fail, not skip**, when the shell they
-must prove is absent (a skipped test reporting success is the failure
-AGENTS.md's testing rules exist to prevent) — install the shells, then run the
-suite the way CI does:
+**Shell integration tests drive real Bash, Zsh, POSIX shells and native Fish.**
+`internal/shellintegration` launches them on real PTYs. The dash and zsh tests
+**fail, not skip**, when a required shell is absent. Install them before running
+the suite:
 
 ```bash
 sudo apt-get install -y dash zsh        # Debian/Ubuntu
 brew install dash                       # macOS (zsh ships with the OS)
 go test -race -count=1 ./internal/shellintegration/...
 ```
+
+Native Fish acceptance requires the pinned 4.9.3 executable, not a skipped test.
+Provision it with `scripts/install-fish-ci.sh ~/.cache/nocx-fish-ci`, put
+`~/.cache/nocx-fish-ci/bin` first on `PATH`, and set
+`NOCX_REQUIRE_NATIVE_FISH=1` for `TestNativeFish_` checks. The installer verifies
+the upstream archive digest and uses a private prefix; it changes neither the
+account shell nor the system Fish installation.
 
 The widget-wrapping zsh plugins — `fast-syntax-highlighting`,
 `zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the one test
@@ -340,11 +356,12 @@ NOCX_ZSH_PLUGINS=~/.cache/nocx-zsh-plugins \
 The gates that run this suite provision the shells so they prove them:
 `scripts/ci-linux.sh` uses an image carrying dash, zsh and a real bash 3.2
 (`.githooks/images/ci-linux/Dockerfile`), and CI's `ci-backend` job runs
-`scripts/install-zsh-ci.sh`, which now installs the pinned plugins as well
-(ubuntu-latest ships both shells already). CI's macOS job installs the pinned
-plugins too and runs the plugin-composition test alone, because that defect was
-measured on a Mac and macOS ships zsh 5.8. The pre-commit hook provisions
-nothing: it runs no tests at all.
+`scripts/install-zsh-ci.sh`, which installs the pinned plugins as well.
+Both runners also install the pinned Fish and require the native checks.
+CI's macOS job provisions the same Fish release and the pinned zsh plugins,
+then runs the native Fish checks and the plugin-composition test. The latter
+was measured on a Mac, where the OS ships zsh 5.8. The pre-commit hook
+provisions nothing: it runs no tests at all.
 
 ## Quality gates
 

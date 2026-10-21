@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
@@ -93,6 +94,7 @@ type fakeKernel struct {
 	// carrying grantBootstrap — the empty string by default, which is the
 	// protocol's refusal echo (nocx-tyyo).
 	answerGrantEmpty bool
+	onEvent          func(net.Conn, kernelEvent)
 	grantBootstrap   string
 }
 
@@ -169,6 +171,9 @@ func (k *fakeKernel) serve(conn net.Conn) {
 			rid, _ := ev.Body["request"].(string)
 			env, _ := ev.Body["env"].(string)
 			k.sendEmptyGrant(conn, rid, env)
+		}
+		if k.onEvent != nil {
+			k.onEvent(conn, ev)
 		}
 	}
 }
@@ -288,13 +293,16 @@ type kernelHarness interface {
 }
 
 type channelShell struct {
-	t        *testing.T
-	cmd      *exec.Cmd
-	ptmx     *os.File
-	kernel   kernelHarness
-	listener net.Listener
-	mu       sync.Mutex
-	out      []byte
+	t                *testing.T
+	cmd              *exec.Cmd
+	ptmx             *os.File
+	kernel           kernelHarness
+	listener         net.Listener
+	terminal         emulator.Terminal
+	mu               sync.Mutex
+	out              []byte
+	commandNames     []string
+	promptBoundaries uint64
 }
 
 // startChannelShell boots the hooks against a fake kernel over loopback TCP
@@ -506,6 +514,9 @@ var ptyPumpLag = func() time.Duration {
 }()
 
 func (s *channelShell) readPump() {
+	if s.terminal != nil {
+		defer s.terminal.Close()
+	}
 	buf := make([]byte, 8192)
 	for {
 		n, err := s.ptmx.Read(buf)
@@ -513,6 +524,30 @@ func (s *channelShell) readPump() {
 			if ptyPumpLag > 0 {
 				// Test-only pacing widens the pump scheduling window.
 				time.Sleep(ptyPumpLag)
+			}
+			if s.terminal != nil {
+				replies, ingestErr := s.terminal.Ingest(buf[:n])
+				if ingestErr != nil {
+					s.t.Errorf("terminal ingest: %v", ingestErr)
+					return
+				}
+				if len(replies) != 0 {
+					if _, writeErr := s.ptmx.Write(replies); writeErr != nil {
+						return
+					}
+				}
+				for _, effect := range s.terminal.Effects() {
+					if effect.Kind == emulator.EffectCommandSnapshot {
+						s.mu.Lock()
+						s.commandNames = effect.CommandNames
+						s.mu.Unlock()
+					}
+					if effect.Kind == emulator.EffectPromptBoundary {
+						s.mu.Lock()
+						s.promptBoundaries++
+						s.mu.Unlock()
+					}
+				}
 			}
 			s.mu.Lock()
 			s.out = append(s.out, buf[:n]...)
@@ -528,6 +563,23 @@ func (s *channelShell) output() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return string(s.out)
+}
+
+func (s *channelShell) hasSessionCommand(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, candidate := range s.commandNames {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *channelShell) promptBoundaryCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.promptBoundaries
 }
 
 // waitForHandshake waits until the kernel has accepted hello and the first
@@ -577,15 +629,15 @@ func (s *channelShell) waitForHandshake() {
 // cannot anchor the race.
 func (s *channelShell) run(cmdline string) {
 	s.t.Helper()
+	completed := s.kernel.count("complete")
 	if _, err := s.ptmx.Write([]byte(cmdline + "\n")); err != nil {
 		s.t.Fatalf("write %q: %v", cmdline, err)
 	}
-	s.waitForAccepted("complete")
-	// And then for the prompt the shell returns to. waitForAccepted stops at
-	// the FIRST event of a kind, so stopping at "complete" leaves the
-	// post-command prompt_ready still in flight — which the assertions below
-	// require. On a fast host it usually arrived anyway; in the test container
-	// it did not, and the test failed for a race rather than for a defect.
+	waittest.WaitForTimeoutDetail(s.t, "this command's completion", 10*time.Second,
+		func() string { return fmt.Sprintf("accepted=%v output=%q", s.kernel.events(), s.output()) },
+		func() bool { return s.kernel.count("complete") > completed })
+	// Completion and readiness are distinct channel events. Then rendezvous
+	// with the PTY fence as well, rather than assuming the byte pump kept up.
 	s.waitForPromptAfterComplete()
 	// The pty half, per the note above.
 	s.waitForRenderedThroughPrompt()
@@ -666,7 +718,13 @@ func (s *channelShell) waitForAccepted(evt string) {
 }
 
 func (s *channelShell) close() {
-	_, _ = s.ptmx.Write([]byte("exit\n"))
+	if s.t.Failed() {
+		// A failed nested/agent assertion may leave a foreground child at
+		// stdin; "exit" would feed that child, then wait forever for Fish.
+		_ = s.cmd.Process.Kill()
+	} else {
+		_, _ = s.ptmx.Write([]byte("exit\n"))
+	}
 	_ = s.cmd.Wait()
 	_ = s.ptmx.Close()
 	_ = s.cmd.Process.Kill()
@@ -1312,6 +1370,7 @@ func lifecycleSocketpair(t *testing.T) (kernelEnd, shellEnd *os.File) {
 // serveFile serves one connection wrapped around a socketpair end.
 func (k *fakeKernel) serveFile(f *os.File) {
 	c, err := net.FileConn(f)
+	_ = f.Close() // FileConn owns a duplicate; retaining this copy conceals peer EOF.
 	if err != nil {
 		return
 	}

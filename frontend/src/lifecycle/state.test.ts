@@ -337,15 +337,28 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
     expect(attemptOf(k.state)?.signalDelivery).toBe('delivered')
   })
 
-  it('a prompt_ready over an open attempt is rejected; it lands after the completion', () => {
+  it('restores input readiness without completing the pending submit or losing a delayed start', () => {
     const k = new LifecycleKernel()
+    const pending = { id: 'att-pending', origin: 'app' as const, submitId: 'submit-pending' }
     k.applyFact(promptReady('d1', 1))
-    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    k.applyFact(running('d1', 1, pending))
+
+    // The backend may reach a ready prompt before this submit's start:
+    // either the parser line was cancelled, or the genuine start is delayed.
     k.applyFact(promptReady('d1', 1))
-    expect(k.state.kind).toBe('running')
-    k.applyFact(running('d1', 1, { id: 'att-1', state: 'completed', exitCode: 0, fence: FENCE }))
+    expect(shouldShowEditor(k.state)).toBe(true)
+    expect(k.attempt(pending.id)).toMatchObject({ ...pending, state: 'open' })
+    expect(k.attempt(pending.id)?.exitCode).toBeUndefined()
+    expect(k.attempt(pending.id)?.fence).toBeUndefined()
+
+    // A genuine start still attaches to that same submit, not a new attempt.
+    k.applyFact(running('d1', 1, pending))
+    expect(shouldShowEditor(k.state)).toBe(false)
+    expect(attemptOf(k.state)).toMatchObject({ ...pending, state: 'open' })
+    k.applyFact(running('d1', 1, { ...pending, state: 'completed', exitCode: 7, fence: FENCE }))
     k.applyFact(promptReady('d1', 1))
-    expect(k.state.kind).toBe('prompt_ready')
+    expect(shouldShowEditor(k.state)).toBe(true)
+    expect(k.attempt(pending.id)).toMatchObject({ ...pending, state: 'completed', exitCode: 7 })
   })
 
   it('a Start while an attempt runs never opens a second top-level attempt', () => {

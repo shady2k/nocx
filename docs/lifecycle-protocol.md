@@ -314,6 +314,11 @@ exactly once: a second `complete` for the same attempt is rejected.
 an app attempt is open but has not started. The kernel makes input ready and
 primes that attempt; the renderer must restore the editor without completing or
 abandoning its record. A delayed genuine `start` still attaches to the same submit.
+When a valid fact then names a different attempt in that domain, the invariant
+of one open attempt per domain proves the retained record can no longer be open.
+Without a completion fact for it, the renderer settles it `unknown` before projecting the
+new attempt, so a cancelled input cannot keep a Running badge or acquire a fake
+exit status.
 This includes Fish's native `fish_cancel`: cancelling a parser continuation
 repaints its cached prompt without a `fish_prompt` event, so the adapter publishes
 one ready observation, never a fabricated execution.

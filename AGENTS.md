@@ -320,6 +320,16 @@ nothing. Four of that stage's five CI rounds were this one defect. The code half
 half no assertion can carry is the test: **put the directory behind a symlink, and the
 Linux run fails too.**
 
+**On KDE Wayland, native keyboard input follows the compositor's layout, not an
+XKB lock alone.** Measured 2026-10-21 (`nocx-sd8uk.1.1`): `XkbLockGroup(..., 0)`
+reported group 0 while `qdbus6 org.kde.keyboard /Layouts
+org.kde.KeyboardLayouts.getLayout` still returned 1, and XTest entered Cyrillic
+into the Wails editor. Save the compositor layout, use
+`org.kde.KeyboardLayouts.setLayout 0`, wait for observable focus before typing,
+and restore the saved layout afterwards. The corrected native Fish run printed
+its version and created the expected proof file; the earlier input was a harness
+error, not a Fish failure.
+
 ## Heavy runs go to the SkyPilot cluster
 
 **Tests run through `nocx-sky-test`, not on this machine.** `nocx-sky-test <worktree>

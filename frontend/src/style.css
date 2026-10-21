@@ -750,10 +750,13 @@
    default. The invisible cell-metric probe must remain measurable: hiding it
    leaves the painter on natural font advances instead of the committed grid.
 
+   A single :not() keeps this less specific than the unstructured history
+   rule above, so preserving the probe does not hide the shell's past.
+
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
-.scrollback-inner.inner-fullscreen-mode > :not(.terminal-live-container):not(.cell-metric-probe) {
+.scrollback-inner.inner-fullscreen-mode > :not(.terminal-live-container, .cell-metric-probe) {
   display: none;
 }
 

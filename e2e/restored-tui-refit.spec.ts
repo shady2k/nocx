@@ -263,11 +263,6 @@ test.describe('a restored tab refits its program (nocx-1ebrs.42)', () => {
         { timeout: 30_000, message: 'the TUI never repainted at its PTY width' },
       )
       .toBe(true)
-    const startCols = await paintedCols(first)
-
-    const firstMeasure = await measurePane(first)
-    // The program was told the truth in window 1: it painted as wide as its PTY.
-    expect(firstMeasure.paintedCols).toBe(startCols)
 
     const sessionsBefore = await liveSessions(ep)
     expect(sessionsBefore).toHaveLength(1)

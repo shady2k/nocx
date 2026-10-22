@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
+	"github.com/shady2k/nocx/internal/helper/fishchannel"
 	"github.com/shady2k/nocx/internal/helper/host"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/notices"
@@ -56,6 +57,20 @@ func main() {
 	args := os.Args[1:]
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if len(args) > 0 && args[0] == "fish-channel" {
+		code, err := fishchannel.Run(ctx, args[1:], os.Stdin, os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: %v\n", err)
+		}
+		os.Exit(code)
+	}
+	if len(args) > 0 && args[0] == "agent-exec" {
+		code, err := fishchannel.ExecAgent(ctx, args[1:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "nocx-helper: %v\n", err)
+		}
+		os.Exit(code)
+	}
 	if len(args) == 3 && args[0] == "mcp" && args[1] == "--socket" && args[2] != "" {
 		if err := mcpstdio.Serve(ctx, os.Stdin, os.Stdout, args[2], log); err != nil && !errors.Is(err, context.Canceled) {
 			log.Error("mcp", "err", err)

@@ -115,7 +115,8 @@ type integrationStatus struct {
 	// shell is what the backend started, absolute where the launch had a
 	// path. Fixed at registration and never revised: a later correction
 	// would be a second answer to "what did nocx start".
-	shell string
+	shell        string
+	shellVersion string
 	// status is the wire value above.
 	status string
 	// reason is why, present exactly when status is conventional or lost.
@@ -150,6 +151,7 @@ type integrationChangedParams struct {
 	Status       string             `json:"status"`
 	Reason       string             `json:"reason,omitempty"`
 	Shell        string             `json:"shell"`
+	ShellVersion string             `json:"shellVersion,omitempty"`
 	Detail       *integrationDetail `json:"detail,omitempty"`
 }
 
@@ -169,7 +171,7 @@ type integrationDetail struct {
 // both directions (AD-7), and the launch runs inside the open call, so the
 // first notification is sent by the open handler after the ack —
 // emitIntegration below.
-func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason) {
+func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason, shellVersion string) {
 	if sid == "" || shell == "" {
 		return
 	}
@@ -182,7 +184,7 @@ func (s *WSServer) RegisterIntegration(sid session.ID, shell string, status stri
 	if s.integrations == nil {
 		s.integrations = make(map[session.ID]*integrationStatus)
 	}
-	s.integrations[sid] = &integrationStatus{shell: shell, status: status, reason: reason}
+	s.integrations[sid] = &integrationStatus{shell: shell, shellVersion: shellVersion, status: status, reason: reason}
 	s.armStartupBoundLocked(sid, status)
 	s.integrationMu.Unlock()
 	if cause := s.pendingSessionLoss[sid]; cause != "" {
@@ -266,7 +268,7 @@ func (s *WSServer) expireIntegrationStartup(sid session.ID) {
 // has no integration to nag about.
 func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.Config, hosted *HostedSessionOpen) {
 	if hosted != nil && hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
-		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason)
+		s.RegisterIntegration(sess.ID(), hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason, hosted.IntegrationShellVersion)
 		return
 	}
 	if sess.Kind() != session.KindRemote {
@@ -289,7 +291,7 @@ func (s *WSServer) registerOpenedIntegration(sess session.Session, cfg session.C
 	if reason != ssh.ReasonNone {
 		status = IntegrationConventional
 	}
-	s.RegisterIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason)
+	s.RegisterIntegration(sess.ID(), remoteShellName(cfg.Remote), status, reason, "")
 }
 
 // sessionAwaitsIntegration answers whether sid has just entered the
@@ -693,7 +695,7 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 	if st.status == IntegrationConventional && !st.everLive {
 		return "", "", false
 	}
-	next := integrationStatus{shell: st.shell, everLive: st.everLive, observedProcess: st.observedProcess}
+	next := integrationStatus{shell: st.shell, shellVersion: st.shellVersion, everLive: st.everLive, observedProcess: st.observedProcess}
 	switch {
 	case st.everLive:
 		// It was integrated and is not any more. Which of the transport's
@@ -882,6 +884,7 @@ func (s *WSServer) emitIntegration(sid session.ID) {
 		SessionEpoch: ident.Epoch,
 		Status:       snap.status,
 		Shell:        snap.shell,
+		ShellVersion: snap.shellVersion,
 	}
 	// Present exactly when the status is conventional or lost, absent
 	// otherwise — the schema pins both halves, so a reason on a 'starting'

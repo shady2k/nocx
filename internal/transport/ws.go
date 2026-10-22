@@ -1877,9 +1877,10 @@ type HostedSessionOpen struct {
 	// An empty status is not "unknown", it is "do not register": absence on
 	// this axis is how "conventional by design" is expressed, and a session
 	// with nothing to say must go on saying nothing.
-	IntegrationShell  string
-	IntegrationStatus string
-	IntegrationReason ssh.RefusalReason
+	IntegrationShell        string
+	IntegrationShellVersion string
+	IntegrationStatus       string
+	IntegrationReason       ssh.RefusalReason
 	// ObserveOutputHoles installs the coordinator's handler for stretches of
 	// this session's output that never crossed the wire — the execution
 	// host's bounded window reclaimed them before this machine could receive

@@ -5464,7 +5464,7 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 		}))
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
-	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	e.ws.emitIntegration(session.ID(sid))
 
 	// First frame: the honest interval. A product that claimed either
@@ -7985,7 +7985,7 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 			sid := e.openSession(t, 1)
 			lane := lifecycle.LaneID(fmt.Sprintf("lane-bootstrap-%d", i))
 			e.ws.RegisterLifecycleLane(lane, session.ID(sid))
-			e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+			e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 			e.ws.emitIntegration(session.ID(sid))
 
 			// The honest interval first: nothing has failed yet, and a
@@ -8311,7 +8311,7 @@ func TestSessionIntegrationChanged_AnAcceptedBootstrapClaimsNothing(t *testing.T
 	sid := e.openSession(t, 1)
 	lane := lifecycle.LaneID("lane-bootstrap-accepted")
 	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
-	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	e.ws.emitIntegration(session.ID(sid))
 	readNotification(t, e.conn, "session.integrationChanged", wantWithin)
 
@@ -8335,7 +8335,7 @@ func TestSessionIntegrationChanged_ABootstrapOutcomeNeverOverwritesAnAnswer(t *t
 	sid := e.openSession(t, 1)
 	lane := lifecycle.LaneID("lane-bootstrap-answered")
 	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
-	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonRemoteCommand)
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonRemoteCommand, "")
 
 	e.ws.NoteBootstrapOutcome(lane, ssh.ReasonGenerationUnavailable)
 

@@ -23,13 +23,15 @@ type HostSessionID struct {
 }
 
 type LaunchRecord struct {
-	Shell       string `json:"shell"`
-	Cwd         string `json:"cwd"`
-	Pid         int    `json:"pid"`
-	Pgid        int    `json:"pgid"`
-	Cols        uint16 `json:"cols"`
-	Rows        uint16 `json:"rows"`
-	WindowBytes int64  `json:"windowBytes"`
+	Shell              string `json:"shell"`
+	IntegrationRefusal string `json:"integrationRefusal,omitempty"`
+	ShellVersion       string `json:"shellVersion,omitempty"`
+	Cwd                string `json:"cwd"`
+	Pid                int    `json:"pid"`
+	Pgid               int    `json:"pgid"`
+	Cols               uint16 `json:"cols"`
+	Rows               uint16 `json:"rows"`
+	WindowBytes        int64  `json:"windowBytes"`
 }
 
 type Observation struct {
@@ -243,7 +245,9 @@ func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 	case in.Launch.Local != nil:
 		out.Launch = &LaunchRecord{
 			Shell: in.Launch.Local.Shell, Cwd: in.Launch.Local.Cwd, Pid: in.Launch.Local.Pid,
-			Pgid: in.Launch.Local.Pgid, Cols: in.Launch.Local.Cols, Rows: in.Launch.Local.Rows,
+			IntegrationRefusal: in.Launch.Local.IntegrationRefusal,
+			ShellVersion:       in.Launch.Local.ShellVersion,
+			Pgid:               in.Launch.Local.Pgid, Cols: in.Launch.Local.Cols, Rows: in.Launch.Local.Rows,
 			WindowBytes: in.Launch.Local.WindowBytes,
 		}
 	case in.Launch.SSH != nil:

@@ -34,6 +34,7 @@ export interface SessionIntegrationChanged {
    */
   reason?:
     | 'unsupported-shell'
+    | 'unsupported-fish-startup'
     | 'no-secure-temp'
     | 'remote-command'
     | 'command-too-long'
@@ -69,6 +70,10 @@ export interface SessionIntegrationChanged {
    * What the backend actually started, as an absolute path when it has one. It is required because the product must be able to say 'nocx started /bin/zsh' without the renderer guessing: which shell a session runs is the single biggest thing that varies between two machines running the same code, and a user cannot act on a diagnosis that omits it.
    */
   shell: string
+  /**
+   * Public shell version discovered without user startup. Diagnostic only; never authorizes integration.
+   */
+  shellVersion?: string
   /**
    * Best-effort observation for the details surface, never authority. Everything here is a guess the product must label as one: it is derived from the process table, which can be raced, and never from the byte stream, which AD-6 forbids the backend to interpret. Absent when the backend observed nothing worth showing.
    */

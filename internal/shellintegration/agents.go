@@ -37,6 +37,7 @@ import (
 	"strings"
 
 	"github.com/shady2k/nocx/internal/agentrecord"
+	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
 )
 
 // shippedAgentNames is this build's own agent set, from the package that owns
@@ -83,10 +84,29 @@ func agentNames(names []string) []string {
 // the line. The awkward spelling at the end is the shell's — "$@" passes the
 // person's own arguments through untouched, which is the whole of a wrapper's
 // job: nocx decides what to WRAP, never what the person meant to run.
-func agentWrappers(names []string) string {
+func agentWrappers(names []string, kind ShellKind) string {
 	var b strings.Builder
-	for _, n := range agentNames(names) {
-		fmt.Fprintf(&b, "%s() { __nocx_agent_run %s \"$@\"; }\n", n, n)
+	canonical := agentNames(names)
+	if kind == ShellFish && len(canonical) != 0 {
+		// Preserve commands already owned by native/user Fish functions,
+		// including autoloads such as prompt_pwd, as well as its builtins.
+		b.WriteString("builtin set --local __nocx_native_commands (builtin --names) (builtin functions --all --names)\n")
+	}
+	for _, n := range canonical {
+		if kind == ShellFish {
+			if strings.HasPrefix(n, "__nocx_") {
+				fmt.Fprintf(&b, "builtin printf 'nocx: agent %%s is reserved by nocx; rename the record\\n' %s >&2\n", fishQuote(n))
+				continue
+			}
+			// Fish validates new function names; existing command owners are
+			// never replaced by a generated agent or a silently chosen alias.
+			fmt.Fprintf(&b, "if builtin contains -- %s $__nocx_native_commands; or builtin functions --query %s\n    builtin printf 'nocx: agent %%s is already a Fish builtin or function; rename the record\\n' %s >&2\nelse if builtin functions --copy __nocx_agent_run %s 2>/dev/null\n    function %s\n        builtin set --local fish_trace\n        __nocx_agent_run %s $argv\n    end\nelse\n    builtin printf 'nocx: agent %%s cannot be a Fish function; rename the record\\n' %s >&2\nend\n", n, n, fishQuote(n), n, n, n, fishQuote(n))
+		} else {
+			fmt.Fprintf(&b, "%s() { __nocx_agent_run %s \"$@\"; }\n", n, n)
+		}
+	}
+	if kind == ShellFish && len(canonical) != 0 {
+		b.WriteString("builtin set --erase --local __nocx_native_commands\n")
 	}
 	return b.String()
 }
@@ -98,8 +118,19 @@ func agentWrappers(names []string) string {
 // own pane sees and what a far host receives can differ only in the ways the
 // rule above allows, and a marker nobody replaced cannot survive unnoticed.
 func renderScript(raw string, names []string, delivery Delivery) string {
+	if strings.Contains(raw, "# @NOCX_FISH_LAUNCH_SUPPORT@") {
+		out := strings.ReplaceAll(raw, "# @NOCX_FISH_LAUNCH_SUPPORT@", fishLaunchSupport)
+		local := "1"
+		if delivery == DeliveryPublished {
+			local = "0"
+		}
+		out = strings.ReplaceAll(out, "# @NOCX_FISH_DELIVERY@", "builtin set --global __nocx_agent_delivery_local "+local)
+		out = strings.ReplaceAll(out, agentBlockMarker, agentWrappers(names, ShellFish))
+		out = strings.ReplaceAll(out, "@NOCX_AGENT_TOKEN_ENV@", panebind.TokenEnvVar)
+		return stripShellComments(out, ShellFish)
+	}
 	surface := toolSurfaceLocal
-	out := strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names))
+	out := strings.ReplaceAll(raw, agentBlockMarker, agentWrappers(names, ShellBash))
 	if delivery == DeliveryPublished {
 		surface = toolSurfacePublished
 		out = stripAgentLaunchHelpers(out)
@@ -116,7 +147,8 @@ func renderScript(raw string, names []string, delivery Delivery) string {
 		out = strings.ReplaceAll(out, agentLaunchCancelMarker, "__nocx_agent_launch_cancel")
 	}
 	out = strings.ReplaceAll(out, toolSurfaceMarker, surface)
-	return stripShellComments(out)
+	out = strings.ReplaceAll(out, "@NOCX_AGENT_TOKEN_ENV@", panebind.TokenEnvVar)
+	return stripShellComments(out, ShellBash)
 }
 
 func stripAgentLaunchHelpers(script string) string {

@@ -84,7 +84,7 @@ func posixEnvFile(envBlock, scriptSource string) string {
 	// inside the bootstrap payload, and the far shell never reads the
 	// template's prose (nocx-z9s9.17). Stripping the rendered text also
 	// covers the substituted bodies.
-	return stripShellComments(env)
+	return stripShellComments(env, ShellBash)
 }
 
 // posixArgFor wraps a rendered ENV file in the minimal tier's pinned

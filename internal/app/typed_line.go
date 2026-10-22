@@ -210,7 +210,7 @@ func bindTypedIntegrationAxis(typed *typedRunner, axis typedIntegrationAxis) {
 		return
 	}
 	typed.reportIntegration = func(sid, shell, status string, reason ssh.RefusalReason) {
-		axis.RegisterIntegration(session.ID(sid), shell, status, reason)
+		axis.RegisterIntegration(session.ID(sid), shell, status, reason, "")
 	}
 	typed.reportBootstrapOutcome = func(lane string, reason ssh.RefusalReason) {
 		if lane == "" {
@@ -224,7 +224,7 @@ func bindTypedIntegrationAxis(typed *typedRunner, axis typedIntegrationAxis) {
 // interface for AD-8's reason: this file must not decide anything about the
 // wire, and the two methods are the whole of what it needs.
 type typedIntegrationAxis interface {
-	RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason)
+	RegisterIntegration(sid session.ID, shell string, status string, reason ssh.RefusalReason, shellVersion string)
 	NoteBootstrapOutcome(lane lifecycle.LaneID, reason ssh.RefusalReason)
 }
 

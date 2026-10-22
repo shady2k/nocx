@@ -207,8 +207,11 @@ run_variant() {
             # pins live in ONE file (scripts/install-zsh-zle-plugins.sh) instead of
             # also in a Dockerfile whose build context would have to widen to the
             # repo root. Costs a few seconds of shallow clone per variant.
-            sh /src/scripts/install-zsh-zle-plugins.sh /tmp/nocx-zsh-plugins >/dev/null
+            bash /src/scripts/install-zsh-zle-plugins.sh /tmp/nocx-zsh-plugins >/dev/null
             export NOCX_ZSH_PLUGINS=/tmp/nocx-zsh-plugins
+            sh /src/scripts/install-fish-ci.sh /tmp/nocx-fish-ci >/dev/null
+            export PATH="/tmp/nocx-fish-ci/bin:$PATH"
+            export NOCX_REQUIRE_NATIVE_FISH=1
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
                 sh -euc "$INNER"
         '

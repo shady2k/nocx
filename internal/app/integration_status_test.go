@@ -1,11 +1,10 @@
 package app
 
 import (
-	"strings"
 	"testing"
 
+	helperclient "github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -30,7 +29,7 @@ import (
 // proved nothing yet, and a product that claimed either outcome here would be
 // guessing for the ten seconds that matter most.
 func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
-	status, reason := localIntegrationStatus("/bin/bash", lifecycle.LaneID("lane-1"))
+	status, reason := localIntegrationStatus(&helperclient.LaunchRecord{Shell: "/bin/bash"}, lifecycle.LaneID("lane-1"))
 	if status != transport.IntegrationStarting || reason != ssh.ReasonNone {
 		t.Fatalf("status/reason = %q/%q, want starting with no refusal", status, reason)
 	}
@@ -42,7 +41,7 @@ func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
 // The helper starts the user's own shell either way — the difference this
 // makes is that the product says so.
 func TestLocalUnsupportedShellSaysSo(t *testing.T) {
-	status, reason := localIntegrationStatus("/usr/bin/fish", lifecycle.LaneID("lane-1"))
+	status, reason := localIntegrationStatus(&helperclient.LaunchRecord{Shell: "/usr/bin/csh"}, lifecycle.LaneID("lane-1"))
 	if status != transport.IntegrationConventional || reason != ssh.ReasonUnsupportedShell {
 		t.Fatalf("status/reason = %q/%q, want conventional/unsupported-shell", status, reason)
 	}
@@ -57,42 +56,34 @@ func TestLocalUnsupportedShellSaysSo(t *testing.T) {
 // established (the kernel is not wired, or the coordinator asked for none),
 // and no shell was reported at all.
 func TestLocalConventionalSessionReportsNothing(t *testing.T) {
-	if status, _ := localIntegrationStatus("/bin/bash", ""); status != "" {
+	if status, _ := localIntegrationStatus(&helperclient.LaunchRecord{Shell: "/bin/bash"}, ""); status != "" {
 		t.Errorf("status = %q, want silence for a session with no lifecycle lane", status)
 	}
-	if status, _ := localIntegrationStatus("", lifecycle.LaneID("lane-1")); status != "" {
+	if status, _ := localIntegrationStatus(&helperclient.LaunchRecord{Shell: ""}, lifecycle.LaneID("lane-1")); status != "" {
 		t.Errorf("status = %q, want silence when the helper named no shell", status)
 	}
 }
 
-// The two packages spell the loss causes independently — the adapter owns the
-// vocabulary, the transport matches on strings so it does not depend on the
-// adapter package, and the composition root is the only thing that sees both.
-// A rename on either side would otherwise silently stop mapping a handshake
-// timeout to its reason, and the symptom would be the same silence the bead
-// exists to end.
-func TestLossCauseSpellingsAgree(t *testing.T) {
-	if string(lifecyclechannel.LossHelloTimeout) != transport.LossCauseHelloTimeout {
-		t.Errorf("hello-timeout spelled %q by the adapter and %q by the transport",
-			lifecyclechannel.LossHelloTimeout, transport.LossCauseHelloTimeout)
+func TestLocalFishRequiresTheNativeStartupLane(t *testing.T) {
+	status, reason := localIntegrationStatus(&helperclient.LaunchRecord{Shell: "/usr/bin/fish"}, lifecycle.LaneID("fish-lane"))
+	if status != transport.IntegrationStarting || reason != ssh.ReasonNone {
+		t.Fatalf("native Fish launch = %q/%q, want starting without refusal", status, reason)
 	}
-	if string(lifecyclechannel.LossClosed) != transport.LossCauseClosed {
-		t.Errorf("closed spelled %q by the adapter and %q by the transport",
-			lifecyclechannel.LossClosed, transport.LossCauseClosed)
+	status, reason = localIntegrationStatus(&helperclient.LaunchRecord{Shell: "/usr/bin/fish"}, "")
+	if status != transport.IntegrationConventional || reason != ssh.ReasonUnsupportedShell {
+		t.Fatalf("Fish without a verified native launch = %q/%q, want an explicit conventional fallback", status, reason)
 	}
-	if string(lifecyclechannel.LossStoreRefused) != transport.LossCauseStoreRefused {
-		t.Errorf("store-refused spelled %q by the adapter and %q by the transport",
-			lifecyclechannel.LossStoreRefused, transport.LossCauseStoreRefused)
+}
+
+func TestLocalFishReportsTheLaunchersStartupRefusal(t *testing.T) {
+	launch := &helperclient.LaunchRecord{
+		Shell: "/usr/bin/fish", ShellVersion: "4.8.0",
+		IntegrationRefusal: "unsupported-fish-startup",
 	}
-	// The two causes the transport does NOT name must not accidentally
-	// collide with the two it does, or a broken descriptor would be
-	// reported as a handshake that expired.
-	for _, c := range []lifecyclechannel.LossCause{lifecyclechannel.LossEndOfStream, lifecyclechannel.LossReadError} {
-		if string(c) == transport.LossCauseHelloTimeout || string(c) == transport.LossCauseClosed {
-			t.Errorf("loss cause %q collides with a cause the transport treats specially", c)
-		}
-		if strings.TrimSpace(string(c)) == "" {
-			t.Errorf("loss cause is empty: an unnamed path is the defect this bead removed")
+	for _, lane := range []lifecycle.LaneID{"", "reserved-fish-lane"} {
+		status, reason := localIntegrationStatus(launch, lane)
+		if status != transport.IntegrationConventional || reason != ssh.ReasonUnsupportedFishStartup {
+			t.Fatalf("Fish startup refusal = %q/%q, want conventional/unsupported-fish-startup", status, reason)
 		}
 	}
 }

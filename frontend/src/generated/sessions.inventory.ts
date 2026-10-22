@@ -33,6 +33,8 @@ export interface SessionEntry {
    */
   launch?: {
     shell: string
+    integrationRefusal?: 'unsupported-shell' | 'unsupported-fish-startup'
+    shellVersion?: string
     cwd: string
     pid: number
     pgid: number

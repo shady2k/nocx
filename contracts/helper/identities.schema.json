@@ -42,7 +42,7 @@
       }
     },
     "localLaunchRecord": {
-      "description": "The launch record of a session whose process runs on THIS machine: a PTY the helper owns and its process group. It is the record every session had before the union existed, unchanged.",
+      "description": "The launch record of a session whose process runs on THIS machine: the PTY, its process group and the launcher's integration decision.",
       "type": "object",
       "additionalProperties": false,
       "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes", "rowBufferBytes"],
@@ -50,6 +50,17 @@
         "shell": {
           "description": "The binary the helper actually started, as exec resolved it. Chosen by the helper's composition root and never nameable over the wire: no operation may accept argv.",
           "type": "string"
+        },
+        "integrationRefusal": {
+          "description": "Why the local launcher declined integration. Absent when it did not refuse.",
+          "type": "string",
+          "enum": ["unsupported-shell", "unsupported-fish-startup"]
+        },
+        "shellVersion": {
+          "description": "Public shell version discovered without user startup. Diagnostic only; never authorizes integration.",
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._+\\-]+$"
         },
         "cwd": {
           "description": "Where the shell was actually started — the RESOLVED directory, not the requested one, so an empty request is answered with the answer rather than with the blank that was sent.",

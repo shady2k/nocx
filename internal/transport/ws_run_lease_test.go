@@ -461,7 +461,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 func (h *runLeaseHarness) openSession(t *testing.T) string {
 	t.Helper()
 	sid := openLocalSession(t, h.conn)
-	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	const lane = lifecycle.LaneID("lane-run-lease")
 	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
 	if err := h.pub.BindTransport("T", noopPort{}); err != nil {
@@ -1095,7 +1095,7 @@ func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) 
 	sid := openLocalSession(t, h.conn)
 	// The session's axis explicitly reports a conventional terminal: shell
 	// integration was attempted but no authenticated lifecycle lane exists.
-	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell)
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell, "")
 	cmd := "printf degraded-runs"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)

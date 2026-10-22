@@ -124,6 +124,16 @@ func isSessionHex(s string) bool {
 	return true
 }
 
+// TokenEnvVar is the environment entry through which the agent's MCP client
+// gives only its bridge the pane's bearer (nocx-50w7p.16). Shell staging writes
+// it into mcp.json, mode 0600 inside a 0700 launch directory; it must never be
+// exported into the pane's shell environment or passed in argv.
+//
+// This pure contract is shared by staging and the process-free bridge, which
+// must not depend on shell-launch composition to read its bearer.
+// #nosec G101 -- a variable name, not a credential; the value is minted per interval.
+const TokenEnvVar = "NOCX_AGENT_TOKEN"
+
 // TokenHexLen is the length of the bearer's hex and TokenLen the whole line.
 //
 // The bearer gets its OWN validator and its own length rather than borrowing the

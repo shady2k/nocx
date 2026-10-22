@@ -61,6 +61,15 @@
           "required": ["shell", "cwd", "pid", "pgid", "cols", "rows", "windowBytes"],
           "properties": {
             "shell": { "type": "string", "minLength": 1 },
+            "integrationRefusal": {
+              "type": "string",
+              "enum": ["unsupported-shell", "unsupported-fish-startup"]
+            },
+            "shellVersion": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._+\\-]+$"
+            },
             "cwd": { "type": "string" },
             "pid": { "type": "integer" },
             "pgid": { "type": "integer" },

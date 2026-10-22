@@ -1049,17 +1049,23 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
 	}
 
+	var integrationRefusal, shellVersion string
+	if facts, ok := proc.(interface{ IntegrationLaunchFacts() (string, string) }); ok {
+		integrationRefusal, shellVersion = facts.IntegrationLaunchFacts()
+	}
 	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindLocal,
 		Local: &proto.LocalLaunchRecord{
-			Shell:          proc.Shell(),
-			Cwd:            resolvedCwd(p.Cwd, proc),
-			Pid:            proc.Pid(),
-			Pgid:           processGroup(proc),
-			Cols:           cols,
-			Rows:           rows,
-			WindowBytes:    bound,
-			RowBufferBytes: rowBuffer,
+			Shell:              proc.Shell(),
+			IntegrationRefusal: integrationRefusal,
+			ShellVersion:       shellVersion,
+			Cwd:                resolvedCwd(p.Cwd, proc),
+			Pid:                proc.Pid(),
+			Pgid:               processGroup(proc),
+			Cols:               cols,
+			Rows:               rows,
+			WindowBytes:        bound,
+			RowBufferBytes:     rowBuffer,
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,

@@ -287,6 +287,12 @@ jobs:
       - name: Test (the widget-wrapping zsh plugin stack, both orders)
         run: go test -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestLocalZshPane_ThePluginStackIntegratesInEitherOrder' ./internal/shellintegration/
 
+      - name: Install the pinned native Fish
+        run: scripts/install-fish-ci.sh "$RUNNER_TEMP/fish-ci"
+
+      - name: Test (native Fish startup and lifecycle)
+        run: go test -race -tags gtk3,nocx_framecheck -count=1 -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
+
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
@@ -371,6 +377,9 @@ jobs:
       # so five zsh launcher tests were failing on main (nocx-bbkh).
       - name: Install zsh (shell integration tests)
         run: scripts/install-zsh-ci.sh
+
+      - name: Install the pinned native Fish
+        run: scripts/install-fish-ci.sh "$RUNNER_TEMP/fish-ci"
 
       # The third shell this job must carry, and the only one that is not a
       # shell anybody here runs: macOS's /bin/bash is GNU bash 3.2.57, and the

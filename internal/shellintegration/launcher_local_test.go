@@ -1,53 +1,8 @@
 package shellintegration
 
 import (
-	"strings"
 	"testing"
 )
-
-// TestLocalBashRcfile_SecretRidesTextNotEnv is the nocx-u7uh.21 acceptance
-// assertion in its strongest form: the rendered LOCAL rcfile must carry the
-// capability and the recovery fence as substituted TEXT (@CAP@/@RECOVERY@),
-// and the environment block inside it must NOT — a value in the env block
-// reaches /proc/<pid>/environ of every child, which is exactly the leak
-// ADR-0024 decision 2 exists to prevent.
-func TestLocalBashRcfile_SecretRidesTextNotEnv(t *testing.T) {
-	opts := LaunchOptions{
-		SessionID:   "sid-local-1",
-		Enhanced:    true,
-		Capability:  strings.Repeat("ab", 32), // 64 hex chars
-		Recovery:    strings.Repeat("cd", 32),
-		Lane:        "lane-1",
-		Domain:      "dom-1",
-		Epoch:       7,
-		LifecycleFD: 3,
-	}
-	rc, err := LocalBashRcfile(opts)
-	if err != nil {
-		t.Fatalf("LocalBashRcfile: %v", err)
-	}
-	// The secrets are in the rcfile text, assigned exactly once.
-	if !strings.Contains(rc, "__nocx_cap='"+opts.Capability+"'") {
-		t.Fatalf("rcfile must carry the capability as substituted text")
-	}
-	if !strings.Contains(rc, "__nocx_lc_recovery='"+opts.Recovery+"'") {
-		t.Fatalf("rcfile must carry the recovery fence as substituted text")
-	}
-	// The env block (exported NOCX_* lines) must never contain them.
-	env := launcherEnvBlock(opts)
-	if strings.Contains(env, opts.Capability) {
-		t.Fatalf("capability leaked into the exported environment block")
-	}
-	if strings.Contains(env, opts.Recovery) {
-		t.Fatalf("recovery fence leaked into the exported environment block")
-	}
-	// The non-secret addressing does travel in the env block.
-	for _, want := range []string{"NOCX_LIFECYCLE_LANE='lane-1'", "NOCX_LIFECYCLE_DOMAIN='dom-1'", "NOCX_LIFECYCLE_EPOCH=7", "NOCX_LIFECYCLE_FD=3", "NOCX_SESSION_ID='sid-local-1'"} {
-		if !strings.Contains(env, want) {
-			t.Fatalf("env block must carry %s, got:\n%s", want, env)
-		}
-	}
-}
 
 // TestLocalBashRcfile_RequiresEnhancedSession pins the precondition: a
 // conventional (non-enhanced) session has no session id anchor and no

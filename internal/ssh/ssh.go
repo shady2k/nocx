@@ -138,10 +138,11 @@ var ErrCommandTooLong = errors.New("ssh: the remote command is longer than the b
 type RefusalReason string
 
 const (
-	ReasonNone             RefusalReason = ""
-	ReasonUnsupportedShell RefusalReason = "unsupported-shell"
-	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
-	ReasonRemoteCommand    RefusalReason = "remote-command"
+	ReasonNone                   RefusalReason = ""
+	ReasonUnsupportedShell       RefusalReason = "unsupported-shell"
+	ReasonUnsupportedFishStartup RefusalReason = "unsupported-fish-startup"
+	ReasonNoSecureTemp           RefusalReason = "no-secure-temp"
+	ReasonRemoteCommand          RefusalReason = "remote-command"
 	// ReasonHandshakeTimeout means the shell never completed the
 	// authenticated handshake inside lifecycle.HelloTimeout (ADR-0024
 	// decision 3): the transport was established and the shell either never

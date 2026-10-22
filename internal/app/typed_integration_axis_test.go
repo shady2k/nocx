@@ -139,7 +139,7 @@ func (s *typedAxisStack) integratedParent(t *testing.T) {
 	// and read the server's state instead of retrying the same lifecycle fact
 	// on a timer; repeated publishes can leave stale integration frames queued
 	// ahead of the typed outcome this test observes on the wire.
-	s.ws.RegisterIntegration(session.ID(s.sid), "/bin/bash", transport.IntegrationStarting, ssh.ReasonNone)
+	s.ws.RegisterIntegration(session.ID(s.sid), "/bin/bash", transport.IntegrationStarting, ssh.ReasonNone, "")
 	s.ws.PublishLifecycle(context.Background(), lifecyclepub.Fact{
 		Lane:      string(typedAxisLane),
 		Domain:    "dom-typed-axis",

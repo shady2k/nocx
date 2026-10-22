@@ -807,12 +807,14 @@ type LaunchRecord struct {
 	SSH *SSHLaunchRecord `json:"ssh,omitempty"`
 }
 
-// LocalLaunchRecord is the launch record a PTY session has always had. It is
-// the same seven facts as before the union existed — a local session's record
-// is unchanged, and only its position moved.
+// LocalLaunchRecord records the local PTY launch and its integration decision.
 type LocalLaunchRecord struct {
 	// Shell is the binary the helper actually started, as exec resolved it.
 	Shell string `json:"shell"`
+	// IntegrationRefusal is the launcher's reason, absent when it did not refuse.
+	IntegrationRefusal string `json:"integrationRefusal,omitempty"`
+	// ShellVersion is public discovery metadata, absent when unavailable.
+	ShellVersion string `json:"shellVersion,omitempty"`
 	// Cwd is the directory the helper started it in — the resolved one, not
 	// the requested one, so an empty request is answered with the answer.
 	Cwd string `json:"cwd"`

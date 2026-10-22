@@ -807,6 +807,7 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 	// (transport.HostedSessionOpen's own comment).
 	remote := res.Entry.RemoteLaunch
 	shell := ""
+	shellVersion := ""
 	var (
 		status string
 		reason ssh.RefusalReason
@@ -827,6 +828,7 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 				"this machine's helper reported no launch record for session %s", sid)
 		}
 		shell = launch.Shell
+		shellVersion = launch.ShellVersion
 		if err := o.registry.RecordOwnedProcessPID(sid, launch.Pid); err != nil {
 			if res.AbortLifecycle != nil {
 				res.AbortLifecycle()
@@ -834,7 +836,7 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 			_ = res.Session.Close()
 			return transport.HostedSessionOpen{}, true, c, fmt.Errorf("recording local helper launch pid: %w", err)
 		}
-		status, reason = localIntegrationStatus(shell, res.LifecycleLane)
+		status, reason = localIntegrationStatus(launch, res.LifecycleLane)
 		o.watchForReplacement(res.Session, launch.Pid, shell)
 	}
 	if res.LifecycleLane != "" && o.noteChildDomainParent != nil {
@@ -857,15 +859,16 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		// THE HELPER'S RECORD rather than from cfg, which is the difference
 		// between what this coordinator asked for and what the daemon actually
 		// dialed.
-		Generation:         generation,
-		LifecycleLane:      res.LifecycleLane,
-		StartLifecycle:     res.StartLifecycle,
-		AbortLifecycle:     res.AbortLifecycle,
-		DetachLifecycle:    res.DetachLifecycle,
-		ObserveOutputHoles: res.ObserveOutputHoles,
-		IntegrationShell:   shell,
-		IntegrationStatus:  status,
-		IntegrationReason:  reason,
+		Generation:              generation,
+		LifecycleLane:           res.LifecycleLane,
+		StartLifecycle:          res.StartLifecycle,
+		AbortLifecycle:          res.AbortLifecycle,
+		DetachLifecycle:         res.DetachLifecycle,
+		ObserveOutputHoles:      res.ObserveOutputHoles,
+		IntegrationShell:        shell,
+		IntegrationShellVersion: shellVersion,
+		IntegrationStatus:       status,
+		IntegrationReason:       reason,
 	}
 	if remote != nil {
 		out.Host = remote.Host
@@ -1290,11 +1293,22 @@ func (o *localHelperOpener) holdConnection(ctx context.Context, target ssh.DialT
 // design" is expressed. A shell nocx has no local tier for is NOT that: it is
 // a session that asked to be integrated and will not be, and saying so out
 // loud is the whole of nocx-wwz0.
-func localIntegrationStatus(shell string, lane lifecycle.LaneID) (string, ssh.RefusalReason) {
-	if shell == "" {
+func localIntegrationStatus(launch *helperclient.LaunchRecord, lane lifecycle.LaneID) (string, ssh.RefusalReason) {
+	if launch.Shell == "" {
 		return "", ssh.ReasonNone
 	}
-	if shellintegration.LocalShellKind(shell) == shellintegration.ShellUnknown {
+	if launch.IntegrationRefusal != "" {
+		switch launch.IntegrationRefusal {
+		case string(shellintegration.ReasonUnsupportedFishStartup):
+			return transport.IntegrationConventional, ssh.ReasonUnsupportedFishStartup
+		case string(shellintegration.ReasonUnsupportedShell):
+			return transport.IntegrationConventional, ssh.ReasonUnsupportedShell
+		default:
+			return transport.IntegrationConventional, ssh.ReasonUnknown
+		}
+	}
+	kind := shellintegration.LocalShellKind(launch.Shell)
+	if kind == shellintegration.ShellUnknown || (kind == shellintegration.ShellFish && lane == "") {
 		return transport.IntegrationConventional, ssh.ReasonUnsupportedShell
 	}
 	if lane == "" {

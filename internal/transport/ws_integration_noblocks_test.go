@@ -30,7 +30,7 @@ import (
 // shellintegration.LocalShellKind answers ShellUnknown for it, and
 // internal/app's local factory then starts it conventionally and reports
 // ReasonUnsupportedShell. The path is only a label here; nothing execs it.
-const unsupportedShellPath = "/usr/local/bin/fish"
+const unsupportedShellPath = "/usr/local/bin/csh"
 
 // unsupportedShellFactory is internal/app's local factory for a login shell
 // with no tier, reduced to the two things this package can observe: it hands
@@ -50,8 +50,7 @@ type unsupportedShellFactory struct {
 
 func (f *unsupportedShellFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	if ws := f.ws.Load(); ws != nil && cfg.SessionID != "" {
-		ws.RegisterIntegration(session.ID(cfg.SessionID), unsupportedShellPath,
-			IntegrationConventional, ssh.ReasonUnsupportedShell)
+		ws.RegisterIntegration(session.ID(cfg.SessionID), unsupportedShellPath, IntegrationConventional, ssh.ReasonUnsupportedShell, "")
 	}
 	return f.term, nil
 }

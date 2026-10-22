@@ -139,7 +139,7 @@ type integrationPTYFactory struct {
 
 func (f *integrationPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	if ws := f.ws.Load(); ws != nil && cfg.SessionID != "" {
-		ws.RegisterIntegration(session.ID(cfg.SessionID), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+		ws.RegisterIntegration(session.ID(cfg.SessionID), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	}
 	return f.stub, nil
 }
@@ -343,7 +343,7 @@ func TestIntegration_HelloTimeoutDuringOpenSurvivesLaneRegistration(t *testing.T
 	// integration axis; the result must be applied when the open is adopted.
 	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
 	e.ws.RegisterLifecycleLane(e.lane, session.ID(e.sid))
-	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	e.ws.emitIntegration(session.ID(e.sid))
 
 	got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
@@ -394,7 +394,7 @@ func TestIntegration_AbandoningAnOpenDiscardsItsPendingTimeout(t *testing.T) {
 	// This lane was never adopted by a session. Even if a later fixture uses
 	// the same identifier, the abandoned open's timeout must not leak into it.
 	e.ws.RegisterLifecycleLane(e.lane, session.ID(e.sid))
-	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.RegisterIntegration(session.ID(e.sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	e.ws.emitIntegration(session.ID(e.sid))
 	got := awaitIntegration(t, e.conn, e.sid, IntegrationStarting)
 	if got.Reason != "" {

@@ -738,7 +738,7 @@ export interface BlockRecord {
   outputAnchor?: BlockOutputStart
   /** Offset from the accepted frame base row when its identity matches the anchor. */
   outputAnchorOffset?: number
-  /** Text of the anchor row from the accepted backend frame. */
+  /** Observed input-span text immediately before the accepted output anchor. */
   outputAnchorText?: string
   /** Rows of the latest accepted frame above `startLine`, while no output
    *  anchor has placed the block (nocx-zg3k3.32). Nothing clears the
@@ -2688,11 +2688,33 @@ export class BlockManager {
       const echoRow = snapshot.rowAt(index - 1)
       if (!echoRow) continue
       rec.outputAnchorOffset = index
-      rec.outputAnchorText = echoRow.cells
-        .filter((cell) => cell.hasText)
-        .map((cell) => cell.grapheme)
-        .join('')
-        .trimEnd()
+      // Only the current live owner consumes this text. A frozen card's
+      // anchor coordinates still follow the accepted frame above.
+      if (rec !== this._runningBlock) continue
+      const command = rec.command.trim()
+      let remainingLines = 1
+      for (let i = 0; i < command.length; i++) {
+        if (command.charCodeAt(i) === 10) remainingLines++
+      }
+      let firstRow = index - 1
+      while (firstRow > 0) {
+        const previous = snapshot.rowAt(firstRow - 1)
+        if (!previous) break
+        if (!previous.wrap && --remainingLines === 0) break
+        firstRow--
+      }
+      // Preserve whitespace at soft-wrap joints. Per-row trimming would
+      // change the command; hard input lines retain their actual newline.
+      const parts: string[] = []
+      for (let i = firstRow; i < index; i++) {
+        // The backwards walk checked every row in this contiguous span.
+        const row = snapshot.rowAt(i)!
+        for (const cell of row.cells) {
+          if (cell.hasText) parts.push(cell.grapheme)
+        }
+        if (i < index - 1 && !row.wrap) parts.push('\n')
+      }
+      rec.outputAnchorText = parts.join('').trimEnd()
     }
   }
 

@@ -7037,6 +7037,76 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it.each([
+    {
+      kind: 'soft-wrapped',
+      command: 'printf fish; read answer',
+      echoRows: ['printf fish;', ' read answer'],
+      softWrap: true,
+    },
+    {
+      kind: 'multiline',
+      command: 'printf fish;\nread answer',
+      echoRows: ['printf fish;', 'read answer'],
+      softWrap: false,
+    },
+  ])(
+    'keeps $kind command echoes out of the running body',
+    async ({ command, echoRows, softWrap }) => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const handler = factHandler(client)
+      const scrollback = scrollbackFor(content)
+      try {
+        Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+          value: 300,
+          configurable: true,
+        })
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: { id: 'att-wrapped-echo', state: 'open', origin: 'shell', command },
+        })
+        client._fireBlockOutputStart({
+          entryId: 'att-wrapped-echo',
+          row: 3,
+          screenRevision: 1,
+          bufferKind: 'normal',
+          bufferInstance: '1',
+          cols: 12,
+          rows: 8,
+        })
+        const frame = screenFrame(1, ['old output', ...echoRows, 'current row'], {
+          cols: 12,
+          rows: 8,
+        })
+        frame.rows[1].wrap = softWrap
+        frame.rows[2].continuation = softWrap
+        frame.cursor.y = 3
+        sessionOf(content).fireScreenFrame(frame)
+        await vi.waitFor(() => {
+          expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-48px)')
+          expect(scrollback.terminalLiveViewport.style.height).toBe('16px')
+        })
+
+        // A program that clears and repaints the normal buffer keeps its new
+        // top row; the old echo's coordinates cannot hide replacement output.
+        const cleared = screenFrame(2, ['fresh output'], { cols: 12, rows: 8 })
+        cleared.cursor.y = 0
+        sessionOf(content).fireScreenFrame(cleared)
+        await vi.waitFor(() => {
+          expect(scrollback.terminalLiveInner.style.transform).toBe('')
+          expect(scrollback.terminalLiveViewport.style.height).toBe('16px')
+        })
+      } finally {
+        teardown()
+      }
+    },
+  )
+
   it('sizes a short running block from visible output, not the blank cursor tail', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -7152,14 +7222,13 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('sizes the live region from the accepted backend screen frame', async () => {
-    // The accepted frame is now both the paint and sizing input. The old
-    // byte-parser path measured before parsing completed, so it sized the
-    // region from the pre-output grid. A one-chunk command had no later
-    // update to correct it; `seq 1 10` measured three rows live and froze
-    // eleven, making the block jump 153px when the command finished.
+  it('restores live output and stdin focus when the same bound attempt resumes after readiness', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     const handler = factHandler(client)
     const withScrollback = content as unknown as { scrollback: ScrollbackController }
     const session = sessionOf(content)
@@ -7169,20 +7238,34 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       return 0
     }
     try {
+      content.setVisible(true)
       Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
         value: 300,
         configurable: true,
       })
       withScrollback.scrollback.scrollbackArea.scrollTo = vi.fn()
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('read reply')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('paste', 'read reply'))
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
         domain: 'd1',
         epoch: 1,
-        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'seq' },
+        attempt: {
+          id: 'att-0',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read reply',
+        },
       })
       expect(withScrollback.scrollback.mode).toBe('running')
+      const input = intentElementOf(content)
+      expect(document.activeElement).toBe(input)
       const before = withScrollback.scrollback.terminalLiveContainer.style.height
 
       // Handing over bytes is not a client-visible update. Only an accepted
@@ -7191,6 +7274,45 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const rows = Array.from({ length: 12 }, (_, i) => `output ${i + 1}`)
       session.fireScreenFrame(screenFrame(1, rows, { rows: rows.length }))
       expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
+
+      const running = withScrollback.scrollback.blockManager.runningBlock
+      expect(running).not.toBeNull()
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(editorOf(content).isVisible).toBe(true)
+      expect(ed.root.contains(document.activeElement)).toBe(true)
+      expect(withScrollback.scrollback.mode).toBe('idle')
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-0',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read reply',
+        },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(document.activeElement).toBe(input)
+      session.intent.mockClear()
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'enter'))
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(running)
+      expect(running!.el.contains(withScrollback.scrollback.terminalLiveContainer)).toBe(true)
+      expect(
+        withScrollback.scrollback.scrollbackInner.querySelectorAll('.cmd-block-running'),
+      ).toHaveLength(1)
     } finally {
       globalThis.requestAnimationFrame = raf
       teardown()
@@ -8040,6 +8162,72 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         expect(session.intent.mock.calls).toContainEqual(['paste', 'sleep 30']),
       )
       expect(document.activeElement).toBe(stop)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+  it('keeps a focused running control across readiness and resumption', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 30')
+      key(view, { key: 'Enter' })
+      await vi.waitFor(() =>
+        expect(sessionOf(content).intent).toHaveBeenCalledWith('paste', 'sleep 30'),
+      )
+      const attempt = {
+        id: 'att-0',
+        state: 'open' as const,
+        origin: 'app' as const,
+        submitId: submitToken(client),
+        command: 'sleep 30',
+      }
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, attempt })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      const stop = block!.el.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')
+      expect(stop).not.toBeNull()
+      stop!.focus()
+      expect(document.activeElement).toBe(stop)
+
+      // CI's native ready arrives after Stop takes the keyboard, followed by
+      // this same attempt's start. Availability must not revoke that choice.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(document.activeElement).toBe(stop)
+
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, attempt })
+      expect(ed.isVisible).toBe(false)
+      expect(document.activeElement).toBe(stop)
+      expect(stop!.isConnected).toBe(true)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(block)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: attempt.id,
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(ed.root.contains(document.activeElement)).toBe(true)
     } finally {
       restoreScroll()
       teardown()
@@ -13224,7 +13412,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         if (!Object.prototype.hasOwnProperty.call(content, 'captureLiveFrame')) {
           content.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
         }
-        gridOf(content).blur()
+        intentElementOf(content).blur()
         expect(document.activeElement).toBe(document.body)
 
         chordOn(document.body)
@@ -13356,18 +13544,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       client,
     )
     const restore = stubScrolling()
-    const selection = {
-      anchorNode: null as Node | null,
-      focusNode: null as Node | null,
-      isCollapsed: false,
-      rangeCount: 1,
-      toString: () => {
-        return 'selected output'
-      },
-    }
-    const selectionSpy = vi
-      .spyOn(window, 'getSelection')
-      .mockReturnValue(selection as unknown as Selection)
+    const selection = window.getSelection()!
     const targets: Array<{ name: string; element: HTMLElement; take?: () => void }> = []
     const scrollbackBackground = tab.pane.querySelector<HTMLElement>('.scrollback-area')
     expect(scrollbackBackground).not.toBeNull()
@@ -13381,8 +13558,6 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     const selectedText = document.createTextNode('selected output')
     frozen.append(selectedText, frozenButton)
     scrollbackInner!.append(frozen)
-    selection.anchorNode = selectedText
-    selection.focusNode = selectedText
     targets.push({ name: 'frozen block', element: frozenButton })
 
     const chrome = document.createElement('button')
@@ -13428,6 +13603,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       for (const target of targets) {
         if (target.take) target.take()
         else target.element.focus()
+        const range = document.createRange()
+        range.selectNodeContents(selectedText)
+        selection.removeAllRanges()
+        selection.addRange(range)
         client.dispatcher.call.mockClear()
         sessionOf(content).signal.mockClear()
         const event = new KeyboardEvent('keydown', {
@@ -13479,7 +13658,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         },
       ])
     } finally {
-      selectionSpy.mockRestore()
+      selection.removeAllRanges()
       if (priorTabIndex === null) scrollbackBackground!.removeAttribute('tabindex')
       else scrollbackBackground!.setAttribute('tabindex', priorTabIndex)
       menu.remove()
@@ -13938,11 +14117,14 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       startCommand(client)
       await summonChord(content)
       const session = sessionOf(content)
+      await waitForSessionQueue(content)
       session.send.mockClear()
+      session.intent.mockClear()
 
       viewOf(ed).contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
+      await waitForSessionQueue(content)
 
       expect(session.send).not.toHaveBeenCalled()
       expect(session.intent).not.toHaveBeenCalled()
@@ -14324,6 +14506,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       const surface = gridOf(content).querySelector<HTMLElement>('.term-grid')!
       await vi.waitFor(() => expect(surface.textContent).toContain('mouse target'))
+      await waitForSessionQueue(content)
+      events.length = 0
       surface.getBoundingClientRect = () =>
         ({ left: 10, top: 20, right: 330, bottom: 84, width: 320, height: 64 }) as DOMRect
       const pointer = (type: 'pointerdown' | 'pointerup', buttons: number): Event => {

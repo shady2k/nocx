@@ -144,7 +144,7 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	// an authenticated domain and renders as a plain terminal, which is
 	// precisely the silent degrade this step exists to end.
 	if hosted.IntegrationStatus != "" && hosted.IntegrationShell != "" {
-		s.RegisterIntegration(sid, hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason)
+		s.RegisterIntegration(sid, hosted.IntegrationShell, hosted.IntegrationStatus, hosted.IntegrationReason, hosted.IntegrationShellVersion)
 	}
 	if hosted.LifecycleLane != "" {
 		s.RegisterLifecycleLane(hosted.LifecycleLane, sid)

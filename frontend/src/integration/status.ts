@@ -11,10 +11,10 @@
 // user reads two different diagnoses of one session. One table, one owner
 // (AD-8).
 //
-// The words never name a third-party program. nocx cannot see which one took
-// the shell over — AD-6 forbids reading the byte stream and the process table
-// is a race — so naming one would be a guess presented as a finding. The
-// remedy surface carries the observation instead, labelled as a guess.
+// A takeover diagnosis never names a guessed third-party program: the process
+// table is a race. The selected shell and its safely discovered version are
+// explicit launch facts, not guesses; a compatibility refusal can name them.
+// The remedy surface labels process observations as observations instead.
 
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
@@ -227,10 +227,10 @@ interface IntegrationFix {
 export interface IntegrationMessage {
   /** The card's title and the tab mark's label. */
   readonly title: string
-  /** What happened, and what is now true of this session's output. No
-   *  program names, no host names, no paths, no error text — a remote
-   *  publish failure is an SFTP status code and a path, meaningful in a log
-   *  and meaningless in a pane (nocx-viil).
+  /** What happened, and what is now true of this session's output. No guessed
+   *  culprit, host names, paths or raw error text. A discovered shell version
+   *  may explain a compatibility refusal; a remote SFTP status and path belong
+   *  in a log, not in a pane (nocx-viil).
    *
    *  Two sentences rather than one since nocx-22k1c.3, and deliberately so:
    *  the reason is half the answer, and "so what is happening to my output"
@@ -377,6 +377,10 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   'unsupported-shell': notIntegrated(
     'nocx has no integration for this shell, so this tab is a plain terminal.',
     'The connection opened. Integration was declined before the shell started.',
+  ),
+  'unsupported-fish-startup': notIntegrated(
+    'nocx could not verify this Fish startup layout against the audited Fish 4.9.3 prelude, so this tab is a plain terminal.',
+    'Fish started normally without integration credentials. Compatibility depends on the startup prelude, not the version number alone.',
   ),
   'no-secure-temp': notIntegrated(
     'nocx could not create a private temporary file for this session, so integration was not installed.',
@@ -587,6 +591,12 @@ export function integrationMessage(
 ): IntegrationMessage | null {
   if (!isDegraded(fact) || !fact) return null
   const { fix, ...words } = MESSAGES[fact.reason as IntegrationReason] ?? MESSAGES.unknown
+  if (fact.reason === 'unsupported-fish-startup') {
+    const version = fact.shellVersion
+      ? `Detected Fish ${fact.shellVersion}.`
+      : 'Fish version is unavailable.'
+    words.description = `${version} ${words.description}`
+  }
   const output = recordingSentence(recording)
   const said = output ? { ...words, description: `${words.description} ${output}` } : words
   return fix ? { ...said, fix: fix(shellFacts(fact.shell)) } : said

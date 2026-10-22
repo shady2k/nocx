@@ -68,6 +68,7 @@ func TestRemoteLauncherAdapter_Declines_MapEveryReasonExplicitly(t *testing.T) {
 	}{
 		{"empty reason maps to none", shellintegration.ReasonNone, ssh.ReasonNone},
 		{"unsupported shell maps", shellintegration.ReasonUnsupportedShell, ssh.ReasonUnsupportedShell},
+		{"unsupported Fish startup maps", shellintegration.ReasonUnsupportedFishStartup, ssh.ReasonUnsupportedFishStartup},
 		{"no secure temp maps", shellintegration.ReasonNoSecureTemp, ssh.ReasonNoSecureTemp},
 	}
 

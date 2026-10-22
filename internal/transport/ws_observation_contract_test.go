@@ -50,7 +50,7 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 		}))
 	t.Cleanup(func() { _ = child.Close() })
 	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
-	e.ws.RegisterIntegration(session.ID(sid), "/bin/zsh", IntegrationStarting, ssh.ReasonNone)
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/zsh", IntegrationStarting, ssh.ReasonNone, "")
 	e.ws.emitIntegration(session.ID(sid))
 
 	raw := readNotification(t, e.conn, "session.integrationChanged", wantWithin)

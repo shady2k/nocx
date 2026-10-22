@@ -3570,6 +3570,8 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 		return ssh.ReasonNone
 	case shellintegration.ReasonUnsupportedShell:
 		return ssh.ReasonUnsupportedShell
+	case shellintegration.ReasonUnsupportedFishStartup:
+		return ssh.ReasonUnsupportedFishStartup
 	case shellintegration.ReasonNoSecureTemp:
 		return ssh.ReasonNoSecureTemp
 	default:

@@ -51,17 +51,18 @@ const (
 func runIntegrationStage(t *testing.T, shell, token string, extra string) (out, dir string, config []byte) {
 	t.Helper()
 	shellPath := requireIntegrationShell(t, shell)
-	scriptPath, err := filepath.Abs(filepath.Join("scripts", "nocx."+shell))
-	if err != nil {
-		t.Fatalf("resolve the integration script: %v", err)
-	}
-	if _, statErr := os.Stat(scriptPath); statErr != nil {
-		t.Fatalf("the shipped %s script is not where the test expects it: %v", shell, statErr)
-	}
 	home := t.TempDir()
+	script := bashScript
+	if shell == "zsh" {
+		script = zshScript
+	}
+	scriptPath := filepath.Join(home, "nocx."+shell)
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("write the delivered %s script: %v", shell, err)
+	}
 	rc := filepath.Join(home, "script")
 	// #nosec G306 — test fixture, private to this test.
-	body := "source " + scriptPath + "\n"
+	body := "source " + shellQuoteForTest(scriptPath) + "\n"
 	if token != "" {
 		body += "__nocx_agent_token=" + shellQuoteForTest(token) + "\n"
 	}

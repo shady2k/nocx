@@ -12,6 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -138,6 +139,81 @@ func TestEarlyHelperHelloTimeoutIsNotifiedByTheShippedOpenPath(t *testing.T) {
 	})
 	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
 		t.Fatalf("integration reason = %q, want %q", got.Reason, ssh.ReasonHandshakeTimeout)
+	}
+}
+
+type fishRefusalHelperOpener struct {
+	helperOpenTestOpener
+	version string
+	ws      *WSServer
+	lane    lifecycle.LaneID
+}
+
+func (o *fishRefusalHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, route string) (HostedSessionOpen, bool, error) {
+	// A reserved lifecycle lane can time out while the helper is discovering
+	// compatibility. That generic loss must not replace its explicit refusal.
+	o.ws.BeginLifecycleLane(o.lane)
+	o.ws.NoteIntegrationLoss(o.lane, LossCauseHelloTimeout)
+	out, handled, err := o.helperOpenTestOpener.OpenHosted(ctx, cfg, route)
+	out.IntegrationShell = "/usr/bin/fish"
+	out.IntegrationShellVersion = o.version
+	out.IntegrationStatus = IntegrationConventional
+	out.IntegrationReason = ssh.ReasonUnsupportedFishStartup
+	out.LifecycleLane = o.lane
+	return out, handled, err
+}
+
+func TestHostedFishStartupRefusalReachesTheVisibleStatusWire(t *testing.T) {
+	for _, version := range []string{"4.0.0-1-g1e069b0ff", ""} {
+		t.Run("version="+version, func(t *testing.T) {
+			ctx, logger := logtest.New(t)
+			reg := newRegWithStub(logger)
+			id := session.ID("0123456789abcdef0123456789abcdef")
+			opener := &fishRefusalHelperOpener{
+				helperOpenTestOpener: helperOpenTestOpener{reg: reg, id: id},
+				version:              version,
+				lane:                 lifecycle.LaneID("fish-refusal-lane"),
+			}
+			ws := NewWSServer(logger, reg, WithHelperSessionOpener(opener))
+			opener.ws = ws
+			if err := ws.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = ws.Stop(ctx) }()
+			conn := connectWS(t, ws)
+			defer func() { _ = conn.Close() }()
+			resp := jsonrpcCall(t, conn, "open", map[string]any{
+				"cols": 80, "rows": 24, "paneId": helperOpenPane,
+			})
+			var opened struct {
+				SessionID         string `json:"sessionId"`
+				AwaitsIntegration bool   `json:"awaitsIntegration"`
+			}
+			decodeJSONRPCResult(t, resp, &opened)
+			if opened.SessionID != string(id) || opened.AwaitsIntegration {
+				t.Fatalf("conventional Fish open is not immediately usable: %+v", opened)
+			}
+			raw, got := readIntegrationWhere(t, conn, string(id), "Fish compatibility refusal", integrationConcluded)
+			validateJSON(t, loadSchema(t, "session.integrationChanged.schema.json"), raw, "Fish compatibility status")
+			if got.Status != IntegrationConventional || got.Reason != "unsupported-fish-startup" ||
+				got.Shell != "/usr/bin/fish" || got.ShellVersion != version {
+				t.Fatalf("visible status lost the helper's Fish compatibility decision: %+v", got)
+			}
+			if version == "" {
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if _, present := fields["shellVersion"]; present {
+					t.Fatal("an unavailable version was sent as an empty version")
+				}
+			}
+			ws.NoteIntegrationLoss(opener.lane, LossCauseHelloTimeout)
+			outcome, err := ws.AwaitIntegration(ctx, id)
+			if err != nil || outcome.Status != IntegrationConventional || outcome.Reason != ssh.ReasonUnsupportedFishStartup {
+				t.Fatalf("a late hello timeout replaced the explicit startup refusal: %+v, %v", outcome, err)
+			}
+		})
 	}
 }
 

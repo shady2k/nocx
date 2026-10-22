@@ -563,13 +563,13 @@ ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-fronten
 # and a package with a platform split that stays in the portable set has its
 # `!unix` half compiled by nothing at all.
 OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
-               internal/coordinator internal/helper/endpoint \
+               internal/coordinator internal/helper/endpoint internal/helper/fishchannel \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system \
                internal/peerpin internal/monoclock internal/emulator/ghostty/ghosttytest
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock|internal/emulator/ghostty/ghosttytest)
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/helper/endpoint|internal/helper/fishchannel|internal/helper/session|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system|internal/peerpin|internal/monoclock|internal/emulator/ghostty/ghosttytest)
 
 # internal/claudeconformance cannot run in CI: no runner can carry an
 # authenticated vendor CLI, and a `t.Fatal` is the honest result when it is

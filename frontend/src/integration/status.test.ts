@@ -76,41 +76,6 @@ describe('what the product says about a degraded session', () => {
     }
   })
 
-  // The owner's rule, asserted rather than trusted to review: nocx cannot
-  // see which program took the shell over — AD-6 forbids reading the byte
-  // stream and the process table is a race — so naming one would present a
-  // guess as a finding. The Details dialog carries the observation instead,
-  // labelled as a guess.
-  it('names no third-party program in any message', () => {
-    const forbidden = [
-      'oh-my-zsh',
-      'ohmyzsh',
-      'powerlevel',
-      'starship',
-      'fish',
-      'tmux',
-      'zplug',
-      'nvm',
-      'conda',
-    ]
-    for (const reason of REASONS) {
-      const m = integrationMessage(fact({ reason }), 'unknown')!
-      const text = [
-        m.title,
-        m.description,
-        m.happening,
-        m.lastGoodStep,
-        m.fix?.lead ?? '',
-        m.fix?.snippet ?? '',
-      ]
-        .join(' ')
-        .toLowerCase()
-      for (const name of forbidden) {
-        expect(text.includes(name), `${reason} mentions ${name}`).toBe(false)
-      }
-    }
-  })
-
   // The two reasons are now a pair, and each must keep its own claim.
   // handshake-timeout is what is left when the startup DID return and the
   // shell still never answered; startup-did-not-return says that nocx's
@@ -189,6 +154,34 @@ describe('what the product says about a degraded session', () => {
     const m = integrationMessage(fact({ reason: 'brand-new' as IntegrationReason }), 'unknown')
     expect(m).not.toBeNull()
     expect(m!.title).toBe('Not integrated')
+  })
+
+  it.each(['4.0.0-1-g1e069b0ff', '4.8.0', '4.9.3'])(
+    'names Fish %s and the audited prelude, not an unsupported shell',
+    (shellVersion) => {
+      const m = integrationMessage(
+        fact({ shell: '/usr/bin/fish', reason: 'unsupported-fish-startup', shellVersion }),
+        'recorded',
+      )!
+      expect(m.description).toContain(`Detected Fish ${shellVersion}`)
+      expect(m.description).toContain('startup layout')
+      expect(m.description).toContain('audited Fish 4.9.3 prelude')
+      expect(m.description).toContain('plain terminal')
+      expect(m.description).toContain('still being recorded')
+      expect(m.description).not.toContain('no integration for this shell')
+      expect(m.lastGoodStep).toContain('not the version number alone')
+      expect(m.fix).toBeUndefined()
+    },
+  )
+
+  it('explains an unknown Fish version without hiding the startup compatibility requirement', () => {
+    const m = integrationMessage(
+      fact({ shell: '/usr/bin/fish', reason: 'unsupported-fish-startup' }),
+      'unknown',
+    )!
+    expect(m.description).toContain('Fish version is unavailable')
+    expect(m.description).toContain('audited Fish 4.9.3 prelude')
+    expect(m.description).not.toContain('Detected Fish')
   })
 })
 

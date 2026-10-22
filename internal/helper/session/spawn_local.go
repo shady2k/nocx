@@ -196,16 +196,13 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	// channel was lost — in another process, ten seconds later, with nothing
 	// naming the shell or the tier that made it inevitable.
 	//
-	// Note what the enhanced arm requires: a session id, no explicit shell
-	// args, and a shell LocalShellKind recognises as bash or zsh. Anything
-	// else takes the plain arm DELIBERATELY — the POSIX tier has no local
-	// launch semantics yet and ShellUnknown means "start it, integrate
-	// nothing, and say so" rather than "substitute bash" (nocx-k28e,
-	// shellintegration.LocalShellKind). The saying-so is this line: it was the
-	// half that did not exist.
+	// Enhancement requires a session id, no explicit shell arguments, and a
+	// native tier for the account shell. Fish additionally verifies its startup
+	// layout before any credential descriptor is passed. Other shells remain
+	// conventional; none is substituted with Bash.
 	launchKind := shellintegration.LocalShellKind(shellPath)
 	enhanced := req.SessionID != "" && len(shellArgs) == 0 &&
-		(launchKind == shellintegration.ShellBash || launchKind == shellintegration.ShellZsh)
+		(launchKind == shellintegration.ShellBash || launchKind == shellintegration.ShellZsh || launchKind == shellintegration.ShellFish)
 	s.log.Info("pane launch decided",
 		"session", req.SessionID,
 		"shell", shellPath,
@@ -215,82 +212,89 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 		"tool_endpoint", req.AgentToolEndpoint,
 		"lifecycle_requested", req.Lifecycle != nil)
 
-	if req.SessionID != "" && len(shellArgs) == 0 {
+	if enhanced {
 		kind := launchKind
-		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
-			if req.Lifecycle != nil {
-				lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
-				if err != nil {
-					release()
-					return nil, err
-				}
-			}
-			opts := shellintegration.LaunchOptions{
-				SessionID: req.SessionID,
-				Enhanced:  true,
-				// The enabled agents this pane's shell offers wrappers for
-				// (nocx-t5e7d), from the request: the daemon has no profile to
-				// read, and a list is the fact it needs.
-				Agents: req.Agents,
-				// The REQUEST's endpoint, and nothing else's: this is the
-				// coordinator that opened this pane, which is the only party
-				// that knows which endpoint the pane's tools belong to
-				// (nocx-50w7p.18). Empty renders no NOCX_TOOL_SOCKET at all,
-				// which is the soft degrade for a caller that runs none.
-				AgentToolSocketPath: req.AgentToolEndpoint,
-				AgentHelperPath:     s.agentHelperPath,
-				// The pane's bearer, on the road every bearer takes
-				// (launcher.go says why it is not in the env block):
-				// nocx-e2bws, and the same value the ssh route carries for a
-				// far pane this machine's helper dials.
-				AgentToolToken: req.AgentToolToken,
-			}
-			if req.Lifecycle != nil {
-				opts.Lane = req.Lifecycle.Lane
-				opts.Domain = req.Lifecycle.Domain
-				opts.Epoch = req.Lifecycle.Epoch
-				opts.Capability = req.Lifecycle.Capability
-				opts.Recovery = req.Lifecycle.Recovery
-				opts.LifecycleFD = 4
-			}
-			launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
+		if req.Lifecycle != nil {
+			lifecycleParent, lifecycleChild, err = lifecyclechannel.NewSocketPair()
 			if err != nil {
-				s.log.Error("pane launch: the enhanced tier could not be built",
-					"session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
 				release()
 				return nil, err
 			}
-			// The argv SHAPE and not its contents: the capability reaches the
-			// shell through a descriptor's text (or, for zsh, through a
-			// transient ZDOTDIR whose bearer is read from that descriptor),
-			// and printing it would put a bearer in a log file.
-			s.log.Info("pane launch: the enhanced tier is built",
-				"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
-				"extra_files", len(launch.ExtraFiles),
-				"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch)
-			if lifecycleChild != nil {
-				launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
-				previousCleanup := launch.Cleanup
-				launch.Cleanup = func() {
-					previousCleanup()
-					_ = lifecycleChild.Close()
-				}
-			}
-			cfg.Command = launch.Command
-			cfg.Args = launch.Args
-			cfg.Env = append(cfg.Env, launch.Env...)
-			// THE ACTIVATION MARKER GOES IN THE SPAWN'S ENVIRONMENT, not only
-			// in the script the shell reads later (nocx-1ebrs.8). A startup
-			// file that asks "am I under a terminal that has taken this shell
-			// over" reads it BEFORE any rcfile of ours runs — a Fig-family
-			// wrapper re-execs the login shell from ~/.zprofile — and its guard
-			// is this variable. Absent here, the guard is false, the wrapper
-			// takes the shell, and the integration arrives at a process that is
-			// no longer there. `pty`'s scrub keeps it out of every shell this
-			// launch did not integrate, so the value always means what it says.
-			cfg.Env = append(cfg.Env, shellintegration.SpawnActivationEnv()...)
-			cfg.ExtraFiles = launch.ExtraFiles
 		}
+		opts := shellintegration.LaunchOptions{
+			SessionID: req.SessionID,
+			Enhanced:  true,
+			// The enabled agents this pane's shell offers wrappers for
+			// (nocx-t5e7d), from the request: the daemon has no profile to
+			// read, and a list is the fact it needs.
+			Agents:       req.Agents,
+			EnvOverrides: cfg.Env,
+			// The REQUEST's endpoint, and nothing else's: this is the
+			// coordinator that opened this pane, which is the only party
+			// that knows which endpoint the pane's tools belong to
+			// (nocx-50w7p.18). Empty renders no NOCX_TOOL_SOCKET at all,
+			// which is the soft degrade for a caller that runs none.
+			AgentToolSocketPath: req.AgentToolEndpoint,
+			AgentHelperPath:     s.agentHelperPath,
+			// The pane's bearer, on the road every bearer takes
+			// (launcher.go says why it is not in the env block):
+			// nocx-e2bws, and the same value the ssh route carries for a
+			// far pane this machine's helper dials.
+			AgentToolToken: req.AgentToolToken,
+		}
+		if req.Lifecycle != nil {
+			opts.Lane = req.Lifecycle.Lane
+			opts.Domain = req.Lifecycle.Domain
+			opts.Epoch = req.Lifecycle.Epoch
+			opts.Capability = req.Lifecycle.Capability
+			opts.Recovery = req.Lifecycle.Recovery
+			opts.LifecycleFD = 4
+		}
+		launch, err = shellintegration.LocalEnhancedLaunchInMemory(shellPath, kind, opts)
+		if err != nil {
+			s.log.Error("pane launch: the enhanced tier could not be built",
+				"session", req.SessionID, "shell", shellPath, "shell_kind", string(kind), "error", err)
+			release()
+			return nil, err
+		}
+		if launch.Refusal != shellintegration.ReasonNone {
+			// A conventional Fish fallback must not inherit either end
+			// of a transport whose credential it was never given.
+			release()
+			lifecycleParent, lifecycleChild = nil, nil
+		}
+		// The argv SHAPE and not its contents: the capability reaches the
+		// shell through a descriptor's text (or, for zsh, through a
+		// transient ZDOTDIR whose bearer is read from that descriptor),
+		// and printing it would put a bearer in a log file.
+		s.log.Info("pane launch: the enhanced tier is built",
+			"session", req.SessionID, "shell", launch.Command, "argv", len(launch.Args),
+			"extra_files", len(launch.ExtraFiles),
+			"lifecycle_fd", opts.LifecycleFD, "lane", opts.Lane, "epoch", opts.Epoch, "refusal", launch.Refusal)
+		if lifecycleChild != nil {
+			launch.ExtraFiles = append(launch.ExtraFiles, lifecycleChild)
+			previousCleanup := launch.Cleanup
+			launch.Cleanup = func() {
+				previousCleanup()
+				_ = lifecycleChild.Close()
+			}
+		}
+		cfg.Command = launch.Command
+		cfg.Args = launch.Args
+		cfg.Env = append(cfg.Env, launch.Env...)
+		// THE ACTIVATION MARKER GOES IN THE SPAWN'S ENVIRONMENT, not only
+		// in the script the shell reads later (nocx-1ebrs.8). A startup
+		// file that asks "am I under a terminal that has taken this shell
+		// over" reads it BEFORE any rcfile of ours runs — a Fig-family
+		// wrapper re-execs the login shell from ~/.zprofile — and its guard
+		// is this variable. Absent here, the guard is false, the wrapper
+		// takes the shell, and the integration arrives at a process that is
+		// no longer there. `pty`'s scrub keeps it out of every shell this
+		// launch did not integrate, so the value always means what it says.
+		if launch.Refusal == shellintegration.ReasonNone {
+			cfg.Env = append(cfg.Env, shellintegration.SpawnActivationEnv()...)
+		}
+		cfg.ExtraFiles = launch.ExtraFiles
 	}
 	lp, err := s.openPTY(s.log, cfg)
 	if err != nil {
@@ -311,7 +315,10 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	if launch.Cleanup != nil {
 		launch.Cleanup()
 	}
-	return &localProcess{localPTY: lp, lifecycle: lifecycleParent}, nil
+	return &localProcess{
+		localPTY: lp, lifecycle: lifecycleParent,
+		integrationRefusal: string(launch.Refusal), shellVersion: launch.ShellVersion,
+	}, nil
 }
 
 // envSlice turns the wire's map into exec's slice, in a STABLE order. The wire
@@ -340,7 +347,13 @@ func envSlice(env map[string]string) []string {
 // started, and which process group the helper owns for it.
 type localProcess struct {
 	localPTY
-	lifecycle *os.File
+	lifecycle          *os.File
+	integrationRefusal string
+	shellVersion       string
+}
+
+func (p *localProcess) IntegrationLaunchFacts() (refusal, version string) {
+	return p.integrationRefusal, p.shellVersion
 }
 
 func (p *localProcess) Lifecycle() io.ReadWriteCloser {

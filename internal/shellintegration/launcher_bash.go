@@ -167,7 +167,7 @@ func bashRcfile(mode startupMode, envBlock, scriptSource, capSource string) stri
 	// template comments are stripped like the generation scripts'
 	// (nocx-z9s9.17): the far shell never reads them. The strip runs on
 	// the rendered text so the substituted bodies are covered too.
-	return stripShellComments(rc)
+	return stripShellComments(rc, ShellBash)
 }
 
 // bashOuterScript is the bash tier's transport: write the rcfile to a real

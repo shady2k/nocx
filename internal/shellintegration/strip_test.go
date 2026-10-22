@@ -13,7 +13,7 @@ import (
 
 func TestStripComments_PreservesHashInSingleQuotes(t *testing.T) {
 	src := "x='a#b'\n# comment\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != "x='a#b'\n" {
 		t.Errorf("got %q", got)
 	}
@@ -21,7 +21,7 @@ func TestStripComments_PreservesHashInSingleQuotes(t *testing.T) {
 
 func TestStripComments_PreservesHashInDoubleQuotes(t *testing.T) {
 	src := "x=\"a#b\"\ny=\"${x} # c\"\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -29,7 +29,7 @@ func TestStripComments_PreservesHashInDoubleQuotes(t *testing.T) {
 
 func TestStripComments_PreservesHashInAnsiCQuotes(t *testing.T) {
 	src := "x=$'a#b\\nc'\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -37,7 +37,7 @@ func TestStripComments_PreservesHashInAnsiCQuotes(t *testing.T) {
 
 func TestStripComments_PreservesHashInHeredoc(t *testing.T) {
 	src := "cat <<'EOF'\n# data line, not a comment\n  # indented data too\nEOF\n# real comment\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	want := "cat <<'EOF'\n# data line, not a comment\n  # indented data too\nEOF\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -46,7 +46,7 @@ func TestStripComments_PreservesHashInHeredoc(t *testing.T) {
 
 func TestStripComments_PreservesHashInTabIndentedHeredoc(t *testing.T) {
 	src := "cat <<-EOF\n\t# tab-indented data\n\tEOF\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -54,7 +54,7 @@ func TestStripComments_PreservesHashInTabIndentedHeredoc(t *testing.T) {
 
 func TestStripComments_PreservesHashInUnquotedHeredoc(t *testing.T) {
 	src := "cat <<EOF\n# data\n$VAR # more data\nEOF\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -63,7 +63,7 @@ func TestStripComments_PreservesHashInUnquotedHeredoc(t *testing.T) {
 func TestStripComments_PreservesParameterExpansionHash(t *testing.T) {
 	// ${var#prefix}, ${var##prefix} and ${#var} are operators, not comments.
 	src := "a=${x#pre}\nb=${y##pre}\nc=${#z}\nd=${x:-${y#p}}\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -73,7 +73,7 @@ func TestStripComments_PreservesArithmeticHash(t *testing.T) {
 	// 16#$hdr is base notation inside $(( )) and (( )); a '#' there is never
 	// a comment even when preceded by whitespace.
 	src := "x=$(( 16#ff ))\ny=$(( 16 # comment-looking ))\n(( 16#0f == 15 ))\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -81,7 +81,7 @@ func TestStripComments_PreservesArithmeticHash(t *testing.T) {
 
 func TestStripComments_PreservesHashInConditional(t *testing.T) {
 	src := "[[ $x == a#b ]]\n[[ -n $x ]] && echo ok # trailing comment\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	want := "[[ $x == a#b ]]\n[[ -n $x ]] && echo ok\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -90,7 +90,7 @@ func TestStripComments_PreservesHashInConditional(t *testing.T) {
 
 func TestStripComments_PreservesEscapedHash(t *testing.T) {
 	src := "echo \\#not-a-comment\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -100,7 +100,7 @@ func TestStripComments_PreservesHashInsideCommandSubstitution(t *testing.T) {
 	// A '#' inside $(…) is subject to normal comment rules; inside a quote
 	// within it, it is data.
 	src := "x=$(echo 'a#b')\ny=$(echo \"c#d\")\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -108,7 +108,7 @@ func TestStripComments_PreservesHashInsideCommandSubstitution(t *testing.T) {
 
 func TestStripComments_PreservesPositionalParameterCount(t *testing.T) {
 	src := "n=$#\necho $# args\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -119,7 +119,7 @@ func TestStripComments_PreservesPositionalParameterCount(t *testing.T) {
 
 func TestStripComments_RemovesFullCommentLines(t *testing.T) {
 	src := "foo=1\n# a comment\n   # indented comment\n\nbar=2\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	want := "foo=1\n\nbar=2\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -128,7 +128,7 @@ func TestStripComments_RemovesFullCommentLines(t *testing.T) {
 
 func TestStripComments_RemovesTrailingComments(t *testing.T) {
 	src := "foo=1 # comment\nbar=2\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	want := "foo=1\nbar=2\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -137,7 +137,7 @@ func TestStripComments_RemovesTrailingComments(t *testing.T) {
 
 func TestStripComments_PreservesShebang(t *testing.T) {
 	src := "#!/bin/sh\n# comment\nfoo=1\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	want := "#!/bin/sh\nfoo=1\n"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -147,7 +147,7 @@ func TestStripComments_PreservesShebang(t *testing.T) {
 func TestStripComments_PreservesHashInCasePattern(t *testing.T) {
 	// An unquoted '#' mid-word in a case pattern is a literal pattern char.
 	src := "case $x in\n  a#b) echo m ;;\n  *) echo n ;;\nesac\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -155,7 +155,7 @@ func TestStripComments_PreservesHashInCasePattern(t *testing.T) {
 
 func TestStripComments_PreservesZshFlagsAndPrompts(t *testing.T) {
 	src := "PROMPT='%~ %# '\nhex=${(l:2::0:)$(( [##16] code ))}\n"
-	got := stripShellComments(src)
+	got := stripShellComments(src, ShellBash)
 	if got != src {
 		t.Errorf("got %q, want %q", got, src)
 	}
@@ -185,7 +185,7 @@ func TestStripComments_ShippedScriptsCarryNoCommentText(t *testing.T) {
 
 func TestStripComments_Idempotent(t *testing.T) {
 	for _, s := range []string{bashScript, zshScript, posixScript, launchCarrier()} {
-		if again := stripShellComments(s); again != s {
+		if again := stripShellComments(s, ShellBash); again != s {
 			t.Errorf("stripping is not idempotent")
 		}
 	}

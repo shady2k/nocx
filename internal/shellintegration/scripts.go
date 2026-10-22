@@ -21,6 +21,9 @@ var bashScriptRaw string
 //go:embed scripts/nocx.posix
 var posixScriptRaw string
 
+//go:embed scripts/nocx.fish
+var fishScriptRaw string
+
 // The delivered scripts, rendered by the ONE generator (agents.go): the
 // authored text with its agent-wrapper marker replaced by a block generated
 // from the names, then comment-stripped. For the EMBEDDED pair the names are
@@ -31,7 +34,7 @@ var posixScriptRaw string
 var (
 	zshScript   = renderScript(zshScriptRaw, shippedAgentNames(), DeliveryLocal)
 	bashScript  = renderScript(bashScriptRaw, shippedAgentNames(), DeliveryLocal)
-	posixScript = stripShellComments(posixScriptRaw)
+	posixScript = stripShellComments(posixScriptRaw, ShellBash)
 )
 
 // version is the integration script version. Bump when scripts change;
@@ -322,7 +325,9 @@ var (
 // met it was the login bash sshd starts with `-c` to run nocx's loader, whose
 // profile sourced this file. Every installed copy must be rewritten: a shell
 // still sourcing 63 arms extdebug during exactly that startup.
-const version = "64"
+// 65: native helper-hosted Fish uses the existing lifecycle channel, with a
+// protected native-startup adapter and Fish-specific generated launch hooks.
+const version = "65"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

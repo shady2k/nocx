@@ -15,6 +15,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -445,4 +446,64 @@ func waitForMarker(t *testing.T, home string) string {
 			return got != ""
 		})
 	return got
+}
+
+func TestLocalSpawner_FishStartupRefusalPreservesFactsWithoutCredentials(t *testing.T) {
+	_, logger := logtest.New(t)
+	shell := filepath.Join(t.TempDir(), "fish")
+	body := "#!/bin/sh\n[ \"$1\" = --no-config ] && [ \"$2\" = --command ] && [ \"$#\" = 3 ] || exit 91\nprintf '4.8.0\\ne# incompatible native startup\\n'\n"
+	if err := os.WriteFile(shell, []byte(body), 0o700); err != nil { //nolint:gosec // executable discovery fixture owned by t.TempDir
+		t.Fatal(err)
+	}
+	var opened bool
+	s := &LocalSpawner{
+		log: logger, shell: Shell{Path: shell},
+		agentHelperPath: "/public/helper",
+		openPTY: func(_ log.Logger, cfg pty.Config) (localPTY, error) {
+			opened = true
+			if cfg.Command != shell || len(cfg.Args) != 1 || cfg.Args[0] != "-i" {
+				t.Fatalf("fallback launch = %q %q, want native interactive Fish", cfg.Command, cfg.Args)
+			}
+			if len(cfg.ExtraFiles) != 0 {
+				t.Fatal("fallback inherited a private credential or lifecycle descriptor")
+			}
+			for _, entry := range cfg.Env {
+				if strings.HasPrefix(entry, "NOCX_SHELL_INTEGRATION=") ||
+					strings.HasPrefix(entry, "NOCX_TOOL_SOCKET=") ||
+					strings.Contains(entry, "private-tool-token") ||
+					strings.Contains(entry, strings.Repeat("a", 64)) {
+					t.Fatalf("fallback inherited private integration environment: %q", entry)
+				}
+			}
+			return &stubPTY{fakeProcess: fakeProcess{shell: shell}}, nil
+		},
+	}
+	proc, err := s.Spawn(SpawnRequest{
+		SessionID: "fish-refusal", Cols: 80, Rows: 24, AgentToolToken: "private-tool-token",
+		AgentToolEndpoint: "/private/tool.sock",
+		Lifecycle: &proto.LifecycleLaunch{
+			Lane: "fish-lane", Domain: "fish-domain", Epoch: 1,
+			Capability: strings.Repeat("a", 64), Recovery: strings.Repeat("b", 64),
+			RecoveryEpisodeID: "rec-0123456789abcdef0123456789abcdef",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := proc.Close(); err != nil {
+			t.Errorf("closing conventional Fish: %v", err)
+		}
+	})
+	local, ok := proc.(*localProcess)
+	if !opened || !ok {
+		t.Fatal("conventional fallback never opened the shell")
+	}
+	if local.Lifecycle() != nil {
+		t.Fatal("conventional Fish retained a private lifecycle transport")
+	}
+	refusal, version := local.IntegrationLaunchFacts()
+	if refusal != "unsupported-fish-startup" || version != "4.8.0" {
+		t.Fatalf("launch facts lost the startup compatibility reason: %q/%q", refusal, version)
+	}
 }

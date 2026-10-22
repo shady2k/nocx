@@ -293,16 +293,15 @@ type kernelHarness interface {
 }
 
 type channelShell struct {
-	t                *testing.T
-	cmd              *exec.Cmd
-	ptmx             *os.File
-	kernel           kernelHarness
-	listener         net.Listener
-	terminal         emulator.Terminal
-	mu               sync.Mutex
-	out              []byte
-	commandNames     []string
-	promptBoundaries uint64
+	t            *testing.T
+	cmd          *exec.Cmd
+	ptmx         *os.File
+	kernel       kernelHarness
+	listener     net.Listener
+	terminal     emulator.Terminal
+	mu           sync.Mutex
+	out          []byte
+	commandNames []string
 }
 
 // startChannelShell boots the hooks against a fake kernel over loopback TCP
@@ -542,11 +541,6 @@ func (s *channelShell) readPump() {
 						s.commandNames = effect.CommandNames
 						s.mu.Unlock()
 					}
-					if effect.Kind == emulator.EffectPromptBoundary {
-						s.mu.Lock()
-						s.promptBoundaries++
-						s.mu.Unlock()
-					}
 				}
 			}
 			s.mu.Lock()
@@ -574,12 +568,6 @@ func (s *channelShell) hasSessionCommand(name string) bool {
 		}
 	}
 	return false
-}
-
-func (s *channelShell) promptBoundaryCount() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.promptBoundaries
 }
 
 // waitForHandshake waits until the kernel has accepted hello and the first

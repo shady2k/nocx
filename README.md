@@ -339,6 +339,13 @@ Provision it with `scripts/install-fish-ci.sh ~/.cache/nocx-fish-ci`, put
 the upstream archive digest and uses a private prefix; it changes neither the
 account shell nor the system Fish installation.
 
+The idle-Ctrl+C journey establishes the same prompt's native reader boundary
+(OSC 133 B, ST-terminated) after nocx's prompt-start marker, so the product key
+encoder has consumed Fish's keyboard-protocol setup. Authenticated readiness
+alone can arrive during prompt construction. The next command still follows
+Ctrl+C immediately, without a cancellation delay; cancelling a prompt function
+is a different native Fish phase, not an idle-input precondition.
+
 The widget-wrapping zsh plugins — `fast-syntax-highlighting`,
 `zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the one test
 about composing with a plugin stack (`nocx-1ebrs.27`), and that test **fails,

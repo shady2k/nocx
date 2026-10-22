@@ -114,6 +114,39 @@ func waitFishOutput(t *testing.T, s *channelShell, text string) {
 		func() bool { return strings.Contains(s.output(), text) })
 }
 
+// waitFishReaderPrompt ties a native reader B to a particular prompt's A.
+// prompt_ready precedes Fish's keyboard-protocol setup; a cumulative B count
+// can still belong to the previous prompt. readPump ingests terminal modes
+// before appending output, so observing this B also establishes encoder state.
+func waitFishReaderPrompt(t *testing.T, s *channelShell, after int) int {
+	t.Helper()
+	if after < 0 {
+		t.Fatal("the completed Fish command has no prompt start")
+	}
+	const promptStart = "\x1b]133;A\a"
+	const readerReady = "\x1b]133;B\x1b\\"
+	var end int
+	waittest.WaitForTimeoutDetail(t, "this Fish prompt's native reader boundary", 10*time.Second,
+		func() string {
+			return fmt.Sprintf("after=%d events=%v output=%q", after, s.kernel.events(), s.output())
+		},
+		func() bool {
+			out := s.output()
+			start := strings.Index(out[after:], promptStart)
+			if start < 0 {
+				return false
+			}
+			start += after + len(promptStart)
+			boundary := strings.Index(out[start:], readerReady)
+			if boundary < 0 {
+				return false
+			}
+			end = start + boundary + len(readerReady)
+			return true
+		})
+	return end
+}
+
 func assertFishExit(t *testing.T, s *channelShell, want int) {
 	t.Helper()
 	var start, complete kernelEvent
@@ -138,6 +171,7 @@ func sendFishInterrupt(t *testing.T, s *channelShell) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("native Fish interrupt encoding: %q", data)
 	if _, err := s.ptmx.Write(data); err != nil {
 		t.Fatal(err)
 	}
@@ -192,14 +226,17 @@ function 'semi;colon'; end
 	s.run("printf 'SECOND_%s\\n' COMMAND")
 	waitFishOutput(t, s, "SECOND_COMMAND")
 	assertFishExit(t, s, 0)
+	// Establish idle input before testing idle Ctrl+C, not the protocol-disabled
+	// prompt-construction phase. Keep the following Ctrl+C-to-command gap empty.
+	promptEnd := waitFishReaderPrompt(t, s, strings.LastIndex(s.output(), "\x1b]133;A\a"))
 	ready := s.kernel.count("prompt_ready")
-	boundary := s.promptBoundaryCount()
 	if _, err := s.ptmx.Write([]byte{'\r'}); err != nil {
 		t.Fatal(err)
 	}
 	waittest.WaitForTimeoutDetail(t, "blank Fish input returns ready", 10*time.Second,
 		func() string { return fmt.Sprintf("events=%v output=%q", s.kernel.events(), s.output()) },
-		func() bool { return s.kernel.count("prompt_ready") > ready && s.promptBoundaryCount() > boundary })
+		func() bool { return s.kernel.count("prompt_ready") > ready })
+	waitFishReaderPrompt(t, s, promptEnd)
 	sendFishInterrupt(t, s)
 	// Native Fish repaints its cached prompt on idle Ctrl+C, without a new
 	// fish_prompt event. A real next command is the processing barrier.

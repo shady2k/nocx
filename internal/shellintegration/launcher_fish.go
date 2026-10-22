@@ -16,7 +16,7 @@ import (
 // interactive theme helper. A public function-path shim consumes the private
 // pipe before forwarding the first one. Normal Fish, not --no-config, still owns
 // history, universals, configuration ordering and the universal-change notifier.
-// See ADR-0096. An unknown prelude gets no private descriptors at all.
+// See ADR-0099. An unknown prelude gets no private descriptors at all.
 var fishPreconfigEdges = [...]string{
 	"__fish_set_locale", "__fish_macos_set_env", "__fish_theme_migrate",
 }

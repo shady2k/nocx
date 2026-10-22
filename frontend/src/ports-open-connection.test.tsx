@@ -139,7 +139,7 @@ function mountPanel(
       <ToastHost />
       <PortsPanel
         profileId={pid}
-        unavailableIn={() => 'pi@192.168.0.93'}
+        unavailableIn={() => 'pi@192.0.2.93'}
         onOpenAsConnection={onOpenAsConnection}
         services={services}
         visible={() => true}
@@ -156,9 +156,9 @@ describe('PortsPanel — open as connection (W2)', () => {
   it('creates the profile via adoptAliasProfile and opens a tab on the id the backend mints', async () => {
     const createProfile = vi.fn().mockResolvedValue({
       id: 'ssh:created:1',
-      name: '192.168.0.93',
+      name: '192.0.2.93',
       type: 'ssh',
-      options: { host: '192.168.0.93', user: 'pi' },
+      options: { host: '192.0.2.93', user: 'pi' },
     })
     const manager = await mountManager(createProfile)
     const status = vi.fn<PortsPanelServices['status']>().mockResolvedValue(statusFixture())
@@ -179,9 +179,9 @@ describe('PortsPanel — open as connection (W2)', () => {
     // the port, and "not set" must stay not set.
     expect(createProfile).toHaveBeenCalledWith({
       id: '',
-      name: '192.168.0.93',
+      name: '192.0.2.93',
       type: 'ssh',
-      options: { host: '192.168.0.93', user: 'pi' },
+      options: { host: '192.0.2.93', user: 'pi' },
     })
 
     // The user lands on a tab whose ports target is the minted id — Ports
@@ -206,7 +206,7 @@ describe('PortsPanel — open as connection (W2)', () => {
     // The failure is a danger toast — sticky, because an error the user was
     // not looking at is an error they never saw.
     await waitFor(() => {
-      expect(document.body.textContent ?? '').toContain('Could not connect to 192.168.0.93')
+      expect(document.body.textContent ?? '').toContain('Could not connect to 192.0.2.93')
       expect(document.body.textContent ?? '').toContain('vault locked')
     })
     // Nothing opened: the user is still on the hand-typed tab, whose ports

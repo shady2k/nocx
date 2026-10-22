@@ -46,13 +46,13 @@ func testFact(identity string) InstalledFact {
 // TestInstalledFactStore_RoundTrip: Record then All names the same fact.
 func TestInstalledFactStore_RoundTrip(t *testing.T) {
 	store, _ := testFactStore(t)
-	if _, ok := observed(store, "pi@192.168.0.93:22"); ok {
+	if _, ok := observed(store, "pi@192.0.2.93:22"); ok {
 		t.Fatal("empty store reports an installation")
 	}
-	if err := store.Record(testFact("pi@192.168.0.93:22")); err != nil {
+	if err := store.Record(testFact("pi@192.0.2.93:22")); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	f, ok := observed(store, "pi@192.168.0.93:22")
+	f, ok := observed(store, "pi@192.0.2.93:22")
 	if !ok {
 		t.Fatal("the fact is missing from All() after Record")
 	}

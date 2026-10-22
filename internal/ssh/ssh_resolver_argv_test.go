@@ -71,8 +71,8 @@ func TestIdentityKey(t *testing.T) {
 		cfg  HostConfig
 		want string
 	}{
-		{"plain", HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22}, "pi@192.168.0.93:22"},
-		{"unset port defaults to 22", HostConfig{User: "pi", HostName: "192.168.0.93", Port: 0}, "pi@192.168.0.93:22"},
+		{"plain", HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22}, "pi@192.0.2.93:22"},
+		{"unset port defaults to 22", HostConfig{User: "pi", HostName: "192.0.2.93", Port: 0}, "pi@192.0.2.93:22"},
 		{"no user", HostConfig{HostName: "host", Port: 2222}, "host:2222"},
 		{"ipv6 literal is bracketed", HostConfig{User: "u", HostName: "::1", Port: 22}, "u@[::1]:22"},
 		{"hostname alias resolved away", HostConfig{User: "deploy", HostName: "10.0.0.1", Port: 2222}, "deploy@10.0.0.1:2222"},
@@ -92,7 +92,7 @@ func TestResolveArgv_RunsTypedArgv(t *testing.T) {
 	sshPath, logPath := scriptedSSH(t)
 	resolver := NewSSHConfigResolver(log.NewSlogAdapter(nil), "/nonexistent/config", sshPath)
 
-	argv := []string{"ssh", "-G", "-p", "2222", "pi@192.168.0.93"}
+	argv := []string{"ssh", "-G", "-p", "2222", "pi@192.0.2.93"}
 	cfg, err := resolver.ResolveArgv(context.Background(), argv)
 	if err != nil {
 		t.Fatalf("ResolveArgv: %v", err)
@@ -105,7 +105,7 @@ func TestResolveArgv_RunsTypedArgv(t *testing.T) {
 	}
 
 	logged := readArgvLog(t, logPath)
-	for _, want := range []string{"-G", "-p", "2222", "pi@192.168.0.93"} {
+	for _, want := range []string{"-G", "-p", "2222", "pi@192.0.2.93"} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("oracle argv log missing %q; the typed line was not executed verbatim:\n%s", want, logged)
 		}

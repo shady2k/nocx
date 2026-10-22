@@ -1,5 +1,5 @@
 import './style.css'
-import { CheckForUpdate, ReportHealthy } from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { ReportHealthy, SetUpdateChannel } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
@@ -50,12 +50,15 @@ import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { apiSidebarAction, registerApiSurface } from './api'
 import { createApiWorkbenchServices, nativePickers } from './api/api-client'
+import { createUpdateCheck } from './update-check'
 import { mountUpdateNotice } from './update-notice'
+import { createUpdateToast } from './update-toast'
 import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connection-overlay'
 import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountClientHost } from './client-host'
+import { mountWindowGeometry } from './window-geometry'
 import type { ApprovalFacts } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
@@ -549,6 +552,10 @@ function main(): void {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
+  // The update channel is one more consumed setting (nocx-1ebrs.35.1): the
+  // same rule as PLACEMENT_KEY above — named here, deliberately, and only
+  // here, because a consumer names what it consumes.
+  const UPDATE_CHANNEL_KEY = 'update.channel'
 
   // The declared default, painted BEFORE the snapshot arrives: the first
   // frame must not show the opposite of what the backend is about to say.
@@ -638,6 +645,12 @@ function main(): void {
   // agent-tree question was answered by whichever mount was faster, and the
   // one that had to wait for a person never was.
   mountClientHost(dispatcher, undefined, undefined, requestAgentHostApproval)
+  // The window half of the UI-state document (ADR-0098): the shell owns the
+  // native window and the coordinator owns the document, and this renderer
+  // is the only road between them. Mounted unconditionally like the client
+  // host above — a client with no Wails runtime reads the saved geometry and
+  // stops there, because a browser window is not the window of record.
+  mountWindowGeometry(dispatcher)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
@@ -694,6 +707,9 @@ function main(): void {
         historyStatusStore,
         aboutClient,
         clipboard,
+        // Why the last update check failed, or null — the About page's
+        // visible-degrade card (nocx-1ebrs.36).
+        updateCheck.error,
         policyClient,
         // The same source the workbench takes below: one panel, one
         // fallback, one place a store row can land (nocx-3o0ed.4).
@@ -711,6 +727,10 @@ function main(): void {
         (sessionId: string) => tm.sessionDisplayName(sessionId),
         checkoutsStatusStore,
         agentRecordsClient,
+        // About's Check for updates: the SAME owner the startup check and
+        // the interval run, so the button cannot check a different channel
+        // than they do (nocx-1ebrs.55).
+        () => updateCheck.run(),
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -1230,6 +1250,14 @@ function main(): void {
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
+        // The update channel changed — apply it to the window and look at
+        // the channel the person just chose, rather than making them wait
+        // up to 24 hours for the interval to notice (nocx-1ebrs.35.1).
+        const nextChannel = snap.values[UPDATE_CHANNEL_KEY]
+        if (typeof nextChannel === 'string' && nextChannel && nextChannel !== lastChannel) {
+          lastChannel = nextChannel
+          void updateCheck.run()
+        }
         // The wrap default is live: flipping it repaints every block nobody
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
@@ -1808,32 +1836,59 @@ function main(): void {
     }
   })
 
-  // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
-  void (async () => {
-    try {
-      const info = await CheckForUpdate()
-      if (info) {
-        notice.showAvailable(info.Version, info.NotesURL)
-      }
-    } catch {
-      // Silent — automatic check failures are not surfaced to the user.
-    }
-  })()
-
-  // Re-check every 24 hours.
-  const DAY_MS = 24 * 60 * 60 * 1000
-  setInterval(() => {
-    void (async () => {
+  // Check for updates, at startup and every 24 hours. One controller owns
+  // the outcome for both (nocx-1ebrs.36): an available update reaches the
+  // notice, a failure is kept with its cause — logged at warn and shown in
+  // Settings > About — instead of vanishing in a silent catch the way
+  // 0.6.0's did.
+  // The channel bridge (nocx-1ebrs.35.1): the setting is stored by the
+  // backend's settings store, the check runs in the window — the renderer
+  // hands the stored value across on every check, so no window-side copy of
+  // update.channel can drift from the one the person set. Resolved per run,
+  // never cached: the 24-hour interval and a switch in Settings both read
+  // the store's current truth through this one path.
+  const updateChannelBridge = {
+    resolve: async () => {
       try {
-        const info = await CheckForUpdate()
-        if (info) {
-          notice.showAvailable(info.Version, info.NotesURL)
-        }
+        const snap = await profileClient.getSnapshot()
+        const value = snap.values[UPDATE_CHANNEL_KEY]
+        const channel = typeof value === 'string' && value ? value : 'stable'
+        // Track what was applied so the observer re-checks only on a real
+        // change — a nightly-preset install would otherwise fire one
+        // spurious check on its first unrelated settings change.
+        lastChannel = channel
+        return channel
       } catch {
-        // Silent.
+        // The store is unreachable: stay on stable rather than skipping the
+        // check entirely — a person whose backend is restarting still
+        // learns there is an update.
+        return 'stable'
       }
-    })()
-  }, DAY_MS)
+    },
+    apply: (channel: string) => SetUpdateChannel(channel),
+  }
+  // The channel the bridge last applied, so the observer only re-checks on a
+  // real change. Starts at the default; the first resolve corrects it.
+  let lastChannel = 'stable'
+  // The actionable announcement (nocx-1ebrs.54): the check's finding fans
+  // out to BOTH presenters at this one composition point — the strip stays
+  // as the quiet persistent marker a dismissed update remains findable in,
+  // and the toast is the announcement a person answers. `restart` is left
+  // unset until nocx-1ebrs.53 lands the coordinator-survival restart; the
+  // installed toast then gains its Restart now in the one line below.
+  const updateToast = createUpdateToast()
+  const updateCheck = createUpdateCheck(
+    {
+      showAvailable: (version, notesUrl) => {
+        notice.showAvailable(version, notesUrl)
+        updateToast.showAvailable(version, notesUrl)
+      },
+    },
+    updateChannelBridge,
+  )
+  void updateCheck.run()
+  const DAY_MS = 24 * 60 * 60 * 1000
+  setInterval(() => void updateCheck.run(), DAY_MS)
 
   // ── Vault dialogs ────────────────────────────────────────────────────
   // Mounted at the app level so they float over every page, not just Settings.

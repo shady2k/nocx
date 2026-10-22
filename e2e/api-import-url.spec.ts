@@ -68,6 +68,7 @@ import {
   bindEndpoint,
   openImportDestination,
   settingsReady,
+  setUpVaultThroughTheSheet,
   VaultBackend,
   type DisposableRoot,
 } from './harness'
@@ -175,16 +176,8 @@ async function setUpVault(page: Page): Promise<void> {
   await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
     timeout: 10_000,
   })
-  await page.locator('#vault-setup-passphrase').fill(VAULT_PASSPHRASE)
-  await page.locator('#vault-setup-confirm').fill(VAULT_PASSPHRASE)
-  await page
-    .getByRole('dialog')
-    .getByRole('button', { name: /Set Up/i })
-    .click()
-  await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-    timeout: 10_000,
-  })
-  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+  // The sheet's journey is the one owner's (harness.ts) — nocx-17ihs.
+  await setUpVaultThroughTheSheet(page, VAULT_PASSPHRASE)
 }
 
 /**

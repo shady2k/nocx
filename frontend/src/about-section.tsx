@@ -13,12 +13,13 @@
  * surface would then be the second owner of.
  */
 
-import { For, Show, createResource } from 'solid-js'
+import { For, Show, createResource, createSignal, type Accessor } from 'solid-js'
 
 import { Badge, Button, PageSection, Stack, StatusCard } from './ui'
 import { showToast } from './ui/toast'
 import type { AppAbout } from './generated/app.about'
 import type { ClipboardAccess } from './clipboard'
+import type { UpdateCheckOutcome } from './update-check'
 
 /** The application's own icon, served from `public/` and therefore addressed
  *  as a URL rather than imported as a module. Vite copies that directory into
@@ -33,6 +34,18 @@ export interface AboutSectionProps {
    *  the page can be driven from a stub without one existing. */
   load: () => Promise<AppAbout>
   clipboard: ClipboardAccess
+  /** Why the last automatic update check failed, or null when it succeeded
+   *  or has not run (nocx-1ebrs.36). Absent in an embedding with no window
+   *  updater; the page then makes no claim either way. An accessor rather
+   *  than a string, because the 24-hour re-check can clear it after the
+   *  page is open. */
+  updateCheckError?: Accessor<string | null>
+  /** Runs one update check through the shared createUpdateCheck owner and
+   *  resolves what it found, or null when it failed (nocx-1ebrs.55). The
+   *  controller is injected rather than imported: the seam a test substitutes
+   *  is the seam a dev stand can leave out, and the page then offers no
+   *  button rather than a dead one. */
+  onCheckForUpdates?: () => Promise<UpdateCheckOutcome | null>
 }
 
 /** Every fact this page knows, in the order a bug report wants them: what it
@@ -67,6 +80,32 @@ function diagnosticsText(about: AppAbout): string {
 
 export function AboutSection(props: AboutSectionProps) {
   const [about] = createResource(() => props.load())
+  // Checking is this page's own state: the shared controller runs checks
+  // nobody pressed a button for (startup, the interval), and only the check
+  // THIS button started belongs on the button.
+  const [checking, setChecking] = createSignal(false)
+  // The answer to the last manual check that found nothing newer. An
+  // available build is not kept here — the update toast announces it
+  // (nocx-1ebrs.54), and a second wording of it on this page would be a
+  // second owner of one announcement.
+  const [upToDate, setUpToDate] = createSignal<string | null>(null)
+
+  async function checkForUpdates(): Promise<void> {
+    if (checking()) return
+    setChecking(true)
+    try {
+      const outcome = await props.onCheckForUpdates?.()
+      if (outcome?.kind === 'up-to-date') {
+        setUpToDate(`You're up to date (${about()?.version ?? ''}, channel ${outcome.channel})`)
+      } else {
+        // An available build is the toast's to say; a failure is the error
+        // card's, with its cause. Neither is a quiet "up to date".
+        setUpToDate(null)
+      }
+    } finally {
+      setChecking(false)
+    }
+  }
 
   async function copy(): Promise<void> {
     const value = about()
@@ -100,6 +139,19 @@ export function AboutSection(props: AboutSectionProps) {
         <Show when={about()} fallback={<p class="ab-loading">Reading the build…</p>}>
           {(build) => (
             <Stack gap="loose">
+              {/* A soft degrade is visible in the product, not only in a log:
+                  this is the surface a person reads when they wonder why no
+                  update was offered. The state is live — the accessor, not a
+                  snapshot — so a re-check that succeeds clears the card. */}
+              <Show when={props.updateCheckError?.() ?? null}>
+                {(reason) => (
+                  <StatusCard
+                    tone="warning"
+                    title="Updates"
+                    description={`update check failed: ${reason()}`}
+                  />
+                )}
+              </Show>
               <div class="ab-identity">
                 {/* Decorative: the name is beside it in text, so an alt would
                     be read out twice by a screen reader. */}
@@ -135,7 +187,17 @@ export function AboutSection(props: AboutSectionProps) {
 
               <div class="ab-actions">
                 <Button onClick={() => void copy()}>Copy diagnostics</Button>
+                <Show when={props.onCheckForUpdates}>
+                  <Button onClick={() => void checkForUpdates()} disabled={checking()}>
+                    {checking() ? 'Checking…' : 'Check for updates'}
+                  </Button>
+                </Show>
               </div>
+              {/* The manual check's answer, said where the button that asked
+                  for it lives. Only the up-to-date case: an available build
+                  is announced by the update toast, and a failure by the
+                  warning card above with its cause. */}
+              <Show when={upToDate()}>{(line) => <p class="ab-check-result">{line()}</p>}</Show>
             </Stack>
           )}
         </Show>

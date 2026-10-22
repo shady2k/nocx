@@ -1,4 +1,4 @@
-# ADR-0097 — A Darwin blocking channel write has an owned, killable writer
+# ADR-0100 — A Darwin blocking channel write has an owned, killable writer
 
 - **Status:** Accepted
 - **Date:** 2026-10-21
@@ -6,8 +6,8 @@
   after the macOS backpressure failure in PR #445's CI.
 - **Related:** AD-5/6/7/8, [ADR-0024](0024-authenticated-shell-integration-channel.md),
   [ADR-0049](0049-the-channel-we-own-is-the-carrier.md), and
-  [ADR-0096](0096-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md).
-  Supersedes only ADR-0096's per-call-nonblocking **write mechanism on Darwin**.
+  [ADR-0099](0099-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md).
+  Supersedes only ADR-0099's per-call-nonblocking **write mechanism on Darwin**.
   Native startup, private activation, framing, lifecycle authority and reads are unchanged.
 
 ## Context and evidence

@@ -1442,7 +1442,7 @@ describe("the dropdown owns the arrows while it is open; recall's bare-Up gestur
           entries: [
             {
               id: 'h1',
-              command: 'ssh pi@192.168.0.93',
+              command: 'ssh pi@192.0.2.93',
               cwd: FIXTURE_CWD,
               host: '',
               status: 'success',
@@ -2404,7 +2404,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       makeBanner(),
       null,
       () => {},
-      { profileId: '', host: '192.168.0.57', user: 'root' },
+      { profileId: '', host: '192.0.2.57', user: 'root' },
     )
     const tab = new Pane(
       content,
@@ -2444,7 +2444,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       // The context is fed at session open from ONE derivation
       // (this.locationLine()); no stream marker may change it (ADR-0024 §1).
       const strong = tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')
-      expect(strong?.textContent).toBe('root@192.168.0.57')
+      expect(strong?.textContent).toBe('root@192.0.2.57')
       // The block header never appears in the severed product: blocks are
       // a completion projection with no stream (or app) trigger.
       expect(tab.pane.querySelector('.cmd-header-meta')).toBeNull()
@@ -3984,6 +3984,65 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     }
   })
 
+  it('names the tab `~` at home once the home resolves — never before (nocx-1ebrs.45)', async () => {
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      // The shell's OSC 7 reports the home directory as an ABSOLUTE path —
+      // the exact reported moment: the title showed the path's tail
+      // (`Users/dev`) where a person reads `~`.
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '', path: '/Users/dev' } })
+      // Home has not resolved yet, so the raw tail stands — never a guessed
+      // `~` (the same rule the prompt line holds, spec §2).
+      expect(tab.title).toBe('Users/dev')
+
+      // The binding resolves the home AFTER the cwd: the title re-derives
+      // from the same fact the prompt line already takes.
+      sessionHome.resolveHome(sessionId, '/Users/dev')
+      expect(tab.title).toBe('~')
+    } finally {
+      teardown()
+    }
+  })
+
+  it("names a directory under home rooted at `~`, keeping the tab's own tail (nocx-1ebrs.45)", async () => {
+    const client = makeClient()
+    const sessionHome = makeFakeSessionHome()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { sessionHome } },
+      client,
+    )
+    const sessionId = sessionOf(content).sessionId
+    try {
+      content.setVisible(true)
+      fireFrameMetadata(sessionOf(content), 1, {
+        cwd: { host: '', path: '/Users/dev/Projects/nocx' },
+      })
+      // Unknown home: the raw tail, exactly as before the fix.
+      expect(tab.title).toBe('Projects/nocx')
+
+      sessionHome.resolveHome(sessionId, '/Users/dev')
+      expect(tab.title).toBe('~/Projects/nocx')
+
+      // A later OSC 7 re-derives with the home already known — the rooted
+      // form, tail cut by the tab's own short-tail policy.
+      fireFrameMetadata(sessionOf(content), 2, {
+        cwd: { host: '', path: '/Users/dev/other/deep/one' },
+      })
+      expect(tab.title).toBe('~/deep/one')
+    } finally {
+      teardown()
+    }
+  })
+
   it('a branch change after a command was submitted updates the composer and not the already-created block', async () => {
     const client = makeClient()
     const branchSource = makeFakeBranchSource()
@@ -4120,7 +4179,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     // git.open's consent gate is a session-level fact the backend never
     // revises from inside the shell (AD-6: no byte-stream sniffing). True,
     // but the wrong fix for the wrong problem: after a hand-typed
-    // `ssh pi@192.168.0.93`, the verified cwd this pane reports is a path
+    // `ssh pi@192.0.2.93`, the verified cwd this pane reports is a path
     // on THAT host, not on the local one `this.sshOpts === undefined`
     // describes. Asking `git.open` about it would resolve `/home/pi`
     // against the LOCAL filesystem — the branch of whatever unrelated
@@ -4130,7 +4189,7 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
     // and it is exactly what a destination-bearing child domain reports
     // false (lifecycle/domain-environment.ts's `_seedFor`). This pane is a
     // LOCAL session throughout (`mountTerminal` with no `ssh` option); it
-    // walks into a hand-typed `ssh pi@192.168.0.93` (the same fact shape
+    // walks into a hand-typed `ssh pi@192.0.2.93` (the same fact shape
     // "a local tab whose pane walks onto a remote host" already uses,
     // ~line 3200), and the branch source must be asked NOTHING for a
     // verified cwd reported on that nested domain — the composer keeps
@@ -4155,11 +4214,11 @@ describe("the pane's where-facts, fed from fake sources (nocx-9bpeq.16)", () => 
         lifecycle: 'prompt_ready',
         domain: 'd2',
         epoch: 1,
-        destination: { host: '192.168.0.93', user: 'pi' },
+        destination: { host: '192.0.2.93', user: 'pi' },
       })
       // A verified cwd reported on the nested domain — a path on the far
       // host, which this pane's own (local) session cannot answer for.
-      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '192.168.0.93', path: '/home/pi' } })
+      fireFrameMetadata(sessionOf(content), 1, { cwd: { host: '192.0.2.93', path: '/home/pi' } })
       expect(branchSource.requests).toHaveLength(0)
       expect(partText(editorOf(content).root, 'branch')).toBeUndefined()
     } finally {
@@ -4294,18 +4353,18 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
       // The parent suspends as the child establishes (protocol §9: the
       // kernel rejects a second prompt_ready without a native between).
       handler({ lane: 'lane-1', lifecycle: 'native' })
-      // The hand-typed `ssh pi@192.168.0.93`.
+      // The hand-typed `ssh pi@192.0.2.93`.
       handler({
         lane: 'lane-1',
         lifecycle: 'prompt_ready',
         domain: 'd2',
         epoch: 1,
-        destination: { host: '192.168.0.93', user: 'pi' },
+        destination: { host: '192.0.2.93', user: 'pi' },
       })
       expect(content.portsTargetId).toBeNull()
       // The reason is the same user@host the block header shows (the one
       // existing derivation, not a second one).
-      expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
+      expect(content.portsUnavailableReason).toBe('pi@192.0.2.93')
     } finally {
       teardown()
     }
@@ -4332,7 +4391,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
         lifecycle: 'prompt_ready',
         domain: 'd2',
         epoch: 1,
-        destination: { host: '192.168.0.93', user: 'pi' },
+        destination: { host: '192.0.2.93', user: 'pi' },
       })
       expect(onPortsTargetChange).toHaveBeenCalledTimes(1)
       expect(content.portsTargetId).toBeNull()
@@ -10310,11 +10369,11 @@ describe('the running command names the tab (nocx-n8n82)', () => {
         lifecycle: 'prompt_ready',
         domain: 'd2',
         epoch: 1,
-        destination: { host: '192.168.0.93', user: 'pi' },
+        destination: { host: '192.0.2.93', user: 'pi' },
       })
 
       const subtitle = onSubtitleChange.mock.lastCall?.[0] as string
-      expect(subtitle).toBe('pi@192.168.0.93')
+      expect(subtitle).toBe('pi@192.0.2.93')
       expect(content.activeOrigin()?.machine).toBe(subtitle)
     } finally {
       restoreScroll()

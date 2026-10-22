@@ -6,11 +6,11 @@ you start; this brief adds the boundaries, the seams and the traps.
 
 Three reports from the owner on 2026-08-04, one root cause.
 
-1. Typing `ssh pi@192.168.0.93` in a local tab: no offer to integrate, no blocks, nothing.
+1. Typing `ssh <user>@<lan-ip>` in a local tab: no offer to integrate, no blocks, nothing.
 2. The Ports panel goes on listing the **backend machine's** listeners — `0.0.0.0:22`,
-   `orca-ide`, `devharness` — under a tab titled `pi@raspberrypi`, with nothing saying
+   `orca-ide`, `devharness` — under a tab titled `pi@host-2`, with nothing saying
    whose they are.
-3. After `exit`, the tab still reads `pi@raspberrypi: ~` while the pane is back home.
+3. After `exit`, the tab still reads `pi@host-2: ~` while the pane is back home.
 
 Every surface that names a place reads a fact about the **tab's lifetime** — the session
 kind, the sticky integrated flag, a title the remote shell set once — when the thing it

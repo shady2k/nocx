@@ -643,10 +643,10 @@ func TestNoAuthMaterial_ConnectSaysWhichMethodHasNothing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SSH_AUTH_SOCK", "")
 	rc := newTestRealClient(t)
-	resolved := &resolvedConfig{user: "root", hostName: "192.168.0.57", port: 22}
+	resolved := &resolvedConfig{user: "root", hostName: "192.0.2.57", port: 22}
 	cfg := &ConnectConfig{AuthMode: "publicKey"}
 
-	dial := rc.dialForConnect(context.Background(), "192.168.0.57", resolved, cfg)
+	dial := rc.dialForConnect(context.Background(), "192.0.2.57", resolved, cfg)
 	_, err := dial(poolKey{})
 	if err == nil {
 		t.Fatal("expected a dial refusal when there is nothing to authenticate with")
@@ -655,7 +655,7 @@ func TestNoAuthMaterial_ConnectSaysWhichMethodHasNothing(t *testing.T) {
 	if !errors.As(err, &noAuth) {
 		t.Fatalf("expected ErrNoAuthMethod, got %T: %v", err, err)
 	}
-	if noAuth.Mode != "publicKey" || noAuth.User != "root" || noAuth.Host != "192.168.0.57" {
+	if noAuth.Mode != "publicKey" || noAuth.User != "root" || noAuth.Host != "192.0.2.57" {
 		t.Fatalf("error lost the context it exists to carry: %+v", noAuth)
 	}
 	// The sentence names the cause, not the library's internals.

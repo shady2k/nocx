@@ -106,7 +106,11 @@ describe('the composer draws the terminal block cursor', () => {
       resolve(import.meta.dirname ?? '.', 'styles/surfaces/composer.css'),
       'utf8',
     )
-    const rule = /\.nocx-editor \.nocx-block-cursor \{[^}]*animation:([^;]*);/.exec(css)
+    // `[^{]*` accepts the rest of the selector list before the brace: the
+    // departure ghost (nocx-1ebrs.40) is listed beside the composer in one
+    // rule, and a selector list applies the body to every name in it, so the
+    // declaration check below still guards the composer's cursor exactly.
+    const rule = /\.nocx-editor \.nocx-block-cursor[^{]*\{[^}]*animation:([^;]*);/.exec(css)
     expect(rule).not.toBeNull()
     // The period comes from the property, and the fallback beside it — which
     // the CSS-integrity gate requires of a property set from outside the
@@ -240,12 +244,14 @@ describe('the caret holds still while keys are arriving', () => {
     // browser that no test is watching.
     const solid =
       String.raw`\.nocx-editor \.cm-editor\[` + CARET_PHASE_ATTR + String.raw`='solid'\] `
+    // The same selector-list acceptance as the period test above: the ghost
+    // is listed beside the composer, and the body reaches both.
     expect(
-      new RegExp(solid + String.raw`\.nocx-block-cursor \{[^}]*animation:\s*none`).test(css),
+      new RegExp(solid + String.raw`\.nocx-block-cursor[^{]*\{[^}]*animation:\s*none`).test(css),
     ).toBe(true)
     expect(
       new RegExp(
-        solid + String.raw`\.cm-cursorLayer \{[^}]*animation-name:\s*none !important`,
+        solid + String.raw`\.cm-cursorLayer[^{]*\{[^}]*animation-name:\s*none !important`,
       ).test(css),
     ).toBe(true)
   })

@@ -1000,6 +1000,40 @@
   transform-origin: 0 50%;
 }
 
+/* PROCEDURAL BOX AND BLOCK INK (nocx-1ebrs.15). Box drawing and block
+   elements are drawn to cell bounds by painter/cell-ink.ts — segments from
+   the cell's own geometry, not the font's glyph, which is built for a
+   typographic cell and cannot tile (a vertical │ run paints dashed). The
+   box spans the run's own pixel rectangle (inline width/height written by
+   paint-row.ts from the metric), so only the layout facts live here: the
+   box hangs from the line-box top, exactly as tall as the row's pitch, so
+   two adjacent rows' ink meets at the shared edge; and the SVG is allowed
+   to paint past its viewport, because the half-pixel overshoot that joins
+   the rows is drawn outside it by design. */
+.term-cell[data-procedural] {
+  vertical-align: top;
+  /* The ink is positioned to the cell's own rectangle, behind the
+     character: the glyph paints in the positioned layer above the SVG, in
+     DOM order. */
+  position: relative;
+}
+
+.term-cell[data-procedural] > svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* The font glyph of a procedurally drawn character is invisible (the
+   transparent colour is written by paint-row.ts beside the run's own ink
+   colour, which the SVG's currentColor must keep reading) and paints above
+   the ink only so selection and find land on it in document order. */
+.term-cell[data-procedural] > .term-cell-glyph {
+  position: relative;
+}
+
 /* THE LIVE CELL GRID (nocx-zg3k3.2.4) — the painter's surface and cursor.
    The rows are .term-grid-row, a class of its own per ADR-0009 (the
    shared rule above gives them the frozen rows' type context, and nothing
@@ -1025,6 +1059,18 @@
   cursor: default;
 }
 
+/* THE ARMED LINK UNDER THE POINTER (nocx-1ebrs.48). The live grid has no
+   anchors for a :hover selector to meet, so the link tracker
+   (terminal-links/live-hover.ts) says when an armed link is under the
+   pointer, and the state becomes the hand — the exact promise ⌘+click
+   keeps, including over a program that reports the mouse, whose armed
+   click still opens rather than reports. One writer to the attribute, like
+   `data-pointer` above; placed after it because the two rules tie on
+   specificity and the hand must win over both of the pointer's states. */
+.term-grid[data-link-hover='true'] {
+  cursor: pointer;
+}
+
 .term-grid-row {
   white-space: pre;
 }
@@ -1046,6 +1092,20 @@
   position: absolute;
   pointer-events: none;
   background: color-mix(in srgb, var(--color-accent), transparent 68%);
+}
+
+/* The armed link's underline (nocx-1ebrs.48): one cell-tall box per
+   underlined span, its line DOTTED at the box's foot — the modifier-held
+   style the frozen scrollback's `.links-armed .term-link` declares too, so
+   one row reads the same as it scrolls from the live grid into a block.
+   The program's colour stays on the glyphs; the line under them is ours,
+   dimmed by the same mix the frozen rule uses. Placed by THE mapping in
+   painter.ts, never by a measurement here. */
+.term-grid-link {
+  position: absolute;
+  pointer-events: none;
+  box-sizing: border-box;
+  border-bottom: 1px dotted color-mix(in srgb, currentColor 55%, transparent);
 }
 
 .term-grid-cursor {
@@ -1071,6 +1131,16 @@
   background: var(--terminal-cursor);
   color: var(--terminal-cursor-accent);
   animation: term-cursor-blink 1.2s step-end infinite;
+}
+
+/* Input and the program's own writing at the cursor hold the phase solid
+   (nocx-1ebrs.37) — the standard the composer's caret follows
+   (nocx-1ebrs.31): a cursor caught mid-off by a key reads as a dropped key.
+   The painter writes data-caret on the overlay and resumes the blink after
+   its idle bound; suspending rather than restarting the animation is what
+   brings the blink back visible. */
+.terminal-live-inner:focus-within .term-grid-cursor[data-caret='solid'] {
+  animation: none;
 }
 
 @keyframes term-cursor-blink {

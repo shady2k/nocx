@@ -35,10 +35,29 @@
 import { Dynamic, Portal } from 'solid-js/web'
 import { For, Show, createSignal, onCleanup, type Component } from 'solid-js'
 import { topOverlayElement } from './overlay/stack'
+import { Button } from './button'
 import { IconButton } from './icon-button'
 import { CloseIcon, InfoIcon, CheckCircleIcon, AlertTriangleIcon, AlertCircleIcon } from './icons'
 
 export type ToastLevel = 'info' | 'success' | 'warning' | 'danger'
+
+/** One action a toast offers. Kit `Button`s, not caller markup — a caller
+ *  hand-rolling its own row inside a toast would be a second vocabulary for
+ *  one concept, which is what this kit exists to prevent (nocx-1ebrs.54).
+ *  Running an action answers the toast, so the kit dismisses it: no action is
+ *  its own dismiss button too. */
+export interface ToastAction {
+  label: string
+  onClick: () => void
+  /** `primary` paints the action the toast exists to offer; at most one. */
+  variant?: 'primary' | 'default'
+}
+
+/** A link a toast carries — where the thing it names can be read. */
+export interface ToastLink {
+  label: string
+  href: string
+}
 
 export interface ToastOptions {
   message: string
@@ -48,6 +67,13 @@ export interface ToastOptions {
    * user closes it. Omit to take the level's default.
    */
   duration?: number
+  /** An inline link after the message, e.g. the release notes an update
+   *  toast names. Off-site pages open in their own tab. */
+  link?: ToastLink
+  /** Actions after the message, in order. A toast with actions should be
+   *  raised sticky (`duration: 0`): one that dismisses itself takes its own
+   *  buttons with it. */
+  actions?: ToastAction[]
 }
 
 export interface Toast {
@@ -55,6 +81,8 @@ export interface Toast {
   message: string
   level: ToastLevel
   duration: number
+  link?: ToastLink
+  actions?: ToastAction[]
 }
 
 /** Per-level auto-dismiss defaults, in ms. `0` is sticky — see the doc comment. */
@@ -80,7 +108,14 @@ const timers = new Map<number, ReturnType<typeof setTimeout>>()
 export function showToast(options: ToastOptions): number {
   const level = options.level ?? 'info'
   const duration = options.duration ?? DEFAULT_DURATION[level]
-  const toast: Toast = { id: nextId++, message: options.message, level, duration }
+  const toast: Toast = {
+    id: nextId++,
+    message: options.message,
+    level,
+    duration,
+    ...(options.link ? { link: options.link } : {}),
+    ...(options.actions ? { actions: options.actions } : {}),
+  }
   setToasts((current) => [...current, toast])
   if (duration > 0) {
     timers.set(
@@ -155,7 +190,45 @@ function renderHost() {
             <span class="ui-toast__icon" aria-hidden="true">
               <Dynamic component={LEVEL_ICON[toast.level]} />
             </span>
-            <span class="ui-toast__message">{toast.message}</span>
+            <span class="ui-toast__message">
+              {toast.message}
+              <Show when={toast.link}>
+                {(link) => (
+                  <>
+                    {' '}
+                    <a
+                      class="ui-toast__link"
+                      href={link().href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {link().label}
+                    </a>
+                  </>
+                )}
+              </Show>
+            </span>
+            <Show when={toast.actions?.length}>
+              <span class="ui-toast__actions">
+                <For each={toast.actions}>
+                  {(action) => (
+                    <Button
+                      variant={action.variant ?? 'default'}
+                      size="sm"
+                      onClick={() => {
+                        // The action answers the toast: run it, then close.
+                        // An action that left its toast standing made the
+                        // label half of a dismiss button nobody pressed.
+                        action.onClick()
+                        dismissToast(toast.id)
+                      }}
+                    >
+                      {action.label}
+                    </Button>
+                  )}
+                </For>
+              </span>
+            </Show>
             <IconButton
               size="xs"
               ariaLabel="Dismiss notification"

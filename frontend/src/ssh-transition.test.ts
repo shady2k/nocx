@@ -305,7 +305,7 @@ describe('isInteractiveTransition / extractDestination (legacy seam, unchanged c
   })
 
   it('extracts the destination from a simple ssh command', () => {
-    expect(extractDestination('ssh pi@192.168.0.93')).toBe('pi@192.168.0.93')
+    expect(extractDestination('ssh pi@192.0.2.93')).toBe('pi@192.0.2.93')
     expect(extractDestination('ssh -p 2222 root@box')).toBe('root@box')
     expect(extractDestination('ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no bob@h')).toBe(
       'bob@h',
@@ -330,9 +330,7 @@ describe('buildBootstrapRewrite (nocx-pu4.6 + nocx-sxdd consume-once)', () => {
     `if [ -s ${P} ]; then ${sshCmd} "$(cat ${P}; rm -f ${P})"; else ${original}; fi`
 
   it('reads the staged launcher and forces a pty', () => {
-    expect(buildRewrite('ssh pi@raspberrypi', P)).toBe(
-      guarded('ssh -t pi@raspberrypi', 'ssh pi@raspberrypi'),
-    )
+    expect(buildRewrite('ssh pi@host-2', P)).toBe(guarded('ssh -t pi@host-2', 'ssh pi@host-2'))
     expect(buildRewrite('ssh myserver', P)).toBe(guarded('ssh -t myserver', 'ssh myserver'))
   })
 
@@ -391,8 +389,8 @@ describe('buildBootstrapRewrite (nocx-pu4.6 + nocx-sxdd consume-once)', () => {
   // `ssh host ""`, which asks sshd for an empty remote command instead of a
   // shell, and never a second ssh chained off the first one's exit status.
   it('falls back to the line the user typed, byte for byte', () => {
-    const out = buildRewrite('  ssh -p 2222 pi@raspberrypi  ', P)!
-    expect(out).toContain('; else ssh -p 2222 pi@raspberrypi; fi')
+    const out = buildRewrite('  ssh -p 2222 pi@host-2  ', P)!
+    expect(out).toContain('; else ssh -p 2222 pi@host-2; fi')
     expect(out).not.toContain('||')
     expect(out).not.toContain('&&')
   })
@@ -419,12 +417,14 @@ describe('buildBootstrapRewrite (nocx-pu4.6 + nocx-sxdd consume-once)', () => {
   // pty, so 4095 is the number, not 4096. The exact byte count is asserted
   // too: this line is the one thing between the user's Enter and the tty, and
   // a change that grows it belongs in a review, not in a screenshot of a
-  // truncated script. 187 = the old 145 plus the 42 bytes of `; rm -f P` —
-  // moving the removal inside the substitution is byte-neutral.
+  // truncated script. 177 = 145, the pre-privacy-scrub length, plus the
+  // 42 bytes of `; rm -f P`, minus the 10 the scrub saved: the fixture's
+  // hostname stand-in is 5 bytes shorter than what it replaced, and the
+  // rewritten line carries the user's command twice.
   it('produces a line the tty can carry', () => {
-    const rewritten = buildRewrite('ssh pi@raspberrypi', P)!
+    const rewritten = buildRewrite('ssh pi@host-2', P)!
     const bytes = new TextEncoder().encode(rewritten).byteLength
-    expect(bytes).toBe(187)
+    expect(bytes).toBe(177)
     expect(bytes).toBeLessThanOrEqual(4095)
   })
 

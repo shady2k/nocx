@@ -240,13 +240,14 @@ function hasSkillRow(root: HTMLElement, name: string): boolean {
 }
 
 /** SettingsContent with a skills store and nothing else — the store is the
- *  fifteenth positional dependency, which is worth writing down once. */
+ *  sixteenth positional dependency, which is worth writing down once. */
 function newSettingsContentWithSkills(
   profileClient: ProfileClient,
   skillsStore: SkillsStore,
 ): SettingsContent {
   return new SettingsContent(
     profileClient,
+    undefined,
     undefined,
     undefined,
     undefined,
@@ -656,6 +657,7 @@ describe('SettingsContent', () => {
       'Skills',
       'Protection',
       'Secrets',
+      'Updates',
       'Terminal',
       'Application',
       'Backup & Restore',
@@ -726,6 +728,57 @@ describe('SettingsContent', () => {
     })
     // The owned section's row is on the page, above the list.
     expect(target.querySelector('[data-key="skills.enabled"]')).toBeTruthy()
+  })
+
+  // The Updates page is the user-facing path the channel feature is asserted
+  // through (nocx-1ebrs.35.1): the select renders from its Go declaration on
+  // the page that owns the section, one rail row, and choosing nightly saves
+  // the key the window bridge reads — a stored value that never reaches a
+  // save is the decorative setting the bead forbids.
+  it('the Updates page renders the channel select from its declaration, and switching it saves update.channel', async () => {
+    const save = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    content = new SettingsContent(client)
+    mockReady(client, {
+      declarations: [
+        ...TEST_DECLARATIONS,
+        {
+          key: 'update.channel',
+          section: 'Updates',
+          label: 'Update channel',
+          description: 'Stable follows the latest release. Nightly follows tonight build.',
+          control: 'select',
+          dataClass: 'publicConfig',
+          default: 'stable',
+          options: [
+            { value: 'stable', label: 'Stable' },
+            { value: 'nightly', label: 'Nightly' },
+          ],
+        },
+      ],
+      values: { 'update.channel': 'stable' },
+      sectionGroups: { ...TEST_SECTION_GROUPS, Updates: 'application' },
+    })
+    await content.mount(target, host, signal)
+
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const rows = Array.from(nav.querySelectorAll<HTMLElement>('.ui-grouped-nav__item')).filter(
+      (l) => l.textContent.replace(/\s*\d+\s*/, '').trim() === 'Updates',
+    )
+    expect(rows.length).toBe(1)
+
+    openSection(target, 'Updates')
+    const select = await vi.waitFor(() => {
+      const el = target.querySelector('[data-key="update.channel"] select')
+      if (!el) throw new Error('channel select not rendered yet')
+      return el as HTMLSelectElement
+    })
+    expect(select.value).toBe('stable')
+
+    select.value = 'nightly'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledWith('update.channel', 'nightly')
+    })
   })
 
   // The count belongs to the section, so it has to follow the rows onto the

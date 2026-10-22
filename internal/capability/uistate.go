@@ -12,13 +12,22 @@ import (
 // callback fails with ErrOperationInactive rather than reaching the store
 // without the exclusion the operation exists to provide.
 //
-// Only the renderer's half is here. Window geometry is deliberately absent:
-// the renderer can neither know it nor act on it, and putting it behind a
-// method the transport could call would create a second potential owner of a
-// fact the Wails side already owns (ADR-0048 §7).
+// Both halves of the document are here. The renderer's half (sidebar, active
+// tab) is read and written by the renderer itself. The window half is RELAYED
+// (ADR-0098): the shell owns the native window and the coordinator owns the
+// document, and neither can reach the other except through this service — the
+// renderer carries the saved geometry to the shell's restore binding and the
+// shell's samples back here, deciding nothing on either leg.
 type UIStateService interface {
 	Layout(context.Context) uistate.Layout
 	SetLayout(context.Context, uistate.Layout)
+	// Window reports the recorded geometry, for the shell to restore at
+	// bootstrap (ADR-0098).
+	Window(context.Context) uistate.Window
+	// ObserveWindow folds one live sample of the shell's window into the
+	// recorded state. The folding rule — a maximised or full-screen sample
+	// moves only its flags — is the store's, not the caller's.
+	ObserveWindow(context.Context, uistate.Window)
 }
 
 // UIStateOperation is the typed operation for the uistate.* methods. Its gate
@@ -63,4 +72,26 @@ func (s *uiStateService) SetLayout(_ context.Context, l uistate.Layout) {
 		return
 	}
 	s.store.SetLayout(l)
+}
+
+// Window serves the recorded geometry. The zero Window on a dead handle is
+// correct for the same reason the zero Layout is: the caller is answering a
+// read it should never have been able to make, and a zero geometry is what an
+// absent document yields anyway — the shell then leaves the window at the
+// size it opened at (ADR-0098).
+func (s *uiStateService) Window(context.Context) uistate.Window {
+	if err := s.guard.check(); err != nil {
+		return uistate.Window{}
+	}
+	return s.store.Window()
+}
+
+// ObserveWindow folds one live sample into the recorded state. The fold is
+// uistate.Observe — one owner for the maximised rule — and the write itself is
+// deferred exactly like SetLayout's, so a drag of any length is one write.
+func (s *uiStateService) ObserveWindow(_ context.Context, live uistate.Window) {
+	if err := s.guard.check(); err != nil {
+		return
+	}
+	s.store.SetWindow(uistate.Observe(s.store.Window(), live))
 }

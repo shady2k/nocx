@@ -35,6 +35,7 @@ import {
   bindEndpoint,
   documentDir,
   settingsReady,
+  setUpVaultThroughTheSheet,
 } from './harness'
 import { readStand } from './stand'
 
@@ -175,16 +176,14 @@ async function setupVault(page: Page): Promise<void> {
   await settingsReady(page)
   await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
   await page.getByRole('button', { name: 'Set up protection' }).click()
+  // This spec's own claim ends at the sheet existing; the journey through it
+  // is setUpVaultThroughTheSheet's (harness.ts) — press-and-look, code, Done,
+  // sheet gone — which is where nocx-17ihs's two CI failures were fixed. It
+  // asserts the code BLOCK is shown, which is the stronger form of the
+  // "Recovery Code" dialog-text wait this file used to carry.
   const setupDialog = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })
   await expect(setupDialog).toBeVisible({ timeout: 10_000 })
-  await page.locator('#vault-setup-passphrase').fill('master-passphrase-7')
-  await page.locator('#vault-setup-confirm').fill('master-passphrase-7')
-  await setupDialog.getByRole('button', { name: /Set Up/i }).click()
-  await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-    timeout: 10_000,
-  })
-  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
-  await expect(setupDialog).not.toBeVisible({ timeout: 10_000 })
+  await setUpVaultThroughTheSheet(page, 'master-passphrase-7')
 }
 
 const test = base

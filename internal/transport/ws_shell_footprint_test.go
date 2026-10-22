@@ -143,13 +143,13 @@ func footprintStatusHarness(t *testing.T, facts *ssh.InstalledFactStore, profs [
 	t.Helper()
 	ctx := context.Background()
 	resolver := newLauncherTestResolver()
-	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
+	resolver.add("pi@192.0.2.93", ssh.HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22})
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithInstalledFactStore(facts),
 		WithSSHConfigResolver(resolver, "/nonexistent/config"),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 		WithProfileRepository(&footprintTestProfileRepo{profiles: profs}),
 	)
 	if err := ws.Start(ctx); err != nil {
@@ -177,7 +177,7 @@ func footprintFact(identity string) ssh.InstalledFact {
 func TestFootprintStatus_ReportsFactsAndRemovability(t *testing.T) {
 	facts := ssh.NewInstalledFactStore(
 		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")
-	if err := facts.Record(footprintFact("pi@192.168.0.93:22")); err != nil {
+	if err := facts.Record(footprintFact("pi@192.0.2.93:22")); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if err := facts.Record(footprintFact("root@10.0.0.7:22")); err != nil {
@@ -185,7 +185,7 @@ func TestFootprintStatus_ReportsFactsAndRemovability(t *testing.T) {
 	}
 	profs := []profile.SSHProfile{{
 		Base:    profile.Base{ID: "p_01"},
-		Options: profile.StoredSSHProfileOptions{Host: "pi@192.168.0.93"},
+		Options: profile.StoredSSHProfileOptions{Host: "pi@192.0.2.93"},
 	}}
 	ws, _ := footprintStatusHarness(t, facts, profs)
 	conn := connectWS(t, ws)
@@ -204,7 +204,7 @@ func TestFootprintStatus_ReportsFactsAndRemovability(t *testing.T) {
 	}
 	// All() orders by identity: "pi@…" sorts before "root@…".
 	first, second := got.Destinations[0], got.Destinations[1]
-	if first.Identity != "pi@192.168.0.93:22" || second.Identity != "root@10.0.0.7:22" {
+	if first.Identity != "pi@192.0.2.93:22" || second.Identity != "root@10.0.0.7:22" {
 		t.Fatalf("destination order = %q, %q; want pi@…, root@…", first.Identity, second.Identity)
 	}
 	if first.RemovableProfileID == nil || *first.RemovableProfileID != "p_01" {
@@ -233,7 +233,7 @@ func TestFootprintStatus_ReportsFactsAndRemovability(t *testing.T) {
 		t.Fatalf("second status: %+v", resp.Error)
 	}
 	argv := append([]string(nil), resolver.lastArgv...)
-	wantArgv := []string{"ssh", "-G", "-l", "test", "pi@192.168.0.93"}
+	wantArgv := []string{"ssh", "-G", "-l", "test", "pi@192.0.2.93"}
 	if len(argv) != len(wantArgv) {
 		t.Fatalf("oracle argv = %v, want %v", argv, wantArgv)
 	}
@@ -303,7 +303,7 @@ func TestFootprintUninstall_DelegatesToCapability(t *testing.T) {
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithRemoteUninstaller(rec),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -326,7 +326,7 @@ func TestFootprintUninstall_DelegatesToCapability(t *testing.T) {
 	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
 		t.Errorf("conflicts = %v, want the capability's lists verbatim", got.Conflicts)
 	}
-	if rec.host != "pi@192.168.0.93" {
+	if rec.host != "pi@192.0.2.93" {
 		t.Errorf("capability host = %q, want the resolved profile host", rec.host)
 	}
 	if rec.cfg == nil || rec.cfg.User != "test" {
@@ -341,7 +341,7 @@ func TestFootprintUninstall_Refusals(t *testing.T) {
 	ctx := context.Background()
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -467,7 +467,7 @@ func footprintHelperUninstallHarness(t *testing.T, installs *consent.InstallStor
 		WithHelperInstallStore(installs),
 		WithHelperChannelCloser(closer),
 		WithRemoteHelperUninstaller(remover),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 	}
 	if len(stores) > 0 {
 		options = append(options, WithHelperConsentStore(stores[0]))
@@ -531,7 +531,7 @@ func TestFootprintHelperUninstall_ClosesBeforeRemoves(t *testing.T) {
 	if closer.fingerprint != "SHA256:deadbeef" {
 		t.Errorf("closer fingerprint = %q, want the row's machine", closer.fingerprint)
 	}
-	if remover.host != "pi@192.168.0.93" || remover.cfg == nil || remover.cfg.User != "test" {
+	if remover.host != "pi@192.0.2.93" || remover.cfg == nil || remover.cfg.User != "test" {
 		t.Errorf("remover = host %q cfg %+v, want the resolved profile's host and config", remover.host, remover.cfg)
 	}
 	// The inventory row is gone: the surface's next status call will not
@@ -705,7 +705,7 @@ func TestFootprintHelperUninstall_Refusals(t *testing.T) {
 	ctx := context.Background()
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

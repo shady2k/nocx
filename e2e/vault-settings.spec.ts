@@ -22,6 +22,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
   type DisposableRoot,
 } from './harness'
 import { addSecretFromLock, pressLock } from './secret-field'
@@ -142,24 +143,12 @@ async function setupVaultAndSavePassword(
     .filter({ has: page.locator('#vault-setup-passphrase') })
   await expect(setupDialog).toBeVisible({ timeout: 10_000 })
 
-  await page.locator('#vault-setup-passphrase').fill(passphrase)
-  await page.locator('#vault-setup-confirm').fill(passphrase)
-
-  await page
-    .getByRole('dialog')
-    .getByRole('button', { name: /Set Up/i })
-    .click()
-
-  // The recovery step, asserted through the code block itself — by now the
-  // setup overlay has closed and the code renders in the form behind it.
-  const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-  await expect(codeBlock).toBeVisible({ timeout: 10_000 })
-  const code = await codeBlock.textContent()
-  expect(code).not.toBeNull()
-  expect((code ?? '').length).toBeGreaterThan(10)
-
-  // Click "Done" to close setup. The vault is open; nothing is minted yet.
-  await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+  // From the passphrase to the sheet closing, ONE owner answers the sheet
+  // (setUpVaultThroughTheSheet in harness.ts) — press-and-look, so a press the
+  // sheet never heard and an answer slower than a blind budget are both
+  // survivable there (nocx-17ihs). It hands back the code the sheet showed.
+  const code = await setUpVaultThroughTheSheet(page, passphrase)
+  expect(code.length).toBeGreaterThan(10)
 
   // Now the password. The sheet took the surface, so the panel closed with it
   // and the lock is pressed again — onto an OPEN, empty vault, whose create

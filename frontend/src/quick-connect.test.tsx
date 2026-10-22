@@ -1553,7 +1553,7 @@ describe('the secret picker (nocx-fk32)', () => {
   const inventory = () =>
     Promise.resolve({
       entries: [
-        { id: 'secrow:1', name: 'pi@192.168.0.93', kind: 'password' },
+        { id: 'secrow:1', name: 'pi@192.0.2.93', kind: 'password' },
         { id: 'secrow:2', name: 'deploy key', kind: 'private-key' },
       ],
     })
@@ -1598,17 +1598,17 @@ describe('the secret picker (nocx-fk32)', () => {
     const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
       (el.textContent ?? '').trim(),
     )
-    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rows.some((r) => r.includes('pi@192.0.2.93'))).toBe(true)
     expect(rows.some((r) => r.includes('deploy key'))).toBe(true)
     // Commands are not secrets: the variant admits one kind set.
     expect(rows.some((r) => r.includes('Local shell'))).toBe(false)
 
     const target = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((el) =>
-      (el.textContent ?? '').includes('pi@192.168.0.93'),
+      (el.textContent ?? '').includes('pi@192.0.2.93'),
     )
     target?.click()
     // The picker never sees material — only the name the reference carries.
-    expect(insert).toHaveBeenCalledWith('pi@192.168.0.93')
+    expect(insert).toHaveBeenCalledWith('pi@192.0.2.93')
   })
 
   it('keeps secrets out of the palette — one Enter must not mean two things', async () => {
@@ -1621,7 +1621,7 @@ describe('the secret picker (nocx-fk32)', () => {
       (el.textContent ?? '').trim(),
     )
     expect(rows.some((r) => r.includes('Local shell'))).toBe(true)
-    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+    expect(rows.some((r) => r.includes('pi@192.0.2.93'))).toBe(false)
   })
 
   it('keeps secrets out of the plain server list too', async () => {
@@ -1631,7 +1631,7 @@ describe('the secret picker (nocx-fk32)', () => {
     const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
       (el.textContent ?? '').trim(),
     )
-    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+    expect(rows.some((r) => r.includes('pi@192.0.2.93'))).toBe(false)
   })
 
   // The secret the vault does not hold yet is the one the user came to type
@@ -1730,7 +1730,7 @@ describe('the secret picker (nocx-fk32)', () => {
     ctrl.showSecrets()
     await settle()
 
-    expect(rowTexts().some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rowTexts().some((r) => r.includes('pi@192.0.2.93'))).toBe(true)
     expect(rowTexts().some((r) => r.includes('Unlock the vault'))).toBe(false)
   })
 })

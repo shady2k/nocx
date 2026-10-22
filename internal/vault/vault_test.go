@@ -2323,7 +2323,7 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
-		SecretMeta{Name: "root@192.168.0.57", Kind: "password"})
+		SecretMeta{Name: "root@192.0.2.57", Kind: "password"})
 	if err != nil {
 		t.Fatalf("CreateNamed: %v", err)
 	}
@@ -2338,8 +2338,8 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 	if rec == nil {
 		t.Fatal("no catalogue record for the created secret")
 	}
-	if rec.Name != "root@192.168.0.57" {
-		t.Errorf("record name = %q, want %q", rec.Name, "root@192.168.0.57")
+	if rec.Name != "root@192.0.2.57" {
+		t.Errorf("record name = %q, want %q", rec.Name, "root@192.0.2.57")
 	}
 	if rec.Kind != "password" {
 		t.Errorf("record kind = %q, want %q", rec.Kind, "password")
@@ -2357,7 +2357,7 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 	if entry == nil {
 		t.Fatal("no journal entry for the created secret")
 	}
-	if entry.Name != "root@192.168.0.57" || entry.Kind != "password" {
+	if entry.Name != "root@192.0.2.57" || entry.Kind != "password" {
 		t.Errorf("journal carries name=%q kind=%q", entry.Name, entry.Kind)
 	}
 	if entry.Phase != PhaseSecretWritten {

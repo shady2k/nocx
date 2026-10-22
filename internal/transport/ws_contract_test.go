@@ -338,7 +338,7 @@ func TestVaultInventory_DTOConformsToContract(t *testing.T) {
 			entries: []vault.InventoryEntry{
 				{
 					ID:        "secrow:9f0c8a1b2c3d4e5faabbccdd00112233",
-					Name:      "root@192.168.0.57",
+					Name:      "root@192.0.2.57",
 					Kind:      "password",
 					Provider:  "system",
 					OwnerID:   "cred:prod:1",
@@ -3050,7 +3050,7 @@ func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
 	removable := "p_01"
 	raw, err := json.Marshal(shellFootprintStatusResult{Destinations: []shellFootprintDestination{
 		{
-			Identity:           "pi@192.168.0.93:22",
+			Identity:           "pi@192.0.2.93:22",
 			Generation:         "v10",
 			Path:               footprintPath,
 			ProtocolVersion:    "1",
@@ -3129,11 +3129,11 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	ctx := context.Background()
 
 	resolver := newLauncherTestResolver()
-	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
+	resolver.add("pi@192.0.2.93", ssh.HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22})
 	facts := ssh.NewInstalledFactStore(
 		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")
 	if err := facts.Record(ssh.InstalledFact{
-		Identity: "pi@192.168.0.93:22", Protocol: "1", ScriptVersion: "0.6.0",
+		Identity: "pi@192.0.2.93:22", Protocol: "1", ScriptVersion: "0.6.0",
 		Generation: "v10", ObservedAt: time.Date(2026, 8, 5, 10, 0, 0, 0, time.UTC),
 	}); err != nil {
 		t.Fatalf("Record: %v", err)
@@ -3161,10 +3161,10 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 		WithInstalledFactStore(facts),
 		WithHelperInstallStore(installs),
 		WithSSHConfigResolver(resolver, "/nonexistent/config"),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 		WithProfileRepository(&footprintTestProfileRepo{profiles: []profile.SSHProfile{{
 			Base:    profile.Base{ID: "p_01"},
-			Options: profile.StoredSSHProfileOptions{Host: "pi@192.168.0.93"},
+			Options: profile.StoredSSHProfileOptions{Host: "pi@192.0.2.93"},
 		}}}),
 	)
 	if err := ws.Start(ctx); err != nil {
@@ -3187,10 +3187,10 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	if len(got.Destinations) != 2 {
 		t.Fatalf("destinations = %d, want 2", len(got.Destinations))
 	}
-	if got.Destinations[0].Identity != "pi@192.168.0.93:22" ||
+	if got.Destinations[0].Identity != "pi@192.0.2.93:22" ||
 		got.Destinations[0].RemovableProfileID == nil ||
 		*got.Destinations[0].RemovableProfileID != "p_01" {
-		t.Errorf("profile destination = %+v, want identity pi@192.168.0.93:22 removable via p_01",
+		t.Errorf("profile destination = %+v, want identity pi@192.0.2.93:22 removable via p_01",
 			got.Destinations[0])
 	}
 	if got.Destinations[1].RemovableProfileID != nil {
@@ -3301,7 +3301,7 @@ func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithRemoteUninstaller(rec),
-		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
+		WithProfileResolver(&openProfileResolver{host: "pi@192.0.2.93"}),
 	)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -5016,7 +5016,7 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 		"ssh child names its destination": {
 			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
 			Domain: "dom-2", Epoch: 4,
-			Destination: &lifecyclepub.Destination{Host: "192.168.0.93", User: "pi", Port: 22},
+			Destination: &lifecyclepub.Destination{Host: "192.0.2.93", User: "pi", Port: 22},
 		},
 		// A destination with no user and no port: the ssh client resolves
 		// its own defaults, which nocx does not model, so the fact says only

@@ -26,7 +26,7 @@ func writeSocketFrame(op *operation, fd int, body []byte) error {
 
 // Darwin's MSG_DONTWAIT does not prevent a send-buffer-space wait. Killing an
 // owned writer process interrupts that wait without shutdown or an O_NONBLOCK
-// change on the description shared with Fish and nested Bash (ADR-0097).
+// change on the description shared with Fish and nested Bash (ADR-0100).
 func writeFrameThroughProcess(op *operation, fd int, body []byte, program string) error {
 	if err := op.check(); err != nil {
 		return err

@@ -2883,6 +2883,10 @@ export class PaneManager {
       // `registered` is what tells the two apart, and it is only ever set
       // once the backend has ANSWERED: a pane whose create is still in flight
       // has no row yet and must not be mistaken for one that has lost it.
+      // The answered case is guarded one store down — a read that predates a
+      // confirmed create is re-read rather than folded (nocx-1ebrs.56), so a
+      // row that is gone here is a row the backend has really taken — and
+      // this drop is the user-visible half of exactly that contract.
       if (this.registered.has(pane.wireId)) this.dropChrome(pane)
     }
     this.applyDecoration()

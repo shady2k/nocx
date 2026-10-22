@@ -102,6 +102,14 @@ async function renderedGridSize(page: Page): Promise<string> {
   })
 }
 
+/** The fixture's SIGWINCH record: one WINCH line per resize the program
+ *  actually received. The count is the observable "a resize crossed the
+ *  PTY"; its stability across two observations is the observable "no
+ *  resize is in flight right now". */
+function winchCount(): number {
+  return fileText(resizePath).split('WINCH').length - 1
+}
+
 test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
@@ -143,8 +151,7 @@ test.beforeAll(async () => {
       `while [ ! -e '${armPath}' ]; do sleep 0.1; done`,
       `printf '\\033]9;%s\\007' '${ARMED}'`,
       `while [ ! -e '${geometryRequestPath}' ]; do sleep 0.1; done`,
-      `printf '%s\n' "$(stty size)" > '${geometrySamplePath}'`,
-      `while [ ! -e '${geometryAcceptedPath}' ]; do sleep 0.1; done`,
+      `while [ ! -e '${geometryAcceptedPath}' ]; do printf '%s\n' "$(stty size)" > '${geometrySamplePath}'; sleep 0.1; done`,
       `while [ ! -e '${summonRequestPath}' ]; do sleep 0.1; done`,
       `printf '%s\n' "$(stty size)" > '${baselineSizePath}'`,
       `cp '${resizePath}' '${baselinePath}'`,
@@ -528,20 +535,42 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       })
       .toBe(true)
 
-    // ARMED is an OSC notification, not proof the screen frame that follows
-    // it has reached the renderer. Ask the fixture for its current PTY size,
-    // then wait until the accepted, rendered frame has that exact geometry
-    // before letting the fixture capture the comparison baseline. This keeps
-    // a delayed initial fit from straddling the baseline and summon action.
+    // ARMED is an OSC notification, not proof the product's fit for the
+    // alternate screen has settled: the fullscreen fit is debounced
+    // (RESIZE_SETTLE_MS) and travels resize → PTY → screen frame, so a
+    // sample taken at ARMED reads the PRE-fit size while the PTY and the
+    // rendered frame settle on the post-fit one a beat later. Three CI
+    // sightings froze "42 132" at this gate and then demanded it of a
+    // correctly settled "48 139" (nocx-zg3k3.16: the fullscreen resize
+    // landed ~105 ms after the sample in PR #442 job 119206362075 and
+    // PR #446 job 119259260270 alike). So the gate waits for CONVERGENCE,
+    // not for a frozen instant: the fixture refreshes its stty sample until
+    // the gate closes, and the test proceeds only when the WINCH record has
+    // stopped moving across two observations and the rendered frame equals
+    // the PTY's current size. The equality stays exact, and the gate still
+    // fails when the rendered frame never follows the PTY — the defect
+    // class this gate exists to catch.
     writeFileSync(geometryRequestPath, 'geometry-request\n')
-    await expect.poll(() => fileText(geometrySamplePath).trim()).not.toBe('')
-    const sampledGeometry = fileText(geometrySamplePath).trim()
+    let winchObserved = -1
     await expect
-      .poll(() => renderedGridSize(page), {
-        timeout: 15_000,
-        message: `the rendered screen frame never accepted PTY geometry ${sampledGeometry}`,
-      })
-      .toBe(sampledGeometry)
+      .poll(
+        async () => {
+          const winch = winchCount()
+          const stable = winch === winchObserved
+          winchObserved = winch
+          if (!stable) return `a resize is still in flight (winch ${winch})`
+          const rendered = await renderedGridSize(page)
+          const sampled = fileText(geometrySamplePath).trim()
+          if (rendered === '' || sampled === '') return 'geometry not readable yet'
+          return rendered === sampled ? 'settled' : `rendered ${rendered} vs pty ${sampled}`
+        },
+        {
+          timeout: 15_000,
+          message: 'the rendered screen frame and the fixture PTY never settled on one geometry',
+        },
+      )
+      .toBe('settled')
+    const sampledGeometry = fileText(geometrySamplePath).trim()
     writeFileSync(geometryAcceptedPath, 'geometry-accepted\n')
 
     // Request the geometry snapshot immediately before the summon action.

@@ -315,11 +315,11 @@ func TestVaultInventory_KeyAndPassphraseCarryKindAndUsage(t *testing.T) {
 	// An encrypted key, saved the way the connection editor does: the key
 	// first, then its passphrase, both under the same generated name.
 	pem, _ := testEncryptedKeyPEM(t, "correct horse")
-	keyRow, _, wantsPass := h.mintKeyMaterial(pem, "root@192.168.0.57")
+	keyRow, _, wantsPass := h.mintKeyMaterial(pem, "root@192.0.2.57")
 	if !wantsPass {
 		t.Fatal("precondition: encrypted key not flagged as wanting a passphrase")
 	}
-	keyPassRow := h.mintKeyPassphrase(keyRow, "correct horse", "root@192.168.0.57")
+	keyPassRow := h.mintKeyPassphrase(keyRow, "correct horse", "root@192.0.2.57")
 
 	// One connection binds the key and its passphrase by row handle.
 	user := "root"
@@ -331,7 +331,7 @@ func TestVaultInventory_KeyAndPassphraseCarryKindAndUsage(t *testing.T) {
 			Type: "ssh",
 		},
 		Options: profile.StoredSSHProfileOptions{
-			Host:                "192.168.0.57",
+			Host:                "192.0.2.57",
 			Port:                &port,
 			KeySecret:           keyRow,
 			KeyPassphraseSecret: keyPassRow,
@@ -354,8 +354,8 @@ func TestVaultInventory_KeyAndPassphraseCarryKindAndUsage(t *testing.T) {
 	if keyRowEntry == nil {
 		t.Fatal("no private-key entry found — the key material reference is not on the wire")
 	}
-	if keyRowEntry.Name != "root@192.168.0.57" {
-		t.Errorf("key name = %q, want %q", keyRowEntry.Name, "root@192.168.0.57")
+	if keyRowEntry.Name != "root@192.0.2.57" {
+		t.Errorf("key name = %q, want %q", keyRowEntry.Name, "root@192.0.2.57")
 	}
 	if keyRowEntry.OwnerID != "prof:encrypted-key:1" {
 		t.Errorf("key ownerId = %q, want %q", keyRowEntry.OwnerID, "prof:encrypted-key:1")
@@ -367,8 +367,8 @@ func TestVaultInventory_KeyAndPassphraseCarryKindAndUsage(t *testing.T) {
 	if passRow == nil {
 		t.Fatal("no key-passphrase entry found")
 	}
-	if passRow.Name != "root@192.168.0.57" {
-		t.Errorf("passphrase name = %q, want %q", passRow.Name, "root@192.168.0.57")
+	if passRow.Name != "root@192.0.2.57" {
+		t.Errorf("passphrase name = %q, want %q", passRow.Name, "root@192.0.2.57")
 	}
 	if passRow.OwnerID != "prof:encrypted-key:1" {
 		t.Errorf("passphrase ownerId = %q, want %q", passRow.OwnerID, "prof:encrypted-key:1")

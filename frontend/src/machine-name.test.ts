@@ -8,7 +8,7 @@ import { machineName, remoteMachineName, THIS_MACHINE } from './machine-name'
 
 describe('naming a remote machine', () => {
   it('is user@host when a user is known', () => {
-    expect(remoteMachineName('pi', '192.168.0.93')).toBe('pi@192.168.0.93')
+    expect(remoteMachineName('pi', '192.0.2.93')).toBe('pi@192.0.2.93')
   })
 
   it('is the bare host when no user is known', () => {
@@ -32,7 +32,7 @@ describe('naming a machine when a machine must be named', () => {
     // One derivation with a fallback bolted on, never a second derivation:
     // if these two could disagree there would be two names for one machine.
     for (const [user, host] of [
-      ['pi', '192.168.0.93'],
+      ['pi', '192.0.2.93'],
       [null, 'srv-01'],
       ['deploy', 'web-prod.example.com'],
     ] as const) {

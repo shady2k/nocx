@@ -648,6 +648,12 @@ export function createApiStore(
   const [selected, setSelected] = createSignal<ApiSelection | null>(null)
   const [draft, setDraft] = createSignal<ApiRequest | null>(null)
   const [saved, setSaved] = createSignal<ApiRequest | null>(null)
+  // A rail choice made while NO request is open — including the window in
+  // which the request being opened has not answered its read yet
+  // (nocx-1ebrs.46). Held until a draft lands; shown by `environmentFor`
+  // while it is; consumed by `openRequest`, never outliving the request it
+  // answered.
+  const [pendingEnvironment, setPendingEnvironment] = createSignal<string | null>(null)
   const [runs, setRuns] = createSignal<readonly ApiRun[]>([])
   const [notes, setNotes] = createSignal<readonly ApiImportNote[]>([])
   const [error, setError] = createSignal('')
@@ -855,6 +861,16 @@ export function createApiStore(
         return chosen
       }
     }
+    // No request is open, so no file's own memory has a say — but a GESTURE
+    // MIGHT (nocx-1ebrs.46): a choice made beside the form answers until a
+    // draft arrives, and only while it still names an environment this
+    // collection holds.
+    if (current === null && target === null) {
+      const held = pendingEnvironment()
+      if (held !== null && (held === '' || envs.some((env) => env.relPath === held))) {
+        return held
+      }
+    }
     return envs.length === 1 ? envs[0].relPath : ''
   }
 
@@ -955,12 +971,22 @@ export function createApiStore(
   /** Refresh the complete backend-computed scope after a source change. */
   const setEnvironment = (relPath: string): void => {
     const handle = untrack(activeCollection)
-    const current = untrack(draft)
-    if (handle === '' || current === null) return
+    if (handle === '') return
     const envs = environmentsOf(handle)
     if (relPath !== '' && !envs.some((env) => env.relPath === relPath)) return
+    const current = untrack(draft)
+    // NO REQUEST IS OPEN, and the rail's rows are clickable anyway — they
+    // render from the collection listing, so a click can land while the
+    // request being opened is still answering its read. The gesture is held
+    // for the draft that is coming rather than dropped: `openRequest` applies
+    // it the moment the file answers (nocx-1ebrs.46).
+    if (current === null) {
+      setPendingEnvironment(relPath)
+      return
+    }
     if (current.environment === relPath) return
     setDraft({ ...current, environment: relPath })
+    setPendingEnvironment(null)
     void refreshVariables()
     if (untrack(selected) !== null) void saveDraft()
   }
@@ -1223,6 +1249,15 @@ export function createApiStore(
       setDraft(adopted)
       setSaved(adopted)
       setError('')
+      // A choice held from before the draft existed — made beside the form,
+      // or in the window this read was in flight — answers the request that
+      // just landed, and only when the file itself carries no environment of
+      // its own to remember (nocx-ei9fy.1). Consumed here either way: the
+      // next sibling opens under the collection's own rule, not under a
+      // gesture made for this one.
+      const held = untrack(pendingEnvironment)
+      setPendingEnvironment(null)
+      if (held !== null && adopted.environment === undefined) setEnvironment(held)
       await refreshVariables()
     } catch (err) {
       // The previous request stays in the form. Clearing it would make one

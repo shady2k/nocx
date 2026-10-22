@@ -6,7 +6,7 @@ package transport
 // credential, and the credential is in the vault. With the vault sealed the
 // lease cannot be taken, so nothing is dialled and nothing leaves the
 // machine — and before this the send answered a RESULT: a dead run reading
-// "…dial pi@192.168.0.93:22: vault is sealed", a sentence describing a door
+// "…dial pi@192.0.2.93:22: vault is sealed", a sentence describing a door
 // with nothing to press.
 //
 // It answers the canonical sealed ERROR now, which is the shape the
@@ -57,7 +57,7 @@ type sealedLeaser struct{ asked atomic.Int64 }
 
 func (l *sealedLeaser) LeaseForProfile(context.Context, string) (ssh.TunnelConn, error) {
 	l.asked.Add(1)
-	return nil, fmt.Errorf("dial pi@192.168.0.93:22: %w", vault.ErrVaultSealed)
+	return nil, fmt.Errorf("dial pi@192.0.2.93:22: %w", vault.ErrVaultSealed)
 }
 
 // refusingLeaser refuses for a reason that has nothing to do with the vault —
@@ -66,7 +66,7 @@ func (l *sealedLeaser) LeaseForProfile(context.Context, string) (ssh.TunnelConn,
 type refusingLeaser struct{}
 
 func (refusingLeaser) LeaseForProfile(context.Context, string) (ssh.TunnelConn, error) {
-	return nil, fmt.Errorf("dial pi@192.168.0.93:22: %w", net.ErrClosed)
+	return nil, fmt.Errorf("dial pi@192.0.2.93:22: %w", net.ErrClosed)
 }
 
 // tcpLease is a granted lease that really carries bytes: ssh.TunnelConn over

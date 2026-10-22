@@ -122,3 +122,72 @@ describe('the notification area clears the activity bar', () => {
     expect(TOKENS_CSS).toMatch(/--activity-bar-width:\s*56px/)
   })
 })
+
+// ── Typed actions and a link (nocx-1ebrs.54) ─────────────────────────────
+//
+// An update toast must offer what it announces: a Release notes link and
+// Install now / Later actions. That capability belongs to the KIT — a caller
+// hand-rolling its own button row inside a toast would be a second
+// vocabulary for one concept, exactly what this kit exists to prevent. These
+// assert the capability the way a caller reaches it: the options are typed
+// on showToast, the actions are real kit Buttons, and activating one both
+// runs the caller's handler and dismisses the toast — a toast whose Later
+// leaves the toast up would make the label a lie.
+describe('showToast with actions and a link', () => {
+  it('renders the link as an anchor to where it points', () => {
+    const { container } = render(() => <ToastHost />)
+    showToast({
+      message: 'nocx 0.7.0 is available',
+      link: { label: 'Release notes', href: 'https://example.com/notes' },
+    })
+    const link = container.querySelector('.ui-toast__link') as HTMLAnchorElement
+    expect(link).not.toBeNull()
+    expect(link.getAttribute('href')).toBe('https://example.com/notes')
+    expect(link.textContent).toBe('Release notes')
+    // Off-site pages open in their own tab, never replacing the terminal.
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+  })
+
+  it('renders actions as kit buttons that reach the caller', () => {
+    const { container } = render(() => <ToastHost />)
+    const install = vi.fn()
+    const later = vi.fn()
+    showToast({
+      message: 'nocx 0.7.0 is available',
+      actions: [
+        { label: 'Install now', onClick: install, variant: 'primary' },
+        { label: 'Later', onClick: later },
+      ],
+    })
+    const buttons = [...container.querySelectorAll('.ui-toast button.ui-button')]
+    expect(buttons.map((b) => b.textContent)).toEqual(['Install now', 'Later'])
+    ;(buttons[1] as HTMLButtonElement).click()
+    expect(later).toHaveBeenCalledTimes(1)
+    expect(install).not.toHaveBeenCalled()
+  })
+
+  it('marks the action a person is meant to press as the toast primary', () => {
+    const { container } = render(() => <ToastHost />)
+    showToast({
+      message: 'nocx 0.7.0 is available',
+      actions: [
+        { label: 'Install now', onClick: () => {}, variant: 'primary' },
+        { label: 'Later', onClick: () => {} },
+      ],
+    })
+    const primary = container.querySelector('.ui-toast button.ui-button[data-variant="primary"]')
+    expect(primary?.textContent).toBe('Install now')
+  })
+
+  it('closes the toast when an action runs, so no action is its own dismiss button too', () => {
+    const { container } = render(() => <ToastHost />)
+    showToast({
+      message: 'nocx 0.7.0 is available',
+      actions: [{ label: 'Later', onClick: () => {} }],
+    })
+    ;(container.querySelector('.ui-toast button.ui-button') as HTMLButtonElement).click()
+    expect(container.querySelector('.ui-toast')).toBeNull()
+    expect(toasts()).toHaveLength(0)
+  })
+})

@@ -873,6 +873,28 @@ var ClipboardOSC52Suppressed = MustRegisterBool(BoolSpec{
 	Default:     false,
 })
 
+// UpdateChannel selects which signed manifest the app's updater follows
+// (ADR-0097): stable — the default, the latest release — or nightly, the
+// build the nightly workflow publishes each night main moved. The window
+// binding parses the same two spellings (update.ParseChannel); the values
+// here and the channels there are one vocabulary, pinned together by a test
+// in main_test.go.
+var UpdateChannel = MustRegisterSelect(SelectSpec{
+	Key:     "update.channel",
+	Section: "Updates",
+	Label:   "Update channel",
+	Description: "Stable checks the signed manifest of the latest release. Nightly checks the " +
+		"nightly channel — a build made from main every night it moved, not tried by anyone " +
+		"before you. Switching back to stable never downgrades: you wait for the next stable " +
+		"release or install it by hand.",
+	DataClass: PublicConfig,
+	Default:   "stable",
+	Options: []SelectOption{
+		{Value: "stable", Label: "Stable"},
+		{Value: "nightly", Label: "Nightly"},
+	},
+})
+
 // TabPlacement controls whether tabs render as a horizontal bar at the top
 // of the window or as a vertical list on the side. Horizontal is the default;
 // vertical matches the layout of the nocx-d3q epic.
@@ -1223,6 +1245,7 @@ func init() {
 	// and mints no rail row for them; a group mapping here would name a
 	// placement that nothing places. See settings-rail-pages.ts.
 	RegisterSectionGroup("Worktrees", "application")
+	RegisterSectionGroup("Updates", "application")
 	RegisterSectionGroup("Terminal", "application")
 	// Test is the fixture section the test binaries declare settings in; it
 	// is grouped here so the rail shows it under Developer in every build

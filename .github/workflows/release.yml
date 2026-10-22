@@ -384,12 +384,25 @@ jobs:
           # `-binary-name` is not a spelling of `-binaryname`, it is a flag
           # that does not exist, and parsing stops at the first unknown one.
           # The icons step below is the same convention read correctly.
+          #
+          # EVERY IDENTITY FLAG IS NAMED, because an unnamed one ships the
+          # template's default and the About window prints it (nocx-1ebrs.43):
+          # 0.6.1's app menu > About nocx read "© now, My Company" out of the
+          # bundle's NSHumanReadableCopyright — the exact string
+          # BuildAssetsOptions falls back to when no -productcopyright is
+          # passed. The copyright is the LICENSE's own line, and the comments
+          # (Finder's Get Info string, CFBundleGetInfoString) are the
+          # description main.go hands application.Options. Both must move with
+          # their owners; TestReleaseBundleCarriesNocxOwnAboutIdentity holds
+          # the flags themselves against this call.
           wails3 generate build-assets \
             -dir build/assets \
             -binaryname nocx \
             -productname nocx \
             -productidentifier com.shady2k.nocx \
-            -productversion "$VERSION"
+            -productversion "$VERSION" \
+            -productcopyright "Copyright © 2026 shady2k" \
+            -productcomments "A local-first, Warp-style terminal"
 
       - name: Generate macOS icon bundle
         run: |
@@ -738,16 +751,37 @@ jobs:
           bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
           [ "$short" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString=$short != $VERSION"; exit 1; }
           [ "$bundle" = "$VERSION" ] || { echo "::error::CFBundleVersion=$bundle != $VERSION"; exit 1; }
-          # 3. The linked binary must report the same version.
+          # 3. The About window's identity is nocx's own, not the Wails
+          #    template's. The app menu's About item is
+          #    orderFrontStandardAboutPanel:, which prints
+          #    NSHumanReadableCopyright out of the assembled bundle verbatim —
+          #    and 0.6.1 shipped the build-assets default "© now, My Company"
+          #    there (nocx-1ebrs.43). Get Info (CFBundleGetInfoString) had the
+          #    same defect with the template's comments, so both keys are held
+          #    against the boilerplate markers the defaults carry.
+          copyright="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$plist")"
+          echo "about copyright: $copyright"
+          case "$copyright" in
+            *shady2k*) ;;
+            *) echo "::error::NSHumanReadableCopyright='$copyright' names no nocx identity; the About window prints it"; exit 1 ;;
+          esac
+          for key in NSHumanReadableCopyright CFBundleGetInfoString; do
+            value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist")"
+            case "$value" in
+              *"My Company"*|"My Product"*|"This is a comment"*|*"© now"*)
+                echo "::error::$key='$value' is the Wails template default, not nocx's own (nocx-1ebrs.43)"; exit 1 ;;
+            esac
+          done
+          # 4. The linked binary must report the same version.
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
-          # 4. The signature must be intact — the baseline the payload round
+          # 5. The signature must be intact — the baseline the payload round
           #    trip (§9) asserts is preserved through packaging. It is the
           #    project certificate's, not the ad-hoc one Wails used to apply:
           #    what changed is the signer, not the check.
           codesign --verify --deep --strict "$APP"
-          # 5. The coordinator ships in the bundle, carries both slices, and
+          # 6. The coordinator ships in the bundle, carries both slices, and
           #    carries a signature of its own — its own codesign call above,
           #    not a by-product of the bundle's.
           #

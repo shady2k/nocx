@@ -160,7 +160,7 @@ design already uses in §3.3) works and is what the timeout variant below uses.
 | --------------------------------------------------------------------------------------------------------------------------- | ----- |
 | today's bootstrap rewrite (canonical path `/home/u/.nocx/run/launcher-12345`)                                               | 189   |
 | today's bootstrap rewrite (realistic `/home/dev` path)                                                                      | 207   |
-| proposed full line: `ssh -o ControlMaster=auto -o ControlPath=/tmp/nocx-mux/m -t pi@192.168.0.93 '<bootstrap>'`             | 158   |
+| proposed full line: `ssh -o ControlMaster=auto -o ControlPath=/tmp/nocx-mux/m -t <user>@<lan-ip> '<bootstrap>'`             | 158   |
 | remote bootstrap alone, POSIX (sleep 1): `while [ ! -s /tmp/nocx-mux/launch ]; do sleep 1; done; exec /tmp/nocx-mux/launch` | 80    |
 | remote bootstrap, fractional sleep 0.1 (non-POSIX; faster poll)                                                             | 76    |
 | remote bootstrap + 30 s timeout + login-shell fallback, if/else form                                                        | 177   |
@@ -168,7 +168,7 @@ design already uses in §3.3) works and is what the timeout variant below uses.
 
 The canonical today's line was reproduced from `buildBootstrapRewrite`'s
 template with the test file's exact inputs (`'/home/u/.nocx/run/launcher-12345'`
-including quotes, `ssh pi@192.168.0.93`). The proposed line is 31–49 bytes
+including quotes, `ssh <user>@<lan-ip>`). The proposed line is 31–49 bytes
 shorter than today's and, more importantly, its payload component is 35,243
 bytes that no longer travel in argv at all (they go over the mux), and it
 works from the first connection to a host with no remote footprint. The line

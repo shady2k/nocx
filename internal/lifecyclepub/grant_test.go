@@ -185,9 +185,9 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 	}
 	mustIngest(t, pub, "T", env("L", parent, 1, helloEvt()))
 
-	// The parent asks for a child at pi@192.168.0.93, suspends, and the far
+	// The parent asks for a child at pi@192.0.2.93, suspends, and the far
 	// shell establishes the child.
-	mustIngest(t, pub, "T", env("L", parent, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "192.168.0.93", "pi", 22)))
+	mustIngest(t, pub, "T", env("L", parent, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "192.0.2.93", "pi", 22)))
 	mustIngest(t, pub, "T", env("L", parent, 3, lifecycle.Event{
 		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
 	}))
@@ -203,8 +203,8 @@ func TestPublisherPublishesTheChildsDestination(t *testing.T) {
 		if f.Destination == nil {
 			t.Fatalf("a fact naming the child carries no destination: %+v", f)
 		}
-		if f.Destination.Host != "192.168.0.93" || f.Destination.User != "pi" || f.Destination.Port != 22 {
-			t.Fatalf("destination = %+v, want pi@192.168.0.93:22", f.Destination)
+		if f.Destination.Host != "192.0.2.93" || f.Destination.User != "pi" || f.Destination.Port != 22 {
+			t.Fatalf("destination = %+v, want pi@192.0.2.93:22", f.Destination)
 		}
 	}
 	if named == 0 {

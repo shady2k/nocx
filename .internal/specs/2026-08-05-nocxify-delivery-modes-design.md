@@ -12,7 +12,7 @@ stood in August 2026 the old spelling is left in the quotation.
 
 ## 0. What a user can do that they could not before
 
-Type `ssh pi@192.168.0.93` by hand and get command blocks on the far host from its first
+Type `ssh <user>@<lan-ip>` by hand and get command blocks on the far host from its first
 prompt, with the `ssh` command itself appearing as an ordinary local block that ends when
 the remote session begins — and, from the second connection to that host onward, without a
 200-character line on screen.
@@ -23,7 +23,7 @@ the remote session begins — and, from the second connection to that host onwar
 submit with
 
 ```
-if [ -s '/home/dev/.nocx/run/launcher-478956003' ]; then ssh -t pi@192.168.0.93 "$(cat '/home/dev/.nocx/run/launcher-478956003')"; else ssh pi@192.168.0.93; fi
+if [ -s '/home/dev/.nocx/run/launcher-478956003' ]; then ssh -t <user>@<lan-ip> "$(cat '/home/dev/.nocx/run/launcher-478956003')"; else ssh <user>@<lan-ip>; fi
 ```
 
 The tty echoes what we send, so that line is on screen for the whole session — the `ssh`
@@ -153,7 +153,7 @@ test would ask this machine about that host, and on a developer's box it answers
 nocx's own local staging directory:
 
 ```
-ssh -t pi@192.168.0.93 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
+ssh -t <user>@<lan-ip> 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
 ```
 
 `~/.nocx/launch` is a 0700 POSIX `sh` script (§4 fixes the modes): it reads `manifest.json`,
@@ -343,12 +343,12 @@ produces no passport.
 
 ## 6. What the user sees
 
-| block                 | label              | contains                                                                                                                                   |
-| --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ssh pi@192.168.0.93` | local (`~`)        | the rewritten line's echo, host-key prompt, banner, `password:`, 2FA, MOTD — everything up to the passport. Freezes on entry, no exit code |
-| next                  | `pi@raspberrypi:~` | the remote shell's first command cycle                                                                                                     |
-| …                     | `pi@raspberrypi:~` | ordinary remote blocks                                                                                                                     |
-| `exit`                | `pi@raspberrypi:~` | `Connection … closed.` — closed by the **local** D                                                                                         |
+| block                 | label         | contains                                                                                                                                   |
+| --------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ssh <user>@<lan-ip>` | local (`~`)   | the rewritten line's echo, host-key prompt, banner, `password:`, 2FA, MOTD — everything up to the passport. Freezes on entry, no exit code |
+| next                  | `pi@host-2:~` | the remote shell's first command cycle                                                                                                     |
+| …                     | `pi@host-2:~` | ordinary remote blocks                                                                                                                     |
+| `exit`                | `pi@host-2:~` | `Connection … closed.` — closed by the **local** D                                                                                         |
 
 **Deliberate divergence from Warp:** the MOTD stays at the end of the `ssh` block rather
 than opening the remote block. Warp puts it in its own block because its server owns the

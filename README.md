@@ -257,7 +257,7 @@ The e2e suite additionally needs its browser once: `npx playwright install chrom
 **Native Fish.** Helper-hosted Fish preserves its normal configuration order,
 universal variables, history and prompt functions; it does not run through Bash.
 The verified startup prelude is Fish 4.9.3's
-([ADR-0096](docs/decisions/0096-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md)).
+([ADR-0099](docs/decisions/0099-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md)).
 An unverified prelude remains a conventional terminal with a visible integration
 refusal. Fish without a helper on a remote host is not claimed as enhanced support.
 The existing login-shell resolver selects a valid account-database shell before

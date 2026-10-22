@@ -338,6 +338,14 @@ sticky, because an error the user was not looking at is an error they never saw.
 explicit `duration` overrides the level's default and `0` means sticky, which is what a
 half-succeeded import uses.
 
+**A toast can carry one link and typed actions** (`link`, `actions` on `showToast`,
+nocx-1ebrs.54): the link renders inline after the message and opens in its own tab; the
+actions render as kit `Button`s, `variant: 'primary'` marking the one the toast exists to
+offer. Running an action answers the toast — the kit dismisses it, so no action is its own
+dismiss button too. A toast with actions should be raised sticky: one that dismisses
+itself takes its own buttons with it. The update toast is the reference caller
+(`src/update-toast.ts`).
+
 **A Toast raised from inside a modal Dialog is visible.** `Dialog` uses `showModal()`, so
 it paints in the browser's **top layer**, above every `z-index` in the normal layer —
 `ToastHost`'s 300 included. Being above a top-layer element is not a number, it is a

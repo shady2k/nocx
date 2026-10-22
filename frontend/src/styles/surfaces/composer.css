@@ -104,7 +104,17 @@
   max-width: 16rem;
 }
 
-.nocx-editor-input {
+/* The submit departure's ghost (nocx-1ebrs.40) wears this ink under its own
+   names: editor.ts renames the two classes the suite locates the composer by
+   — `.nocx-editor` on the box, `.nocx-editor-input` on the content — to
+   `nocx-editor-departure` / `-input`, so a document-wide locator always
+   answers one composer (Playwright's strict mode reads two as a product bug).
+   Every ink selector below lists the departure's name beside the composer's:
+   one rule, two wearers, no copied declarations. The box's own placement rule
+   (`.nocx-editor` position/flex) is not mirrored — the ghost is fixed at its
+   rectangle by inline style, which that rule never reached. */
+.nocx-editor-input,
+.nocx-editor-departure-input {
   width: 100%;
   background: transparent;
   color: var(--color-text);
@@ -138,7 +148,8 @@
    the padding alone. Border-box keeps the border inside that budget instead
    of adding 2px on top of it, so MAX_ROWS in editor.ts and this calc still
    agree at the cap. */
-.nocx-editor .cm-editor {
+.nocx-editor .cm-editor,
+.nocx-editor-departure .cm-editor {
   font-size: var(--font-size-terminal);
   max-height: min(50vh, calc(30 * var(--terminal-ui-line-height) + 6px));
   box-sizing: border-box;
@@ -146,7 +157,8 @@
 
 /* The kit card owns the only border. CM6 and the mode switch occupy
    separate columns in the card's open input row. */
-.nocx-editor .cm-scroller {
+.nocx-editor .cm-scroller,
+.nocx-editor-departure .cm-scroller {
   font-family: var(--font-family-mono);
   line-height: var(--terminal-ui-line-height);
   overflow-y: auto;
@@ -180,7 +192,8 @@
   min-width: 0;
 }
 
-.nocx-editor .cm-content {
+.nocx-editor .cm-content,
+.nocx-editor-departure .cm-content {
   padding: 2px 8px 4px;
 }
 
@@ -211,7 +224,8 @@
    is what makes the rule font-independent: the same seven fonts all measure
    0.000 with it, on both engines. The buffer stays in the DOM — deleting it
    would take CM6's caret workaround with it. */
-.nocx-editor .cm-widgetBuffer {
+.nocx-editor .cm-widgetBuffer,
+.nocx-editor-departure .cm-widgetBuffer {
   vertical-align: top;
 }
 
@@ -223,7 +237,8 @@
    own colour and the mark span is nested inside it, so the two-class
    selector is what wins — an `!important` here would be a rule whose
    correctness nothing states. */
-.nocx-editor .nocx-block-cursor {
+.nocx-editor .nocx-block-cursor,
+.nocx-editor-departure .nocx-block-cursor {
   background: var(--terminal-cursor);
   color: var(--terminal-cursor-accent);
 }
@@ -246,7 +261,8 @@
    half cannot be guarded here — its animation is inline — so the rate handed
    to drawSelection carries the same answer (block-cursor.ts). */
 @media (prefers-reduced-motion: no-preference) {
-  .nocx-editor .nocx-block-cursor {
+  .nocx-editor .nocx-block-cursor,
+  .nocx-editor-departure .nocx-block-cursor {
     animation: nocx-block-cursor-blink var(--nocx-cursor-blink, 1200ms) steps(1) infinite;
   }
 }
@@ -262,7 +278,8 @@
    so "the animation is not running" is the only form of the reset this half
    can be given; the base rule above already paints the solid block, so nothing
    else needs to be said. */
-.nocx-editor .cm-editor[data-caret='solid'] .nocx-block-cursor {
+.nocx-editor .cm-editor[data-caret='solid'] .nocx-block-cursor,
+.nocx-editor-departure .cm-editor[data-caret='solid'] .nocx-block-cursor {
   animation: none;
 }
 
@@ -294,7 +311,8 @@
    timing is not this file's to set: the layer writes an inline
    `animation-name` on itself, which only the `!important` phase rule below can
    reach. */
-.nocx-editor .cm-cursorLayer .cm-cursor {
+.nocx-editor .cm-cursorLayer .cm-cursor,
+.nocx-editor-departure .cm-cursorLayer .cm-cursor {
   width: 1ch;
   border-left: none;
   background: var(--terminal-cursor);
@@ -309,14 +327,16 @@
    nothing else: the period and the timing function stay CM6's, and removing
    the attribute drops the suppression, which re-creates the animation from its
    first frame (solid) rather than resuming it mid-cycle. */
-.nocx-editor .cm-editor[data-caret='solid'] .cm-cursorLayer {
+.nocx-editor .cm-editor[data-caret='solid'] .cm-cursorLayer,
+.nocx-editor-departure .cm-editor[data-caret='solid'] .cm-cursorLayer {
   animation-name: none !important;
 }
 
 /* …and it steps aside for the mark, which is the block whenever the caret has
    a character to stand on. Two cursors on screen is the defect this whole
    surface has already had once (nocx-dvdfx). */
-.nocx-editor .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor {
+.nocx-editor .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor,
+.nocx-editor-departure .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor {
   display: none;
 }
 
@@ -327,7 +347,8 @@
    boundary by construction, with nothing to reserve inside the document
    itself. The rules that computed a hanging indent are gone with the
    widget that needed them. */
-.nocx-editor .cm-line {
+.nocx-editor .cm-line,
+.nocx-editor-departure .cm-line {
   padding: 0;
 }
 
@@ -349,7 +370,8 @@
    underline, nothing more — no panel, no focus change, no selection. The
    mark says "⌘S will store this span", and it is the only thing it says.
    The tier that decides which findings earn it lives in secret-kind.ts. */
-.nocx-editor .cm-secret-candidate {
+.nocx-editor .cm-secret-candidate,
+.nocx-editor-departure .cm-secret-candidate {
   text-decoration: underline;
   text-decoration-style: dotted;
   text-decoration-color: var(--color-warning);

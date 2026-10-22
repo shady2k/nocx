@@ -26,7 +26,7 @@
 //   forwarded row renders the same three-button row the fix is about).
 //
 // The remote-forward destination is the brief's own failing example
-// (`192.168.0.93:9993`), the string the bug report shows truncating.
+// (`192.0.2.93:9993`), the string the bug report shows truncating.
 //
 // W7 revision (nocx-4wbx): CI webkit once failed this spec before the
 // measurement — the setup produced TWO rows for the same destination (a
@@ -54,7 +54,7 @@ const ADDR = '.ports-row__addr'
 const DEST = '.ports-row__dest'
 
 /** The remote-forward destination the brief's bug report shows truncating. */
-const LONG_DESTINATION = '192.168.0.93:9993'
+const LONG_DESTINATION = '192.0.2.93:9993'
 
 interface Fixture {
   proc: ChildProcess

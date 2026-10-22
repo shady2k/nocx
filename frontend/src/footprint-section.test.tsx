@@ -30,7 +30,7 @@ function mockProfileClient(): ProfileClient {
 const INSTALLED: ShellFootprintStatusResult = {
   destinations: [
     {
-      identity: 'pi@192.168.0.93:22',
+      identity: 'pi@192.0.2.93:22',
       generation: 'v10',
       path: '~/.nocx',
       protocolVersion: '1',
@@ -115,7 +115,7 @@ describe('remote footprint', () => {
     const { container } = mountWithFootprint(INSTALLED)
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('pi@192.168.0.93:22')
+      expect(container.textContent).toContain('pi@192.0.2.93:22')
     })
 
     const text = container.textContent ?? ''
@@ -142,7 +142,7 @@ describe('remote footprint', () => {
     const { container, statusSpy, uninstallSpy } = mountWithFootprint(INSTALLED)
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('pi@192.168.0.93:22')
+      expect(container.textContent).toContain('pi@192.0.2.93:22')
     })
 
     // The user asks to remove the host's integration.
@@ -164,7 +164,7 @@ describe('remote footprint', () => {
     const dialog = [...document.querySelectorAll('dialog')].find((d) =>
       d.textContent?.includes('Only manifest-owned, unmodified files are removed'),
     )!
-    expect(dialog.textContent).toContain('pi@192.168.0.93:22')
+    expect(dialog.textContent).toContain('pi@192.0.2.93:22')
 
     // Confirming drives the uninstall through the saved connection.
     const confirm = [...dialog.querySelectorAll('button')].find((b) =>
@@ -181,7 +181,7 @@ describe('remote footprint', () => {
     // refreshes to what remains.
     await vi.waitFor(() => {
       expect(
-        toasts().some((t) => t.message.includes('Removed 2 file(s) from pi@192.168.0.93:22')),
+        toasts().some((t) => t.message.includes('Removed 2 file(s) from pi@192.0.2.93:22')),
       ).toBe(true)
     })
     expect(

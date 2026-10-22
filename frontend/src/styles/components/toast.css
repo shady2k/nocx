@@ -120,6 +120,27 @@
   overflow-wrap: anywhere;
 }
 
+/* A link a toast carries reads as part of the message, in the accent, with
+   the same break-anywhere discipline: a URL the caller cannot shorten is a
+   long token (nocx-1ebrs.54). */
+.ui-toast__link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* The actions sit in their own row-capable block after the message: they are
+   the answer the toast asks for, so they are not squeezed onto the message's
+   baseline. Buttons are the kit's own; this places them and nothing else. */
+.ui-toast__actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-1);
+}
+
 /* The close button recedes until the toast is under the pointer. It is always
    reachable — opacity, not display — but it is not competing with the message
    for attention on a toast that will dismiss itself anyway. */

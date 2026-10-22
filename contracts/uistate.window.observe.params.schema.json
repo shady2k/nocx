@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/uistate.window.observe.params.schema.json",
+  "title": "UistateWindowObserveParams",
+  "description": "Params of the uistate.window.observe notification (ADR-0098): one live sample of the client's native window, taken by the shell's sampler and relayed by the renderer, which decides nothing about it. The store folds the sample under its own rule \u2014 a maximised or full-screen sample moves only its flags, so the recorded normal geometry survives \u2014 which is why the sample carries the platform's raw size: the fold, not the sender, decides what is kept. It is a notification because no consumer of an answer exists: the next uistate.window.get answers with what the store holds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["width", "height", "x", "y", "maximised", "fullScreen", "displays"],
+  "properties": {
+    "width": {
+      "description": "The normal window's width in logical pixels, or 0 when no size was ever recorded.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "height": {
+      "description": "The normal window's height in logical pixels, or 0 when no size was ever recorded.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "x": {
+      "description": "The normal window's position. May be negative: a display left of or above the primary is an ordinary arrangement.",
+      "type": "integer"
+    },
+    "y": {
+      "description": "The normal window's position. May be negative: a display left of or above the primary is an ordinary arrangement.",
+      "type": "integer"
+    },
+    "maximised": {
+      "description": "Whether the window was maximised when the session ended. Entering the state is what makes leaving it land on the normal geometry beside it.",
+      "type": "boolean"
+    },
+    "fullScreen": {
+      "description": "Whether the window was full-screen when the session ended.",
+      "type": "boolean"
+    },
+    "displays": {
+      "description": "A human-readable fingerprint of the attached displays at the moment the position was recorded. Identity, not containment: a mismatch keeps the size and drops only the position, so plugging the monitor back in restores the old arrangement.",
+      "type": "string",
+      "maxLength": 256
+    }
+  }
+}

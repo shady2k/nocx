@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cwdLabel } from './cwd-label'
+import { cwdLabel, homeRelation } from './cwd-label'
 
 describe('cwdLabel — without a known home, the absolute path (spec 2026-09-15 §2)', () => {
   it.each([
@@ -56,5 +56,43 @@ describe('cwdLabel — with a known home', () => {
   it('a missing cwd is `~` regardless of a known home', () => {
     expect(cwdLabel('', '/home/dutch')).toBe('~')
     expect(cwdLabel('   ', '/home/dutch')).toBe('~')
+  })
+})
+
+describe('homeRelation — the one `~` decision, shared with the tab title (nocx-1ebrs.45)', () => {
+  it('the home itself is `home`', () => {
+    expect(homeRelation('/Users/dev', '/Users/dev')).toEqual({ kind: 'home' })
+  })
+
+  it('a trailing slash on either side changes nothing', () => {
+    expect(homeRelation('/Users/dev/', '/Users/dev')).toEqual({ kind: 'home' })
+    expect(homeRelation('/Users/dev/project', '/Users/dev/')).toEqual({
+      kind: 'under',
+      rest: ['project'],
+    })
+  })
+
+  it('a path under home is `under` with the segments past home', () => {
+    expect(homeRelation('/Users/dev/a/b', '/Users/dev')).toEqual({
+      kind: 'under',
+      rest: ['a', 'b'],
+    })
+  })
+
+  it('a sibling that merely shares a prefix is NOT under home', () => {
+    expect(homeRelation('/Users/dev-other/x', '/Users/dev')).toEqual({
+      kind: 'outside',
+      segments: ['Users', 'dev-other', 'x'],
+    })
+  })
+
+  it('no known home, or a path outside it, is `outside` with the absolute segments', () => {
+    // No home was ever reported — `outside` is the whole truth available,
+    // and the surfaces render it without a guessed `~`.
+    expect(homeRelation('/home/dev')).toEqual({ kind: 'outside', segments: ['home', 'dev'] })
+    expect(homeRelation('/srv/other', '/Users/dev')).toEqual({
+      kind: 'outside',
+      segments: ['srv', 'other'],
+    })
   })
 })

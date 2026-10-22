@@ -23,8 +23,10 @@
  *   unfinished-content  a placeholder (TODO, TBD, angle brackets,
  *                       [NEEDS CLARIFICATION]): an unknown is a question
  *   duplicate-id        two documents claim one id
- *   dangling-reference  a document under docs/ names an id no document holds,
- *                       or a prototype's code folder that does not exist
+ *   dangling-reference  a document the set writes names an id no document
+ *                       holds, prose it does not write links to a document that
+ *                       is not there, or a prototype's code folder that does not
+ *                       exist
  *   wrong-link          a link field names a kind it may not grow from
  *   unknown-step        a use case's extension names no step of its scenario
  *   written-status      a Status: field: status is computed from the links
@@ -42,14 +44,23 @@
  * requirement can name no code and still describe a database; that is found
  * by reading. Ids are found as written (a prefix, a dash, three digits or
  * more), outside code blocks, code spans and HTML comments.
+ *
+ * WHERE IT LOOKS FOR A REFERENCE. In a document the set writes, every id it
+ * names is a reference, because the set's own forms put ids there and mean
+ * them. In prose it does not write — a decision record, a guide, a note — a
+ * word that merely looks like an id is a word, and a reference is only what is
+ * written as a link to a document's file. A document the set writes is one
+ * that opens with one of the set's identity forms (a document's identity line,
+ * a spec's `Capability:` field, a change record's `Change:` field) or stands
+ * where its kind collects, the place the product's registry names.
  */
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const RULES_VERSION = '0.46.0';
+export const RULES_VERSION = '0.51.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class Misuse extends Error {}
@@ -58,7 +69,7 @@ const WHY = {
   'document-form': 'a product document is its identity line "# <ID> — <title>", its fields as "Name: value", then its own sections; see the protocol\'s product documents',
   'unfinished-content': 'a placeholder is not content: write what is known, and make what is not an open question (Q-…) with who can answer it',
   'duplicate-id': 'each id belongs to one document and is never reused: give one of them the next free number',
-  'dangling-reference': 'the id or folder named here does not exist: write that document, or correct the reference',
+  'dangling-reference': 'the document or folder named here does not exist: write it, or correct the reference. A word that only looks like an id is marked as code, in backticks (`AB-12`); in prose the set does not write — a decision record, a guide — a reference is a link to the document\'s own file, [the shape](../system/capabilities/<name>.md)',
   'wrong-link': 'this field links only the kinds a document of this kind grows from',
   'unknown-step': 'an extension names the step of the main success scenario it alters, as 3a for step 3',
   'written-status': 'status is computed from the links and the checks: remove the Status: field',
@@ -196,16 +207,107 @@ function lines(textOf) {
 // The ids a line names, outside code spans.
 const mentions = (raw) => [...raw.replace(/`[^`]*`/g, '').matchAll(MENTION)].map((m) => m[0]);
 
-function parse(path, body, finding) {
-  const all = lines(body);
-  const first = all.find((l) => l.raw.trim());
-  const head = first && first.structural && first.raw.match(/^# (\S+) — (.+)$/);
-  if (!head || !ID.test(head[1])) {
-    // A first line that starts with an id is a product document out of form.
-    const near = first && first.structural && first.raw.match(/^#\s*((?:PRA|S|H|US|UC|FR|Q|P|R)-\d{3,})(?![\w-])/);
-    if (near) finding('document-form', path, first.line, `the identity line is "# ${near[1]} — <title>", with a dash between the id and the title`);
-    return near ? { broken: first.line } : null;
+// The vision is the one document the set writes that carries no id of its own:
+// the check knows it by its path, the way the protocol names it.
+const VISION = 'docs/vision.md';
+
+// ---- which documents the set writes ----------------------------------------
+
+// The forms the set's own templates open with, read once per file: the identity
+// line of a document of a kind, the identity field a spec or a change record
+// carries under its title, and the vision, the one document the set names by
+// path because it carries no id of its own. Both the parser and the reference
+// rule ask this one question, so a file is the set's or it is not by one answer:
+// what the set writes keeps every id it names checked, and prose it does not
+// write is never searched for ids.
+const IDENTITY_FIELD = /^(?:Capability|Change):\s*\S/;
+// The kinds the set writes documents of, and so the kinds whose every id is a
+// reference: the chain's kinds and the practice record's (the forms this file
+// reads), the spec's and the change record's (the forms the set's own templates
+// write, `Capability:` and `Change:`). A decision record, an exploration, a
+// roadmap or a milestone charter is prose the set does not write, even where the
+// set ships a template for its shape: what a person writes there is their own.
+const WRITTEN = new Set([...PREFIXES, 'CAP', 'CHG', 'DES']);
+// A product that holds no registry yet gets the set's own places for these
+// kinds, which are the defaults the registry would carry.
+const DEFAULT_FOLDERS = ['docs/vision.md', 'docs/sources', 'docs/hypotheses', 'docs/stories', 'docs/use-cases',
+  'docs/requirements', 'docs/questions', 'docs/prototypes', 'docs/results', 'docs/practices',
+  'docs/system/capabilities', 'docs/changes'];
+// Where those kinds' documents collect is the product's own data, never a list
+// here: the registry at `docs/kinds.yaml` says it, in the words the wiki reads.
+// A document that lost its identity line still stands where its kind collects,
+// so losing the line cannot turn an id into prose.
+function kindFolders(source) {
+  const registry = 'docs/kinds.yaml';
+  if (!source.files.includes(registry)) return DEFAULT_FOLDERS;
+  let text;
+  try { text = source.read(registry); } catch { return []; }
+  const folders = [];
+  let prefix = null;
+  for (const line of text.replace(/\r\n/g, '\n').split('\n')) {
+    const p = line.match(/^\s*-?\s*prefix:\s*(\S+)\s*$/);
+    if (p) prefix = p[1];
+    const f = line.match(/^\s*folder:\s*(\S+)\s*$/);
+    if (f && prefix && WRITTEN.has(prefix)) folders.push(f[1].replace(/^\.\//, ''));
   }
+  return folders;
+}
+const inFolders = (path, folders) => folders.some((f) => (f.endsWith('.md') ? path === f : path.startsWith(`${f.replace(/\/+$/, '')}/`)));
+
+function ownership(path, all, folders) {
+  // The first line that is content: a comment above the title is not the title.
+  const first = all.find((l) => l.structural && l.raw.trim());
+  let identity = null;
+  if (first) {
+    const head = first.raw.match(/^# (\S+) — (.+)$/);
+    const near = first.raw.match(/^#\s*((?:PRA|S|H|US|UC|FR|Q|P|R)-\d{3,})(?![\w-])/);
+    if (head && ID.test(head[1])) identity = { line: first, head };
+    else if (near) identity = { line: first, near };
+  }
+  let field = false;
+  for (const l of all) {
+    if (!l.structural) continue;
+    if (/^## /.test(l.raw)) break;
+    if (IDENTITY_FIELD.test(l.raw)) { field = true; break; }
+  }
+  return { identity, written: path === VISION || Boolean(identity) || field || inFolders(path, folders) };
+}
+
+// The documents a line links to: a Markdown link's target — written inline or as
+// a reference definition — resolved against the file that holds it, when it
+// names a Markdown file under docs/. This is how a reference is written in prose
+// the set does not write, and a link to a document that is not there is refused
+// wherever it stands. A link inside an HTML comment or a code span is an example.
+const INLINE_LINK = /\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'(][^)]*)?\)/g;
+const LINK_DEFINITION = /^\s{0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?/;
+function linkTargets(raw, path) {
+  const text = raw.replace(/`[^`]*`/g, '').replace(/<!--[\s\S]*?-->/g, '');
+  const found = [...text.matchAll(INLINE_LINK)].map((m) => m[1]);
+  const definition = text.match(LINK_DEFINITION);
+  if (definition) found.push(definition[1]);
+  const out = [];
+  for (const target of found) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('#') || target.startsWith('/')) continue;
+    const bare = target.replace(/[?#].*$/, '');
+    if (!bare) continue;
+    let decoded = bare;
+    try { decoded = decodeURIComponent(bare); } catch { /* a target that is not a URI stays as it is */ }
+    const resolved = posix.normalize(posix.join(posix.dirname(path), decoded));
+    if (resolved.startsWith('docs/') && resolved.endsWith('.md')) out.push(resolved);
+  }
+  return out;
+}
+
+function parse(path, body, finding, folders) {
+  const all = lines(body);
+  const identity = ownership(path, all, folders).identity;
+  const head = identity?.head;
+  if (!head) {
+    // A first line that starts with an id is a product document out of form.
+    if (identity) finding('document-form', path, identity.line.line, `the identity line is "# ${identity.near[1]} — <title>", with a dash between the id and the title`);
+    return identity ? { broken: identity.line.line } : null;
+  }
+  const first = identity.line;
   const id = head[1];
   const prefix = id.split('-')[0];
   const kind = kindFor(prefix);
@@ -352,10 +454,11 @@ export function checkProduct(source) {
   const docs = [];
   const bodies = new Map();
   const broken = new Map();
+  const folders = kindFolders(source);
   for (const path of markdown) {
     const body = source.read(path);
     bodies.set(path, body);
-    const doc = parse(path, body, finding);
+    const doc = parse(path, body, finding, folders);
     if (doc?.broken) broken.set(path, doc.broken);
     else if (doc) docs.push(doc);
   }
@@ -373,12 +476,25 @@ export function checkProduct(source) {
   const hasVision = source.files.includes('docs/vision.md');
   const ctx = { files: source.files, byId };
   for (const d of docs) inspect(d, finding, ctx);
-  // Every id named anywhere under docs/ resolves, the specs' included.
-  for (const [path, body] of bodies) for (const l of lines(body)) {
-    if (!l.structural || broken.get(path) === l.line) continue;
-    for (const n of new Set(mentions(l.raw))) if (!byId.has(n)) finding('dangling-reference', path, l.line, `no document is ${n}`);
-    if (/(?<![\w-])VISION(?![\w-])/.test(l.raw.replace(/`[^`]*`/g, '')) && !hasVision && docs.some((d) => d.path === path))
-      finding('dangling-reference', path, l.line, 'VISION is docs/vision.md, which does not exist');
+  // Every id a document the set writes names resolves, the specs' included; in
+  // prose the set does not write, a reference is a link to a document's file.
+  const files = new Set(source.files);
+  for (const [path, body] of bodies) {
+    const all = lines(body);
+    const { written } = ownership(path, all, folders);
+    for (const l of all) {
+      if (!l.structural || broken.get(path) === l.line) continue;
+      if (written) {
+        for (const n of new Set(mentions(l.raw))) if (!byId.has(n)) finding('dangling-reference', path, l.line, `no document is ${n}`);
+        if (/(?<![\w-])VISION(?![\w-])/.test(l.raw.replace(/`[^`]*`/g, '')) && !hasVision)
+          finding('dangling-reference', path, l.line, 'VISION is docs/vision.md, which does not exist');
+      }
+      // A link is a reference wherever it stands, and a link to a document that
+      // is not there is refused. In prose the set does not write it is the only
+      // reference: a bare token there is a word.
+      for (const target of linkTargets(l.raw, path)) if (!files.has(target))
+        finding('dangling-reference', path, l.line, `the link names ${target}, which does not exist`);
+    }
   }
   return found.sort(order);
 }

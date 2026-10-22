@@ -168,6 +168,30 @@ func TestBootstrapWindow_ClosesOnce(t *testing.T) {
 	}
 }
 
+// THE MECHANISM UNDER TestBootstrapWindow_FindsTheLoaderTokenBehindRendererBytesWithoutANewline,
+// pinned without the scheduler's help (nocx-1ebrs.50, run 39602953353, ci-backend
+// no-secret-service): both chunks arrived while the reader was parked, so the
+// second chunk's signal fell out of the one-slot channel and the reader's one
+// wake was the takeLine call that trimmed the drawing away in front of the
+// token. A trim onto a complete token is a complete line: returning "not yet"
+// there leaves the reader to sit out its whole deadline beside a line it
+// holds, with no further byte or signal ever coming.
+func TestOutputTap_TheTrimOntoACompleteTokenReturnsItWithoutAFurtherByte(t *testing.T) {
+	tap := newOutputTap()
+	tap.feed([]byte("\x1b[K\x1b[?1h\x1b=\x1b[?2004h\x1b[Ks\rssh runner@127.0.0.1:44433"))
+	tap.feed([]byte("\x1b]1337;NOCX1 LOADER_READY\x07"))
+	// The one wake the reader gets: the first chunk's signal. The second was
+	// dropped against it. What follows is that wake's takeLine, alone.
+	<-tap.sig
+	line, ok, err := tap.takeLine()
+	if err != nil {
+		t.Fatalf("takeLine: %v", err)
+	}
+	if !ok || line != "\x1b]1337;NOCX1 LOADER_READY\x07" {
+		t.Fatalf("takeLine = %q, %v; the token was complete behind the drawing and the trim left it there", line, ok)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fixture: a realSession over a channel whose reads the test drives.
 

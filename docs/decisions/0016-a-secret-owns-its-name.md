@@ -42,7 +42,7 @@ The name is filled in two ways, and which one applies is decided by where the se
 created:
 
 - **Created by saving a password on a connection** — the name is generated from what is
-  already known: `root@192.168.0.57`. The user is not asked, because they did not set out
+  already known: `<user>@<lan-ip>`. The user is not asked, because they did not set out
   to create a secret.
 - **Created on the Secrets page** — the user is asked, because they did.
 

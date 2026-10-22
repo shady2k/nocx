@@ -206,7 +206,7 @@ describe('forConnection variant (nocx-pu4.7)', () => {
   it('renders a single-row receipt with SSH host kind', () => {
     const onSave = vi.fn()
     const onDismiss = vi.fn()
-    const receipt = BlockReceipt.forConnection('pi@raspberrypi', 'raspberrypi', {
+    const receipt = BlockReceipt.forConnection('pi@host-2', 'host-2', {
       onSave,
       onDismiss,
     })
@@ -220,11 +220,11 @@ describe('forConnection variant (nocx-pu4.7)', () => {
 
     // Masked value is the destination
     const value = root.querySelector<HTMLElement>('.ui-block-receipt__value')
-    expect(value?.textContent).toBe('pi@raspberrypi')
+    expect(value?.textContent).toBe('pi@host-2')
 
     // Name field is pre-filled
     const input = root.querySelector<HTMLInputElement>('.ui-text-field__input')
-    expect(input?.value).toBe('raspberrypi')
+    expect(input?.value).toBe('host-2')
 
     // One primary action
     const primary = root.querySelector<HTMLButtonElement>('.ui-block-receipt__primary')
@@ -232,7 +232,7 @@ describe('forConnection variant (nocx-pu4.7)', () => {
 
     // Clicking Save calls onSave with the input value
     primary?.click()
-    expect(onSave).toHaveBeenCalledWith('raspberrypi')
+    expect(onSave).toHaveBeenCalledWith('host-2')
 
     // Clicking Dismiss calls onDismiss
     const dismiss = root.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')

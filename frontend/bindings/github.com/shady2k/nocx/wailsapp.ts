@@ -36,7 +36,11 @@ export function ApplyUpdate(): $CancellablePromise<void> {
 /**
  * CheckForUpdate fetches and verifies the signed release manifest.
  * Returns an update description if a newer version is available,
- * or null when already current or on a dev build.
+ * null when already current or on a dev build, and the check's own
+ * error when the check failed. A failure is a state the renderer
+ * surfaces (About, nocx-1ebrs.36) — returning null for it made a dead
+ * check indistinguishable from "no update", which is how 0.6.0 never
+ * offered anybody 0.6.1.
  */
 export function CheckForUpdate(): $CancellablePromise<update$0.UpdateInfo | null> {
     return $Call.ByName("main.WailsApp.CheckForUpdate").then(($result: any) => {
@@ -122,6 +126,22 @@ export function HostOpenUrl(url: string): $CancellablePromise<void> {
 }
 
 /**
+ * HostRestoreWindow puts the window back where the person left it, from the
+ * geometry the renderer just read over the control plane (ADR-0098).
+ * 
+ * THE SHELL PERFORMS AND DECIDES NOTHING: what the saved geometry means on
+ * these displays — the clamp, whether the position can be trusted, which
+ * state to re-enter — is uistate.Restore's, applied through uistate.Apply.
+ * The renderer calls this once at bootstrap, after the backend has answered
+ * uistate.window.get; the sampler starts here and only here, so a launch can
+ * never record its own opening over the geometry being restored. A renderer
+ * reload calls it again, and the second call is deliberately inert.
+ */
+export function HostRestoreWindow(width: number, height: number, x: number, y: number, maximised: boolean, fullScreen: boolean, displays: string): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostRestoreWindow", width, height, x, y, maximised, fullScreen, displays);
+}
+
+/**
  * Log logs a message from the frontend.
  * 
  * It reaches this process's stderr rather than the backend's log file: the
@@ -165,6 +185,18 @@ export function ResolveBackend(): $CancellablePromise<$models.BackendResolution>
     return $Call.ByName("main.WailsApp.ResolveBackend").then(($result: any) => {
         return $$createType2($result);
     });
+}
+
+/**
+ * SetUpdateChannel selects which signed manifest the next check fetches:
+ * stable (the default) or nightly (ADR-0097). The renderer calls this with
+ * the persisted update.channel setting — at startup and whenever the person
+ * changes it — so the stored value, not a window-side guess, decides the
+ * channel. An unknown channel is an error rather than a fallback: the two
+ * there are were decided, and a third spelling is a bug to surface.
+ */
+export function SetUpdateChannel(channel: string): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.SetUpdateChannel", channel);
 }
 
 // Private type creation functions

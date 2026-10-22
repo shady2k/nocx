@@ -258,7 +258,7 @@ type shellFootprintHelperUninstallResult struct {
 // destinations a saved connection can remove.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.footprint.status"}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"destinations":[{"identity":"pi@192.168.0.93:22","generation":"v10","path":"~/.nocx","protocolVersion":"1","scriptVersion":"0.6.0","lastObservedAt":"…","removableProfileId":"p_01"}],"helpers":[{"identity":"u@db01:22","fingerprint":"SHA256:…","path":"~/.nocx/helper/1-linux-amd64-…/","hash":"…","installedAt":"…"}]}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"destinations":[{"identity":"pi@192.0.2.93:22","generation":"v10","path":"~/.nocx","protocolVersion":"1","scriptVersion":"0.6.0","lastObservedAt":"…","removableProfileId":"p_01"}],"helpers":[{"identity":"u@db01:22","fingerprint":"SHA256:…","path":"~/.nocx/helper/1-linux-amd64-…/","hash":"…","installedAt":"…"}]}}
 //
 // The removable pass resolves every saved profile through the SAME ssh -G
 // oracle path and cache the fact-writer uses — never a reconstructed

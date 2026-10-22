@@ -24,7 +24,10 @@
 .links-armed .term-link {
   cursor: pointer;
   text-decoration: underline;
-  text-decoration-style: solid;
+  /* Dotted while armed (nocx-1ebrs.48, the owner's wording) — the style
+     the live grid's .term-grid-link overlay declares too, so a row reads
+     the same on both sides of the freeze. */
+  text-decoration-style: dotted;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
   /* The program's colour still wins for the glyphs; the line under them is

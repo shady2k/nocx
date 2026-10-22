@@ -16,6 +16,9 @@ const resultAliases = new Map([
   ['connections.test', 'connections.probe.schema.json'],
   ['uistate.get', 'uistate.schema.json'],
   ['uistate.set', 'uistate.schema.json'],
+  // The window half (ADR-0086) shares one result shape between nothing else:
+  // only the get answers with it, and observe is a notification.
+  ['uistate.window.get', 'uistate.window.schema.json'],
   ['agent.calibration.answer', 'agent.calibration.schema.json'],
   // The three writes answer with the state they produced, like the calibration
   // above: a surface that had to ask again would draw a rule one round trip

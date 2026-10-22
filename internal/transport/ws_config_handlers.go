@@ -2576,6 +2576,20 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		// The window half (ADR-0098): a read for the shell's restore at
+		// bootstrap, and a notification for every sample the shell's own
+		// sampler relays through the renderer. Both sit in the config
+		// conflict domain with the layout methods, because the document they
+		// touch lives in the config directory.
+		regResponder(configSub, "uistate.window.get", noParams(), func(r Responder) handlerFunc {
+			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		reg(configSub, "uistate.window.observe", params(validateUIStateWindowObserveRaw),
+			func(_ *wsConn, _ *connState, r Responder) handlerFunc {
+				h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
+				return h.handleWindowObserve
+			}),
 		regResponder(tabbySub, "profiles.importTabby", params(validateTabbyImportRaw), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleImportTabby(ctx, req) }

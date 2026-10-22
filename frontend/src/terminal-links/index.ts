@@ -23,6 +23,7 @@ import { createLinkOpener, type LinkOpenDeps, type LinkOpener } from './open'
 import { trackLinkModifier, type ArmedTracker } from './armed'
 import { attachLinkClicks } from './surface'
 import { createLivePolicy, type LivePolicy } from './live'
+import { installLiveLinkHover, type LinkHighlightSink } from './live-hover'
 
 // No re-export barrel: the modules below are imported directly by the two
 // places that need them (blocks.ts asks decorate.ts, the renderer asks
@@ -46,17 +47,30 @@ export function registerTerminalLinks(deps: LinkOpenDeps): void {
   }
 }
 
+/** One tab's link surfaces, held for the pane's lifetime. `screenChanged`
+ *  is the frame seam: the live hover re-derives at the pointer when the
+ *  program changes what is on the screen. */
+export interface TerminalLinksHandle {
+  detach(): void
+  screenChanged(): void
+}
+
 /** One tab's frozen DOM and painter-owned live screen share the same
- *  grammar and link opener. The live reader supplies the row text and UTF-16
- *  offset under a click, so this path does not depend on a terminal emulator. */
+ *  grammar and link opener. The live reader supplies the row, its text and
+ *  the UTF-16 offset under a pointer position, so this path does not
+ *  depend on a terminal emulator. The highlight sink is the live grid's
+ *  overlay painter (the cell painter); without one — a pane mounted before
+ *  its painter, a test harness — the hover is simply not installed, and
+ *  the frozen half and the click path are unaffected. */
 export function attachTerminalLinks(
   scrollbackRoot: HTMLElement,
   liveSurface: HTMLElement,
   origin: () => Omit<ActiveOrigin, 'paneId'> | null,
-  lineAtPoint: (event: MouseEvent) => { text: string; offset: number } | null,
-): () => void {
+  lineAtPoint: (x: number, y: number) => { row: number; text: string; offset: number } | null,
+  highlight: LinkHighlightSink | null,
+): TerminalLinksHandle {
   const w = wiring
-  if (w === null) return () => {}
+  if (w === null) return { detach: () => {}, screenChanged: () => {} }
   const detachClicks = attachLinkClicks(scrollbackRoot, {
     opener: w.opener,
     origin,
@@ -68,14 +82,30 @@ export function attachTerminalLinks(
     armed: w.armed,
     notify: w.notify,
   })
+  const hover =
+    highlight === null
+      ? null
+      : installLiveLinkHover({
+          surface: liveSurface,
+          armed: w.armed,
+          spans: (lineText) => policy.ranges(lineText),
+          cellAt: lineAtPoint,
+          highlight,
+        })
   const onClick = (event: MouseEvent): void => {
     if (!(event.metaKey || event.ctrlKey)) return
-    const point = lineAtPoint(event)
+    const point = lineAtPoint(event.clientX, event.clientY)
     if (point !== null) policy.activateAt(point.text, point.offset)
   }
   liveSurface.addEventListener('click', onClick)
-  return () => {
-    detachClicks()
-    liveSurface.removeEventListener('click', onClick)
+  return {
+    detach() {
+      hover?.dispose()
+      detachClicks()
+      liveSurface.removeEventListener('click', onClick)
+    },
+    screenChanged() {
+      hover?.screenChanged()
+    },
   }
 }

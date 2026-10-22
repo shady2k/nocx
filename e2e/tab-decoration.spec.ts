@@ -1,3 +1,4 @@
+import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 import { readStand } from './stand'
@@ -161,24 +162,34 @@ test.describe('a decorated strip survives the renderer', () => {
   })
 
   test('a tab the user has not named is labelled by what is in its pane', async ({ page }) => {
+    // A directory UNDER the stand's home, so the pane's derived label is a
+    // spelling only the full chain can produce. A tab sitting AT home reads
+    // "~" once the session's home is known (nocx-1ebrs.45) — the same text
+    // the session-open placeholder carries — so asserting there cannot tell
+    // a settled label from one captured too early. One directory under home
+    // can: the label is "~" at session open, the raw tail after the first
+    // OSC 7 (home not resolved yet), and "~/work" only once the cwd is
+    // verified AND the home is known — the re-derivation moment the bead was
+    // filed for.
+    const work = path.join(readStand().home, 'work')
+    mkdirSync(work, { recursive: true })
+
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1, { timeout: 15_000 })
     await promptReady(page)
 
     // Nobody named this tab — a tab minted for a pane never was — so its
     // label is its pane's title, which is the cwd until something in the pane
-    // says otherwise (§4.5, nocx-n8n82).
+    // says otherwise (§4.5, nocx-n8n82). WAIT FOR THE DERIVED LABEL TO
+    // SETTLE, not merely to be non-empty: a spec that captures on
+    // `not.toHaveText('')` captures whichever state it happened to see, and
+    // comparing that against the label restored at the end then asserts the
+    // two are equal when the first was a placeholder (git-panel waits for
+    // its settled label the same way).
     const title = page.locator(`${TAB} .nocx-tab-title`).first()
-    // WAIT FOR THE DERIVED LABEL TO SETTLE, not merely to be non-empty. The
-    // pane reports its cwd over OSC 7 after it starts, so the label is "~"
-    // first and the resolved directory a moment later — and a spec that
-    // captures on `not.toHaveText('')` captures whichever it happened to see.
-    // Comparing that against the label restored at the end then asserts the
-    // two are equal when the first was a placeholder: "~" against
-    // ".e2e/home". The stand publishes the disposable home, so its basename
-    // is what the settled label must contain, and that is a state to wait for
-    // rather than a moment to hope for (git-panel waits the same way).
-    await expect(title).toContainText(path.basename(readStand().home), { timeout: 15_000 })
+    await page.keyboard.type(`cd '${work}'`)
+    await page.keyboard.press('Enter')
+    await expect(title).toHaveText('~/work', { timeout: 15_000 })
     const derived = await title.textContent()
 
     // A name the user types wins over it…
@@ -195,5 +206,15 @@ test.describe('a decorated strip survives the renderer', () => {
     await field.fill('')
     await panel.locator('button', { hasText: 'Save' }).click()
     await expect(title).toHaveText(derived ?? '', { timeout: 10_000 })
+
+    // And the bead's headline itself: back at home the label is exactly "~",
+    // never the home directory's path tail. The shell reports the home's
+    // absolute path over OSC 7, and the known home abbreviates it. The click
+    // first is what a person does after a dialog: Save kept the focus, and
+    // typing without taking it back sends the cd nowhere.
+    await page.locator('.pane.active .nocx-editor-input').click()
+    await page.keyboard.type('cd')
+    await page.keyboard.press('Enter')
+    await expect(title).toHaveText('~', { timeout: 15_000 })
   })
 })

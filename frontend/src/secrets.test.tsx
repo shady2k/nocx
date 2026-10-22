@@ -779,8 +779,8 @@ it('states each row kind in readable text beside the storage badge', async () =>
   client.status = vi.fn().mockResolvedValue(UNSEALED_STATUS)
   inventory.mockResolvedValue({
     entries: [
-      { ...MOCK_ENTRY_1, name: 'root@192.168.0.57', kind: 'private-key' },
-      { ...MOCK_ENTRY_2, name: 'root@192.168.0.57', kind: 'key-passphrase' },
+      { ...MOCK_ENTRY_1, name: 'root@192.0.2.57', kind: 'private-key' },
+      { ...MOCK_ENTRY_2, name: 'root@192.0.2.57', kind: 'key-passphrase' },
     ],
   })
 

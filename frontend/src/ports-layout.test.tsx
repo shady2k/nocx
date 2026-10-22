@@ -98,7 +98,7 @@ const forwardedStatusFixture = (): PortsStatusResult => ({
     listeners: [
       {
         family: 'ipv4' as const,
-        address: '192.168.0.93',
+        address: '192.0.2.93',
         port: 9993,
         process: { evidence: 'known', name: 'node', pid: 123 },
       },
@@ -118,7 +118,7 @@ const forwardedStatusFixture = (): PortsStatusResult => ({
       direction: 'local',
       requestedBind: { host: '127.0.0.1', port: 9993 },
       actualBind: { host: '127.0.0.1', port: 9993 },
-      destination: '192.168.0.93:9993',
+      destination: '192.0.2.93:9993',
       caveat: '',
       scope: 'ports:ssh:p1:1',
       state: 'running',
@@ -242,7 +242,7 @@ describe('the forwarded destination renders in full on its own line (nocx-na05)'
     // reach this" — and the destination sits beneath it in full: what the
     // cap used to cut to "19…" is the string the row exists to show.
     expect(addr?.textContent).toBe('127.0.0.1:9993')
-    expect(dest?.textContent).toBe('→ 192.168.0.93:9993')
+    expect(dest?.textContent).toBe('→ 192.0.2.93:9993')
     expect(stacked.indexOf(dest as HTMLElement)).toBeGreaterThan(
       stacked.indexOf(addr as HTMLElement),
     )

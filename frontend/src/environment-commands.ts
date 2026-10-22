@@ -26,7 +26,7 @@ import { isInteractiveTransition, extractDestination } from './ssh-transition'
 export interface EnvironmentEntry {
   /** The command family, for the tests and for future per-kind wording. */
   kind: 'ssh' | 'docker' | 'podman' | 'kubectl' | 'su' | 'sudo' | 'tmux' | 'screen' | 'nix-shell'
-  /** `pi@192.168.0.93`, `docker exec …`'s container, `su bob`. */
+  /** `pi@192.0.2.93`, `docker exec …`'s container, `su bob`. */
   label: string
 }
 

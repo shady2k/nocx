@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/uistate.window.schema.json",
+  "title": "UIStateWindow",
+  "description": "The result of uistate.window.get: the WINDOW half of the UI-state document (ADR-0098). The shell owns the native window and the coordinator owns the document, and no process holds both, so the recorded geometry crosses the control plane on its own method and the renderer relays it \u2014 carrying the saved geometry to the shell's restore binding at bootstrap, deciding nothing on either leg. Width/Height/X/Y always describe the NORMAL window, never the maximised or full-screen one: those are states, restored by asking the platform to enter them. Every field has a meaningful zero, so an absent document is an ordinary state: Width or Height of 0 means no size was ever recorded and the window keeps the size it opened at; displays of \"\" means no position can be trusted and the window is centred rather than placed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["width", "height", "x", "y", "maximised", "fullScreen", "displays"],
+  "properties": {
+    "width": {
+      "description": "The normal window's width in logical pixels, or 0 when no size was ever recorded.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "height": {
+      "description": "The normal window's height in logical pixels, or 0 when no size was ever recorded.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "x": {
+      "description": "The normal window's position. May be negative: a display left of or above the primary is an ordinary arrangement.",
+      "type": "integer"
+    },
+    "y": {
+      "description": "The normal window's position. May be negative: a display left of or above the primary is an ordinary arrangement.",
+      "type": "integer"
+    },
+    "maximised": {
+      "description": "Whether the window was maximised when the session ended. Entering the state is what makes leaving it land on the normal geometry beside it.",
+      "type": "boolean"
+    },
+    "fullScreen": {
+      "description": "Whether the window was full-screen when the session ended.",
+      "type": "boolean"
+    },
+    "displays": {
+      "description": "A human-readable fingerprint of the attached displays at the moment the position was recorded. Identity, not containment: a mismatch keeps the size and drops only the position, so plugging the monitor back in restores the old arrangement.",
+      "type": "string",
+      "maxLength": 256
+    }
+  }
+}

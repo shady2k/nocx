@@ -24,7 +24,7 @@ describe('detectAgentStatus', () => {
   // mentions an agent is not an idle agent, and the caller must fall back to
   // its own rules rather than reporting a state nobody claimed.
   it.each([
-    ['a plain shell title', 'shady@wemosd1-1: ~/repos/nocx'],
+    ['a plain shell title', 'dev@host-1: ~/repos/nocx'],
     ['a bare path', '~/Documents/repos/nocx'],
     ['a program name', 'vim main.go'],
     ['an empty title', ''],

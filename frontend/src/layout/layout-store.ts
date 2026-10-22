@@ -70,6 +70,12 @@ export class LayoutStore {
   /** How many reads have been STARTED (nocx-tdiqs). The newest one's answer
    *  is the one folded in; see load(). */
   private reads = 0
+  /** How many CONFIRMED facts have been folded in outside load() — a create
+   *  the backend answered, a remote tab fact — since the store was made.
+   *  A read whose request predates a fold cannot be known to describe it,
+   *  which is the half of the ordering the `reads` sequence cannot see: it
+   *  compares REQUESTS, and the defect is in the ANSWERS (nocx-1ebrs.56). */
+  private mutations = 0
   private readonly listeners = new Set<() => void>()
 
   constructor(private readonly client: LayoutClientLike) {}
@@ -158,12 +164,49 @@ export class LayoutStore {
    *  newer read already describes the backend at a later moment, and folding
    *  the older one in would put a tab that has since appeared back out of the
    *  cache. A lock would be the wrong shape here — the newer request is the
-   *  one worth waiting for, so the older one is simply not consulted. */
+   *  one worth waiting for, so the older one is simply not consulted.
+   *
+   *  AND A READ DOES NOT OUTVOTE A FACT IT PREDATES (nocx-1ebrs.56). The
+   *  sequence above compares REQUESTS; it cannot see the read whose request
+   *  came first and whose ANSWER came last — a snapshot taken before a tab
+   *  was created, delivered after the create's own answer had already folded
+   *  the tab in. Folding that snapshot replaced the cache with the past, the
+   *  pane layer found a registered pane with no row, and the pane closed
+   *  with no gesture anywhere. So an answer that arrives while a confirmed
+   *  fact landed in between is not folded: the read is made again, and the
+   *  loop below is what asks. */
   async load(): Promise<void> {
     const mine = ++this.reads
-    const next = await this.client.read()
-    if (mine !== this.reads) return
-    this.state = next
+    for (;;) {
+      const atRequest = this.mutations
+      const next = await this.client.read()
+      if (mine !== this.reads) return
+      if (atRequest === this.mutations) {
+        this.state = next
+        this.changed()
+        return
+      }
+      // The answer may be older than a fact already folded: a create
+      // answered while this read was in flight is IN the cache and MISSING
+      // from a snapshot taken before it existed, and folding that snapshot
+      // would unmake a tab the person just opened — the pane layer reads the
+      // rows, finds none, and closes the pane with no gesture anywhere
+      // (nocx-1ebrs.56). A remote close read the other way would put a tab
+      // the backend took out back in. The one honest repair is to ask again:
+      // each retry is a fresh request whose snapshot cannot predate a fact
+      // confirmed before it, so the loop runs once per fact that lands
+      // mid-read and stops when one lands clean.
+    }
+  }
+
+  /** Fold a confirmed fact and record that the cache moved: a read in
+   *  flight when this happens cannot be known to describe the result, which
+   *  is what `mutations` tells load() (nocx-1ebrs.56). Every write to
+   *  `state` outside load() goes through here, so the count and the cache
+   *  cannot drift apart. */
+  private fold(state: LayoutReadResult): void {
+    this.state = state
+    this.mutations++
     this.changed()
   }
 
@@ -197,12 +240,11 @@ export class LayoutStore {
         firstPane: paneFacts(paneId, pane),
       })
       .then((made) => {
-        this.state = {
+        this.fold({
           ...this.state,
           tabs: [...this.state.tabs.filter((t) => t.id !== made.tab.id), made.tab],
           panes: [...this.state.panes.filter((p) => p.id !== made.firstPane.id), made.firstPane],
-        }
-        this.changed()
+        })
       })
     return { tabId, paneId, created }
   }
@@ -221,12 +263,11 @@ export class LayoutStore {
    * asked for.
    */
   applyRemoteTab(tab: Tab, pane: Pane): void {
-    this.state = {
+    this.fold({
       ...this.state,
       tabs: [...this.state.tabs.filter((t) => t.id !== tab.id), tab],
       panes: [...this.state.panes.filter((p) => p.id !== pane.id), pane],
-    }
-    this.changed()
+    })
   }
 
   /**
@@ -246,12 +287,11 @@ export class LayoutStore {
    * backend already agree, which is the state every fold aims at.
    */
   applyRemoteTabClosed(tabId: string): void {
-    this.state = {
+    this.fold({
       ...this.state,
       tabs: this.state.tabs.filter((t) => t.id !== tabId),
       panes: this.state.panes.filter((p) => p.tabId !== tabId),
-    }
-    this.changed()
+    })
   }
 
   /**
@@ -286,7 +326,7 @@ export class LayoutStore {
         firstPane: paneFacts(paneId, pane),
       })
       .then((made) => {
-        this.state = {
+        this.fold({
           ...this.state,
           workspaces: [
             ...this.state.workspaces.filter((w) => w.id !== made.workspace.id),
@@ -294,8 +334,7 @@ export class LayoutStore {
           ],
           tabs: [...this.state.tabs.filter((t) => t.id !== made.firstTab.id), made.firstTab],
           panes: [...this.state.panes.filter((p) => p.id !== made.firstPane.id), made.firstPane],
-        }
-        this.changed()
+        })
       })
     return { workspaceId, tabId, paneId, created }
   }
@@ -333,11 +372,10 @@ export class LayoutStore {
    */
   async renameWorkspace(workspaceId: string, name: string): Promise<void> {
     const renamed = (await this.client.renameWorkspace(workspaceId, name)).workspace
-    this.state = {
+    this.fold({
       ...this.state,
       workspaces: this.state.workspaces.map((w) => (w.id === renamed.id ? renamed : w)),
-    }
-    this.changed()
+    })
   }
 
   /** The workspace's colour, as the backend answers it. Same shape as the
@@ -345,11 +383,10 @@ export class LayoutStore {
    *  came back, never what was sent. */
   async recolourWorkspace(workspaceId: string, colour: string | null): Promise<void> {
     const recoloured = (await this.client.recolourWorkspace(workspaceId, colour)).workspace
-    this.state = {
+    this.fold({
       ...this.state,
       workspaces: this.state.workspaces.map((w) => (w.id === recoloured.id ? recoloured : w)),
-    }
-    this.changed()
+    })
   }
 
   /** The WHOLE order, which is what the wire takes: the answer replaces the
@@ -358,8 +395,7 @@ export class LayoutStore {
    *  discrepancy to reconcile. */
   async reorderWorkspaces(ids: readonly string[]): Promise<void> {
     const reordered = (await this.client.reorderWorkspaces(ids)).workspaces
-    this.state = { ...this.state, workspaces: [...reordered] }
-    this.changed()
+    this.fold({ ...this.state, workspaces: [...reordered] })
   }
 
   /** The name the user typed, or null to go back to the label its panes
@@ -400,8 +436,7 @@ export class LayoutStore {
   async reorder(workspaceId: string, tabIds: readonly string[]): Promise<void> {
     const reordered = (await this.client.reorderTabs(workspaceId, tabIds)).tabs
     const others = this.state.tabs.filter((t) => t.workspaceId !== workspaceId)
-    this.state = { ...this.state, tabs: [...reordered, ...others] }
-    this.changed()
+    this.fold({ ...this.state, tabs: [...reordered, ...others] })
   }
 
   /**
@@ -425,19 +460,17 @@ export class LayoutStore {
   }
 
   private replacePane(pane: Pane): void {
-    this.state = {
+    this.fold({
       ...this.state,
       panes: this.state.panes.map((p) => (p.id === pane.id ? pane : p)),
-    }
-    this.changed()
+    })
   }
 
   private replaceTab(tab: Tab): void {
-    this.state = {
+    this.fold({
       ...this.state,
       tabs: this.state.tabs.map((t) => (t.id === tab.id ? tab : t)),
-    }
-    this.changed()
+    })
   }
 
   private changed(): void {

@@ -18,6 +18,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
@@ -192,13 +193,10 @@ test.describe('Tabby import preview + execute', () => {
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
     await expect(setupSheet).toBeVisible({ timeout: 10_000 })
-    await page.locator('#vault-setup-passphrase').fill('tabby-import-passphrase')
-    await page.locator('#vault-setup-confirm').fill('tabby-import-passphrase')
-    await setupSheet.getByRole('button', { name: /Set Up/i }).click()
-
-    const recoveryCode = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-    await expect(recoveryCode).toBeVisible({ timeout: 10_000 })
-    await page.getByRole('button', { name: 'Done', exact: true }).click()
+    // The sheet's journey is the one owner's (harness.ts) — nocx-17ihs. It
+    // scopes the Done press to the sheet's own dialog, which this file's
+    // document-wide `getByRole('button', { name: 'Done' })` did not.
+    await setUpVaultThroughTheSheet(page, 'tabby-import-passphrase')
 
     // Setup done — the deferred import runs and the preview closes.
     await expect(

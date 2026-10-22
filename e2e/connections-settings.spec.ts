@@ -12,6 +12,7 @@ import {
   test,
   expect,
   settingsReady,
+  setUpVaultThroughTheSheet,
   SHARED_VAULT_PASSPHRASE,
   type Page,
 } from './harness'
@@ -169,14 +170,10 @@ test.describe('Connections inside Settings', () => {
     // project order (nocx-8rda).
     const setup = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })
     if (await setup.isVisible().catch(() => false)) {
-      await page.locator('#vault-setup-passphrase').fill(SHARED_VAULT_PASSPHRASE)
-      await page.locator('#vault-setup-confirm').fill(SHARED_VAULT_PASSPHRASE)
-      await setup.getByRole('button', { name: /Set Up/i }).click()
-      await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-        timeout: 10_000,
-      })
-      await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
-      await expect(setup).not.toBeVisible({ timeout: 10_000 })
+      // The sheet's journey is the one owner's (harness.ts) — nocx-17ihs. It
+      // ends on the sheet being gone, which is the wait this block used to
+      // carry itself.
+      await setUpVaultThroughTheSheet(page, SHARED_VAULT_PASSPHRASE)
     }
 
     // A new SSH tab should have been created. Asserted with a retrying

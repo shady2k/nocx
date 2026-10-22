@@ -71,9 +71,11 @@ type Sidebar struct {
 }
 
 // Layout is the renderer's half of the document: everything the webview knows
-// and the Go side cannot. It is the whole of what crosses the wire
-// (ADR-0048 §7) — window geometry deliberately does not, in either direction,
-// because the renderer can neither know it nor act on it.
+// on its own account. It is the whole of what the uistate.get/uistate.set
+// pair carries; the window half crosses on its own methods instead, relayed
+// by the renderer between the shell and the store (ADR-0098, which superseded
+// ADR-0048 §7 when the cutover left no process owning both the window and the
+// document).
 type Layout struct {
 	Sidebar   Sidebar `json:"sidebar"`
 	ActiveTab string  `json:"activeTab"`

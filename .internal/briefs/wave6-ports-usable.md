@@ -121,7 +121,7 @@ chip takes most of the width and wraps to three lines, making each row about
 three times taller than it needs to be. The address must be fully readable at the
 sidebar's default width; the process is secondary and must truncate before the
 address does. The action is an icon, not a text button, and `Detected —
-192.168.0.57` repeats what the tab already says in a column that has no room for
+<lan-ip>` repeats what the tab already says in a column that has no room for
 it.
 
 **3. Retry and Pause should not be standing in the body.** Retry already exists

@@ -59,10 +59,11 @@
  *     whether a criterion is a good criterion, belong to the owner.
  */
 
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spansOf } from './time-format.mjs';
 
@@ -87,6 +88,23 @@ const LIVE = (s) => ['open', 'active', 'submitted', 'implemented'].includes(s);
 const isContainer = (m, i) =>
   !!i && (i.type === 'epic' || (m.children.get(i.id) || []).some((c) => LIVE(m.by.get(c)?.status)));
 
+// A stage is a container of work: it either carries leaves under it, or it is
+// the one and only child of its feature. A leaf that is one of several
+// children of a feature is one step of the feature's work, not the place its
+// outcome is reachable; letting one serve an outcome is how a stray task
+// quietly replaces the person's path.
+const carries = (m, i) => (m.children.get(i?.id) || []).length > 0;
+const isStage = (m, i) => {
+  if (!i || !i.parent) return false;
+  const feature = m.by.get(i.parent);
+  if (feature?.type !== 'epic') return false;
+  // Under a feature, the stages are the children that carry work. Where no
+  // child carries any, the children themselves are the breakdown, so a feature
+  // cut into two layer leaves is still judged.
+  const siblings = (m.children.get(i.parent) || []).map((id) => m.by.get(id)).filter(Boolean);
+  return carries(m, i) || !siblings.some((s) => carries(m, s));
+};
+
 // ---------------------------------------------------------------- model
 
 function index(backlog) {
@@ -97,7 +115,14 @@ function index(backlog) {
     if (!children.has(i.parent)) children.set(i.parent, []);
     children.get(i.parent).push(i.id);
   }
-  return { issues: backlog.issues, by, children, generatedAt: backlog.generatedAt };
+  return {
+    issues: backlog.issues, by, children, outcomes: backlog.outcomes || [],
+    vision: backlog.vision || null, forecasts: backlog.forecasts || [],
+    // The forecast rules are turned on by the export carrying the records at all:
+    // a project whose adapter emits none has not adopted them, and its existing
+    // dates are not judged by a rule it never agreed to.
+    hasForecasts: backlog.forecasts != null, generatedAt: backlog.generatedAt,
+  };
 }
 
 function rootOf(m, id) {
@@ -126,15 +151,181 @@ const isIdea = (cfg, i) =>
 
 // A marker alone is a heading somebody meant to fill in. It counts when words
 // follow it before the next heading.
-const hasCriterion = (i) => {
-  const b = (i.body || '').toLowerCase();
-  return CRITERION_MARKERS.some((mk) => {
-    const at = b.indexOf(mk);
-    if (at < 0) return false;
-    const after = b.slice(at + mk.length).split(/\n\s*#/)[0];
-    return (after.match(/[\p{L}\p{N}]{2,}/gu) || []).length >= 3;
-  });
+// Body syntax the gate itself reads, one line per fact, no adapter parsing:
+//
+//   Serves: O1, O2          (a stage — the outcome ids it serves)
+//   Seen at: signup, receipt  (a feature — the places a person reaches its outcome)
+//   Preparatory: <reason>   (a stage — prefactoring, and why)
+//
+// Each is matched case-insensitively, at the start of a line, with an optional
+// leading `-`, `*` or `>`, exactly like the DONE WHEN recognition above: a
+// marker at the top of a file that somebody meant and never filled counts as a
+// declaration, and an empty one does not.
+const afterMarker = (i, marker) => {
+  const re = new RegExp(`^\\s*[-*>]?\\s*${marker}\\s*:(.*)$`, 'im');
+  const at = re.exec(i.body || '');
+  // One fact, one line: the value is the rest of that line and nothing after
+  // it. Prose on the next line is not a value, so a `Serves: O1` above a
+  // sentence does not turn that sentence into outcome ids.
+  return at ? at[1].trim() : '';
 };
+
+// A value that is only a placeholder declares nothing: TODO, TBD, TKTK and
+// anything between angle brackets is somebody's intent to fill it in later,
+// not the fact itself.
+const isPlaceholder = (t) =>
+  !t || /(?:\W|^)(?:todo|tbd|tktk)(?:\W|$)|<[^>]*>/.test(t.toLowerCase());
+
+const wordIds = (t) => t.match(/[\p{L}\p{N}][\p{L}\p{N}-]*/gu) || [];
+const servesOf = (i) => (isPlaceholder(afterMarker(i, 'serves')) ? [] : wordIds(afterMarker(i, 'serves')));
+const seenAtOf = (i) =>
+  isPlaceholder(afterMarker(i, 'seen at')) ? [] : wordIds(afterMarker(i, 'seen at')).map((h) => h.toLowerCase());
+// A date or a duration a document promises: one line, in the same shape as the
+// facts above. What the gate refuses is a promise nothing measured stands
+// behind, whether it is a target date on a charter or a feature or a duration a
+// status reports.
+const targetOf = (i) => (isPlaceholder(afterMarker(i, 'target')) ? '' : afterMarker(i, 'target'));
+const forecastOf = (i) => (isPlaceholder(afterMarker(i, 'forecast')) ? '' : afterMarker(i, 'forecast'));
+const statedOf = (i) => [{ kind: 'Target', value: targetOf(i) }, { kind: 'Forecast', value: forecastOf(i) }]
+  .filter((x) => x.value);
+
+// Three word characters is the least a reason can carry and still be one;
+// an empty or bracketed placeholder declares nothing.
+const preparatoryOf = (i) =>
+  !isPlaceholder(afterMarker(i, 'preparatory')) &&
+  (afterMarker(i, 'preparatory').match(/[\p{L}\p{N}]/gu) || []).length >= 3;
+
+// The DONE WHEN text of one issue, lowercased, from the first marker to the
+// next heading, with this syntax's own lines stripped first. The same slice
+// hasCriterion has always read, kept honest by one owner.
+const criterionTextOf = (i) => {
+  const b = (i.body || '').toLowerCase();
+  for (const mk of CRITERION_MARKERS) {
+    const at = b.indexOf(mk);
+    if (at >= 0) return b.slice(at + mk.length).split(/\n\s*#/)[0]
+      .split('\n').filter((l) => !/^\s*[-*>]?\s*(?:serves|seen at|preparatory)\s*:/i.test(l)).join('\n');
+  }
+  return '';
+};
+
+export const hasCriterion = (i) => (criterionTextOf(i).match(/[\p{L}\p{N}]{2,}/gu) || []).length >= 3;
+
+// ------------------------------------------------ the vision, and the chain
+// The owner's journeys and principles, each with a stable id, as the vision
+// record (or the decision record it points to) keeps them. Everything under the
+// vision names these ids and nothing copies their wording: the text is read from
+// the record at the moment it is needed, so a changed vision changes the answer
+// and no copy rots.
+const low = (t) => String(t).toLowerCase();
+function visionItems(v) {
+  const items = new Map();
+  for (const [kind, list] of [['journey', v?.journeys], ['principle', v?.principles]])
+    for (const item of list || [])
+      if (item && typeof item.id === 'string' && item.id) items.set(low(item.id), { id: item.id, kind, title: item.title });
+  return items;
+}
+
+// The exact task set covering the outcomes a document serves: the leaves under
+// the live and closed stages that serve one of them. A document that serves
+// nothing is its own scope, and the leaves under it are its set.
+function taskSetOf(m, scope) {
+  const wanted = new Set(servesOf(scope).map(low));
+  const roots = wanted.size
+    ? m.issues.filter((x) => (LIVE(x.status) || x.status === 'closed') && isStage(m, x)
+      && servesOf(x).some((s) => wanted.has(low(s)))).map((x) => x.id)
+    : [scope.id];
+  const leaves = new Set();
+  for (const r of roots)
+    for (const id of [r, ...subtree(m, r)]) {
+      const x = m.by.get(id);
+      if (x && x.type !== 'epic' && !(m.children.get(id) || []).length) leaves.add(id);
+    }
+  leaves.delete(scope.id);
+  return [...leaves].sort();
+}
+
+// One definition of a task set's digest, shared with the run script that writes
+// the record: sha256 over the sorted ids, one per line.
+const setDigest = (ids) => createHash('sha256').update([...ids].sort().join('\n')).digest('hex');
+
+// Every promise of a date or a duration a live or closed issue carries, with the
+// set the gate computes for it and the record it names.
+function statements(m) {
+  return m.issues
+    .filter((i) => LIVE(i.status) || i.status === 'closed')
+    .flatMap((issue) => statedOf(issue).map((s) => ({
+      issue, kind: s.kind, stated: s.value, tasks: taskSetOf(m, issue),
+      record: (m.forecasts || []).find((r) => r.scope === issue.id && r.stated === s.value),
+    })));
+}
+const recordMismatch = (s, r) => r.digest !== setDigest(r.tasks) ||
+  r.tasks.slice().sort().join(' ') !== s.tasks.join(' ');
+// A record that carries no measurement is not a forecast: the run script writes
+// how many finished runs it had, and the range when it had enough of them. Three
+// is the least a pace can be measured from, the same bound the run script uses.
+const recordComputed = (r) => typeof r.enough === 'boolean' && Number.isFinite(r.runs)
+  && (r.enough ? Number.isFinite(r.low) && Number.isFinite(r.high) && r.runs >= 3 : r.runs < 3);
+
+/**
+ * The purpose of one task, for the brief a worker is handed: what it serves, in
+ * the vision's current wording, whom it serves and where a person sees it. Ids
+ * travel down the chain and are expanded here, at read time — a reference, never
+ * a copy.
+ */
+export function purposeOf(backlog, taskId) {
+  const m = index(backlog);
+  const task = m.by.get(taskId);
+  if (!task) throw new Misuse(`purpose: the backlog holds no issue ${taskId}`);
+  const items = visionItems(m.vision);
+  const outcomes = new Map(m.outcomes.map((o) => [low(o.id), o]));
+  const chain = [];
+  for (let cur = task, seen = new Set(); cur && !seen.has(cur.id); cur = m.by.get(cur.parent)) {
+    seen.add(cur.id);
+    chain.push(cur);
+  }
+  const served = new Map();
+  const vision = new Map();
+  const take = (id) => {
+    if (served.has(low(id)) || vision.has(low(id))) return;
+    const outcome = outcomes.get(low(id));
+    if (!outcome) {
+      vision.set(low(id), items.get(low(id)) || { id, kind: 'unknown', title: 'not declared in the vision record' });
+      return;
+    }
+    served.set(low(id), outcome);
+    for (const x of outcome.serves || []) take(x);
+  };
+  for (const node of chain) for (const id of servesOf(node)) take(id);
+  const byId = (a, b) => (a.id < b.id ? -1 : 1);
+  const of = (kind) => [...vision.values()].filter((x) => x.kind === kind).sort(byId);
+  const feature = chain.find((x) => x.type === 'epic') || null;
+  return {
+    id: task.id, title: task.title,
+    serves: [...served.values()].sort(byId),
+    journeys: of('journey'), principles: of('principle'), unknown: of('unknown'),
+    // The stage the task sits in, beside the feature it belongs to: the purpose
+    // descends to the task through both, and a brief that names only the feature
+    // leaves the stage out.
+    stage: chain[1] && chain[1].type !== 'epic' ? chain[1] : null,
+    under: feature, seenAt: feature ? seenAtOf(feature) : [],
+  };
+}
+
+/** The one fixed shape the brief carries: no prose, one line per fact. */
+export function describePurpose(p) {
+  const lines = [`${p.id}: ${p.title}`];
+  for (const o of p.serves) lines.push(`serves ${o.id}: ${o.title}`);
+  for (const j of p.journeys) lines.push(`serves ${j.id}: ${j.title}`);
+  for (const k of p.principles) lines.push(`principle ${k.id}: ${k.title}`);
+  for (const u of p.unknown) lines.push(`serves ${u.id}: declared in no vision record this backlog carries`);
+  if (!p.serves.length && !p.journeys.length && !p.principles.length && !p.unknown.length)
+    lines.push(`serves nothing: no stage or feature above ${p.id} names what it is for`);
+  if (p.stage) lines.push(`stage ${p.stage.id}: ${p.stage.title}`);
+  if (p.under) lines.push(`under ${p.under.id}: ${p.under.title}`);
+  lines.push(p.seenAt.length ? `seen at ${p.seenAt.join(', ')}` : 'seen at: nowhere declared, so no person reaches it yet');
+  return lines.join('\n');
+}
+
 
 // A span that has ended with no receipt: its session claimed something else,
 // its item was claimed again, or its item is no longer being worked on. One
@@ -283,6 +474,28 @@ const CHECKS = [
       }),
   },
   {
+    id: 'orphaned-outcome',
+    severity: 'error',
+    why: 'A milestone outcome no stage serves is a promise made on paper. Deferred stages serve nothing, so a milestone whose gains sit beyond every live and closed stage is headed nowhere while looking planned.',
+    fix: 'Green looks like this: every outcome id the charter declares is named in the Serves line of at least one stage that is live or closed, and stages name only ids the charter declares. A milestone that has not got there yet is best honest about it: defer the milestone\'s work knowingly rather than stage layers underneath a person who never reaches anything.',
+    run: (m) => {
+      if (!m.outcomes.length) return [];
+      const declared = new Set(m.outcomes.map((o) => o.id.toLowerCase()));
+      const stageServes = m.issues
+        .filter((i) => (LIVE(i.status) || i.status === 'closed') && isStage(m, i))
+        .map((i) => servesOf(i).map((x) => ({ id: x, key: x.toLowerCase() })));
+      const low = (t) => t.toLowerCase();
+      return [
+        ...m.outcomes.flatMap((o) =>
+          stageServes.some((ids) => ids.some((x) => x.key === low(o.id)))
+            ? []
+            : [{ id: o.id, note: `the outcome ${o.id} (${o.title}) is what the charter says a person gains, and no live or closed stage serves it; deferred work serves nothing` }]),
+        ...[...new Set(stageServes.flat().filter((x) => !declared.has(x.key)).map((x) => x.id))]
+          .map((id) => ({ id, note: `the stage serves the outcome ${id}, but the charter declares no such outcome id, so what it names is nobody's planned gain` })),
+      ];
+    },
+  },
+  {
     id: 'epic-without-criterion',
     severity: 'error',
     why: 'An epic with no criterion that stops being false exactly once becomes an area of code wearing an epic\'s clothes, and absorbs every new bug in its area until it can never finish.',
@@ -291,6 +504,85 @@ const CHECKS = [
       m.issues
         .filter((i) => LIVE(i.status) && i.type === 'epic' && !hasCriterion(i))
         .map((i) => ({ id: i.id, note: 'no DONE WHEN / Success Criteria / Falsified if' })),
+  },
+  {
+    id: 'unobservable-first-stage',
+    severity: 'error',
+    why: 'A feature whose first work is architecture shows a person nothing at any step until the last one. One such step is real prefactoring and is allowed with its reason; after it, a stage that still hides the feature from the person means the milestone said where they would see something and the breakdown does not pass through it. A feature that names no place in its body is not judged here — a known limit: without the place, the rule has nothing to bind to.',
+    fix: 'Green looks like this: the feature names in its Seen at line the place a person reaches its outcome, and the stage first in line has a DONE WHEN that names that place too — a person does the thing there — or that first stage says Preparatory with its reason, and the stage after it reaches the person. More than one preparatory stage before anything observable, or none at all, is the breakdown to re-cut.',
+    run: (m) =>
+      m.issues.flatMap((f) => {
+        if (f.type !== 'epic' || !(m.children.get(f.id) || []).length) return [];
+        const handles = seenAtOf(f);
+        if (!handles.length) return [];
+        const stages = (m.children.get(f.id) || []).map((id) => m.by.get(id)).filter((i) => isStage(m, i))
+          .sort((a, b) => ((Date.parse(a.createdAt) || Infinity) - (Date.parse(b.createdAt) || Infinity) || (a.id < b.id ? -1 : 1)));
+        // A criterion that is only a placeholder names nothing a person sees,
+        // even when the declared handle appears in it.
+        const observable = (i) => {
+          const t = criterionTextOf(i);
+          return !isPlaceholder(t) && handles.some((h) => t.includes(h));
+        };
+        const note = (i) => `the stage ${i.id} shows a person nothing: DONE WHEN names none of ${handles.join(', ')}, which the feature ${f.id} declares as the places a person reaches the outcome of ${f.id}`;
+        let allowed = true;
+        for (let k = 0; k < stages.length; k++) {
+          const s = stages[k];
+          if (preparatoryOf(s)) {
+            if (allowed && k === stages.length - 1)
+              return [{ id: s.id, ref: f.id, note: `${note(s)}; the stage is declared Preparatory, but the feature has no later stage, so the person would reach those places nowhere` }];
+            if (!allowed)
+              return [{ id: s.id, ref: f.id, note: `${note(s)}; and it is the second preparatory stage, and the first was already allowed once and must be followed by the observable one` }];
+            allowed = false;
+            continue;
+          }
+          if (observable(s)) return [];
+          return [{ id: s.id, ref: f.id, note: note(s) }];
+        }
+        return [];
+      }),
+  },
+  {
+    id: 'unserved-outcome',
+    severity: 'error',
+    why: 'An outcome that serves nothing the vision declares is work nobody asked for, and an id the vision does not declare is a link to something that does not exist. A milestone whose outcomes name no journey and no principle has stopped being the owner\'s milestone: what reaches the plan is the breakdown somebody invented, not the purpose he gave.',
+    fix: 'Green looks like this: each outcome line of the charter carries a Serves: line naming the vision journeys and principles it serves, and every id it names is declared in the vision record. The ids are added to a charter that already exists without changing its text.',
+    run: (m) => {
+      const v = visionItems(m.vision);
+      if (!v.size || !m.outcomes.length) return [];
+      const declared = [...v.values()].map((x) => x.id).join(', ');
+      return m.outcomes.flatMap((o) => {
+        const ids = (o.serves || []).filter((x) => typeof x === 'string' && x);
+        if (!ids.length)
+          return [{ id: o.id, note: `the outcome ${o.id} (${o.title}) serves nothing: the vision declares ${declared}, and this outcome names none of them` }];
+        return ids.filter((x) => !v.has(low(x)))
+          .map((x) => ({ id: o.id, ref: x, note: `the outcome ${o.id} serves ${x}, and the vision declares no such journey or principle` }));
+      });
+    },
+  },
+  {
+    id: 'unforecast-target',
+    severity: 'error',
+    why: 'A date that arrives with the work — in a brief, from a parent session, out of habit — or headroom chosen instead of an estimate, is not a forecast: nothing measured stands behind it, and the plan is fitted to it instead of to the work. A date whose forecast no longer covers the work it serves is the same promise with a stale number under it.',
+    fix: 'Green looks like this: one record stands beside the date or the duration, computed by the run script from the measured pace over the exact task set covering the outcomes the document serves, pinned to that set\'s digest. Where the work grew or shrank, compute the record again rather than restating the date.',
+    run: (m) => m.hasForecasts ? statements(m).flatMap((s) => {
+      if (!s.record)
+        return [{ id: s.issue.id, note: `the ${s.stated} it promises has no forecast record: compute one over the ${s.tasks.length} task(s) covering the outcomes it serves` }];
+      if (recordMismatch(s, s.record))
+        return [{ id: s.issue.id, note: `the forecast record for ${s.stated} covers ${s.record.tasks.length} task(s) and the outcomes it serves cover ${s.tasks.length} today: compute the record again` }];
+      // The set is right; the record must also carry what was measured, or it is
+      // a task list wearing a forecast's name.
+      return recordComputed(s.record) ? []
+        : [{ id: s.issue.id, note: `the forecast record for ${s.stated} carries no measured pace: the run script writes how many finished runs it had and, once there are enough, the range it measured; a record without the measurement is not a forecast` }];
+    }) : [],
+  },
+  {
+    id: 'unmeasured-forecast',
+    severity: 'warn',
+    why: 'A project with too little history has no pace to measure, and a date computed from nothing would be a guess wearing a number. Saying so is not a refusal: it is the record being honest, and the owner being told which date stands on a guess.',
+    fix: 'Green looks like this: the record stands beside the date and says how many finished runs it had; once three runs have finished work comparable to this, compute the record again and the warning goes.',
+    run: (m) => m.hasForecasts ? statements(m)
+      .filter((s) => s.record && !recordMismatch(s, s.record) && s.record.enough === false)
+      .map((s) => ({ id: s.issue.id, note: `the forecast record for ${s.stated} is computed from ${s.record.runs ?? 0} finished run(s): too little history for a measured pace, so the date stands on a guess` })) : [],
   },
   {
     id: 'label-vocabulary',
@@ -500,7 +792,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.46.0';
+const RULES_VERSION = '0.51.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
@@ -554,6 +846,52 @@ function checkedBacklog(raw, where) {
     for (const c of i.comments || []) {
       if (comments.has(c.id)) throw new Misuse(`${where}: the comment id ${c.id} appears twice`);
       comments.add(c.id);
+    }
+  }
+  // The charter's outcomes are how the milestone's gains get ids. No list is
+  // the adoption path: a project mid-run that has not put ids on its charter
+  // is not stopped, and the rules that read them report nothing.
+  // The vision record the rest of the chain names by id: the owner's journeys
+  // and principles, each with its own wording. Its presence is what turns the
+  // chain's rules on; a project that keeps no such record yet is not judged by
+  // them, and the ids are added at setup with the owner's agreement.
+  if (raw.vision != null) {
+    const v = raw.vision;
+    if (typeof v !== 'object' || Array.isArray(v)) throw new Misuse(`${where}: vision must be an object holding journeys and principles`);
+    for (const k of Object.keys(v)) if (!['journeys', 'principles'].includes(k))
+      throw new Misuse(`${where}: vision.${k} is not part of the vision record, which holds journeys and principles`);
+    for (const k of ['journeys', 'principles']) {
+      if (v[k] == null) continue;
+      if (!Array.isArray(v[k]) || v[k].some((x) => !x || typeof x.id !== 'string' || !x.id || typeof x.title !== 'string'))
+        throw new Misuse(`${where}: vision.${k} must be a list of { id, title }, each with a non-empty string id and a string title`);
+    }
+    // One namespace, matched the way the rules match it: an id that differs only
+    // in case would silently overwrite the other in the chain, so it is refused
+    // as a duplicate of the id it stands for.
+    const ids = new Map();
+    for (const k of ['journeys', 'principles'])
+      for (const x of v[k] || []) {
+        const key = x.id.toLowerCase();
+        if (ids.has(key)) throw new Misuse(`${where}: the vision id ${x.id} appears twice (${ids.get(key)} and ${k}), and the rules read them as one id`);
+        ids.set(key, k);
+      }
+  }
+  // A forecast record: what the run script computed, over which tasks, beside
+  // which promise. The gate recomputes the set and its digest itself.
+  if (raw.forecasts != null) {
+    if (!Array.isArray(raw.forecasts) || raw.forecasts.some((f) => !f || typeof f.scope !== 'string' || !f.scope
+      || typeof f.stated !== 'string' || !f.stated || typeof f.digest !== 'string' || !f.digest
+      || !Array.isArray(f.tasks) || f.tasks.some((t) => typeof t !== 'string' || !t)))
+      throw new Misuse(`${where}: forecasts must be a list of { scope, stated, tasks, digest }: the issue it stands beside, the date or duration it was computed for, the ids of the task set it covers, and that set's digest`);
+  }
+  if (raw.outcomes != null) {
+    if (!Array.isArray(raw.outcomes) || raw.outcomes.some((o) => !o || typeof o.id !== 'string' || !o.id || typeof o.title !== 'string'
+      || (o.serves != null && (!Array.isArray(o.serves) || o.serves.some((x) => typeof x !== 'string' || !x)))))
+      throw new Misuse(`${where}: outcomes must be a list of { id, title }, with a non-empty string id and a string title, and an optional serves list of vision ids`);
+    const ids = new Set();
+    for (const o of raw.outcomes) {
+      if (ids.has(o.id)) throw new Misuse(`${where}: the outcome id ${o.id} appears twice`);
+      ids.add(o.id);
     }
   }
   return raw;
@@ -775,6 +1113,14 @@ function runSelftest(cfg, projectConfigPath) {
   const covered = new Set(readdirSync(join(dir, 'bad')).map((n) => n.split('.')[0]));
   for (const c of CHECKS) if (!covered.has(c.id)) say(false, `no fixture for check ${c.id}`);
 
+  // The purpose command is proven on its own fixture: the exact lines a brief
+  // carries, the vision's own wording and all. It reads and judges nothing, so
+  // its proof is that the text it prints is the text the record holds.
+  const purpose = load('.', 'purpose.json');
+  for (const c of purpose.cases) {
+    const got = describePurpose(purposeOf(purpose.backlog, c.task));
+    say(got === c.expect.join('\n'), `purpose/${c.task} → ${got === c.expect.join('\n') ? 'the lines a brief carries' : `got ${JSON.stringify(got)}`}`);
+  }
   // The three strengths, on one backlog that violates an error-severity rule.
   // Old debt is the same backlog as its own baseline; a new violation is that
   // backlog against a clean one. `report` is green in both and must still
@@ -866,7 +1212,7 @@ function runSelftest(cfg, projectConfigPath) {
 
 function main() {
   const argv = process.argv.slice(2);
-  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null, at: null };
+  const args = { json: false, only: null, input: null, selftest: false, config: null, baseline: null, baselineConfig: null, strength: null, agesFrom: null, agesThrough: null, at: null, purpose: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--json') args.json = true;
     else if (argv[i] === '--only') args.only = argv[++i].split(',');
@@ -877,6 +1223,7 @@ function main() {
     else if (argv[i] === '--ages-from') args.agesFrom = argv[++i];
     else if (argv[i] === '--ages-through') args.agesThrough = argv[++i];
     else if (argv[i] === '--at') args.at = argv[++i];
+    else if (argv[i] === '--purpose') args.purpose = argv[++i];
     else if (argv[i] === '--selftest') args.selftest = true;
     else if (argv[i] === '--help' || argv[i] === '-h') args.help = true;
     else if (argv[i] === '--version') args.version = true;
@@ -893,6 +1240,7 @@ function main() {
         '          [--strength block|block-new|report] [--ages-from <before.json> --ages-through <after.json>]\n' +
         '          [--at <code revision>]\n' +
         '          [--only <id,id>] [--json]\n' +
+        'check.mjs --purpose <task id> <normalized.json>\n' +
         'check.mjs --selftest [--config <project config>]\n' +
         'check.mjs --version\n\n' +
         'Applies the backlog invariants to the normalized backlog on stdin or at <path>.\n' +
@@ -903,6 +1251,9 @@ function main() {
         'that can say which revision it stands for.\n' +
         '--baseline-config judges the baseline by the rules of its own day, so a\n' +
         'config change that creates violations shows up as new errors.\n' +
+        '--purpose prints the purpose of one task for the brief of whoever does it:\n' +
+        'the vision items it serves in their current wording, whom it serves and where\n' +
+        'a person sees it. One line per fact, and no config: it judges nothing.\n' +
         'Exit 0 green, 1 red, 2 misuse.\n\n' +
         'Checks: ' + CHECKS.map((c) => c.id).join(', '),
     );
@@ -915,6 +1266,12 @@ function main() {
   if (args.selftest)
     return runSelftest(checkedConfig(readJson(join(HERE, 'fixtures', 'config.json'), 'the fixture config'), 'fixture config'), args.config);
 
+  // The purpose of a task is read, never judged: it needs the backlog and
+  // nothing else, so a brief can be written in a project whose gate is red.
+  if (args.purpose) {
+    console.log(describePurpose(purposeOf(checkedBacklog(readJson(args.input, 'the backlog'), 'backlog'), args.purpose)));
+    return 0;
+  }
   if (!args.config) throw new Misuse('--config <project config> is required; the rules carry no project of their own');
   const cfg = checkedConfig(readJson(args.config, 'the config'), 'config');
   const strength = args.strength || cfg.strength;
@@ -946,11 +1303,15 @@ function main() {
   return report.failed ? 1 : 0;
 }
 
-try {
-  process.exitCode = main();
-} catch (e) {
-  // Anything unforeseen is misuse too: exit 1 means "the backlog is red", and
-  // a crash has established no such thing.
-  console.error(`check.mjs: ${e instanceof Misuse ? e.message : e.stack}`);
-  process.exitCode = 2;
+// Imported by another checker, this file runs nothing; run directly, it
+// behaves exactly as before.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    process.exitCode = main();
+  } catch (e) {
+    // Anything unforeseen is misuse too: exit 1 means "the backlog is red", and
+    // a crash has established no such thing.
+    console.error(`check.mjs: ${e instanceof Misuse ? e.message : e.stack}`);
+    process.exitCode = 2;
+  }
 }

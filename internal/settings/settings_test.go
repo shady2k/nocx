@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1347,4 +1348,27 @@ func declarationFor(t *testing.T, key string) settings.Declaration {
 	}
 	t.Fatalf("no declaration for %q", key)
 	return settings.Declaration{}
+}
+
+// The channel setting is the persisted half of ADR-0097's channel selection:
+// stable by default, nightly by explicit opt-in, and only those two — the
+// window binding refuses any third spelling.
+func TestUpdateChannelDeclaration(t *testing.T) {
+	if got := settings.UpdateChannel.Default(); got != "stable" {
+		t.Errorf("update.channel default = %v, want stable — nightly is an explicit opt-in", got)
+	}
+	var values []string
+	for _, o := range settings.UpdateChannel.Options() {
+		values = append(values, o.Value)
+	}
+	sort.Strings(values)
+	if len(values) != 2 || values[0] != "nightly" || values[1] != "stable" {
+		t.Errorf("update.channel options = %v, want exactly stable and nightly", values)
+	}
+	if settings.UpdateChannel.Section() != "Updates" {
+		t.Errorf("update.channel section = %q, want Updates", settings.UpdateChannel.Section())
+	}
+	if settings.UpdateChannel.DataClass() != settings.PublicConfig {
+		t.Errorf("update.channel data class = %q, want publicConfig", settings.UpdateChannel.DataClass())
+	}
 }

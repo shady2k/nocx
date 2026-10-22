@@ -47,9 +47,11 @@
  *
  * WORK RECORDS. Comments starting with `[shady2k-time` carry spans; comments
  * starting with `<!-- shady2k-exec` carry command durations used by the next
- * run's bound. Both families go out RAW and whole, damaged or not, with the
- * tracker's comment id, time and author: their consumers judge them. Dropping
- * either loses recorded work. Other comments are left out.
+ * run's bound. Both families go out whole, damaged or not: their consumers
+ * judge them. BR comment numbers are clone-local, so the normalized identity
+ * is `<issue>:<comment>`. Numeric void targets get the same issue scope in
+ * this view only; stored comments are never rewritten. Other bodies, times
+ * and authors pass through unchanged. Other comments are left out.
  *
  * Usage:
  *   node .githooks/backlog-gate/adapter.mjs [--at <git-rev>] [--export <path>]
@@ -62,6 +64,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { parseRecord } from './time-format.mjs'
 
 const TYPES = new Set(['epic', 'task', 'bug', 'chore'])
 const STATUS = {
@@ -78,14 +81,28 @@ const RECORD = /^(\S+)\s+--\s+(\S[\s\S]*)$/
 const WORK_RECORD = '[shady2k-time'
 const EXEC_RECORD = '<!-- shady2k-exec'
 
-export function workRecords(comments) {
+function workRecords(issueId, comments) {
   return (comments || [])
     .filter(
       (c) =>
         typeof c.text === 'string' &&
         (c.text.startsWith(WORK_RECORD) || c.text.startsWith(EXEC_RECORD)),
     )
-    .map((c) => ({ id: String(c.id), at: c.created_at, author: c.author, body: c.text }))
+    .map((c) => {
+      let body = c.text
+      const parsed = c.text.startsWith(WORK_RECORD) ? parseRecord(c.text) : null
+      if (
+        parsed?.kind === 'void' &&
+        !parsed.problems.length &&
+        /^\d+$/.test(parsed.fields.comment)
+      ) {
+        body = body.replace(
+          /^([ \t]*comment:[ \t]*)\d+([ \t]*\r?)$/m,
+          (_, prefix, suffix) => `${prefix}${issueId}:${parsed.fields.comment}${suffix}`,
+        )
+      }
+      return { id: `${issueId}:${c.id}`, at: c.created_at, author: c.author, body }
+    })
 }
 
 // The record of the latest `<kind>:` comment, or an empty one where there is
@@ -139,7 +156,7 @@ export function normalize(rows) {
       updatedAt: r.updated_at,
       createdAt: r.created_at,
       holder: r.assignee || null,
-      comments: workRecords(r.comments),
+      comments: workRecords(r.id, r.comments),
       ...(delivery && { delivery }),
       ...(integration && { integration }),
     })

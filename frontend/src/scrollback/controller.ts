@@ -19,16 +19,9 @@ import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { AgentDump } from '../generated/agent.dump'
 import { windowPet } from '../pets/window-pet'
+import { SETTLE_EASING, SETTLE_MS, motionAllowed } from '../motion'
 import { isAtTail, TailFollow } from './tail-follow'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
-
-/** How long the pane takes to settle after a block opens or freezes. Short
- *  enough to belong to the keypress that caused it; long enough to read as a
- *  movement rather than a displacement. */
-const SETTLE_MS = 140
-/** Fast out, slow in: the stack leaves at once and arrives gently, which is
- *  what makes it read as the block taking its place. */
-const SETTLE_EASING = 'cubic-bezier(0.2, 0, 0, 1)'
 
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
@@ -134,6 +127,9 @@ export class ScrollbackController {
   private _paintWatch = 0
   private _painting = false
   private _followObserver: IntersectionObserver | null = null
+  /** Watches the scroller's own box, so a box the mutation paths know
+   *  nothing about still keeps the tail — see the constructor. */
+  private _boxResizeObserver: ResizeObserver | null = null
   /** The ask mode's owner (nocx-x8s2.2): called when the scrollback is
    *  cleared, so the chip — and with it the agent target — closes when its
    *  block is gone. */
@@ -240,6 +236,24 @@ export class ScrollbackController {
     this.cellMetricsChanged()
 
     // ── Follow state ─────────────────────────────────────────────────────
+    // THE FOLD NEVER DETACHES WHILE FOLLOWING (nocx-1ebrs.40). The pane's box
+    // redistribution — the composer's animated hand-off, the process bar's
+    // swap, a pane or window resize — changes this scroller's box without any
+    // block mutation, and the mutation paths below do not run for it: the
+    // frames the box moves are the frames the fold moves. Measured on main:
+    // the composer's 130px left, the echo and the process bar landed below the
+    // fold, and nothing re-pinned until the freeze, which snapped the view 98px
+    // in one frame. Keep the live end on the bottom edge whenever the box
+    // moves under a follower. ResizeObserver delivers after that frame's
+    // layout and before its paint, so the pin lands in the same frame as the
+    // box that caused it. Guarded like the observer below: jsdom has none.
+    if (typeof ResizeObserver === 'function') {
+      this._boxResizeObserver = new ResizeObserver(() => {
+        if (this._tail.following) this._scrollToBottom()
+      })
+      this._boxResizeObserver.observe(this.scrollbackArea)
+    }
+
     // Whether the end of the live output is on screen. Not "did the last scroll
     // look like a human" — that question has no answer: the `scroll` event does
     // not carry its origin, and a classifier built from wheel and touch misses
@@ -1079,13 +1093,10 @@ export class ScrollbackController {
     this._paintWatch = requestAnimationFrame(tick)
   }
 
-  /** Whether this build may move anything: the Web Animations API has to
-   *  exist (it does not in jsdom, where a test asserts the layout and not the
-   *  motion) and the person must not have asked for less of it. */
+  /** Whether this build may move anything. The shared decision (motion.ts) —
+   *  the composer's box transition reads the same one. */
   private _motionAllowed(): boolean {
-    if (typeof this.scrollbackInner.animate !== 'function') return false
-    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)')
-    return mq ? !mq.matches : true
+    return motionAllowed(this.scrollbackInner)
   }
 
   /** The freeze landed: play back the card's displacement and tell the pet
@@ -1199,6 +1210,8 @@ export class ScrollbackController {
     this._cancelGlides()
     this._followObserver?.disconnect()
     this._followObserver = null
+    this._boxResizeObserver?.disconnect()
+    this._boxResizeObserver = null
     this._blockManager.dispose()
     this.scrollbackLayout.remove()
   }

@@ -55,12 +55,32 @@ func (h uiStateHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			// way in, and a renderer that never learns that holds a number
 			// nobody will read back.
 			_ = h.r.TryResult(req.ID, mustMarshal(wireLayout(svc.Layout(ctx))))
+		case "uistate.window.get":
+			_ = h.r.TryResult(req.ID, mustMarshal(wireWindow(svc.Window(ctx))))
 		}
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
 	}
+}
+
+// handleWindowObserve folds one live sample relayed by a client's shell
+// (ADR-0098). It is a notification, so there is no response to write: the
+// sample is recorded and the next uistate.window.get answers with what the
+// store now holds, folded — which is not always what was sent.
+func (h uiStateHandlers) handleWindowObserve(ctx context.Context, req jsonrpcRequest) {
+	if !h.wired {
+		return
+	}
+	var p uiStateWindow
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		return
+	}
+	_ = h.op.Run(ctx, func(ctx context.Context, svc capability.UIStateService) error {
+		svc.ObserveWindow(ctx, uistate.Window(p))
+		return nil
+	})
 }
 
 // uiStateLayout is the wire DTO for both methods. It is a hand-written struct
@@ -115,5 +135,72 @@ func validateUIStateSetRaw(raw json.RawMessage) string {
 	// which is the single owner of that policy. Refusing it here would be a
 	// second answer to one question, and the two would drift the first time
 	// the bounds moved.
+	return ""
+}
+
+// uiStateWindow is the wire DTO for the window half in BOTH directions
+// (ADR-0098): what uistate.window.get answers and what one
+// uistate.window.observe notification carries. A hand-written struct beside
+// the schema for the same reason as uiStateLayout — the domain type is free
+// to change shape without silently changing the wire.
+type uiStateWindow struct {
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
+	X          int    `json:"x"`
+	Y          int    `json:"y"`
+	Maximised  bool   `json:"maximised"`
+	FullScreen bool   `json:"fullScreen"`
+	Displays   string `json:"displays"`
+}
+
+func wireWindow(w uistate.Window) uiStateWindow {
+	return uiStateWindow{
+		Width:      w.Width,
+		Height:     w.Height,
+		X:          w.X,
+		Y:          w.Y,
+		Maximised:  w.Maximised,
+		FullScreen: w.FullScreen,
+		Displays:   w.Displays,
+	}
+}
+
+// The geometry bounds are generous rather than policy: what a size MEANS is
+// uistate's (Restore clamps on read), and these exist only so the control
+// plane cannot be made to carry an absurd integer. A position may be
+// negative on purpose — a display left of or above the primary.
+const (
+	maxUIStateWindowExtent  = 100000
+	maxUIStateDisplaysRunes = 256
+)
+
+func validateUIStateWindowObserveRaw(raw json.RawMessage) string {
+	var p uiStateWindow
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	// A sample with no size is not a sample: the shell's probe discards a
+	// zero reading rather than record it (nocx-39vhn's rule), and the store
+	// reads zeros as "never saved". Refusing it here also keeps the method
+	// answering a request that carries an id — every registered method must
+	// (the wire sweep over them all).
+	if p.Width <= 0 || p.Height <= 0 {
+		return "a sample must carry a real size"
+	}
+	if p.Width > maxUIStateWindowExtent {
+		return "width out of range"
+	}
+	if p.Height > maxUIStateWindowExtent {
+		return "height out of range"
+	}
+	if p.X < -maxUIStateWindowExtent || p.X > maxUIStateWindowExtent {
+		return "x out of range"
+	}
+	if p.Y < -maxUIStateWindowExtent || p.Y > maxUIStateWindowExtent {
+		return "y out of range"
+	}
+	if msg := boundedRunes("displays", p.Displays, maxUIStateDisplaysRunes); msg != "" {
+		return msg
+	}
 	return ""
 }

@@ -7,7 +7,7 @@ describe('environmentEntry recognises an environment change', () => {
   it('recognises ssh', () => {
     expect(environmentEntry('ssh user@host') !== null).toBe(true)
     expect(environmentEntry('ssh -i key.pem user@host') !== null).toBe(true)
-    expect(environmentEntry('ssh pi@192.168.0.93') !== null).toBe(true)
+    expect(environmentEntry('ssh pi@192.0.2.93') !== null).toBe(true)
     expect(environmentEntry('  ssh user@host  ') !== null).toBe(true)
   })
 
@@ -95,7 +95,7 @@ describe('environmentEntry recognises an environment change', () => {
 
 describe('environmentEntry — the destination we can name because we sent the line', () => {
   const cases: Array<[string, string | null]> = [
-    ['ssh pi@192.168.0.93', 'pi@192.168.0.93'],
+    ['ssh pi@192.0.2.93', 'pi@192.0.2.93'],
     ['ssh -p 2222 root@box', 'root@box'],
     ['ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no bob@h', 'bob@h'],
     // A remote command comes straight back: not a place the user is sitting in.

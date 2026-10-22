@@ -2574,7 +2574,7 @@ describe('eager validation', () => {
 // ── A generated name says what the secret is ─────────────────────────────
 // Reported from the running app: a connection with an encrypted key stores
 // the key and its passphrase, and the Secrets page showed two rows both
-// called `root@192.168.0.57`. The kind badge tells them apart in the list;
+// called `root@192.0.2.57`. The kind badge tells them apart in the list;
 // the name has to tell them apart everywhere else, starting with any picker
 // that chooses between them.
 

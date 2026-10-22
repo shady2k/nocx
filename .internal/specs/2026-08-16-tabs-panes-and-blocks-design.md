@@ -157,7 +157,7 @@ the title the program declared (OSC 0/2)
 ```
 
 The middle one is missing today, which is why a tab running `herdr` is labelled
-`Users/shady`: nothing sits between a program that declares a title and a directory that
+`Users/<user>`: nothing sits between a program that declares a title and a directory that
 declares nothing. The renderer already knows the answer — `command-ledger.ts` holds the
 command text and a `running` status, put there by the shell integration — so this is a
 source to connect, not one to build. It is written here because it is the same rule the

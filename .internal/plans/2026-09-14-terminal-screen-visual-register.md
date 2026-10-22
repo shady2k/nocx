@@ -6129,9 +6129,9 @@ it('an SSH prompt names the host first, in the strong emphasis (nocx-3779, spec 
   const { ed, container } = setup()
   ed.show()
   ed.setCwd('/srv/nocx')
-  ed.setLocation('root@192.168.0.57')
+  ed.setLocation('<user>@<lan-ip>')
   const strong = context(container).querySelector('[data-emphasis="strong"]')
-  expect(strong?.textContent).toBe('root@192.168.0.57')
+  expect(strong?.textContent).toBe('<user>@<lan-ip>')
   expect(context(container).textContent).toContain('srv/nocx')
 })
 
@@ -6237,7 +6237,7 @@ Then rewrite by hand each line the grep still prints.
 
 - `:1776-1780` and `:1794-1797`: the location chip.
   - SSH: `tab.pane.querySelector('.nocx-editor-context [data-emphasis="strong"]')?.textContent` is
-    `root@192.168.0.57`.
+    `<user>@<lan-ip>`.
   - Local: that query returns `null`.
 - `:2472-2485`: the clock stylesheet test. Delete it with its `describe` (`nocx-a44m`'s clock no longer exists),
   and add:

@@ -1,7 +1,6 @@
 package uistate
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── Fingerprint ────────────────────────────────────────────────────────
@@ -466,7 +464,7 @@ func TestGeometrySurvivesARestartOnTheSameDisplays(t *testing.T) {
 	}
 
 	first := New(storage.NewDocumentStore(dir), quietLogger())
-	first.Sample(probe)
+	sampleInto(first, probe)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -493,7 +491,7 @@ func TestGeometryFromAVanishedDisplayFallsBackToAVisibleWindow(t *testing.T) {
 	}
 
 	first := New(storage.NewDocumentStore(dir), quietLogger())
-	first.Sample(probe)
+	sampleInto(first, probe)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -507,19 +505,6 @@ func TestGeometryFromAVanishedDisplayFallsBackToAVisibleWindow(t *testing.T) {
 	}
 	if got.Width > 1920 || got.Height > 1080 {
 		t.Fatalf("size %dx%d does not fit the remaining display", got.Width, got.Height)
-	}
-}
-
-func TestSampleDiscardsAnUnavailableReading(t *testing.T) {
-	rec := &recordingDocStore{}
-	clock := &fakeTimer{}
-	s := newStore(rec, quietLogger(), DefaultDebounce, clock.after)
-
-	s.Sample(&fakeProbe{unavailable: true})
-	clock.fire()
-
-	if rec.writes() != 0 {
-		t.Fatal("a probe that could not answer was recorded as zeros")
 	}
 }
 
@@ -671,50 +656,19 @@ func (p *fakeProbe) Geometry() (Window, []Display, bool) {
 	return p.window, p.displays, true
 }
 
-// ── Restoring against a window that does not exist yet ─────────────────
+// ── Applying a placement ──────────────────────────────────────────────
+//
+// The watch loop that used to live here is gone: the store and the window
+// are in different processes now (ADR-0098), so that loop could never run
+// against this store again. What stays tested in this package is the
+// placement policy — the half the shell performs through Apply.
 
-// THE DEFECT THIS ASSERTS AGAINST. The composition root used to probe the
-// window once, and abandon window persistence for the whole session when that
-// one probe could not answer:
-//
-//	_, displays, ok := probe.Geometry()
-//	if !ok { return }        // <- the sampler below never started
-//
-// Under Wails v3 that probe CANNOT answer. Services start before the window is
-// realised, `WebviewWindow.Size()` reports (0,0) until the platform window
-// exists, and so the one moment the code asked was the one moment there was
-// nothing to ask. Nothing was ever sampled, nothing was ever written, and every
-// launch read back a document of zeros and opened at the default (nocx-39vhn).
-//
-// So the contract is stated the other way round: not being ready yet is an
-// ordinary state that costs a tick, never the session.
-func TestRestoreAndWatchWaitsForAWindowThatIsNotReadyYet(t *testing.T) {
+func TestApplyUsesThePositionWhenTheDisplaysMatch(t *testing.T) {
 	displays := []Display{{Width: 2560, Height: 1440, Primary: true}}
 	saved := Window{Width: 1440, Height: 900, X: 120, Y: 64, Displays: Fingerprint(displays)}
 
-	rec := &recordingDocStore{}
-	clock := &fakeTimer{}
-	s := newStore(rec, quietLogger(), DefaultDebounce, clock.after)
-	s.SetWindow(saved)
-
-	// Silent for the first three asks, exactly as an unrealised window is.
-	probe := &lateProbe{
-		silentFor: 3,
-		window:    Window{Width: 1440, Height: 900, X: 120, Y: 64},
-		displays:  displays,
-	}
 	placer := &fakePlacer{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.RestoreAndWatch(ctx, probe, placer, time.Millisecond)
-
-	// Waited on the state changing, never on a duration: the tick is an
-	// implementation detail and a test that slept for one would be a test about
-	// this machine's speed.
-	waittest.WaitFor(t, "the window to be placed once it can answer", func() bool {
-		return placer.calls() > 0
-	})
+	Apply(placer, Restore(saved, displays))
 
 	if got := placer.size(); got != [2]int{1440, 900} {
 		t.Fatalf("placed at %v, want the saved 1440x900", got)
@@ -727,77 +681,53 @@ func TestRestoreAndWatchWaitsForAWindowThatIsNotReadyYet(t *testing.T) {
 	}
 }
 
-// AND IT GOES ON WATCHING. Placement is half the feature; a session that
-// restores the window and then records nothing leaves the next launch reading
-// the same stale document — which is the shape the defect actually took.
-func TestRestoreAndWatchRecordsAfterAnUnreadyStart(t *testing.T) {
+func TestApplyCentresWhenThePositionCannotBeTrusted(t *testing.T) {
+	other := []Display{{Width: 1920, Height: 1080, Primary: true}}
+	saved := Window{
+		Width: 1440, Height: 900, X: 2400, Y: 30,
+		Displays: Fingerprint([]Display{{Width: 1920, Height: 1080, Primary: true}, {Width: 1920, Height: 1080}}),
+	}
+
+	placer := &fakePlacer{}
+	Apply(placer, Restore(saved, other))
+
+	if !placer.centred {
+		t.Fatal("the saved position is off-screen on these displays, so the window must be centred")
+	}
+	if placer.position() != [2]int{0, 0} {
+		t.Fatalf("positioned at %v, want none applied", placer.position())
+	}
+}
+
+func TestApplyEntersTheSavedStatesAfterTheSize(t *testing.T) {
 	displays := []Display{{Width: 2560, Height: 1440, Primary: true}}
-	rec := &recordingDocStore{}
-	s := newStore(rec, quietLogger(), time.Millisecond, realAfterFunc)
-
-	probe := &lateProbe{
-		silentFor: 2,
-		window:    Window{Width: 1280, Height: 800, X: 40, Y: 20},
-		displays:  displays,
+	saved := Window{
+		Width: 1440, Height: 900, X: 120, Y: 64,
+		Maximised: true, FullScreen: true, Displays: Fingerprint(displays),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
+	placer := &fakePlacer{}
+	Apply(placer, Restore(saved, displays))
 
-	waittest.WaitFor(t, "the moved window to reach the document", func() bool {
-		w := s.Window()
-		return w.Width == 1280 && w.Height == 800 && w.X == 40 && w.Y == 20
-	})
-	waittest.WaitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
-}
-
-// A window that never becomes readable must not spin forever, and must let go
-// at shutdown like every other background owner.
-func TestRestoreAndWatchStopsWhenTheContextIsCancelled(t *testing.T) {
-	s := newStore(&recordingDocStore{}, quietLogger(), DefaultDebounce, (&fakeTimer{}).after)
-	probe := &lateProbe{silentFor: 1 << 30}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
-		close(done)
-	}()
-
-	waittest.WaitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RestoreAndWatch outlived its context")
+	if !placer.maximised || !placer.fullscreen {
+		t.Fatalf("states applied: maximised=%v fullscreen=%v, want both", placer.maximised, placer.fullscreen)
+	}
+	if placer.calls() == 0 {
+		t.Fatal("no size was applied before the states were entered")
 	}
 }
 
-// lateProbe answers `ok=false` for its first `silentFor` calls, which is what
-// an unrealised Wails window does.
-type lateProbe struct {
-	mu        sync.Mutex
-	calls     int
-	silentFor int
-	window    Window
-	displays  []Display
-}
-
-func (p *lateProbe) Geometry() (Window, []Display, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.calls++
-	if p.calls <= p.silentFor {
-		return Window{}, nil, false
+// sampleInto folds one probe reading into the store exactly as the
+// coordinator's UI-state service does for a sample that arrived over the
+// wire (ADR-0098): fingerprint the displays, then Observe — one owner for
+// the fold — then record.
+func sampleInto(s *Store, p Probe) {
+	live, displays, ok := p.Geometry()
+	if !ok {
+		return
 	}
-	return p.window, p.displays, true
-}
-
-func (p *lateProbe) asked() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.calls
+	live.Displays = Fingerprint(displays)
+	s.SetWindow(Observe(s.Window(), live))
 }
 
 type fakePlacer struct {

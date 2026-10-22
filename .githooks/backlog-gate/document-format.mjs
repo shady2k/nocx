@@ -35,9 +35,22 @@ function sections(text, names) {
 }
 
 export function parseVision(text) {
-  const s = sections(text, ['Audience', 'Non-users', 'Problem', 'Alternatives and difference', 'Key journeys', 'Outcome',
+  const s = sections(text, ['Audience', 'Non-users', 'Problem', 'Alternatives and difference', 'Key journeys', 'Principles', 'Outcome',
     'Success signal', 'Exclusions', 'Constraints and assumptions', 'Direction']);
-  return { audience: s.Audience ?? '', problem: s.Problem ?? '', outcome: s.Outcome ?? '', exclusions: s.Exclusions ?? '' };
+  // Journeys and principles are the owner's own words, one per line with a stable
+  // id in front of it (J1, P1, …): the ids everything below the vision names, and
+  // the wording it is read from. One reader for both, so an id a document names
+  // is read the same way whichever of the two it is.
+  const items = (text) => text.split('\n')
+    .map((line) => /^\s*[-*>]?\s*([a-zA-Z0-9][a-zA-Z0-9_.:-]*)\s*[:.)—-]\s*(\S.*)$/.exec(line))
+    .filter(Boolean).map((m) => ({ id: m[1], title: m[2].trim() }));
+  return {
+    audience: s.Audience ?? '', problem: s.Problem ?? '', outcome: s.Outcome ?? '', exclusions: s.Exclusions ?? '',
+    // Absent when the record has no such section, so a vision without principles
+    // carries no empty list for every reader to tell apart from "none kept".
+    ...(s['Key journeys'] == null ? {} : { journeys: items(s['Key journeys']) }),
+    ...(s.Principles == null ? {} : { principles: items(s.Principles) }),
+  };
 }
 
 export function parseMilestone(text, id) {

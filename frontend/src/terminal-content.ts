@@ -123,7 +123,7 @@ import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE_COMMAND } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
-import { attachTerminalLinks } from './terminal-links'
+import { attachTerminalLinks, type TerminalLinksHandle } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
@@ -186,7 +186,7 @@ import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
 import { createPaneContext, updatePaneContext, type PaneContextFacts } from './ui/pane-context'
 import { createProcessBar, updateProcessBar } from './ui/process-bar'
-import { cwdLabel } from './cwd-label'
+import { cwdLabel, homeRelation } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -772,14 +772,20 @@ const FALLBACK_TITLE = ''
 
 /**
  * Names a tab after its directory, the way every other terminal does.
- * Keeps the tail — the CSS ellipsis cuts from the right.
+ * Keeps the tail — the CSS ellipsis cuts from the right. The `~` spelling
+ * itself has ONE owner (`homeRelation` in cwd-label.ts, the same decision
+ * the prompt line renders from, nocx-1ebrs.45): at a known home the tab
+ * reads `~`, under it the rooted `~/…` form, and with no known home the
+ * raw tail stands — never a guessed `~`.
  */
-function directoryLabel(cwd: string): string {
+function directoryLabel(cwd: string, home?: string): string {
   const path = cwd.trim().replace(/\/+$/, '')
   if (!path) return FALLBACK_TITLE
-  const parts = path.split('/').filter(Boolean)
-  if (path === '~' || parts.length === 0) return path || FALLBACK_TITLE
-  return parts.slice(-2).join('/')
+  if (path === '~') return path
+  const rel = homeRelation(path, home)
+  if (rel.kind === 'home') return '~'
+  if (rel.kind === 'under') return `~/${rel.rest.slice(-2).join('/')}`
+  return rel.segments.slice(-2).join('/')
 }
 
 /**
@@ -1829,9 +1835,9 @@ export class TerminalContent extends BasePaneContent {
 
   // _readyPromise resolves true when the painter and PTY session
   // opens; resolves false when mount() throws. Never rejects.
-  /** Detaches this tab's link surfaces (terminal-links/): the scrollback's
-   *  click listeners and the live grid's link policy. */
-  private _detachLinks: (() => void) | null = null
+  /** This tab's link surfaces (terminal-links/): the scrollback's click
+   *  listeners, the live grid's link policy and its armed-link hover. */
+  private _detachLinks: TerminalLinksHandle | null = null
   private readonly _readyPromise: Promise<boolean>
   /** The drop gesture's detach, held for dispose. */
   private _dropDetach: (() => void) | null = null
@@ -2240,7 +2246,7 @@ export class TerminalContent extends BasePaneContent {
     this._host = view.host
     this._user = view.user
     this.programTitle = view.programTitle
-    this.cwdTitle = directoryLabel(view.cwd)
+    this.cwdTitle = directoryLabel(view.cwd, this.currentHome())
     this.editor?.setCwd(view.cwd)
     this.onTooltipChange(
       view.host
@@ -2393,12 +2399,19 @@ export class TerminalContent extends BasePaneContent {
    *  from `_blockBranch`, never the pane's current one (a block's branch
    *  is history; only its path takes the new `~` form). Ask/tool/text
    *  blocks are not command records and are out of this loop's reach —
-   *  `blockManager.blocks` names only what it can reach. */
+   *  `blockManager.blocks` names only what it can reach.
+   *
+   *  The tab title re-derives too (nocx-1ebrs.45): home is learned
+   *  asynchronously, AFTER the first OSC 7 that already named the tab
+   *  with the raw path — resolving it is exactly the moment `~` becomes
+   *  the truthful spelling. */
   private _onHomeKnown(home: string): void {
     this.editor?.setWhereFacts({ home, branch: this.branchSource?.branch() })
     for (const rec of this.scrollback?.blockManager.blocks ?? []) {
       setBlockWhere(rec.el, { home, branch: this._blockBranch.get(rec.id) })
     }
+    this.cwdTitle = directoryLabel(this._cwd, home)
+    this.pushTitle()
     this._syncPaneContext()
   }
 
@@ -4164,12 +4177,12 @@ export class TerminalContent extends BasePaneContent {
           scrollbackArea,
           painterSurface,
           () => this.activeOrigin(),
-          (event) => {
+          (x, y) => {
             const snapshot = this._cellModel?.current()
             const mapping = this._painter?.mapping()
             if (!snapshot || !mapping) return null
             const rect = painterSurface.getBoundingClientRect()
-            const cell = mapping.pixelToCell(event.clientX - rect.left, event.clientY - rect.top)
+            const cell = mapping.pixelToCell(x - rect.left, y - rect.top)
             if (cell === null) return null
             const row = snapshot.rows[cell.row]
             if (!row) return null
@@ -4178,10 +4191,12 @@ export class TerminalContent extends BasePaneContent {
               .slice(0, cell.col)
               .reduce((total, item) => total + item.grapheme.length, 0)
             return {
+              row: cell.row,
               text,
               offset: row.cells[cell.col]?.grapheme ? offset : Math.max(0, offset - 1),
             }
           },
+          this._painter,
         )
       }
 
@@ -5278,6 +5293,10 @@ export class TerminalContent extends BasePaneContent {
     // gesture compares the new frame with the snapshot the selection was
     // captured on.
     this._selectionGesture?.screenChanged(snapshot)
+    // THE ARMED LINK'S UNDERLINE NAMES THE TEXT UNDER IT (nocx-1ebrs.48):
+    // output that moved the row under a still pointer re-derives the hover,
+    // before the frame paints it.
+    this._detachLinks?.screenChanged()
     this._pendingPaint = snapshot
     if (this._paintFrameHandle !== 0) return
     this._paintFrameHandle = requestAnimationFrame(() => {
@@ -8315,6 +8334,9 @@ export class TerminalContent extends BasePaneContent {
     // between the press and the release.
     if (intent.kind === 'key' || intent.kind === 'text' || intent.kind === 'paste') {
       this._selectionGesture?.dismiss()
+      // The grid cursor holds still while input arrives (nocx-1ebrs.37),
+      // the phase rule the composer's caret already follows (nocx-1ebrs.31).
+      this._painter?.noteInput()
     }
     const held = this._heldRaw
     if (held !== null && !held.cancelled) {
@@ -8672,7 +8694,7 @@ export class TerminalContent extends BasePaneContent {
     this._blockRowsInFlight.clear()
     this._blockRowsRefreshPending.clear()
     this._blockRowsFinalPending.clear()
-    this._detachLinks?.()
+    this._detachLinks?.detach()
     this._detachLinks = null
     this._homeUnsub?.()
     this._scrollerWidthObserver?.disconnect()

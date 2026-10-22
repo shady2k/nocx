@@ -1747,7 +1747,7 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
     const container = document.createElement('div')
     const running = createRunningBlock(
       1,
-      'ssh pi@192.168.0.93',
+      'ssh pi@192.0.2.93',
       '~',
       '',
       () => container,
@@ -1759,7 +1759,7 @@ describe('freezeBlock entered presentation (N6, nocx-y5v5)', () => {
     const frozen = freezeBlock(
       running,
       1,
-      'ssh pi@192.168.0.93',
+      'ssh pi@192.0.2.93',
       '~',
       '',
       '<span>host key prompt</span>',
@@ -1829,7 +1829,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
   })
 
   it('freezeEntered freezes the running block as entered with no exit code', () => {
-    const rec = manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    const rec = manager.startBlock('ssh pi@192.0.2.93', '~', 0)
     const entered = manager.freezeEntered(3)
     expect(entered).not.toBeNull()
     expect(entered!.id).toBe(rec.id)
@@ -1851,7 +1851,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
   })
 
   it('after freezeEntered the next startBlock creates a new running block and leaves the entered one untouched', () => {
-    manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    manager.startBlock('ssh pi@192.0.2.93', '~', 0)
     const entered = manager.freezeEntered(3)
     expect(manager.runningBlock).toBeNull()
 
@@ -1866,7 +1866,7 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
   })
 
   it('a normal D freeze after an entered block still renders success/failure from the real code', () => {
-    manager.startBlock('ssh pi@192.168.0.93', '~', 0)
+    manager.startBlock('ssh pi@192.0.2.93', '~', 0)
     manager.freezeEntered(3)
     manager.startBlock('pwd', '~', 5)
     const done = closeRunningBlock(manager)

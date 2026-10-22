@@ -439,3 +439,33 @@ describe('CellFit measurement handoff', () => {
     }
   })
 })
+
+// The pitch (nocx-1ebrs.15): --term-cell-height is the vertical half of the
+// published cell metric — the number the rows already lay out at, and the
+// number the procedural box/block ink needs to fill the cell top to bottom.
+// It is read where padY already reads it, and published beside it.
+
+describe('CellFit publishes the row pitch', () => {
+  it('carries --term-cell-height as pitch in the row context', () => {
+    const el = containerWith(8)
+    el.style.setProperty('--term-cell-height', '20px')
+    const fit = createCellFit(
+      () => el,
+      batch(() => 13.572),
+    )
+    fit.begin()
+    expect(fit.geometry()).toMatchObject({ cellWidth: 8, pitch: 20 })
+    fit.dispose()
+    expect(fit.geometry()).toBeNull()
+  })
+
+  it('omits pitch when no height is published — the old shape, no worse', () => {
+    const fit = createCellFit(
+      () => containerWith(8),
+      batch(() => 13.572),
+    )
+    fit.begin()
+    expect(fit.geometry()).toMatchObject({ cellWidth: 8 })
+    expect(fit.geometry()?.pitch).toBeUndefined()
+  })
+})

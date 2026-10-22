@@ -79,6 +79,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
   VaultBackend,
 } from './harness'
 import { readStand } from './stand'
@@ -533,16 +534,11 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
     await expect(setupSheet).toBeVisible({ timeout: 10_000 })
-    await page.locator('#vault-setup-passphrase').fill(`vault-pass-${nonce}`)
-    await page.locator('#vault-setup-confirm').fill(`vault-pass-${nonce}`)
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-    const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-    await expect(codeBlock).toBeVisible({ timeout: 10_000 })
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
-    await expect(setupSheet).not.toBeVisible({ timeout: 10_000 })
+    // The sheet's journey is the one owner's (harness.ts): press-and-look,
+    // code, Done, sheet gone. This file's private copy was the shape that
+    // waited blind on the code block while the press it sent never landed
+    // (nocx-17ihs).
+    await setUpVaultThroughTheSheet(page, `vault-pass-${nonce}`)
 
     // The deferred save ran with the vault now existing: the dialog closes
     // and the record is in the list. That the KEY landed is not asserted

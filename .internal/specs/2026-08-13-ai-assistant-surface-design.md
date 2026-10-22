@@ -165,7 +165,7 @@ the room back**:
 
 ```
 ┌───────────────────────────────────────────────┐
-│  htop  root@192.168.0.57               live   │  the live program, re-rendered at a
+│  htop  <user>@<lan-ip>               live   │  the live program, re-rendered at a
 │  ▏1[|||    ] 2[|      ] 3[||||   ] …          │  smaller FONT. The PTY is untouched.
 ├───────────────────────────────────────────────┤
 │ ▸ frame 14:32:07             ✓ still matches  │  the frame — an entry in the flow

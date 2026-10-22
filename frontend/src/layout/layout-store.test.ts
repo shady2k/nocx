@@ -319,6 +319,100 @@ describe('LayoutStore', () => {
     expect(store.tabs().map((t) => t.id)).toEqual(['newer'])
   })
 
+  // The ordering half the sequence above cannot see (nocx-1ebrs.56): the
+  // read is requested FIRST and answered LAST, so no later request exists to
+  // disqualify it — but a create answered in between has already folded the
+  // tab in, and the read's snapshot was taken before that tab existed.
+  // Folding it would unmake a pane the backend confirmed, and the pane layer
+  // would close the pane with no gesture anywhere. The store asks again.
+  it('re-reads rather than folds an answer that predates a confirmed create (nocx-1ebrs.56)', async () => {
+    const answers: Array<(result: LayoutReadResult) => void> = []
+    let tabsHeld: Tab[] = []
+    let panesHeld: Pane[] = []
+    const client = fakeClient({
+      // The snapshot is taken the moment the request is made — exactly the
+      // moment the backend's read handler builds its answer — and held.
+      read: () => {
+        const snap = snapshot({ tabs: [...tabsHeld], panes: [...panesHeld] })
+        return new Promise<LayoutReadResult>((resolve) => answers.push(resolve)).then(() => snap)
+      },
+      createTab: (t) => {
+        const made = {
+          tab: tab(t.id, { workspaceId: t.workspaceId }),
+          firstPane: pane(t.firstPane.id, t.id, { kind: t.firstPane.kind }),
+          replayed: false,
+        }
+        tabsHeld = [...tabsHeld, made.tab]
+        panesHeld = [...panesHeld, made.firstPane]
+        return Promise.resolve(made)
+      },
+    })
+    const store = new LayoutStore(client)
+
+    const first = store.load()
+    expect(answers).toHaveLength(1)
+    answers[0](snapshot())
+    await first
+
+    // The read whose answer will be stale: requested while the chain holds
+    // nothing, still in flight when the tab is created and confirmed.
+    const stale = store.load()
+    expect(answers).toHaveLength(2)
+    const opened = store.openTab({ kind: 'local', endpoint: null, cwd: '' })
+    await opened.created
+
+    answers[1](snapshot())
+    // The store re-asks rather than fold: a third read is REQUESTED once the
+    // stale answer lands, and only that one may describe the chain.
+    await vi.waitFor(() => expect(answers).toHaveLength(3))
+    answers[2](snapshot({ tabs: [tab(opened.tabId)], panes: [pane(opened.paneId, opened.tabId)] }))
+    await stale
+
+    expect(store.panes().map((p) => p.id)).toEqual([opened.paneId])
+  })
+
+  // The same race read the other way (nocx-1ebrs.56): a remote close folded
+  // while the read was in flight, and the read's snapshot still holds the
+  // tab. Folding it would put a tab the backend took out back on the strip.
+  it('re-reads rather than folds an answer that still holds a remotely closed tab (nocx-1ebrs.56)', async () => {
+    const answers: Array<(result: LayoutReadResult) => void> = []
+    let tabsHeld: Tab[] = []
+    let panesHeld: Pane[] = []
+    const client = fakeClient({
+      read: () => {
+        const snap = snapshot({ tabs: [...tabsHeld], panes: [...panesHeld] })
+        return new Promise<LayoutReadResult>((resolve) => answers.push(resolve)).then(() => snap)
+      },
+    })
+    const store = new LayoutStore(client)
+
+    const first = store.load()
+    expect(answers).toHaveLength(1)
+    answers[0](snapshot())
+    await first
+
+    // The participant's tab appears (the notification is the backend's word
+    // that the row exists), then leaves again while a read is in flight.
+    const participantTab = tab('worker-tab')
+    const participantPane = pane('worker-pane', 'worker-tab')
+    tabsHeld = [participantTab]
+    panesHeld = [participantPane]
+    store.applyRemoteTab(participantTab, participantPane)
+    const stale = store.load()
+    expect(answers).toHaveLength(2)
+    tabsHeld = []
+    panesHeld = []
+    store.applyRemoteTabClosed('worker-tab')
+
+    answers[1](snapshot({ tabs: [participantTab], panes: [participantPane] }))
+    await vi.waitFor(() => expect(answers).toHaveLength(3))
+    answers[2](snapshot())
+    await stale
+
+    expect(store.tabs()).toEqual([])
+    expect(store.panes()).toEqual([])
+  })
+
   it('notifies its listeners when a remote tab is folded in, like every other mutation', async () => {
     const store = new LayoutStore(fakeClient())
     await store.load()

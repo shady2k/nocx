@@ -58,6 +58,11 @@ export interface RunMetric {
    *  background covers the content box, exactly as the frozen blocks ship
    *  today. */
   readonly padY?: number
+  /** The published row pitch (--term-cell-height) — the vertical half of
+   *  the same metric cellWidth is the horizontal half of. The procedural
+   *  box/block ink (nocx-1ebrs.15) fills the cell top to bottom with it;
+   *  absent, nothing published it and those cells paint from the font. */
+  readonly pitch?: number
   /** What the measurements behind advanceOf/boxOf were taken against — the
    *  fit's signature: font epoch, family, size, stretch, letter spacing and
    *  shaping features. Two metrics with equal numbers and different
@@ -88,13 +93,17 @@ export function cellSpacing(
  *  marks a single cell whose ink cell-fit locked into a box: it is its own
  *  run — a merged pair would have taken one column for two — the box owns
  *  the advance, and `spacing` is 0 because the drawer must not letter-space
- *  a box that is already exactly its columns wide. */
+ *  a box that is already exactly its columns wide. `spans` marks an OWN-RUN
+ *  run (nocx-1ebrs.15): every merged cell's ink its painter draws to cell
+ *  bounds itself, and the array carries the columns each merged cell claimed
+ *  so the painter can draw each codepoint on its own cell. */
 export interface GeometryRun<A> {
   chars: string
   attrs: A
   cols: number
   spacing: number
   box?: CellBox
+  spans?: number[]
 }
 
 /** THE merge walk (rule 2). Cells in, runs out, in order. */
@@ -103,18 +112,28 @@ export function runsOf<A>(
   attrsEqual: (a: A, b: A) => boolean,
   faceOf: (attrs: A) => FitFace,
   metric?: RunMetric,
+  ownRun?: (chars: string, cols: number) => boolean,
 ): GeometryRun<A>[] {
   const cellWidth = metric?.cellWidth ?? 0
   const defaultSpacing = metric?.defaultSpacing ?? 0
   const runs: GeometryRun<A>[] = []
 
   for (const cell of cells) {
+    // An OWN-RUN cell (nocx-1ebrs.15) is drawn to cell bounds by its
+    // painter: it consumes no font advance and no box verdict, and it
+    // contributes exactly its columns by construction — spacing 0. It may
+    // merge only with another own-run cell, never into an ordinary run: an
+    // atomic inline between tracked text takes the run's letter-spacing
+    // around itself and lands off its column.
+    const own = ownRun !== undefined && !cell.blank && ownRun(cell.chars, cell.cols)
     let spacing: number
     let box: CellBox | undefined
     if (cell.blank) {
       // No ink, nothing to measure: the blank carries the row default, the
       // same correction it inherited when the row carried one correction.
       spacing = defaultSpacing
+    } else if (own) {
+      spacing = 0
     } else {
       const face = faceOf(cell.attrs)
       // The box verdict is cell-fit's — its header owns the question "does
@@ -135,18 +154,21 @@ export function runsOf<A>(
     }
 
     const last = runs[runs.length - 1]
+    const lastOwn = last !== undefined && last.spans !== undefined
     if (
       last !== undefined &&
-      last.box === undefined &&
-      box === undefined &&
+      own === lastOwn &&
+      (own || (last.box === undefined && box === undefined)) &&
       attrsEqual(last.attrs, cell.attrs) &&
-      last.spacing === spacing
+      (own || last.spacing === spacing)
     ) {
       last.chars += cell.chars
       last.cols += cell.cols
+      if (own) last.spans?.push(cell.cols)
     } else {
       const run: GeometryRun<A> = { chars: cell.chars, attrs: cell.attrs, cols: cell.cols, spacing }
       if (box !== undefined) run.box = box
+      if (own) run.spans = [cell.cols]
       runs.push(run)
     }
   }

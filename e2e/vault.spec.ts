@@ -23,6 +23,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
@@ -178,32 +179,18 @@ test.describe('Vault — no keyring, full round trip', () => {
       .filter({ has: page.locator('#vault-setup-passphrase') })
     await expect(setupDialog).toBeVisible({ timeout: 10_000 })
 
-    // Enter passphrase.
-    await page.locator('#vault-setup-passphrase').fill('my-master-passphrase-42')
-    await page.locator('#vault-setup-confirm').fill('my-master-passphrase-42')
-
-    // Click "Set Up".
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-
-    // Wait for the recovery code to appear — title changes to "Recovery Code".
-    // The recovery step is asserted through the code block itself, not through
-    // a "dialog named Recovery Code". By this point the setup overlay has
-    // closed and the code is rendered in the form behind it, so an overlay
-    // scope finds nothing and a role+text scope matches every ancestor that
-    // contains the words. The code block is the thing under test.
-    const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-    await expect(codeBlock).toBeVisible({ timeout: 10_000 })
-
-    // Capture the recovery code from the CodeBlock.
-    const code = await codeBlock.textContent()
-    expect(code).not.toBeNull()
-    expect((code ?? '').length).toBeGreaterThan(10)
-
-    // Click "Done" to close setup. The vault is open; nothing is minted yet.
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    // From the passphrase to the sheet closing, ONE owner answers the sheet:
+    // setUpVaultThroughTheSheet presses and then looks, so both of this file's
+    // CI failures of 2026-10-21 are survivable there — the press the sheet
+    // never heard (job 119215257557: no vault.setup ever left, snapshot still
+    // on step 1 with both buttons live) and the answer that legitimately
+    // outlived a blind budget (job 119202248263: vault.setup worked 12.78 s
+    // against this file's private 10 s wait; 0.14–0.59 s is typical on the
+    // same runner). What THIS spec still owns is the lock: an uninitialized
+    // vault must answer it with the sheet, asserted above — and the helper
+    // hands back the code block it waited for, the thing under test.
+    const code = await setUpVaultThroughTheSheet(page, 'my-master-passphrase-42')
+    expect(code.length).toBeGreaterThan(10)
 
     // ── Phase 2b: the password itself ───────────────────────────────────
     // The setup sheet took the surface, so the panel closed with it and the
@@ -357,28 +344,11 @@ test.describe('Vault — recovery code unseal', () => {
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
     await expect(setupDialog).toBeVisible({ timeout: 10_000 })
-    await page.locator('#vault-setup-passphrase').fill('recovery-passphrase-99')
-    await page.locator('#vault-setup-confirm').fill('recovery-passphrase-99')
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
 
-    // Capture recovery code.
-    // The recovery step is asserted through the code block itself, not through
-    // a "dialog named Recovery Code". By this point the setup overlay has
-    // closed and the code is rendered in the form behind it, so an overlay
-    // scope finds nothing and a role+text scope matches every ancestor that
-    // contains the words. The code block is the thing under test.
-    const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-    await expect(codeBlock).toBeVisible({ timeout: 10_000 })
-    const code = await codeBlock.textContent()
-    expect(code).not.toBeNull()
-    expect((code ?? '').length).toBeGreaterThan(10)
-    const recoveryCode = code ?? ''
-
-    // Click "Done". The vault is open; the form is still open behind it.
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    // One owner from here to the sheet closing (case 1 says why at length);
+    // the code comes back because Phase 3 unseals with it after the restart.
+    const recoveryCode = await setUpVaultThroughTheSheet(page, 'recovery-passphrase-99')
+    expect(recoveryCode.length).toBeGreaterThan(10)
 
     // Now the password: the lock again, onto an open and empty vault, whose
     // create row raises the generator and whose result is minted and bound.
@@ -553,23 +523,13 @@ test.describe('Vault — a reachable keyring still asks for a passphrase', () =>
         .filter({ has: page.locator('#vault-setup-passphrase') })
       await expect(setupDialog).toBeVisible({ timeout: 10_000 })
 
-      await page.locator('#vault-setup-passphrase').fill('keyring-master-passphrase-7')
-      await page.locator('#vault-setup-confirm').fill('keyring-master-passphrase-7')
-      await page
-        .getByRole('dialog')
-        .getByRole('button', { name: /Set Up/i })
-        .click()
-
       // AND A RECOVERY CODE COMES BACK. This is the assertion the epic is
       // closed by: the silent path minted none, so the person who lost that
       // keychain item had lost the vault with no second way in. Its presence
-      // here is the difference, not the sheet.
-      const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
-      await expect(codeBlock).toBeVisible({ timeout: 10_000 })
-      const recoveryCode = await codeBlock.textContent()
-      expect((recoveryCode ?? '').length).toBeGreaterThan(10)
-
-      await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+      // here is the difference, not the sheet — and the journey to it is the
+      // one owner's (case 1 says why).
+      const recoveryCode = await setUpVaultThroughTheSheet(page, 'keyring-master-passphrase-7')
+      expect(recoveryCode.length).toBeGreaterThan(10)
 
       // The sheet took the surface, so the panel closed with it: the person
       // presses the lock again, this time onto an OPEN vault.

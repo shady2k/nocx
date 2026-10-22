@@ -9,6 +9,7 @@ import {
   makeClipboard,
   makeBanner,
   setupTabBarDOM,
+  makeLayoutBackend,
   makeLayoutStore,
   makeUIStateBackend,
   FIXTURE_CWD,
@@ -30,7 +31,11 @@ import type { TerminalContent } from './terminal-content'
 import type { WorkersTabCreated } from './generated/workers.tabCreated'
 import type { WorkersTabClosed } from './generated/workers.tabClosed'
 import type { Exit } from './generated/exit'
-import type { Pane as LayoutPane, Tab as LayoutTab } from './generated/layout.read'
+import type {
+  LayoutReadResult,
+  Pane as LayoutPane,
+  Tab as LayoutTab,
+} from './generated/layout.read'
 import type { DriverState } from './pane-observation'
 import { frameOf, type CellSpec } from './painter/fixtures'
 import type { SessionFrame } from './generated/session.frame'
@@ -3409,6 +3414,72 @@ describe('a restored pane and the session the backend still holds', () => {
 // layout.read. The tests below watch it happen in the renderer's own state —
 // the layout cache and the tab strip's DOM — never merely that a handler was
 // registered.
+// ── A stale layout answer cannot close a pane (nocx-1ebrs.56) ──────────────
+//
+// The read and the create are two requests on one socket, and nothing on it
+// promises their ANSWERS arrive in the order their requests did. A read
+// answered late describes the chain as it was when the backend snapshotted
+// it — before the tab the person just opened existed. In PR #454's WebKit
+// run that answer folded over a confirmed create, the renderer found a
+// registered pane with no row, and the pane closed ~25 ms after it opened
+// with no gesture anywhere. The discriminator the bead names: inject exactly
+// that answer, and watch the pane.
+describe('a stale layout answer cannot close a newly created pane (nocx-1ebrs.56)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  it('keeps the pane and its session when a late answer omits the row it never saw', async () => {
+    const client = makeClient()
+    const underlying = makeLayoutBackend()
+    // The read snapshots the chain the moment it is requested and holds its
+    // answer until released — the reordering a slow answer on a live socket
+    // produces, made deterministic.
+    const gates: Array<() => void> = []
+    const delayed = {
+      ...underlying,
+      read: (): Promise<LayoutReadResult> =>
+        new Promise((resolve) => {
+          const snapshot = underlying.read()
+          gates.push(() => void snapshot.then(resolve))
+        }),
+    }
+    const layout = makeLayoutStore(delayed)
+    const mounting = mountPaneManager(client, undefined, undefined, undefined, layout)
+
+    // Boot's own read is the first gate; the manager does not finish
+    // starting until it answers.
+    await vi.waitFor(() => expect(gates).toHaveLength(1))
+    gates.shift()!()
+    const { bar, manager } = await mounting
+
+    // The read that will go stale: requested BEFORE the new tab exists...
+    void layout.store.load()
+    manager.newPane()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+    const second = client._sessions[1]
+
+    // ...and answered AFTER the backend confirmed the tab.
+    gates.shift()!()
+
+    // Drain every read still in flight — the fix re-reads, the defect folds
+    // — and let the DOM settle before asserting anything.
+    for (let guard = 0; gates.length > 0 && guard < 4; guard++) {
+      gates.shift()!()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(manager.paneCount).toBe(2)
+    expect(bar.querySelectorAll('.nocx-tab')).toHaveLength(2)
+    expect(second.close).not.toHaveBeenCalled()
+    expect(second.detach).not.toHaveBeenCalled()
+  })
+})
+
 describe('a worker participant tab appears live (nocx-ui8q6.3)', () => {
   /**
    * The backend's OWN row for a participant, and the fact that announces it.

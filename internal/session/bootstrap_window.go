@@ -150,6 +150,19 @@ func (t *outputTap) takeLine() (string, bool, error) {
 	// only copy being dropped.
 	if start, ok := bootstrapstream.NextLineStart(t.buf); ok && start > 0 {
 		t.buf = t.buf[start:]
+		// The trim moved the buffer onto the OSC's own opening, and the
+		// line there may already be complete: its bytes arrived in the
+		// same read as the drawing in front of them. Saying "not yet"
+		// here strands the line — ReadLine's next look needs a further
+		// signal, and the signal that carried these bytes fed THIS call
+		// (the one-slot sig drops any that arrived while the reader was
+		// not taking it), so on CI the reader sat out its whole deadline
+		// beside a token it held (nocx-1ebrs.50).
+		if content, next, ok := bootstrapstream.LineEnd(t.buf); ok {
+			line := string(bytes.TrimRight(t.buf[:content], "\r"))
+			t.buf = t.buf[next:]
+			return line, true, nil
+		}
 	}
 	if len(t.buf) > maxWindowLine {
 		// Not our protocol. The bytes are the renderer's and it already

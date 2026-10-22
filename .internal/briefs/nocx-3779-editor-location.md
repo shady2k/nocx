@@ -27,7 +27,7 @@ A finished block tells you where it ran. The prompt you are about to press
 Enter on does not.
 
 - `frontend/src/scrollback/blocks.ts:157` renders a `cmd-header-location` chip
-  (`root@192.168.0.57`) into every finished block's header.
+  (`<user>@<lan-ip>`) into every finished block's header.
 - The string comes from `terminal-content.ts:862`, which calls `locationLine()`
   and passes it to `blockManager.setLocation(...)` — **only when `sshOpts` is
   set**, so a local session correctly gets an empty string.
@@ -63,7 +63,7 @@ worktree. Read it. Its binding sentence:
 > never keep rendering the last trusted cwd as though it were current.
 
 That is the whole point of the feature. A chip that keeps showing
-`root@192.168.0.57` after the shell stopped answering is worse than no chip,
+`<user>@<lan-ip>` after the shell stopped answering is worse than no chip,
 because it is confidently wrong next to an irreversible action — and running the
 right command on the wrong machine is precisely what `nocx-uahp` exists to
 prevent.

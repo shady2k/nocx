@@ -439,6 +439,12 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"uistate.set": {
 			[]byte(`{"sidebar":{"activeViewId":"home","width":240},"activeTab":"tab-1"}`),
 		},
+		"uistate.window.get": {
+			[]byte(`{}`),
+		},
+		"uistate.window.observe": {
+			[]byte(`{"width":1280,"height":800,"x":40,"y":60,"maximised":false,"fullScreen":false,"displays":"1:1920x1080p"}`),
+		},
 		"agent.approve": {
 			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"once"}`),
 			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"expand"}`),

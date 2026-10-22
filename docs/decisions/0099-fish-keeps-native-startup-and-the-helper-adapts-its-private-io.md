@@ -1,4 +1,4 @@
-# ADR-0096 — Fish keeps native startup; the helper adapts its private I/O
+# ADR-0099 — Fish keeps native startup; the helper adapts its private I/O
 
 - **Status:** Accepted
 - **Date:** 2026-10-21

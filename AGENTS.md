@@ -330,23 +330,12 @@ and restore the saved layout afterwards. The corrected native Fish run printed
 its version and created the expected proof file; the earlier input was a harness
 error, not a Fish failure.
 
-## Heavy runs go to the SkyPilot cluster
+## Where heavy suites run
 
-**Tests run through `nocx-sky-test`, not on this machine.** `nocx-sky-test <worktree>
-'<command>'` stages the worktree (tracked + untracked files, never `.git`), runs the command on
-that worktree's own SkyPilot cluster, and exits with the command's own status. The first call
-starts the cluster (about two minutes); later calls reuse it (about thirty seconds). `--down`
-when you are done. This machine is 12 GB of SHARED memory: a vitest or `go test -race` run
-here fails for want of memory rather than for a defect, and three load-shaped failures were
-filed from exactly that (`nocx-wsgrt`, `nocx-u8saf`, `nocx-n05m6`).
-
-A guard refuses the heavy local spellings inside a nocx checkout - `go test`, `npm test`,
-`npx vitest`, `npx tsc`, `vitest`, `tsc` - and passes everything else, every other project,
-and anything started by `make` (a build-path target never needs an override).
-`NOCX_ALLOW_LOCAL_TESTS=1` runs locally anyway and says so; the merged-tree gate uses it.
-
-The tools, the recipes, what each job would look like on SkyPilot and what that route does NOT
-prove: [`docs/agents/heavy-runs.md`](docs/agents/heavy-runs.md).
+**Where heavy suites run is the developer's choice.** The containerized runners are the
+project's default — `./scripts/ci-*.sh` and `e2e/run-in-container.sh` — because they mirror
+CI. If `AGENTS.local.md` exists at the checkout root, read it — it holds this machine's own
+setup and is never committed.
 
 ## How we work
 

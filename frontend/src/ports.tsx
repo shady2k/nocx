@@ -712,7 +712,7 @@ export function PortsPanel(props: PortsPanelProps) {
               <Section title="Detected" divided dense>
                 {/* Whose listeners these are, said out loud and always. The
                     panel had no such statement, so a tab titled
-                    `pi@raspberrypi` showed this machine's listeners and
+                    `pi@host-2` showed this machine's listeners and
                     nothing contradicted the title (owner, 2026-08-04). A list
                     of addresses is meaningless without the machine it belongs
                     to, and the tab title is NOT that machine — it is whatever

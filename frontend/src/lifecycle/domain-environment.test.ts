@@ -225,9 +225,9 @@ describe('nested domains — the renderer half (ADR-0024 §6, protocol §9)', ()
       lifecycle: 'prompt_ready',
       domain: 'd2',
       epoch: 2,
-      destination: { host: '192.168.0.93', user: 'pi', port: 22 },
+      destination: { host: '192.0.2.93', user: 'pi', port: 22 },
     })
-    expect(env.view()).toMatchObject({ host: '192.168.0.93', user: 'pi' })
+    expect(env.view()).toMatchObject({ host: '192.0.2.93', user: 'pi' })
     // An authenticated ssh child is not the local machine, whatever the
     // session started as — the flag may only ever get more conservative.
     expect(env.view().isLocal).toBe(false)

@@ -28,6 +28,7 @@ import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { SkillsSection } from './skills-section'
+import { UpdatesSection } from './updates-section'
 import type { SkillsStore } from './skills-store'
 import { reconcileRailPages, type SettingsPage } from './settings-rail-pages'
 import type { SnippetsStore } from './snippets/snippets-store'
@@ -76,6 +77,7 @@ import {
 import { BackupRestoreSection } from './backup-restore-section'
 import { AboutSection } from './about-section'
 import type { AboutClient } from './about-client'
+import type { UpdateCheckController, UpdateCheckOutcome } from './update-check'
 import type { ClipboardAccess } from './clipboard'
 import { VaultSection } from './vault'
 import { log } from './log'
@@ -129,6 +131,7 @@ const PETS_SECTION = 'Pets'
  *  whose control the sweep's degrade contradicts. */
 const WORKTREES_SECTION = 'Worktrees'
 const SKILLS_SECTION = 'Skills'
+const UPDATES_SECTION = 'Updates'
 
 /** The clipboard an embedding without one hands the About page. It refuses
  *  rather than resolving: a Copy button that reports success while nothing was
@@ -251,6 +254,14 @@ export interface SettingsComponentProps {
    *  rather than reached for, because the platform seam is what a test
    *  substitutes and what refuses in a non-secure context. */
   clipboard?: ClipboardAccess
+  /** Why the last automatic update check failed, or null when it succeeded
+   *  (nocx-1ebrs.36). Passed through to the About page, whose card is the
+   *  product-visible half of a check that can fail. */
+  updateCheckError?: UpdateCheckController['error']
+  /** Runs one update check through the shared controller, for the About
+   *  page's Check for updates action (nocx-1ebrs.55). Absent in an
+   *  embedding with no updater, which then offers no dead button. */
+  checkForUpdates?: () => Promise<UpdateCheckOutcome | null>
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
@@ -840,6 +851,24 @@ export function SettingsComponent(props: SettingsComponentProps) {
       ),
     }
 
+    // The Updates page OWNS its section: `update.channel` is declared in Go
+    // under section "Updates" (internal/settings), which would otherwise
+    // mint a rail row of its own holding one select — the same duplicate the
+    // Skills page refuses. Owning it puts the channel select above what the
+    // page adds on top: the Linux install-only fact the declaration cannot
+    // know (nocx-1ebrs.35.1).
+    const updatesPage: SettingsPage = {
+      kind: 'component',
+      id: 'updates',
+      title: 'Updates',
+      groupId: 'application',
+      scrollMode: 'page',
+      ownsSection: UPDATES_SECTION,
+      renderContent: () => (
+        <UpdatesSection load={props.aboutClient ? () => props.aboutClient!.load() : undefined} />
+      ),
+    }
+
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
@@ -858,6 +887,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
               : Promise.reject(new Error('the build description is not available in this window'))
           }
           clipboard={props.clipboard ?? unavailableClipboard}
+          updateCheckError={props.updateCheckError}
+          onCheckForUpdates={props.checkForUpdates}
         />
       ),
     }
@@ -866,6 +897,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // defect this refuses rather than renders (nocx-fe7fe.2).
     return reconcileRailPages([
       connectionPage,
+      updatesPage,
       ...generated,
       backupPage,
       vaultPage,

@@ -138,3 +138,94 @@ func TestReleaseBuildStampsTheShellVersion(t *testing.T) {
 		t.Fatal("no LDFLAGS chain stamps the version; the check above proved nothing")
 	}
 }
+
+// THE SHIPPED APP'S ABOUT WINDOW READS THE BUNDLE, AND THE BUNDLE'S PLIST IS
+// GENERATED FROM WAILS' OWN DEFAULTS UNLESS EVERY IDENTITY FLAG IS NAMED
+// (nocx-1ebrs.43). The app menu's About item is orderFrontStandardAboutPanel:,
+// which prints NSHumanReadableCopyright out of the bundle's Info.plist
+// verbatim — and the plist's only producer is `wails3 generate build-assets`,
+// whose unset copyright default is the template string "© now, My Company".
+// That is the line the owner read off the shipped 0.6.1. The identity reaches
+// the bundle as flags on that one call, and a flag the workflow stops passing
+// is the defect returning — asserted here the same way the Wails stamp is.
+func TestReleaseBundleCarriesNocxOwnAboutIdentity(t *testing.T) {
+	path := filepath.Join("..", "..", ".github", "workflows", "release.yml")
+	raw, err := os.ReadFile(path) //nolint:gosec // this repository's own tracked workflow file
+	if err != nil {
+		t.Fatalf("the release workflow is the only place the bundle plist is generated: %v", err)
+	}
+	call := buildAssetsCall(string(raw))
+	if call == "" || !strings.Contains(call, "-productversion") {
+		t.Fatal("no build-assets invocation found; the check below proved nothing")
+	}
+	for _, flag := range []string{"-productcopyright", "-productcomments"} {
+		value, ok := flagValue(call, flag)
+		if !ok {
+			t.Errorf("the build-assets call passes no %s, so the bundle ships the Wails template default and the About window prints it (nocx-1ebrs.43)", flag)
+			continue
+		}
+		for _, boilerplate := range []string{"My Company", "My Product", "This is a comment"} {
+			if strings.Contains(value, boilerplate) {
+				t.Errorf("%s value %q carries the Wails template's %q boilerplate", flag, value, boilerplate)
+			}
+		}
+		if flag == "-productcopyright" && !strings.Contains(value, "shady2k") {
+			t.Errorf("-productcopyright value %q names no nocx identity; the LICENSE holds the project's own holder", value)
+		}
+	}
+}
+
+// buildAssetsCall joins the workflow's `wails3 generate build-assets`
+// invocation into one line, resolving the shell's continuation backslashes so
+// a flag can be read no matter where the YAML wrapped it.
+func buildAssetsCall(workflow string) string {
+	var call strings.Builder
+	inCall := false
+	for _, line := range strings.Split(workflow, "\n") {
+		trimmed := strings.TrimSpace(line)
+		continued := strings.HasSuffix(trimmed, "\\")
+		trimmed = strings.TrimSuffix(trimmed, "\\")
+		if inCall {
+			call.WriteByte(' ')
+			call.WriteString(trimmed)
+			if !continued {
+				return call.String()
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "wails3 generate build-assets") {
+			inCall = true
+			call.WriteString(trimmed)
+			if !continued {
+				return call.String()
+			}
+		}
+	}
+	if inCall {
+		return call.String()
+	}
+	return ""
+}
+
+// flagValue reads one flag's argument out of a joined shell command. A quoted
+// argument is taken whole — the copyright line and the description both
+// contain spaces — and the quotes are stripped, because the value that
+// reaches the generator is the shell's, not the YAML's.
+func flagValue(call, flag string) (string, bool) {
+	i := strings.Index(call, flag)
+	if i < 0 {
+		return "", false
+	}
+	rest := strings.TrimLeft(call[i+len(flag):], " ")
+	if rest == "" {
+		return "", false
+	}
+	if strings.HasPrefix(rest, `"`) {
+		if end := strings.Index(rest[1:], `"`); end >= 0 {
+			return rest[1 : 1+end], true
+		}
+		return "", false
+	}
+	fields := strings.Fields(rest)
+	return strings.Trim(fields[0], "'"), true
+}

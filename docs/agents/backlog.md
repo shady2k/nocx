@@ -1,9 +1,12 @@
 # Backlog integration
 
 Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.46.0 after this update lands. Setup task nocx-q8yjf.25 owns the proof
-evidence and any unperformed checks. Protocol 0.44.0 was installed by
-nocx-q8yjf.24. A branch alone is not an installed update. The protocol ships
+0.51.0 after this update lands. Setup task nocx-fs95y owns the proof evidence
+and any unperformed checks. Protocol 0.46.0 was installed by nocx-q8yjf.25,
+whose record — with nocx-q8yjf.26–.28 and root nocx-nl23a — the published
+export carries but this tracker's database has lost, so `br` cannot show them.
+Protocol 0.44.0 was installed by nocx-q8yjf.24. A branch alone is not an
+installed update. The protocol ships
 with the skills and is not restated here. This file holds project facts and
 commands; changing choices live only in the config. Each person's plugin,
 runtime and connected hooks are checked directly, never represented as shared
@@ -163,15 +166,20 @@ keeps every later change.
   `list` omits edges/comments; full `show` over the historical queue was too slow. It
   maps statuses, emits `holder` (assignee), `createdAt` and stored acceptance criteria,
   drops tombstones, and reads the submitted, implemented and accepted-stage records
-  above. Provenance edges are dropped; only `blocks` gates. Its own test:
+  above. Work-record identities are `<issue-id>:<BR-comment-id>`: numeric comment
+  IDs from independent clones may collide after a merge. Numeric `void` targets
+  receive the same issue scope in the normalized view; already-qualified targets
+  stay unchanged. The stored BR comments and export are not rewritten. Both work
+  record families, including damaged records, remain available to their consumers.
+  Provenance edges are dropped; only `blocks` gates. Its own test:
   `node --test .githooks/backlog-gate/adapter.test.mjs`.
 - **Rules:** `check.mjs`, `check-commits.mjs`, `check-docs.mjs`,
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs` and
   `document-format.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
   `skills/backlog/setup-shady2k-skills/` at source commit
-  `648084b49fc27042a9219c5ec4a400ad00e08046` (plugin 0.115.0, setup protocol
-  0.46.0), never edited here. Compare each copy with that source. Run all five `--selftest`
+  `a8441dfe9c6c4d62524a0b53457ca63dd817baa4` (plugin 0.121.0, setup protocol
+  0.51.0), never edited here. Compare each copy with that source. Run all five `--selftest`
   commands from the plugin directory, where their fixtures live; `check.mjs`
   additionally takes `--config <repo>/.githooks/backlog-gate/config.json` for
   portability.

@@ -14,7 +14,7 @@
 // visibility. The document is read back directly in exactly three places
 // where no public channel exists and the assertion is state integrity
 // (cleared after a throwing submit; untouched by a no-op Ctrl-C).
-import { describe, it, expect, vi, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
@@ -384,9 +384,9 @@ describe('CommandEditor', () => {
     const { ed, container } = setup()
     ed.show()
     ed.setCwd('/srv/nocx')
-    ed.setLocation('root@192.168.0.57')
+    ed.setLocation('root@192.0.2.57')
     const strong = context(container).querySelector('[data-emphasis="strong"]')
-    expect(strong?.textContent).toBe('root@192.168.0.57')
+    expect(strong?.textContent).toBe('root@192.0.2.57')
     expect(context(container).textContent).toContain('srv/nocx')
   })
 
@@ -775,7 +775,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       applicable: (c) => c.doc.trim() !== '',
       suggest: (ctx) =>
         Promise.resolve({
-          candidates: ['ssh pi@192.168.0.93', 'ssh pi@192.168.0.93 -p 22', 'ssh prod'].map(
+          candidates: ['ssh pi@192.0.2.93', 'ssh pi@192.0.2.93 -p 22', 'ssh prod'].map(
             (r): Candidate => ({
               id: `hist:${r}`,
               targetId: 'shell',
@@ -795,7 +795,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       // The host provider is wired too. At bare `ssh` the token sits in
       // COMMAND position, where the host provider is inapplicable — the
       // composition must surface HISTORY here, not hosts.
-      providers: [sshHostProvider(['root@192.168.0.57']), historyProvider],
+      providers: [sshHostProvider(['root@192.0.2.57']), historyProvider],
       dropdown,
       env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
       latencyBudgetMs: 0,
@@ -823,9 +823,9 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       [...dropdown.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row')].map(
         (r) => r.textContent ?? '',
       )
-    expect(rows().some((t) => t.includes('ssh pi@192.168.0.93'))).toBe(true)
+    expect(rows().some((t) => t.includes('ssh pi@192.0.2.93'))).toBe(true)
     // The host provider was not consulted: its row is nowhere on the list.
-    expect(rows().some((t) => t.includes('root@192.168.0.57'))).toBe(false)
+    expect(rows().some((t) => t.includes('root@192.0.2.57'))).toBe(false)
     expect(submit).not.toHaveBeenCalled()
   })
 })
@@ -1248,5 +1248,259 @@ describe('the grant chip (nocx-wcswn)', () => {
     ed.onGrantChipClick(opened)
     ed.root.querySelector<HTMLElement>('[data-control="grant"]')!.click()
     expect(opened).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the box transition (nocx-1ebrs.40)', () => {
+  // jsdom performs no layout and ships no Web Animations API, so the animated
+  // path needs both named by the test: `rect` stands in for the box's
+  // measured rectangle, and Element.animate is stubbed for EVERY element so
+  // the fade's two surfaces — the box (its return) and the ghost (the
+  // departure) — can be told apart by the element that was asked to move.
+  const rect = (
+    ed: CommandEditor,
+    box: { x: number; y: number; left: number; top: number; width: number; height: number },
+  ): void => {
+    vi.spyOn(ed.root, 'getBoundingClientRect').mockReturnValue(box as DOMRect)
+  }
+  const animateAny = () => {
+    const calls: {
+      el: Element
+      keyframes: Keyframe[]
+      options: number | KeyframeAnimationOptions
+    }[] = []
+    const anims: {
+      el: Element
+      finished: Promise<void>
+      resolve: () => void
+      cancel: ReturnType<typeof vi.fn>
+    }[] = []
+    const proto = Element.prototype as unknown as { animate?: unknown }
+    const orig = proto.animate
+    Object.defineProperty(proto, 'animate', {
+      configurable: true,
+      value: function (keyframes: Keyframe[], options: number | KeyframeAnimationOptions) {
+        calls.push({ el: this as Element, keyframes, options })
+        // One promise, settled by resolve() or rejected by cancel() — the
+        // real WAAPI settles `finished` in rejection on cancel, and the
+        // implementation's rejection handler is what removes the ghost, so
+        // the stand-in has to too, or a cancelled ghost outlives the test.
+        let resolve!: () => void
+        let reject!: (e: Error) => void
+        const finished = new Promise<void>((res, rej) => {
+          resolve = res
+          reject = rej
+        })
+        const cancel = vi.fn(() => {
+          reject(new Error('cancelled'))
+        })
+        anims.push({ el: this as Element, finished, resolve, cancel })
+        return { finished, cancel }
+      },
+    })
+    const restore = (): void => {
+      if (orig === undefined) delete proto.animate
+      else proto.animate = orig
+    }
+    return { calls, anims, restore }
+  }
+  const BOX = { x: 8, y: 9, left: 8, top: 9, width: 300, height: 130 }
+  const ghostOf = (): HTMLElement | null =>
+    document.querySelector<HTMLElement>('[data-nocx-motion-ghost]')
+  // A ghost whose stand-in promise never settled would leak into the next
+  // test's document-wide queries; each test owns its ghosts only.
+  afterEach(() => {
+    document.querySelectorAll('[data-nocx-motion-ghost]').forEach((g) => g.remove())
+  })
+
+  it('without the Web Animations API the box leaves in one frame, as before', () => {
+    // jsdom is that build: no `animate` on the element, so hide() is the
+    // instant removal every existing test and every reduced-motion user gets.
+    const { ed } = setup()
+    ed.show()
+    ed.hide()
+    expect(ed.root.style.display).toBe('none')
+    expect(ed.isVisible).toBe(false)
+    expect(ghostOf()).toBeNull()
+  })
+
+  it('hide() takes the box out of the flow in one step; a ghost fades where it was', () => {
+    const { ed } = setup()
+    ed.show()
+    rect(ed, BOX)
+    const { calls, restore } = animateAny()
+    try {
+      ed.hide()
+      // Input ownership has already moved — isVisible is false the instant
+      // hide() ran — and the box is out of the layout in the SAME frame as
+      // the blur: every consumer that waits for the composer to be visible
+      // must wait for the box that owns input, never catch a dying one
+      // (a submit typed into that dying window went raw to the pty and no
+      // block was ever recorded — the journey spec caught it).
+      expect(ed.isVisible).toBe(false)
+      expect(ed.root.style.display).toBe('none')
+      expect(ed.root.style.position).toBe('')
+      expect(ed.root.getAttribute('inert')).toBeNull()
+      // The ink fades on the ghost: the box's frozen copy, fixed at the
+      // rectangle the box occupied, owning paint only.
+      const ghost = ghostOf()
+      expect(ghost).not.toBeNull()
+      const call = calls.find((c) => c.el === ghost)
+      expect(call, 'the ghost is what animates').toBeTruthy()
+      expect(call!.keyframes).toEqual([{ opacity: '1' }, { opacity: '0' }])
+      expect(ghost!.style.position).toBe('fixed')
+      expect(ghost!.style.left).toBe('8px')
+      expect(ghost!.style.top).toBe('9px')
+      expect(ghost!.style.width).toBe('300px')
+      expect(ghost!.style.height).toBe('130px')
+      expect(ghost!.style.pointerEvents).toBe('none')
+      expect(ghost!.getAttribute('inert')).toBe('')
+      expect(ghost!.getAttribute('aria-hidden')).toBe('true')
+    } finally {
+      restore()
+    }
+  })
+
+  it('the departure wears no composer identity: a document-wide query still answers one composer', () => {
+    // The suite's promise (e2e/harness.ts): a bare `.nocx-editor` /
+    // `.nocx-editor-input` locator resolves to ONE element per tab, and
+    // Playwright's strict mode reads two as a product bug. Bought on CI run
+    // 39602953353: both identity classes rode the clone, so for the 140ms of
+    // every submit two elements answered, and the first strict poll after
+    // Enter — command-editor.spec.ts:246, enhanced-input.spec.ts:21 — failed
+    // on all four e2e shards. The departure carries its own name; the ink
+    // classes stay, because they are the ink.
+    // This file's earlier tests leave their roots in the document, so a
+    // whole-document count is the FILE's, not the product's: the assertion is
+    // this test's own surfaces — the box is the only composer its container
+    // holds, and the ghost, the one other element hide() puts in the
+    // document, answers neither name. The document-wide strictness itself is
+    // owned by the two e2e specs that bought it.
+    const { ed, view, container } = setup()
+    ed.show()
+    rect(ed, BOX)
+    const { restore } = animateAny()
+    try {
+      ed.hide()
+      const editors = [...document.querySelectorAll('.nocx-editor')].filter((el) =>
+        container.contains(el),
+      )
+      expect(editors).toHaveLength(1)
+      expect(editors[0]).toBe(ed.root)
+      const inputs = [...document.querySelectorAll('.nocx-editor-input')].filter((el) =>
+        container.contains(el),
+      )
+      expect(inputs).toHaveLength(1)
+      expect(inputs[0]).toBe(view.contentDOM)
+      // The ghost keeps its own names, and the ink classes with them.
+      const ghost = ghostOf()!
+      expect(ghost.matches('.nocx-editor')).toBe(false)
+      expect(ghost.closest('.nocx-editor')).toBeNull()
+      expect(ghost.querySelector('.nocx-editor-input')).toBeNull()
+      expect(ghost.classList.contains('nocx-editor-departure')).toBe(true)
+      const ghostInput = ghost.querySelector<HTMLElement>('.nocx-editor-departure-input')!
+      expect(ghostInput).not.toBeNull()
+      expect(ghostInput.classList.contains('cm-content')).toBe(true)
+      expect(ghostInput.classList.contains('nocx-editor-input')).toBe(false)
+      expect(ghost.querySelector('.cm-editor')).not.toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  it('the ghost is removed when its fade ends, and when dispose() runs', async () => {
+    const { ed } = setup()
+    ed.show()
+    rect(ed, BOX)
+    const { anims, restore } = animateAny()
+    try {
+      ed.hide()
+      const ghost = ghostOf()!
+      const anim = anims.find((x) => x.el === ghost)!
+      anim.resolve()
+      await anim.finished
+      expect(document.contains(ghost)).toBe(false)
+      // And a ghost in flight does not survive a dispose.
+      ed.show()
+      rect(ed, BOX)
+      ed.hide()
+      const second = ghostOf()!
+      expect(second).not.toBeNull()
+      ed.dispose()
+      expect(document.contains(second)).toBe(false)
+    } finally {
+      restore()
+    }
+  })
+
+  it('show() while a departure fades: the ghost goes, the box returns from nothing', async () => {
+    const { ed } = setup()
+    ed.show()
+    rect(ed, BOX)
+    const { calls, anims, restore } = animateAny()
+    try {
+      ed.hide()
+      const ghost = ghostOf()!
+      const ghostAnim = anims.find((x) => x.el === ghost)!
+      ed.show()
+      // The box is back; the ghost's half-faded ink over it would read as a
+      // second flicker, so the return cancels the departure outright.
+      expect(ghostAnim.cancel).toHaveBeenCalled()
+      // The removal rides the rejection the cancel settled; one microtask.
+      await Promise.resolve()
+      expect(document.contains(ghost)).toBe(false)
+      expect(ed.root.style.display).toBe('')
+      expect(ed.isVisible).toBe(true)
+      const backCall = calls.filter((c) => c.el === ed.root)
+      expect(backCall).toHaveLength(1)
+      // Opacity only, from nothing: the box's layout height never animates,
+      // so no fit number moves mid-return.
+      expect(backCall[0].keyframes).toEqual([{ opacity: '0' }, { opacity: '1' }])
+    } finally {
+      restore()
+    }
+  })
+
+  it('hide() mid-return hands the reached ink to the ghost', () => {
+    const { ed } = setup()
+    ed.show()
+    rect(ed, BOX)
+    const first = animateAny()
+    try {
+      ed.show()
+      // The return is mid-fade at 0.4 ink when the box is asked to leave:
+      // the ghost starts from the ink the person is actually looking at.
+      ed.root.style.opacity = '0.4'
+      ed.hide()
+      expect(ed.root.style.display).toBe('none')
+      const ghost = ghostOf()!
+      const call = first.calls.find((c) => c.el === ghost)
+      expect(call).toBeTruthy()
+      expect(call!.keyframes).toEqual([{ opacity: '0.4' }, { opacity: '0' }])
+    } finally {
+      first.restore()
+    }
+  })
+
+  it('a reduced-motion preference keeps the old instant box', () => {
+    const { ed } = setup()
+    ed.show()
+    rect(ed, BOX)
+    // jsdom defines no matchMedia at all; motion.ts reads it optionally, so
+    // the stub is the whole answer.
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    try {
+      const { calls, restore } = animateAny()
+      try {
+        ed.hide()
+        expect(ed.root.style.display).toBe('none')
+        expect(calls).toHaveLength(0)
+        expect(ghostOf()).toBeNull()
+      } finally {
+        restore()
+      }
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

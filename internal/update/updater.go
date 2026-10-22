@@ -161,28 +161,62 @@ func NewUpdater(cfg UpdaterConfig) Updater {
 // GitHub manifest fetcher (production)
 // ---------------------------------------------------------------------------
 
-// GitHubManifestFetcher fetches the signed manifest from GitHub Releases'
-// "latest" redirect. It makes two GET requests: one for manifest.json and
-// one for manifest.json.sig.
+// GitHubManifestFetcher fetches the signed manifest from GitHub Releases.
+// Which release it follows is the CHANNEL (ADR-0097): stable — the default —
+// rides the "latest" redirect, nightly rides the moving `nightly` prerelease
+// tag. It makes two GET requests: one for manifest.json and one for
+// manifest.json.sig, from whichever base the selected channel names.
 type GitHubManifestFetcher struct {
-	BaseURL    string
-	HTTPClient *http.Client
+	// BaseURL is the STABLE channel's base. The field stays settable so a
+	// test can point the fetch at its own server; production gets the
+	// constant.
+	BaseURL string
+	// NightlyBaseURL is the NIGHTLY channel's base, overridable for the
+	// same reason.
+	NightlyBaseURL string
+	HTTPClient     *http.Client
+
+	selected channelState
 }
 
-// NewGitHubManifestFetcher returns a fetcher pointed at the nocx releases.
+// NewGitHubManifestFetcher returns a fetcher pointed at the nocx releases,
+// on the stable channel — the default every install keeps until the person
+// opts into nightly.
+//
+// A nil client means "no client was chosen", not "no client exists": it
+// falls back to the same 30-second-timeout default NewUpdater applies to
+// its download client. One package, one rule for the same missing input —
+// before nocx-1ebrs.36 the nil was stored instead and panicked on every
+// check, because main.go (the one production caller) passes nil.
 func NewGitHubManifestFetcher(client *http.Client) *GitHubManifestFetcher {
-	return &GitHubManifestFetcher{
-		BaseURL:    "https://github.com/shady2k/nocx/releases/latest/download",
-		HTTPClient: client,
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	return &GitHubManifestFetcher{
+		BaseURL:        stableManifestBaseURL,
+		NightlyBaseURL: nightlyManifestBaseURL,
+		HTTPClient:     client,
+	}
+}
+
+// SetChannel selects the manifest the NEXT fetch reads. Safe beside a check
+// in flight; the one that is running keeps the channel it started with.
+func (f *GitHubManifestFetcher) SetChannel(c Channel) { f.selected.set(c) }
+
+// baseURL resolves the base the current selection fetches from.
+func (f *GitHubManifestFetcher) baseURL() string {
+	if f.selected.get() == ChannelNightly {
+		return f.NightlyBaseURL
+	}
+	return f.BaseURL
 }
 
 func (f *GitHubManifestFetcher) Fetch(ctx context.Context) ([]byte, []byte, error) {
-	body, err := f.get(ctx, f.BaseURL+"/manifest.json")
+	body, err := f.get(ctx, f.baseURL()+"/manifest.json")
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetch manifest: %w", err)
 	}
-	sig, err := f.get(ctx, f.BaseURL+"/manifest.json.sig")
+	sig, err := f.get(ctx, f.baseURL()+"/manifest.json.sig")
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetch manifest signature: %w", err)
 	}

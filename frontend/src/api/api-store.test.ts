@@ -867,6 +867,79 @@ describe('ApiStore — the environment', () => {
     expect(store.activeEnvironment()).toBe(PROD_ENV.relPath)
   })
 
+  it('a choice made while no request is open is held for the request being opened (nocx-1ebrs.46)', async () => {
+    // The rail renders from the collection listing, so a person can click a
+    // row while the request's read is still in flight — or before any request
+    // is open at all. The click used to be dropped on the floor by
+    // setEnvironment's draft-null guard, with the rail still advertising the
+    // choice it refused: one sighting on CI webkit, reproduced from the
+    // mechanism. The choice is held until a draft lands and applied to it.
+    const { store } = storeWith(withEnvironments([DEV_ENV]))
+    await store.refresh()
+
+    // The click with NOTHING open. The single-environment fallback would pick
+    // dev; the person's gesture must beat it the moment it is made.
+    store.setEnvironment('')
+    expect(store.activeEnvironment()).toBe('')
+
+    await store.openRequest(HANDLE, 'users/create.json')
+    expect(store.activeEnvironment()).toBe('')
+
+    // CONSUMED, not sticky: the gesture answered the request that was being
+    // opened. A sibling opened next falls back to the collection's own rule.
+    await store.openRequest(HANDLE, 'users/list.json')
+    expect(store.activeEnvironment()).toBe(DEV_ENV.relPath)
+  })
+
+  it("a held choice reaches the opened request's file like a click after the open", async () => {
+    const disk = new Map<string, ApiRequest>()
+    const readRequest = vi.fn((_handle: string, relPath: string) =>
+      Promise.resolve({
+        request: structuredClone(
+          disk.get(relPath) ?? {
+            ...REQUEST,
+            id: relPath,
+          },
+        ),
+      }),
+    )
+    const writeRequest = vi.fn((_handle: string, relPath: string, request: ApiRequest) => {
+      disk.set(relPath, structuredClone(request))
+      return Promise.resolve({ ok: true as const })
+    })
+    const { store } = storeWith({
+      ...withEnvironments([DEV_ENV]),
+      readRequest,
+      writeRequest,
+    })
+    await store.refresh()
+
+    store.setEnvironment('')
+    await store.openRequest(HANDLE, 'users/create.json')
+    await vi.waitFor(() => expect(disk.get('users/create.json')?.environment).toBe(''))
+  })
+
+  it('a held choice does not rewrite a request that remembers its own', async () => {
+    // The file's own environment is the request's memory (nocx-ei9fy.1). A
+    // gesture made beside the form does not overwrite what a saved file says
+    // about itself; it only answers a request that has no opinion.
+    const readRequest = vi.fn(() =>
+      Promise.resolve({ request: structuredClone({ ...REQUEST, environment: DEV_ENV.relPath }) }),
+    )
+    const writeRequest = vi.fn().mockResolvedValue({ ok: true as const })
+    const { store } = storeWith({
+      ...withEnvironments([DEV_ENV, PROD_ENV]),
+      readRequest,
+      writeRequest,
+    })
+    await store.refresh()
+
+    store.setEnvironment('')
+    await store.openRequest(HANDLE, 'users/create.json')
+    expect(store.activeEnvironment()).toBe(DEV_ENV.relPath)
+    expect(writeRequest).not.toHaveBeenCalled()
+  })
+
   it('the choice belongs to one collection, and leaves with it', async () => {
     const { store } = storeWith(withEnvironments([DEV_ENV, PROD_ENV]))
     await store.refresh()

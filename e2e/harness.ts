@@ -1056,8 +1056,10 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
     .not.toBe('pending')
 
   if (await setupSheet.isVisible()) {
+    // The owner ends on the sheet being gone; what this helper still owes its
+    // own caller is the ENDPOINT dialog closing, which the deferred save does
+    // once the vault exists.
     await setUpVaultThroughTheSheet(page, spec.vaultPassphrase)
-    await baseExpect(setupSheet).not.toBeVisible({ timeout: 10_000 })
     await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
   }
 
@@ -1102,8 +1104,28 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
  * for the code block without clicking), and a second Setup that does arrive is
  * refused by the vault itself ("vault is already initialized",
  * internal/vault/vault.go:283) rather than re-keying anything.
+ *
+ * THE SECOND MECHANISM IS THE ANSWER BEING LATE, and a press-then-look survives
+ * it too: `saving()` is set the moment the request is sent and cleared only when
+ * its answer arrives (vault.tsx handleSetup), so a submit in flight shows step 1
+ * with BOTH buttons disabled — and the answer can legitimately outlive a caller's
+ * blind budget. Measured in CI run 39594109583's `ci-e2e (webkit, 2)` (job
+ * 119202248263): vault.setup was dispatched at 11:58:06.566Z and the vault was
+ * initialized at 11:58:19.343Z — 12.78 s of real work on the same runner where
+ * every other setup that day took 0.14–0.59 s — while vault.spec.ts's private
+ * copy waited a fixed ten seconds on the code block and gave up 2.8 s before the
+ * backend answered. The sheet's own snapshot said exactly this: "Setting up…",
+ * both buttons disabled, no error. The retry loop above does not widen that
+ * budget to make the wait pass; it waits on the sheet's own state inside the
+ * same 15 s the press-and-look already owned, and a second press against a
+ * disabled button is swallowed rather than owed.
+ *
+ * ONE OWNER means ONE: every spec that answers this sheet — vault.spec.ts's
+ * three journeys, the Secrets-page walks, the deferred saves and imports —
+ * calls this and none of them keeps its own copy of the steps. Each returns
+ * the recovery code this now hands back.
  */
-export async function setUpVaultThroughTheSheet(page: Page, passphrase: string): Promise<void> {
+export async function setUpVaultThroughTheSheet(page: Page, passphrase: string): Promise<string> {
   const sheet = page
     .locator('.ui-prompt-overlay')
     .filter({ has: page.locator('#vault-setup-passphrase') })
@@ -1130,8 +1152,16 @@ export async function setUpVaultThroughTheSheet(page: Page, passphrase: string):
     baseExpect(await recoveryCode.isVisible()).toBe(true)
   }).toPass({ timeout: 15_000 })
 
+  // The code is read BEFORE Done closes the sheet: callers need it (vault.spec.ts
+  // unseals with it after a restart) and its length is the caller's assertion to
+  // make. Reading it here is also what makes this the sheet's one owner — a
+  // caller that re-derived the locator would be a second answer to "what did
+  // setup show".
+  const code = (await recoveryCode.textContent()) ?? ''
+
   await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
   await baseExpect(sheet).not.toBeVisible({ timeout: 10_000 })
+  return code
 }
 
 /**

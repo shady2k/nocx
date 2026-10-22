@@ -7,6 +7,8 @@
 .env.*
 .idea/
 .vscode/
+# A checkout's own machine setup; AGENTS.md says to read it when present.
+/AGENTS.local.md
 *.db
 *.dll
 *.dylib

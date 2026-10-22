@@ -63,11 +63,19 @@
 
 .ab-actions {
   display: flex;
+  gap: var(--space-2);
 }
 
 /* The reading state is a plain line in the quiet register; the failed state
    belongs to the kit's StatusCard (nocx-8sudy sweep 3/4). */
 .ab-loading {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+/* The manual update check's answer, beside the button that asked for it —
+   the same quiet register as the loading line (nocx-1ebrs.55). */
+.ab-check-result {
   margin: 0;
   color: var(--color-text-muted);
 }

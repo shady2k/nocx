@@ -24,6 +24,7 @@ import type { ModelStyle as Style, ScreenSnapshot } from '../cell-model'
 import type { FitCandidate } from '../scrollback/cell-fit'
 import { runsOf, type GeometryRun, type GridCell, type RunMetric } from '../scrollback/run-geometry'
 import type { TerminalSnapshot } from '../scrollback/serializer'
+import { isProceduralInk, proceduralSvgOf } from './cell-ink'
 import { faceOf, resolveInk, styleEquals } from './style'
 
 export interface PaintRowOptions {
@@ -42,6 +43,11 @@ export function fitCandidatesOf(rows: Iterable<ScreenSnapshot['rows'][number]>):
   for (const row of rows) {
     for (const cell of row.cells) {
       if (!cell.hasText) continue
+      // Box drawing and block elements are painted to cell bounds from the
+      // metric itself (nocx-1ebrs.15): no font advance is consumed, so the
+      // measurer is never asked — asking would only warm a cache entry that
+      // no paint reads.
+      if (isProceduralInk(cell.grapheme)) continue
       out.push({ chars: cell.grapheme, width: cell.span, face: faceOf(cell.style) })
     }
   }
@@ -70,12 +76,26 @@ export function paintRow(
       attrs: cell.style,
       blank: !cell.hasText,
     }))
-  const runs = runsOf(cells, styleEquals, faceOf, opts.metric ?? undefined)
+  const runs = runsOf(
+    cells,
+    styleEquals,
+    faceOf,
+    opts.metric ?? undefined,
+    proceduralOf(opts.metric) ? isProceduralInk : undefined,
+  )
   const defaultSpacing = opts.metric?.defaultSpacing ?? 0
   for (const run of runs) {
     appendRun(el, run, defaultSpacing, opts)
   }
   return el
+}
+
+/** Procedural ink is paintable when the metric carries both halves of the
+ *  cell: the width across and the published pitch down (nocx-1ebrs.15).
+ *  Without either there is no cell rectangle to fill, and the font glyph —
+ *  the behaviour every terminal without this module ships — stands. */
+function proceduralOf(metric: RunMetric | null): boolean {
+  return metric !== null && metric.cellWidth > 0 && (metric.pitch ?? 0) > 0
 }
 
 function appendRun(
@@ -86,6 +106,59 @@ function appendRun(
 ): void {
   const ink = resolveInk(run.attrs, opts.palette)
   const padY = opts.metric?.padY
+
+  // Box drawing and block elements drawn TO CELL BOUNDS (nocx-1ebrs.15):
+  // the frozen path's .term-cell owns the advance, the ink is the metric's
+  // own geometry — cols × cellWidth across, the published pitch down. One
+  // box per RUN: every cell of it shares one SVG coordinate space, so a
+  // line across cells never meets a per-element device-pixel snap.
+  //
+  // THE CHARACTER STAYS TEXT (owner decision, 2026-10-21): the run's
+  // characters are a text node in the row, so selection, copy, find and the
+  // accessibility tree read exactly what the program painted — no
+  // aria-label stands in for them. Only the font glyph is made invisible
+  // (.term-cell-glyph is transparent); the ink keeps the run's own colour
+  // through the box's currentColor and paints behind the character (the
+  // glyph's positioned layer, style.css). A glyph nobody can see cannot
+  // tile wrongly; the geometry the bead is about is the SVG's.
+  const metric = opts.metric
+  if (
+    metric !== null &&
+    metric.cellWidth > 0 &&
+    (metric.pitch ?? 0) > 0 &&
+    isProceduralInk(run.chars)
+  ) {
+    const pitch = metric.pitch as number
+    const cell = document.createElement('span')
+    cell.className = 'term-cell'
+    cell.dataset.cols = String(run.cols)
+    cell.dataset.procedural = ''
+    if (ink.css) cell.style.cssText = ink.css
+    // SIZED BY THE PUBLISHED VARS, not baked pixels: the frozen block's
+    // re-pitch story (cell-metric.ts) is that old blocks adopt the current
+    // geometry without a repaint, and a box nailed to the day's numbers
+    // would sit at the old pitch inside text that moved. The SVG carries
+    // preserveAspectRatio="none" for the same reason: it stretches with the
+    // box, and every shape in it is defined to fill or centre on the cell,
+    // so the stretched ink is still exact.
+    cell.style.width = `calc(var(--term-cell-width, 1ch) * ${run.cols})`
+    cell.style.height = 'var(--term-cell-height, 1.2em)'
+    cell.appendChild(
+      proceduralSvgOf(
+        run.chars,
+        run.spans ?? Array.from(run.chars, () => 1),
+        metric.cellWidth,
+        pitch,
+      ),
+    )
+    const glyph = document.createElement('span')
+    glyph.className = 'term-cell-glyph'
+    glyph.style.color = 'transparent'
+    glyph.textContent = run.chars
+    cell.appendChild(glyph)
+    row.appendChild(cell)
+    return
+  }
 
   if (run.box !== undefined) {
     // The frozen path's own box classes — one CSS truth for "a cell that

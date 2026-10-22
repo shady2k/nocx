@@ -10,7 +10,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   DEFAULT_SNAPSHOT,
   serializeLine,
@@ -20,6 +20,9 @@ import {
 import { lineWith } from '../scrollback/test-helpers'
 import type { RunMetric } from '../scrollback/run-geometry'
 import { createCellPainter, metricOf } from './painter'
+import { CARET_IDLE_MS, CARET_PHASE_ATTR } from '../caret-phase'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { frameOf, snapshotOf, styleOf, type CellSpec } from './fixtures'
 
 /** The row the one-owner test drives: `a`, wide `漢` plus its spacer, `b`.
@@ -605,5 +608,312 @@ describe('the pointer answers who owns the click (nocx-1ebrs.24)', () => {
     expect(stale?.isConnected).toBe(true)
     painter.dispose()
     expect(surface.dataset.pointer).toBeUndefined()
+  })
+})
+
+describe('the armed link underline (nocx-1ebrs.48)', () => {
+  // ADR-0072 took xterm's own hover underline away with xterm itself; the
+  // armed provider's spans were left with nothing to paint them. The
+  // underline is an overlay like the cursor and the selection — positioned
+  // by THE mapping, over exactly the span's cells — and `from`/`to` arrive
+  // in the grammar's own units (UTF-16 offsets into the row's text), the
+  // same numbers `LivePolicy.ranges` speaks.
+  const URL_ROW: CellSpec[] = [...'xhttps://e.co'].map((ch) => [ch, 1, true] as CellSpec)
+
+  it('underlines exactly the span\u2019s cells, in the grammar\u2019s UTF-16 units', () => {
+    const { painter, surface } = mount(() => null)
+    painter.apply(
+      snapshotOf(frameOf(1, [URL_ROW], { x: 0, y: 0, visible: false }, { cols: 13, rows: 1 })),
+    )
+    painter.setLinkHighlight({ row: 0, from: 1, to: 13 })
+    const link = surface.querySelector<HTMLElement>('.term-grid-link')
+    expect(link).not.toBeNull()
+    // The `x` before the url is not the link's: column 1 through 12.
+    expect(link?.style.left).toBe('8px')
+    expect(link?.style.width).toBe('96px')
+    expect(link?.style.top).toBe('0px')
+    expect(link?.style.height).toBe('20px')
+    expect(link?.dataset.row).toBe('0')
+    expect(link?.dataset.start).toBe('1')
+    expect(link?.dataset.end).toBe('13')
+    painter.dispose()
+  })
+
+  it('carries a wide cell whole: the underline covers its columns, not its code units', () => {
+    // `a漢b`: the wide cluster is one code unit and two columns. A span
+    // naming it in UTF-16 (1..2) must underline both of its columns.
+    const { painter, surface } = mount(() => null)
+    painter.apply(
+      snapshotOf(
+        frameOf(1, [
+          [
+            ['a', 1, true],
+            ['漢', 2, true],
+            ['', 3, false],
+            ['b', 1, true],
+          ],
+        ]),
+      ),
+    )
+    painter.setLinkHighlight({ row: 0, from: 1, to: 2 })
+    const link = surface.querySelector<HTMLElement>('.term-grid-link')
+    expect(link?.style.left).toBe('8px')
+    expect(link?.style.width).toBe('16px')
+    // And `b` — text offset 2, because the spacer column spells no
+    // character — still lands on column 3, its own column.
+    painter.setLinkHighlight({ row: 0, from: 2, to: 3 })
+    const b = surface.querySelector<HTMLElement>('.term-grid-link')
+    expect(b?.style.left).toBe('24px')
+    expect(b?.style.width).toBe('8px')
+    painter.dispose()
+  })
+
+  it('clears when told the pointer left the link, and stays clear', () => {
+    const { painter, surface } = mount(() => null)
+    painter.apply(
+      snapshotOf(frameOf(1, [URL_ROW], { x: 0, y: 0, visible: false }, { cols: 13, rows: 1 })),
+    )
+    painter.setLinkHighlight({ row: 0, from: 1, to: 13 })
+    expect(surface.querySelector('.term-grid-link')).not.toBeNull()
+    painter.setLinkHighlight(null)
+    expect(surface.querySelector('.term-grid-link')).toBeNull()
+    // Clearing twice is the steady state, not a second removal of one node.
+    painter.setLinkHighlight(null)
+    expect(surface.querySelector('.term-grid-link')).toBeNull()
+    painter.dispose()
+  })
+
+  it('keeps the underline across a repaint that keeps the row, and drops it when the row goes', () => {
+    const { painter, surface } = mount(() => null)
+    painter.apply(
+      snapshotOf(frameOf(1, [URL_ROW], { x: 0, y: 0, visible: false }, { cols: 13, rows: 1 })),
+    )
+    painter.setLinkHighlight({ row: 0, from: 1, to: 13 })
+    // A new revision whose row is unchanged keeps its DOM, so the overlay
+    // would survive anyway; a PALETTE change repaints every row, and the
+    // underline has to come back with them.
+    painter.apply(
+      snapshotOf(frameOf(2, [URL_ROW], { x: 0, y: 0, visible: false }, { cols: 13, rows: 1 })),
+    )
+    expect(surface.querySelector('.term-grid-link')).not.toBeNull()
+    const shrunk = frameOf(
+      3,
+      [[['z', 1, true]]],
+      { x: 0, y: 0, visible: false },
+      { cols: 1, rows: 1 },
+    )
+    painter.apply(snapshotOf(shrunk))
+    expect(surface.querySelector('.term-grid-link')).toBeNull()
+    painter.dispose()
+  })
+
+  it('takes no overlay for a row the grid does not have, and removes everything on dispose', () => {
+    const { painter, surface } = mount(() => null)
+    painter.apply(
+      snapshotOf(frameOf(1, [URL_ROW], { x: 0, y: 0, visible: false }, { cols: 13, rows: 1 })),
+    )
+    painter.setLinkHighlight({ row: 5, from: 1, to: 13 })
+    expect(surface.querySelector('.term-grid-link')).toBeNull()
+    painter.setLinkHighlight({ row: 0, from: 1, to: 13 })
+    expect(surface.querySelector('.term-grid-link')).not.toBeNull()
+    painter.dispose()
+    expect(surface.querySelector('.term-grid-link')).toBeNull()
+  })
+})
+
+// The pitch is a paint input (nocx-1ebrs.15): the procedural ink bakes the
+// row pitch into its geometry, so a republished pitch must repaint rows the
+// way a metric change does — even though the cells, and the row comparison,
+// are unchanged.
+
+describe('the published pitch is a paint input (nocx-1ebrs.15)', () => {
+  const fit = {
+    geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature: 'regular' }),
+    advanceOf: () => null,
+    boxOf: () => null,
+  }
+  it('repaints unchanged rows when the pitch changes', () => {
+    let pitch: number | undefined = 20
+    const shifting = {
+      ...fit,
+      geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature: 's', pitch }),
+    }
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const painter = createCellPainter({
+      surface,
+      metric: () => metricOf(shifting),
+      palette: () => DEFAULT_SNAPSHOT,
+    })
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    const before = liveRow(surface)
+    pitch = 24
+    painter.apply(snapshotOf(frameOf(2, [MERGE_ROW])))
+    expect(liveRow(surface)).not.toBe(before)
+  })
+
+  it('carries the pitch into RunMetric through metricOf', () => {
+    const withPitch = {
+      ...fit,
+      geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature: 's', pitch: 20 }),
+    }
+    expect(metricOf(withPitch)?.pitch).toBe(20)
+    expect(metricOf(fit)?.pitch).toBeUndefined()
+  })
+})
+
+describe('the grid cursor holds still while input arrives (nocx-1ebrs.37)', () => {
+  // The rule the composer's caret already follows (nocx-1ebrs.31), applied to
+  // the painter's overlay: solid while keys arrive and while the program
+  // writes at the cursor, blinking again after the idle bound. A grid cursor
+  // caught mid-off by a keystroke reads as a dropped key, the one thing a
+  // cursor must never look like.
+  //
+  // The phase is asserted through the attribute the painter writes — the
+  // same seam the stylesheet consumes — never through a class name. What the
+  // stylesheet does with it is a stylesheet fact and is checked as one, in
+  // the last test of this block.
+  const GEOMETRY = { cols: 4, rows: 3, cellWidthPx: 8, cellHeightPx: 20 }
+  const BLANK: CellSpec = ['', 1, false]
+
+  /** Three rows whose only text is `first` in the top-left cell. */
+  const rowsWith = (first: string): CellSpec[][] => [
+    [[first, 1, true], BLANK, BLANK, BLANK],
+    [BLANK, BLANK, BLANK, BLANK],
+    [BLANK, BLANK, BLANK, BLANK],
+  ]
+  const at = (x: number, y: number) => ({ x, y, visible: true as const })
+
+  const caretOf = (surface: HTMLElement): string | null =>
+    surface.querySelector<HTMLElement>('.term-grid-cursor')?.getAttribute(CARET_PHASE_ATTR) ?? null
+
+  /** A cursor that has been sitting quiet long enough to be blinking: the
+   *  state every pane opens in and returns to. */
+  const quiet = (painter: ReturnType<typeof createCellPainter>): void => {
+    painter.apply(snapshotOf(frameOf(1, rowsWith('a'), at(0, 0), GEOMETRY)))
+    vi.advanceTimersByTime(CARET_IDLE_MS)
+  }
+
+  beforeEach(() => {
+    // Only the idle timer is faked, the way the composer's own file does it:
+    // the painter schedules nothing else.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('blinks from the first frame and stays blinking while nothing arrives', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+    expect(caretOf(surface)).toBe('blinking')
+    vi.advanceTimersByTime(CARET_IDLE_MS * 3)
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('a keystroke leaves the cursor solid, and the blink resumes after the idle bound', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    painter.noteInput() // the seam the intent path calls for every key, text and paste
+
+    expect(caretOf(surface)).toBe('solid')
+    vi.advanceTimersByTime(CARET_IDLE_MS - 1)
+    expect(caretOf(surface)).toBe('solid')
+    vi.advanceTimersByTime(1)
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('a program write at the cursor is input too: the covered character changed', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    // The frame a shell's echo produces: the cell under the cursor now
+    // spells what was typed.
+    painter.apply(snapshotOf(frameOf(2, rowsWith('b'), at(0, 0), GEOMETRY)))
+
+    expect(caretOf(surface)).toBe('solid')
+    vi.advanceTimersByTime(CARET_IDLE_MS)
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('the cursor moving under a frame is the program writing at it too', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    painter.apply(snapshotOf(frameOf(2, rowsWith('a'), at(1, 0), GEOMETRY)))
+
+    expect(caretOf(surface)).toBe('solid')
+  })
+
+  it('a frame that changes nothing at the cursor wakes nothing', () => {
+    // A theme switch re-applies the installed snapshot; a program may write
+    // far from the cursor. Neither is activity AT the cursor, and a cursor
+    // that went solid for them would blink whenever the screen moved.
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    const rows = rowsWith('a')
+    rows[2] = [BLANK, BLANK, BLANK, ['z', 1, true]] // row the cursor is not on
+    painter.apply(snapshotOf(frameOf(2, rows, at(0, 0), GEOMETRY)))
+
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('stays solid for as long as input and writes keep arriving', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    // Four acts, each inside the idle bound of the one before: a person
+    // typing into a streaming program must never see the cursor flicker.
+    for (const ch of 'abcd') {
+      painter.noteInput()
+      painter.apply(snapshotOf(frameOf(2, rowsWith(ch), at(0, 0), GEOMETRY)))
+      vi.advanceTimersByTime(CARET_IDLE_MS - 100)
+      expect(caretOf(surface)).toBe('solid')
+    }
+    vi.advanceTimersByTime(CARET_IDLE_MS)
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('a write restarts a half-spent idle wait', () => {
+    const { painter, surface } = mount(() => null)
+    quiet(painter)
+
+    painter.noteInput()
+    vi.advanceTimersByTime(300)
+    painter.apply(snapshotOf(frameOf(2, rowsWith('b'), at(0, 0), GEOMETRY)))
+    vi.advanceTimersByTime(300)
+    expect(caretOf(surface)).toBe('solid') // 600 since the key, 300 since the write
+    vi.advanceTimersByTime(200)
+    expect(caretOf(surface)).toBe('blinking')
+  })
+
+  it('disposing stops the wait: no idle timer outlives the painter', () => {
+    const { painter } = mount(() => null)
+    quiet(painter)
+    painter.noteInput()
+    expect(vi.getTimerCount()).toBe(1)
+
+    painter.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('the phase is what the stylesheet reads: solid suspends the blink, focused runs it', () => {
+    // jsdom computes no CSS and runs no animation, so the stylesheet is the
+    // only place this fact exists — read as text, the way the composer's
+    // file checks its own half.
+    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
+    const blink =
+      /\.terminal-live-inner:focus-within \.term-grid-cursor \{[^}]*animation:\s*term-cursor-blink/.exec(
+        css,
+      )
+    expect(blink).not.toBeNull()
+    const solid =
+      /\.terminal-live-inner:focus-within \.term-grid-cursor\[data-caret='solid'\] \{[^}]*animation:\s*none/.exec(
+        css,
+      )
+    expect(solid).not.toBeNull()
   })
 })

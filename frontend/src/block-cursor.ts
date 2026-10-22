@@ -70,23 +70,12 @@ export function cursorBlinkRate(): number {
   return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 0 : CURSOR_BLINK_MS
 }
 
-/**
- * How long the caret holds still after the last key, before the blink resumes.
- *
- * The standard rather than a taste: macOS text fields, VS Code and iTerm all
- * keep the caret SOLID while input is arriving and let the blink return on a
- * pause of about half a second. A caret caught mid-off by a key reads as a
- * dropped key, which is the one thing a caret must never look like.
- *
- * A hold, not a second period: the blink's rhythm stays CURSOR_BLINK_MS.
- */
-export const CARET_IDLE_MS = 500
+// The idle bound, the phase attribute and the phase's two words are the
+// shared caret vocabulary (caret-phase.ts): the grid's overlay follows the
+// same rule (nocx-1ebrs.37) and reads them from the same owner.
+import { CARET_IDLE_MS, CARET_PHASE_ATTR, type CaretPhase } from './caret-phase'
 
-/** The attribute the phase is written on, which is what the stylesheet reads. */
-export const CARET_PHASE_ATTR = 'data-caret'
-
-/** Solid while keys are arriving; blinking once they have stopped. */
-export type CaretPhase = 'solid' | 'blinking'
+export { CARET_IDLE_MS, CARET_PHASE_ATTR, type CaretPhase } from './caret-phase'
 
 /**
  * The caret's phase as the surface is rendering it.

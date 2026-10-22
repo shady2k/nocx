@@ -13,6 +13,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@solidjs/testing-library'
 import { AboutSection } from './about-section'
 import type { AppAbout } from './generated/app.about'
+import type { UpdateCheckOutcome } from './update-check'
 import type { ClipboardAccess } from './clipboard'
 
 const toasts: { message: string; level?: string }[] = []
@@ -145,5 +146,153 @@ describe('AboutSection', () => {
     expect(card).not.toBeNull()
     expect(card?.getAttribute('data-tone')).toBe('danger')
     expect(screen.getByText(/could not read this build's details/i)).toBeTruthy()
+  })
+
+  it('says why the last update check failed, where a person goes to look (nocx-1ebrs.36)', async () => {
+    // A soft degrade must be visible in the product: 0.6.0's failed checks
+    // vanished in a silent catch, and the About page is where somebody who
+    // wonders "why has it not offered me 0.6.1?" goes to read.
+    render(() => (
+      <AboutSection
+        load={load(RELEASE)}
+        clipboard={fakeClipboard()}
+        updateCheckError={() => 'fetch manifest: unexpected status 500'}
+      />
+    ))
+
+    await waitFor(() =>
+      expect(
+        screen.getByText('update check failed: fetch manifest: unexpected status 500'),
+      ).toBeTruthy(),
+    )
+  })
+
+  it('makes no claim about the update check when it has not failed', async () => {
+    render(() => (
+      <AboutSection
+        load={load(RELEASE)}
+        clipboard={fakeClipboard()}
+        updateCheckError={() => null}
+      />
+    ))
+
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+    expect(screen.queryByText(/update check failed/i)).toBeNull()
+  })
+})
+
+// ── Check for updates: a person can ask now (nocx-1ebrs.55) ───────────────
+//
+// The bead's sentence: activate "Check for updates", it runs the existing
+// createUpdateCheck().run owner, and the surface shows checking, then one of
+// three answers. These assert through the seam a person actually reaches —
+// the button, its disabled moment, and the line that lands beside it — with
+// the check itself stubbed at the controller boundary, never re-implemented
+// here.
+describe('AboutSection Check for updates (nocx-1ebrs.55)', () => {
+  it('offers the action where a check seam exists, and not where none does', async () => {
+    render(() => (
+      <AboutSection
+        load={load(RELEASE)}
+        clipboard={fakeClipboard()}
+        onCheckForUpdates={() => Promise.resolve(null)}
+      />
+    ))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /check for updates/i })).toBeTruthy(),
+    )
+
+    cleanup()
+    render(() => <AboutSection load={load(RELEASE)} clipboard={fakeClipboard()} />)
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+    // No seam, no button: a control that cannot run is a dead control, and
+    // the bead that owns this page already forbids those.
+    expect(screen.queryByRole('button', { name: /check for updates/i })).toBeNull()
+  })
+
+  it('activates the check through the seam a person presses', async () => {
+    const onCheck = vi
+      .fn<() => Promise<UpdateCheckOutcome | null>>()
+      .mockResolvedValue({ kind: 'up-to-date', channel: 'stable' })
+    render(() => (
+      <AboutSection load={load(RELEASE)} clipboard={fakeClipboard()} onCheckForUpdates={onCheck} />
+    ))
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /check for updates/i }))
+
+    await waitFor(() => expect(onCheck).toHaveBeenCalledTimes(1))
+  })
+
+  it('says checking while the check runs, and reports up to date with the build and the channel', async () => {
+    let answer: (() => void) | undefined
+    const onCheck = () =>
+      new Promise<{ kind: 'up-to-date'; channel: string }>((resolve) => {
+        answer = () => resolve({ kind: 'up-to-date', channel: 'nightly' })
+      })
+    render(() => (
+      <AboutSection load={load(RELEASE)} clipboard={fakeClipboard()} onCheckForUpdates={onCheck} />
+    ))
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /check for updates/i }))
+    // Checking is a state a person can see, not a frozen page: the button
+    // says so and holds.
+    await waitFor(() => expect(screen.getByText(/checking…/i)).toBeTruthy())
+    expect(screen.getByRole('button', { name: /checking…/i })).toBeTruthy()
+
+    answer!()
+    await waitFor(() =>
+      expect(
+        screen.getByText(`You're up to date (${RELEASE.version}, channel nightly)`),
+      ).toBeTruthy(),
+    )
+    // The checking state is gone once there is an answer.
+    expect(screen.queryByText(/checking…/i)).toBeNull()
+  })
+
+  it('shows the failure with its cause where the check itself already owns it', async () => {
+    // A failed check resolves null and the shared error accessor carries the
+    // cause — the card below is the surface a person reads, and it updates
+    // live because it reads the accessor rather than a snapshot.
+    const onCheck = vi.fn<() => Promise<UpdateCheckOutcome | null>>().mockResolvedValue(null)
+    render(() => (
+      <AboutSection
+        load={load(RELEASE)}
+        clipboard={fakeClipboard()}
+        onCheckForUpdates={onCheck}
+        updateCheckError={() => 'fetch manifest: unexpected status 500'}
+      />
+    ))
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /check for updates/i }))
+    await waitFor(() => expect(onCheck).toHaveBeenCalledTimes(1))
+
+    expect(
+      screen.getByText('update check failed: fetch manifest: unexpected status 500'),
+    ).toBeTruthy()
+    // And no up-to-date line: a failure is not quietly also a success.
+    expect(screen.queryByText(/up to date/i)).toBeNull()
+  })
+
+  it('leaves the announcement of an available build to the toast path', async () => {
+    // The available case is reported by the update toast the check raises
+    // (nocx-1ebrs.54); this page does not keep a second wording of it. What
+    // the page must not do is claim up-to-date.
+    const onCheck = vi.fn<() => Promise<UpdateCheckOutcome | null>>().mockResolvedValue({
+      kind: 'available',
+      version: '0.7.0',
+      notesUrl: 'https://example.com/notes',
+    })
+    render(() => (
+      <AboutSection load={load(RELEASE)} clipboard={fakeClipboard()} onCheckForUpdates={onCheck} />
+    ))
+    await waitFor(() => expect(screen.getByText(RELEASE.version)).toBeTruthy())
+
+    fireEvent.click(screen.getByRole('button', { name: /check for updates/i }))
+    await waitFor(() => expect(onCheck).toHaveBeenCalledTimes(1))
+
+    expect(screen.queryByText(/up to date/i)).toBeNull()
   })
 })

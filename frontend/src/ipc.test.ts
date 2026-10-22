@@ -426,10 +426,7 @@ describe('openSession', () => {
 
     void client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
     void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
-    void client.openSSHSessionByHost(
-      { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
-      'pi@192.168.0.93',
-    )
+    void client.openSSHSessionByHost({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'pi@192.0.2.93')
 
     for (const req of socket().requests()) {
       expect(req.params).not.toHaveProperty('enhanced')
@@ -486,7 +483,7 @@ describe('openSession', () => {
       const client = await connected()
       void client.openSSHSessionByHost(
         { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
-        '192.168.0.93',
+        '192.0.2.93',
         'pi',
         { paneId: PANE },
       )
@@ -496,7 +493,7 @@ describe('openSession', () => {
         xpixel: 0,
         ypixel: 0,
         kind: 'ssh',
-        host: '192.168.0.93',
+        host: '192.0.2.93',
         user: 'pi',
         paneId: PANE,
       })
@@ -512,7 +509,7 @@ describe('openSession', () => {
       void client.openSSHSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 }, 'ssh:test:1')
       void client.openSSHSessionByHost(
         { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
-        '192.168.0.93',
+        '192.0.2.93',
         'pi',
       )
 

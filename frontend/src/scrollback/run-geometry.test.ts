@@ -165,3 +165,62 @@ describe('runsOf (ADR-0009 rule 2)', () => {
     expect(runs.map((r) => r.chars)).toEqual(['漢', ' x'])
   })
 })
+
+// Own-run cells (nocx-1ebrs.15): the procedural box/block ink is drawn to
+// cell bounds by the painter, so its cells carry no font measurement at all —
+// no advance to space, no box verdict to consult. The walk must keep them
+// out of ordinary runs (an atomic inline between tracked text takes the
+// run's letter-spacing around itself and lands off its column) while letting
+// them merge with EACH OTHER, so one painted box spans a whole line of ─ and
+// the interior cell boundaries are one coordinate space, not per-element
+// layout boxes that each snap to device pixels on their own.
+
+describe('runsOf own-run cells (nocx-1ebrs.15)', () => {
+  const own = (chars: string): boolean => chars.codePointAt(0)! >= 0x2500
+
+  it('gives an own-run cell its own run with spacing 0 and no box verdict', () => {
+    const asked: string[] = []
+    const m: RunMetric = {
+      cellWidth: 8,
+      defaultSpacing: -0.5,
+      advanceOf: (chars) => {
+        asked.push(`advance:${chars}`)
+        return null
+      },
+      boxOf: (chars) => {
+        asked.push(`box:${chars}`)
+        return null
+      },
+    }
+    const runs = runsOf([cell('│'), cell('a')], attrsEqual, faceOf, m, own)
+    expect(runs).toEqual([
+      { chars: '│', attrs: plain, cols: 1, spacing: 0, spans: [1] },
+      { chars: 'a', attrs: plain, cols: 1, spacing: -0.5 },
+    ])
+    // Nothing was measured for the procedural cell: it owns its geometry.
+    expect(asked).toEqual(['box:a', 'advance:a'])
+  })
+
+  it('never merges an own-run cell into an ordinary run, even on equal attrs and spacing', () => {
+    const runs = runsOf([cell('a'), cell('│'), cell('b')], attrsEqual, faceOf, metric(), own)
+    expect(runs.map((r) => r.chars)).toEqual(['a', '│', 'b'])
+  })
+
+  it('merges own-run neighbours of equal attrs into ONE run', () => {
+    const runs = runsOf([cell('─'), cell('─'), cell('─')], attrsEqual, faceOf, metric(), own)
+    expect(runs).toEqual([{ chars: '───', attrs: plain, cols: 3, spacing: 0, spans: [1, 1, 1] }])
+  })
+
+  it('splits own-run neighbours whose attrs differ', () => {
+    const red: Attr = { fg: '#f00' }
+    const runs = runsOf([cell('─'), cell('─', 1, red)], attrsEqual, faceOf, metric(), own)
+    expect(runs.map((r) => r.chars)).toEqual(['─', '─'])
+    expect(runs[0]?.attrs).toEqual(plain)
+    expect(runs[1]?.attrs).toEqual(red)
+  })
+
+  it('walks without an ownRun predicate exactly as before', () => {
+    const runs = runsOf([cell('│'), cell('a')], attrsEqual, faceOf, metric({}))
+    expect(runs).toEqual([{ chars: '│a', attrs: plain, cols: 2, spacing: -0.5 }])
+  })
+})

@@ -995,7 +995,7 @@ describe('shellCompleteProvider — the line a pick produces', () => {
       token: { text, from: doc.length - text.length, to: doc.length },
       position: 'argument',
       cwd: '/home/dev',
-      host: 'dev@192.168.0.25',
+      host: 'dev@192.0.2.25',
     })
 
   it('keeps the typed directory once when the token is nested', async () => {

@@ -1330,3 +1330,75 @@ describe('ScrollbackController tells the pet a command has started', () => {
     expect(heard).not.toHaveBeenCalled()
   })
 })
+
+describe('the scroller box keeps the tail (nocx-1ebrs.40)', () => {
+  // jsdom has no ResizeObserver; the stand-in lets the test fire the delivery
+  // a real box change would. One instance per construction, recorded here.
+  class FakeBoxResizeObserver {
+    static latest: FakeBoxResizeObserver | null = null
+    readonly disconnect = vi.fn()
+    private readonly cb: ResizeObserverCallback
+    constructor(cb: ResizeObserverCallback) {
+      this.cb = cb
+      FakeBoxResizeObserver.latest = this
+    }
+    observe(): void {}
+    unobserve(): void {}
+    deliver(): void {
+      this.cb([], {} as ResizeObserver)
+    }
+  }
+
+  it('a box change with no block mutation keeps the live end on the bottom edge', () => {
+    vi.stubGlobal('ResizeObserver', FakeBoxResizeObserver)
+    try {
+      const { controller } = makeController()
+      const scrollTo = vi.fn()
+      controller.scrollbackArea.scrollTo = scrollTo
+      Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+        value: 1400,
+        configurable: true,
+      })
+      // The composer's box animated away, the process bar swapped in: the
+      // scroller's box changed and no block mutation ran. Following, the
+      // live end stays pinned — nothing accumulates below the fold for a
+      // later pin to land as a jump.
+      FakeBoxResizeObserver.latest!.deliver()
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+
+      // Not following: the box is not the reader's movement to answer.
+      scrollTo.mockClear()
+      stopFollowing(controller)
+      FakeBoxResizeObserver.latest!.deliver()
+      expect(scrollTo).not.toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('no box watcher is installed where the platform has none', () => {
+    // The pod's node carries a ResizeObserver global, so the absence must be
+    // named: the constructor must skip, not throw — the same guard the follow
+    // observer carries for IntersectionObserver.
+    vi.stubGlobal('ResizeObserver', undefined)
+    try {
+      const { controller } = makeController()
+      const box = (controller as unknown as { _boxResizeObserver: unknown })._boxResizeObserver
+      expect(box).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('dispose disconnects the box watcher', () => {
+    vi.stubGlobal('ResizeObserver', FakeBoxResizeObserver)
+    try {
+      const { controller } = makeController()
+      const watcher = FakeBoxResizeObserver.latest!
+      controller.dispose()
+      expect(watcher.disconnect).toHaveBeenCalled()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})

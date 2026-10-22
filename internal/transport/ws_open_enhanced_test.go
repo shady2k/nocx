@@ -157,7 +157,7 @@ func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
 	reg.WithSSHFactory(rec.factory(logger))
 
 	resolver := newLauncherTestResolver()
-	resolver.add("pi@192.168.0.93", ssh.HostConfig{User: "pi", HostName: "192.168.0.93", Port: 22})
+	resolver.add("pi@192.0.2.93", ssh.HostConfig{User: "pi", HostName: "192.0.2.93", Port: 22})
 
 	ws := NewWSServer(logger, reg,
 		// The ssh pane this case opens is this machine's helper's
@@ -174,7 +174,7 @@ func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 
 	openOverWire(t, ws, map[string]any{
-		"cols": 80, "rows": 24, "kind": "ssh", "host": "pi@192.168.0.93",
+		"cols": 80, "rows": 24, "kind": "ssh", "host": "pi@192.0.2.93",
 	})
 
 	if got := rec.config(t); !got.Enhanced {

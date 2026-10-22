@@ -579,7 +579,7 @@ describe('ports sidebar view', () => {
     const { container } = render(() => (
       <PortsPanel
         profileId={() => null}
-        unavailableIn={() => 'pi@192.168.0.93'}
+        unavailableIn={() => 'pi@192.0.2.93'}
         services={services}
         visible={() => true}
         pause={pause}
@@ -587,7 +587,7 @@ describe('ports sidebar view', () => {
       />
     ))
     await vi.waitFor(() => {
-      expect(container.textContent ?? '').toContain('pi@192.168.0.93')
+      expect(container.textContent ?? '').toContain('pi@192.0.2.93')
       expect(container.textContent ?? '').toContain('Cannot see the ports')
     })
     expect(status).not.toHaveBeenCalled()

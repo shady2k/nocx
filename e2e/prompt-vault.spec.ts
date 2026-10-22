@@ -39,6 +39,7 @@ import {
   appReadyForInput,
   bindEndpoint,
   settingsReady,
+  setUpVaultThroughTheSheet,
   type DisposableRoot,
 } from './harness'
 import { readStand } from './stand'
@@ -121,16 +122,8 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible({
       timeout: 10_000,
     })
-    await page.locator('#vault-setup-passphrase').fill(PASS)
-    await page.locator('#vault-setup-confirm').fill(PASS)
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: /Set Up/i })
-      .click()
-    await expect(page.getByRole('dialog').filter({ hasText: 'Recovery Code' })).toBeVisible({
-      timeout: 10_000,
-    })
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    // The sheet's journey is the one owner's (harness.ts) — nocx-17ihs.
+    await setUpVaultThroughTheSheet(page, PASS)
 
     // ── Phase 2: type a key and run it — composition is NOT interrupted ──
     await page.locator(TITLE).first().click()

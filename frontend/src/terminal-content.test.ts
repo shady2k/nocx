@@ -7022,6 +7022,76 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it.each([
+    {
+      kind: 'soft-wrapped',
+      command: 'printf fish; read answer',
+      echoRows: ['printf fish;', ' read answer'],
+      softWrap: true,
+    },
+    {
+      kind: 'multiline',
+      command: 'printf fish;\nread answer',
+      echoRows: ['printf fish;', 'read answer'],
+      softWrap: false,
+    },
+  ])(
+    'keeps $kind command echoes out of the running body',
+    async ({ command, echoRows, softWrap }) => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const handler = factHandler(client)
+      const scrollback = scrollbackFor(content)
+      try {
+        Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+          value: 300,
+          configurable: true,
+        })
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: { id: 'att-wrapped-echo', state: 'open', origin: 'shell', command },
+        })
+        client._fireBlockOutputStart({
+          entryId: 'att-wrapped-echo',
+          row: 3,
+          screenRevision: 1,
+          bufferKind: 'normal',
+          bufferInstance: '1',
+          cols: 12,
+          rows: 8,
+        })
+        const frame = screenFrame(1, ['old output', ...echoRows, 'current row'], {
+          cols: 12,
+          rows: 8,
+        })
+        frame.rows[1].wrap = softWrap
+        frame.rows[2].continuation = softWrap
+        frame.cursor.y = 3
+        sessionOf(content).fireScreenFrame(frame)
+        await vi.waitFor(() => {
+          expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-48px)')
+          expect(scrollback.terminalLiveViewport.style.height).toBe('16px')
+        })
+
+        // A program that clears and repaints the normal buffer keeps its new
+        // top row; the old echo's coordinates cannot hide replacement output.
+        const cleared = screenFrame(2, ['fresh output'], { cols: 12, rows: 8 })
+        cleared.cursor.y = 0
+        sessionOf(content).fireScreenFrame(cleared)
+        await vi.waitFor(() => {
+          expect(scrollback.terminalLiveInner.style.transform).toBe('')
+          expect(scrollback.terminalLiveViewport.style.height).toBe('16px')
+        })
+      } finally {
+        teardown()
+      }
+    },
+  )
+
   it('sizes a short running block from visible output, not the blank cursor tail', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

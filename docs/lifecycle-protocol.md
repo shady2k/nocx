@@ -278,8 +278,8 @@ authenticated `start` is exactly as attributable as an authenticated `complete`:
 - `start` while an attempt already runs in the domain → rejected: a nested event
   or a protocol violation, never a second top-level attempt.
 
-A `start` is legal only from lane lifecycle `PromptReady(domain)` with the domain
-active and `Established`.
+A `start` is legal at lane lifecycle `PromptReady(domain)`, or attaches to the
+domain's open, unstarted app attempt. The domain must be active and `Established`.
 
 ## 8. Attempts: completion, the fence
 
@@ -310,12 +310,27 @@ Validation: the attempt must exist, be open, and belong to the **active** domain
 rejected ("an attempt cannot complete across domains"). The exit status is set
 exactly once: a second `complete` for the same attempt is rejected.
 
+**Readiness is not completion.** An authenticated `prompt_ready` may arrive while
+an app attempt is open but has not started. The kernel makes input ready and
+primes that attempt; the renderer must restore the editor without completing or
+abandoning its record. A delayed genuine `start` still attaches to the same submit.
+When a valid fact then names a different attempt in that domain, the invariant
+of one open attempt per domain proves the retained record can no longer be open.
+Without a completion fact for it, the renderer settles it `unknown` before projecting the
+new attempt, so a cancelled input cannot keep a Running badge or acquire a fake
+exit status.
+This includes Fish's native `fish_cancel`: cancelling a parser continuation
+repaints its cached prompt without a `fish_prompt` event, so the adapter publishes
+one ready observation, never a fabricated execution.
+
 **Abandonment.** Nothing may mark an attempt successful and nothing may assign it
 an exit code it did not report (decision 5). An open attempt becomes `unknown`
 only on: transport loss of its domain, closure of its domain, an authenticated
 snapshot that cannot recover its completion, or an explicit abandon (native-mode
-escape). Absence of a completion is not a timeout — commands legitimately run for
-hours.
+escape). An unstarted, primed app attempt also becomes `unknown` on a second
+genuine prompt observation or a fresh submit, if no start attached between them.
+The first ready observation alone does not settle it. Absence of a completion is
+not a timeout — commands legitimately run for hours.
 
 ## 9. Domains: the stack
 

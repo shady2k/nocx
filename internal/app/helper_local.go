@@ -1294,7 +1294,8 @@ func localIntegrationStatus(shell string, lane lifecycle.LaneID) (string, ssh.Re
 	if shell == "" {
 		return "", ssh.ReasonNone
 	}
-	if shellintegration.LocalShellKind(shell) == shellintegration.ShellUnknown {
+	kind := shellintegration.LocalShellKind(shell)
+	if kind == shellintegration.ShellUnknown || (kind == shellintegration.ShellFish && lane == "") {
 		return transport.IntegrationConventional, ssh.ReasonUnsupportedShell
 	}
 	if lane == "" {

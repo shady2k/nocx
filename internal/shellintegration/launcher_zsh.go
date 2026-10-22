@@ -246,7 +246,7 @@ func zshRcfile(envBlock, scriptSource, capSource string) string {
 	// ships inside the bootstrap payload, and the far shell never reads
 	// the template's prose (nocx-z9s9.17). Stripping the rendered text
 	// also covers the substituted bodies.
-	return stripShellComments(rc)
+	return stripShellComments(rc, ShellBash)
 }
 
 // zshEnvFile and zshProfileFile render the two login-phase files that go into
@@ -283,7 +283,7 @@ func zshEnvFile() string { return zshEnvFileWith("") }
 // finished before the reader arrives.
 func zshEnvFileWith(capSource string) string {
 	env := strings.ReplaceAll(zshEnvTemplate, "@TRAP@", zshCleanupTrap)
-	return stripShellComments(strings.ReplaceAll(env, "@CAPSRC@", capSource))
+	return stripShellComments(strings.ReplaceAll(env, "@CAPSRC@", capSource), ShellBash)
 }
 
 // zshEnvFileLocal is the LOCAL tier's .zshenv: the same file, with the
@@ -292,7 +292,7 @@ func zshEnvFileWith(capSource string) string {
 // read looks like, not a second one written here).
 func zshEnvFileLocal() string { return zshEnvFileWith(capabilityFromDescriptor(zshUnsetExport)) }
 
-func zshProfileFile() string { return stripShellComments(zshProfileTemplate) }
+func zshProfileFile() string { return stripShellComments(zshProfileTemplate, ShellBash) }
 
 // zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the
 // POSIX outer script writes it, and the two login-phase files beside it,

@@ -215,7 +215,7 @@ func launchCarrier() string {
 		"@ACCEPTED@", OutcomeToken(OutcomeBootstrapAccepted),
 		"@NOGEN@", OutcomeToken(OutcomeGenerationUnavailable),
 	).Replace(s)
-	return stripShellComments(s)
+	return stripShellComments(s, ShellBash)
 }
 
 // launchBundle assembles the bundle descriptor both carriers publish (AD-8):

@@ -33,7 +33,7 @@ import "strings"
 // data, never comments, and is emitted verbatim. A heredoc nested inside a
 // ${…} expansion is deliberately out of scope — none of the scripts use one,
 // and the exec suites are the backstop that would catch a misparse.
-func stripShellComments(src string) string {
+func stripShellComments(src string, kind ShellKind) string {
 	var b strings.Builder
 	b.Grow(len(src))
 	i, n := 0, len(src)
@@ -95,7 +95,12 @@ func stripShellComments(src string) string {
 		if inSQ {
 			b.WriteByte(c)
 			i++
-			if c == '\'' {
+			if kind == ShellFish && c == '\\' && i < n && (src[i] == '\\' || src[i] == '\'') {
+				// Fish, unlike the POSIX family, permits these two escapes
+				// inside single quotes. An escaped quote must not end them.
+				b.WriteByte(src[i])
+				i++
+			} else if c == '\'' {
 				inSQ = false
 			}
 			continue

@@ -9,8 +9,11 @@ import (
 type ShellKind string
 
 const (
-	ShellBash    ShellKind = "bash"
-	ShellZsh     ShellKind = "zsh"
+	ShellBash ShellKind = "bash"
+	ShellZsh  ShellKind = "zsh"
+	// Fish uses the helper-hosted inherited-descriptor adapter; it does not
+	// claim the helper-less remote carrier's TCP transport.
+	ShellFish    ShellKind = "fish"
 	ShellUnknown ShellKind = "unknown"
 	// ShellAuto means "the far host decides": the launcher emits a single
 	// strictly-POSIX dispatcher that detects the login shell at runtime and
@@ -39,19 +42,6 @@ const (
 // variable can never spell it two different ways (nocx-2tesu).
 const ToolSocketEnvVar = "NOCX_TOOL_SOCKET"
 
-// AgentToolTokenEnvVar is the one spelling of the variable an agent's MCP
-// bridge reads the pane's bearer from (nocx-50w7p.16).
-//
-// It is NOT an environment variable nocx sets in a shell: the staging writes it
-// into the launch directory's mcp.json — 0600 in a 0700 directory — and the
-// agent's own MCP client is what puts it in the bridge's environment. That is
-// the whole point of the carrier: the far host's argv is world-readable, and a
-// shell's environment is inherited by everything it starts, while this reaches
-// exactly one child. Every reader and writer of the name goes through this
-// constant, so the Go side and the shells cannot spell it two ways.
-// #nosec G101 -- a variable NAME, not a credential: what it carries is minted per interval and never written here.
-const AgentToolTokenEnvVar = "NOCX_AGENT_TOKEN"
-
 // LaunchOptions carries what the start command must embed.
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
@@ -76,6 +66,10 @@ type LaunchOptions struct {
 	// lifecycle capability and report rendezvous remain outside this config.
 	AgentHelperPath     string
 	AgentToolSocketPath string
+	// EnvOverrides is the pending pane's explicit environment, before the
+	// startup adapter adds its own entries. Fish temporarily replaces its
+	// function path and must restore the effective original, not the helper's.
+	EnvOverrides []string
 	// AgentToolsAbsent says why this pane's agent has NO tool surface, from
 	// the closed set in agenttools.go. It is set exactly when both paths above
 	// are empty and nocx knows the reason — an ssh pane on a host with no
@@ -173,61 +167,40 @@ func (remoteLauncher) StartCommand(shell ShellKind, opts LaunchOptions) (string,
 
 func launcherEnvBlock(opts LaunchOptions) string {
 	var b strings.Builder
-	b.WriteString("NOCX_SHELL_INTEGRATION=1\n")
-	if opts.Enhanced {
-		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
-		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
-	}
-	if opts.AgentHelperPath != "" {
-		b.WriteString("NOCX_AGENT_HELPER_PATH=" + ShellQuote(opts.AgentHelperPath) + "\n")
-	}
-	if opts.AgentToolSocketPath != "" {
-		b.WriteString(ToolSocketEnvVar + "=" + ShellQuote(opts.AgentToolSocketPath) + "\n")
-	}
-	if opts.AgentToolsAbsent != "" {
-		// Non-secret and going into the shell's environment: the stage reads it
-		// to choose its sentence, and a person who inspects the pane sees the
-		// same code the launch was built from.
-		b.WriteString(AgentToolsAbsentEnvVar + "=" + ShellQuote(opts.AgentToolsAbsent.String()) + "\n")
-	}
-	// Lifecycle channel addressing and transport (ADR-0024). The capability
-	// is deliberately NOT here: it reaches the shell by one of the two forms
-	// in capability_source.go and must never appear in /proc/<pid>/environ.
-	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
-		b.WriteString("NOCX_LIFECYCLE_LANE=" + ShellQuote(opts.Lane) + "\n")
-		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + ShellQuote(opts.Domain) + "\n")
-		b.WriteString("NOCX_LIFECYCLE_EPOCH=" + fmt.Sprintf("%d\n", opts.Epoch))
-		if opts.LifecycleFD > 0 {
-			b.WriteString("NOCX_LIFECYCLE_FD=" + fmt.Sprintf("%d\n", opts.LifecycleFD))
-		}
-		if opts.LifecyclePort > 0 {
-			b.WriteString("NOCX_LIFECYCLE_PORT=" + fmt.Sprintf("%d\n", opts.LifecyclePort))
-		}
-	}
-	b.WriteString("export NOCX_SHELL_INTEGRATION")
-	if opts.Enhanced {
-		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
-	}
-	if opts.AgentHelperPath != "" {
-		b.WriteString(" NOCX_AGENT_HELPER_PATH")
-	}
-	if opts.AgentToolSocketPath != "" {
-		b.WriteString(" " + ToolSocketEnvVar)
-	}
-	if opts.AgentToolsAbsent != "" {
-		b.WriteString(" " + AgentToolsAbsentEnvVar)
-	}
-	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
-		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")
-		if opts.LifecycleFD > 0 {
-			b.WriteString(" NOCX_LIFECYCLE_FD")
-		}
-		if opts.LifecyclePort > 0 {
-			b.WriteString(" NOCX_LIFECYCLE_PORT")
-		}
-	}
-	b.WriteString("\n")
+	forLauncherEnv(opts, func(name, value string) {
+		b.WriteString("export " + name + "=" + ShellQuote(value) + "\n")
+	})
 	return b.String()
+}
+
+// forLauncherEnv owns the public launch fields for every shell dialect.
+// Bearers are deliberately absent: their only carrier is private bootstrap I/O.
+func forLauncherEnv(opts LaunchOptions, emit func(name, value string)) {
+	emit("NOCX_SHELL_INTEGRATION", "1")
+	if opts.Enhanced {
+		emit("NOCX_PROMPT_MODE", "marker-only")
+		emit("NOCX_SESSION_ID", opts.SessionID)
+	}
+	if opts.AgentHelperPath != "" {
+		emit("NOCX_AGENT_HELPER_PATH", opts.AgentHelperPath)
+	}
+	if opts.AgentToolSocketPath != "" {
+		emit(ToolSocketEnvVar, opts.AgentToolSocketPath)
+	}
+	if opts.AgentToolsAbsent != "" {
+		emit(AgentToolsAbsentEnvVar, opts.AgentToolsAbsent.String())
+	}
+	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
+		emit("NOCX_LIFECYCLE_LANE", opts.Lane)
+		emit("NOCX_LIFECYCLE_DOMAIN", opts.Domain)
+		emit("NOCX_LIFECYCLE_EPOCH", fmt.Sprintf("%d", opts.Epoch))
+		if opts.LifecycleFD > 0 {
+			emit("NOCX_LIFECYCLE_FD", fmt.Sprintf("%d", opts.LifecycleFD))
+		}
+		if opts.LifecyclePort > 0 {
+			emit("NOCX_LIFECYCLE_PORT", fmt.Sprintf("%d", opts.LifecyclePort))
+		}
+	}
 }
 
 // ShellQuote wraps s in single quotes, escaping embedded quotes with the

@@ -3627,12 +3627,21 @@ export class TerminalContent extends BasePaneContent {
           // else would move the pane off the conventional grid it was left
           // in — the first prompt after integration, or the prompt after a
           // desynchronized episode comes back, used to stay flat until the
-          // first command opened a block. 'running' is deliberately absent:
-          // the command cycle owns the live region there (beginBlock,
-          // freezeFromAttempt and the fullscreen path), and forcing idle
-          // mid-command would collapse it. setIdle declines while an
+          // first command opened a block. setIdle declines while an
           // alt-screen program owns the pane.
           this.scrollback?.setIdle()
+        } else if (
+          this.lifecycle.state.kind === 'running' &&
+          this.lifecycle.state.attempt.state === 'open' &&
+          this.scrollback &&
+          this.scrollback.mode !== 'running' &&
+          this.scrollback.blockManager.runningBlock?.attemptId === this.lifecycle.state.attempt.id
+        ) {
+          // Readiness can retain an open attempt while collapsing its live
+          // presentation. A later running fact restores that same binding;
+          // projections must not open the block twice. New attempts still
+          // enter through the projection, and fullscreen keeps its own guard.
+          this.scrollback.setRunning()
         }
       })
 
@@ -8237,6 +8246,12 @@ export class TerminalContent extends BasePaneContent {
     this._intentInput?.focus()
   }
 
+  private keyboardOnGridOrUnclaimed(): boolean {
+    const holder = document.activeElement
+    const grid = this._intentInput?.element ?? null
+    return holder === null || holder === document.body || holder === grid
+  }
+
   /** The same handoff, one round trip later — where it is a REPAIR and not a
    *  claim (nocx-xn63t.6.37).
    *
@@ -8262,10 +8277,7 @@ export class TerminalContent extends BasePaneContent {
    *  pane that does not have the keyboard must not take it"
    *  (IntentInput.focus). */
   private takeKeyboardToGridAfterSubmit(): void {
-    const holder = document.activeElement
-    const grid = this._intentInput?.element ?? null
-    if (holder !== null && holder !== document.body && holder !== grid) return
-    this.takeKeyboardToGrid()
+    if (this.keyboardOnGridOrUnclaimed()) this.takeKeyboardToGrid()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before
@@ -8536,15 +8548,23 @@ export class TerminalContent extends BasePaneContent {
         // its height. It is glided; the freeze that precedes it has its own.
         this._setEditorPlacement('inline')
         if (!editor.isVisible) {
+          // Readiness can leave this same attempt open. Reveal its composer
+          // without taking a control's keyboard; a real completion retains
+          // the ordinary hand-back to the prompt.
+          const attemptId = this.scrollback?.blockManager.runningBlock?.attemptId
+          const focus =
+            !attemptId ||
+            this.lifecycle.attempt(attemptId)?.state !== 'open' ||
+            this.keyboardOnGridOrUnclaimed()
           const sb = this.scrollback
           if (sb) {
             sb.settleAround(() => {
-              editor.show()
+              editor.show({ focus })
               // The scroller just lost the composer's height. Inside the
               // mutation, so the glide measures the settled position once.
               sb.scrollToBottomIfFollowing()
             })
-          } else editor.show()
+          } else editor.show({ focus })
         }
       }
     } else {
@@ -8567,7 +8587,11 @@ export class TerminalContent extends BasePaneContent {
       // therefore kill a live animation mid-flight and snap the stack, which
       // is the jitter it was meant to remove.
       this._setEditorPlacement('inline')
+      const keyboardWasInEditor = editor.root.contains(document.activeElement)
       editor.hide()
+      // A delayed start can withdraw the ready composer after submit's
+      // handoff already ran. Transfer only its keyboard, never a control's.
+      if (keyboardWasInEditor) this.takeKeyboardToGrid()
     }
     // Visibility is the presentation axis; refresh it after the ownership
     // projection has shown or hidden the editor so recovery actions cannot

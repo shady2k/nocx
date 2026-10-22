@@ -166,7 +166,12 @@ keeps every later change.
   `list` omits edges/comments; full `show` over the historical queue was too slow. It
   maps statuses, emits `holder` (assignee), `createdAt` and stored acceptance criteria,
   drops tombstones, and reads the submitted, implemented and accepted-stage records
-  above. Provenance edges are dropped; only `blocks` gates. Its own test:
+  above. Work-record identities are `<issue-id>:<BR-comment-id>`: numeric comment
+  IDs from independent clones may collide after a merge. Numeric `void` targets
+  receive the same issue scope in the normalized view; already-qualified targets
+  stay unchanged. The stored BR comments and export are not rewritten. Both work
+  record families, including damaged records, remain available to their consumers.
+  Provenance edges are dropped; only `blocks` gates. Its own test:
   `node --test .githooks/backlog-gate/adapter.test.mjs`.
 - **Rules:** `check.mjs`, `check-commits.mjs`, `check-docs.mjs`,
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs` and

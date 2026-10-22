@@ -1058,6 +1058,20 @@ type oscMarker struct {
 	pos  int    // byte offset in the raw output
 }
 
+// oscTerminator recognizes both standard endings, so an unrelated ST-ended
+// OSC cannot swallow the next BEL-ended marker in the test's capture.
+func oscTerminator(out string, start int) (payloadEnd, sequenceEnd int) {
+	for i := start + 2; i < len(out); i++ {
+		if out[i] == '\a' {
+			return i, i + 1
+		}
+		if out[i] == '\x1b' && i+1 < len(out) && out[i+1] == '\\' {
+			return i, i + 2
+		}
+	}
+	return -1, -1
+}
+
 // extractOscMarkers returns the 133 A/B/C/D and 636 H/S/P markers in order.
 func extractOscMarkers(out string) []oscMarker {
 	var ms []oscMarker
@@ -1066,11 +1080,11 @@ func extractOscMarkers(out string) []oscMarker {
 			i++
 			continue
 		}
-		rel := strings.IndexByte(out[i:], 0x07)
-		if rel < 0 {
+		payloadEnd, sequenceEnd := oscTerminator(out, i)
+		if payloadEnd < 0 {
 			break
 		}
-		head := strings.SplitN(out[i+2:i+rel], ";", 3)
+		head := strings.SplitN(out[i+2:payloadEnd], ";", 3)
 		if len(head) >= 2 {
 			switch head[0] {
 			case "133":
@@ -1083,19 +1097,18 @@ func extractOscMarkers(out string) []oscMarker {
 				}
 			}
 		}
-		i += rel + 1
+		i = sequenceEnd
 	}
 	return ms
 }
 
-// stripOsc removes every OSC sequence from out — the protocol payloads the
-// frontend consumes — leaving the plain text a user would see on the tty.
+// stripOsc removes OSC sequences from test captures, leaving the visible text.
 func stripOsc(out string) string {
 	var b strings.Builder
 	for i := 0; i < len(out); {
 		if i+2 <= len(out) && out[i] == 0x1b && out[i+1] == ']' {
-			if rel := strings.IndexByte(out[i:], 0x07); rel >= 0 {
-				i += rel + 1
+			if _, end := oscTerminator(out, i); end >= 0 {
+				i = end
 				continue
 			}
 		}

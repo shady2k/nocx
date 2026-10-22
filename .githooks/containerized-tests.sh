@@ -189,8 +189,11 @@ go_test_containerized() {
             # test fails, not skips, without the plugins — so they are provisioned
             # here from the mounted tree, where the pins have one owner. A few
             # seconds of shallow clone per run, and only this runner pays it.
-            sh /src/scripts/install-zsh-zle-plugins.sh /tmp/nocx-zsh-plugins >/dev/null
+            bash /src/scripts/install-zsh-zle-plugins.sh /tmp/nocx-zsh-plugins >/dev/null
             export NOCX_ZSH_PLUGINS=/tmp/nocx-zsh-plugins
+            sh /src/scripts/install-fish-ci.sh /tmp/nocx-fish-ci >/dev/null
+            export PATH="/tmp/nocx-fish-ci/bin:$PATH"
+            export NOCX_REQUIRE_NATIVE_FISH=1
             # TWO PASSES: the untagged build, and then the packages that exist
             # only under the tag. One tagged run over ./... would not be the
             # union of the two — the tag also EXCLUDES the `!nocx_local_ssh`

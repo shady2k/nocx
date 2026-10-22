@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { contextualReady, normalize } from './adapter.mjs'
+import { formatRecord, spansOf } from './time-format.mjs'
 
 const row = (comments, status = 'in_progress') => ({
   id: 'nocx-a',
@@ -77,6 +78,87 @@ const nativeIssue = (id, type, status, parent = null, extras = {}) => ({
   dependencies: parent ? [{ type: 'parent-child', depends_on_id: parent }] : [],
   comments: [],
   ...extras,
+})
+
+const claimComment = (id, span, session) => ({
+  id,
+  author: session,
+  created_at: '2026-09-26T10:00:00Z',
+  text: formatRecord('claim', {
+    span,
+    at: '2026-09-26T10:00:00Z',
+    session: `omp:${session}`,
+    agent: session,
+    role: 'worker',
+  }),
+})
+
+test('BR comment ids from independent issue histories retain both work spans at the gate', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'adapter-comment-identities-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const config = join(dir, 'config.json')
+  writeFileSync(config, JSON.stringify({ strength: 'report' }))
+  const issues = normalize([
+    nativeIssue('nocx-first', 'task', 'open', null, {
+      created_at: '2026-09-26T10:00:00Z',
+      updated_at: '2026-09-26T10:00:00Z',
+      comments: [claimComment(7, 'aaaaaaaa', 'first')],
+    }),
+    nativeIssue('nocx-second', 'task', 'open', null, {
+      created_at: '2026-09-26T10:00:00Z',
+      updated_at: '2026-09-26T10:00:00Z',
+      comments: [claimComment(7, 'bbbbbbbb', 'second')],
+    }),
+  ])
+  const checked = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./check.mjs', import.meta.url)), '--config', config, '--json', '-'],
+    { input: JSON.stringify({ issues }), encoding: 'utf8' },
+  )
+  assert.equal(checked.status, 0, checked.stderr)
+  assert.deepEqual(
+    JSON.parse(checked.stdout).results.find(({ id }) => id === 'time-span-conflict').violations,
+    [],
+  )
+  assert.deepEqual(
+    spansOf({ issues }).spans.map((span) => [span.id, span.claim.item]),
+    [
+      ['aaaaaaaa', 'nocx-first'],
+      ['bbbbbbbb', 'nocx-second'],
+    ],
+  )
+})
+
+test('BR void retires its own local record, not another issue with the same comment number', () => {
+  const issues = normalize([
+    nativeIssue('nocx-first', 'task', 'open', null, {
+      comments: [
+        claimComment(7, 'aaaaaaaa', 'first'),
+        {
+          id: 8,
+          author: 'first',
+          created_at: '2026-09-26T10:01:00Z',
+          text: formatRecord('void', {
+            comment: '7',
+            at: '2026-09-26T10:01:00Z',
+            note: 'The first issue replaces its own mistaken claim.',
+          }),
+        },
+      ],
+    }),
+    nativeIssue('nocx-second', 'task', 'open', null, {
+      comments: [claimComment(7, 'bbbbbbbb', 'second')],
+    }),
+  ])
+  const state = spansOf({ issues })
+  assert.deepEqual(state.idle, [])
+  assert.deepEqual(state.damaged, [])
+  assert.deepEqual(
+    state.spans.map((span) => [span.id, span.claim.item]),
+    [['bbbbbbbb', 'nocx-second']],
+  )
+  assert.equal(state.voided.has(issues[0].comments[0].id), true)
+  assert.equal(state.voided.has(issues[1].comments[0].id), false)
 })
 
 function checkout() {

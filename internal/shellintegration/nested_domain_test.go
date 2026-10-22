@@ -210,7 +210,7 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 		}
 		k.sendAcceptLocked(f.Dom, f.Epoch)
 	case "domain_request":
-		k.grantLocked()
+		k.grantLocked(f.Request)
 	case "agent_launch_resolve":
 		if k.holdLaunchAnswer && k.heldLaunch == nil {
 			held := f
@@ -268,7 +268,7 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 // opaque bootstrap built EXACTLY as the composition root builds it
 // (buildLocalChildBootstrap's shape: LocalBashRcfile with the child's
 // addressing and the preserved-fd close).
-func (k *nestedKernel) grantLocked() {
+func (k *nestedKernel) grantLocked(request string) {
 	bootstrap := ""
 	if !k.refuseChild {
 		rc, err := LocalBashRcfile(LaunchOptions{
@@ -298,7 +298,7 @@ func (k *nestedKernel) grantLocked() {
 		Domain:  lifecycle.DomainID(testDom),
 		Epoch:   testEpoch,
 		Event: lifecycle.Event{Kind: lifecycle.KindDomainGrant, DomainGrant: &lifecycle.DomainGrant{
-			RequestID: "r-" + testDom + "-0",
+			RequestID: lifecycle.RequestID(request),
 			Env:       lifecycle.EnvSudo,
 			Domain:    lifecycle.DomainID(nestedChildDom),
 			Epoch:     nestedChildEpoch,
@@ -554,6 +554,7 @@ func (k *nestedKernel) events() []kernelEvent {
 
 func (k *nestedKernel) serveFile(f *os.File) {
 	c, err := net.FileConn(f)
+	_ = f.Close()
 	if err != nil {
 		return
 	}
@@ -586,20 +587,19 @@ func TestBashNestedChildDomain(t *testing.T) {
 	// -u BASHOPTS bash --rcfile /dev/fd/4 -i`; a preserve-fds sudo keeps
 	// fds 3 and 4 and runs that command. The fake strips sudo's own arguments
 	// and executes the generated child.
-	fakeSudo := "#!/bin/sh\n" +
-		"# Advertise the capability the production launcher probes before\n" +
-		"# consuming the user's sudo command.\n" +
-		"if [ \"$1\" = --help ]; then echo '  --preserve-fds=list'; exit 0; fi\n" +
-		"# Test stand-in for a preserve-fds-capable sudo: plain exec preserves\n" +
-		"# every fd. Strip sudo's own prefix, then execute the REAL generated\n" +
-		"# child command so its environment boundary is covered too.\n" +
-		"shift\n" +
-		"[ \"$1\" = -i ] && shift\n" +
-		"exec \"$@\"\n"
+	fakeSudo := preservingSudoFixture()
 	s := startNestedBashParent(t, k, "sudo", fakeSudo)
 	exportBashOptsWithExtdebug(t, s, k)
 	driveNestedHappyInterval(t, s, k, "sudo -i", "")
 	assertNoInheritedBashDebugger(t, s)
+}
+
+func preservingSudoFixture() string {
+	return "#!/bin/sh\n" +
+		"if [ \"$1\" = --help ]; then echo '  --preserve-fds=list'; exit 0; fi\n" +
+		"shift\n" +
+		"[ \"$1\" = -i ] && shift\n" +
+		"exec \"$@\"\n"
 }
 
 // BASHOPTS is readonly but can retain the export attribute from user startup.

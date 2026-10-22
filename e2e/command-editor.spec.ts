@@ -245,22 +245,13 @@ test.describe('command editor (nocx-4ff)', () => {
     // inline TUI on the normal buffer needs (nocx-g6hnk).
     await expect(page.locator(EDITOR)).toBeHidden()
 
-    // The OSC title is emitted after all three rows. Waiting for it makes the
-    // running sample content-ordered rather than a timeout/height surrogate.
+    // A title can already contain the submitted text, and DOM/ARIA rows
+    // can survive inside a collapsed live region. Wait for viewport ink.
     await expect(page.locator(TITLE)).toContainText('JIT')
-    await page.waitForFunction(() => {
-      const clip =
-        document
-          .querySelector<HTMLElement>('.pane.active .terminal-live-viewport')
-          ?.getBoundingClientRect().height ?? 0
-      const live =
-        document
-          .querySelector<HTMLElement>('.pane.active .terminal-live-container')
-          ?.getBoundingClientRect().height ?? 0
-      // The flow box is the clip plus the body padding both halves share, so
-      // it is never smaller — and the rows are in by the time it passes 50px.
-      return clip >= 50 && live >= clip
-    })
+    const liveGrid = page.locator('.pane.active [role="grid"][aria-label="Terminal output"]')
+    for (const name of ['A', 'B', 'C']) {
+      await expect(liveGrid.getByRole('row', { name, exact: true })).toBeInViewport()
+    }
     // The submit mutation animates the scrollback stack while the live
     // region opens. Measure the command only after that observable glide ends;
     // the transform is not its final layout position.
@@ -305,6 +296,7 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)
 
     // Release the shell-side hold only after observing the running geometry.
+    await expect(page.locator('.pane.active .ui-terminal-input')).toBeFocused()
     await page.keyboard.press('Enter')
 
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 5000 })

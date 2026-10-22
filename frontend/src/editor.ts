@@ -1157,10 +1157,10 @@ export class CommandEditor {
    * in over SETTLE_MS from nothing, so a quick command's prompt is never
    * seen to vanish: the departure it missed is on the ghost, and this return
    * cancels that ghost rather than painting over it. Ownership is not
-   * deferred by this: `_inputActive` is true and the view is focused the
-   * instant this runs.
+   * deferred by this: `_inputActive` is true immediately. A lifecycle reveal
+   * may leave focus with another control that still owns the keyboard.
    */
-  show(): void {
+  show(options?: { readonly focus?: boolean }): void {
     this._inputActive = true
     // A departure still on screen is a ghost, not the box: the box's own
     // timeline is main's exact one — display:none landed in the same frame
@@ -1185,7 +1185,7 @@ export class CommandEditor {
     // to re-measure before it is painted and focused (spec W1 check 5).
     this.view.requestMeasure()
     if (wasHidden) this._fadeBackIn()
-    this.view.focus()
+    if (options?.focus !== false) this.view.focus()
   }
 
   /** Fade the box's ink back to full over SETTLE_MS. Opacity only: the box's

@@ -87,7 +87,8 @@ Raw terminal bytes and raw marker sequences never cross the WebSocket as text. T
 The pure `toolendpoint/panebind` contract owns the tool bearer's wire format and
 private MCP environment name. Shell staging renders that name into the private
 launch configuration; `mcpstdio` reads it without depending on shell-launch
-composition, preserving the bridge's no-child-process boundary.
+composition, preserving the bridge's no-child-process boundary
+(amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099).
 
 **Frontend**:
 
@@ -144,9 +145,9 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
   - The OSC-7 cwd event payload = `{host, path}` (percent-decoded). Ownership: the **backend** owns "local vs remote + host" and validates the host; the frontend only supplies the desired path.
   - Fallback: when the shell emits no OSC 7, cwd falls back to `$HOME` — **surfaced to the user, not applied silently.**
   - Tier A shell hooks emit OSC 7/133; the session runtime owns parsing and publishes only typed, validated observations. The renderer does not parse the byte stream (ADR-0066, ADR-0081).
-  - Helper-hosted Fish retains native startup, universals, history and prompt functions; the existing helper adapts its private I/O to the same authenticated lifecycle channel. Unverified startup remains conventional rather than receiving private activation. Helper-less remote Fish has no enhanced TCP adapter. See [ADR-0099](decisions/0099-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md) and [ADR-0100](decisions/0100-a-darwin-blocking-channel-write-has-an-owned-killable-writer.md) for Darwin's bounded write mechanism, which never changes the surviving socket's flags.
-  - Authenticated prompt readiness can retain an unresolved app attempt. If the same bound attempt returns to running, its existing live presentation is restored without opening or binding a second block; readiness and execution lifetime are distinct. Revealing that ready composer does not reclaim the keyboard from a control while its bound attempt remains open. When a delayed start hides the focused composer, the existing terminal input owner receives its keyboard without a pointer click. Authenticated completion retains the ordinary focus hand-back to the prompt.
-  - The current live block reconstructs the logical input span before its accepted output anchor, including soft wraps and explicit newlines. The existing whole-command repaint guard still owns whether that span is shifted out; a physical-row suffix is not the whole command.
+  - Helper-hosted Fish retains native startup, universals, history and prompt functions (amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099); the existing helper adapts its private I/O to the same authenticated lifecycle channel. Unverified startup remains conventional rather than receiving private activation. Helper-less remote Fish has no enhanced TCP adapter. See [ADR-0099](decisions/0099-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md) and [ADR-0100](decisions/0100-a-darwin-blocking-channel-write-has-an-owned-killable-writer.md) for Darwin's bounded write mechanism, which never changes the surviving socket's flags.
+  - Authenticated prompt readiness can retain an unresolved app attempt (amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099). If the same bound attempt returns to running, its existing live presentation is restored without opening or binding a second block; readiness and execution lifetime are distinct. Revealing that ready composer does not reclaim the keyboard from a control while its bound attempt remains open. When a delayed start hides the focused composer, the existing terminal input owner receives its keyboard without a pointer click. Authenticated completion retains the ordinary focus hand-back to the prompt.
+  - The current live block reconstructs the logical input span before its accepted output anchor, including soft wraps and explicit newlines (amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099). The existing whole-command repaint guard still owns whether that span is shifted out; a physical-row suffix is not the whole command.
 
 **AD-6 — Single-owner state ownership.**
 

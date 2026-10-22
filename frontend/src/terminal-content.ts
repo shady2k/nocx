@@ -3619,12 +3619,21 @@ export class TerminalContent extends BasePaneContent {
           // else would move the pane off the conventional grid it was left
           // in — the first prompt after integration, or the prompt after a
           // desynchronized episode comes back, used to stay flat until the
-          // first command opened a block. 'running' is deliberately absent:
-          // the command cycle owns the live region there (beginBlock,
-          // freezeFromAttempt and the fullscreen path), and forcing idle
-          // mid-command would collapse it. setIdle declines while an
+          // first command opened a block. setIdle declines while an
           // alt-screen program owns the pane.
           this.scrollback?.setIdle()
+        } else if (
+          this.lifecycle.state.kind === 'running' &&
+          this.lifecycle.state.attempt.state === 'open' &&
+          this.scrollback &&
+          this.scrollback.mode !== 'running' &&
+          this.scrollback.blockManager.runningBlock?.attemptId === this.lifecycle.state.attempt.id
+        ) {
+          // Readiness can retain an open attempt while collapsing its live
+          // presentation. A later running fact restores that same binding;
+          // projections must not open the block twice. New attempts still
+          // enter through the projection, and fullscreen keeps its own guard.
+          this.scrollback.setRunning()
         }
       })
 

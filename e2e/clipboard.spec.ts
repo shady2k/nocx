@@ -212,12 +212,16 @@ test.describe('copy-on-select', () => {
         r.setStart(n, i + 3)
         r.setEnd(n, i + 4)
         const box = r.getBoundingClientRect()
-        return { x: box.left + box.width / 2, y: box.top + box.height / 2 }
+        const rowBox = el.getBoundingClientRect()
+        return {
+          x: box.left - rowBox.left + box.width / 2,
+          y: box.top - rowBox.top + box.height / 2,
+        }
       }
       return null
     }, word)
     if (!at) throw new Error('the word is not on the painted row')
-    await page.mouse.dblclick(at.x, at.y)
+    await row.dblclick({ position: at })
     await expect
       .poll(() => page.evaluate(() => navigator.clipboard.readText()), { timeout: 3000 })
       .toBe(word)

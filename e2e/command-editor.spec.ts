@@ -245,12 +245,12 @@ test.describe('command editor (nocx-4ff)', () => {
     // inline TUI on the normal buffer needs (nocx-g6hnk).
     await expect(page.locator(EDITOR)).toBeHidden()
 
-    // The OSC title is emitted after all three rows. Waiting for it makes the
-    // running sample content-ordered rather than a timeout/height surrogate.
+    // A title can already contain the submitted text, and DOM/ARIA rows
+    // can survive inside a collapsed live region. Wait for viewport ink.
     await expect(page.locator(TITLE)).toContainText('JIT')
     const liveGrid = page.locator('.pane.active [role="grid"][aria-label="Terminal output"]')
     for (const name of ['A', 'B', 'C']) {
-      await expect(liveGrid.getByRole('row', { name, exact: true })).toBeVisible()
+      await expect(liveGrid.getByRole('row', { name, exact: true })).toBeInViewport()
     }
     // The submit mutation animates the scrollback stack while the live
     // region opens. Measure the command only after that observable glide ends;

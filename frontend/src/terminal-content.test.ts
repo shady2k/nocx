@@ -7137,7 +7137,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('sizes the live region from the accepted backend screen frame', async () => {
+  it('restores accepted live output when the same bound attempt resumes after readiness', async () => {
     // The accepted frame is now both the paint and sizing input. The old
     // byte-parser path measured before parsing completed, so it sized the
     // region from the pre-output grid. A one-chunk command had no later
@@ -7176,6 +7176,27 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const rows = Array.from({ length: 12 }, (_, i) => `output ${i + 1}`)
       session.fireScreenFrame(screenFrame(1, rows, { rows: rows.length }))
       expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
+
+      const running = withScrollback.scrollback.blockManager.runningBlock
+      expect(running).not.toBeNull()
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(editorOf(content).isVisible).toBe(true)
+      expect(withScrollback.scrollback.mode).toBe('idle')
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'seq' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(running)
+      expect(running!.el.contains(withScrollback.scrollback.terminalLiveContainer)).toBe(true)
+      expect(
+        withScrollback.scrollback.scrollbackInner.querySelectorAll('.cmd-block-running'),
+      ).toHaveLength(1)
     } finally {
       globalThis.requestAnimationFrame = raf
       teardown()

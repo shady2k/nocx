@@ -146,6 +146,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
   - Fallback: when the shell emits no OSC 7, cwd falls back to `$HOME` — **surfaced to the user, not applied silently.**
   - Tier A shell hooks emit OSC 7/133; the session runtime owns parsing and publishes only typed, validated observations. The renderer does not parse the byte stream (ADR-0066, ADR-0081).
   - Helper-hosted Fish retains native startup, universals, history and prompt functions; the existing helper adapts its private I/O to the same authenticated lifecycle channel. Unverified startup remains conventional rather than receiving private activation. Helper-less remote Fish has no enhanced TCP adapter. See [ADR-0096](decisions/0096-fish-keeps-native-startup-and-the-helper-adapts-its-private-io.md) and [ADR-0097](decisions/0097-a-darwin-blocking-channel-write-has-an-owned-killable-writer.md) for Darwin's bounded write mechanism, which never changes the surviving socket's flags.
+  - Authenticated prompt readiness can retain an unresolved app attempt. If the same bound attempt returns to running, its existing live presentation is restored without opening or binding a second block; readiness and execution lifetime are distinct.
 
 **AD-6 — Single-owner state ownership.**
 

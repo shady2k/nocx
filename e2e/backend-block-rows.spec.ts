@@ -32,7 +32,7 @@ test('a running command block grows from backend-stored rows', async ({ page }) 
   // Departed rows are durable output; the live tail names the command's pause.
   // Observe both tiers before explicitly giving the running reader its input.
   await expect(running.locator('.cmd-output')).toContainText(firstMarker, { timeout: 15_000 })
-  await expect(liveGrid.getByRole('row', { name: markers[149], exact: true })).toBeVisible({
+  await expect(liveGrid.getByRole('row', { name: markers[149], exact: true })).toBeInViewport({
     timeout: 15_000,
   })
   await liveGrid.click()

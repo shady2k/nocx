@@ -62,6 +62,8 @@ func agentStagesMCPConfigAndCleansLaunchDirectory(t *testing.T, start nestedPare
 	waitForEvent(t, k, "agent_enrol")
 	waitForEvent(t, k, "agent_withdraw")
 	waitUntil(t, "the agent output", func() bool { return strings.Contains(s.output(), "AGENT-RAN") })
+	s.waitForPromptAfterComplete()
+	s.waitForRenderedThroughPrompt()
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if strings.Contains(out, "USER_FILE_WRITTEN=") {
 		t.Fatalf("staging wrote a user-owned file: output=%q", out)

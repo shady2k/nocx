@@ -976,6 +976,8 @@ func agentWrapperPointsAWorkerLaunchAtTheToolSurface(t *testing.T, start nestedP
 		return os.IsNotExist(statErr)
 	})
 
+	s.waitForPromptAfterComplete()
+	s.waitForRenderedThroughPrompt()
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if strings.Contains(out, "tool surface unavailable") {
 		t.Fatalf("a worker pane with a configured socket refused its tool surface: %q", out)

@@ -99,6 +99,8 @@ func TestBashLocalPaneLaunchCarriesToolSocketAndStagesAgent(t *testing.T) {
 	waitForEvent(t, k, "agent_enrol")
 	waitForEvent(t, k, "agent_withdraw")
 	waitUntil(t, "the agent output", func() bool { return strings.Contains(s.output(), "AGENT-RAN") })
+	s.waitForPromptAfterComplete()
+	s.waitForRenderedThroughPrompt()
 
 	out := strings.ReplaceAll(s.output(), "\r", "")
 	if strings.Contains(out, "tool surface unavailable") {

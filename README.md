@@ -346,6 +346,11 @@ alone can arrive during prompt construction. The next command still follows
 Ctrl+C immediately, without a cancellation delay; cancelling a prompt function
 is a different native Fish phase, not an idle-input precondition.
 
+Agent-report assertions also wait for the authenticated command completion and
+its render fence before reading a whole PTY snapshot. A withdrawal event, a
+complete argv file or the first output marker does not drain the independent
+PTY pump.
+
 The widget-wrapping zsh plugins — `fast-syntax-highlighting`,
 `zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the one test
 about composing with a plugin stack (`nocx-1ebrs.27`), and that test **fails,

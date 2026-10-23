@@ -81,6 +81,9 @@ type Vault struct {
 	rootKey      []byte // nil when sealed
 	logger       *slog.Logger
 	initializing bool // guards concurrent Setup (defect 7)
+	// A document write can fail after rename. These IDs stay unavailable
+	// until deletion's readback resolves the persisted journal outcome.
+	uncertainDeletions map[credential.SecretID]struct{}
 
 	autoSealWake chan struct{} // buffered(1), wakes the auto-seal goroutine
 	autoSealQuit chan struct{} // closed by Close to stop the goroutine
@@ -630,6 +633,10 @@ func (v *Vault) Unseal(ctx context.Context, req UnsealRequest) error {
 	if retireAsk != nil {
 		retireAsk()
 	}
+
+	// Startup cannot delete from a locked file provider. Retry durable
+	// deletion intents now that providers have their keys, outside v.mu.
+	v.retryScheduledDeletes(ctx)
 
 	v.wakeAutoSeal()
 	v.logger.Info("vault unsealed", "duration", time.Since(t0))
@@ -1317,98 +1324,6 @@ func (v *Vault) Get(ctx context.Context, id credential.SecretID) (credential.Sec
 	return sec, nil
 }
 
-// Delete removes the secret from its provider. Following ADR-0011 §4, the
-// reference is removed first (journal cleared), then the provider delete is
-// retriable (the entry survives if the provider call fails).
-func (v *Vault) Delete(ctx context.Context, id credential.SecretID) error {
-	t0 := time.Now()
-
-	pID, err := parseID(id)
-	if err != nil {
-		return err
-	}
-
-	v.mu.Lock()
-	st := v.stateLocked()
-	switch st {
-	case StateUninitialized:
-		v.mu.Unlock()
-		return ErrVaultUninitialized
-	case StateSealed:
-		v.mu.Unlock()
-		return ErrVaultSealed
-	}
-	gen := v.gen
-
-	prov, ok := v.reg.Writable(pID)
-	v.mu.Unlock()
-
-	if !ok {
-		return unavailable(pID, ReasonUnknownProvider,
-			fmt.Errorf("provider %q is not writable", pID))
-	}
-
-	// Journal the deletion before the provider call.
-	v.mu.Lock()
-	// Re-check state and gen before journaling and delegating (defect 8).
-	if v.rootKey == nil || v.gen != gen {
-		v.mu.Unlock()
-		return ErrVaultSealed
-	}
-	rec, _ := recordFor(v.doc.Secrets, id)
-	systemOnly := rec.SystemOnly
-	for _, entry := range v.doc.Journal {
-		if entry.NewID == id && entry.SystemOnly {
-			systemOnly = true
-		}
-	}
-	v.doc.Journal = append(v.doc.Journal, JournalEntry{
-		Op:         "delete",
-		NewID:      id,
-		Phase:      PhasePrepared,
-		SystemOnly: systemOnly,
-	})
-	// The catalogue record goes with the journal write, not after the
-	// provider delete: deletion is metadata-first (ADR-0011 §4), and the
-	// record is metadata. A failed provider delete leaves an invisible
-	// orphan, never a dangling row.
-	dropRecord(&v.doc, id)
-	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
-		v.mu.Unlock()
-		return fmt.Errorf("journal save: %w", saveErr)
-	}
-	v.mu.Unlock()
-
-	// Provider call outside lock.
-	delErr := prov.Delete(ctx, id)
-
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if v.gen != gen || v.rootKey == nil {
-		v.logger.Warn("delete result rejected by generation change",
-			"secretID", id, "provider", pID, "duration", time.Since(t0))
-		return ErrVaultSealed
-	}
-
-	// Clear journal on success; retain on failure so reconciliation retries.
-	if delErr != nil {
-		v.logger.Warn("provider delete failed",
-			"secretID", id, "provider", pID,
-			"error", delErr, "duration", time.Since(t0))
-		return delErr
-	}
-
-	v.clearJournalEntryLocked(id)
-	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
-		return fmt.Errorf("save after delete: %w", saveErr)
-	}
-
-	v.logger.Info("secret deleted",
-		"secretID", id, "provider", pID, "duration", time.Since(t0))
-	return nil
-}
-
 // Exists reports whether a secret exists in its named provider.
 func (v *Vault) Exists(ctx context.Context, id credential.SecretID) (bool, error) {
 	pID, err := parseID(id)
@@ -1783,7 +1698,12 @@ func (v *Vault) resolveRowLocked(row string, inputs []CredentialInventory) (cred
 	// Reject before the legacy inventory fallback, including a journal-only
 	// create whose provider write may have landed before its record did.
 	for _, entry := range v.doc.Journal {
-		if entry.SystemOnly && rowID(entry.NewID) == row {
+		if (entry.SystemOnly || entry.Op == "delete") && rowID(entry.NewID) == row {
+			return "", "", false
+		}
+	}
+	for id := range v.uncertainDeletions {
+		if rowID(id) == row {
 			return "", "", false
 		}
 	}

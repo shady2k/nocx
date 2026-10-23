@@ -20,6 +20,7 @@
 package proc
 
 import (
+	"errors"
 	"os/exec"
 	"syscall"
 	"time"
@@ -76,4 +77,21 @@ func KillGroup(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) {
 		case <-time.After(grace):
 		}
 	}
+}
+
+// TerminateGroupAndWait owns the only Wait for a started group leader. Keeping
+// the leader unreaped reserves its PID/PGID even when it exits before descendants
+// or closes every inherited stream. Therefore escalation must not stop at leader
+// exit, and none of its signals can target a recycled group identity.
+//
+// Call InOwnGroup before Start, and never call cmd.Wait elsewhere. Callers may
+// first close stdin and allow their protocol-specific graceful shutdown period.
+// KILL is sent to the entire still-owned group before the leader is reaped.
+func TerminateGroupAndWait(cmd *exec.Cmd, grace time.Duration) error {
+	if cmd == nil || cmd.Process == nil || cmd.ProcessState != nil ||
+		cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid || cmd.SysProcAttr.Pgid != 0 {
+		return errors.New("process group termination requires an unreaped owned leader")
+	}
+	KillGroup(cmd, nil, grace)
+	return cmd.Wait()
 }

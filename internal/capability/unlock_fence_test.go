@@ -32,7 +32,7 @@ func TestOperationHoldingTheAnsweringGateFencesAMaterialRead(t *testing.T) {
 	op := capability.NewConfigOperation(
 		capability.Gate(capability.GateConfig, 1, 8, time.Second),
 		capability.UnlockAnsweringGate(capability.GateVault, 1, 8, time.Second),
-		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	var got error
 	if err := op.Run(context.Background(), func(ctx context.Context, _ capability.ConfigService) error {
@@ -59,7 +59,7 @@ func TestTheSameReadAfterTheOperationSucceeds(t *testing.T) {
 	op := capability.NewConfigOperation(
 		capability.Gate(capability.GateConfig, 1, 8, time.Second),
 		capability.UnlockAnsweringGate(capability.GateVault, 1, 8, time.Second),
-		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil)
+		testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	ctx := context.Background()
 	if err := op.Run(ctx, func(context.Context, capability.ConfigService) error { return nil }); err != nil {

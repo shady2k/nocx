@@ -229,6 +229,9 @@ type Declaration struct {
 	// (validateDeclaration), so a tool cannot be offered as a name and a
 	// schema with nothing to say what it is for.
 	Description string
+	// CatalogSearchText is bounded untrusted metadata for local search only.
+	// It never becomes a provider-facing declaration description.
+	CatalogSearchText string
 	// Effect is the set of classes this tool can resolve to. Singleton
 	// declarations describe ordinary actions; a command carrier may resolve
 	// to several classes after its arguments are parsed.
@@ -359,6 +362,8 @@ type Capability any
 // only real parameter is `command` (nocx-ydu92).
 type Tool struct {
 	Declaration
+	// CatalogOnly keeps a tool hidden until local discovery explicitly loads it.
+	CatalogOnly bool
 	// Effect is the singular class selected for the invocation currently
 	// being evaluated. Approval, ledger and wire records describe this
 	// decision, never Declaration.Effect's whole reachable set.
@@ -1379,6 +1384,12 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		}
 		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
 			continue
+		}
+		if t.Executes == InMCP {
+			resources, err := t.ResolveResources(nil, RunContext{})
+			if err != nil || len(resources) != 1 || !resourceInGrant(g, resources[0]) {
+				continue
+			}
 		}
 		covered := true
 		for _, k := range t.ResourceKinds {

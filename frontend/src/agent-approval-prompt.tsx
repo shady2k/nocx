@@ -207,30 +207,14 @@ type ApprovalScope = AgentApprove['scope']
  * it: the wire type said `string`, so 'run' was as valid a comparand as any
  * other string, and the tests carried the component's own belief.
  *
- * `AgentApprovalRequested['tool']` is now a union generated from the
- * contract's enum, which a Go test holds equal to the declaration table
- * (TestApprovalRequestedToolEnumMatchesTheTable). So `satisfies` below fails
- * to compile the moment a name here stops being a name the backend can
- * send, and the comparisons that read these constants fail with it — a
- * rename cannot leave this file comparing against a dead string and a green
- * suite.
+ * `AgentApprovalRequested['tool']` is generated from the builtin enum and
+ * the MCP name pattern. TestApprovalRequestedToolEnumMatchesTheTable keeps
+ * the builtin enum aligned with the backend declaration table. `satisfies`
+ * below rejects a renamed builtin, while MCP proposals use the generic
+ * presentation without acquiring a builtin's special treatment.
  */
 const COMMAND_TOOL = 'session.run' satisfies AgentApprovalRequested['tool']
 const NETWORK_TOOL = 'fetch.url' satisfies AgentApprovalRequested['tool']
-
-/**
- * What the window keys its two by-name branches on, for the test that proves
- * the chain from this file to the declaration table is unbroken.
- *
- * `skills.install` is deliberately NOT a third entry. Its block is keyed on
- * the PRESENCE of the `install` field, which the backend fills for that tool
- * and no other, so there is no name here to go stale — the strongest form of
- * the rule the two constants above were bought by, not an exception to it.
- */
-export const TOOLS_THIS_WINDOW_NAMES = {
-  command: COMMAND_TOOL,
-  network: NETWORK_TOOL,
-} as const
 
 /** What the command's variables read as, as the backend derived it. */
 type ExpansionFacts = NonNullable<NonNullable<AgentApprovalRequested['expansion']>>

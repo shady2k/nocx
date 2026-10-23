@@ -15,7 +15,7 @@
 // line — see [Server.serve], which is the only code that ever names it.
 package coordinator
 
-// ProtocolVersion is the version of THIS socket's request/response shapes.
+// ProtocolVersion covers discovery and the loopback WS control plane (ADR-0101).
 // It is deliberately separate from the build version: two builds of the
 // same release may speak it, and one build may not speak another's.
 //
@@ -23,7 +23,7 @@ package coordinator
 // to do about a mismatch. That comparison is not here — this package makes
 // the fact available and states nothing about what a client should conclude
 // from it.
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

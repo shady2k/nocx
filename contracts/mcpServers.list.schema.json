@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.list.schema.json",
+  "title": "MCPServersListResult",
+  "description": "Bounded MCP server summaries without tool schemas, secret material, or opaque secret references.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["servers"],
+  "properties": {
+    "servers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/summary" }
+    }
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "name",
+        "enabled",
+        "transport",
+        "catalogState",
+        "toolCount",
+        "enabledToolCount",
+        "oauthStatus"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "transport": { "type": "string", "enum": ["stdio", "streamable-http"] },
+        "catalogState": { "type": "string", "enum": ["missing", "fresh", "stale"] },
+        "toolCount": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "enabledToolCount": { "type": "integer", "minimum": 0, "maximum": 256 },
+        "oauthStatus": {
+          "type": ["string", "null"],
+          "enum": ["missing", "connected", "expired", null]
+        }
+      }
+    }
+  }
+}

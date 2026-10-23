@@ -54,12 +54,26 @@ func (e JournalEntry) String() string {
 	return fmt.Sprintf("%s old=%s new=%s target=%q phase=%s", e.Op, e.OldID, e.NewID, e.Target, e.Phase)
 }
 
-// Reconcile processes journal entries left from an interrupted operation.
-// It is idempotent: the second run is a no-op.
+// Reconcile processes a recovered document before its Vault starts serving.
+// The document must be quiescent, not a snapshot of live operations. New is
+// the production caller; Unseal only retries unconditional deletion intents.
+// Reconciliation is idempotent: the second run is a no-op.
+// Delete intents take precedence over unfinished create/finalize entries for
+// the same identifier. They survive provider failure (including a locked file
+// provider at startup), and are retried after Unseal as well as on restart.
+// Conditional delete-candidate entries are never executed here: only the
+// metadata owner can establish that no references survive and promote them.
+// Their pending create entries are retained until that decision, too.
 //
-// Entries in PhasePrepared or PhaseSecretWritten with an empty Target
-// represent a new secret that was never referenced by metadata. The record
-// (doc.Secrets, ADR-0016) decides what happened:
+// Recovered system-only creates in PhasePrepared or PhaseSecretWritten become
+// conditional candidates, whether or not a target was attached. A record proves
+// material was written, not that its metadata reference was committed. Startup
+// ends the old operation's in-flight interval; the metadata owner must now
+// distinguish an abandoned create from an already-referenced session. Live
+// creates are never converted by Unseal or PendingDeleteCandidates.
+//
+// Ordinary user creates in PhasePrepared or PhaseSecretWritten with an empty
+// Target use the record (doc.Secrets, ADR-0016) to decide what happened:
 //
 //   - no record — the create's durable half never landed; the orphan is
 //     deleted and the entry cleared;
@@ -84,11 +98,31 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 		if entry.Op == "" {
 			continue // already cleared
 		}
+		// Metadata-first deletion supersedes the earlier create/finalize
+		// sequence. Do not preserve its record or report it blocked while a
+		// durable delete owns this identifier.
+		if entry.Op != "delete" && hasPendingDelete(doc, entry.NewID) {
+			continue
+		}
 		// Validate Op is a known operation (defect 10).
 		switch entry.Op {
 		case "create", "delete", "rotate", "replace":
+		case "delete-candidate":
+			continue // reference checking belongs to the metadata owner
 		default:
 			blocked = append(blocked, *entry)
+			continue
+		}
+		if entry.Op != "delete" && hasDeleteCandidate(doc, entry.NewID) {
+			continue
+		}
+		if entry.Op == "create" && entry.SystemOnly &&
+			(entry.Phase == PhasePrepared || entry.Phase == PhaseSecretWritten) {
+			// Conversion is metadata-only, including for a locked or missing
+			// provider. Preserve classification and target evidence; neither
+			// proves whether a cross-store reference commit completed.
+			entry.Op = "delete-candidate"
+			entry.Phase = PhasePrepared
 			continue
 		}
 
@@ -103,6 +137,19 @@ func Reconcile(ctx context.Context, doc *Document, reg *Registry) []JournalEntry
 			// Provider unknown or not writable — retain and report.
 			// Never re-route to another provider (spec §6).
 			blocked = append(blocked, *entry)
+			continue
+		}
+		if entry.Op == "delete" {
+			if entry.Phase != PhasePrepared {
+				blocked = append(blocked, *entry)
+				continue
+			}
+			id := entry.NewID
+			if err := wp.Delete(ctx, id); err != nil {
+				blocked = append(blocked, *entry)
+				continue
+			}
+			completeDeletion(doc, id)
 			continue
 		}
 		switch entry.Phase {

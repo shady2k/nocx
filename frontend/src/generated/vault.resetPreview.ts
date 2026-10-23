@@ -26,6 +26,10 @@ export interface VaultResetPreview {
    */
   endpointCount: number
   /**
+   * MCP servers holding at least one env, header, bearer or OAuth secret binding that reset would clear (ADR-0102).
+   */
+  mcpServerCount: number
+  /**
    * False when the OS keychain is not answering, so secrets stored there cannot be removed and will remain readable. The user is told this BEFORE confirming, so proceeding is an informed choice rather than a surprise half-way through. True when there is no system keychain on this platform at all: an absent store is not a broken one.
    */
   systemKeychainReachable: boolean

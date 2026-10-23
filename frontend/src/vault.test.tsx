@@ -1864,6 +1864,8 @@ describe('ResetVaultDialog', () => {
     const resetPreview = vi.fn().mockResolvedValue({
       secretCount: 3,
       profileCount: 5,
+      endpointCount: 2,
+      mcpServerCount: 4,
       systemKeychainReachable: true,
       vaultInitialized: true,
       ...overrides?.preview,
@@ -1874,6 +1876,8 @@ describe('ResetVaultDialog', () => {
         : vi.fn().mockResolvedValue({
             secretCount: 3,
             profileCount: 5,
+            endpointCount: 2,
+            mcpServerCount: 4,
             residue: [],
             ...overrides?.result,
           })
@@ -1979,6 +1983,18 @@ describe('ResetVaultDialog', () => {
       expect(toast.getAttribute('data-level')).toBe('success')
       expect(toast.textContent).toContain('Set up protection to start again')
     })
+  })
+  it('shows endpoint and MCP impact without hiding partial cleanup', async () => {
+    await openReset({ result: { residue: [{ store: 'system', reason: 'no-service' }] } })
+    await vi.waitFor(() => {
+      expect(document.body.textContent).toContain('2 AI endpoints')
+      expect(document.body.textContent).toContain('4 MCP servers')
+    })
+    fireEvent.click(screen.getByLabelText('I understand this cannot be undone'))
+    fireEvent.click(resetButton())
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast')?.textContent).toContain('still holds secrets'),
+    )
   })
 
   it('says so when there is nothing to delete', async () => {

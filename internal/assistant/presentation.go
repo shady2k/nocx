@@ -78,7 +78,6 @@ func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (str
 		grant = m.grantProvider()
 	}
 	matches := m.kernel.registry.Search(grant, req.Query, projection.Visible)
-	m.rememberLoaded(presentationToolNames(matches)...)
 	if m.kernel.log != nil {
 		m.kernel.log.Info("assistant tool catalog searched", "query", req.Query, "matches", len(matches))
 	}
@@ -86,14 +85,45 @@ func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (str
 		Query string             `json:"query"`
 		Tools []searchToolResult `json:"tools"`
 	}{Query: req.Query, Tools: make([]searchToolResult, 0, len(matches))}
+	encodedBytes := len(req.Query) + 64
+	untrusted := false
+	loaded := make([]string, 0, len(matches))
 	for _, match := range matches {
-		result.Tools = append(result.Tools, searchToolResult{
-			Name:        match.Name,
-			Description: match.Description,
-			Parameters:  match.ParamsSchema,
-		})
+		description := match.Description
+		if match.CatalogOnly {
+			description = match.CatalogSearchText
+		}
+		row := searchToolResult{Name: match.Name, Description: description, Parameters: match.ParamsSchema}
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			return "", fmt.Errorf("tools.search: encode row: %w", err)
+		}
+		// Catalog discovery is local but still consumes model context. Load
+		// only the rows actually returned, within one bounded result.
+		if encodedBytes+len(encoded)+1 > 256<<10 {
+			break
+		}
+		encodedBytes += len(encoded) + 1
+		result.Tools = append(result.Tools, row)
+		loaded = append(loaded, match.Name)
+		untrusted = untrusted || match.CatalogOnly
 	}
-	return marshalSearchResult(result)
+	out, err := marshalSearchResult(result)
+	if err != nil {
+		return "", err
+	}
+	if untrusted {
+		findings, err := m.kernel.screenResult(ctx, out, nil)
+		if err != nil {
+			return "", &EgressScreeningError{Tool: toolsSearchName, Gate: "catalog", Err: err}
+		}
+		if len(findings) > 0 {
+			return "", &EgressScreeningError{Tool: toolsSearchName, Gate: "catalog", Err: fmt.Errorf("catalog contains sensitive material")}
+		}
+		out = agenttools.FrameUntrusted(out)
+	}
+	m.rememberLoaded(loaded...)
+	return out, nil
 }
 
 type searchToolResult struct {
@@ -141,14 +171,6 @@ func (t *presentationSearchTool) Info(context.Context) (*schema.ToolInfo, error)
 
 func (t *presentationSearchTool) InvokableRun(ctx context.Context, rawArgs string, _ ...tool.Option) (string, error) {
 	return t.middleware.searchTools(ctx, rawArgs)
-}
-
-func presentationToolNames(tools []agenttools.Tool) []string {
-	names := make([]string, 0, len(tools))
-	for _, tool := range tools {
-		names = append(names, tool.Name)
-	}
-	return names
 }
 
 func declaredToolInfos(permitted []agenttools.Tool) ([]*schema.ToolInfo, error) {

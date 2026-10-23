@@ -2,6 +2,7 @@ package proc_test
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -275,5 +276,60 @@ func TestInOwnGroup_MakesTheChildItsOwnGroupLeader(t *testing.T) {
 	}
 	if pgid == syscall.Getpgrp() {
 		t.Fatalf("child shares our group %d; a group kill would reach us", pgid)
+	}
+}
+
+func TestTerminateGroupAndWaitReservesExitedLeaderUntilDescendantsAreKilled(t *testing.T) {
+	for _, exitBeforeSignals := range []bool{true, false} {
+		t.Run(fmt.Sprint(exitBeforeSignals), func(t *testing.T) {
+			f := newFixture(t)
+			f.script = strings.Replace(f.script, "trap '' INT TERM\n", "trap 'exit 0' INT TERM\n", 1)
+			f.script = strings.Replace(f.script, " ) &", " ) </dev/null >/dev/null 2>&1 &", 1)
+			// Only the leader waits on stdin; the descendant retains its FIFO
+			// and ignores both polite signals, with every standard stream closed.
+			f.script = f.script[:strings.LastIndex(f.script, "read line <")] + "read line\n"
+			cmd := exec.Command("sh", "-c", f.script) //nolint:gosec // test literal
+			proc.InOwnGroup(cmd)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = stdin.Close()
+				if cmd.ProcessState == nil {
+					_ = proc.TerminateGroupAndWait(cmd, time.Millisecond)
+				}
+			}()
+			leader, descendant := f.awaitStarted(t)
+			if exitBeforeSignals {
+				_ = stdin.Close()
+				eof := make(chan error, 1)
+				go func() { _, err := io.Copy(io.Discard, stdout); eof <- err }()
+				select {
+				case err := <-eof:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(waitCeiling):
+					t.Fatal("leader did not close its private stdout on exit")
+				}
+				if gone(leader) || cmd.ProcessState != nil {
+					t.Fatal("leader identity was released before group termination")
+				}
+			}
+			_ = proc.TerminateGroupAndWait(cmd, time.Millisecond)
+			if cmd.ProcessState == nil {
+				t.Fatal("leader was not reaped")
+			}
+			waitGone(t, "leader", leader)
+			waitGone(t, "redirected TERM-ignoring descendant", descendant)
+		})
 	}
 }

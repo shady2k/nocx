@@ -2294,7 +2294,7 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 	return capability.NewConfigOperation(
 		configGate, vaultGate, lane,
 		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
-		s.vaultRowResolver(), s.vaultEndpointSecrets(),
+		s.vaultRowResolver(), s.vaultEndpointSecrets(), s.mcpConfigDependencies(),
 	), endpointsRepo != nil
 }
 
@@ -2359,19 +2359,19 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r, mutations: s.mcpMutations}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "endpoints.create", params(validateEndpointCreateRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r, mutations: s.mcpMutations}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "endpoints.update", params(validateEndpointUpdateRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r, mutations: s.mcpMutations}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "endpoints.delete", params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
-			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r, mutations: s.mcpMutations}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		// The role methods (beads nocx-e6kn2, nocx-rikz5): roles.list,

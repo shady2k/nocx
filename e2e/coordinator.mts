@@ -42,7 +42,7 @@ import { basename } from 'node:path'
  * wrong thing, which is why the constant carries the reference rather than
  * being written as a bare 1.
  */
-const PROTOCOL_VERSION = 1
+const PROTOCOL_VERSION = 4
 
 /** What the backend is and where it answers. */
 export interface CoordinatorEndpoint {

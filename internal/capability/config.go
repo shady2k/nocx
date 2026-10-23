@@ -44,6 +44,23 @@ type EndpointSecrets interface {
 // constructed with a ConfigOperation therefore never needs the vault: the
 // service is the only reach, and the service resolves.
 type ConfigService interface {
+	// MCP configuration is dormant metadata. Runtime cancellation/draining must
+	// happen outside this operation, before verification and the committing call.
+	ListMCPServers() ([]profile.MCPServer, error)
+	GetMCPServer(id string) (profile.MCPServer, error)
+	CreateMCPServer(context.Context, MCPServerConfigInput) (profile.MCPServer, error)
+	UpdateMCPServer(context.Context, string, uint64, MCPServerConfigInput) (profile.MCPServer, error)
+	DeleteMCPServer(context.Context, string, uint64) error
+	SetMCPToolsEnabled(string, uint64, []string) (profile.MCPServer, error)
+	RefreshMCPServerCatalog(string, uint64, profile.MCPCatalog) (profile.MCPServer, error)
+	CommitMCPOAuth(context.Context, string, uint64, profile.MCPOAuthConfig) (profile.MCPServer, error)
+	ForgetMCPOAuth(context.Context, string, uint64) (profile.MCPServer, error)
+	SnapshotMCPMutation(MCPMutationTarget) (MCPMutationSnapshot, error)
+	VerifyMCPMutation(MCPMutationSnapshot) error
+	// ReconcileMCPSecrets promotes durable deletion candidates only after
+	// checking every surviving aggregate reference under this operation.
+	ReconcileMCPSecrets(context.Context) error
+
 	// Profiles.
 	ListProfiles() ([]profile.SSHProfile, error)
 	CreateProfile(p profile.SSHProfile) error
@@ -178,9 +195,10 @@ func NewConfigOperation(
 	reg *settings.Registry,
 	rows RowResolver,
 	secrets EndpointSecrets,
+	mcp MCPConfigDependencies,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
+	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets, mcp))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -196,6 +214,7 @@ func newConfigService(
 	reg *settings.Registry,
 	rows RowResolver,
 	secrets EndpointSecrets,
+	mcp MCPConfigDependencies,
 ) *configService {
 	return &configService{
 		guard:     g,
@@ -207,6 +226,7 @@ func newConfigService(
 		settings:  reg,
 		rows:      rows,
 		secrets:   secrets,
+		mcp:       mcp,
 	}
 }
 
@@ -220,6 +240,7 @@ type configService struct {
 	settings  *settings.Registry
 	rows      RowResolver
 	secrets   EndpointSecrets
+	mcp       MCPConfigDependencies
 }
 
 func (s *configService) ListProfiles() ([]profile.SSHProfile, error) {

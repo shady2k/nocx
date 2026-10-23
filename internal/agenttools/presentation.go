@@ -46,7 +46,11 @@ func (r Registry) Project(g content.Grant, cfg PresentationConfig) PresentationP
 		limit = DefaultSchemaTokenLimit
 	}
 	lazy := cfg.Lazy && tokens >= limit
-	if !lazy {
+	catalogOnly := false
+	for _, tool := range eligible {
+		catalogOnly = catalogOnly || tool.CatalogOnly
+	}
+	if !lazy && !catalogOnly {
 		return PresentationProjection{Visible: eligible, SchemaTokens: tokens}
 	}
 
@@ -66,7 +70,11 @@ func (r Registry) Project(g content.Grant, cfg PresentationConfig) PresentationP
 	visible := make([]Tool, 0, len(essential)+len(loaded))
 	catalog := make([]Tool, 0, len(eligible))
 	for _, tool := range eligible {
-		if _, ok := essential[tool.Name]; ok {
+		if !lazy && !tool.CatalogOnly {
+			visible = append(visible, tool)
+			continue
+		}
+		if _, ok := essential[tool.Name]; ok && !tool.CatalogOnly {
 			visible = append(visible, tool)
 			continue
 		}
@@ -100,7 +108,7 @@ func (r Registry) Search(g content.Grant, query string, visible []Tool) []Tool {
 		if _, ok := visibleNames[tool.Name]; ok {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(tool.Name), query) && !strings.Contains(strings.ToLower(tool.Description), query) {
+		if query != "" && !strings.Contains(strings.ToLower(tool.Name), query) && !strings.Contains(strings.ToLower(tool.Description), query) && !strings.Contains(strings.ToLower(tool.CatalogSearchText), query) {
 			continue
 		}
 		out = append(out, tool)

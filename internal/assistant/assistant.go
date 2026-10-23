@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"sync"
 	"time"
 
 	tools "github.com/shady2k/nocx/contracts/tools"
@@ -32,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/skill"
 )
 
@@ -233,6 +235,9 @@ type SkillLibrary interface {
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {
+	// MCPCatalogs are detached, dormant snapshots retained across approval resumes.
+	MCPCatalogs []agenttools.MCPCatalogSnapshot
+	MCPRuntime  mcp.Runtime
 	// Key is the endpoint's resolved credential. Never persisted, never
 	// echoed; it lives only in the model config for the call's duration.
 	Key credential.Secret
@@ -553,4 +558,6 @@ type client struct {
 	approvals   *ApprovalStore
 	checkpoints *runCheckpoints
 	snapshots   *runSnapshots
+	mcpMu       sync.Mutex
+	mcpRuns     map[string]mcp.Runtime
 }

@@ -14,12 +14,10 @@ import (
 // (d71263ab). Nothing went red: the renderer's type said `string`, so every
 // fixture agreed with the component, and the component was wrong.
 //
-// contracts/agent.approvalRequested.schema.json now ENUMERATES the names, so
-// the generated renderer type is a union and a comparison against a name no
-// tool declares is a compile error rather than a branch never taken. This
-// test is the other end of that chain: the enum is a copy of this table, and
-// a copy that nothing checks is exactly the trap being closed. Rename a row
-// here and this fails in the same second.
+// The contract enumerates builtin names separately from its constrained MCP
+// namespace. The generated renderer type remains a builtin union plus an MCP
+// template, so a stale builtin comparison is still a type error. This test
+// keeps the builtin branch equal to the declaration table when a row changes.
 //
 // It reads the repository's contract rather than an embedded copy on
 // purpose: the file the generator reads is the file that must agree.
@@ -31,7 +29,9 @@ func TestApprovalRequestedToolEnumMatchesTheTable(t *testing.T) {
 	var contract struct {
 		Properties struct {
 			Tool struct {
-				Enum []string `json:"enum"`
+				OneOf []struct {
+					Enum []string `json:"enum"`
+				} `json:"oneOf"`
 			} `json:"tool"`
 		} `json:"properties"`
 	}
@@ -42,11 +42,10 @@ func TestApprovalRequestedToolEnumMatchesTheTable(t *testing.T) {
 	for _, d := range declarations {
 		declared = append(declared, d.Name)
 	}
-	if len(contract.Properties.Tool.Enum) == 0 {
-		t.Fatal("contracts/agent.approvalRequested.schema.json declares no enum for `tool`: " +
-			"without it the renderer's type is a bare string again and a rename in this table goes dark")
+	if len(contract.Properties.Tool.OneOf) != 2 || len(contract.Properties.Tool.OneOf[0].Enum) == 0 {
+		t.Fatal("approval tool must retain its builtin enum separately from the constrained MCP namespace")
 	}
-	inContract := slices.Clone(contract.Properties.Tool.Enum)
+	inContract := slices.Clone(contract.Properties.Tool.OneOf[0].Enum)
 	inTable := slices.Clone(declared)
 	slices.Sort(inContract)
 	slices.Sort(inTable)

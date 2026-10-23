@@ -23,16 +23,10 @@
  * covers — this call has not run, and no call after it will — and does NOT
  * claim the domain is untouched.
  */
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createSignal } from 'solid-js'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
-import {
-  AgentApprovalPrompt,
-  standingAnswerReceipt,
-  TOOLS_THIS_WINDOW_NAMES,
-} from './agent-approval-prompt'
+import { AgentApprovalPrompt, standingAnswerReceipt } from './agent-approval-prompt'
 import { AgentInputTarget } from './agent-ask'
 import { recordApprovalDecision } from './agent-approval-decision'
 import { BlockManager } from './scrollback/blocks'
@@ -260,35 +254,6 @@ describe('AgentApprovalPrompt — the tool name is the backend\u2019s, not ours 
       ],
     },
   }
-
-  /**
-   * The link the compiler cannot state at runtime, and the one that closes
-   * the trap. The two names this window branches on are read from the
-   * component itself and checked against the wire contract's enum — which a
-   * Go test (TestApprovalRequestedToolEnumMatchesTheTable) holds equal to
-   * internal/agenttools' declaration table. Rename a tool there and leave
-   * this file alone: the Go test reds first, and once the contract is
-   * corrected this one reds too, before any rendering assertion is reached.
-   */
-  it('branches only on names the wire contract declares', () => {
-    const contract = JSON.parse(
-      readFileSync(
-        resolve(
-          import.meta.dirname ?? new URL('.', import.meta.url).pathname,
-          '../../contracts/agent.approvalRequested.schema.json',
-        ),
-        'utf8',
-      ),
-    ) as { properties: { tool: { enum?: string[] } } }
-    const declared = contract.properties.tool.enum
-    expect(
-      declared,
-      'the contract must ENUMERATE the tool names, or the union is a bare string again',
-    ).toBeDefined()
-    for (const [branch, name] of Object.entries(TOOLS_THIS_WINDOW_NAMES)) {
-      expect(declared, `the ${branch} branch compares against ${name}`).toContain(name)
-    }
-  })
 
   it('draws the lead, the labelled command block and the expansion for the shipped tool', () => {
     const { container } = renderPrompt({ ask: SHIPPED_RUN_ASK, sessionWhere: () => HERE })

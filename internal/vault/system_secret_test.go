@@ -206,6 +206,25 @@ func TestSystemSecretCreateFailuresRecoverWithoutExposingMaterial(t *testing.T) 
 			assertSystemSecretHidden(t, v, id)
 			provider.fail = nil
 			v = systemSecretRestart(t, v, docs)
+			candidates, candidatesErr := v.PendingDeleteCandidates(ctx)
+			if candidatesErr != nil {
+				t.Fatal(candidatesErr)
+			}
+			if failure == "prepared-save" {
+				if len(candidates) != 0 {
+					t.Fatalf("unwritten create became a recovery candidate: %v", candidates)
+				}
+			} else if len(candidates) != 1 || candidates[0] != id {
+				t.Fatalf("recovered system create lost cleanup ownership: %v", candidates)
+			}
+			if failure != "none" && len(candidates) != 0 {
+				// No reference was committed by these failed creates. Their
+				// metadata owner, not startup provider availability, decides
+				// that the conditional candidate may be promoted.
+				if scheduleErr := v.ScheduleDelete(ctx, id); scheduleErr != nil {
+					t.Fatal(scheduleErr)
+				}
+			}
 			if failure == "none" {
 				assertSystemSecretHidden(t, v, id)
 				assertSystemSecretValue(t, v, id, "session")
@@ -275,7 +294,14 @@ func TestSystemSecretBlockedRecoveryKeepsJournalClassification(t *testing.T) {
 		t.Fatalf("blocked orphan lost classification: %+v, %v", doc, err)
 	}
 	provider.fail = nil
-	systemSecretRestart(t, v, docs)
+	v = systemSecretRestart(t, v, docs)
+	candidates, candidatesErr := v.PendingDeleteCandidates(ctx)
+	if candidatesErr != nil || len(candidates) != 1 || candidates[0] != id {
+		t.Fatalf("unblocked provider lost conditional recovery: %v, %v", candidates, candidatesErr)
+	}
+	if scheduleErr := v.ScheduleDelete(ctx, id); scheduleErr != nil {
+		t.Fatal(scheduleErr)
+	}
 	if _, err := provider.Get(ctx, id); !errors.Is(err, ErrSecretNotFound) {
 		t.Fatalf("unblocked recovery left orphan: %v", err)
 	}
@@ -291,7 +317,7 @@ func TestSystemSecretDeleteFailureKeepsJournalClassification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	v = systemSecretRestart(t, v, docs) // clear completed create journal
+	v = systemSecretRestart(t, v, docs) // retain create as a conditional candidate
 	provider.fail = errors.New("provider offline")
 	if err := v.Delete(ctx, id); err == nil {
 		t.Fatal("owned deletion ignored provider failure")

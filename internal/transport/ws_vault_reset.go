@@ -31,6 +31,7 @@ type vaultResetPreviewResponse struct {
 	SecretCount             int  `json:"secretCount"`
 	ProfileCount            int  `json:"profileCount"`
 	EndpointCount           int  `json:"endpointCount"`
+	MCPServerCount          int  `json:"mcpServerCount"`
 	SystemKeychainReachable bool `json:"systemKeychainReachable"`
 	VaultInitialized        bool `json:"vaultInitialized"`
 }
@@ -41,10 +42,11 @@ type vaultResetResidueEntry struct {
 }
 
 type vaultResetResponse struct {
-	SecretCount   int                      `json:"secretCount"`
-	ProfileCount  int                      `json:"profileCount"`
-	EndpointCount int                      `json:"endpointCount"`
-	Residue       []vaultResetResidueEntry `json:"residue"`
+	SecretCount    int                      `json:"secretCount"`
+	ProfileCount   int                      `json:"profileCount"`
+	EndpointCount  int                      `json:"endpointCount"`
+	MCPServerCount int                      `json:"mcpServerCount"`
+	Residue        []vaultResetResidueEntry `json:"residue"`
 }
 
 // vaultResetHandlers answers vault.resetPreview and vault.reset. Reset is
@@ -53,9 +55,10 @@ type vaultResetResponse struct {
 // alone, independent of the vault lifecycle. The handler holds the operation,
 // the Responder and the vault.changed fan-out; nothing else.
 type vaultResetHandlers struct {
-	op      capability.VaultResetOperation // nil → reset not wired
-	r       Responder
-	machine vaultMachine
+	op        capability.VaultResetOperation // nil → reset not wired
+	r         Responder
+	machine   vaultMachine
+	mutations *mcpMutations
 }
 
 func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcRequest) {
@@ -73,6 +76,7 @@ func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcR
 			SecretCount:             p.Impact.SecretCount,
 			ProfileCount:            p.Impact.ProfileCount,
 			EndpointCount:           p.Impact.EndpointCount,
+			MCPServerCount:          p.Impact.MCPServerCount,
 			SystemKeychainReachable: p.SystemKeychainReachable,
 			VaultInitialized:        p.VaultInitialized,
 		}))
@@ -88,32 +92,38 @@ func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest)
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
-		result, err := svc.Execute(ctx)
-		if err != nil {
-			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
-			return nil
-		}
-
-		// Empty, not nil. The contract declares an array and the renderer types it
-		// as one; `residue: null` reaching a `.length` is the same defect this
-		// project already shipped once on the inventory (nocx-25k9.14).
-		residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
-		for _, r := range result.Residue {
-			residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
-		}
-
-		h.machine.broadcastVaultChanged()
-
-		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
-			SecretCount:   result.Impact.SecretCount,
-			ProfileCount:  result.Impact.ProfileCount,
-			EndpointCount: result.Impact.EndpointCount,
-			Residue:       residue,
-		}))
-		return nil
+	var result vaultreset.Result
+	var cleared *capability.MCPMutationSnapshot
+	err := h.mutations.run(ctx, capability.MCPMutationTarget{Kind: capability.MCPMutationReset}, func(ctx context.Context, snapshot *capability.MCPMutationSnapshot) error {
+		return h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
+			if snapshot != nil {
+				if err := svc.VerifyMCPMutation(*snapshot); err != nil {
+					return err
+				}
+			}
+			var err error
+			result, err = svc.Execute(ctx)
+			if err == nil {
+				cleared = snapshot
+			}
+			return err
+		})
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req, err)
+		answerMCPMutationError(h.r, req, err, -32603, "vault.reset: ")
+		return
 	}
+	residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
+	for _, r := range result.Residue {
+		residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
+	}
+	h.machine.broadcastVaultChanged()
+	_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
+		SecretCount:    result.Impact.SecretCount,
+		ProfileCount:   result.Impact.ProfileCount,
+		EndpointCount:  result.Impact.EndpointCount,
+		MCPServerCount: result.Impact.MCPServerCount,
+		Residue:        residue,
+	}))
+	h.mutations.announceCleared(cleared)
 }

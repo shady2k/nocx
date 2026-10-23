@@ -117,6 +117,8 @@ func (v *Vault) ProviderStatus(ctx context.Context, id credential.SecretID) (pro
 // SecretRecords returns a copied backend-only catalogue for known-material
 // screening. Unlike user inventory it includes system-owned secrets. IDs and
 // classification must not be exposed through user-facing inventory or RPC.
+// An unresolved deletion write fails screening closed until journal readback
+// establishes which material remains owned.
 func (v *Vault) SecretRecords(ctx context.Context) ([]SecretRecord, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -128,6 +130,9 @@ func (v *Vault) SecretRecords(ctx context.Context) ([]SecretRecord, error) {
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if len(v.uncertainDeletions) != 0 {
+		return nil, errDeletionOutcomeUncertain
 	}
 	return append([]SecretRecord(nil), v.doc.Secrets...), nil
 }
@@ -151,18 +156,21 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 	v.mu.Lock()
 	state := v.stateLocked()
 	records := append([]SecretRecord(nil), v.doc.Secrets...)
-	// An interrupted create/delete may have only a journal entry. Its
-	// classification must still prevent legacy references exposing material.
-	systemOnly := make(map[credential.SecretID]bool)
+	// Hidden material, retired IDs and unresolved deletion writes cannot be
+	// selected again through either catalogue or legacy-reference inventory.
+	unavailable := make(map[credential.SecretID]bool)
 	for _, entry := range v.doc.Journal {
-		if entry.SystemOnly {
-			systemOnly[entry.NewID] = true
+		if entry.SystemOnly || entry.Op == "delete" {
+			unavailable[entry.NewID] = true
 		}
 	}
 	for _, rec := range records {
 		if rec.SystemOnly {
-			systemOnly[rec.ID] = true
+			unavailable[rec.ID] = true
 		}
+	}
+	for id := range v.uncertainDeletions {
+		unavailable[id] = true
 	}
 	v.mu.Unlock()
 
@@ -186,7 +194,7 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 
 		for _, sr := range refs {
 			referenced[sr.ref] = true
-			if systemOnly[sr.ref] {
+			if unavailable[sr.ref] {
 				continue
 			}
 
@@ -241,7 +249,7 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 	// The record is the only source — nothing derived it, and a record whose
 	// name did not land renders as the kind.
 	for _, rec := range records {
-		if referenced[rec.ID] || systemOnly[rec.ID] {
+		if referenced[rec.ID] || unavailable[rec.ID] {
 			continue
 		}
 		providerID, err := parseID(rec.ID)

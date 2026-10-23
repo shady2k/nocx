@@ -318,6 +318,16 @@ describe('SettingsContent', () => {
     expect(page).toBeTruthy()
     expect(page!.querySelector('.ui-page__rail')).toBeTruthy()
   })
+  it('offers MCP Servers even without a client and explains unavailability', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+    const page = target.querySelector<HTMLElement>('[data-item="mcpServers"]')!
+    expect(page).not.toBeNull()
+    openSection(target, 'MCP Servers')
+    await vi.waitFor(() =>
+      expect(target.textContent).toContain('MCP servers are not available in this window.'),
+    )
+  })
 
   /**
    * A SETTINGS CHANGE MUST NOT TAKE BACK WHAT THE PERSON JUST DID (nocx-hphhh).
@@ -636,6 +646,7 @@ describe('SettingsContent', () => {
     expect(labels).toEqual([
       'Connections',
       'Endpoints',
+      'MCP Servers',
       'Roles',
       'Assistant permissions',
       // Beside the permissions page and not the same subject: that one

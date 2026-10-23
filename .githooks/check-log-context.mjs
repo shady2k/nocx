@@ -12,6 +12,10 @@
  * because there is nothing to forget. This ratchet is what stops a new call
  * site opting back into forgetting them.
  *
+ * Zero-argument Error calls are error values, not logger calls. The Error
+ * function imported from net/http writes an HTTP response, not a log; its
+ * actual import alias is resolved rather than exempting the name "http".
+ *
  * WHAT IT CANNOT SEE, the same admission the sibling ratchets make about
  * their own blind spots:
  *
@@ -66,6 +70,8 @@ const CALL_RE = /(?:^|[^.\w])([A-Za-z_]\w*)\.(Debug|Info|Warn|Error)\(/g
 //   nocxlog "github.com/shady2k/nocx/internal/log"
 const IMPORT_RE =
   /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"github\.com\/shady2k\/nocx\/internal\/log"\s*$/
+const HTTP_IMPORT_RE = /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"net\/http"\s*$/
+const NO_ARGUMENTS_RE = /^(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*(?:\n|$))*\)/
 
 /** repo-relative, tracked, non-test *.go files, '/'-separated. */
 export function trackedGoFiles() {
@@ -82,18 +88,13 @@ export function trackedGoFiles() {
     .filter((f) => !f.startsWith('.claude/')) // nested worktree, see pre-commit's own note
 }
 
-/** The local alias `internal/log` is imported under in this file, or "log"
- * (the package's own name) when the file does not import it at all — a file
- * with no import can still have violations if it manufactures a raw
- * *slog.Logger, so scanning does not skip it, it just cannot see a `log.`
- * prefix any file that never imported the package could not have written. */
-function resolveAlias(lines) {
+/** Resolve a package's local import name; no import means no alias. */
+function resolveAlias(lines, importRe, packageName) {
   for (const line of lines) {
-    const m = IMPORT_RE.exec(line)
-    IMPORT_RE.lastIndex = 0
-    if (m) return m[1] || 'log'
+    const m = importRe.exec(line)
+    if (m) return m[1] || packageName
   }
-  return 'log'
+  return null
 }
 
 /** Violations in Go source text already read into memory, decoupled from the
@@ -101,7 +102,8 @@ function resolveAlias(lines) {
  * only ever used as the label on the returned records. */
 export function violationsInText(file, text) {
   const lines = text.split('\n')
-  const alias = resolveAlias(lines)
+  const alias = resolveAlias(lines, IMPORT_RE, 'log') || 'log'
+  const httpAlias = resolveAlias(lines, HTTP_IMPORT_RE, 'http')
 
   const fromRe = new RegExp(`\\b(\\w+)\\s*(?::=|=)[^\\n]*\\b${alias}\\.From\\(`)
   const startRe = new RegExp(
@@ -122,6 +124,7 @@ export function violationsInText(file, text) {
   }
 
   const violations = []
+  let lineOffset = 0
   lines.forEach((line, idx) => {
     const fm = fromRe.exec(line)
     if (fm) compliant.add(fm[1])
@@ -133,10 +136,17 @@ export function violationsInText(file, text) {
     CALL_RE.lastIndex = 0
     let m
     while ((m = CALL_RE.exec(line))) {
-      const [, receiver] = m
+      const [, receiver, method] = m
+      if (
+        method === 'Error' &&
+        (receiver === httpAlias || NO_ARGUMENTS_RE.test(text.slice(lineOffset + CALL_RE.lastIndex)))
+      ) {
+        continue
+      }
       if (compliant.has(receiver)) continue
       violations.push({ file, line: idx + 1, text: line.trim() })
     }
+    lineOffset += line.length + 1
   })
   return violations
 }

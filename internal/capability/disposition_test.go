@@ -34,7 +34,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"BackupOperation", NewBackupOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"CaptureSaveOperation", NewCaptureSaveOperation(gate(GateVault), gate(GateContent), gate("lane"), nil, nil), DispositionDirect},
 		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil), DispositionDirect},
-		{"ConfigOperation", NewConfigOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil, nil, nil, nil), DispositionDirect},
+		{"ConfigOperation", NewConfigOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil, nil, nil, nil, MCPConfigDependencies{}), DispositionDirect},
 		{"ContentOperation", NewContentOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
 		{"FilesystemOpenOperation", NewFilesystemOpenOperation(gate(GateSession), gate(GateFilesystem), gate("lane"), nil, nil, nil), DispositionAdapted},
 		{"FilesystemBindingOperation", NewFilesystemBindingOperation(gate(GateFilesystem), gate("lane"), nil), DispositionAdapted},
@@ -44,13 +44,13 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"LedgerOperation", NewLedgerOperation(gate(GateContent), gate("lane"), db), DispositionExcluded},
 		{"NoteOperation", NewNoteOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"OpenOperation", NewOpenOperation(gate(GateConfig), gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
-		{"SecretOperation", NewSecretOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil), DispositionDirect},
+		{"SecretOperation", NewSecretOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, MCPConfigDependencies{}), DispositionDirect},
 		{"SessionOperation", NewSessionOperation(gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
 		{"SessionTargetOperation", targetOp, DispositionAdapted},
 		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), gate("lane"), nil), DispositionExcluded},
 		{"VaultOperation", NewVaultOperation(gate(GateVault), gate("lane"), nil), DispositionDirect},
-		{"VaultResetOperation", NewVaultResetOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil), DispositionDirect},
+		{"VaultResetOperation", NewVaultResetOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, MCPConfigDependencies{}), DispositionDirect},
 	}
 
 	if len(cases) != 23 {

@@ -181,7 +181,7 @@ run_variant() {
         -v "$REPO:/src:ro" \
         -v "$GOMOD_VOL:/cache/gomod" \
         -v "$GOBUILD_VOL:/cache/gobuild" \
-        -e RUN_UID="$HOST_UID" -e RUN_GID="$HOST_GID" \
+        -e RUN_UID="$HOST_UID" \
         -e HOME=/tmp/nocx-ci-home \
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
@@ -193,6 +193,9 @@ run_variant() {
         -w /src \
         "$IMAGE" \
         sh -euc '
+            # Translate the source group inside this user namespace; keep the
+            # test UID non-root even when rootless Docker maps the owner to 0.
+            RUN_GID="$(stat -c "%g" /src)"
             chown "$RUN_UID:$RUN_GID" /cache/gomod /cache/gobuild
             mkdir -p "$HOME" && chown "$RUN_UID:$RUN_GID" "$HOME"
             # The live-sshd suite spawns a real OpenSSH server as the dropped

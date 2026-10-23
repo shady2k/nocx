@@ -34,9 +34,10 @@
 # cross-container pattern races on a fresh named volume (the chown from the
 # first container is not reliably visible to the second, so /work can still be
 # root-owned at cp time). Instead each runner starts as root, chowns the cache
-# mounts, then `exec setpriv` to the host uid/gid for the actual command — one
-# container, no ordering race. HOME and caches live outside /root (a non-root
-# process cannot traverse /root). Cache volumes are keyed by uid/gid so a macOS
+# mounts, then `exec setpriv` to the host numeric UID and the source mount's
+# namespace-local GID — one container, no ordering race. HOME and caches live
+# outside /root (a non-root process cannot traverse /root). Cache volumes are
+# keyed by uid/gid so a macOS
 # dev (often 501:20) and a Linux box (1000:100) never inherit each other's (or
 # root's) cache ownership.
 
@@ -169,7 +170,7 @@ go_test_containerized() {
         -v "$PWD:/src:ro" \
         -v "$GOMOD_VOL:/cache/gomod" \
         -v "$GOBUILD_VOL:/cache/gobuild" \
-        -e RUN_UID="$HOST_UID" -e RUN_GID="$HOST_GID" \
+        -e RUN_UID="$HOST_UID" \
         -e HOME=/tmp \
         -e GOCACHE=/cache/gobuild \
         -e GOMODCACHE=/cache/gomod \
@@ -177,6 +178,9 @@ go_test_containerized() {
         -w /src \
         "$GO_TEST_IMAGE" \
         sh -euc '
+            # Translate the source group inside this user namespace; keep the
+            # test UID non-root even when rootless Docker maps the owner to 0.
+            RUN_GID="$(stat -c "%g" /src)"
             chown "$RUN_UID:$RUN_GID" /cache/gomod /cache/gobuild
             # The live-sshd suite (nocx-u7uh.17) spawns a real OpenSSH server
             # as the setpriv-dropped test user; a non-root sshd serves only a
@@ -223,13 +227,15 @@ vitest_containerized() {
         -v "$PWD/frontend:/src:ro" \
         -v "$FE_VOL:/work" \
         -v "$NPM_VOL:/npm" \
-        -e RUN_UID="$HOST_UID" -e RUN_GID="$HOST_GID" \
+        -e RUN_UID="$HOST_UID" \
         -e HOME=/tmp \
         -e npm_config_cache=/npm \
         -e INNER="$_inner" \
         -w /work \
         "$NODE_IMAGE" \
         sh -euc '
+            # Use the mounted source group, not its host numeric GID.
+            RUN_GID="$(stat -c "%g" /src)"
             chown "$RUN_UID:$RUN_GID" /work /npm
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups sh -euc "$INNER"
         '

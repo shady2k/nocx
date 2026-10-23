@@ -63,6 +63,25 @@ interface Geometry {
   /** The row either side of the joint, so a failure says which rows. */
   lastBlockRow: string
   firstLiveRow: string
+  /** Computed line-height/height and viewport geometry for the two seam rows,
+   *  including their containing elements up to the running block. */
+  jointRows: {
+    lastBlock: RowLayout | null
+    firstLive: RowLayout | null
+  }
+  /** The pitch every painted row must use, read from the owning grid metric. */
+  expectedPitch: number
+  /** Every saved and live row has the shared terminal pitch. */
+  rowsSharePitch: boolean
+  rowsOffPitch: string[]
+}
+
+interface RowLayout {
+  text: string
+  lineHeight: string
+  height: number
+  top: number
+  chain: Array<{ className: string; lineHeight: string; height: number; top: number }>
 }
 
 /** Read after the painter and the stack's observable glide completion. WebKit
@@ -90,6 +109,10 @@ async function geometry(page: Page): Promise<Geometry> {
         bodyTrailing: 0,
         lastBlockRow: '',
         firstLiveRow: '',
+        jointRows: { lastBlock: null, firstLive: null },
+        expectedPitch: 0,
+        rowsSharePitch: true,
+        rowsOffPitch: [],
       }
     }
     const bodyRows = [...(body?.querySelectorAll<HTMLElement>('.term-grid-row') ?? [])]
@@ -97,8 +120,41 @@ async function geometry(page: Page): Promise<Geometry> {
     const box = (el: Element): DOMRect => el.getBoundingClientRect()
     const text = (el: Element | undefined): string =>
       (el?.textContent ?? '').trim().replace(/\s+/g, ' ')
+    const rowLayout = (row: HTMLElement | undefined): RowLayout | null => {
+      if (!row) return null
+      const chain: RowLayout['chain'] = []
+      for (let el: HTMLElement | null = row; el; el = el.parentElement) {
+        const rect = box(el)
+        const style = getComputedStyle(el)
+        chain.push({
+          className: el.className.toString(),
+          lineHeight: style.lineHeight,
+          height: rect.height,
+          top: rect.top,
+        })
+        if (el === running) break
+      }
+      const rect = box(row)
+      const style = getComputedStyle(row)
+      return {
+        text: text(row),
+        lineHeight: style.lineHeight,
+        height: rect.height,
+        top: rect.top,
+        chain,
+      }
+    }
     const lastBody = bodyRows[bodyRows.length - 1]
     const firstLive = liveRows[0]
+    const expectedPitch = parseFloat(
+      getComputedStyle(running).getPropertyValue('--term-cell-height'),
+    )
+    const rowsOffPitch = [...bodyRows, ...liveRows].flatMap((row) => {
+      const lineHeight = parseFloat(getComputedStyle(row).lineHeight)
+      return Math.abs(lineHeight - expectedPitch) < 0.01
+        ? []
+        : [`${text(row)}: ${lineHeight}px != ${expectedPitch}px`]
+    })
     return {
       blockRows: bodyRows.length,
       blockPitch: bodyRows.length > 1 ? box(bodyRows[1]).top - box(bodyRows[0]).top : 0,
@@ -123,6 +179,10 @@ async function geometry(page: Page): Promise<Geometry> {
           : 0,
       lastBlockRow: text(lastBody),
       firstLiveRow: text(firstLive),
+      jointRows: { lastBlock: rowLayout(lastBody), firstLive: rowLayout(firstLive) },
+      expectedPitch,
+      rowsSharePitch: rowsOffPitch.length === 0,
+      rowsOffPitch: rowsOffPitch.slice(0, 8),
     }
   })
 }
@@ -157,6 +217,7 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     expect(Math.abs(g.jointGap), said).toBeLessThan(0.5)
     expect(g.jointStep, said).not.toBeNull()
     expect(Math.abs(g.jointStep! - g.blockPitch), said).toBeLessThan(0.5)
+    expect(g.rowsSharePitch, said).toBe(true)
     expect(g.jointInBlock, said).toBe(true)
     // And the body's trailing space is paid ONCE, at the body's end — the same
     // total a frozen block pays, so the pane does not move at the freeze.

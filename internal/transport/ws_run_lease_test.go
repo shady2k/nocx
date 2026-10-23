@@ -469,8 +469,19 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 func (h *runLeaseHarness) openNativeSession(t *testing.T) string {
 	t.Helper()
 	sid := openLocalSession(t, h.conn)
+	waitNativeShellReady(t, h.conn, nil, sid, "")
+	return sid
+}
+
+// waitNativeShellReady shares the native terminal handshake with tapped clients.
+// A non-nil tap remains the socket's sole reader; replies are written by the
+// test goroutine before it submits any command. When after is nonempty, the
+// reader boundary must follow that command-output marker: Fish queries the
+// terminal at subsequent prompts too, not only at startup.
+func waitNativeShellReady(t *testing.T, conn *websocket.Conn, tap *socketTap, sid, after string) {
+	t.Helper()
 	if filepath.Base(loginshell.New().Resolve().Path) != "fish" {
-		return sid
+		return
 	}
 	terminal, err := ghostty.New(emulator.Geometry{Cols: 80, Rows: 24, CellWidthPx: 10, CellHeightPx: 20})
 	if err != nil {
@@ -479,29 +490,52 @@ func (h *runLeaseHarness) openNativeSession(t *testing.T) string {
 	defer terminal.Close()
 	var output strings.Builder
 	deadline := time.Now().Add(10 * time.Second)
+	var timeout <-chan time.Time
+	if tap != nil {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		timeout = timer.C
+	}
 	for {
-		raw, readErr := awaitFrame(h.conn, deadline, func(raw []byte) bool {
-			frame, decodeErr := DecodeFrame(raw)
-			return decodeErr == nil && frame.MsgType == MsgTypeData &&
-				string(session.IDFromBytes(frame.SessionID)) == sid
-		})
-		if readErr != nil {
-			t.Fatalf("native shell reader never became ready: %v; output=%q", readErr, output.String())
-		}
-		frame, err := DecodeFrame(raw)
-		if err != nil {
-			t.Fatalf("decode native shell output: %v", err)
+		var frame Frame
+		if tap == nil {
+			raw, readErr := awaitFrame(conn, deadline, func(raw []byte) bool {
+				decodedFrame, decodeErr := DecodeFrame(raw)
+				return decodeErr == nil && decodedFrame.MsgType == MsgTypeData &&
+					string(session.IDFromBytes(decodedFrame.SessionID)) == sid
+			})
+			if readErr != nil {
+				t.Fatalf("native shell reader never became ready: %v; output=%q", readErr, output.String())
+			}
+			frame, err = DecodeFrame(raw)
+			if err != nil {
+				t.Fatalf("decode native shell output: %v", err)
+			}
+		} else {
+			select {
+			case next, ok := <-tap.data:
+				if !ok {
+					t.Fatalf("socket closed before native shell reader became ready; output=%q%s", output.String(), socketClosedWhy)
+				}
+				frame = next
+			case <-timeout:
+				t.Fatalf("native shell reader never became ready; output=%q", output.String())
+			}
+			if frame.MsgType != MsgTypeData || string(session.IDFromBytes(frame.SessionID)) != sid {
+				continue
+			}
 		}
 		replies, err := terminal.Ingest(frame.Payload)
 		if err != nil {
 			t.Fatalf("ingest native shell output: %v", err)
 		}
 		if len(replies) != 0 {
-			writeKeystroke(t, h.conn, sid, replies)
+			writeKeystroke(t, conn, sid, replies)
 		}
 		output.Write(frame.Payload)
-		if strings.Contains(output.String(), "\x1b]133;B\x1b\\") {
-			return sid
+		text := output.String()
+		if start := strings.Index(text, after); start >= 0 && strings.Contains(text[start+len(after):], "\x1b]133;B\x1b\\") {
+			return
 		}
 	}
 }

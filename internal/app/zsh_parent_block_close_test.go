@@ -171,7 +171,7 @@ func writeZshPluginFixtureHome(t *testing.T, wrapperDir string) string {
 }
 
 func TestLiveSshd_ZshParentBlockClosesWhenTheSshChildExits(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	logger := fx.log()
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {

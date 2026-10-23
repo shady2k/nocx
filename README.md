@@ -393,9 +393,10 @@ complete argv file or the first output marker does not drain the independent
 PTY pump.
 
 The widget-wrapping zsh plugins — `fast-syntax-highlighting`,
-`zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the one test
-about composing with a plugin stack (`nocx-1ebrs.27`), and that test **fails,
-not skips**, when they are missing. Provision the PINNED checkouts, because a
+`zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the
+plugin-composition check (`nocx-1ebrs.27`) and the real Zsh pane/SSH-child
+checks in `internal/app`. Those checks **fail, not skip**, when the plugins
+are missing. Provision the PINNED checkouts, because a
 package manager's bottles move and then a green run stops saying which widget
 wrapping it measured:
 
@@ -405,6 +406,18 @@ NOCX_ZSH_PLUGINS=~/.cache/nocx-zsh-plugins \
   go test -race -count=1 -run TestLocalZshPane_ThePluginStackIntegratesInEitherOrder \
   ./internal/shellintegration/
 ```
+
+Keep `NOCX_ZSH_PLUGINS` set for native `make ci` / `make ci-full` runs too;
+their host-side app checks do not install those prerequisites themselves.
+
+SSH lifecycle assembly checks use a real disposable Bash endpoint, including
+OpenSSH's external `sftp-server`, rather than expecting enhanced integration
+from a helper-less remote Fish shell (outside AD-5). This does not replace the
+account's native shell in local foreground-signal checks.
+
+Native Fish fixtures answer terminal queries at each reader boundary they
+cross, including after job-control setup. A command's output marker alone does
+not establish that the next prompt can accept input.
 
 The gates that run this suite provision the shells so they prove them:
 `scripts/ci-linux.sh` uses an image carrying dash, zsh and a real bash 3.2

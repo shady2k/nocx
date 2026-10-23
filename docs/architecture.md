@@ -83,12 +83,32 @@ Raw terminal bytes and raw marker sequences never cross the WebSocket as text. T
 | `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
 | `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
+| `mcp`              | Own dormant outbound MCP activation, bounded stdio/HTTP sessions, OAuth, and cancellation/drain barriers. Profile metadata and Vault material enter through narrow injected interfaces.                         |
+| `httppolicy`       | Validate and dial HTTP destinations under a caller-specific policy; MCP supplies its own restricted routing and redirect policy without changing other clients.                                                 |
 
 The pure `toolendpoint/panebind` contract owns the tool bearer's wire format and
 private MCP environment name. Shell staging renders that name into the private
 launch configuration; `mcpstdio` reads it without depending on shell-launch
 composition, preserving the bridge's no-child-process boundary
 (amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099).
+
+The outbound `mcp` client is distinct from the inbound `mcpstdio` bridge
+([ADR-0102](decisions/0102-mcp-tools-are-activated-only-after-admission.md)).
+`profile` owns catalogs, descriptor identity and all credential references;
+`capability` owns guarded metadata mutations and reference-aware secret retirement.
+`transport` coordinates snapshot → drain → guarded revalidation/commit, without
+holding configuration or Vault admission across the drain. The assistant's
+existing registry, delegate policy, effect kernel, egress screening and ledger
+remain the invocation authority; enabled catalogs alone grant no authority.
+
+Vault deletion candidates are durable but not permission to delete. Startup
+converts uncommitted system-secret creates into conditional candidates, including
+fresh OAuth tokens whose discard intent could not be written. It then checks
+the complete profile aggregate before promoting an unreferenced candidate.
+Live unseal and configuration reconciliation do not convert in-flight creates.
+An uncertain deletion-document write is read back; unresolved outcomes fence
+reuse and fail known-material screening closed. Reconciliation is local recovery,
+not MCP discovery or authentication.
 
 **Frontend**:
 
@@ -239,6 +259,13 @@ a recorder is a commit interval, and abandoning it would lose output the
 session already produced. The accepted cost is that a store write that never
 returns holds shutdown open with it; the cure for that is in the store, not a
 timeout here.
+
+MCP shutdown follows transport admission shutdown and precedes Vault closure.
+The manager cancels and drains credential resolution, discovery, OAuth and calls
+before releasing their sessions. Stdio owns its process group through escalation
+and reap; HTTP event streams live with their session rather than a response-age
+timer. Run completion and approval/egress suspension use the same close boundary,
+while resumable assistant checkpoints remain available.
 
 **Quality gates & CI.** Enforced from commit #1: both Go and TypeScript are gated the same way — format, lint, and test. Go uses `golangci-lint` and `gofumpt`; the frontend is held to the same bar. The per-commit gate is the `.githooks/pre-commit` hook, and since `nocx-hzsiv` it is a **static** gate — format, lint, types, ratchets, contracts, no test runner and no container. The tests are `make ci`'s and CI's; GitHub Actions (`ci.yml`) runs on every pull request to `main` and on manual dispatch, and is _called_ by `release.yml` on a version tag so a release gates on a green suite. The `pull_request` trigger is the mechanical enforcement of **no merge without green** on `main` (nocx-q36): the pre-commit hook and `make ci` give the identical checks as fast local feedback, but a hook is bypassable with `--no-verify` and `make hooks` is a per-clone step a fresh checkout may skip, so for anything arriving through a pull request CI is the gate that cannot be side-stepped. Be precise about the shape of that claim: there is deliberately **no `push: [main]` trigger**, so a direct push to `main` is ungated. Work reaches `main` through a pull request as a rule, and the owner keeps the exception for themselves — the trigger list is that policy written down, not an oversight to be closed. What protects a _release_ is separate and unconditional: `release.yml` calls `ci.yml` on the tagged commit, so the suite is green on the exact commit being shipped however it got to `main`. `ci.yml` no longer has its own tag trigger — with `release.yml` calling it, keeping one would run the whole suite twice per release. Tests are mandatory (TDD) for every language.
 

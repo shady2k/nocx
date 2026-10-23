@@ -38,6 +38,43 @@ or a cloud service of ours.
 
 Everything in that list ships in `v0.6.0`. The terminal is painted from the backend cell model; nocx also coordinates agents in panes without requiring herdr.
 
+## MCP tools (0.8 development)
+
+In **Settings → Assistant → MCP Servers**, create either a local **stdio**
+server or a **Streamable HTTP** endpoint. Stdio runs the executable and its
+argument list directly, without a shell. Supply credentials through the Vault
+secret controls rather than literal environment variables or headers.
+
+Saving a server does not connect to it. **Refresh tools** explicitly starts or
+contacts the saved server, reads every catalog page, and closes the connection.
+New or changed tools start disabled; enable only the tools the assistant may
+discover. Searching the saved catalog does not start a server.
+
+An enabled tool still needs the existing **delegate** permission for its exact
+destination. Approval applies to the proposed call and arguments, not every tool
+on that server. A changed live tool descriptor refuses execution until another
+explicit Refresh. Runs close their MCP sessions when they finish, are canceled,
+or suspend for approval.
+
+HTTP authentication supports a Vault-backed bearer token or OAuth with dynamic
+or preregistered clients. Save the configuration before **Connect OAuth**.
+Interactive authorization requires the desktop host's URL-opening capability;
+the plain browser preview reports its absence instead of opening a fallback
+popup. Token renewal is silent. **Forget OAuth** clears the saved authorization
+without opening a browser or unlocking the Vault.
+
+Configuration edits are a Save/Cancel draft. Catalog refresh, tool switches and
+OAuth actions affect the saved server immediately and leave that draft intact.
+A conflicting revision preserves the draft and requires an explicit reload.
+Vault reset clears MCP credential bindings, not the server's literal configuration.
+
+The MCP methods require window/coordinator protocol **4**. An older coordinator
+is replaced through the existing, announced protocol-mismatch path; a matching
+release version alone does not make the two wire surfaces compatible.
+
+See [the 0.8 scope](docs/milestones/v0-8.md) and
+[ADR-0102](docs/decisions/0102-mcp-tools-are-activated-only-after-admission.md).
+
 ## Install (macOS)
 
 Install the cask from our third-party tap:

@@ -105,7 +105,7 @@ func TestExecute_ClearsReferencesBeforeDestroyingSecrets(t *testing.T) {
 func TestExecute_AbortsWithoutDestroyingAnythingWhenReferencesCannotBeCleared(t *testing.T) {
 	order := []string{}
 	v := &fakeVault{snap: sealedSnapshot(true), order: &order}
-	r := &fakeRefs{clearErr: errors.New("disk full"), order: &order}
+	r := &fakeRefs{impact: profile.SecretReferenceImpact{MCPServerCount: 2}, clearErr: errors.New("disk full"), order: &order}
 
 	if _, err := newService(t, v, r).Execute(context.Background()); err == nil {
 		t.Fatal("Execute returned nil when the references could not be cleared")
@@ -127,7 +127,7 @@ func TestExecute_SucceedsWithResidueWhenAStoreCannotBeCleared(t *testing.T) {
 		purgeErr: errors.New("provider system: no service"),
 		order:    &order,
 	}
-	r := &fakeRefs{impact: profile.SecretReferenceImpact{SecretCount: 2}, order: &order}
+	r := &fakeRefs{impact: profile.SecretReferenceImpact{SecretCount: 2, MCPServerCount: 3}, order: &order}
 
 	got, err := newService(t, v, r).Execute(context.Background())
 	if err != nil {
@@ -138,6 +138,9 @@ func TestExecute_SucceedsWithResidueWhenAStoreCannotBeCleared(t *testing.T) {
 	}
 	if got.Residue[0].Store != string(vault.ProviderSystem) {
 		t.Errorf("Residue names %q, want %q", got.Residue[0].Store, vault.ProviderSystem)
+	}
+	if got.Impact.MCPServerCount != 3 {
+		t.Fatalf("MCP server impact lost on residue path: %+v", got.Impact)
 	}
 }
 
@@ -355,5 +358,55 @@ func TestService_WithRealStore_CountsAndClearsEndpointReferences(t *testing.T) {
 	}
 	if eps[0].CredentialRef != "" {
 		t.Errorf("CredentialRef = %q, want cleared", eps[0].CredentialRef)
+	}
+}
+
+func TestMCPReferencesPreviewAndResetThroughRealStore(t *testing.T) {
+	refs := profile.NewJSONStore(filepath.Join(t.TempDir(), "profiles.json"))
+	literal := "keep"
+	server, err := refs.CreateMCPServer(profile.MCPServer{
+		Name: "MCP", Enabled: true, Transport: profile.MCPTransportStreamableHTTP,
+		HTTP: &profile.MCPHTTPConfig{
+			Endpoint: "https://example.com/mcp", Auth: profile.MCPHTTPAuthOAuth,
+			Headers: []profile.MCPHeaderBinding{{Name: "X-Literal", Value: profile.MCPValueBinding{Kind: profile.MCPBindingLiteral, Literal: &literal}}},
+			OAuth: &profile.MCPOAuthConfig{
+				Registration: profile.MCPOAuthPreregistered, ClientID: "client",
+				ClientSecret: &profile.MCPSecretBinding{SecretRef: "client-secret", Owned: true},
+				SessionRef:   &profile.MCPSecretBinding{SecretRef: "session-secret", Owned: true},
+				Status:       profile.MCPOAuthConnected,
+			},
+		},
+		Limits: profile.MCPLimits{StartupTimeoutMS: 1000, CallTimeoutMS: 1000, IdleTimeoutMS: 0, MaxResultBytes: 1024},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	order := []string{}
+	v := &fakeVault{
+		snap: sealedSnapshot(false), order: &order,
+		failures: []vault.PurgeFailure{{Provider: vault.ProviderSystem, Err: errors.New("unreachable")}},
+		purgeErr: errors.New("provider unavailable"),
+	}
+	service := vaultreset.New(v, refs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	preview, err := service.Preview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Impact.SecretCount != 2 || preview.Impact.MCPServerCount != 1 || v.purged {
+		t.Fatalf("preview = %+v, purged=%v", preview, v.purged)
+	}
+	result, err := service.Execute(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Impact != preview.Impact || len(result.Residue) != 1 {
+		t.Fatalf("reset result = %+v", result)
+	}
+	loaded, err := refs.GetMCPServer(server.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Revision != server.Revision+1 || loaded.HTTP.OAuth.SessionRef != nil || loaded.HTTP.OAuth.ClientSecret != nil || loaded.HTTP.Endpoint != server.HTTP.Endpoint || len(loaded.HTTP.Headers) != 1 || *loaded.HTTP.Headers[0].Value.Literal != literal {
+		t.Fatalf("provider residue restored references or lost configuration: %+v", loaded)
 	}
 }

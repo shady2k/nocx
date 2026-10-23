@@ -690,7 +690,7 @@ func TestConfigOperationCannotReachVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	vaultSeam := newFakeVault()
 
-	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	// The handler-shaped consumer: it takes the operation and nothing else.
 	runConsumer := func(op capability.ConfigOperation) error {
@@ -744,7 +744,7 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	configGate, vaultGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	var leaked capability.ConfigService
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
@@ -791,7 +791,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 	seam := newFakeVault()
 	cfgSvc := newProfileService(t)
 
-	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, capability.MCPConfigDependencies{})
 	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, testLane(), profiles, groups, cfgSvc, seam, seam)
 
 	// Run both in both arrival orders, concurrently, repeatedly.
@@ -888,7 +888,7 @@ func TestSameDomainExclusion(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -921,7 +921,7 @@ func TestForSecretUnknownID(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists, capability.MCPConfigDependencies{})
 
 	op, err := factory.ForSecret(context.Background(), "sec:v1:file:does-not-exist")
 	if err == nil {
@@ -945,7 +945,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists, capability.MCPConfigDependencies{})
 	op, err := factory.ForSecret(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ForSecret with a known id failed: %v", err)
@@ -1075,7 +1075,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, capability.MCPConfigDependencies{})
 
 	// Failure path: unknown row.
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1141,10 +1141,10 @@ func TestVaultLifecycleSetupSucceeds(t *testing.T) {
 func TestVaultResetAndConfigRunTogether(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	reset := &fakeReset{}
-	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, testLane(), reset)
+	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, testLane(), reset, capability.MCPConfigDependencies{})
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1234,7 +1234,7 @@ func TestSettingsSurfaceSucceeds(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, newFakeSecretStore())
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), reg, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), reg, nil, nil, capability.MCPConfigDependencies{})
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		snap, err := svc.Settings().GetSnapshot()
@@ -1257,7 +1257,7 @@ func TestConfigWriteWithRowButNoVaultFails(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, nil, nil, capability.MCPConfigDependencies{})
 
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1287,7 +1287,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	seam := newFakeVault()
 	seam.rows["secrow:1"] = "sec:v1:file:fakea"
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, seam, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, nil, newProfileService(t), nil, seam, nil, capability.MCPConfigDependencies{})
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1315,7 +1315,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 func TestMintSecretReturnsTheMintedID(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam, capability.MCPConfigDependencies{})
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1339,7 +1339,7 @@ func TestMintSecretReturnsTheMintedID(t *testing.T) {
 func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	store := newFakeSecretStore()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store, capability.MCPConfigDependencies{})
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {

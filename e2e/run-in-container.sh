@@ -314,8 +314,6 @@ run_one() {
     -e NOCX_PROVE_FAILURE_CONTEXT="${NOCX_PROVE_FAILURE_CONTEXT:-}" \
     -e NOCX_E2E_SHARD_FILES="${NOCX_E2E_SHARD_FILES:-}" \
     -e NOCX_E2E_SHARD="${NOCX_E2E_SHARD:-}" \
-    -e NOCX_E2E_HOST_UID="$(id -u)" \
-    -e NOCX_E2E_HOST_GID="$(id -g)" \
     -w /work \
     "$image" \
     bash -euo pipefail /work/e2e/container-entry.sh "${@:2}"

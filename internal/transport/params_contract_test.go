@@ -68,6 +68,20 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 	}
 	invalid = append(invalid, idsProbe)
 	valid := map[string][][]byte{
+		"mcpServers.list":            {[]byte(`{}`)},
+		"mcpServers.get":             {[]byte(`{"id":"mcp:fixture"}`)},
+		"mcpServers.delete":          {[]byte(`{"id":"mcp:fixture","revision":1}`)},
+		"mcpServers.refresh":         {[]byte(`{"id":"mcp:fixture","revision":1}`)},
+		"mcpServers.oauthAuthorize":  {[]byte(`{"id":"mcp:fixture","revision":1}`)},
+		"mcpServers.oauthForget":     {[]byte(`{"id":"mcp:fixture","revision":1}`)},
+		"mcpServers.setToolsEnabled": {[]byte(`{"id":"mcp:fixture","revision":1,"tools":[]}`)},
+		"mcpServers.create": {
+			[]byte(`{"name":"fixture","enabled":true,"transport":"stdio","stdio":{"command":"/usr/bin/true","argv":[],"cwd":"","env":[]},"http":null,"limits":{"startupTimeoutMs":1000,"callTimeoutMs":1000,"idleTimeoutMs":0,"maxResultBytes":1024}}`),
+			[]byte(`{"name":"fixture","enabled":true,"transport":"streamable-http","stdio":null,"http":{"endpoint":"http://127.0.0.1:8090/mcp","auth":"none","headers":[],"bearer":null,"oauth":null},"limits":{"startupTimeoutMs":1000,"callTimeoutMs":1000,"idleTimeoutMs":0,"maxResultBytes":1024}}`),
+		},
+		"mcpServers.update": {
+			[]byte(`{"id":"mcp:fixture","revision":1,"name":"fixture","enabled":true,"transport":"stdio","stdio":{"command":"/usr/bin/true","argv":[],"cwd":"","env":[]},"http":null,"limits":{"startupTimeoutMs":1000,"callTimeoutMs":1000,"idleTimeoutMs":0,"maxResultBytes":1024}}`),
+		},
 		"session.recoveryStatus": {
 			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"0123456789abcdef0123456789abcdef","sessionEpoch":1}`),
 		},

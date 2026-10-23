@@ -16,6 +16,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/storage"
@@ -261,5 +262,71 @@ func TestAgentApprovalRequested_EgressArmOverTheWireConformsToContract(t *testin
 	}
 	if got.Reason != "egress" || got.Effect != "observe" {
 		t.Fatalf("notification = %s, want the egress arm carrying effect observe", raw)
+	}
+}
+
+func TestAgentApprovalRequested_MCPArmsOverTheWireConformToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.approvalRequested.schema.json")
+	const serverID = "mcp:local-catalog:98aa106a-e1a3-4fb4-8c14-43b2d2c898a4"
+	name := agenttools.MCPModelName(serverID, "echo")
+	destination := content.GrantScope{Kind: content.ResourceDestination, ID: "mcp+stdio:" + serverID}
+	for _, reason := range []string{"policy", "egress"} {
+		t.Run(reason, func(t *testing.T) {
+			client := &scriptedApprovalClient{script: []approvalScriptStep{
+				{suspend: func(runID string) error {
+					if reason == "policy" {
+						return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+							RunID: runID, Attempt: 1, Tool: name, CallID: "mcp-call",
+							Arguments: `{"value":"approved"}`, ArgHash: "mcp-args-hash",
+							Effect: content.EffectDelegate, Resource: &destination,
+						}}
+					}
+					return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
+						RunID: runID, Attempt: 1, Tool: name, CallID: "mcp-call",
+						Arguments: `{"value":"approved"}`, ArgHash: "mcp-args-hash",
+						Effect: content.EffectDelegate, Resource: &destination,
+						Findings: []assistant.EgressFinding{{
+							Source: assistant.EgressFindingKnown, SecretName: "MCP credential", Start: 0, End: 8,
+						}},
+					}}
+				}},
+			}}
+			h := newAskHarness(t, client)
+			h.createEndpoint()
+			sid := openLocalSession(t, h.conn)
+			if _, rpcErr := askOverWire(t, h.conn, map[string]any{
+				"askId": "mcp-contract-" + reason, "sessionId": sid, "question": "use the configured tool", "cwd": "/repo",
+			}, 1); rpcErr != nil {
+				t.Fatalf("ask: %+v", rpcErr)
+			}
+			raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+			validateJSON(t, schema, raw, "MCP "+reason+" approval notification (real socket)")
+			var emitted agentApprovalRequested
+			if err := json.Unmarshal(raw, &emitted); err != nil {
+				t.Fatal(err)
+			}
+			if emitted.Tool != name || emitted.Reason != reason || emitted.Effect != string(content.EffectDelegate) ||
+				emitted.Resource == nil || *emitted.Resource != destination {
+				t.Fatalf("MCP wire notification changed exact identity: %s", raw)
+			}
+
+			// Change only tool on the actual emitted payload, so the negative
+			// assertions cannot pass because another required field is missing.
+			var payload map[string]any
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			for _, invalid := range []string{
+				"arbitrary.tool", "tools.search", "run", "mcp_", name[:len(name)-1],
+				name + "a", name + "\n", strings.ToUpper(name),
+				"mcp_" + strings.Repeat("0", 32), "mcp_" + strings.Repeat("8", 32),
+				"mcp_" + strings.Repeat("_", 32),
+			} {
+				payload["tool"] = invalid
+				if err := schema.Validate(payload); err == nil {
+					t.Errorf("approval contract accepted invalid tool %q", invalid)
+				}
+			}
+		})
 	}
 }

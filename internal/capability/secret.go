@@ -34,6 +34,7 @@ type SecretVault interface {
 // secret) is computed inside the service from the profile/group stores;
 // the handler never sees those stores.
 type SecretService interface {
+	VerifyMCPMutation(MCPMutationSnapshot) error
 	// Inventory returns the vault inventory — the Secrets page.
 	Inventory(ctx context.Context) ([]vault.InventoryEntry, error)
 	// CreateSecret stores value with its catalogue metadata (ADR-0016).
@@ -172,6 +173,7 @@ type SecretOperations struct {
 	// exists answers whether id names a stored secret. Wired from the
 	// vault's own existence check; nil means "no check" (a test seam).
 	exists func(context.Context, credential.SecretID) (bool, error)
+	mcp    MCPConfigDependencies
 }
 
 // NewSecretOperations wires the per-secret factory. Each ForSecret call
@@ -183,6 +185,7 @@ func NewSecretOperations(
 	v SecretVault,
 	store credential.SecretStore,
 	exists func(context.Context, credential.SecretID) (bool, error),
+	mcp MCPConfigDependencies,
 ) *SecretOperations {
 	return &SecretOperations{
 		configGate: configGate,
@@ -193,6 +196,7 @@ func NewSecretOperations(
 		vault:      v,
 		store:      store,
 		exists:     exists,
+		mcp:        mcp,
 	}
 }
 
@@ -213,7 +217,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 		Direct("SecretOperation"),
 		control.NewComposite(f.configGate, f.vaultGate, f.lane),
 		g,
-		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
+		newSecretService(g, f.profiles, f.groups, f.vault, f.store, f.mcp),
 	), nil
 }
 
@@ -226,13 +230,14 @@ func NewSecretOperation(
 	groups profile.GroupRepository,
 	v SecretVault,
 	store credential.SecretStore,
+	mcp MCPConfigDependencies,
 ) SecretOperation {
 	g := &guard{}
 	return newOperation[SecretService](
 		Direct("SecretOperation"),
 		control.NewComposite(configGate, vaultGate, lane),
 		g,
-		newSecretService(g, profiles, groups, v, store),
+		newSecretService(g, profiles, groups, v, store, mcp),
 	)
 }
 
@@ -244,8 +249,9 @@ func newSecretService(
 	groups profile.GroupRepository,
 	v SecretVault,
 	store credential.SecretStore,
+	mcp MCPConfigDependencies,
 ) *secretService {
-	return &secretService{guard: g, profiles: profiles, groups: groups, vault: v, store: store}
+	return &secretService{guard: g, profiles: profiles, groups: groups, vault: v, store: store, mcp: mcp}
 }
 
 type secretService struct {
@@ -254,6 +260,7 @@ type secretService struct {
 	groups   profile.GroupRepository
 	vault    SecretVault
 	store    credential.SecretStore
+	mcp      MCPConfigDependencies
 }
 
 func (s *secretService) Inventory(ctx context.Context) ([]vault.InventoryEntry, error) {

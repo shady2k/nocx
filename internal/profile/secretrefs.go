@@ -1,5 +1,7 @@
 package profile
 
+import "sort"
+
 // Secret references, in bulk.
 //
 // A vault reset destroys the key material for every stored secret at once, and
@@ -31,54 +33,67 @@ type SecretReferenceImpact struct {
 	// "9 connections" and "2 endpoints" answer different questions
 	// (ADR-0031).
 	EndpointCount int
+	// MCPServerCount counts servers holding any env, header or OAuth reference.
+	MCPServerCount int
+}
+
+// visitSecretReferences owns enumeration of every durable reference holder.
+// Group defaults contribute distinct secrets, not connection-profile counts.
+func visitSecretReferences(d *storeData, visit func(ref, kind, id string)) {
+	emit := func(ref, kind, id string) {
+		if ref != "" {
+			visit(ref, kind, id)
+		}
+	}
+	for _, p := range d.Profiles {
+		for _, ref := range []string{p.Options.PasswordSecret, p.Options.KeySecret, p.Options.KeyPassphraseSecret} {
+			emit(ref, "profile", p.ID)
+		}
+	}
+	for _, g := range d.Groups {
+		if g.Defaults == nil {
+			continue
+		}
+		o := &g.Defaults.SparseSSHOptions
+		for _, ref := range []*string{o.PasswordSecret, o.KeySecret, o.KeyPassphraseSecret} {
+			if ref != nil {
+				emit(*ref, "group", g.ID)
+			}
+		}
+	}
+	for _, ep := range d.Endpoints {
+		emit(ep.CredentialRef, "endpoint", ep.ID)
+		for _, h := range ep.Headers {
+			emit(h.ValueRef, "endpoint", ep.ID)
+		}
+	}
+	for i := range d.MCPServers {
+		server := &d.MCPServers[i]
+		visitMCPSecretRefs(server, func(ref string, _ bool) {
+			emit(ref, "mcp", server.ID)
+		})
+	}
 }
 
 func impactOf(d *storeData) SecretReferenceImpact {
 	distinct := make(map[string]struct{})
-	heldByProfiles := make(map[string]struct{})
-	heldByEndpoints := make(map[string]struct{})
-
-	for i := range d.Profiles {
-		o := &d.Profiles[i].Options
-		holds := false
-		for _, ref := range []string{o.PasswordSecret, o.KeySecret, o.KeyPassphraseSecret} {
-			if ref != "" {
-				distinct[ref] = struct{}{}
-				holds = true
-			}
+	profiles := make(map[string]struct{})
+	endpoints := make(map[string]struct{})
+	servers := make(map[string]struct{})
+	visitSecretReferences(d, func(ref, kind, id string) {
+		distinct[ref] = struct{}{}
+		switch kind {
+		case "profile":
+			profiles[id] = struct{}{}
+		case "endpoint":
+			endpoints[id] = struct{}{}
+		case "mcp":
+			servers[id] = struct{}{}
 		}
-		if holds {
-			heldByProfiles[d.Profiles[i].ID] = struct{}{}
-		}
-	}
-	for i := range d.Endpoints {
-		ep := &d.Endpoints[i]
-		holds := ep.CredentialRef != ""
-		if !holds {
-			for j := range ep.Headers {
-				if ep.Headers[j].ValueRef != "" {
-					holds = true
-					break
-				}
-			}
-		}
-		if holds {
-			heldByEndpoints[ep.ID] = struct{}{}
-		}
-		if ep.CredentialRef != "" {
-			distinct[ep.CredentialRef] = struct{}{}
-		}
-		for j := range ep.Headers {
-			if ref := ep.Headers[j].ValueRef; ref != "" {
-				distinct[ref] = struct{}{}
-			}
-		}
-	}
-
+	})
 	return SecretReferenceImpact{
-		SecretCount:   len(distinct),
-		ProfileCount:  len(heldByProfiles),
-		EndpointCount: len(heldByEndpoints),
+		SecretCount: len(distinct), ProfileCount: len(profiles),
+		EndpointCount: len(endpoints), MCPServerCount: len(servers),
 	}
 }
 
@@ -131,6 +146,14 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 		o.KeySecret = ""
 		o.KeyPassphraseSecret = ""
 	}
+	for i := range d.Groups {
+		if d.Groups[i].Defaults != nil {
+			o := &d.Groups[i].Defaults.SparseSSHOptions
+			o.PasswordSecret = nil
+			o.KeySecret = nil
+			o.KeyPassphraseSecret = nil
+		}
+	}
 	for i := range d.Endpoints {
 		ep := &d.Endpoints[i]
 		ep.CredentialRef = ""
@@ -142,6 +165,9 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 			kept = append(kept, h)
 		}
 		ep.Headers = kept
+	}
+	for i := range d.MCPServers {
+		clearAllMCPSecretRefs(&d.MCPServers[i])
 	}
 
 	if err := s.writeLocked(d); err != nil {
@@ -178,6 +204,9 @@ func (s *JSONStore) ClearSecretRefs(secretID string) error {
 // credentials — reporting whether anything changed. The caller holds s.mu
 // and owns the subsequent write.
 func clearSecretRefLocked(d *storeData, secretID string) bool {
+	if secretID == "" {
+		return false
+	}
 	changed := false
 	for i := range d.Profiles {
 		o := &d.Profiles[i].Options
@@ -234,5 +263,78 @@ func clearSecretRefLocked(d *storeData, secretID string) bool {
 		}
 		ep.Headers = kept
 	}
+	for i := range d.MCPServers {
+		if clearMCPSecretRef(&d.MCPServers[i], secretID) {
+			changed = true
+		}
+	}
 	return changed
+}
+
+// SecretReferenceQuery is the aggregate query needed after metadata-first
+// updates. Callers hold their configuration admission through cleanup so no
+// new holder can appear between this query and deletion of owned material.
+type SecretReferenceQuery interface {
+	UnreferencedSecretRefs(refs []string) ([]string, error)
+}
+
+// MCPSecretReferenceQuery supplies immutable mutation-barrier snapshots.
+// Empty input matches no servers; reset callers enumerate servers explicitly.
+type MCPSecretReferenceQuery interface {
+	MCPServersReferencingSecrets(refs []string) ([]MCPServer, error)
+}
+
+func unreferencedSecretRefs(d *storeData, refs []string) []string {
+	candidates := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref != "" {
+			candidates[ref] = struct{}{}
+		}
+	}
+	visitSecretReferences(d, func(ref, _, _ string) { delete(candidates, ref) })
+	out := make([]string, 0, len(candidates))
+	for ref := range candidates {
+		out = append(out, ref)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *JSONStore) UnreferencedSecretRefs(refs []string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return unreferencedSecretRefs(d, refs), nil
+}
+
+func (s *JSONStore) MCPServersReferencingSecrets(refs []string) ([]MCPServer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	wanted := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if ref != "" {
+			wanted[ref] = struct{}{}
+		}
+	}
+	affected := make(map[string]struct{})
+	visitSecretReferences(d, func(ref, kind, id string) {
+		if _, ok := wanted[ref]; ok && kind == "mcp" {
+			affected[id] = struct{}{}
+		}
+	})
+	out := make([]MCPServer, 0, len(affected))
+	for _, server := range d.MCPServers {
+		if _, ok := affected[server.ID]; ok {
+			out = append(out, server)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
 }

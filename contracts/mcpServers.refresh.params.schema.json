@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.refresh.params.schema.json",
+  "title": "MCPServersRefreshParams",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "revision"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "revision": { "type": "integer", "minimum": 1 }
+  }
+}

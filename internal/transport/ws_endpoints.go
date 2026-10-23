@@ -31,9 +31,10 @@ import (
 // -32601 "endpoints not available", the same shape profiles and groups
 // use.
 type endpointHandlers struct {
-	op    capability.ConfigOperation
-	wired bool
-	r     Responder
+	op        capability.ConfigOperation
+	wired     bool
+	mutations *mcpMutations
+	r         Responder
 }
 
 func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
@@ -41,91 +42,93 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "endpoints not available"})
 		return
 	}
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-		switch req.Method {
-		case "endpoints.list":
-			eps, err := svc.ListEndpoints()
-			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
-				return nil
-			}
-			// Secret references stay backend-owned: hand the renderer row
-			// handles (ADR-0017 §1).
-			_ = h.r.TryResult(req.ID, mustMarshal(endpointsListResponse{Endpoints: wireEndpoints(eps)}))
-		case "endpoints.create":
-			var params endpointCreateParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-				return nil
-			}
-			e := params.toEndpoint()
-			// Mint an ID when the renderer sends none, exactly like
-			// profiles.create.
-			if e.ID == "" {
-				e.ID = profile.NewEndpointID(e.Name)
-			}
-			var key credential.Secret
-			if params.Key != "" {
-				key = credential.NewSecret(params.Key)
-			}
-			created, err := svc.CreateEndpoint(ctx, e, key)
-			if err != nil {
-				// rpcErrorFor keeps the endpoint conflict codes (-32602) and
-				// attaches the vault's reason when the mint failed because the
-				// vault needs setup or is sealed: without data.reason the
-				// renderer's operation-first wrapper (saveSecretWithVault) and
-				// the dispatcher's sealed interception cannot tell the vault
-				// from a disk error, so the setup/unlock sheet never opens and
-				// the save dies in a toast (nocx-4egm, the shape of nocx-25k9.7).
-				_ = h.r.TryError(req.ID, rpcErrorFor(endpointMethodErrorCode(err), "", err))
-				return nil
-			}
-			_ = h.r.TryResult(req.ID, mustMarshal(endpointResultResponse{Endpoint: wireEndpoint(created)}))
-		case "endpoints.update":
-			var params endpointUpdateParams
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-				return nil
-			}
-			if params.ID == "" {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
-				return nil
-			}
-			e := params.toEndpoint()
-			// "Absent or empty key" keeps the existing material (design
-			// §4.5.4); a non-empty one rotates or mints.
-			var key *credential.Secret
-			if params.Key != "" {
-				sk := credential.NewSecret(params.Key)
-				key = &sk
-			}
-			updated, err := svc.UpdateEndpoint(ctx, e, key)
-			if err != nil {
-				_ = h.r.TryError(req.ID, rpcErrorFor(endpointMethodErrorCode(err), "", err))
-				return nil
-			}
-			_ = h.r.TryResult(req.ID, mustMarshal(endpointResultResponse{Endpoint: wireEndpoint(updated)}))
-		case "endpoints.delete":
-			var params struct {
-				ID string `json:"id"`
-			}
-			if err := json.Unmarshal(req.Params, &params); err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-				return nil
-			}
-			if err := svc.DeleteEndpoint(ctx, params.ID); err != nil {
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", err))
-				return nil
-			}
-			// Nothing to return; the list is the state (like
-			// vault.deleteSecret's empty result).
-			_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+	var result any
+	var cleared *capability.MCPMutationSnapshot
+	var target *capability.MCPMutationTarget
+	if req.Method == "endpoints.delete" {
+		var p struct {
+			ID string `json:"id"`
 		}
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
+		_ = json.Unmarshal(req.Params, &p)
+		target = &capability.MCPMutationTarget{Kind: capability.MCPMutationEndpointCredential, EndpointID: p.ID}
+	} else if req.Method == "endpoints.update" {
+		var p endpointUpdateParams
+		_ = json.Unmarshal(req.Params, &p)
+		// Only a material rotation invalidates existing MCP sessions. Changing
+		// an endpoint's display/configuration does not change shared material.
+		if p.Key != "" {
+			target = &capability.MCPMutationTarget{Kind: capability.MCPMutationEndpointCredential, EndpointID: p.ID}
+		}
 	}
+	commit := func(ctx context.Context, snapshot *capability.MCPMutationSnapshot) error {
+		return h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
+			if snapshot != nil {
+				if err := svc.VerifyMCPMutation(*snapshot); err != nil {
+					return err
+				}
+			}
+			switch req.Method {
+			case "endpoints.list":
+				eps, err := svc.ListEndpoints()
+				if err != nil {
+					return err
+				}
+				result = endpointsListResponse{Endpoints: wireEndpoints(eps)}
+			case "endpoints.create":
+				var params endpointCreateParams
+				_ = json.Unmarshal(req.Params, &params)
+				e := params.toEndpoint()
+				if e.ID == "" {
+					e.ID = profile.NewEndpointID(e.Name)
+				}
+				var key credential.Secret
+				if params.Key != "" {
+					key = credential.NewSecret(params.Key)
+				}
+				created, err := svc.CreateEndpoint(ctx, e, key)
+				if err != nil {
+					return err
+				}
+				result = endpointResultResponse{Endpoint: wireEndpoint(created)}
+			case "endpoints.update":
+				var params endpointUpdateParams
+				_ = json.Unmarshal(req.Params, &params)
+				var key *credential.Secret
+				if params.Key != "" {
+					value := credential.NewSecret(params.Key)
+					key = &value
+				}
+				updated, err := svc.UpdateEndpoint(ctx, params.toEndpoint(), key)
+				if err != nil {
+					return err
+				}
+				result = endpointResultResponse{Endpoint: wireEndpoint(updated)}
+			case "endpoints.delete":
+				var params struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(req.Params, &params)
+				if err := svc.DeleteEndpoint(ctx, params.ID); err != nil {
+					return err
+				}
+				cleared = snapshot
+				result = struct{}{}
+			}
+			return nil
+		})
+	}
+	var err error
+	if target == nil {
+		err = commit(ctx, nil)
+	} else {
+		err = h.mutations.run(ctx, *target, commit)
+	}
+	if err != nil {
+		answerMCPMutationError(h.r, req, err, endpointMethodErrorCode(err), "")
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(result))
+	h.mutations.announceCleared(cleared)
 }
 
 // endpointMethodErrorCode maps the endpoint store's sentinel errors to

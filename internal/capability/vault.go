@@ -155,6 +155,7 @@ type VaultReset interface {
 
 // VaultResetService is what a VaultResetOperation hands its callback.
 type VaultResetService interface {
+	VerifyMCPMutation(MCPMutationSnapshot) error
 	Preview(ctx context.Context) (vaultreset.Preview, error)
 	Execute(ctx context.Context) (vaultreset.Result, error)
 }
@@ -170,19 +171,20 @@ type VaultResetOperation interface {
 // NewVaultResetOperation builds a VaultResetOperation that acquires
 // configGate before vaultGate (the canonical order), then the execution
 // lane, for every Run.
-func NewVaultResetOperation(configGate, vaultGate, lane control.Admission, reset VaultReset) VaultResetOperation {
+func NewVaultResetOperation(configGate, vaultGate, lane control.Admission, reset VaultReset, mcp MCPConfigDependencies) VaultResetOperation {
 	g := &guard{}
-	return newOperation[VaultResetService](Direct("VaultResetOperation"), control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset))
+	return newOperation[VaultResetService](Direct("VaultResetOperation"), control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset, mcp))
 }
 
 // newVaultResetService builds the concrete reset service bound to guard g.
-func newVaultResetService(g *guard, reset VaultReset) *vaultResetService {
-	return &vaultResetService{guard: g, reset: reset}
+func newVaultResetService(g *guard, reset VaultReset, mcp MCPConfigDependencies) *vaultResetService {
+	return &vaultResetService{guard: g, reset: reset, mcp: mcp}
 }
 
 type vaultResetService struct {
 	guard *guard
 	reset VaultReset
+	mcp   MCPConfigDependencies
 }
 
 func (s *vaultResetService) Preview(ctx context.Context) (vaultreset.Preview, error) {

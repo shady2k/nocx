@@ -84,13 +84,15 @@ interface RowLayout {
   chain: Array<{ className: string; lineHeight: string; height: number; top: number }>
 }
 
-/** Read inside an animation frame, after the painter's own callback for it:
- *  a frame's rows are painted there while its layout is applied when the
- *  frame is accepted, and a read between the two sees a screen nobody does. */
+/** Read after the painter and the stack's observable glide completion. WebKit
+ *  can advance an ancestor's compositor transform between rectangle reads in
+ *  one callback, manufacturing a different row pitch from equal-height rows. */
 async function geometry(page: Page): Promise<Geometry> {
   return page.evaluate(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     const pane = document.querySelector<HTMLElement>('.pane.active')!
+    do {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    } while ((pane.querySelector('.scrollback-inner')?.getAnimations().length ?? 0) > 0)
     const running = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')
     const body = running?.querySelector<HTMLElement>(':scope > .cmd-output') ?? null
     const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')

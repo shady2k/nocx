@@ -451,6 +451,8 @@ type WSServer struct {
 	// JSON-RPC error.
 	vaultLifecycle VaultLifecycle
 	vaultReset     VaultResetService
+	mcp            *mcpServices
+	mcpMutations   *mcpMutations
 	// Native dialog capability (dialog.* RPCs). When nil, those methods
 	// return -32601: the dev-web harness has no Wails runtime to open a
 	// dialog with. Set post-construction from main.go's WailsApp.startup,
@@ -2143,6 +2145,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.runResolutionSpec(immediate))
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
+	specs = append(specs, s.mcpServerSpecs(configOp)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)

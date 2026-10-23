@@ -22,42 +22,47 @@ export interface AgentApprovalRequested {
    */
   attempt: number
   /**
-   * The tool the model proposed calling — one of the names internal/agenttools' declaration table declares, and nothing else. The set is CLOSED on purpose (nocx-69sew): the renderer keys two sentences on this value (the command block for the command carrier, the network row for fetch.url), and while it was a bare string a rename in the table — `run` became `session.run` — left the renderer comparing against a dead literal, which no test and no schema could see. Enumerated here, the generated renderer type is a union, so a comparison against a name the table no longer declares is a compile error rather than a branch that is quietly never taken; TestApprovalRequestedToolEnumMatchesTheTable is the other end, and fails the moment the table and this list disagree. Only a declared tool can reach this notification: the two names that are not declarations — the unknown-tool anchor and tools.search — are answered inside WrapInvokableToolCall and never reach the kernel that escalates.
+   * The exact declared tool proposed by the model: a builtin name from internal/agenttools' declaration table, or the provider-safe MCPModelName (mcp_ followed by 32 lowercase base32 characters). The builtin enum remains synchronized with the declaration table; the dynamic branch admits only the MCP namespace, never arbitrary names. Its tsType hint preserves a builtin union plus an MCP template-literal type in generated renderer code, rather than weakening every builtin comparison to string. This notification grants nothing: agent.approve must still match the pending run/attempt/tool/callId/argument-hash binding. Internal presentation tools such as tools.search cannot raise approval notifications.
    */
-  tool:
-    | 'files.read'
-    | 'fetch.url'
-    | 'session.list'
-    | 'session.read'
-    | 'session.keys'
-    | 'session.message'
-    | 'session.run'
-    | 'session.wait'
-    | 'files.edit'
-    | 'files.create'
-    | 'git.status'
-    | 'notes.search'
-    | 'notes.create'
-    | 'notes.update'
-    | 'notes.delete'
-    | 'snippets.list'
-    | 'snippets.create'
-    | 'snippets.update'
-    | 'snippets.delete'
-    | 'snippets.reorder'
-    | 'skills.read'
-    | 'skills.create'
-    | 'skills.update'
-    | 'skills.delete'
-    | 'skills.resolve'
-    | 'skills.install'
-    | 'workers.holdings'
-    | 'workers.spawn'
-    | 'workers.say'
-    | 'workers.inbox'
-    | 'workers.report'
-    | 'workers.close'
-    | 'workers.removeCheckout'
+  tool: (
+    | (
+        | 'files.read'
+        | 'fetch.url'
+        | 'session.list'
+        | 'session.read'
+        | 'session.keys'
+        | 'session.message'
+        | 'session.run'
+        | 'session.wait'
+        | 'files.edit'
+        | 'files.create'
+        | 'git.status'
+        | 'notes.search'
+        | 'notes.create'
+        | 'notes.update'
+        | 'notes.delete'
+        | 'snippets.list'
+        | 'snippets.create'
+        | 'snippets.update'
+        | 'snippets.delete'
+        | 'snippets.reorder'
+        | 'skills.read'
+        | 'skills.create'
+        | 'skills.update'
+        | 'skills.delete'
+        | 'skills.resolve'
+        | 'skills.install'
+        | 'workers.holdings'
+        | 'workers.spawn'
+        | 'workers.say'
+        | 'workers.inbox'
+        | 'workers.report'
+        | 'workers.close'
+        | 'workers.removeCheckout'
+      )
+    | `mcp_${string}`
+  ) &
+    string
   /**
    * The model's call id for the proposed call — part of the binding.
    */

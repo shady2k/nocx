@@ -1678,17 +1678,23 @@ func (m *effectKernel) closeAttempt(ctx context.Context, execID int64, reason co
 	})
 }
 
-// terminationReasonOf maps a tool call's terminal error to the reason the
-// attempt records. A run the LEASE terminalized (ADR-0020 decision 2) is
-// the one case where the generic "failed" is the wrong fact: the ledger
-// must say WHICH bound ended the run — wall-clock, inactivity or the
-// output budget — so "the command was terminalized, and here is the bound
-// that did it" stays answerable from the record, never reconstructed.
-// Everything else keeps TermFailed.
+// terminationReasonOf preserves the execution's terminal cause on its attempt.
+// Lease bounds name their specific reason. Named process cancellation remains
+// distinct from a lost connection; ordinary cancellation and deadlines keep
+// their terminal reasons rather than becoming generic failures.
 func terminationReasonOf(err error) content.TerminationReason {
 	var leaseErr *RunLeaseError
 	if errors.As(err, &leaseErr) {
 		return leaseErr.Reason
+	}
+	if _, named := ProgramEndedSentence(err); named {
+		return content.TermFailed
+	}
+	if errors.Is(err, context.Canceled) {
+		return content.TermTransportGone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return content.TermTimeout
 	}
 	return content.TermFailed
 }
@@ -1711,6 +1717,8 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 	defer cancel()
 	runCtx = withToolBound(runCtx, decl.ResultBound)
 	switch decl.Executes {
+	case agenttools.InMCP:
+		return executeMCP(runCtx, capability, rawArgs, m.runSeams.mcpRuntime)
 	case agenttools.Dynamic:
 		reader, ok := capability.(*agenttools.SessionDescendantCapability)
 		if !ok {
@@ -1836,7 +1844,12 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	return out.text, nil
 }
 
-func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
+func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (result modelResult, resultErr error) {
+	defer func() {
+		if k.runSeams.mcpRuntime != nil && resultErr != nil {
+			k.runSeams.mcpRuntime.CloseRun(k.runID)
+		}
+	}()
 	// Skill drafting is model-adapter machinery: the generated arguments
 	// replace the model payload before the shared operation validates it.
 	if decl, ok := k.registry.Lookup(name); ok && decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
@@ -2105,6 +2118,23 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// failures has closed the wide door and left the narrow one open.
 	egress, screenErr := k.screenResult(ctx, out, runErr)
 	if screenErr != nil {
+		if ctx.Err() != nil && (errors.Is(screenErr, context.Canceled) || errors.Is(screenErr, context.DeadlineExceeded)) {
+			// Screening shares the run's lifetime. If that lifetime ended,
+			// its cancellation is not a new detector failure. Withhold all
+			// output, but keep the terminal cause the execution already owns.
+			// Lease/process causes are more specific than their wrapped
+			// context cancellation (and than a plain canceled parent).
+			cause := context.Cause(ctx)
+			var leaseErr *RunLeaseError
+			var programErr *cancelCause
+			if errors.As(runErr, &leaseErr) {
+				cause = leaseErr
+			} else if errors.As(runErr, &programErr) {
+				cause = programErr
+			}
+			_ = k.closeAttempt(ctx, execID, terminationReasonOf(cause), content.EntryFailure)
+			return modelResult{}, cause
+		}
 		// Detection failed: the result is withheld and the run fails —
 		// the masking service's fail-closed contract, and the gate's:
 		// nothing leaves when the gate cannot see.

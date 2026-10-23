@@ -33,6 +33,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/eino-contrib/jsonschema"
+	"github.com/shady2k/nocx/internal/mcp"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
@@ -305,7 +306,26 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 // guarded HTTP client. Zero ANSWER text after a completed stream is a
 // StreamError — the endpoint answered; it did not answer. Reasoning alone
 // does not count: a model that only thought did not reply.
-func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
+func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) (resultErr error) {
+	if p.MCPRuntime != nil && p.RunID != "" {
+		c.mcpMu.Lock()
+		if c.mcpRuns == nil {
+			c.mcpRuns = make(map[string]mcp.Runtime)
+		}
+		c.mcpRuns[p.RunID] = p.MCPRuntime
+		c.mcpMu.Unlock()
+		// Suspension closes sessions, but retains its continuation and runtime
+		// owner. Every terminal path, including setup failure, drops both.
+		defer func() {
+			var approval *ApprovalRequestedError
+			var egress *EgressRequestedError
+			if errors.As(resultErr, &approval) || errors.As(resultErr, &egress) {
+				p.MCPRuntime.CloseRun(p.RunID)
+			} else {
+				c.Discard(p.RunID)
+			}
+		}()
+	}
 	// The chain the transport put in the context becomes the chain
 	// everything under this ask logs with — the kernel and the declared-call
 	// carrier are both handed THIS logger. Binding it once here is what makes
@@ -389,7 +409,11 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	if p.Grant != nil {
 		grant := *p.Grant
 		grant.Policy = grant.Policy.WithFloor(c.floor)
-		permitted := c.tools.ForGrant(grant)
+		registry, err := c.tools.WithMCP(p.MCPCatalogs)
+		if err != nil {
+			return err
+		}
+		permitted := registry.ForGrant(grant)
 		// The approval store is the client's own (process-lifetime, one
 		// per client, keyed by run id — ADR-0028: checkpoints are
 		// process-lifetime state); a caller may pass one explicitly.
@@ -406,9 +430,10 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		if p.Classifier != nil {
 			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
 		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
+		mw, err := newPolicyMiddleware(askLog, grant, registry, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
+			mcpRuntime:        p.MCPRuntime,
 			sessions:          p.SessionSource,
 			screenCapture:     p.ScreenCapture,
 			noteOperation:     p.NoteOperation,
@@ -431,12 +456,12 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		}
 		if p.Presentation != nil {
 			mw.presentation = *p.Presentation
-			mw.presentationState = newPresentationState(p.Presentation.Loaded)
-			mw.grantProvider = func() content.Grant {
-				return grant
-			}
-			mw.searchSchema = append([]byte(nil), c.searchSchema...)
 		}
+		mw.presentationState = newPresentationState(mw.presentation.Loaded)
+		mw.grantProvider = func() content.Grant {
+			return grant
+		}
+		mw.searchSchema = append([]byte(nil), c.searchSchema...)
 		declared, err = mw.Declare(permitted)
 		if err != nil {
 			return err
@@ -445,7 +470,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		// refused. The policy middleware removes this internal anchor from
 		// ToolInfos before every model call, so it is never declared.
 		runTools = append(append([]tool.BaseTool(nil), declared...), &unknownToolAnchor{})
-		if p.Presentation != nil && p.Presentation.Lazy && len(c.searchSchema) > 0 {
+		if mw.presentationProjection().Lazy && len(c.searchSchema) > 0 {
 			search, err := mw.searchTool()
 			if err != nil {
 				return err
@@ -511,6 +536,13 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 func (c *client) Discard(runID string) {
 	if runID == "" {
 		return
+	}
+	c.mcpMu.Lock()
+	runtime := c.mcpRuns[runID]
+	delete(c.mcpRuns, runID)
+	c.mcpMu.Unlock()
+	if runtime != nil {
+		runtime.CloseRun(runID)
 	}
 	if c.snapshots != nil {
 		c.snapshots.Discard(runID)

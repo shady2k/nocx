@@ -74,6 +74,7 @@ type Transport struct {
 	route        Route
 	log          log.Logger
 	maxRedirects int
+	mcp          *MCPPolicy
 }
 
 // NewTransport builds the guarded transport alone, for a caller that needs
@@ -96,7 +97,7 @@ func NewTransport(p Params) *Transport {
 		// request the user believes is local. https keeps the route's
 		// proxy.
 		Proxy: func(req *http.Request) (*url.URL, error) {
-			if req.URL.Scheme == "http" {
+			if req.URL.Scheme == "http" || t.mcp != nil {
 				return nil, nil
 			}
 			return t.route.ProxyForHTTPS(req)
@@ -127,7 +128,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	if spec.scheme == "http" {
+	if spec.scheme == "http" || t.mcp != nil {
 		ctx := context.WithValue(req.Context(), dialSpecKey{}, spec)
 		return t.Inner.RoundTrip(req.WithContext(ctx))
 	}
@@ -137,6 +138,9 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 // check applies the address rule to one URL. It returns the dial spec that
 // pins the connection to the validated resolution.
 func (t *Transport) check(ctx context.Context, u *url.URL) (dialSpec, error) {
+	if t.mcp != nil {
+		return t.checkMCP(ctx, u)
+	}
 	switch u.Scheme {
 	case "https":
 		return dialSpec{scheme: "https"}, nil
@@ -217,7 +221,7 @@ func portFor(u *url.URL) string {
 // route, which is the point of the extraction — the assistant's route dials
 // with net.Dialer, a connection route dials on the far side.
 func (t *Transport) dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	if spec, ok := ctx.Value(dialSpecKey{}).(dialSpec); ok && spec.scheme == "http" {
+	if spec, ok := ctx.Value(dialSpecKey{}).(dialSpec); ok && (spec.scheme == "http" || t.mcp != nil) {
 		var lastErr error
 		for _, ip := range spec.ips {
 			conn, err := t.route.DialContext(ctx, network, net.JoinHostPort(ip.String(), spec.port))

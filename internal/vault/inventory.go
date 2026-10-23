@@ -114,6 +114,29 @@ func (v *Vault) ProviderStatus(ctx context.Context, id credential.SecretID) (pro
 	return p, status.Ready, status.Reason, nil
 }
 
+// SecretRecords returns a copied backend-only catalogue for known-material
+// screening. Unlike user inventory it includes system-owned secrets. IDs and
+// classification must not be exposed through user-facing inventory or RPC.
+// An unresolved deletion write fails screening closed until journal readback
+// establishes which material remains owned.
+func (v *Vault) SecretRecords(ctx context.Context) ([]SecretRecord, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	switch v.stateLocked() {
+	case StateUninitialized:
+		return nil, ErrVaultUninitialized
+	case StateSealed:
+		return nil, ErrVaultSealed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(v.uncertainDeletions) != 0 {
+		return nil, errDeletionOutcomeUncertain
+	}
+	return append([]SecretRecord(nil), v.doc.Secrets...), nil
+}
+
 // BuildInventory assembles the full inventory. It traverses the credential
 // metadata for unique secret references, reads each secret's name from the
 // vault's own catalogue record (ADR-0016) instead of deriving it, and also
@@ -133,6 +156,22 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 	v.mu.Lock()
 	state := v.stateLocked()
 	records := append([]SecretRecord(nil), v.doc.Secrets...)
+	// Hidden material, retired IDs and unresolved deletion writes cannot be
+	// selected again through either catalogue or legacy-reference inventory.
+	unavailable := make(map[credential.SecretID]bool)
+	for _, entry := range v.doc.Journal {
+		if entry.SystemOnly || entry.Op == "delete" {
+			unavailable[entry.NewID] = true
+		}
+	}
+	for _, rec := range records {
+		if rec.SystemOnly {
+			unavailable[rec.ID] = true
+		}
+	}
+	for id := range v.uncertainDeletions {
+		unavailable[id] = true
+	}
 	v.mu.Unlock()
 
 	switch state {
@@ -155,6 +194,9 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 
 		for _, sr := range refs {
 			referenced[sr.ref] = true
+			if unavailable[sr.ref] {
+				continue
+			}
 
 			providerID, err := parseID(sr.ref)
 			if err != nil {
@@ -207,7 +249,7 @@ func (v *Vault) BuildInventory(ctx context.Context, inputs []CredentialInventory
 	// The record is the only source — nothing derived it, and a record whose
 	// name did not land renders as the kind.
 	for _, rec := range records {
-		if referenced[rec.ID] {
+		if referenced[rec.ID] || unavailable[rec.ID] {
 			continue
 		}
 		providerID, err := parseID(rec.ID)

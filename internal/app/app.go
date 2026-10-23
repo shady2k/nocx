@@ -53,6 +53,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
@@ -125,6 +126,7 @@ type App struct {
 	// composition root keeps depending on behaviour instead of a type.
 	vaultCloser       interface{ Close() }
 	toolSurfaceCloser interface{ Close() }
+	mcpCloser         interface{ Close() error }
 	// noteCloser closes the notes database on shutdown; nil when the store
 	// never opened.
 	noteCloser interface{ Close() error }
@@ -2174,7 +2176,16 @@ func New(opts ...Option) (*App, error) {
 		// enroller closes the same interval by lane on the shell's own
 		// withdrawal, and both call Forget.
 		transport.WithPaneAdmissions(agentApprovalService))
-	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	var tp *transport.WSServer
+	mcpSecrets := mcpCredentials{resolver: credResolver, tokens: v}
+	mcpRuntime := mcp.NewManager(mcpSecrets, mcp.WithActivationVerifier(func(ctx context.Context, activation mcp.Activation) error {
+		return tp.VerifyMCPActivation(ctx, activation)
+	}))
+	mcpOAuth := mcp.NewOAuthManager(v, mcpSecrets, mcpRuntime)
+	tpOpts = append(tpOpts, transport.WithMCPServices(mcpRuntime, mcpRuntime, mcpOAuth))
+	// Both constructors above are dormant. The verifier becomes reachable
+	// only after this fully configured transport starts accepting requests.
+	tp = transport.NewWSServer(logger, sess, tpOpts...)
 	// The screen plane's transport half, bound here because the opener was
 	// built before the transport existed — the same late-binding every other
 	// opener seam below gets (nocx-zg3k3.2.2's publish).
@@ -2785,6 +2796,7 @@ func New(opts ...Option) (*App, error) {
 		Credentials:             v,
 		skills:                  skills,
 		vaultCloser:             v,
+		mcpCloser:               mcpRuntime,
 		noteCloser:              noteCloser,
 		contentCloser:           contentDB,
 		discoverySched:          discoverySched,
@@ -3132,6 +3144,9 @@ func (a *App) Start(ctx context.Context) error {
 	ctx = log.WithLogger(ctx, a.Logger)
 	log.SetRoot(a.Logger)
 	a.Logger.Info("starting application services")
+	if err := a.Transport.ReconcileMCPSecrets(ctx); err != nil {
+		return fmt.Errorf("MCP credential cleanup: %w", err)
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -3444,6 +3459,13 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// Transport admission is stopped before draining MCP, and Vault stays
+	// open until every registered call/authorization/renewal has ended.
+	if a.mcpCloser != nil {
+		if err := a.mcpCloser.Close(); err != nil {
+			log.From(ctx).Error("MCP shutdown error", "error", err)
+		}
 	}
 	// After the transport, so no pane can still be opening. The daemon and
 	// every session on it survive this — closing the connection is this

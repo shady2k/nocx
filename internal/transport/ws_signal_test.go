@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -84,7 +85,29 @@ func openSessionTapped(t *testing.T, conn *websocket.Conn, tap *socketTap) strin
 	if env.Result.SessionID == "" {
 		t.Fatal("open returned an empty sessionId")
 	}
+	waitNativeShellReady(t, conn, tap, env.Result.SessionID, "")
 	return env.Result.SessionID
+}
+
+// disableNativeJobControl keeps the real account shell as the protected parent.
+// Fish's `set` does not control jobs: its own status builtin must establish the
+// same topology that POSIX shells get from `set +m`.
+func disableNativeJobControl(t *testing.T, conn *websocket.Conn, tap *socketTap, sid string) {
+	t.Helper()
+	command := "set +m"
+	isFish := filepath.Base(loginshell.New().Resolve().Path) == "fish"
+	if isFish {
+		command = "status job-control none && status is-no-job-control"
+	}
+	submitCommand(t, conn, sid, command+" && printf %s%s JOBCONTROL -OFF")
+	if isFish {
+		// The command's output precedes Fish's next terminal queries. Answer
+		// those before returning, so a following command (including exit)
+		// cannot wait behind an unanswered native reader handshake.
+		waitNativeShellReady(t, conn, tap, sid, "JOBCONTROL-OFF")
+		return
+	}
+	tapDataFor(t, tap, sid, "JOBCONTROL-OFF", 20*time.Second)
 }
 
 // tapSignal drives one session.signal on a tapped socket and fails on a
@@ -692,9 +715,9 @@ func tapAckEstablishment(t *testing.T, tap *socketTap, pub *lifecyclepub.Publish
 // sentence as a user can check it (nocx-7l4ex.11): a program owns the screen
 // from INSIDE the shell's own process group, and the person's Stop ends it.
 //
-// This is the incident's topology, produced the way ADR-0024 already names it
-// — `set +m` turns job control off, and bash then runs the command in its own
-// group rather than making one for it. The kernel's answer is therefore
+// This is the incident's topology: job control is disabled in the native
+// shell, which then runs the command in its own group rather than making one
+// for it. The kernel's answer is therefore
 // identical to the one it gives at an idle prompt, so the ordinary ladder
 // correctly refuses (it would be killing the shell) and everything below
 // rests on the authenticated projection instead.
@@ -722,11 +745,9 @@ func TestSessionSignal_StopsAProgramInsideTheLauncherShellsGroup(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("PROTECTED-READY\n"), 0o600); err != nil {
 		t.Fatalf("write the readiness marker: %v", err)
 	}
-	// Job control off FIRST, and observed before the job is launched — a
-	// `set +m` that had not taken effect yet would silently give the job its
-	// own group and test the ordinary ladder instead of this one.
-	submitCommand(t, conn, sid, "set +m; printf %s%s JOBCONTROL -OFF")
-	tapDataFor(t, tap, sid, "JOBCONTROL-OFF", 20*time.Second)
+	// Job control off FIRST, and observed before the job is launched — or
+	// this would silently test the ordinary ladder instead.
+	disableNativeJobControl(t, conn, tap, sid)
 	submitCommand(t, conn, sid, "tail -f '"+marker+"'")
 	tapDataFor(t, tap, sid, "PROTECTED-READY", 20*time.Second)
 
@@ -769,8 +790,7 @@ func TestSessionSignal_UnreconciledOverTheWire(t *testing.T) {
 	// INT is trapped and ignored, so the terminal interrupt arrives and
 	// changes nothing — and there is no rung left, because the group is the
 	// shell's.
-	submitCommand(t, conn, sid, "set +m; printf %s%s JOBCONTROL -OFF")
-	tapDataFor(t, tap, sid, "JOBCONTROL-OFF", 20*time.Second)
+	disableNativeJobControl(t, conn, tap, sid)
 	submitCommand(t, conn, sid,
 		"sh -c 'trap \"\" INT; printf %s%s STUBBORN -READY; while true; do sleep 1; done'")
 	tapDataFor(t, tap, sid, "STUBBORN-READY", 20*time.Second)

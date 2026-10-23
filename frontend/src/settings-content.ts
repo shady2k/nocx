@@ -18,6 +18,7 @@ import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { SkillsStore } from './skills-store'
 import type { EndpointClient } from './endpoints'
+import type { MCPServerClient } from './mcp-servers-client'
 import type { HistoryStatusStore } from './history-status'
 import type { CheckoutsStatusStore } from './checkouts-status'
 
@@ -91,11 +92,12 @@ export class SettingsContent extends SolidPaneContent {
     private readonly checkoutsStatus?: CheckoutsStatusStore,
     private readonly agentRecordsClient?: import('./agent-records-client').AgentRecordsClient,
     /** Runs one update check through the shared controller, for the About
-     *  page's Check for updates action (nocx-1ebrs.55). The last positional
-     *  parameter: the constructor call in main.tsx passes these in order. */
+     *  page's Check for updates action (nocx-1ebrs.55). Keep positional
+     *  dependencies in the same order as main.tsx. */
     private readonly checkForUpdates?: () => Promise<
       import('./update-check').UpdateCheckOutcome | null
     >,
+    private readonly mcpServersClient?: MCPServerClient,
   ) {
     super()
   }
@@ -120,6 +122,7 @@ export class SettingsContent extends SolidPaneContent {
           typingClient: this.typingClient,
           paneName: this.paneName,
           endpointsClient: this.endpointsClient,
+          mcpServersClient: this.mcpServersClient,
           snippetsStore: this.snippetsStore,
           skillsStore: this.skillsStore,
           historyStatus: this.historyStatus,

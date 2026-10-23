@@ -44,6 +44,12 @@ func ValidateGrantScope(scope GrantScope) error {
 			return fmt.Errorf("resource scope: workspace id %q: %w", scope.ID, err)
 		}
 	case ResourceDestination:
+		if strings.HasPrefix(scope.ID, "mcp+stdio:") {
+			if scope.IncludeSubdomains || !validMCPStdioDestination(scope.ID) {
+				return errors.New("resource scope: MCP stdio requires an exact server identity")
+			}
+			return nil
+		}
 		if scope.ID == star {
 			if scope.IncludeSubdomains {
 				return errors.New("resource scope: * already covers every address; it cannot also include subdomains")
@@ -313,6 +319,13 @@ func defaultPortFor(scheme string) string {
 	return "443"
 }
 
+func validMCPStdioDestination(id string) bool {
+	serverID, ok := strings.CutPrefix(id, "mcp+stdio:")
+	// Profile IDs contain colons (mcp:<slug>:<uuid>). They are opaque
+	// identity bytes, not URL separators or a scope hierarchy.
+	return ok && validResourceAtom(serverID) && !strings.ContainsAny(serverID, "?#%\\* \t")
+}
+
 // destinationContains is THE containment predicate for network grants, and
 // the only one: content.GrantScope.Contains and agenttools.URLScope.Allows
 // both reach it, so what the settings page shows and what the dialler
@@ -323,6 +336,10 @@ func defaultPortFor(scheme string) string {
 // a grant over github.com, and the leading dot on the suffix is the whole of
 // why.
 func destinationContains(scope, child GrantScope) bool {
+	if strings.HasPrefix(scope.ID, "mcp+stdio:") || strings.HasPrefix(child.ID, "mcp+stdio:") {
+		return !scope.IncludeSubdomains && !child.IncludeSubdomains &&
+			validMCPStdioDestination(scope.ID) && scope.ID == child.ID
+	}
 	if ValidateGrantScope(scope) != nil {
 		return false
 	}

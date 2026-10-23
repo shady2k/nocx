@@ -55,7 +55,7 @@ func TestDocument_RoundTrip(t *testing.T) {
 		Threads:    4,
 	}
 	orig := Document{
-		Version:         2,
+		Version:         vaultModule.Current,
 		Instance:        "devbox",
 		DefaultProvider: ProviderFile,
 		Passphrase:      pass,

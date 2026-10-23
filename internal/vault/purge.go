@@ -96,6 +96,8 @@ func (v *Vault) Purge(ctx context.Context) ([]PurgeFailure, error) {
 	// with its providers emptied is the one outcome worse than either end.
 	v.mu.Lock()
 	v.doc = Document{}
+	// Uncertainty belongs to the discarded identity, never its replacement.
+	v.uncertainDeletions = nil
 	v.initializing = false
 	err := v.store.Delete(vaultDocName)
 	v.mu.Unlock()

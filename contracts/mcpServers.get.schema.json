@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/mcpServers.get.schema.json",
+  "title": "MCPServersGetResult",
+  "description": "One editable MCP server and its persisted catalog. Secret material and opaque secret references never appear in this shape.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["server"],
+  "properties": { "server": { "$ref": "#/$defs/server" } },
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startupTimeoutMs", "callTimeoutMs", "idleTimeoutMs", "maxResultBytes"],
+      "properties": {
+        "startupTimeoutMs": { "type": "integer" },
+        "callTimeoutMs": { "type": "integer" },
+        "idleTimeoutMs": { "type": "integer" },
+        "maxResultBytes": { "type": "integer" }
+      }
+    },
+    "valueBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "literal", "secretSet", "owned"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["literal", "secret"] },
+        "literal": { "type": ["string", "null"] },
+        "secretSet": { "type": "boolean" },
+        "owned": { "type": "boolean" }
+      }
+    },
+    "secretBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secretSet", "owned"],
+      "properties": {
+        "secretSet": { "type": "boolean" },
+        "owned": { "type": "boolean" }
+      }
+    },
+    "stdio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "argv", "cwd", "env"],
+      "properties": {
+        "command": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "cwd": { "type": "string" },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "$ref": "#/$defs/valueBinding" }
+            }
+          }
+        }
+      }
+    },
+    "oauth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registration",
+        "clientId",
+        "clientSecret",
+        "scopes",
+        "sessionSet",
+        "status",
+        "issuer",
+        "grantedScopes",
+        "accessTokenExpires"
+      ],
+      "properties": {
+        "registration": { "type": "string", "enum": ["dynamic", "preregistered"] },
+        "clientId": { "type": "string" },
+        "clientSecret": { "$ref": "#/$defs/secretBinding" },
+        "scopes": { "type": "array", "items": { "type": "string" } },
+        "sessionSet": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["missing", "connected", "expired"] },
+        "issuer": { "type": "string" },
+        "grantedScopes": { "type": "array", "items": { "type": "string" } },
+        "accessTokenExpires": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "http": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "auth", "headers", "bearer", "oauth"],
+      "properties": {
+        "endpoint": { "type": "string" },
+        "auth": { "type": "string", "enum": ["none", "bearer", "oauth"] },
+        "headers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "value"],
+            "properties": {
+              "name": { "type": "string" },
+              "value": { "$ref": "#/$defs/valueBinding" }
+            }
+          }
+        },
+        "bearer": { "$ref": "#/$defs/secretBinding" },
+        "oauth": { "oneOf": [{ "$ref": "#/$defs/oauth" }, { "type": "null" }] }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "inputSchema",
+        "outputSchema",
+        "descriptorDigest",
+        "enabled",
+        "status"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "inputSchema": { "type": "object" },
+        "outputSchema": { "type": ["object", "null"] },
+        "descriptorDigest": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["unchanged", "new", "changed"] }
+      }
+    },
+    "catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "serverName",
+        "serverVersion",
+        "protocolVersion",
+        "refreshedAt",
+        "digest",
+        "tools"
+      ],
+      "properties": {
+        "state": { "type": "string", "enum": ["missing", "fresh", "stale"] },
+        "serverName": { "type": "string" },
+        "serverVersion": { "type": "string" },
+        "protocolVersion": { "type": "string" },
+        "refreshedAt": { "type": ["string", "null"], "format": "date-time" },
+        "digest": { "type": "string" },
+        "tools": { "type": "array", "items": { "$ref": "#/$defs/tool" } }
+      }
+    },
+    "server": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "revision",
+        "name",
+        "enabled",
+        "transport",
+        "stdio",
+        "http",
+        "limits",
+        "catalog"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "name": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "transport": { "type": "string", "enum": ["stdio", "streamable-http"] },
+        "stdio": { "oneOf": [{ "$ref": "#/$defs/stdio" }, { "type": "null" }] },
+        "http": { "oneOf": [{ "$ref": "#/$defs/http" }, { "type": "null" }] },
+        "limits": { "$ref": "#/$defs/limits" },
+        "catalog": { "$ref": "#/$defs/catalog" }
+      }
+    }
+  }
+}

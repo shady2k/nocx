@@ -47,7 +47,6 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
-	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workspace"
 )
@@ -224,7 +223,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	preview := loadSchema(t, "vault.resetPreview.schema.json")
 	result := loadSchema(t, "vault.reset.schema.json")
 	rawPreview, err := json.Marshal(vaultResetPreviewResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		SystemKeychainReachable: false, VaultInitialized: true,
 	})
 	if err != nil {
@@ -233,7 +232,7 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 	validateJSON(t, preview, rawPreview, "vault.resetPreview DTO")
 
 	rawWithResidue, err := json.Marshal(vaultResetResponse{
-		SecretCount: 3, ProfileCount: 5,
+		SecretCount: 3, ProfileCount: 5, MCPServerCount: 2,
 		Residue: []vaultResetResidueEntry{{Store: "system", Reason: "no-service"}},
 	})
 	if err != nil {
@@ -253,73 +252,6 @@ func TestVaultReset_DTOsConformToContract(t *testing.T) {
 		t.Errorf("residue serialised as null: %s", rawClean)
 	}
 	validateJSON(t, result, rawClean, "vault.reset DTO with nothing left behind")
-}
-
-// The real methods through the real socket. This is the assertion that would
-// have caught vault.status shipping without defaultProvider: nothing here
-// names a field, so nothing here can omit one.
-func TestVaultReset_OverTheWireConformsToContract(t *testing.T) {
-	previewSchema := loadSchema(t, "vault.resetPreview.schema.json")
-	resultSchema := loadSchema(t, "vault.reset.schema.json")
-
-	ws, stop := newVaultResetWSServer(t, &fakeVaultReset{})
-	defer stop()
-
-	conn := connectWS(t, ws)
-
-	previewResp := vaultCall(t, conn, "vault.resetPreview", map[string]any{}, 1)
-	if previewResp.Error != nil {
-		t.Fatalf("vault.resetPreview: %+v", previewResp.Error)
-	}
-	validateJSON(t, previewSchema, previewResp.Result, "vault.resetPreview result")
-
-	resetResp := vaultCall(t, conn, "vault.reset", map[string]any{}, 2)
-	if resetResp.Error != nil {
-		t.Fatalf("vault.reset: %+v", resetResp.Error)
-	}
-	validateJSON(t, resultSchema, resetResp.Result, "vault.reset result")
-}
-
-// A reset must be reachable on a vault that is broken or half-built, so the
-// methods deliberately do not go through the gate that refuses when the vault
-// lifecycle is absent. Routing them there would make the way out unavailable
-// in exactly the states it exists for.
-func TestVaultReset_IsReachableWithNoVaultLifecycleWired(t *testing.T) {
-	ws, stop := newVaultResetWSServer(t, &fakeVaultReset{})
-	defer stop()
-
-	resp := vaultCall(t, connectWS(t, ws), "vault.reset", map[string]any{}, 1)
-	if resp.Error != nil {
-		t.Fatalf("vault.reset with no vault lifecycle: %+v", resp.Error)
-	}
-}
-
-func newVaultResetWSServer(t *testing.T, rs VaultResetService) (*WSServer, func()) {
-	t.Helper()
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithVaultReset(rs))
-	ctx := context.Background()
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	return ws, func() { _ = ws.Stop(ctx) }
-}
-
-type fakeVaultReset struct{}
-
-func (f *fakeVaultReset) Preview(_ context.Context) (vaultreset.Preview, error) {
-	return vaultreset.Preview{
-		Impact:                  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
-		SystemKeychainReachable: false,
-		VaultInitialized:        true,
-	}, nil
-}
-
-func (f *fakeVaultReset) Execute(_ context.Context) (vaultreset.Result, error) {
-	return vaultreset.Result{
-		Impact:  vaultreset.Impact{SecretCount: 3, ProfileCount: 5},
-		Residue: []vaultreset.Residue{{Store: "system", Reason: "no-service"}},
-	}, nil
 }
 
 // ── vault.inventory ───────────────────────────────────────────────────

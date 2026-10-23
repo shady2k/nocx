@@ -38,6 +38,43 @@ or a cloud service of ours.
 
 Everything in that list ships in `v0.6.0`. The terminal is painted from the backend cell model; nocx also coordinates agents in panes without requiring herdr.
 
+## MCP tools (0.8 development)
+
+In **Settings → Assistant → MCP Servers**, create either a local **stdio**
+server or a **Streamable HTTP** endpoint. Stdio runs the executable and its
+argument list directly, without a shell. Supply credentials through the Vault
+secret controls rather than literal environment variables or headers.
+
+Saving a server does not connect to it. **Refresh tools** explicitly starts or
+contacts the saved server, reads every catalog page, and closes the connection.
+New or changed tools start disabled; enable only the tools the assistant may
+discover. Searching the saved catalog does not start a server.
+
+An enabled tool still needs the existing **delegate** permission for its exact
+destination. Approval applies to the proposed call and arguments, not every tool
+on that server. A changed live tool descriptor refuses execution until another
+explicit Refresh. Runs close their MCP sessions when they finish, are canceled,
+or suspend for approval.
+
+HTTP authentication supports a Vault-backed bearer token or OAuth with dynamic
+or preregistered clients. Save the configuration before **Connect OAuth**.
+Interactive authorization requires the desktop host's URL-opening capability;
+the plain browser preview reports its absence instead of opening a fallback
+popup. Token renewal is silent. **Forget OAuth** clears the saved authorization
+without opening a browser or unlocking the Vault.
+
+Configuration edits are a Save/Cancel draft. Catalog refresh, tool switches and
+OAuth actions affect the saved server immediately and leave that draft intact.
+A conflicting revision preserves the draft and requires an explicit reload.
+Vault reset clears MCP credential bindings, not the server's literal configuration.
+
+The MCP methods require window/coordinator protocol **4**. An older coordinator
+is replaced through the existing, announced protocol-mismatch path; a matching
+release version alone does not make the two wire surfaces compatible.
+
+See [the 0.8 scope](docs/milestones/v0-8.md) and
+[ADR-0103](docs/decisions/0103-mcp-tools-are-activated-only-after-admission.md).
+
 ## Install (macOS)
 
 Install the cask from our third-party tap:
@@ -356,9 +393,10 @@ complete argv file or the first output marker does not drain the independent
 PTY pump.
 
 The widget-wrapping zsh plugins — `fast-syntax-highlighting`,
-`zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the one test
-about composing with a plugin stack (`nocx-1ebrs.27`), and that test **fails,
-not skips**, when they are missing. Provision the PINNED checkouts, because a
+`zsh-syntax-highlighting`, `zsh-autosuggestions` — are needed by the
+plugin-composition check (`nocx-1ebrs.27`) and the real Zsh pane/SSH-child
+checks in `internal/app`. Those checks **fail, not skip**, when the plugins
+are missing. Provision the PINNED checkouts, because a
 package manager's bottles move and then a green run stops saying which widget
 wrapping it measured:
 
@@ -368,6 +406,18 @@ NOCX_ZSH_PLUGINS=~/.cache/nocx-zsh-plugins \
   go test -race -count=1 -run TestLocalZshPane_ThePluginStackIntegratesInEitherOrder \
   ./internal/shellintegration/
 ```
+
+Keep `NOCX_ZSH_PLUGINS` set for native `make ci` / `make ci-full` runs too;
+their host-side app checks do not install those prerequisites themselves.
+
+SSH lifecycle assembly checks use a real disposable Bash endpoint, including
+OpenSSH's external `sftp-server`, rather than expecting enhanced integration
+from a helper-less remote Fish shell (outside AD-5). This does not replace the
+account's native shell in local foreground-signal checks.
+
+Native Fish fixtures answer terminal queries at each reader boundary they
+cross, including after job-control setup. A command's output marker alone does
+not establish that the next prompt can accept input.
 
 The gates that run this suite provision the shells so they prove them:
 `scripts/ci-linux.sh` uses an image carrying dash, zsh and a real bash 3.2

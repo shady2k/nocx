@@ -20,47 +20,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty"
 	"github.com/shady2k/nocx/internal/waittest"
 	"golang.org/x/sys/unix"
 )
 
-// waitForOutput waits until the pty has produced `want`. The pty is read on a
-// goroutine of its own because Read blocks: a test that read inline would
-// hang past its own bound rather than fail with what it did see. The bound is
-// a failure detector, never the thing being waited on — the condition is the
-// marker's arrival.
-func waitForOutput(t testing.TB, lp *LocalPty, want string) {
+// waitForOutput observes the sole reader's recording. The bound is a failure
+// detector, never the thing being waited on — the condition is the marker's
+// arrival, not the shell's echo of a command containing it.
+func waitForOutput(t testing.TB, screen func() string, want string) {
 	t.Helper()
-	var mu sync.Mutex
-	var seen strings.Builder
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		buf := make([]byte, 4096)
-		for {
-			n, err := lp.Read(buf)
-			if n > 0 {
-				mu.Lock()
-				seen.Write(buf[:n])
-				mu.Unlock()
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	t.Cleanup(func() { <-done })
 	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("the pty to produce %q", want), 20*time.Second,
-		func() string {
-			mu.Lock()
-			defer mu.Unlock()
-			return seen.String()
-		},
-		func() bool {
-			mu.Lock()
-			defer mu.Unlock()
-			return strings.Contains(seen.String(), want)
-		})
+		screen,
+		func() bool { return strings.Contains(screen(), want) })
 }
 
 // waitForeground waits until the pty reports a foreground process group at
@@ -84,18 +57,46 @@ func waitForeground(t testing.TB, lp *LocalPty) int {
 // recordPty keeps everything the pty prints, from now until it closes, and
 // returns a reader of it. A failure that says only "the file never appeared"
 // sends the next person to guess; the screen says whether the command was
-// typed, echoed, refused by the shell or never reached it.
+// typed, echoed, refused by the shell or never reached it. As in the native
+// shellintegration fixture, the product emulator answers Fish's terminal queries;
+// recording bytes alone leaves its startup negotiation waiting for a terminal.
 func recordPty(t testing.TB, lp *LocalPty) func() string {
 	t.Helper()
+	var terminal emulator.Terminal
+	if filepath.Base(lp.cmd.Path) == "fish" {
+		var err error
+		terminal, err = ghostty.New(emulator.Geometry{Cols: 80, Rows: 24, CellWidthPx: 10, CellHeightPx: 20})
+		if err != nil {
+			t.Fatalf("create native shell terminal: %v", err)
+		}
+	}
 	var mu sync.Mutex
 	var seen strings.Builder
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if terminal != nil {
+			defer terminal.Close()
+		}
 		buf := make([]byte, 4096)
 		for {
 			n, err := lp.Read(buf)
 			if n > 0 {
+				if terminal != nil {
+					replies, ingestErr := terminal.Ingest(buf[:n])
+					if ingestErr != nil {
+						t.Errorf("ingest native shell output: %v", ingestErr)
+						return
+					}
+					if len(replies) != 0 {
+						if _, writeErr := lp.Write(replies); writeErr != nil {
+							if !errors.Is(writeErr, os.ErrClosed) {
+								t.Errorf("answer native shell terminal query: %v", writeErr)
+							}
+							return
+						}
+					}
+				}
 				mu.Lock()
 				seen.Write(buf[:n])
 				mu.Unlock()
@@ -106,11 +107,18 @@ func recordPty(t testing.TB, lp *LocalPty) func() string {
 		}
 	}()
 	t.Cleanup(func() { <-done })
-	return func() string {
+	screen := func() string {
 		mu.Lock()
 		defer mu.Unlock()
 		return seen.String()
 	}
+	if terminal != nil {
+		// Fish's OSC 133 B is its own reader boundary, not lifecycle authority.
+		// Do not submit a command while its terminal negotiation can consume it.
+		waittest.WaitForDetail(t, "the native Fish reader to accept input", screen,
+			func() bool { return strings.Contains(screen(), "\x1b]133;B\x1b\\") })
+	}
+	return screen
 }
 
 // failureContext is what a failed wait in the child-signal test prints: the
@@ -359,6 +367,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
+	recordPty(t, lp)
 
 	if _, err := lp.Write([]byte("sleep 30\n")); err != nil {
 		t.Fatalf("Write: %v", err)
@@ -405,7 +414,7 @@ func TestLocalPty_ProtectedShellGroupIsItsOwnAnswer(t *testing.T) {
 // TestLocalPty_ProtectedGroupHoldsARunningProgram is the incident's topology
 // at the seam that decides about it (nocx-7l4ex.11).
 //
-// `set +m` turns job control off, and bash then runs a foreground command in
+// Disabling job control makes the native shell run a foreground command in
 // its OWN process group instead of creating one for it — the same shape
 // ADR-0024 names ("`set +m` puts shell and command in one group"), and the
 // shape the owner's `top` was in. So the kernel's answer is identical to the
@@ -415,6 +424,7 @@ func TestLocalPty_ProtectedShellGroupIsItsOwnAnswer(t *testing.T) {
 func TestLocalPty_ProtectedGroupHoldsARunningProgram(t *testing.T) {
 	lp := mustSpawn(t, 80, 24)
 	defer func() { _ = lp.Close() }()
+	screen := recordPty(t, lp)
 
 	waitForeground(t, lp)
 	dir := t.TempDir()
@@ -426,10 +436,16 @@ func TestLocalPty_ProtectedGroupHoldsARunningProgram(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("SHARED-GROUP-READY\n"), 0o600); err != nil {
 		t.Fatalf("write the readiness marker: %v", err)
 	}
-	if _, err := lp.Write([]byte("set +m\ntail -f '" + marker + "'\n")); err != nil {
+	disableJobControl := "set +m"
+	if filepath.Base(lp.cmd.Path) == "fish" {
+		// Fish's `set` assigns variables; its job-control switch is `status`.
+		// Keep the real native parent, rather than replacing it with a POSIX shell.
+		disableJobControl = "status job-control none"
+	}
+	if _, err := lp.Write([]byte(disableJobControl + "; tail -f '" + marker + "'\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	waitForOutput(t, lp, "SHARED-GROUP-READY")
+	waitForOutput(t, screen, "SHARED-GROUP-READY")
 
 	pgid, err := lp.ForegroundProcessGroup()
 	if err != nil {

@@ -86,8 +86,8 @@ func (h openUrlHandlers) handleShellOpenUrl(ctx context.Context, req jsonrpcRequ
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: url required"})
 		return
 	}
-	u, err := url.Parse(params.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	u, ok := browserURL(params.URL)
+	if !ok {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: only http(s) URLs can be opened"})
 		return
 	}
@@ -101,4 +101,14 @@ func (h openUrlHandlers) handleShellOpenUrl(ctx context.Context, req jsonrpcRequ
 		return
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+}
+
+// browserURL is the common native presentation boundary. Consumers may narrow
+// it further (OAuth requires TLS except loopback), never broaden its schemes.
+func browserURL(raw string) (*url.URL, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, false
+	}
+	return u, true
 }

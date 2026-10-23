@@ -24,6 +24,8 @@ const (
 	// InRenderer asks the renderer to produce the effect (a terminal tool:
 	// submit, read the screen, send keys) and waits for the result.
 	InRenderer Executes = "renderer"
+	// InMCP delegates an exact authorized call to the dormant MCP runtime.
+	InMCP Executes = "mcp"
 	// Dynamic selects the owner from the ledger state of the addressed
 	// session item. It is not a hidden third implementation: the executor
 	// explicitly routes exited items to the ledger and live items to the
@@ -31,11 +33,11 @@ const (
 	Dynamic Executes = "dynamic"
 )
 
-var allExecutes = []Executes{InGo, InRenderer, Dynamic}
+var allExecutes = []Executes{InGo, InRenderer, Dynamic, InMCP}
 
 func supportedExecutes(e Executes) bool {
 	switch e {
-	case InGo, InRenderer, Dynamic:
+	case InGo, InRenderer, Dynamic, InMCP:
 		return true
 	default:
 		return false

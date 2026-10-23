@@ -50,10 +50,14 @@ npm ci --prefer-offline --no-audit --no-fund
 # In the EXIT trap, not after the run: the point is the FAILING run, whose
 # artefacts are the ones somebody is about to read. `|| true` because a
 # best-effort tidy must never be what a run reports — the test result is.
+#
+# Resolve the checkout owner in this container's user namespace: with rootless
+# Docker the host developer is UID 0 here, not their host numeric UID.
 handback() {
   local status=$?
-  if [ -n "${NOCX_E2E_HOST_UID:-}" ] && [ -n "${NOCX_E2E_HOST_GID:-}" ]; then
-    chown -R "$NOCX_E2E_HOST_UID:$NOCX_E2E_HOST_GID" \
+  local owner
+  if owner="$(stat -c "%u:%g" /work 2>/dev/null)"; then
+    chown -R "$owner" \
       /work/.e2e /work/test-results /work/internal/helper/deploy/artifacts \
       /work/build/libghostty-vt 2>/dev/null || true
   fi

@@ -968,6 +968,18 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
               <Show when={p().secretCount === 0}>
                 <p class="ui-vault-reset-impact">There are no saved secrets to delete.</p>
               </Show>
+              <Show when={p().endpointCount > 0}>
+                <p class="ui-vault-reset-impact">
+                  {countPhrase(p().endpointCount, 'AI endpoint', 'AI endpoints')} will need
+                  credentials again.
+                </p>
+              </Show>
+              <Show when={p().mcpServerCount > 0}>
+                <p class="ui-vault-reset-impact">
+                  {countPhrase(p().mcpServerCount, 'MCP server', 'MCP servers')} will lose secret
+                  bindings and OAuth sessions. Server configuration and literal values are kept.
+                </p>
+              </Show>
               {/* Stated before the choice, not after it. Whether the keychain
                   answers decides whether anything stored there can be removed
                   at all, and finding that out afterwards is a surprise rather

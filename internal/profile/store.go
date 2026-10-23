@@ -68,9 +68,10 @@ func NewJSONStoreWithDocStore(docStore storage.DocumentStore, fileName string) *
 }
 
 type storeData struct {
-	Profiles  []SSHProfile   `json:"profiles,omitempty"`
-	Groups    []ProfileGroup `json:"groups,omitempty"`
-	Endpoints []Endpoint     `json:"endpoints,omitempty"`
+	Profiles   []SSHProfile   `json:"profiles,omitempty"`
+	Groups     []ProfileGroup `json:"groups,omitempty"`
+	Endpoints  []Endpoint     `json:"endpoints,omitempty"`
+	MCPServers []MCPServer    `json:"mcpServers,omitempty"`
 	// Roles are the role assignments (bead nocx-e6kn2): each role's one
 	// (endpoint, model) pair. They share this document with endpoints
 	// because a role names an endpoint — the same reason endpoints share
@@ -98,6 +99,12 @@ func (s *JSONStore) load() (*storeData, error) {
 	}
 	if !found {
 		return &storeData{}, nil
+	}
+	for i := range d.MCPServers {
+		normalizeMCPServer(&d.MCPServers[i])
+	}
+	if err := validateMCPStoreData(&d); err != nil {
+		return nil, fmt.Errorf("read profile store: %w", err)
 	}
 	return &d, nil
 }

@@ -538,7 +538,7 @@ func validateSecretsCaptureDismissRaw(raw json.RawMessage) string {
 // the handlers carry the wired flags that reproduce the old dispatchers'
 // unwired answers.
 func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, contentGate control.Admission) []methodSpec {
-	secretOp := capability.NewSecretOperation(configGate, vaultGate, lane, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
+	secretOp := capability.NewSecretOperation(configGate, vaultGate, lane, s.profiles, s.groups, s.vaultLifecycle, s.credentials, s.mcpConfigDependencies())
 	secretResolver := s.credentialResolver()
 	captureOp := capability.NewCaptureSaveOperation(vaultGate, contentGate, lane, s.vaultLifecycle, s.contentDB)
 	vaultWired := s.vaultLifecycle != nil

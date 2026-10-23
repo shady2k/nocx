@@ -26,6 +26,10 @@ export interface VaultResetResult {
    */
   endpointCount: number
   /**
+   * MCP servers whose secret bindings were cleared and which now require reconfiguration (ADR-0103).
+   */
+  mcpServerCount: number
+  /**
    * Stores whose material could not be removed — empty when everything was. The renderer must not say 'everything was deleted' while this is non-empty. Always an array, never null: a null where the renderer's type says list has cost this project a defect once already (nocx-25k9.14).
    */
   residue: ResidueEntry[]

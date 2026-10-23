@@ -11,7 +11,7 @@ const vaultDocName = "vault.json"
 
 var vaultModule = storage.Module{
 	Name:    "vault",
-	Current: 2,
+	Current: 3,
 }
 
 // SecretRecord is the vault's durable catalogue entry for one secret:
@@ -24,10 +24,13 @@ var vaultModule = storage.Module{
 // A record whose Name did not land is legal — the surfaces fall back to the
 // derived label or the kind — but a secret with a connection using it and no
 // record cannot exist: records are what make an unowned secret possible.
+// SystemOnly marks backend-owned material (for example OAuth sessions). It is
+// durable authority, not user-editable catalogue metadata; missing means false.
 type SecretRecord struct {
-	ID   credential.SecretID `json:"id"`
-	Name string              `json:"name,omitempty"`
-	Kind string              `json:"kind"`
+	ID         credential.SecretID `json:"id"`
+	Name       string              `json:"name,omitempty"`
+	Kind       string              `json:"kind"`
+	SystemOnly bool                `json:"systemOnly,omitempty"`
 }
 
 // Document is the on-disk shape of the vault document. It holds key material,

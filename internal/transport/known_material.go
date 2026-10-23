@@ -11,7 +11,6 @@ package transport
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/assistant"
@@ -53,9 +52,9 @@ const knownMaterialReason = "screen the tool result"
 
 // FindKnown reports the byte spans of text that match a secret the vault
 // holds, with the catalogue name of each matched secret. Errors — a sealed
-// vault, a provider that refuses a read, an inventory row that cannot be
-// resolved — are returned, never skipped: a row the adapter cannot compare
-// is a secret the gate cannot see, and a miss off-machine is invisible and
+// vault or a provider that refuses a read — are returned, never skipped: a
+// record the adapter cannot compare is a secret the gate cannot see, and a
+// miss off-machine is invisible and
 // permanent.
 func (k *vaultKnownMaterial) FindKnown(ctx context.Context, text string) ([]assistant.KnownMatch, error) {
 	if k.v == nil || k.resolver == nil {
@@ -66,21 +65,17 @@ func (k *vaultKnownMaterial) FindKnown(ctx context.Context, text string) ([]assi
 			return nil, err
 		}
 	}
-	inventory, err := k.v.BuildInventory(ctx, nil)
+	records, err := k.v.SecretRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var matches []assistant.KnownMatch
-	for _, entry := range inventory {
-		id, ok := k.v.ResolveRow(entry.ID, nil)
-		if !ok {
-			// Unreachable for the catalogue BuildInventory enumerates (a
-			// record's row always resolves to itself), but fail closed
-			// rather than let listed material screen as compared when it
-			// was not.
-			return nil, fmt.Errorf("known material: inventory row %q does not resolve — the listed secret could not be compared", entry.ID)
+	for _, entry := range records {
+		name := entry.Name
+		if name == "" {
+			name = entry.Kind
 		}
-		sec, err := k.resolver.Resolve(ctx, id, credential.Operation(knownMaterialReason))
+		sec, err := k.resolver.Resolve(ctx, entry.ID, credential.Operation(knownMaterialReason))
 		if err != nil {
 			return nil, err
 		}
@@ -99,7 +94,7 @@ func (k *vaultKnownMaterial) FindKnown(ctx context.Context, text string) ([]assi
 				matches = append(matches, assistant.KnownMatch{
 					Start:      start,
 					End:        start + len(value),
-					SecretName: entry.Name,
+					SecretName: name,
 				})
 				from = start + len(value)
 			}

@@ -296,12 +296,11 @@ func (s *heldStopStand) establishWith(t *testing.T, jobControl bool) {
 	} else {
 		s.sid = openSessionTapped(t, s.conn, s.tap)
 	}
-	// Asked of the product, never slept for: a `set +m` that had not taken
-	// effect yet would let the shell give the command its own group, and every
-	// case below would silently test the ordinary ladder instead.
+	// Observe the native shell disabling job control before launching a job,
+	// or these cases would silently test the ordinary process-group ladder
+	// rather than the protected parent's terminal interrupt.
 	if !jobControl {
-		submitCommand(t, s.conn, s.sid, "set +m; printf %s%s JOBCONTROL -OFF")
-		tapDataFor(t, s.tap, s.sid, "JOBCONTROL-OFF", 20*time.Second)
+		disableNativeJobControl(t, s.conn, s.tap, s.sid)
 	}
 
 	s.lane = lifecycle.LaneID("lane-held-stop")
@@ -422,6 +421,7 @@ func openSessionTappedInPane(t *testing.T, conn *websocket.Conn, tap *socketTap,
 	if env.Error != nil || env.Result.SessionID == "" {
 		t.Fatalf("open: %+v (sessionId %q)", env.Error, env.Result.SessionID)
 	}
+	waitNativeShellReady(t, conn, tap, env.Result.SessionID, "")
 	return env.Result.SessionID
 }
 
@@ -1730,11 +1730,38 @@ func TestHeldStop_AShellThatExitsTakesItsStopRecordsWithIt(t *testing.T) {
 		t.Fatal("the held Stop recorded no hold or no record; the case below would be vacuous")
 	}
 
+	sess, err := s.ws.registry.Get(session.ID(s.sid))
+	if err != nil {
+		t.Fatalf("registry.Get before shell exit: %v", err)
+	}
 	// The shell exits on its own. Nothing closes the session by hand.
 	submitCommand(t, s.conn, s.sid, "exit")
 	waittest.WaitForDetail(t, "the exited session's Stop records to be dropped",
 		func() string {
-			return fmt.Sprintf("held=%v record=%v", s.ws.heldStopArmed(attempt), s.ws.stopStateKnown(attempt))
+			// Read only the tap's already-buffered frames, never the socket
+			// itself, and cap both the drain and retained failure output.
+			const outputLimit = 16 * 1024
+			var output bytes.Buffer
+			truncated := false
+			for range len(s.tap.data) {
+				frame := <-s.tap.data
+				if frame.MsgType != MsgTypeData || string(session.IDFromBytes(frame.SessionID)) != s.sid {
+					continue
+				}
+				n := min(len(frame.Payload), outputLimit-output.Len())
+				output.Write(frame.Payload[:n])
+				truncated = truncated || n < len(frame.Payload)
+			}
+			done := false
+			select {
+			case <-sess.Done():
+				done = true
+			default:
+			}
+			delivered, undelivered, inflight := s.stopRecord(attempt)
+			return fmt.Sprintf("held=%v record=%v delivered=%v undelivered=%v inflight=%d sessionDone=%v exitWrites=%d outputTruncated=%v terminalOutput=%q",
+				s.ws.heldStopArmed(attempt), s.ws.stopStateKnown(attempt),
+				delivered, undelivered, inflight, done, s.recorder.count("exit\r"), truncated, output.String())
 		},
 		func() bool { return !s.ws.heldStopArmed(attempt) && !s.ws.stopStateKnown(attempt) })
 }

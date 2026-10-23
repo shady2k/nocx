@@ -28,6 +28,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/httppolicy"
+	"github.com/shady2k/nocx/internal/mcp"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -99,6 +100,7 @@ type SkillSource interface {
 // 4 — the dispatcher narrows, it does not check), while the session ledger is
 // wiring, exactly as the renderer requester is for InRenderer tools.
 type toolSeams struct {
+	mcpRuntime       mcp.Runtime
 	sessions         SessionSource
 	screenCapture    ScreenCaptureSource
 	noteOperation    capability.NoteOperation

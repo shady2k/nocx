@@ -98,9 +98,11 @@ set -euo pipefail
 git config --global --add safe.directory /work
 
 handback() {
-  status=$?
-  if [ -n "${HOST_UID:-}" ] && [ -n "${HOST_GID:-}" ]; then
-    chown -R "$HOST_UID:$HOST_GID" /work/frontend/dist 2>/dev/null || true
+  local status=$?
+  local owner
+  # Host numeric IDs are not container IDs under rootless Docker.
+  if owner="$(stat -c "%u:%g" /work 2>/dev/null)"; then
+    chown -R "$owner" /work/frontend/dist 2>/dev/null || true
   fi
   return $status
 }
@@ -154,8 +156,6 @@ exec docker run --rm -i \
     -v "$FE_FRONTEND_VOL":/work/frontend/node_modules \
     -e RUN_FRONTEND="$RUN_FRONTEND" \
     -e RUN_ROOT="$RUN_ROOT" \
-    -e HOST_UID="$(id -u)" \
-    -e HOST_GID="$(id -g)" \
     -w /work \
     "$IMAGE" \
     bash -c "$inner"

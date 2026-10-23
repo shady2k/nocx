@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -110,10 +111,17 @@ func TestRunLease_BoundBeforeForkLeavesNoProcessOrSignal(t *testing.T) {
 	readyPrefix := "__lease_ready__:"
 	probePrefix := "__lease_probe__:"
 
+	// The trap and both probes must run in the native parent, not a sh -c
+	// child: they prove that the shell itself received no signal and survived.
+	shellPIDExpr := "\"$$\""
+	if filepath.Base(loginshell.New().Resolve().Path) == "fish" {
+		shellPIDExpr = "\"$fish_pid\""
+	}
+
 	setupAction := "printf signal > " + shellSingleQuote(signalMarker)
 	setup := "trap " + shellSingleQuote(setupAction) + " INT TERM; " +
-		"printf '%s' \"$$\" > " + shellSingleQuote(shellPIDFile) + "; " +
-		"printf '" + readyPrefix + "%s\\n' \"$$\""
+		"printf '%s' " + shellPIDExpr + " > " + shellSingleQuote(shellPIDFile) + "; " +
+		"printf '" + readyPrefix + "%s\\n' " + shellPIDExpr
 	tapCommand := func(command string) {
 		submitCommand(t, h.conn, sid, command)
 	}
@@ -174,7 +182,7 @@ func TestRunLease_BoundBeforeForkLeavesNoProcessOrSignal(t *testing.T) {
 	// A probe is an observable post-run barrier. If escalation had sent KILL,
 	// the shell could not answer it; if INT or TERM arrived, its trap would
 	// have produced the marker before this response was emitted.
-	tapCommand("printf '" + probePrefix + "%s\\n' \"$$\"")
+	tapCommand("printf '" + probePrefix + "%s\\n' " + shellPIDExpr)
 	readSessionMarkerFromTap(t, tap, sid, probePrefix)
 
 	if _, err := os.Stat(commandPIDFile); !os.IsNotExist(err) {

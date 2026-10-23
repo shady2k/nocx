@@ -37,10 +37,13 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/emulator"
+	"github.com/shady2k/nocx/internal/emulator/ghostty"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -458,9 +461,57 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, pub: pub, fake: fake, srv: &testSrv{url: srv.URL}}
 }
 
-func (h *runLeaseHarness) openSession(t *testing.T) string {
+// openNativeSession leaves the account shell conventional, without the synthetic
+// lifecycle handshake used by openSession. Fish must finish its terminal queries
+// before command input: a raw WebSocket client is not itself a terminal emulator.
+// Answer with the same terminal owner used by the native shellintegration fixture,
+// then observe Fish's own reader boundary, not an integration prompt-ready fact.
+func (h *runLeaseHarness) openNativeSession(t *testing.T) string {
 	t.Helper()
 	sid := openLocalSession(t, h.conn)
+	if filepath.Base(loginshell.New().Resolve().Path) != "fish" {
+		return sid
+	}
+	terminal, err := ghostty.New(emulator.Geometry{Cols: 80, Rows: 24, CellWidthPx: 10, CellHeightPx: 20})
+	if err != nil {
+		t.Fatalf("create native shell terminal: %v", err)
+	}
+	defer terminal.Close()
+	var output strings.Builder
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, readErr := awaitFrame(h.conn, deadline, func(raw []byte) bool {
+			frame, decodeErr := DecodeFrame(raw)
+			return decodeErr == nil && frame.MsgType == MsgTypeData &&
+				string(session.IDFromBytes(frame.SessionID)) == sid
+		})
+		if readErr != nil {
+			t.Fatalf("native shell reader never became ready: %v; output=%q", readErr, output.String())
+		}
+		frame, err := DecodeFrame(raw)
+		if err != nil {
+			t.Fatalf("decode native shell output: %v", err)
+		}
+		replies, err := terminal.Ingest(frame.Payload)
+		if err != nil {
+			t.Fatalf("ingest native shell output: %v", err)
+		}
+		if len(replies) != 0 {
+			writeKeystroke(t, h.conn, sid, replies)
+		}
+		output.Write(frame.Payload)
+		if strings.Contains(output.String(), "\x1b]133;B\x1b\\") {
+			return sid
+		}
+	}
+}
+
+// openSession adds the lease tests' synthetic lifecycle lane only after the real
+// account shell can accept input. That lane drives submit/bind accounting; its
+// hello cannot answer the native shell's terminal queries or make its reader ready.
+func (h *runLeaseHarness) openSession(t *testing.T) string {
+	t.Helper()
+	sid := h.openNativeSession(t)
 	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
 	const lane = lifecycle.LaneID("lane-run-lease")
 	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
@@ -782,7 +833,7 @@ func TestRunLease_ConnectionLossKillsCommandAndRecordsTransportGone(t *testing.T
 		SignalGrace: 50 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openNativeSession(t)
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT TERM; sleep 100 & wait'"
@@ -1092,7 +1143,7 @@ func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) 
 		SignalGrace:  200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openNativeSession(t)
 	// The session's axis explicitly reports a conventional terminal: shell
 	// integration was attempted but no authenticated lifecycle lane exists.
 	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell, "")

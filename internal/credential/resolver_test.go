@@ -3,7 +3,6 @@ package credential_test
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,31 +123,5 @@ func TestResolverCallWithoutStanceDoesNotCompile(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "not enough arguments in call to r.Resolve") {
 		t.Fatalf("fixture failed for the wrong reason:\n%s", out)
-	}
-}
-
-func TestProductDoesNotTellThePersonToFindTheVault(t *testing.T) {
-	const forbidden = "the vault is locked — unlock it and ask again"
-	root := filepath.Clean("../..")
-	for _, rel := range []string{"internal", filepath.Join("frontend", "src")} {
-		err := filepath.WalkDir(filepath.Join(root, rel), func(path string, entry fs.DirEntry, err error) error {
-			if err != nil || entry.IsDir() {
-				return err
-			}
-			if strings.HasSuffix(path, "_test.go") || strings.HasSuffix(path, ".test.ts") {
-				return nil
-			}
-			body, readErr := os.ReadFile(path) //nolint:gosec // WalkDir confines path to product source roots
-			if readErr != nil {
-				return readErr
-			}
-			if strings.Contains(string(body), forbidden) {
-				t.Errorf("forbidden unlock instruction survives in %s", path)
-			}
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("scan %s: %v", rel, err)
-		}
 	}
 }

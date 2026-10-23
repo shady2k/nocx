@@ -162,8 +162,14 @@ func TestTheProtocolSurfaceGoldenMatchesTheCommittedSurface(t *testing.T) {
 		if err := os.MkdirAll("testdata", 0o750); err != nil {
 			t.Fatalf("mkdir testdata: %v", err)
 		}
-		if err := os.WriteFile(golden, []byte(digest+"\n"), 0o600); err != nil { //nolint:gosec // a repo-relative test fixture
+		// This is a public source fingerprint, not secret material. Preserve
+		// readability for the non-root CI user over a rootless bind mount.
+		if err := os.WriteFile(golden, []byte(digest+"\n"), 0o644); err != nil { //nolint:gosec // a public, repo-relative test fixture
 			t.Fatalf("writing %s: %v", golden, err)
+		}
+		// WriteFile does not change an existing file's private mode.
+		if err := os.Chmod(golden, 0o644); err != nil { //nolint:gosec // a public, repo-relative test fixture
+			t.Fatalf("making %s readable: %v", golden, err)
 		}
 		stale, err := filepath.Glob(filepath.Join("testdata", "protocol-surface-v*.golden"))
 		if err != nil {

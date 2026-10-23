@@ -50,8 +50,8 @@ manifest. Methods without a result schema are marked explicitly with
 `x-nocx-schemaRefs` list also names standalone notification result schemas so the
 renderer generator does not need a directory glob.
 
-`internal/transport/TestOpenRPCManifestMatchesRegisteredMethods` compares the
-manifest's method set with the actual `buildControlPlane` registration output in
+`TestOpenRPCManifestMatchesRegisteredMethods` in `internal/transport` compares
+the manifest's method set with the actual `buildControlPlane` registration output in
 both directions. It also verifies every referenced schema exists. Therefore a
 new registration absent from the manifest, or a manifest entry without a
 registration, fails the transport gate.
@@ -64,6 +64,21 @@ place for nocx-specific agent disposition metadata without duplicating schemas.
 The shared `rpc.error.schema.json` is referenced by every method's common
 JSON-RPC error entries. Domain-specific error data continues to use its existing
 schema where one exists.
+
+## Coordinator compatibility
+
+A changed wire surface also updates `ProtocolVersion` in
+`internal/coordinator/handshake.go` and the matching client constant in
+`e2e/coordinator.mts`, following
+[ADR-0101](../docs/decisions/0101-a-protocol-compatible-coordinator-is-kept-across-an-update.md).
+Regenerate the versioned fingerprint with
+`NOCX_PROTOCOL_SURFACE_UPDATE=1 go test ./internal/coordinator -run TestTheProtocolSurface`
+(add `-tags gtk3` on Linux). The writer deliberately fails after updating the
+fixture so the change must be reviewed; the ordinary test then verifies it.
+
+The generated fingerprint is public source data, not credential material.
+Generation keeps new and overwritten goldens readable by the non-root CI user
+over a bind mount; do not compensate by broadening permissions on Vault data.
 
 ## Adding a method
 

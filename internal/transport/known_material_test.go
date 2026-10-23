@@ -1,7 +1,7 @@
 package transport
 
-// The vault adapter's own tests (design §7.1): the BuildInventory →
-// ResolveRow → Get → match round trip against a REAL vault, the spans and
+// The vault adapter's own tests (design §7.1): the backend catalogue →
+// stanced resolve → match round trip against a REAL vault, the spans and
 // the catalogue names, and the sealed-vault fail-closed. The e2e readScreen
 // tests prove the adapter screens clean text without false positives; these
 // prove it finds the material when it is there.
@@ -9,12 +9,12 @@ package transport
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
@@ -31,8 +31,7 @@ func adapterVault(t *testing.T) *vault.Vault {
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
-	logger := slog.New(slog.NewTextHandler(nil, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	v, err := vault.New(docStore, reg, logger)
+	v, err := vault.New(docStore, reg, logtest.Slog(t))
 	if err != nil {
 		t.Fatalf("vault.New: %v", err)
 	}
@@ -173,5 +172,37 @@ func TestVaultKnownMaterial_SealedVaultFailsClosed(t *testing.T) {
 	k := adapterKnownMaterial(v)
 	if _, err := k.FindKnown(t.Context(), "deploy key: correct-horse-battery-9"); err == nil {
 		t.Fatal("sealed vault: FindKnown succeeded — the gate would have screened against nothing")
+	}
+}
+
+func TestVaultKnownMaterial_SystemOnlyRenewalRemainsScreened(t *testing.T) {
+	v := adapterVault(t)
+	id, err := v.CreateSystemSecret(t.Context(), credential.NewSecret("private-oauth-old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := v.BuildInventory(t.Context(), nil)
+	if err != nil || len(inventory) != 0 {
+		t.Fatalf("system-only material must not be selectable: inventory=%v err=%v", inventory, err)
+	}
+	k := adapterKnownMaterial(v)
+	const oldText = "server echoed private-oauth-old"
+	matches, err := k.FindKnown(t.Context(), oldText)
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("hidden material escaped screening: matches=%v err=%v", matches, err)
+	}
+	if got := oldText[matches[0].Start:matches[0].End]; got != "private-oauth-old" {
+		t.Fatalf("screened span = %q", got)
+	}
+	if replaceErr := v.ReplaceSystemSecret(t.Context(), id, credential.NewSecret("private-oauth-new")); replaceErr != nil {
+		t.Fatal(replaceErr)
+	}
+	const renewedText = "private-oauth-old then private-oauth-new"
+	matches, err = k.FindKnown(t.Context(), renewedText)
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("renewed hidden material escaped screening: matches=%v err=%v", matches, err)
+	}
+	if got := renewedText[matches[0].Start:matches[0].End]; got != "private-oauth-new" {
+		t.Fatalf("screening retained obsolete material: %q", got)
 	}
 }

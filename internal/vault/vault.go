@@ -1062,7 +1062,15 @@ func (v *Vault) SetDefaultProvider(ctx context.Context, p ProviderID) error {
 // use CreateNamed; this form records a nameless password-kind secret, which
 // the surfaces render by fallback.
 func (v *Vault) Create(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
-	id, _, err := v.createNamed(ctx, value, SecretMeta{Kind: KindPassword}, false)
+	id, _, err := v.createNamed(ctx, value, SecretMeta{Kind: KindPassword}, false, false)
+	return id, err
+}
+
+// CreateSystemSecret creates backend-owned material that cannot be selected or
+// mutated through user-facing row handles. Classification is journaled before
+// the provider is called and remains attached to the durable record.
+func (v *Vault) CreateSystemSecret(ctx context.Context, value credential.Secret) (credential.SecretID, error) {
+	id, _, err := v.createNamed(ctx, value, SecretMeta{Kind: KindPassword}, false, true)
 	return id, err
 }
 
@@ -1098,10 +1106,10 @@ func (v *Vault) createNamedResolved(ctx context.Context, value credential.Secret
 	if err := validateSecretName(meta.Name); err != nil {
 		return "", "", err
 	}
-	return v.createNamed(ctx, value, meta, resolveCollisions)
+	return v.createNamed(ctx, value, meta, resolveCollisions, false)
 }
 
-func (v *Vault) createNamed(ctx context.Context, value credential.Secret, meta SecretMeta, resolveCollisions bool) (credential.SecretID, string, error) {
+func (v *Vault) createNamed(ctx context.Context, value credential.Secret, meta SecretMeta, resolveCollisions, systemOnly bool) (credential.SecretID, string, error) {
 	t0 := time.Now()
 
 	v.mu.Lock()
@@ -1147,11 +1155,12 @@ func (v *Vault) createNamed(ctx context.Context, value credential.Secret, meta S
 	// Journal PhasePrepared before delegating. The entry carries the
 	// catalogue metadata (ADR-0016): the name rides the sequence from here.
 	v.doc.Journal = append(v.doc.Journal, JournalEntry{
-		Op:    "create",
-		NewID: id,
-		Phase: PhasePrepared,
-		Name:  name,
-		Kind:  meta.Kind,
+		Op:         "create",
+		NewID:      id,
+		Phase:      PhasePrepared,
+		Name:       name,
+		Kind:       meta.Kind,
+		SystemOnly: systemOnly,
 	})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
@@ -1208,7 +1217,7 @@ func (v *Vault) createNamed(ctx context.Context, value credential.Secret, meta S
 			break
 		}
 	}
-	v.setRecordLocked(SecretRecord{ID: id, Name: name, Kind: meta.Kind})
+	v.setRecordLocked(SecretRecord{ID: id, Name: name, Kind: meta.Kind, SystemOnly: systemOnly})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		return "", "", fmt.Errorf("save after create: %w", saveErr)
 	}
@@ -1346,10 +1355,18 @@ func (v *Vault) Delete(ctx context.Context, id credential.SecretID) error {
 		v.mu.Unlock()
 		return ErrVaultSealed
 	}
+	rec, _ := recordFor(v.doc.Secrets, id)
+	systemOnly := rec.SystemOnly
+	for _, entry := range v.doc.Journal {
+		if entry.NewID == id && entry.SystemOnly {
+			systemOnly = true
+		}
+	}
 	v.doc.Journal = append(v.doc.Journal, JournalEntry{
-		Op:    "delete",
-		NewID: id,
-		Phase: PhasePrepared,
+		Op:         "delete",
+		NewID:      id,
+		Phase:      PhasePrepared,
+		SystemOnly: systemOnly,
 	})
 	// The catalogue record goes with the journal write, not after the
 	// provider delete: deletion is metadata-first (ADR-0011 §4), and the
@@ -1627,6 +1644,20 @@ func (v *Vault) RenameSecret(ctx context.Context, row string, name string, input
 // record is untouched), so reconciliation has nothing to repair: whichever
 // half of the write landed, the id still names a valid secret.
 func (v *Vault) ReplaceSecret(ctx context.Context, row string, value credential.Secret, inputs []CredentialInventory) error {
+	return v.replaceSecret(ctx, "", row, value, inputs)
+}
+
+// ReplaceSystemSecret renews backend-owned material under its existing ID.
+// Ordinary records and unrecorded IDs are refused; this never promotes a user
+// secret into a system secret. The owning service serializes renewals per ID.
+func (v *Vault) ReplaceSystemSecret(ctx context.Context, id credential.SecretID, value credential.Secret) error {
+	if id == "" {
+		return ErrSecretNotFound
+	}
+	return v.replaceSecret(ctx, id, "", value, nil)
+}
+
+func (v *Vault) replaceSecret(ctx context.Context, id credential.SecretID, row string, value credential.Secret, inputs []CredentialInventory) error {
 	t0 := time.Now()
 
 	v.mu.Lock()
@@ -1643,10 +1674,20 @@ func (v *Vault) ReplaceSecret(ctx context.Context, row string, value credential.
 	}
 	gen := v.gen
 
-	id, _, ok := v.resolveRowLocked(row, inputs)
-	if !ok {
-		v.mu.Unlock()
-		return fmt.Errorf("unknown secret row %q", row)
+	systemOnly := id != ""
+	if systemOnly {
+		rec, ok := recordFor(v.doc.Secrets, id)
+		if !ok || !rec.SystemOnly {
+			v.mu.Unlock()
+			return ErrSecretNotFound
+		}
+	} else {
+		var ok bool
+		id, _, ok = v.resolveRowLocked(row, inputs)
+		if !ok {
+			v.mu.Unlock()
+			return fmt.Errorf("unknown secret row %q", row)
+		}
 	}
 
 	provID, err := parseID(id)
@@ -1664,9 +1705,10 @@ func (v *Vault) ReplaceSecret(ctx context.Context, row string, value credential.
 	// Journal PhasePrepared before delegating — the same discipline as every
 	// other provider write (spec §4.2).
 	v.doc.Journal = append(v.doc.Journal, JournalEntry{
-		Op:    "replace",
-		NewID: id,
-		Phase: PhasePrepared,
+		Op:         "replace",
+		NewID:      id,
+		Phase:      PhasePrepared,
+		SystemOnly: systemOnly,
 	})
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
 		v.mu.Unlock()
@@ -1738,8 +1780,18 @@ func (v *Vault) ResolveRow(row string, inputs []CredentialInventory) (credential
 // primary source; unrecorded references come from the credential metadata.
 // Must hold v.mu.
 func (v *Vault) resolveRowLocked(row string, inputs []CredentialInventory) (credential.SecretID, string, bool) {
+	// Reject before the legacy inventory fallback, including a journal-only
+	// create whose provider write may have landed before its record did.
+	for _, entry := range v.doc.Journal {
+		if entry.SystemOnly && rowID(entry.NewID) == row {
+			return "", "", false
+		}
+	}
 	for _, rec := range v.doc.Secrets {
 		if rowID(rec.ID) == row {
+			if rec.SystemOnly {
+				return "", "", false
+			}
 			return rec.ID, rec.Kind, true
 		}
 	}

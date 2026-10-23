@@ -36,12 +36,13 @@ type JournalEntry struct {
 	NewID  credential.SecretID `json:"newId"`
 	Target string              `json:"target"`
 	Phase  Phase               `json:"phase"`
-	// Name and Kind carry the secret's catalogue record through the create
-	// sequence (ADR-0016): the name joins the journal at PhasePrepared and
-	// lands in the durable record at PhaseSecretWritten. They are metadata,
-	// never secret bytes.
-	Name string `json:"name,omitempty"`
-	Kind string `json:"kind,omitempty"`
+	// Name, Kind and SystemOnly carry the secret's catalogue record through
+	// the create sequence: classification joins the journal at PhasePrepared
+	// and lands in the durable record at PhaseSecretWritten. They are
+	// metadata, never secret bytes.
+	Name       string `json:"name,omitempty"`
+	Kind       string `json:"kind,omitempty"`
+	SystemOnly bool   `json:"systemOnly,omitempty"`
 }
 
 // String returns a compact representation for logging. It emits identifiers

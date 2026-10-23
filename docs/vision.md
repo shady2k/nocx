@@ -141,6 +141,15 @@ Phases as one-liners. The detailed, executable backlog lives in **beads**, not i
 - **Phase 2 — Comfort layer.** Splits/panes + scrollback search + the semantic command line + API testing without an account.
 - **Phase 3 — Ask an agent + reach.** Natural-language query from the terminal to any AI model the user chooses — bring-your-own, including a fully local model; expand to Windows / Linux.
 
+The owner admitted **MCP tools on demand** to 0.8 on 2026-10-23: explicitly
+configured stdio and Streamable HTTP servers, including OAuth, are available to
+the assistant through its existing delegate approval policy. Catalogs stay local;
+only explicit Refresh discovers tools, and only admitted execution invokes them.
+This extends the bring-your-own assistant without cloud sync, mandatory login or
+automatic connection. Secret material remains Vault-owned. See
+[ADR-0102](decisions/0102-mcp-tools-are-activated-only-after-admission.md) and the
+[0.8 charter](milestones/v0-8.md); admission is not a claim of shipped behavior.
+
 ## 7. Tech stack
 
 - **xterm.js** — WebGL VT engine (MIT).

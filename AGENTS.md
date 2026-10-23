@@ -154,91 +154,9 @@ called before that", the fix is an assertion or a test.
 
 ## Code search
 
-**`grep`, `glob` and reading the file** is the answer for _does this exist, and who calls
-it_ — measured against `repowise` rather than assumed
-([ADR-0056](docs/decisions/0056-repowise-is-kept-for-history-not-for-search.md)).
-
-**`repowise` is installed, and it is not a second `grep`.** That ordering is measured, not
-asserted: `nocx-14sbw` put both against five questions we actually ask. With a live
-embedder repowise answered 2 correctly, 1 partially, missed 1 honestly, and got 1
-confidently wrong by repeating a stale comment in our own code (`nocx-n5gr2`). `grep`
-answered all five in under 0.1 s. With the embedder dead it scored 0 of 5. So `grep`,
-`glob` and reading the file remain the answer for _does this exist, and who calls it_, and
-the MCP tools are for the questions underneath that: history, risk, and how a module hangs
-together.
-
-- **History is what it gives that a search cannot.** `get_risk` / `repowise risk`: hotspot
-  scores, defect profiles, bus factor, and co-change partners with support counts —
-  including pairs with no import and no structural link.
-- **Never take its prose as fact about the tree.** It repeats our own comments, stale ones
-  included, and its line numbers drift. Confirm anything it claims about code by reading
-  the code.
-- **The web Chat at `repowise serve` is broken** — the UI proxy stalls the stream the
-  moment the agent calls a tool. Use the MCP tools.
-- **`repowise decision add` is not how a decision is recorded here.** Decisions are ADRs in
-  `docs/decisions/`, which repowise indexes by itself. A decision authored into `.repowise/`
-  sits in a directory git does not carry. The generated `.claude/CLAUDE.md` says otherwise;
-  this file wins.
-
-**The semantic half is off unless a dimension override is set, and nothing says so out
-loud.** repowise's `_DIMS` table declares `google/gemini-embedding-001` at 768 while the
-model returns 3072, so every vector fails its width check, none is written, and retrieval
-falls back to BM25 over the generated pages — which is the configuration that scored 0 of 5
-above. The override is `REPOWISE_EMBEDDING_DIMS=3072`, and it is needed **twice**: once for
-`repowise reindex`, which writes the vectors, and once in the environment of the MCP
-server, which embeds the QUERY. The server gets it from the tracked `.mcp.json`; a Claude
-Code session also carries it in `~/.claude/settings.json`. The symptom when it is missing
-is inside the tool result rather than on the surface — `retrieval_degraded: ["embed"]` with
-`confidence: "low"` — so an agent reads a hedged answer and learns not to ask again.
-
-**Check it with `repowise doctor`, and read the right row.** `Coordinator drift` is the one
-that tells the truth. `SQL ↔ Vector Store: in sync` passes while both sides are empty, and
-that pair was once read the wrong way round here: the drift counter was written off as the
-broken check while it was reporting 3699 pages against 0 vectors, correctly. After the
-override the same row reads `SQL=3854, Vector=3854, Drift=0.0%`, and `SQL ↔ Vector Store`
-is the one that goes red mid-rebuild.
-
-**The MCP registration is path-less on purpose, and it lives in two places.** Path-less so
-it resolves whichever repo you are in — pin a path and every worktree silently answers
-about `main`, stale on exactly the files you are there to change. The two places are not
-interchangeable: `~/.claude.json` is user-scope and **only Claude Code reads it**, while
-the tracked `.mcp.json` at the repo root is what every other agent reads. A new agent gets
-repowise by being added to `.mcp.json`.
-
-**Nothing in git turns repowise on.** `.mcp.json` names the server and carries the
-embedding override, and that is all it can do: the index in `.repowise/`, the post-commit
-sync in `.githooks/post-commit` and the read hooks in `~/.claude/settings.json` are
-gitignored or machine-scoped, so they are per-clone and opt-in. A fresh clone has the
-registration and no index — which is the "no index" answer described below, not a broken
-connection.
-
-**In a worktree the index does not come free, and we build it on demand** — when somebody
-is about to work there, not in advance. Budget several minutes and a few hundred megabytes.
-
-```bash
-REPOWISE_SKIP_EDITOR_SETUP=1 repowise init -y --no-prose --no-editor-setup
-repowise hook install   # post-commit sync; per worktree
-```
-
-`--no-editor-setup` keeps `init` from writing `.claude/CLAUDE.md`, `.vscode/mcp.json` and a
-managed `AGENTS.md` into a branch that may not ignore them; `--no-prose` keeps it free of
-model spend.
-
-**An unindexed worktree still STARTS the MCP server**, and then every tool answers "no
-index" — which reads as a broken connection rather than as a missing index. Know the
-difference before you debug it. **An empty `.repowise/` is not an index either:** an init
-that never finished leaves a database with no pages, and it behaves exactly as if the
-directory were absent. Check `repowise status` for the page count, not the directory.
-
-**Distill only rewrites a BARE recognized command.** The hook wraps `go test …`,
-`npm ci`, `git log …`, `make …` and their kind, and by design never touches a compound
-command — `cd somewhere && go test ./...` passes through raw, and so does an unrecognized
-spelling of a known tool. So write the command plainly and pass the directory as an
-argument where the tool supports one; a habitual `cd … &&` prefix spends the whole saving.
-
-**Do not `git add -A` in a worktree whose branch predates this.** `.repowise/` and
-`.claude/CLAUDE.md` are ignored on `main` only; on an older branch they show up untracked,
-and `.repowise/.env` holds an API key.
+Use `grep`, `glob` and reading the file to answer _does this exist, and who calls it_.
+For history, risk and module relationships, inspect git history and the code directly.
+Do not rely on generated summaries as facts about the tree; confirm claims against source.
 
 ## Your machine is not the product's
 
@@ -1023,14 +941,3 @@ export is `br sync --flush-only` to `.beads/issues.jsonl`.
 The official `br` skill is installed too and carries the same kind of leftovers — config
 keys that do not exist in `br config schema`, and an id prefix that was never ours. Believe
 the binary over any skill, and this file over both.
-
-<!-- REPOWISE_DISTILL:START — Do not edit below this line. Auto-generated by Repowise. -->
-
-### Output Distillation
-
-- Prefer `repowise distill <cmd>` for noisy commands — test runs, builds, `git status`/`log`/`diff`, searches, file listings. It runs the command unchanged (exit code preserved) and prints a compact, errors-first rendering; every error line survives.
-- Output may contain a marker like `[repowise#a1b2c3d4e5f6: 230 lines omitted (~6.1k tokens); restore: repowise expand a1b2c3d4e5f6]`. The omitted content is fully preserved — run `repowise expand <ref>` to retrieve it, or `repowise expand <ref> -q <regex>` for just the matching lines.
-- Never re-run a command to see omitted output; expand the marker instead.
-- For structure-level questions about a large indexed file ("what's in here", "which function handles X"), `get_context(["path"], include=["skeleton"])` returns the file with bodies elided — every signature plus the bodies of the most central symbols — at a fraction of the cost of a full Read.
-
-<!-- REPOWISE_DISTILL:END -->

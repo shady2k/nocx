@@ -93,7 +93,7 @@ composition, preserving the bridge's no-child-process boundary
 (amended 2026-10-22, nocx-sd8uk.1.1, ADR-0099).
 
 The outbound `mcp` client is distinct from the inbound `mcpstdio` bridge
-([ADR-0102](decisions/0102-mcp-tools-are-activated-only-after-admission.md)).
+([ADR-0103](decisions/0103-mcp-tools-are-activated-only-after-admission.md)).
 `profile` owns catalogs, descriptor identity and all credential references;
 `capability` owns guarded metadata mutations and reference-aware secret retirement.
 `transport` coordinates snapshot → drain → guarded revalidation/commit, without

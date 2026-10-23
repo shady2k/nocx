@@ -26,7 +26,7 @@ export interface VaultResetResult {
    */
   endpointCount: number
   /**
-   * MCP servers whose secret bindings were cleared and which now require reconfiguration (ADR-0102).
+   * MCP servers whose secret bindings were cleared and which now require reconfiguration (ADR-0103).
    */
   mcpServerCount: number
   /**

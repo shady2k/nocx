@@ -31,7 +31,7 @@ eslint-fixtures/
 # Agent-tooling scratch, the same class as .agents/ and .claude/ above: the
 # SDD brief/report workspace (written per worktree by the beads-superpowers
 # plugin, self-ignored by a generated .gitignore), the briefs a coordinator
-# hands a herdr worker, and repowise's index. All exist only on a machine
+# hands a herdr worker. All exist only on a machine
 # running those tools, so CI never sees them — but `prettier --check .` walks
 # the filesystem rather than the index, so they failed the ci-frontend job
 # locally while the same job was green on the runner, on files no human wrote
@@ -44,7 +44,6 @@ eslint-fixtures/
 # is the second (nocx-x4i5z).
 .internal/sdd/
 .internal/handoff/
-.repowise/
 
 # Память репозитория для cass-memory. Файл генерируется
 # scripts/bd-memories-to-cass.py из .internal/memories-export.jsonl, и
@@ -71,7 +70,7 @@ eslint-fixtures/
 
 # Image-generation scratch: prompts and renders written by an agent session, in
 # a directory nothing in the repository reads and git does not track. Same class
-# as .internal/sdd/ and .repowise/ above — prettier walks the filesystem rather
+# as .internal/sdd/ above — prettier walks the filesystem rather
 # than the index, so it found five unformatted files here and failed
 # `prettier --check .` for every commit in this checkout, on files no human
 # wrote (measured 2026-09-18).

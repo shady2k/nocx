@@ -30,7 +30,7 @@
       "minimum": 0
     },
     "mcpServerCount": {
-      "description": "MCP servers holding at least one env, header, bearer or OAuth secret binding that reset would clear (ADR-0102).",
+      "description": "MCP servers holding at least one env, header, bearer or OAuth secret binding that reset would clear (ADR-0103).",
       "type": "integer",
       "minimum": 0
     },

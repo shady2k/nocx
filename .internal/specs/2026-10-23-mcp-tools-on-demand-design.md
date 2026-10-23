@@ -3,7 +3,7 @@ title: MCP tools on demand for the assistant
 status: approved-for-implementation
 created: 2026-10-23
 source-revision: e4ea37c88fd506c61b49a03035b8ec3eb6bb6615
-binding-design: docs/decisions/0102-mcp-tools-are-activated-only-after-admission.md
+binding-design: docs/decisions/0103-mcp-tools-are-activated-only-after-admission.md
 related: AD-1, AD-2, AD-6, AD-7, AD-8, ADR-0011, ADR-0028, ADR-0030, ADR-0031, ADR-0045, ADR-0053
 beads: nocx-ga29v, nocx-ga29v.8, nocx-ga29v.8.1
 review: source behavior retained; current-main correctness and security acceptance required
@@ -168,7 +168,7 @@ Controls remain labelled, keyboard-operable, and usable at narrow widths. Search
 
 ## 12. Rollback and documentation
 
-Runtime rollback is disabling MCP records; disabled/stale records leave new snapshots and close active sessions. Code rollback is a normal revert. The additive profile field is ignored by an older build. Secret material remains in Vault until an explicit delete/forget/reset by the new build; an older build must never guess-delete unknown references. Architecture, vision, ADR-0102, and this spec are updated with the final implemented contract.
+Runtime rollback is disabling MCP records; disabled/stale records leave new snapshots and close active sessions. Code rollback is a normal revert. The additive profile field is ignored by an older build. Secret material remains in Vault until an explicit delete/forget/reset by the new build; an older build must never guess-delete unknown references. Architecture, vision, and this spec describe the final implemented contract; ADR-0103 preserves the accepted decision.
 
 ## 13. Binding current-main reconciliation
 

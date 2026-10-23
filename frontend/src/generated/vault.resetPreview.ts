@@ -26,7 +26,7 @@ export interface VaultResetPreview {
    */
   endpointCount: number
   /**
-   * MCP servers holding at least one env, header, bearer or OAuth secret binding that reset would clear (ADR-0102).
+   * MCP servers holding at least one env, header, bearer or OAuth secret binding that reset would clear (ADR-0103).
    */
   mcpServerCount: number
   /**

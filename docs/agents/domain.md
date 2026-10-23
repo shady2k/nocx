@@ -51,10 +51,9 @@ the project does not use (reconsider), or there is a real gap (note it for
 
 ## Flag ADR conflicts
 
-If your output contradicts an existing ADR, surface it rather than silently overriding:
-
-> _Contradicts ADR-0056 (repowise is kept for history, not for search), but worth
-> reopening because…_
+If your output contradicts an existing ADR, surface the conflict and explain why the
+accepted decision should change. Record a changed decision as a new ADR that names the
+superseded record; do not silently override it.
 
 **An accepted ADR is never edited. A change is a NEW record that supersedes it** — the
 owner's rule, with the spelling in `AGENTS.md` and the row in `docs/decisions/INDEX.md`.

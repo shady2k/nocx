@@ -23,7 +23,7 @@
       "minimum": 0
     },
     "mcpServerCount": {
-      "description": "MCP servers whose secret bindings were cleared and which now require reconfiguration (ADR-0102).",
+      "description": "MCP servers whose secret bindings were cleared and which now require reconfiguration (ADR-0103).",
       "type": "integer",
       "minimum": 0
     },

@@ -1,4 +1,4 @@
-# ADR-0102 — MCP tools are activated only after admission
+# ADR-0103 — MCP tools are activated only after admission
 
 - **Status:** Accepted design; implementation acceptance is separate.
 - **Date:** 2026-10-23

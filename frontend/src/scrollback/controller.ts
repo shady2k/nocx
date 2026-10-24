@@ -61,10 +61,8 @@ export interface ScrollbackControllerOpts {
    *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
    *  neither summons the editor nor signals a session. */
   runningActions?: RunningBlockActions
-  /** Fired whenever the mode settles — idle, running, unstructured,
-   *  fullscreen. The live tier's surface (scrollback/live-history.ts) is
-   *  the unstructured mode's alone, and this is how it learns the pane
-   *  changed hands (nocx-zg3k3.10.4). */
+  /** Fired whenever the lifecycle/buffer presentation settles. Live history
+   *  independently chooses a qualified command window or a terminal view. */
   onModeChanged?: (mode: LiveRegionMode) => void
   /** Fired when the follow sentinel's answer CHANGES: the reader left the
    *  live end, or returned to it. The same observer that owns `_tail`
@@ -98,6 +96,9 @@ export class ScrollbackController {
   private readonly _liveContentHeight: () => number | null
   private readonly _cellMetrics: () => { cellWidth: number; cellHeight: number } | null
   private _mode: LiveRegionMode = 'idle'
+  private _historyPresentation: 'none' | 'block' | 'terminal' = 'none'
+  private _historyElement: HTMLElement | null = null
+  private _historyBlock: HTMLElement | null = null
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -383,9 +384,9 @@ export class ScrollbackController {
     this.terminalLiveInner.className = 'terminal-live-inner terminal-live-inner inner-fullscreen'
     this._setFilledPane(true)
     this._applyEchoShift()
-    // The live tier's surface is this mode's alone: the class is what the
-    // stylesheet's filled-pane exclusion reads to hand the rows above the
-    // live rectangle back (nocx-zg3k3.10.4).
+    // Markerless full-pane layout permits primary history. Alternate-screen
+    // layout removes this class; qualified running windows have their own
+    // explicit live-history projection.
     this.scrollbackInner.classList.add('inner-unstructured')
     this._seatLive()
     this._fillPane()
@@ -462,7 +463,11 @@ export class ScrollbackController {
     // re-measure, which is why the fill belongs here rather than in a method
     // every caller has to remember to call (the version that had to be
     // remembered was called exactly twice, at the two mode entries).
-    if (this._mode === 'unstructured' || this._mode === 'fullscreen') {
+    if (
+      this._mode === 'unstructured' ||
+      this._mode === 'fullscreen' ||
+      this._historyPresentation === 'terminal'
+    ) {
       this._fillPane()
       return
     }
@@ -577,7 +582,7 @@ export class ScrollbackController {
    * screen row. Both row text and offset are supplied only by an accepted,
    * identity-matching CellModel snapshot. */
   private _echoShiftPx(): number {
-    if (this._mode !== 'running') return 0
+    if (this._mode !== 'running' || this._historyPresentation === 'terminal') return 0
     const rec = this._blockManager.runningBlock
     if (!rec) return 0
     const cell = this._cellMetrics()?.cellHeight ?? 0
@@ -592,21 +597,39 @@ export class ScrollbackController {
     return rec.outputAnchorOffset * cell
   }
 
-  /** WHERE THE LIVE REGION SITS, as the mode decides it (ADR-0091).
-   *
-   *  A running command's output is ONE block: while a command runs on the
-   *  normal screen the region is that block's body, inside the block's own box,
-   *  so its ground and its trailing space cover every row the command has
-   *  written. Everywhere there are no blocks — the prompt, a session with no
-   *  shell integration, an alternate-screen program — it is the stack's own
-   *  child, which is where the fullscreen rule and the idle height address it.
-   *
-   *  One input, the mode, and one answer, the manager's seat: the controller
-   *  builds and sizes this element but does not own the block elements it is
-   *  seated beside or inside (AD-8). */
+  /** Switch complete projections, never union unrelated row number spaces.
+   * The live tier replaces a running card's durable body only while its
+   * command window is qualified. An opaque window belongs to the terminal,
+   * outside all cards; the stylesheet removes the archive layer atomically. */
+  setHistoryPresentation(kind: 'none' | 'block' | 'terminal', element: HTMLElement): void {
+    this._historyPresentation = kind
+    this._historyElement = element
+    if (kind === 'terminal') this.terminalLiveViewport.style.height = ''
+    this._seatLive()
+    this._applyEchoShift()
+    this.setLiveHeight(this._lastLiveHeightPx ?? this._liveContentHeight())
+    this._updateSeparator()
+  }
+
   private _seatLive(): void {
-    if (this._mode === 'running') this._blockManager.holdLiveInRunningBlock()
+    const terminal = this._historyPresentation === 'terminal' && this._mode !== 'fullscreen'
+    if (this._mode === 'running' && !terminal) this._blockManager.holdLiveInRunningBlock()
     else this._blockManager.releaseLiveRegion()
+    const block =
+      this._historyPresentation === 'block' && this._mode === 'running'
+        ? (this._blockManager.runningBlock?.el ?? null)
+        : null
+    if (this._historyBlock !== block) {
+      if (this._historyBlock !== null) delete this._historyBlock.dataset.liveHistory
+      this._historyBlock = block
+      if (block !== null) block.dataset.liveHistory = 'true'
+    }
+    this.scrollbackInner.classList.toggle('inner-terminal-history', terminal)
+    this.terminalLiveContainer.classList.toggle('live-terminal-history', terminal)
+    const history = this._historyElement
+    if (history !== null && history.nextSibling !== this.terminalLiveContainer) {
+      this.terminalLiveContainer.before(history)
+    }
   }
 
   /** Apply the echo shift to the grid, or clear it. The write is guarded:
@@ -1147,7 +1170,10 @@ export class ScrollbackController {
 
   private _updateSeparator(): void {
     const hasBlocks = this._blockManager.blocks.length > 0
-    this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
+    this.separator.style.display =
+      hasBlocks && this._mode !== 'fullscreen' && this._historyPresentation !== 'terminal'
+        ? ''
+        : 'none'
   }
 
   /** The attempt-driven freeze (ADR-0024 §7 projection): the LOGICAL

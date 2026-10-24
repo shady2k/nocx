@@ -437,7 +437,7 @@ describe('a wheel gesture is counted in lines, not in events (nocx-1ebrs.26)', (
 })
 
 describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)', () => {
-  function wheelPane(localScrolling = true) {
+  function wheelPane(localScrolling: boolean | 'native' = true) {
     const intents: SessionIntent[] = []
     const localScrolls: Array<[number, number]> = []
     const surface = document.createElement('div')
@@ -461,10 +461,12 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
       isLiveTarget: (target) => target instanceof Node && grid.contains(target),
       scrollLocal: localScrolling
         ? (x, y, overLive) => {
+            if (localScrolling === 'native') return false
             localScrolls.push([x, y])
             const scroller = overLive ? grid : history
             scroller.scrollLeft += x
             scroller.scrollTop += y
+            return true
           }
         : undefined,
       lineHeight: () => state.lineHeight,
@@ -483,8 +485,26 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
       target.dispatchEvent(event)
       return event
     }
-    return { surface, grid, history, intents, localScrolls, state, wheel }
+    return { input, surface, grid, history, intents, localScrolls, state, wheel }
   }
+
+  it('retires fractions when the accepted input binding changes between wheel events', () => {
+    const { input, wheel, intents } = wheelPane()
+    wheel(10)
+    input.resetWheel()
+    wheel(7)
+    expect(intents).toEqual([])
+    wheel(10)
+    expect(intents).toEqual([{ kind: 'mouse', payload: 'press wheel-down 2 3' }])
+  })
+
+  it('leaves nested archived scrolling native when the local owner declines the event', () => {
+    const { wheel, history, intents } = wheelPane('native')
+    const event = wheel(40, {}, history)
+    expect(event.defaultPrevented).toBe(false)
+    expect(intents).toEqual([])
+    expect(history.scrollTop).toBe(0)
+  })
 
   // Reproduced failures: Shift and historical targets reached the program,
   // and sub-line captured deltas still reached the browser's scroller.

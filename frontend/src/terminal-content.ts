@@ -153,7 +153,7 @@ import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { blockColumnsOf, paintStoredRows, repaintStoredRows } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
-import { TailFollow } from './scrollback/tail-follow'
+import { isAtTail, TailFollow } from './scrollback/tail-follow'
 import { fromITheme, type TerminalSnapshot } from './scrollback/serializer'
 import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapter'
 import { subscribeTerminalFontChanges } from './terminal-font'
@@ -1641,11 +1641,12 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
-  /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
-   *  the live rectangle in a session with no shell integration. Created at
-   *  mount beside the painter it shares its painter and its measuring
-   *  authority with; bound to the page seam per session below. */
+  /** The emulator-owned live tier, independent of durable command output. */
   private _liveHistory: LiveHistorySurface | null = null
+  private _historyBlockId: number | null = null
+  private _historyReview = false
+  private _historyOpaque = false
+  private _unqualifiedHistoryBlock: number | null = null
   /** The committed columns of the last frame this pane applied, so a
    *  reflow — the one event that renumbers the emulator's history under
    *  the reader (ADR-0078) — is seen by the one watcher frames flow
@@ -2714,11 +2715,8 @@ export class TerminalContent extends BasePaneContent {
         // bytes (nocx-hp8p2.13).
         toolResult: (actionEntryId: string) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
-        // The live tier's surface follows the pane's hands (nocx-zg3k3.10.4):
-        // it is the unstructured mode's alone, and a return to the live end
-        // is what drops a stale past so the next scroll-up reads the head.
         onModeChanged: (mode) => {
-          this._liveHistory?.setMode(mode === 'unstructured' ? 'unstructured' : 'other')
+          this._syncLiveHistoryPresentation()
           // A scroller width that moved under a running program is fitted at
           // the prompt, where every other width decision is taken.
           if (
@@ -2731,7 +2729,10 @@ export class TerminalContent extends BasePaneContent {
           }
         },
         onTailFollow: (following) => {
-          if (following) this._liveHistory?.tailReengaged()
+          if (following) {
+            this._syncLiveHistoryPresentation()
+            this._liveHistory?.tailReengaged()
+          }
         },
       })
 
@@ -2824,6 +2825,7 @@ export class TerminalContent extends BasePaneContent {
         scroller: this.scrollback.scrollbackArea,
         stack: this.scrollback.scrollbackInner,
         columns: () => this._cellModel?.current()?.geometry.cols ?? null,
+        screen: () => this._cellModel?.current() ?? null,
         metric: () => {
           const fit = this._cellFit
           if (fit === null || !fit.begin()) return null
@@ -2833,6 +2835,7 @@ export class TerminalContent extends BasePaneContent {
         palette: livePalette,
       })
       this._liveHistory = liveHistory
+      this._syncLiveHistoryPresentation()
 
       // THE GRID'S WIDTH IS THE SCROLLER'S, AND THE SCROLLER CAN CHANGE IT
       // ALONE (nocx-zg3k3.30). usableViewport reads `.scrollback-area`'s
@@ -2907,6 +2910,18 @@ export class TerminalContent extends BasePaneContent {
         // backend frame; with no accepted mode the pointer remains available
         // to selection and native scrollback.
         mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        bufferKind: () => this._cellModel?.current()?.state.bufferKind ?? 'normal',
+        isLiveTarget: insideLiveRegion,
+        scrollLocal: (deltaX, deltaY, overLive) => {
+          if (!overLive) return false
+          if (this._cellModel?.current()?.state.bufferKind === 'alternate') return true
+          if (deltaY < 0 && this.scrollback?.mode === 'idle') {
+            this._historyReview = true
+            this._syncLiveHistoryPresentation()
+          }
+          this._liveHistory?.scrollBy(deltaX, deltaY)
+          return true
+        },
         // The wheel is counted in LINES, so it needs the row pitch: the
         // painter's accepted cell height, which is the same number the caret,
         // the selection and hit-testing are placed by (nocx-1ebrs.26). A
@@ -3691,6 +3706,7 @@ export class TerminalContent extends BasePaneContent {
           // enter through the projection, and fullscreen keeps its own guard.
           this.scrollback.setRunning()
         }
+        this._syncLiveHistoryPresentation()
       })
 
       // ── The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7) ──
@@ -4717,8 +4733,10 @@ export class TerminalContent extends BasePaneContent {
         'sessionId' in params && typeof params.sessionId === 'string' ? params.sessionId : null
       if (clearedSession !== null && this.session?.sessionId === clearedSession) {
         this._liveHistory?.cleared()
+        this._unqualifiedHistoryBlock = this.scrollback?.blockManager.runningBlock?.id ?? null
       }
       this.scrollback?.onClearBoundary(keepEntryId)
+      this._syncLiveHistoryPresentation()
     }
     this._blockRowsUnsubs.push(
       this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
@@ -4727,6 +4745,7 @@ export class TerminalContent extends BasePaneContent {
       this.client.onBlockOutputStart((anchor) => {
         this.scrollback?.blockManager.setOutputStartAnchor(anchor.entryId, anchor)
         this.scrollback?.outputAnchorChanged()
+        this._syncLiveHistoryPresentation()
       }),
     )
     const session = await this.openSessionWithHostKeyRecovery(signal)
@@ -4753,10 +4772,17 @@ export class TerminalContent extends BasePaneContent {
     this.snapshotStore.reset()
     this.session = session
     this._resetFrameMetadataSession(session.sessionId)
+    this._intentInput?.resetWheel()
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
     // bind. A rebind replaces both with the new session's — a new session
     // is a new history space, and the bind forgets the painted past.
+    this._historyBlockId = null
+    this._historyReview = false
+    this._historyOpaque = false
+    this._unqualifiedHistoryBlock = null
+    this._liveHistory?.setActive(false)
+    this._liveHistory?.setStart(null)
     this._liveHistory?.bind(session)
     // What the reclaim could NOT give back, said where a person will see it
     // (nocx-fz4qa). The recovered bytes are already queued for the terminal
@@ -5013,6 +5039,15 @@ export class TerminalContent extends BasePaneContent {
             previous.geometry.rows !== geometry.rows ||
             previous.geometry.cellWidthPx !== geometry.cellWidthPx ||
             previous.geometry.cellHeightPx !== geometry.cellHeightPx
+          if (
+            geometryChanged ||
+            (previous !== null &&
+              (previous.state.bufferKind !== result.snapshot.state.bufferKind ||
+                previous.state.bufferInstance !== result.snapshot.state.bufferInstance ||
+                previous.state.mouseTracking !== result.snapshot.state.mouseTracking))
+          ) {
+            this._intentInput?.resetWheel()
+          }
           if (geometryChanged) {
             this.scrollback?.cellMetricsChanged()
             this._scheduleResizeReport()
@@ -5024,6 +5059,7 @@ export class TerminalContent extends BasePaneContent {
             }
           }
           this.scrollback?.blockManager.noteCommandOutput()
+          this._syncLiveHistoryPresentation()
           this._liveHistory?.noteOutput()
           // Only normal-buffer output can be unread work in another tab.
           // Alternate-buffer frames are commonly full-screen redraws; an
@@ -6853,6 +6889,49 @@ export class TerminalContent extends BasePaneContent {
     if (path === this._frameCwdPath) return
     this._frameCwdPath = path
     this.env?.recordCwd(path)
+  }
+
+  /** Select one projection from backend-qualified screen coordinates.
+   * A missing/invalid boundary exposes the whole retained terminal, not a
+   * guessed command interval or an overlap with durable row-stream cursors. */
+  private _syncLiveHistoryPresentation(): void {
+    const history = this._liveHistory
+    const sb = this.scrollback
+    if (history === null || sb === null) return
+    const block = sb.blockManager.runningBlock
+    const blockId = block?.id ?? null
+    if (blockId !== this._historyBlockId) {
+      this._historyReview = block === null && this._historyOpaque
+      this._historyBlockId = blockId
+      this._unqualifiedHistoryBlock = null
+    }
+    const snapshot = this._cellModel?.current()
+    if (
+      !snapshot ||
+      snapshot.state.bufferKind !== 'normal' ||
+      sb.mode === 'fullscreen' ||
+      (block === null &&
+        this.lifecycle.state.kind !== 'running' &&
+        sb.mode !== 'unstructured' &&
+        !this._historyReview)
+    ) {
+      history.setActive(false)
+      sb.setHistoryPresentation('none', history.el)
+      return
+    }
+    const anchor = block?.outputAnchor ?? null
+    const candidate =
+      this._unqualifiedHistoryBlock !== blockId &&
+      (!this._historyOpaque || isAtTail(sb.scrollbackArea))
+        ? anchor
+        : null
+    const qualified = history.setStart(candidate, () => {
+      this._unqualifiedHistoryBlock = this.scrollback?.blockManager.runningBlock?.id ?? null
+      this._syncLiveHistoryPresentation()
+    })
+    this._historyOpaque = !qualified
+    sb.setHistoryPresentation(qualified ? 'block' : 'terminal', history.el)
+    history.setActive(true)
   }
 
   /** Apply alternate-screen presentation only from a locally accepted backend
@@ -9502,6 +9581,7 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    this._syncLiveHistoryPresentation()
     if (this.lifecycle.state.kind !== 'prompt_ready') {
       this._screenHandbackAwaitingBoundary = true
     }

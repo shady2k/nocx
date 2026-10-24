@@ -1,8 +1,8 @@
 // THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4, ADR-0078 decision 1).
 //
-// The rows above the live rectangle in a session with no shell integration:
-// pages of the emulator's own scrollback, asked for as the reader scrolls,
-// painted by the same painter as the live screen. Nothing here parses a byte
+// The rows above the live rectangle: either a qualified running command's
+// window or the terminal's whole retained primary history. Pages come from
+// the emulator, independently of durable command recording. Nothing here parses a byte
 // and nothing here measures a character's width: the rows arrive in the frame
 // contract's own text+marks+runs vocabulary (session.historyPageRows), the
 // pane's cell model decodes them — the same decode a frame gets — and
@@ -29,6 +29,7 @@
 
 import type { SessionHistoryPage } from '../generated/session.historyPage'
 import type { SessionHistoryPageRows } from '../generated/session.historyPageRows'
+import type { BlockOutputStart } from '../generated/block.outputStart'
 import { createCellModel, type ScreenSnapshot } from '../cell-model'
 import { fitCandidatesOf, paintRow } from '../painter/paint-row'
 import type { FitCandidate } from './cell-fit'
@@ -58,6 +59,19 @@ export interface LiveHistoryPageSource {
   onHistoryPageRows(cb: (page: SessionHistoryPageRows) => void): void
 }
 
+type HistoryScreen = Pick<ScreenSnapshot, 'revision' | 'state' | 'geometry'>
+
+/** Geometry revisions use the runtime clock, not a resize counter. Only
+ * the immediately next commit proves no coalesced width change intervened. */
+function observedNonReflowCommit(before: HistoryScreen, after: HistoryScreen): boolean {
+  return (
+    after.geometry.revision === before.revision + 1 &&
+    after.geometry.cols === before.geometry.cols &&
+    after.state.bufferKind === before.state.bufferKind &&
+    after.state.bufferInstance === before.state.bufferInstance
+  )
+}
+
 export interface LiveHistoryOptions {
   /** The scrolling element (scrollbackArea): the reader anchor's owner. */
   readonly scroller: HTMLElement
@@ -67,6 +81,9 @@ export interface LiveHistoryOptions {
    *  stored row needs exactly one external fact — geometry.cols — to pad
    *  the implied trailing blanks the compact wire does not carry. */
   readonly columns: () => number | null
+  /** A newer page must never paint rows still visible on this client's
+   * accepted live screen. Geometry and identity qualify the same row space. */
+  readonly screen?: () => HistoryScreen | null
   /** The measuring authority, re-read per paint — the same supplier the
    *  live painter uses, so one shaping engines every row on the pane. */
   readonly metric: () => RunMetric | null
@@ -107,8 +124,13 @@ export class LiveHistorySurface {
   private readonly _metric: () => RunMetric | null
   private readonly _warm: ((candidates: Iterable<FitCandidate>) => void) | undefined
   private readonly _palette: () => TerminalSnapshot
+  private readonly _screen: LiveHistoryOptions['screen']
   private readonly _offScroll: () => void
 
+  private _start: BlockOutputStart | null = null
+  private _onUnqualified: (() => void) | undefined
+  private _startGeometryRevision = 0
+  private _acceptedScreen: HistoryScreen | null = null
   private _source: LiveHistoryPageSource | null = null
   /** The painted pages, DOM order: oldest first, youngest last. Their union
    *  is one contiguous absolute interval — every fetch chains from the
@@ -159,7 +181,7 @@ export class LiveHistorySurface {
    *  (nocx-zg3k3.15.2) — see _holdThroughTyping. Null when nothing is held. */
   private _holdTop: number | null = null
   private _holdFrame = 0
-  /** True only while the unstructured mode owns the pane. */
+  /** True while a primary live-history projection owns the surface. */
   private _active = false
   /** One page's two planes, held apart until they meet: the rows document
    *  rides the binary carrier and lands before the result that names it
@@ -173,6 +195,7 @@ export class LiveHistorySurface {
   constructor(opts: LiveHistoryOptions) {
     this._scroller = opts.scroller
     this._columns = opts.columns
+    this._screen = opts.screen
     this._metric = opts.metric
     this._warm = opts.warm
     this._palette = opts.palette
@@ -193,18 +216,6 @@ export class LiveHistorySurface {
     // reveal it makes — rather than after the input layer has seen the key.
     const onKeyDown = (ev: KeyboardEvent): void => this._holdThroughTyping(ev)
     opts.scroller.addEventListener('keydown', onKeyDown, true)
-    // THE WHEEL, TRANSLATED BY THE SCROLLER'S OWN OWNER (nocx-zg3k3.10.4).
-    // The terminal input is a separate surface; the painter receives the accepted frame, and the
-    // consumes a wheel over the live screen into its OWN viewport — which
-    // is empty now that the emulator is the backend's (ADR-0078): the
-    // gesture died there and the person's first wheels after output moved
-    // nothing. A preventDefault cancels the default action, never the
-    // propagation, so this bubble-phase listener on the scroller still
-    // sees every wheel and applies the delta itself — in the unstructured
-    // mode alone. The alternate screen keeps the terminal's wheel (mouse
-    // reporting, the program's own mode), and keys are untouched.
-    const onWheel = (ev: WheelEvent): void => this._translateWheel(ev)
-    opts.scroller.addEventListener('wheel', onWheel, { passive: false })
     // A pointer press on the live output surface can run the browser's
     // native focus action after the pane's mousedown handler focused its hidden
     // keyboard input. Restore that single input owner after the click, without
@@ -221,50 +232,27 @@ export class LiveHistorySurface {
     opts.scroller.addEventListener('click', onLiveOutputClick, true)
     this._offScroll = () => {
       opts.scroller.removeEventListener('scroll', onScroll)
-      opts.scroller.removeEventListener('wheel', onWheel)
       opts.scroller.removeEventListener('keydown', onKeyDown, true)
       opts.scroller.removeEventListener('click', onLiveOutputClick, true)
     }
   }
 
-  /** Apply one wheel gesture to the scroller, in the units the device
-   *  sent. Pixels pass through; lines and pages are scaled by the
-   *  geometry the scroller itself knows. */
-  private _translateWheel(ev: WheelEvent): void {
-    if (!this._active) return
-    let delta = ev.deltaY
-    if (ev.deltaMode === WheelEvent.DOM_DELTA_LINE) {
-      const line = parseFloat(getComputedStyle(this._scroller).lineHeight)
-      delta *= Number.isFinite(line) && line > 0 ? line : 20
-    } else if (ev.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
-      delta *= this._scroller.clientHeight
-    }
+  /** Apply a local gesture already normalized and claimed by IntentInput.
+   * Application wheel input never reaches this owner. */
+  scrollBy(deltaX: number, deltaY: number): void {
     this._releaseHold()
-    const before = this._scroller.scrollTop
-    // The browser clamps; when the clamp holds the reader exactly where
-    // they were, there is nothing to claim — but the GESTURE still counts:
-    // an empty surface's wheel-up is the "next gesture" a refused page or a
-    // timed-out rows document waits on, and the live rectangle fills the
-    // scroller exactly, so the clamp would otherwise swallow the retry
-    // (the e2e review's second P2). The pump decides; claiming the event
-    // needs a move.
-    this._scroller.scrollTop = before + delta
-    if (this._scroller.scrollTop === before) {
-      this._pump()
-      return
-    }
-    ev.preventDefault()
-    // The browser's own scroll would have fired one; the translation just
-    // made the change ourselves, so the pump runs for the same reason.
+    this._scroller.scrollLeft += deltaX
+    this._scroller.scrollTop += deltaY
     this._pump()
   }
 
   /** The pane bound a session: the page seam is replaced, the past is
    *  forgotten (a new session is a new history space), and — if the
-   *  unstructured mode already owns the pane — the head page is asked for
+   *  primary live presentation is already active — the head page is asked for
    *  once, so scrolling up is possible the moment the reader tries. */
   bind(source: LiveHistoryPageSource): void {
     this._source = source
+    this._acceptedScreen = null
     this._away = false
     this._forget()
     source.onHistoryPageRows((doc) => {
@@ -283,14 +271,57 @@ export class LiveHistorySurface {
     this._sync()
   }
 
-  /** The pane's mode changed. Only the unstructured mode shows the surface
-   *  and grows it; every other mode hides it, and the filled-pane
-   *  stylesheet rule hides it again where an alt-screen program owns the
-   *  pane. Hidden pages stay painted: an alternate-screen excursion moves
-   *  nothing in the primary's numbering (the page contract's own words),
-   *  so what returns is what left. */
-  setMode(mode: 'unstructured' | 'other'): void {
-    const active = mode === 'unstructured'
+  /** A live window is a screen-coordinate interval, never a stored row-stream
+   * cursor. A new scope retires its pages before either source can be shown. */
+  setStart(start: BlockOutputStart | null, onUnqualified?: () => void): boolean {
+    this._onUnqualified = onUnqualified
+    const old = this._start
+    const same =
+      old === start ||
+      (old !== null &&
+        start !== null &&
+        old.entryId === start.entryId &&
+        old.row === start.row &&
+        old.bufferKind === start.bufferKind &&
+        old.bufferInstance === start.bufferInstance &&
+        old.cols === start.cols)
+    if (start !== null && this._screen !== undefined) {
+      const screen = this._screen()
+      const carried =
+        same &&
+        old !== null &&
+        screen !== null &&
+        (this._startGeometryRevision === screen.geometry.revision ||
+          (this._acceptedScreen !== null &&
+            this._startGeometryRevision === this._acceptedScreen.geometry.revision &&
+            observedNonReflowCommit(this._acceptedScreen, screen)))
+      if (
+        !screen ||
+        start.bufferKind !== 'normal' ||
+        screen.state.bufferKind !== start.bufferKind ||
+        screen.state.bufferInstance !== start.bufferInstance ||
+        screen.geometry.cols !== start.cols ||
+        start.screenRevision > screen.revision ||
+        (start.screenRevision < screen.geometry.revision && !carried)
+      ) {
+        start = null
+      }
+      this._startGeometryRevision = start !== null && screen !== null ? screen.geometry.revision : 0
+    } else if (start === null) {
+      this._startGeometryRevision = 0
+    }
+    const unchanged = start === null ? old === null : same
+    this._start = start
+    if (unchanged) return start !== null
+    this._away = false
+    this._forget()
+    this._sync()
+    return start !== null
+  }
+
+  /** The presentation chooses whether primary history is visible. An
+   * alternate-buffer pane always deactivates it, regardless of recording. */
+  setActive(active: boolean): void {
     if (active === this._active) return
     this._active = active
     this.el.hidden = !active
@@ -322,6 +353,29 @@ export class LiveHistorySurface {
    *  gives the wheel something to scroll. */
   noteOutput(): void {
     this._outputSeq++
+    const screen = this._screen?.()
+    if (screen?.state.bufferKind === 'normal') {
+      const previous = this._acceptedScreen
+      this._acceptedScreen = screen
+      if (this._active) {
+        const newest = this._pages[this._pages.length - 1]
+        const unknownCoordinates =
+          previous !== null &&
+          (previous.state.bufferInstance !== screen.state.bufferInstance ||
+            previous.geometry.cols !== screen.geometry.cols ||
+            (previous.geometry.revision !== screen.geometry.revision &&
+              !observedNonReflowCommit(previous, screen)))
+        if (
+          unknownCoordinates ||
+          (newest !== undefined && newest.bufferInstance !== screen.state.bufferInstance)
+        ) {
+          this._away = false
+          this._forget()
+        } else {
+          this._pruneAbove(screen.state.baseRow)
+        }
+      }
+    }
     // The DIRTY past is a painted past: pages read before this output have
     // a coverage that ends below the head the emulator holds now. An empty
     // surface with a stale cursor has nothing to rebuild — its next read
@@ -401,7 +455,6 @@ export class LiveHistorySurface {
    *  to scroll: the wheel cannot ask for what it cannot reach (the e2e
    *  review's first finding). */
   reflowed(): void {
-    if (this._pages.length === 0 && this._cursor === null) return
     this._away = false
     this._forget()
     this._sync()
@@ -491,7 +544,7 @@ export class LiveHistorySurface {
    * (scroll anchoring) — so a key that TYPES holds the reader's place across
    * the reveal its own default action makes. A key that NAVIGATES (Page Up,
    * the arrows, Home/End) holds nothing, because it is the reader's own way
-   * of moving; neither does a wheel (`_translateWheel`), for the same
+   * of moving; neither does a local wheel (`scrollBy`), for the same
    * reason. The hold lasts ONE FRAME: long enough for the reveal and for the
    * follow sentinel's delivery of it, and short enough that it can never
    * undo a scroll the reader makes afterwards.
@@ -700,6 +753,40 @@ export class LiveHistorySurface {
       this._rearHeadRefresh()
       return
     }
+    // A request can race the accepted buffer switch. No alternate-buffer
+    // row is primary history, even if its row numbers happen to match.
+    if (page.bufferKind !== 'normal') return
+    if (page.cols !== this._columns()) {
+      this._rearHeadRefresh()
+      return
+    }
+    const screen = this._screen?.()
+    if (
+      this._screen !== undefined &&
+      (!screen ||
+        screen.state.bufferKind !== page.bufferKind ||
+        screen.state.bufferInstance !== page.bufferInstance ||
+        screen.geometry.cols !== page.cols)
+    ) {
+      this._rearHeadRefresh()
+      return
+    }
+    if (screen && this._acceptedScreen === null) this._acceptedScreen = screen
+    if (screen) this._pruneAbove(screen.state.baseRow)
+    const liveBase = Math.min(page.baseRow, screen?.state.baseRow ?? page.baseRow)
+    const start = this._start
+    if (
+      start !== null &&
+      (start.bufferKind !== page.bufferKind ||
+        start.bufferInstance !== page.bufferInstance ||
+        start.cols !== page.cols)
+    ) {
+      // The caller atomically removes the card layer before this whole
+      // terminal window is painted. Never guess a command boundary.
+      this._start = null
+      this._onUnqualified?.()
+    }
+    const floor = Math.max(page.floor, this._start?.row ?? page.floor)
 
     // A buffer switch creates a new row address space even if its numbers
     // happen to match. Never join pages from separate screen instances.
@@ -721,11 +808,10 @@ export class LiveHistorySurface {
     // page's floor is also how a clear that arrived between two fetches is
     // caught: the floor is the head, everything painted is below it, and
     // the surface empties instead of inventing a boundary.
-    this._pruneBelow(page.floor)
-    this._cursor = Math.min(page.start, page.baseRow)
-    // "Nothing remains below the cursor" is the READ's verdict, and it
-    // stands only if nothing has departed since the read began.
-    this._exhausted = !page.more && entry.readSeq === this._outputSeq
+    this._pruneBelow(floor)
+    this._cursor = Math.min(Math.max(page.start, floor), liveBase)
+    // The block's own lower bound is just as final as the retention floor.
+    this._exhausted = (!page.more || page.start <= floor) && entry.readSeq === this._outputSeq
     if (entry.readSeq !== this._outputSeq) {
       // The page was read BEFORE output departed during its flight: its
       // coverage already ends below the head the emulator holds now, and
@@ -740,16 +826,20 @@ export class LiveHistorySurface {
       // go, and the coverage is current.
       this._refreshPending = false
     }
-    const historicalCount = Math.max(0, Math.min(doc.rows.length, page.baseRow - page.start))
+    const first = Math.max(page.start, floor)
+    const historicalCount = Math.max(0, Math.min(page.end, liveBase) - first)
     if (historicalCount === 0) {
       // A head page may consist only of the active screen. It contributes
       // no scrollback rows; a page with older retained rows is followed at
       // baseRow, while an empty/changed head waits for the scheduled refresh.
-      if (page.more && !this._dirty) this._pump()
+      if (!this._exhausted && !this._dirty) this._pump()
       this._rearHeadRefresh()
       return
     }
-    this._paint(page, doc)
+    this._paint(
+      { ...page, start: first, baseRow: liveBase },
+      { pageId: doc.pageId, rows: doc.rows.slice(first - page.start) },
+    )
     this._pump()
     this._rearHeadRefresh()
   }
@@ -773,29 +863,47 @@ export class LiveHistorySurface {
     // from its surviving rows — the decoded cells are kept for exactly
     // this — and the reader's anchor is paid back the height removed.
     const keep = oldest.rows.slice(floor - oldest.start)
-    const metric = this._metric()
-    this._warm?.(fitCandidatesOf(keep))
-    const el = document.createElement('div')
-    el.className = 'live-history-page'
-    el.dataset.start = String(floor)
-    el.dataset.end = String(oldest.end)
-    const palette = oldest.palette
-    for (const row of keep) el.appendChild(paintRow(row, { metric, palette }))
+    const el = this._paintPageRows(floor, keep, oldest.palette)
     const before = this._scroller.scrollHeight
     oldest.el.replaceWith(el)
     const removed = before - this._scroller.scrollHeight
     // Ours, not the engine's: a reveal has nothing left to undo here.
     this._releaseHold()
     if (removed > 0) this._scroller.scrollTop = Math.max(0, this._scroller.scrollTop - removed)
-    this._pages[0] = {
-      el,
-      start: floor,
-      end: oldest.end,
-      bufferKind: oldest.bufferKind,
-      bufferInstance: oldest.bufferInstance,
-      rows: keep,
-      palette,
+    this._pages[0] = { ...oldest, el, start: floor, rows: keep }
+  }
+
+  /** A taller live screen can pull history back onto itself. Remove that
+   * suffix even while the reader is away; it is now painted by the grid.
+   * Unlike pruning a prefix, removing rows below a reader needs no offset. */
+  private _pruneAbove(ceiling: number): void {
+    if (this._cursor !== null) this._cursor = Math.min(this._cursor, ceiling)
+    while (this._pages.length > 0 && this._pages[this._pages.length - 1].start >= ceiling) {
+      this._pages.pop()!.el.remove()
     }
+    const index = this._pages.length - 1
+    const newest = this._pages[index]
+    if (newest === undefined || newest.end <= ceiling) return
+    const keep = newest.rows.slice(0, ceiling - newest.start)
+    const el = this._paintPageRows(newest.start, keep, newest.palette)
+    newest.el.replaceWith(el)
+    this._releaseHold()
+    this._pages[index] = { ...newest, el, end: ceiling, rows: keep }
+  }
+
+  private _paintPageRows(
+    start: number,
+    rows: readonly ScreenSnapshot['rows'][number][],
+    palette: TerminalSnapshot,
+  ): HTMLElement {
+    const metric = this._metric()
+    this._warm?.(fitCandidatesOf(rows))
+    const el = document.createElement('div')
+    el.className = 'live-history-page'
+    el.dataset.start = String(start)
+    el.dataset.end = String(start + rows.length)
+    for (const row of rows) el.appendChild(paintRow(row, { metric, palette }))
+    return el
   }
 
   /** Decode one page through the pane's cell model and paint it with the
@@ -829,17 +937,9 @@ export class LiveHistorySurface {
       log.debug('nocx: history page refused by the cell model', { refusal: result.refusal })
       return
     }
-    const metric = this._metric()
-    this._warm?.(fitCandidatesOf(result.snapshot.rows))
-    const pageEl = document.createElement('div')
-    pageEl.className = 'live-history-page'
     const historyEnd = page.start + historyRows.length
-    pageEl.dataset.start = String(page.start)
-    pageEl.dataset.end = String(historyEnd)
     const palette = this._palette()
-    for (const row of result.snapshot.rows) {
-      pageEl.appendChild(paintRow(row, { metric, palette }))
-    }
+    const pageEl = this._paintPageRows(page.start, result.snapshot.rows, palette)
     // THE ANCHOR. The page lands above everything, so the rows the reader
     // is looking at would slide down by its height. The scroller owns the
     // position (the stylesheet's own `overflow-anchor: none` — one

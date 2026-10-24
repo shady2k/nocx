@@ -643,29 +643,35 @@
   flex: none;
 }
 
-/* THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4, ADR-0078): the rows
-   above the live rectangle in a session with no shell integration, painted
-   from the pages session.historyPage answers with by the same painter as
-   the live screen. Hidden by default, and shown by exactly one state — the
-   unstructured mode owning the pane — so a missed JS transition can never
-   leak the past into a block transcript or an alt-screen program's pane:
-   the filled-pane exclusion above hides the surface beside every other
-   child while `inner-fullscreen-mode` is set and `inner-unstructured` is
-   not, which is the rule that keeps Page Up and the scrollbar from
-   revealing the primary's history while a full-screen program runs.
-   `.term-grid-row` shares the live rows' type context (the shared rule
-   above), so the surface itself carries only what `.term-grid` carries:
-   the mono family the measuring probe assumes. The gutter padding comes
-   from the same `.scrollback-inner > *` rule the live region wears, which
-   is why the columns of a history row and a live row are one grid. */
+/* The emulator's primary history is independent of durable command recording.
+   A qualified running window sits inside its card; an unqualified/recovered
+   window replaces the archive layer as one whole terminal presentation. */
 .live-history {
   display: none;
   flex: none;
   font-family: var(--font-family-mono);
 }
 
-.scrollback-inner.inner-unstructured > .live-history:not([hidden]) {
+.scrollback-inner.inner-unstructured > .live-history:not([hidden]),
+.scrollback-inner.inner-terminal-history > .live-history:not([hidden]),
+.scrollback-inner:not(.inner-fullscreen-mode) .live-history:not([hidden]) {
   display: block;
+}
+
+.scrollback-inner.inner-terminal-history
+  > :not(.terminal-live-container, .live-history, .cell-metric-probe) {
+  display: none;
+}
+
+.terminal-live-container.live-terminal-history > .terminal-live-viewport {
+  height: 100%;
+}
+
+/* Only the active command's body changes source. A late/capped artifact
+   cannot reintroduce a second visible copy of its live historical rows. */
+.cmd-block[data-live-history='true']
+  > :is(.cmd-output, [data-output-incomplete], [data-output-empty], [data-output-unreadable]) {
+  display: none;
 }
 
 /* Live grid wrapper: a stable min-height keeps row geometry sane even when

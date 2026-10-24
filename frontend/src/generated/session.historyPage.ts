@@ -18,7 +18,7 @@ export interface SessionHistoryPage {
    */
   pageId: string
   /**
-   * The absolute history row number of the page's FIRST row; the exclusive lower bound of what this page delivered. A row's number is fixed for its lifetime: output arriving, a resize and an alternate-screen excursion move nothing, and only retention pruning and an erase-saved-lines raise the floor beneath it. When the page is empty, start is the cursor the page was taken at and end equals it.
+   * The absolute history row number of the page's FIRST row, the inclusive lower bound of the delivered interval. Output arriving preserves positions within the same buffer instance and column geometry; a column reflow may renumber them, so clients invalidate pages and anchors on column or buffer-identity changes and apply floor for pruning or ED3. An alternate-screen excursion does not permit joining separate buffer identities. When the page is empty, start is the cursor the page was taken at and end equals it.
    */
   start: number
   /**
@@ -46,7 +46,7 @@ export interface SessionHistoryPage {
    */
   bufferInstance: string
   /**
-   * The absolute row number of the active screen's first row in this buffer. History pages may include rows at or beyond baseRow; their [start,end) is always the shared screen coordinate, with no gap or overlap at this boundary.
+   * The absolute row number of the active screen's first row at this read. Pages may include rows at or beyond baseRow in the same screen coordinate. A client painting a different accepted live frame caps historical rows at the lesser of this baseRow and its accepted frame's baseRow, after qualifying buffer identity and columns, so rows still visible live cannot also appear in history.
    */
   baseRow: number
   /**

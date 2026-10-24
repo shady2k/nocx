@@ -232,10 +232,10 @@ export interface IntentInputOptions {
   /** Distinguish the live grid from historical rows inside the same surface.
    *  Absent means the whole surface is live, as for a bare grid. */
   isLiveTarget?: (target: EventTarget | null) => boolean
-  /** Own local scrolling in normalized CSS pixels, with the already-classified
-   *  live target so historical rows cannot trigger a live presentation change.
-   *  When absent, local wheel events retain the browser's native default. */
-  scrollLocal?: (deltaX: number, deltaY: number, overLive: boolean) => void
+  /** Claim local scrolling in normalized CSS pixels. Returning false leaves
+   * the native default to archived/nested scroll areas; the classification
+   * lets a local owner distinguish the live grid without a second hit-test. */
+  scrollLocal?: (deltaX: number, deltaY: number, overLive: boolean) => boolean
   /** The pane's row pitch in CSS pixels — the painter's accepted cell height,
    *  read here so a pixel-delta wheel can be counted in LINES (nocx-1ebrs.26).
    *  The pointer's geometry is the painter's (see `cellAt`), and a value of
@@ -380,8 +380,9 @@ export class IntentInput {
     this.listen(surface, 'pointerleave', () => this.resetWheel())
   }
 
-  /** Residuals belong only to the app input context that produced them. */
-  private resetWheel(): void {
+  /** Binding and accepted-mode transitions retire residuals even when no
+   * wheel event occurred between them. The old app never lends a fraction. */
+  resetWheel(): void {
     this.wheelPx.x = 0
     this.wheelPx.y = 0
     this.wheelContext = null
@@ -571,10 +572,7 @@ export class IntentInput {
 
     if (!liveTarget || e.shiftKey || (!tracking && buffer === 'normal')) {
       this.resetWheel()
-      if (this.scrollLocal) {
-        e.preventDefault()
-        this.scrollLocal(deltaX, deltaY, liveTarget)
-      }
+      if (this.scrollLocal?.(deltaX, deltaY, liveTarget)) e.preventDefault()
       return
     }
 

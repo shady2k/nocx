@@ -24,7 +24,7 @@
     "payload": {
       "type": "string",
       "contentEncoding": "base64",
-      "description": "The intent's own argument, and its shape is the kind's: a key name with modifier prefixes (\"Ctrl+Up\"), committed UTF-8 text, a verbatim paste body, a mouse event as \"<action> <button> <x> <y>\" in cell coordinates (\"press left 12 5\"), or \"in\"/\"out\" for focus."
+      "description": "The decoded argument's shape is the kind's: a key name with modifier prefixes (\"Ctrl+Up\"), committed UTF-8 text, a verbatim paste body, a mouse event as \"<modifiers><action> <button> <x> <y>\" in cell coordinates (\"Ctrl+Alt+press wheel-up 12 5\"), or \"in\"/\"out\" for focus. Mouse actions accept the key vocabulary's optional Ctrl+, Alt+, Shift+ and Super+ prefixes. The runtime encodes mouse reporting and alternate-screen mode-1007 cursor fallback against current emulator modes; the payload is never pre-encoded VT input."
     }
   }
 }

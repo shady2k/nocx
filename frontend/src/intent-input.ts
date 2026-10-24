@@ -153,7 +153,9 @@ const KEY_NAMES: Readonly<Record<string, string>> = {
 /** The modifier prefixes, in the order this module writes them. The backend
  *  peels them off in any order, so the order is a readability choice and the
  *  spelling is not: ctrl, alt, shift, super are the four it knows. */
-function modifierPrefix(e: KeyboardEvent): string {
+function modifierPrefix(
+  e: Pick<KeyboardEvent, 'ctrlKey' | 'altKey' | 'shiftKey' | 'metaKey'>,
+): string {
   let prefix = ''
   if (e.ctrlKey) prefix += 'Ctrl+'
   if (e.altKey) prefix += 'Alt+'
@@ -221,9 +223,18 @@ export interface IntentInputOptions {
    *  under this point" (AD-8). */
   cellAt?: (clientX: number, clientY: number) => { x: number; y: number } | null
   /** Whether the accepted backend screen frame says the program is tracking
-   *  the pointer. Ordinary clicks and wheel events belong to selection and
-   *  scrolling, not to a program that has not enabled mouse reporting. */
+   *  the pointer. Pointer reporting deliberately coexists with DOM selection;
+   *  wheel ownership also depends on the buffer and the target below. */
   mouseTracking?: () => boolean
+  /** The accepted backend buffer. Alternate-screen wheel input goes to the
+   *  runtime even without reporting, so its mode 1007 owns the fallback. */
+  bufferKind?: () => 'normal' | 'alternate'
+  /** Distinguish the live grid from historical rows inside the same surface.
+   *  Absent means the whole surface is live, as for a bare grid. */
+  isLiveTarget?: (target: EventTarget | null) => boolean
+  /** Own local scrolling in normalized CSS pixels. When absent, local wheel
+   *  events retain the browser's native default instead. */
+  scrollLocal?: (deltaX: number, deltaY: number) => void
   /** The pane's row pitch in CSS pixels — the painter's accepted cell height,
    *  read here so a pixel-delta wheel can be counted in LINES (nocx-1ebrs.26).
    *  The pointer's geometry is the painter's (see `cellAt`), and a value of
@@ -253,16 +264,16 @@ export class IntentInput {
     ((clientX: number, clientY: number) => { x: number; y: number } | null) | null
   private readonly mouseTracking: (() => boolean) | null
   private readonly lineHeight: (() => number) | null
+  private readonly bufferKind: (() => 'normal' | 'alternate') | null
+  private readonly isLiveTarget: ((target: EventTarget | null) => boolean) | null
+  private readonly scrollLocal: ((deltaX: number, deltaY: number) => void) | null
   private readonly listeners: Array<() => void> = []
 
-  /** The wheel's running total per axis, in CSS pixels, and the tracking state
-   *  it was accumulated under (nocx-1ebrs.26). A macOS trackpad emits dozens
-   *  of small deltas per gesture and keeps emitting through momentum after the
-   *  fingers lift, so one report per event told the program the person scrolled
-   *  dozens of times when they scrolled once. Reports are emitted per LINE of
-   *  movement, and the remainder is carried into the next event. */
+  /** App-owned wheel residuals, in normalized CSS pixels. Small trackpad
+   *  deltas carry forward only within the same ownership/modifier context;
+   *  they must never be spent by another owner or a later live-grid hit. */
   private wheelPx = { x: 0, y: 0 }
-  private wheelTracking: boolean | null = null
+  private wheelContext: string | null = null
 
   /** Set while the keydown that produced the text in flight went out as a KEY.
    *  Some platforms commit a character for a chord as well (Ctrl+A on some
@@ -297,6 +308,9 @@ export class IntentInput {
     this.cellAt = options.cellAt ?? null
     this.mouseTracking = options.mouseTracking ?? null
     this.lineHeight = options.lineHeight ?? null
+    this.bufferKind = options.bufferKind ?? null
+    this.isLiveTarget = options.isLiveTarget ?? null
+    this.scrollLocal = options.scrollLocal ?? null
 
     const element = createTerminalInput()
     this.element = element
@@ -365,11 +379,11 @@ export class IntentInput {
     this.listen(surface, 'pointerleave', () => this.resetWheel())
   }
 
-  /** Forget the wheel's running total. Called on leaving the pane and on any
-   *  change of the tracking mode, because the remainder belongs to the gesture
-   *  that produced it — not to the next one, and not to the other owner. */
+  /** Residuals belong only to the app input context that produced them. */
   private resetWheel(): void {
-    this.wheelPx = { x: 0, y: 0 }
+    this.wheelPx.x = 0
+    this.wheelPx.y = 0
+    this.wheelContext = null
   }
 
   private onKeydown(e: KeyboardEvent): void {
@@ -536,82 +550,89 @@ export class IntentInput {
     this.emitMouse('motion', this.heldButton ?? button ?? 'none', e)
   }
 
-  /** One wheel REPORT per line of movement, not per event (nocx-1ebrs.26).
-   *
-   *  A wheel event is a press and a release of one step in a single event, so
-   *  it is reported as the press the program's tracking mode is looking for —
-   *  and the count is the point. A high-resolution trackpad sends tens of
-   *  sub-line deltas per flick and keeps going through momentum, so reporting
-   *  each one told the program the person scrolled dozens of times when they
-   *  scrolled once. That is not a speed preference: it is a false statement
-   *  about the input, and the momentum tail arrives after the gesture ended.
-   *
-   *  The deltas are converted to pixels first, as scrollback/live-history.ts
-   *  does for the scroller (`_translateWheel`), so the three `deltaMode`s mean
-   *  the same thing here: a line is a line and must not be divided again, a
-   *  page is a viewport, and only a pixel delta is accumulated. */
+  /** Arbitrate before accumulating: local scrolling and program input are
+   *  exclusive owners of a wheel event. The frontend reports intent only;
+   *  alternate-scroll encoding and mode 1007 remain the runtime's decision. */
   private onWheel(e: WheelEvent): void {
     const tracking = this.mouseTracking?.() ?? false
-    if (!tracking) {
-      this.wheelTracking = false
-      this.resetWheel()
-      return
-    }
-    // A NEW OWNER STARTS A NEW GESTURE: a remainder accumulated while the
-    // program was reporting says nothing about what the person is doing now.
-    if (this.wheelTracking !== true) {
-      this.wheelTracking = true
-      this.resetWheel()
-    }
-    const line = this.lineHeight?.() ?? 0
-    if (!(line > 0)) {
-      // No row pitch to count in (the pane has no committed metric yet). One
-      // event is one step, which is what this did before and is the degrade
-      // rather than a second rule.
-      const button = e.deltaY < 0 ? 'wheel-up' : e.deltaY > 0 ? 'wheel-down' : null
-      if (button !== null && this.emitMouse('press', button, e)) e.preventDefault()
-      return
-    }
+    const buffer = this.bufferKind?.() ?? 'normal'
+    const liveTarget = this.isLiveTarget?.(e.target) ?? true
+    const pitch = this.lineHeight?.() ?? 0
+    const line = pitch > 0 ? pitch : 1
     const scale =
       e.deltaMode === WheelEvent.DOM_DELTA_LINE
         ? line
         : e.deltaMode === WheelEvent.DOM_DELTA_PAGE
           ? Math.max(line, this.surface?.clientHeight ?? line)
           : 1
-    this.wheelPx.x += e.deltaX * scale
-    this.wheelPx.y += e.deltaY * scale
-    let reported = false
+    const deltaX = e.deltaX * scale
+    const deltaY = e.deltaY * scale
+
+    if (!liveTarget || e.shiftKey || (!tracking && buffer === 'normal')) {
+      this.resetWheel()
+      if (this.scrollLocal) {
+        e.preventDefault()
+        this.scrollLocal(deltaX, deltaY)
+      }
+      return
+    }
+
+    // An invalid hit must neither save new deltas nor retain an old remainder.
+    const cell = this.cellAt?.(e.clientX, e.clientY) ?? null
+    if (!cell) {
+      this.resetWheel()
+      return
+    }
+    // Capture even sub-line movement: letting its browser default run and
+    // later reporting the accumulated line would give that input two owners.
+    e.preventDefault()
+    const modifiers = modifierPrefix(e)
+    const context = `${buffer}:${tracking}:${e.deltaMode}:${modifiers}`
+    if (this.wheelContext !== context) {
+      this.resetWheel()
+      this.wheelContext = context
+    }
+    if (!(pitch > 0)) {
+      // Before the painter commits a pitch, retain one step per moving axis.
+      if (deltaY !== 0) {
+        this.emitMouseAt('press', deltaY < 0 ? 'wheel-up' : 'wheel-down', cell, modifiers)
+      }
+      if (deltaX !== 0) {
+        this.emitMouseAt('press', deltaX < 0 ? 'wheel-left' : 'wheel-right', cell, modifiers)
+      }
+      return
+    }
+    this.wheelPx.x += deltaX
+    this.wheelPx.y += deltaY
     while (this.wheelPx.y <= -line) {
-      if (!this.emitMouse('press', 'wheel-up', e)) break
+      this.emitMouseAt('press', 'wheel-up', cell, modifiers)
       this.wheelPx.y += line
-      reported = true
     }
     while (this.wheelPx.y >= line) {
-      if (!this.emitMouse('press', 'wheel-down', e)) break
+      this.emitMouseAt('press', 'wheel-down', cell, modifiers)
       this.wheelPx.y -= line
-      reported = true
     }
     while (this.wheelPx.x <= -line) {
-      if (!this.emitMouse('press', 'wheel-left', e)) break
+      this.emitMouseAt('press', 'wheel-left', cell, modifiers)
       this.wheelPx.x += line
-      reported = true
     }
     while (this.wheelPx.x >= line) {
-      if (!this.emitMouse('press', 'wheel-right', e)) break
+      this.emitMouseAt('press', 'wheel-right', cell, modifiers)
       this.wheelPx.x -= line
-      reported = true
     }
-    if (reported) e.preventDefault()
   }
 
-  private emitMouse(
+  private emitMouse(action: string, button: string, e: PointerEvent): void {
+    const cell = this.cellAt?.(e.clientX, e.clientY) ?? null
+    if (cell) this.emitMouseAt(action, button, cell, modifierPrefix(e))
+  }
+
+  private emitMouseAt(
     action: string,
     button: string,
-    e: { clientX: number; clientY: number },
-  ): boolean {
-    const cell = this.cellAt?.(e.clientX, e.clientY) ?? null
-    if (!cell) return false
-    this.emit({ kind: 'mouse', payload: `${action} ${button} ${cell.x} ${cell.y}` })
-    return true
+    cell: { x: number; y: number },
+    modifiers: string,
+  ): void {
+    this.emit({ kind: 'mouse', payload: `${modifiers}${action} ${button} ${cell.x} ${cell.y}` })
   }
 }

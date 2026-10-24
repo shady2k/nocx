@@ -567,11 +567,48 @@
             </p>
           </div>
         </section>
+        <section class="section restore" id="closed-panes">
+          <div>
+            <p class="eyebrow">03 / Рендерер отпускает</p>
+            <h2>Закрытая панель<br />не остаётся в памяти.</h2>
+            <p class="section-copy">
+              Раньше закрытая панель оставалась в памяти рендерера. Тест на шести вкладках проходит
+              восемнадцать циклов закрытия и открытия и заканчивает их с тем же числом панелей в
+              куче, что было в начале, а куча остаётся в пределах порога.
+            </p>
+          </div>
+          <div>
+            <div class="restore-list">
+              <div class="restore-row">
+                <span>Панелей в куче после 18 циклов</span><span>6 &nbsp;·&nbsp; было 24</span>
+              </div>
+              <div class="restore-row">
+                <span>Объектов содержимого терминала</span><span>6 &nbsp;·&nbsp; было 24</span>
+              </div>
+              <div class="restore-row">
+                <span>Отсоединённых узлов закрытой панели</span><span>0</span>
+              </div>
+              <div class="restore-row">
+                <span>Куча рендерера после GC, начало → конец</span><span>28,36 → 30,95 МБ</span>
+              </div>
+              <div class="restore-row excluded">
+                <span>Память всего приложения или процесса</span><span>— &nbsp; не измерялась</span>
+              </div>
+            </div>
+            <p class="aside-note">
+              Headless Chromium 149.0.7827.55, 52,7 с: шесть вкладок по двенадцать раундов вывода и
+              перерисовки, затем восемнадцать циклов закрытия и открытия с перерисовкой в каждом.
+              Раньше этот же тест заканчивался 24 панелями и 24 объектами содержимого терминала.
+              Порог проверки — 7 панелей при шести в начале и рост кучи до 24 МБ; этот прогон
+              заканчивается на 2,59 МБ выше старта. Только куча JavaScript рендерера.
+            </p>
+          </div>
+        </section>
       </main>
     </div>
     <section class="privacy" id="privacy">
       <div class="wrap">
-        <p class="eyebrow">03 / Локально — по устройству</p>
+        <p class="eyebrow">04 / Локально — по устройству</p>
         <div class="privacy-grid">
           <div>
             <h2>Секреты остаются<br />ссылками.</h2>
@@ -600,7 +637,7 @@
     </section>
     <div class="wrap">
       <section class="section">
-        <p class="eyebrow">04 / Меньше переключений</p>
+        <p class="eyebrow">05 / Меньше переключений</p>
         <div class="tools-grid">
           <article class="tool">
             <h2>Ассистент там,<br />где идёт работа.</h2>
@@ -650,7 +687,7 @@
       <section class="install" id="install">
         <div class="install-grid">
           <div>
-            <p class="eyebrow">05 / Начать работу</p>
+            <p class="eyebrow">06 / Начать работу</p>
             <h2>Ваш следующий<br />терминал.</h2>
             <p class="section-copy">
               Без регистрации. Скачайте nocx для своей системы и продолжайте с привычными хостами.

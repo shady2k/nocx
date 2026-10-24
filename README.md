@@ -4,9 +4,9 @@
 
 <!-- Claims verified against docs/architecture.md, internal/vault/system, internal/vault/vault.go, internal/profile/profile.go, internal/importer/tabby.go, internal/apicoll/collection.go and internal/apiimport. -->
 
-**A local-first terminal built on the platform WebView rather than Chromium.** On macOS it uses WKWebView; the Linux AppImage carries WebKitGTK. No comparative memory claim is made here.
+**A local-first terminal built on the platform WebView rather than Chromium.** On macOS it uses WKWebView; the Linux AppImage carries WebKitGTK. It claims no memory advantage over another terminal; the one memory figure this README states is its own renderer's, under [Measured renderer memory](#measured-renderer-memory).
 
-1. **A native WebView by construction.** Wails uses the platform WebView—WKWebView on macOS and WebKitGTK on Linux—instead of Chromium. The Linux AppImage carries its WebKitGTK runtime. This describes the runtime architecture, not a measured memory advantage.
+1. **A native WebView by construction.** Wails uses the platform WebView—WKWebView on macOS and WebKitGTK on Linux—instead of Chromium. The Linux AppImage carries its WebKitGTK runtime. This describes the runtime architecture, not a measured advantage over another terminal.
 2. **Secrets stay references.** nocx stores secrets in an OS-keychain provider or its encrypted file provider; command history keeps a reference in place of the secret value.
 3. **SSH connections stay organized.** Create profiles and groups, and link passwords or key passphrases from the vault. Tabby profiles and groups can be imported; `~/.ssh/config` aliases can be resolved, not imported.
 4. **An API client lives in your terminal.** Organize requests into file-backed collections, use environments, and import Postman collections. It is a focused API client, not a claim of full Postman feature parity.
@@ -22,6 +22,14 @@ Tabs, command output, notes and interface layout restore after restart; running 
 ## What makes it different
 
 A terminal, SSH connection manager, secrets vault and file-backed API client in one local-first app. The assistant can act in the same scrollback, with user approval; the configured model provider’s data-retention policy still applies.
+
+## Measured renderer memory
+
+`e2e/renderer-memory-soak.spec.ts` drives the renderer in headless Chromium 149.0.7827.55: six tabs, twelve output-and-redraw rounds per tab, then eighteen close-and-reopen cycles with a redraw on each replacement, 52.7 s in total. It records `Performance.getMetrics` (including `JSHeapUsedSize`), document node counts, detached heap-node counts and a heap snapshot at each end of the run.
+
+Before the fix, the snapshot taken after the eighteen cycles held 24 `Pane` and 24 `TerminalContent` objects, against a six-object baseline and a bound of 7. A module-level map keyed by session was populated when a session opened and never cleared when it closed, so it retained every closed pane content and its owner. After the fix the snapshot holds six `Pane` and six `TerminalContent` objects. Detached heap nodes are 6495 → 6466, live document nodes 1956 → 1951, no detached pane or editor DOM nodes remain, and `JSHeapUsedSize` after GC goes from 28.36 MB at the start of the run to 30.95 MB at the end — 2.59 MB, inside the 24 MB the check allows.
+
+The claim is therefore narrow: closing and reopening panes no longer retains them, and the heap stays inside its bound. These are renderer JavaScript heap figures for that one workload — not whole-app memory, not process memory, and not a comparison with another terminal.
 
 ## Install (macOS)
 

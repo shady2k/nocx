@@ -553,11 +553,48 @@
             </p>
           </div>
         </section>
+        <section class="section restore" id="closed-panes">
+          <div>
+            <p class="eyebrow">03 / The renderer lets go</p>
+            <h2>Closed panes<br />don’t stay in memory.</h2>
+            <p class="section-copy">
+              Closing a pane and opening another one used to leave the closed pane in the renderer’s
+              memory. A soak of six tabs now runs eighteen close-and-reopen cycles and ends holding
+              no more panes than it started with, with the heap inside its bound.
+            </p>
+          </div>
+          <div>
+            <div class="restore-list">
+              <div class="restore-row">
+                <span>Panes held after 18 cycles</span><span>6 &nbsp;·&nbsp; was 24</span>
+              </div>
+              <div class="restore-row">
+                <span>Terminal contents held</span><span>6 &nbsp;·&nbsp; was 24</span>
+              </div>
+              <div class="restore-row">
+                <span>Detached nodes of a closed pane</span><span>0</span>
+              </div>
+              <div class="restore-row">
+                <span>Renderer heap after GC, start → end</span><span>28.36 → 30.95 MB</span>
+              </div>
+              <div class="restore-row excluded">
+                <span>Whole-app or process memory</span><span>— &nbsp; not measured</span>
+              </div>
+            </div>
+            <p class="aside-note">
+              Headless Chromium 149.0.7827.55, 52.7 s: six tabs with twelve output and redraw rounds
+              each, then eighteen close-and-reopen cycles with a redraw on every one. The same soak
+              used to end with 24 panes and 24 terminal contents. The check allows 7 panes against a
+              six-pane baseline and a 24 MB heap rise; this run ends 2.59 MB above where it started.
+              Renderer JavaScript heap only.
+            </p>
+          </div>
+        </section>
       </main>
     </div>
     <section class="privacy" id="privacy">
       <div class="wrap">
-        <p class="eyebrow">03 / Local by design</p>
+        <p class="eyebrow">04 / Local by design</p>
         <div class="privacy-grid">
           <div>
             <h2>Secrets stay<br />as references.</h2>
@@ -585,7 +622,7 @@
     </section>
     <div class="wrap">
       <section class="section">
-        <p class="eyebrow">04 / Fewer context switches</p>
+        <p class="eyebrow">05 / Fewer context switches</p>
         <div class="tools-grid">
           <article class="tool">
             <h2>An assistant where<br />the work happens.</h2>
@@ -634,7 +671,7 @@
       <section class="install" id="install">
         <div class="install-grid">
           <div>
-            <p class="eyebrow">05 / Get started</p>
+            <p class="eyebrow">06 / Get started</p>
             <h2>Your next<br />terminal.</h2>
             <p class="section-copy">
               No sign-up. Download nocx for your system and keep working with your existing hosts.

@@ -158,7 +158,11 @@ for (const timing of ['before', 'during', 'after']) {
           '  size=$(stty size)',
           `  if [ "$size" != "$last" ]; then log SIZE; last="$size"; fi`,
           `  printf '%s\\n' "$size" > '${sample}.tmp'; mv '${sample}.tmp' '${sample}'`,
-          `  if IFS= read -r -N 1 -t 0.005 key; then hex=$(printf '%s' "$key" | od -An -tx1 | tr -d ' \\n'); log BYTE "$hex"; fi`,
+          '  key=',
+          '  IFS= read -r -N 1 -t 0.005 key; status=$?',
+          `  hex=$(printf '%s' "$key" | od -An -tx1 | tr -d ' \n')`,
+          '  log RETURN "$status:$hex"',
+          '  if [ -n "$hex" ]; then log BYTE "$hex"; fi',
           'done',
           '',
         ]

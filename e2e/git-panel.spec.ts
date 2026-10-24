@@ -154,7 +154,24 @@ test('a changed row reads +3 −1, and an untracked row reads nothing', async ({
 
 // ── Commits (brief, git.log) — the DONE WHEN ──────────────────────────────
 
+// THIS JOURNEY CARRIES ITS OWN BUDGET, and the budget is what was wrong, not a
+// wait. Every wait below is on an observable state and each keeps its own
+// ceiling; what ran out was the 30 s per-test default, because on the runner
+// the app's first paint is most of it. Measured on the failing trace (webkit
+// shard 2, 2026-10-21): page.goto('/') returned 24.6 s into the test, 19.4 s of
+// it inside the call; the panel was open and the initial commit read at 27.0 s,
+// which is when the out-of-band edit below could first be made — and the row it
+// must produce arrives on the panel's own 5 s poll. Playwright cut the test at
+// 30.0 s, 3.0 s into that wait, which is less than one poll. Nothing in the
+// panel had failed: its snapshot was the pre-edit state, Commits holding only
+// 'initial' and the commit form untouched, because the journey never reached
+// the commit.
+//
+// 120_000 is a hang detector, and the number is the one this file's
+// remote-consent journey and agent-reads-the-screen.spec.ts already state for
+// this same measured boot. No wait here is widened to fit it.
 test('a commit made from the panel appears at the top of the Commits list', async ({ page }) => {
+  test.setTimeout(120_000)
   const repo = createRepo()
   try {
     await openGitPanelAt(page, repo.root, repo.basename)

@@ -232,9 +232,10 @@ export interface IntentInputOptions {
   /** Distinguish the live grid from historical rows inside the same surface.
    *  Absent means the whole surface is live, as for a bare grid. */
   isLiveTarget?: (target: EventTarget | null) => boolean
-  /** Own local scrolling in normalized CSS pixels. When absent, local wheel
-   *  events retain the browser's native default instead. */
-  scrollLocal?: (deltaX: number, deltaY: number) => void
+  /** Own local scrolling in normalized CSS pixels, with the already-classified
+   *  live target so historical rows cannot trigger a live presentation change.
+   *  When absent, local wheel events retain the browser's native default. */
+  scrollLocal?: (deltaX: number, deltaY: number, overLive: boolean) => void
   /** The pane's row pitch in CSS pixels — the painter's accepted cell height,
    *  read here so a pixel-delta wheel can be counted in LINES (nocx-1ebrs.26).
    *  The pointer's geometry is the painter's (see `cellAt`), and a value of
@@ -266,7 +267,7 @@ export class IntentInput {
   private readonly lineHeight: (() => number) | null
   private readonly bufferKind: (() => 'normal' | 'alternate') | null
   private readonly isLiveTarget: ((target: EventTarget | null) => boolean) | null
-  private readonly scrollLocal: ((deltaX: number, deltaY: number) => void) | null
+  private readonly scrollLocal: IntentInputOptions['scrollLocal'] | null
   private readonly listeners: Array<() => void> = []
 
   /** App-owned wheel residuals, in normalized CSS pixels. Small trackpad
@@ -572,7 +573,7 @@ export class IntentInput {
       this.resetWheel()
       if (this.scrollLocal) {
         e.preventDefault()
-        this.scrollLocal(deltaX, deltaY)
+        this.scrollLocal(deltaX, deltaY, liveTarget)
       }
       return
     }

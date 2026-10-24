@@ -460,8 +460,11 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
       bufferKind: () => state.buffer,
       isLiveTarget: (target) => target instanceof Node && grid.contains(target),
       scrollLocal: localScrolling
-        ? (x, y) => {
+        ? (x, y, overLive) => {
             localScrolls.push([x, y])
+            const scroller = overLive ? grid : history
+            scroller.scrollLeft += x
+            scroller.scrollTop += y
           }
         : undefined,
       lineHeight: () => state.lineHeight,
@@ -488,7 +491,7 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
   it.each(['normal', 'alternate'] as const)(
     'scrolls Shift-wheel locally exactly once on the %s buffer, never as app input',
     (buffer) => {
-      const { state, wheel, intents, localScrolls } = wheelPane()
+      const { state, wheel, grid, history, intents, localScrolls } = wheelPane()
       state.buffer = buffer
       const event = wheel(-2, {
         deltaX: 1,
@@ -497,17 +500,23 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
         ctrlKey: true,
       })
       expect(localScrolls).toEqual([[17, -34]])
+      expect(grid.scrollLeft).toBe(17)
+      expect(grid.scrollTop).toBe(-34)
+      expect(history.scrollTop).toBe(0)
       expect(intents).toEqual([])
       expect(event.defaultPrevented).toBe(true)
     },
   )
 
   it('keeps historical deltas local and clears app residuals on both target transitions', () => {
-    const { wheel, history, intents, localScrolls } = wheelPane()
+    const { wheel, grid, history, intents, localScrolls } = wheelPane()
     wheel(10, { deltaX: 10 })
     const historical = wheel(100, { deltaX: 100 }, history)
     wheel(7, { deltaX: 7 })
     expect(localScrolls).toEqual([[100, 100]])
+    expect(history.scrollLeft).toBe(100)
+    expect(history.scrollTop).toBe(100)
+    expect(grid.scrollTop).toBe(0)
     expect(intents).toEqual([])
     expect(historical.defaultPrevented).toBe(true)
     wheel(10, { deltaX: 10 })

@@ -39,6 +39,8 @@ var ErrIntentUnsupported = errors.New("sessionruntime: the intent has no encodin
 //	Paste  the pasted body, verbatim.
 //	Mouse  "<action> <button> <x> <y>" in CELL coordinates, e.g. "press left 12 5",
 //	       "release left 12 5", "motion none 12 5", "press wheel-up 4 9".
+//	       The action accepts the same modifier prefixes as Key, e.g.
+//	       "Ctrl+Alt+press wheel-up 4 9" or "Shift+release left 12 5".
 //	Focus  "in" or "out".
 //
 // A name this vocabulary does not carry is REFUSED rather than guessed: a
@@ -135,9 +137,9 @@ func keyEvent(payload []byte) (emulator.KeyEvent, error) {
 	return ev, nil
 }
 
-// splitMods peels the modifier prefixes off a key's name. A modifier the table
-// does not know is refused rather than ignored: silently dropping a Ctrl is
-// how a program receives a different key than the one that was pressed.
+// splitMods peels the modifier prefixes off a key name or mouse action. A
+// modifier the table does not know is refused rather than ignored: silently
+// dropping a Ctrl is how a program receives a different event than was sent.
 func splitMods(name string) (string, emulator.Mods, error) {
 	var mods emulator.Mods
 	for {
@@ -177,14 +179,18 @@ var (
 )
 
 // mouseEvent reads a mouse intent's payload: "<action> <button> <x> <y>", in
-// cell coordinates.
+// cell coordinates, with key-style modifier prefixes on the action.
 func mouseEvent(payload []byte) (emulator.MouseEvent, error) {
 	fields := strings.Fields(string(payload))
 	if len(fields) != 4 {
 		return emulator.MouseEvent{}, fmt.Errorf("%w: mouse %q, want \"<action> <button> <x> <y>\"",
 			ErrIntentUnsupported, payload)
 	}
-	action, ok := mouseActions[strings.ToLower(fields[0])]
+	name, mods, err := splitMods(fields[0])
+	if err != nil {
+		return emulator.MouseEvent{}, err
+	}
+	action, ok := mouseActions[strings.ToLower(name)]
 	if !ok {
 		return emulator.MouseEvent{}, fmt.Errorf("%w: mouse action %q", ErrIntentUnsupported, fields[0])
 	}
@@ -200,7 +206,7 @@ func mouseEvent(payload []byte) (emulator.MouseEvent, error) {
 	if err != nil {
 		return emulator.MouseEvent{}, fmt.Errorf("%w: mouse row %q", ErrIntentUnsupported, fields[3])
 	}
-	return emulator.MouseEvent{Action: action, Button: button, X: x, Y: y}, nil
+	return emulator.MouseEvent{Action: action, Button: button, Mods: mods, X: x, Y: y}, nil
 }
 
 // focusEvent reads a focus intent's payload: "in" for the terminal gaining

@@ -168,6 +168,69 @@ func TestMouseIsEncodedInTheProgramsTrackingModeAndFormat(t *testing.T) {
 	}
 }
 
+func TestAlternateScrollUsesTheProgramsCursorKeyMode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		modes string
+		event emulator.MouseEvent
+		want  string
+	}{
+		{"default alternate scroll up", "\x1b[?1049h", emulator.MouseEvent{Button: emulator.MouseWheelUp}, "\x1b[A"},
+		{"normal down", "\x1b[?1049h\x1b[?1007h", emulator.MouseEvent{Button: emulator.MouseWheelDown}, "\x1b[B"},
+		{"application up ignores wheel modifiers", "\x1b[?1049h\x1b[?1h", emulator.MouseEvent{Button: emulator.MouseWheelUp, Mods: emulator.Mods{Ctrl: true, Alt: true, Shift: true, Super: true}}, "\x1bOA"},
+		{"application down", "\x1b[?1049h\x1b[?1h", emulator.MouseEvent{Button: emulator.MouseWheelDown}, "\x1bOB"},
+		{"disabled alternate scroll", "\x1b[?1049h\x1b[?1007l", emulator.MouseEvent{Button: emulator.MouseWheelUp}, ""},
+		{"primary never navigates", "\x1b[?1007h", emulator.MouseEvent{Button: emulator.MouseWheelDown}, ""},
+		{"returned primary never navigates", "\x1b[?1049h\x1b[?1049l", emulator.MouseEvent{Button: emulator.MouseWheelUp}, ""},
+		{"horizontal left has no vertical fallback", "\x1b[?1049h", emulator.MouseEvent{Button: emulator.MouseWheelLeft}, ""},
+		{"horizontal right has no vertical fallback", "\x1b[?1049h", emulator.MouseEvent{Button: emulator.MouseWheelRight}, ""},
+		{"wheel release has no fallback", "\x1b[?1049h", emulator.MouseEvent{Action: emulator.MouseRelease, Button: emulator.MouseWheelUp}, ""},
+		{"wheel motion has no fallback", "\x1b[?1049h", emulator.MouseEvent{Action: emulator.MouseMotion, Button: emulator.MouseWheelDown}, ""},
+		{"reporting precedes fallback with modifiers", "\x1b[?1049h\x1b[?1h\x1b[?1000h\x1b[?1006h", emulator.MouseEvent{Button: emulator.MouseWheelUp, Mods: emulator.Mods{Ctrl: true, Alt: true, Shift: true}}, "\x1b[<92;1;1M"},
+		{"reporting survives disabled alternate scroll", "\x1b[?1049h\x1b[?1007l\x1b[?1000h\x1b[?1006h", emulator.MouseEvent{Button: emulator.MouseWheelDown}, "\x1b[<65;1;1M"},
+		{"X10 reporting declines wheel without fallback", "\x1b[?1049h\x1b[?9h", emulator.MouseEvent{Button: emulator.MouseWheelUp}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			term := newTerminal(t, 20, 4)
+			ingest(t, term, tc.modes)
+			got, err := term.Mouse(tc.event)
+			if tc.want == "" {
+				if !errors.Is(err, emulator.ErrUnsupported) || got != nil {
+					t.Fatalf("Mouse = (%q, %v), want no bytes and ErrUnsupported", got, err)
+				}
+			} else if err != nil || string(got) != tc.want {
+				t.Fatalf("Mouse = (%q, %v), want (%q, nil)", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAlternateScrollFollowsModeChangesBetweenEvents(t *testing.T) {
+	term := newTerminal(t, 20, 4)
+	ev := emulator.MouseEvent{Button: emulator.MouseWheelUp}
+	for _, tc := range []struct {
+		modes string
+		want  string
+	}{
+		{"\x1b[?1049h", "\x1b[A"},
+		{"\x1b[?1007l", ""},
+		{"\x1b[?1007h\x1b[?1h", "\x1bOA"},
+		{"\x1b[?1000h\x1b[?1006h", "\x1b[<64;1;1M"},
+		{"\x1b[?1000l", "\x1bOA"},
+		{"\x1b[?1049l", ""},
+	} {
+		ingest(t, term, tc.modes)
+		got, err := term.Mouse(ev)
+		if tc.want == "" {
+			if !errors.Is(err, emulator.ErrUnsupported) || got != nil {
+				t.Fatalf("after %q: Mouse = (%q, %v), want no bytes and ErrUnsupported", tc.modes, got, err)
+			}
+		} else if err != nil || string(got) != tc.want {
+			t.Fatalf("after %q: Mouse = (%q, %v), want (%q, nil)", tc.modes, got, err, tc.want)
+		}
+	}
+}
+
 // TestFocusIsSentOnlyWhenTheProgramAskedForIt is the same state dependence for
 // the third kind of input: the report is nothing to a program that did not ask
 // for it, ESC[I when it gains focus and ESC[O when it loses it once it has, and

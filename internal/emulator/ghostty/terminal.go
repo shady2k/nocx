@@ -89,6 +89,9 @@ const (
 	// modeFocusEvent is DEC private mode 1004: the program asks to be told when
 	// the terminal's window gains and loses focus.
 	modeFocusEvent = 1004
+	// modeAlternateScroll is DEC private mode 1007: vertical wheel events
+	// become cursor keys on the alternate screen when mouse reporting is off.
+	modeAlternateScroll = 1007
 	// modeBracketedPaste is DEC private mode 2004: the program asks for pastes
 	// to be wrapped in the bracketed-paste sequences.
 	modeBracketedPaste = 2004
@@ -1673,6 +1676,12 @@ func (t *terminal) EncodeKey(ev emulator.KeyEvent) ([]byte, error) {
 	if t.t == nil {
 		return nil, emulator.ErrClosed
 	}
+	return t.encodeKeyLocked(ev)
+}
+
+// encodeKeyLocked shares the terminal's key encoder with alternate scrolling.
+// The caller holds mu so the mode read and the encoding describe one instant.
+func (t *terminal) encodeKeyLocked(ev emulator.KeyEvent) ([]byte, error) {
 	key, ok := cKey(ev.Key)
 	if !ok {
 		return nil, fmt.Errorf("ghostty: key %d: %w", ev.Key, emulator.ErrUnsupported)
@@ -1830,7 +1839,10 @@ func (t *terminal) Paste(text []byte) ([]byte, error) {
 }
 
 // Mouse hands the terminal one mouse event and returns the bytes the program is
-// to be sent, in the tracking mode and output format the program set.
+// to be sent, in the tracking mode and output format the program set. Without
+// reporting, mode 1007 converts vertical wheel presses on the alternate screen
+// to cursor keys through the same key encoder as keyboard input. Physical wheel
+// modifiers are ignored for that fallback, matching Ghostty Surface semantics.
 //
 // # The mode is re-derived, and the coordinates are the port's
 //
@@ -1869,6 +1881,33 @@ func (t *terminal) Mouse(ev emulator.MouseEvent) ([]byte, error) {
 	button, ok := cMouseButton(ev.Button)
 	if !ok {
 		return nil, fmt.Errorf("ghostty: mouse button %d: %w", ev.Button, emulator.ErrUnsupported)
+	}
+	if ev.Action == emulator.MousePress &&
+		(ev.Button == emulator.MouseWheelUp || ev.Button == emulator.MouseWheelDown) {
+		var tracking C.bool
+		if r := C.ghostty_terminal_get(t.t, C.GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING,
+			unsafe.Pointer(&tracking)); r != C.GHOSTTY_SUCCESS {
+			return nil, resultError("mouse_tracking", r)
+		}
+		if !bool(tracking) {
+			alternateScroll, err := t.mode(modeAlternateScroll)
+			if err != nil {
+				return nil, err
+			}
+			if alternateScroll {
+				screen, err := t.screenLocked()
+				if err != nil {
+					return nil, err
+				}
+				if screen == emulator.ScreenAlternate {
+					key := emulator.KeyUp
+					if ev.Button == emulator.MouseWheelDown {
+						key = emulator.KeyDown
+					}
+					return t.encodeKeyLocked(emulator.KeyEvent{Key: key})
+				}
+			}
+		}
 	}
 	hasButton := ev.Button != emulator.MouseNone
 	size := C.GhosttyMouseEncoderSize{

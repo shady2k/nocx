@@ -1,6 +1,7 @@
 package sessionruntime
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -45,5 +46,46 @@ func TestKeyNamesCarryTheKeypadsEnterAsItsOwnKey(t *testing.T) {
 	}
 	if chorded.Key != emulator.KeyNumpadEnter || !chorded.Mods.Shift {
 		t.Errorf("\"Shift+NumpadEnter\" parsed as key %d with mods %+v, want the keypad's Enter with Shift", chorded.Key, chorded.Mods)
+	}
+}
+
+func TestMouseActionCarriesKeyStyleModifiers(t *testing.T) {
+	for _, tc := range []struct {
+		payload string
+		want    emulator.MouseEvent
+	}{
+		{"press wheel-up 2 3", emulator.MouseEvent{Action: emulator.MousePress, Button: emulator.MouseWheelUp, X: 2, Y: 3}},
+		{"Ctrl+Alt+press wheel-down 2 3", emulator.MouseEvent{Action: emulator.MousePress, Button: emulator.MouseWheelDown, Mods: emulator.Mods{Ctrl: true, Alt: true}, X: 2, Y: 3}},
+		{"Shift+release left 2 3", emulator.MouseEvent{Action: emulator.MouseRelease, Button: emulator.MouseLeft, Mods: emulator.Mods{Shift: true}, X: 2, Y: 3}},
+		{"sUpEr+ShIfT+MoTiOn none 2 3", emulator.MouseEvent{Action: emulator.MouseMotion, Button: emulator.MouseNone, Mods: emulator.Mods{Super: true, Shift: true}, X: 2, Y: 3}},
+	} {
+		t.Run(tc.payload, func(t *testing.T) {
+			got, err := mouseEvent([]byte(tc.payload))
+			if err != nil || got != tc.want {
+				t.Fatalf("mouseEvent = (%+v, %v), want (%+v, nil)", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMalformedMouseModifierPayloadsAreRefused(t *testing.T) {
+	for _, payload := range []string{
+		"Meta+press wheel-up 2 3",
+		"Ctrl++press wheel-up 2 3",
+		"+press wheel-up 2 3",
+		"Shift+ wheel-up 2 3",
+		"Shift+click wheel-up 2 3",
+		"press+Ctrl wheel-up 2 3",
+		"Ctrl+press Shift+wheel-up 2 3",
+		"Ctrl+press wheel-up two 3",
+		"Ctrl+press wheel-up 2 three",
+		"Ctrl+press wheel-up 2",
+		"Ctrl+press wheel-up 2 3 extra",
+	} {
+		t.Run(payload, func(t *testing.T) {
+			if got, err := mouseEvent([]byte(payload)); !errors.Is(err, ErrIntentUnsupported) || got != (emulator.MouseEvent{}) {
+				t.Fatalf("mouseEvent = (%+v, %v), want empty event and ErrIntentUnsupported", got, err)
+			}
+		})
 	}
 }

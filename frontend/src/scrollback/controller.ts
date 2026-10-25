@@ -660,7 +660,6 @@ export class ScrollbackController {
     // cards are hidden. BlockManager preserves focus across a DOM move alone,
     // but cannot restore it into a destination the old projection still hides.
     const focused = document.activeElement
-    const heldFocus = focused instanceof HTMLElement && this.terminalLiveContainer.contains(focused)
     const terminal = this._historyPresentation === 'terminal' && this._mode !== 'fullscreen'
     if (this._mode === 'running' && !terminal) this._blockManager.holdLiveInRunningBlock()
     else this._blockManager.releaseLiveRegion()
@@ -680,7 +679,17 @@ export class ScrollbackController {
     if (history !== null && history.nextSibling !== this.terminalLiveContainer) {
       this.terminalLiveContainer.before(history)
     }
-    if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
+    this._restoreLiveFocus(focused)
+  }
+
+  private _restoreLiveFocus(focused: Element | null): void {
+    if (
+      focused instanceof HTMLElement &&
+      this.terminalLiveContainer.contains(focused) &&
+      document.activeElement !== focused
+    ) {
+      focused.focus({ preventScroll: true })
+    }
   }
 
   private _markHistoryContext(terminal: boolean): void {
@@ -892,6 +901,11 @@ export class ScrollbackController {
     startAnchor?: BlockScreenAnchor,
   ): void {
     const cmd = command || '(empty)'
+    // startBlock moves the grid before the projection's visibility is
+    // reconciled. Keep its keyboard through that entire transaction: a
+    // hidden intermediate card cannot accept focus, and the submit receipt
+    // that repairs BODY can arrive after the person's next Enter.
+    const focused = document.activeElement
     this._glide(() => {
       this._blockManager.startBlock(cmd, cwd, startLine, author, startAnchor)
       // The pet learned only about endings before this, so during the minute a
@@ -899,6 +913,7 @@ export class ScrollbackController {
       // it wandered about as though nothing were happening.
       windowPet()?.attendTo(author)
       this.setRunning()
+      this._restoreLiveFocus(focused)
     })
   }
 

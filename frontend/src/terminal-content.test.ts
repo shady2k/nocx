@@ -7971,6 +7971,105 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       teardown()
     }
   })
+  it('keeps the continuation Enter while the start fact precedes the submit receipt', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (value: unknown) => void
+    const attemptPromise = new Promise<unknown>((resolve) => {
+      resolveAttempt = resolve
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScrolling()
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    const input = intentElementOf(content)
+    const nativeFocus = input.focus.bind(input)
+    // jsdom focuses display:none descendants, unlike a browser. Keep that
+    // platform boundary faithful while the real stylesheet hides old cards.
+    const focus = vi.spyOn(input, 'focus').mockImplementation((options) => {
+      for (let ancestor: HTMLElement | null = input; ancestor; ancestor = ancestor.parentElement) {
+        if (getComputedStyle(ancestor).display === 'none') return
+      }
+      nativeFocus(options)
+    })
+    try {
+      content.setVisible(true)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const session = sessionOf(content)
+      session.fireScreenFrame(screenFrame(1, ['shell prompt']))
+      const prefix = "printf '%s"
+      const suffix = "' 'PS2-INPUT'"
+      ed.insertText(prefix)
+      key(view, { key: 'Enter', code: 'Enter' })
+      expect(document.activeElement).toBe(input)
+      for (const character of suffix) {
+        const target = document.activeElement!
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: character,
+            code: 'Unidentified',
+            bubbles: true,
+            cancelable: true,
+          }),
+        )
+        target.dispatchEvent(
+          new InputEvent('input', {
+            data: character,
+            inputType: 'insertText',
+            bubbles: true,
+          }),
+        )
+      }
+      const attempt = {
+        id: 'att-ps2',
+        domain: 'd1',
+        state: 'open',
+        command: prefix,
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      }
+      // The notification opens and seats the card while the command's own
+      // write still waits for its receipt. Enter belongs to the held suffix,
+      // not to BODY until that independent receipt happens to repair focus.
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, attempt })
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      resolveAttempt(attempt)
+      await vi.waitFor(() => {
+        const committed = session.intent.mock.calls
+          .map(([kind, payload]) =>
+            kind === 'text' || kind === 'paste'
+              ? payload
+              : kind === 'key' && payload === 'enter'
+                ? '\n'
+                : '',
+          )
+          .join('')
+        expect(committed).toBe(`${prefix}\n${suffix}\n`)
+      })
+      expect(document.activeElement).toBe(input)
+    } finally {
+      focus.mockRestore()
+      style.remove()
+      restoreScroll()
+      teardown()
+    }
+  })
   it('still hands the grid the keyboard when the round trip left it on nobody (nocx-u7uh.23)', async () => {
     // The other half of the guard, and the reason it is a guard rather than a
     // deletion. The deferred handoff exists because the editor gives the

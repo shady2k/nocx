@@ -546,6 +546,42 @@ describe('abortable RPC calls', () => {
   })
 })
 
+describe('dispatcher vault intent', () => {
+  it('rejects a sealed report intact without unlock or replay, while an operation unlocks and retries', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    d.onVaultSealed = vi.fn().mockResolvedValue(undefined)
+    await connected(d)
+    const error = {
+      code: -32001,
+      message: 'vault.inventory: vault is sealed',
+      data: { reason: 'vault-sealed' },
+    }
+    const report = d.call('vault.inventory', {}, undefined, 'report')
+    const operation = d.call('vault.inventory', {})
+    const [reportRequest, operationRequest] = socket().requests()
+    expect(reportRequest).toEqual({
+      jsonrpc: '2.0',
+      id: reportRequest.id,
+      method: 'vault.inventory',
+      params: {},
+    })
+    socket().deliverText({ jsonrpc: '2.0', id: reportRequest.id, error })
+    await expect(report).rejects.toMatchObject(error)
+    expect(d.onVaultSealed).not.toHaveBeenCalled()
+    expect(socket().requests()).toHaveLength(2)
+
+    socket().deliverText({ jsonrpc: '2.0', id: operationRequest.id, error })
+    await flush()
+    expect(d.onVaultSealed).toHaveBeenCalledExactlyOnceWith('vault.inventory')
+    const requests = socket().requests()
+    expect(requests).toHaveLength(3)
+    expect(requests[2].id).not.toBe(operationRequest.id)
+    socket().deliverText({ jsonrpc: '2.0', id: requests[2].id, result: { entries: [] } })
+    await expect(operation).resolves.toEqual({ entries: [] })
+    d.close()
+  })
+})
+
 describe('dispatcher heartbeat', () => {
   it('pings an idle socket and stays online when the response arrives', async () => {
     const d = new Dispatcher(new TestEndpointProvider())

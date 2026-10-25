@@ -103,7 +103,7 @@ function unsealedVault(rows: InventoryEntry[]) {
     defaultProvider: null,
   })
   const inventory = vi.fn().mockResolvedValue({ entries: rows })
-  const client = { status, inventory } as unknown as VaultClient
+  const client = { status, inventory, reportInventory: inventory } as unknown as VaultClient
   const ctrl = createVaultState(client)
   return { ctrl, client, status, inventory }
 }
@@ -411,7 +411,7 @@ function sealedVault(rows: InventoryEntry[], state: 'sealed' | 'uninitialized' =
     defaultProvider: null,
   })
   const inventory = vi.fn().mockResolvedValue({ entries: rows })
-  const client = { status, inventory } as unknown as VaultClient
+  const client = { status, inventory, reportInventory: inventory } as unknown as VaultClient
   const ctrl = createVaultState(client)
   return { ctrl, client, status, inventory }
 }

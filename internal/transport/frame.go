@@ -65,6 +65,15 @@
 // open carries the initial {cols, rows, xpixel, ypixel} and the PTY is created
 // at that size. Never spawn-then-resize. resize carries the same shape.
 //
+// The resize result is an APPLICATION receipt: {} answers only once the size
+// reached the PTY or SSH channel, so it is what a renderer may release input it
+// held behind the size on. A resize that was admitted and did not apply —
+// coalesced away by a newer one, or cancelled by the session's close — answers
+// error -32013, "resize did not apply: superseded" or "resize did not apply:
+// cancelled". Either way the answer is written off the read loop, from the
+// session's own lane: a blocked window-change delays the next resize of that
+// session, never the next request on the connection.
+//
 // # Ordering invariant (AD-7)
 //
 // The client MUST NOT send data frames for a session before the open result

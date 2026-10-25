@@ -373,7 +373,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *    handle, with nothing on screen to say why (nocx-5ratm).
    *  - 'list' — the endpoints LIST needs the same rows for its per-endpoint
    *    credential state, and merely showing a page must never ask for a
-   *    passphrase. It asks only while the vault is already unsealed.
+   *    passphrase. It asks only while the vault is already unsealed, and it
+   *    asks as a REPORT (ADR-0032): the unsealed status it gated on is a
+   *    CACHED answer, so a seal can land in the window between the gate and
+   *    the call. The read is then answered `vault-sealed` and must report
+   *    that, not raise the unlock sheet over a page nobody was asked about
+   *    (nocx-76wyh). The editor's 'picker' read is the operation: it wants
+   *    the rows on purpose and still prompts.
    *
    *  An UNINITIALIZED vault is skipped either way: there is no vault to
    *  unlock, so the call could only fail. The skip leaves the state 'idle',
@@ -381,7 +387,9 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *
    *  A dismissed unlock is a choice, not a store failure: it leaves the
    *  state 'idle', so no row says 'unavailable' about it and a later unseal
-   *  still loads. 'failed' is kept for a store that really did not answer. */
+   *  still loads. 'failed' is kept for a read that came back with nothing —
+   *  a store that did not answer, or a passive report the lock refused,
+   *  which the sealed status that follows then turns back into 'idle'. */
   async function loadInventory(intent: 'picker' | 'list') {
     if (!props.vaultClient) return
     if (inventoryState() === 'loading') return // one fetch owner, one in flight
@@ -407,11 +415,20 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setSecretRows([])
     setInventoryState('loading')
     try {
-      const inv = await props.vaultClient.inventory()
+      const inv =
+        intent === 'list'
+          ? await props.vaultClient.reportInventory()
+          : await props.vaultClient.inventory()
       setSecretRows(inv?.entries ?? [])
       setInventoryState('loaded')
     } catch (err) {
       setSecretRows([])
+      // A sealed REPORT arrives here as a plain refusal, because the
+      // dispatcher does not replay one (ADR-0032). It stays 'failed' only for
+      // the instant before the sealed status lands, whose effect above resets
+      // it to 'idle'. Deliberately not reset here: 'idle' is what the
+      // unsealed effect retries on, so a vault that kept refusing would be
+      // asked again in a loop.
       setInventoryState(err instanceof VaultOperationCancelledError ? 'idle' : 'failed')
     }
   }

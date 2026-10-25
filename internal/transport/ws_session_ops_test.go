@@ -2,12 +2,15 @@ package transport
 
 // Per-session resize and close semantics (worker G brief):
 //
-// resize is the only control method the renderer sends fire-and-forget, and
-// on an SSH session it is a window-change round trip that can block on a dead
-// transport. The two halves of the defect: a resize that blocks the read loop
-// freezes every tab, and a resize serialized behind the session's close would
-// recreate head-of-line blocking — the close, the one operation that could
-// tear the dead channel down, must never queue behind it.
+// A resize on an SSH session is a window-change round trip that can block on
+// a dead transport. The two halves of the defect: a resize that blocks the
+// read loop freezes every tab, and a resize serialized behind the session's
+// close would recreate head-of-line blocking — the close, the one operation
+// that could tear the dead channel down, must never queue behind it.
+//
+// The request's answer is an APPLICATION receipt, and the lane is what makes
+// it true: {} says the size reached the channel; -32013 says it did not apply,
+// because a newer resize replaced it or the session's close cancelled it.
 //
 // The acceptance tests drive the real socket (stallServer + connectWS) with
 // channel fakes that stand in for the PTY/SSH channel. gatedResizeChannel
@@ -104,8 +107,8 @@ func (c *gatedResizeChannel) appliedResizes() []resizeCall {
 	return append([]resizeCall(nil), c.applied...)
 }
 
-// sendResizeRaw writes a resize RPC without awaiting its response — exactly
-// how the renderer sends it (fire-and-forget, void … .catch(() => {})).
+// sendResizeRaw writes a resize RPC without awaiting its response, so tests
+// can hold an apply in flight and send later requests on the same connection.
 func sendResizeRaw(t *testing.T, conn *websocket.Conn, sid string, cols, rows uint16, id int) {
 	t.Helper()
 	req, err := json.Marshal(map[string]any{
@@ -320,8 +323,8 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 
 	sid := openSSHOverSocket(t, ws, conn, 1)
 
-	// A window drag fires a burst of resizes with nobody awaiting the
-	// answers — exactly how the renderer sends them. Hold the first in
+	// A window drag fires a burst of resizes without awaiting the
+	// answers between sends. Hold the first in
 	// flight so the burst lands while the worker is busy; the intermediate
 	// sizes have no value and must be coalesced away.
 	sendResizeRaw(t, conn, sid, 100, 30, 11)
@@ -338,11 +341,12 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 	// resize and the intermediate size is gone. Awaiting it before
 	// releasing the gate is what makes the coalescing assertion below
 	// deterministic rather than a race with the read loop.
-	awaitResponse(t, conn, 12, 5*time.Second)
+	superseded := collectResponses(t, conn, []int{12}, 5*time.Second)[12]
+	assertResizeNotApplied(t, superseded, 12, "superseded")
 	close(gated.release)
 
-	// Every admitted request is answered (the renderer ignores the answers,
-	// but a request may not be left without a completion).
+	// Every applied request is answered successfully; a request may not
+	// be left without a completion.
 	resps := collectResponses(t, conn, []int{11, 13}, 5*time.Second)
 	assertResponseOK(t, resps[11], 11)
 	assertResponseOK(t, resps[13], 13)
@@ -351,19 +355,6 @@ func TestRapidResizesSettleOnLastDimensions(t *testing.T) {
 	// coalesced, never replayed one size at a time.
 	waitApplied(t, gated, []resizeCall{{cols: 100, rows: 30}, {cols: 140, rows: 50}},
 		"rapid resize burst")
-}
-
-// awaitResponse waits for the response with the given id. It is the sync
-// point for "the read loop has processed a specific request".
-//
-// Notifications and other ids seen on the way are RETAINED, not discarded:
-// the tests that use this collect them afterwards, and this used to be the
-// reader that had already thrown them away (ws_inbox_test.go).
-func awaitResponse(t *testing.T, conn *websocket.Conn, id int, d time.Duration) {
-	t.Helper()
-	if _, err := awaitFrame(conn, time.Now().Add(d), isResponseTo(id)); err != nil {
-		t.Fatalf("await response %d: %v", id, err)
-	}
 }
 
 // --- acceptance 4: after close admission begins, no resize reaches the
@@ -404,8 +395,8 @@ func TestResizeAfterCloseAdmissionNeverReachesSession(t *testing.T) {
 	}
 	resps := collectResponses(t, conn, []int{1, 2, 3}, 5*time.Second)
 	assertResponseOK(t, resps[3], 3)
-	assertResponseOK(t, resps[1], 1)
-	assertResponseOK(t, resps[2], 2)
+	assertResizeNotApplied(t, resps[1], 1, "cancelled")
+	assertResizeNotApplied(t, resps[2], 2, "cancelled")
 
 	// Release the gate: even then, nothing may reach the session — the
 	// in-flight resize was cancelled by the admission, the queued one dropped.
@@ -476,5 +467,106 @@ func TestResizeFromAttachedConnectionAfterCloseIsRefused(t *testing.T) {
 			return
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+// assertResizeNotApplied pins both the error and the absence of a success
+// result: the renderer may release an input fence only on an applied resize.
+func assertResizeNotApplied(t *testing.T, data json.RawMessage, id int, reason string) {
+	t.Helper()
+	assertResponseError(t, data, id, -32013)
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+		Error  struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("decode resize response %d: %v", id, err)
+	}
+	if want := "resize did not apply: " + reason; resp.Error.Message != want {
+		t.Fatalf("resize response %d: message = %q, want %q", id, resp.Error.Message, want)
+	}
+	if len(resp.Result) != 0 {
+		t.Fatalf("resize response %d has a success result: %s", id, resp.Result)
+	}
+}
+
+func TestResizeAcknowledgesOnlyAfterApplyWithoutBlockingControlFIFO(t *testing.T) {
+	blocked := newGatedResizeChannel()
+	live := newGatedResizeChannel()
+	close(live.release)
+	ws := stallServer(t, blocked, live)
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	blockedSID := openSSHOverSocket(t, ws, conn, 1)
+	liveSID := openSSHOverSocket(t, ws, conn, 2)
+
+	sendResizeRaw(t, conn, blockedSID, 100, 30, 11)
+	select {
+	case <-blocked.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the blocked resize never started")
+	}
+	// A later control request on this very connection must complete while
+	// the first session's resize is still blocked. Its response is also an
+	// observable barrier: an early success for 11 must not precede it.
+	sendResizeRaw(t, conn, liveSID, 120, 40, 12)
+	first, err := awaitFrame(conn, time.Now().Add(5*time.Second), func(data []byte) bool {
+		return isResponseTo(11)(data) || isResponseTo(12)(data)
+	})
+	if err != nil {
+		t.Fatalf("the slow resize blocked the control FIFO: %v", err)
+	}
+	if !isResponseTo(12)(first) {
+		t.Fatalf("the blocked resize was acknowledged before it applied: %s", first)
+	}
+	assertResponseOK(t, first, 12)
+	if got := blocked.appliedResizes(); len(got) != 0 {
+		t.Fatalf("the unreleased resize applied: %+v", got)
+	}
+
+	close(blocked.release)
+	applied, err := awaitFrame(conn, time.Now().Add(5*time.Second), isResponseTo(11))
+	if err != nil {
+		t.Fatalf("the applied resize was not acknowledged: %v", err)
+	}
+	assertResponseOK(t, applied, 11)
+	var resp struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err = json.Unmarshal(applied, &resp); err != nil {
+		t.Fatalf("decode applied resize response: %v", err)
+	}
+	if string(resp.Result) != "{}" {
+		t.Fatalf("the applied resize result changed: %s", resp.Result)
+	}
+	if got := blocked.appliedResizes(); len(got) != 1 || got[0] != (resizeCall{cols: 100, rows: 30}) {
+		t.Fatalf("the success preceded the requested channel size: %+v", got)
+	}
+	sess, err := ws.registry.Get(session.ID(blockedSID))
+	if err != nil {
+		t.Fatalf("get resized session: %v", err)
+	}
+	if got := sess.EffectiveSize(); got.Cols != 100 || got.Rows != 30 {
+		t.Fatalf("the success preceded the effective size update: %+v", got)
+	}
+}
+
+func TestResizeOnClosingLaneAnswersCancelled(t *testing.T) {
+	gated := newGatedResizeChannel()
+	ws := stallServer(t, gated)
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHOverSocket(t, ws, conn, 1)
+
+	// The close gate lands before registry removal. A resize still passes
+	// ownership and registry validation, but the lane can no longer apply it.
+	ws.closeLane(session.ID(sid))
+	sendResizeRaw(t, conn, sid, 100, 30, 11)
+	resp := collectResponses(t, conn, []int{11}, 5*time.Second)[11]
+	assertResizeNotApplied(t, resp, 11, "cancelled")
+	if got := gated.appliedResizes(); len(got) != 0 {
+		t.Fatalf("a resize applied after the close gate: %+v", got)
 	}
 }

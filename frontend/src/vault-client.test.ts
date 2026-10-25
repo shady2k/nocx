@@ -19,6 +19,24 @@ function fakeRpc(
   return Object.assign(rpc, { calls })
 }
 
+describe('VaultClient inventory intent', () => {
+  it('marks only the passive inventory read as a report on the shared RPC seam', async () => {
+    const calls: unknown[][] = []
+    const client = new VaultClient({
+      call: <T>(...args: Parameters<VaultRpc['call']>): Promise<T> => {
+        calls.push(args)
+        return Promise.resolve({ entries: [] } as T)
+      },
+    })
+    await expect(client.reportInventory()).resolves.toEqual({ entries: [] })
+    await expect(client.inventory()).resolves.toEqual({ entries: [] })
+    expect(calls).toEqual([
+      ['vault.inventory', {}, undefined, 'report'],
+      ['vault.inventory', {}],
+    ])
+  })
+})
+
 describe('VaultClient.resolveLine', () => {
   it('sends the exact { line } request', async () => {
     const rpc = fakeRpc({ line: 'x', refs: [] })

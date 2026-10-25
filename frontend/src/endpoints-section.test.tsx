@@ -256,7 +256,7 @@ function vaultHarness(statusOverride: Record<string, unknown> = {}): VaultHarnes
    *  referenced row absent from the inventory is a deleted credential. The
    *  test supplies the entries per case. */
   const inventory = vi.fn().mockResolvedValue({ entries: [] as InventoryEntry[] })
-  const client = { status, setup, inventory } as unknown as VaultClient
+  const client = { status, setup, inventory, reportInventory: inventory } as unknown as VaultClient
   const ctrl = createVaultState(client)
   return { ctrl, client, status, setup, inventory }
 }

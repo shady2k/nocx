@@ -1,6 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID, MSG_TYPE_METADATA } from './frame'
 import type { DecodedFrame } from './frame'
-import { Dispatcher, RpcError } from './dispatcher'
+import { Dispatcher, RpcError, type RpcIntent } from './dispatcher'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
@@ -1355,8 +1355,13 @@ export class WSClient {
    *  control plane carries JSON-RPC (AD-1); session-bound calls (open,
    *  resize, close) go through the dedicated methods above so their
    *  correlation with the binary data plane stays owned here. */
-  call<T = unknown>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
-    return this.dispatcher.call<T>(method, params, signal)
+  call<T = unknown>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    intent: RpcIntent = 'operation',
+  ): Promise<T> {
+    return this.dispatcher.call<T>(method, params, signal, intent)
   }
 
   /** Tell the backend a pane closed, so its PENDING CAPTURES die with it

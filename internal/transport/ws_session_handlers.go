@@ -661,8 +661,9 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		// read loop with a per-session cancellable context: a window-change
 		// blocked on a dead transport must not freeze this connection, and the
 		// session's close (which cancels the lane) must not queue behind it.
-		// The response completes when the lane settles the op (applied,
-		// superseded, or cancelled by close) — the renderer never reads it.
+		// A success acknowledges application, not admission. Superseded and
+		// cancelled operations answer an error so a renderer holding input
+		// behind this resize does not release it on an unapplied size.
 		rop := &resizeOp{
 			reported: session.Size{
 				Cols:   params.Cols,
@@ -671,6 +672,11 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 				YPixel: params.YPixel,
 			},
 			done: func(err error) {
+				if msg, notApplied := resizeNotAppliedMessage(err); notApplied {
+					resp := newJSONRPCError(req.ID, resizeNotAppliedCode, msg)
+					_ = respond(h.r, resp)
+					return
+				}
 				if err != nil {
 					resp := newJSONRPCError(req.ID, -32603, "Internal error")
 					_ = respond(h.r, resp)
@@ -684,10 +690,9 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		if !h.machine.laneFor(sid, sess).enqueue(rop) {
 			// The session's close was already admitted (a second connection may
 			// have closed it between the checks above and the enqueue): the
-			// resize cannot reach it. Same refusal as a session the registry
-			// no longer holds.
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(h.r, resp)
+			// resize cannot reach it. It is cancelled, just like an entry
+			// already pending when close was admitted.
+			rop.done(errResizeCancelled)
 		}
 		return nil
 	})

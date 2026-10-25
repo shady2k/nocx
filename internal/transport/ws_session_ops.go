@@ -2,8 +2,7 @@ package transport
 
 // Per-session resize lane with a terminal close gate (worker G brief).
 //
-// resize is the only control method the renderer sends fire-and-forget, and
-// on an SSH session it is a window-change round trip over the network that
+// A resize on an SSH session is a window-change round trip that
 // can block on a dead transport. The two halves of the defect forbid both
 // obvious implementations:
 //
@@ -23,18 +22,16 @@ package transport
 //     worker applies a resize whose dimensions are at least as new (the
 //     enqueued one, or a superseding one), at most one resize is in flight
 //     and the pending slot holds at most the latest. An enqueue REPLACES the
-//     pending op and completes the replaced request immediately — its
-//     dimensions are subsumed, and the terminal settles on the latest truth.
-//     The renderer never reads resize responses, so a subsumed request's
-//     completion is admission, not application; what a user observes is the
-//     PTY ending at the last dimensions.
+//     pending op and answers the replaced request with a superseded error.
+//     Only an applied resize answers success, after sess.Resize returns;
+//     a renderer may use that receipt to release input held behind the size.
 //  2. Close terminality. From the moment admitClose returns (the lane's
 //     closed flag set and its context cancelled) until the worker's exit,
-//     no enqueue succeeds, the pending op is dropped (its request completed
-//     as admitted), and any in-flight sess.Resize runs against a cancelled
-//     context — a conforming Channel.Resize performs no work and returns
-//     promptly. The closing event of the interval is the worker's exit after
-//     the cancelled resize returns.
+//     no enqueue succeeds, the pending op is dropped (its request answered
+//     with a cancelled error), and any in-flight sess.Resize runs against a
+//     cancelled context — a conforming Channel.Resize performs no work and
+//     returns promptly. The closing event of the interval is the worker's
+//     exit after the cancelled resize returns.
 //  3. Close never waits. admitClose holds the lane mutex only to flip state,
 //     drop the pending op and cancel the context; the worker never holds the
 //     mutex across sess.Resize. closeSession, the only thing that can tear
@@ -181,7 +178,7 @@ func (l *sessionLane) enqueue(op *resizeOp) bool {
 		return false
 	}
 	if l.pending != nil {
-		l.pending.done(nil)
+		l.pending.done(errResizeSuperseded)
 	}
 	l.pending = op
 	l.startOnce.Do(func() { go l.worker() })
@@ -193,11 +190,10 @@ func (l *sessionLane) enqueue(op *resizeOp) bool {
 }
 
 // admitClose makes the close terminal for this lane: future enqueues are
-// refused, the pending op is dropped (answered as admitted — the session is
-// closing, so the terminal will not settle on those dimensions), and the
-// lane context is cancelled so an in-flight resize aborts. It never waits
-// for the worker. Idempotent: the second admission of a tombstone does
-// nothing.
+// refused, the pending op is dropped (answered with a cancelled error — the
+// session will not settle on those dimensions), and the lane context is
+// cancelled so an in-flight resize aborts. It never waits for the worker.
+// Idempotent: the second admission of a tombstone does nothing.
 func (l *sessionLane) admitClose() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -206,7 +202,7 @@ func (l *sessionLane) admitClose() {
 	}
 	l.closed = true
 	if l.pending != nil {
-		l.pending.done(nil)
+		l.pending.done(errResizeCancelled)
 		l.pending = nil
 	}
 	l.sess = nil
@@ -242,6 +238,43 @@ func (l *sessionLane) worker() {
 
 		l.run(sess, op)
 	}
+}
+
+// A resize success is an application receipt, not an admission receipt.
+// Discarded operations carry a distinct outcome so the handler never answers
+// with a success that could release input before the requested size applied.
+//
+// Each outcome's text is a constant, and the sentinel is built from it: the
+// wire answer is the sentinel's own wording, and one string each is what keeps
+// the log and the response from drifting apart.
+const (
+	resizeSupersededMessage = "resize did not apply: superseded"
+	resizeCancelledMessage  = "resize did not apply: cancelled"
+
+	// resizeNotAppliedCode is what a resize the lane admitted and did not
+	// apply answers. It sits in JSON-RPC's implementation-defined server range
+	// (-32000..-32099), where a client must expect outcomes the protocol does
+	// not name, rather than in the -326xx codes that describe a malformed
+	// request — this request was well formed and was accepted.
+	resizeNotAppliedCode = -32013
+)
+
+var (
+	errResizeSuperseded = errors.New(resizeSupersededMessage)
+	errResizeCancelled  = errors.New(resizeCancelledMessage)
+)
+
+// resizeNotAppliedMessage answers the text a resize the lane did not apply must
+// carry, and whether err is one of those outcomes at all. One owner for the
+// mapping, so a new discard reason cannot reach the wire without a message.
+func resizeNotAppliedMessage(err error) (string, bool) {
+	switch {
+	case errors.Is(err, errResizeSuperseded):
+		return resizeSupersededMessage, true
+	case errors.Is(err, errResizeCancelled):
+		return resizeCancelledMessage, true
+	}
+	return "", false
 }
 
 // errResizePanicked is what a request is answered with when the op that would
@@ -308,18 +341,16 @@ func (l *sessionLane) apply(sess session.Session, op *resizeOp) error {
 		// assumed, because assuming it dereferenced nil on a goroutine nobody
 		// recovers and took the backend with it (nocx-44349).
 		//
-		// The request is answered as admitted, exactly as a resize cancelled
-		// by close is: a lane with no session is a lane whose session is
-		// going away, and there is no failure of the client's to report. It
-		// is said out loud because nothing else would say it — no request is
-		// left waiting, and a resize that silently evaporates is how a
-		// terminal ends up at a grid nobody chose.
+		// The request is answered as cancelled, exactly as a resize dropped
+		// by close is: no size was applied, so success would be a false
+		// receipt. Log the unexpected claim as well, so a lane holding no
+		// session does not silently keep discarding work.
 		if l.log != nil {
 			l.log.Warn("a resize was claimed for a lane that holds no session; it was dropped",
 				"session_id", string(l.sid),
 				"cols", op.reported.Cols, "rows", op.reported.Rows)
 		}
-		return nil
+		return errResizeCancelled
 	}
 	err := sess.Resize(l.ctx, op.reported)
 	if err == nil && l.resized != nil {
@@ -340,9 +371,9 @@ func (l *sessionLane) settle(op *resizeOp, err error) {
 	l.mu.Unlock()
 	if closed {
 		// Close was admitted while the resize was in flight: the
-		// cancellation is the terminal outcome. The request is answered as
-		// admitted — the session is gone, there is no failure to report.
-		op.done(nil)
+		// cancellation is the terminal outcome. The request must not report
+		// an applied size for a session that is going away.
+		op.done(errResizeCancelled)
 		return
 	}
 	op.done(err)
@@ -381,15 +412,22 @@ func (s *WSServer) laneFor(sid session.ID, sess session.Session) *sessionLane {
 // is by definition no client left to tell — so the log is the only audience
 // there is, and "the terminal is at a different grid than the window" is
 // exactly the state a silent degrade would hide.
+//
+// Coalescing is not that failure. A superseded hand-off means a newer resize —
+// the client's own, or a later attach — already took the grid, and a cancelled
+// one means the session's close was admitted, so there is no channel left to
+// give a size to. Warning on either would report a terminal at the wrong grid
+// on every ordinary attach in which the client resized before this applied.
 func (s *WSServer) takeSize(sid session.ID, sess session.Session, reported session.Size) {
 	op := &resizeOp{
 		reported: reported,
 		done: func(err error) {
-			if err != nil {
-				s.log.Warn("the session could not be resized to the client that owns it; the terminal is running at a different grid than the window",
-					"session_id", string(sid),
-					"cols", reported.Cols, "rows", reported.Rows, "error", err)
+			if err == nil || errors.Is(err, errResizeSuperseded) || errors.Is(err, errResizeCancelled) {
+				return
 			}
+			s.log.Warn("the session could not be resized to the client that owns it; the terminal is running at a different grid than the window",
+				"session_id", string(sid),
+				"cols", reported.Cols, "rows", reported.Rows, "error", err)
 		},
 	}
 	if !s.laneFor(sid, sess).enqueue(op) {

@@ -17,6 +17,7 @@ export type { VaultResolveLine, ResolveRef } from './generated/vault.resolveLine
 export type { SecretsDetect } from './generated/secrets.detect'
 export type { SecretsCaptureSave } from './generated/secrets.captureSave'
 export type { SecretsCaptureDismiss } from './generated/secrets.captureDismiss'
+import type { RpcIntent } from './dispatcher'
 import type { VaultStatus } from './generated/vault.status'
 import type { VaultResetPreview } from './generated/vault.resetPreview'
 import type { VaultResetResult } from './generated/vault.reset'
@@ -123,7 +124,12 @@ export interface VaultDeleteSecretParams {
  * caller-side behavior.
  */
 export interface VaultRpc {
-  call<T = unknown>(method: string, params: unknown): Promise<T>
+  call<T = unknown>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    intent?: RpcIntent,
+  ): Promise<T>
   onVaultSealed?: (method: string) => Promise<void>
 }
 
@@ -180,8 +186,21 @@ export class VaultClient {
     return this.dispatcher.call('vault.reset', {})
   }
 
+  /** An OPERATION (ADR-0032): a person is asking to see or use the vault's
+   *  contents, so a sealed answer raises the unlock prompt and the read is
+   *  replayed once the vault opens. */
   inventory(): Promise<VaultInventory> {
     return this.dispatcher.call('vault.inventory', {})
+  }
+
+  /** A REPORT (ADR-0032): the read happens because a surface is on screen,
+   *  not because somebody asked the vault for anything. A seal that wins a
+   *  race with a cached unsealed status then answers here as a refusal the
+   *  caller shows — it raises no unlock and is not replayed, because a page
+   *  merely listing endpoints must not put a sheet over the window
+   *  (nocx-76wyh). */
+  reportInventory(): Promise<VaultInventory> {
+    return this.dispatcher.call('vault.inventory', {}, undefined, 'report')
   }
 
   /** Store a secret created on the Secrets page: name and kind were asked of

@@ -22,6 +22,7 @@ package transport
 // session that was never there. That is the ordering these tests force.
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -74,8 +75,9 @@ func TestResizeClaimedForALaneWithNoSessionIsAbandoned(t *testing.T) {
 	if !lane.enqueue(op) {
 		t.Fatal("the lane refused the resize; this test needs it admitted, which is the state the defect needs too")
 	}
-	if err := awaitSettled(t, settled, "a resize claimed for a lane with no session"); err != nil {
-		t.Fatalf("the abandoned resize was answered with an error: %v", err)
+	err := awaitSettled(t, settled, "a resize claimed for a lane with no session")
+	if !errors.Is(err, errResizeCancelled) {
+		t.Fatalf("the abandoned resize error = %v, want cancelled", err)
 	}
 
 	// And the lane keeps serving: abandoning one resize must not end the
@@ -84,8 +86,9 @@ func TestResizeClaimedForALaneWithNoSessionIsAbandoned(t *testing.T) {
 	if !lane.enqueue(op2) {
 		t.Fatal("the lane refused a second resize: the worker did not survive the first")
 	}
-	if err := awaitSettled(t, settled2, "the second resize on the same lane"); err != nil {
-		t.Fatalf("the second abandoned resize was answered with an error: %v", err)
+	err = awaitSettled(t, settled2, "the second resize on the same lane")
+	if !errors.Is(err, errResizeCancelled) {
+		t.Fatalf("the second abandoned resize error = %v, want cancelled", err)
 	}
 }
 
@@ -111,7 +114,7 @@ func TestCloseLaneNeverPublishesAnOpenLane(t *testing.T) {
 // crash report first suggested — the close lands after the worker claimed the
 // op and before the resize returns — and shows it is NOT the mechanism: the
 // claimed copy keeps the session usable for the whole apply, and the request
-// is answered as admitted.
+// is answered as cancelled.
 //
 // It is here because the correction is the load-bearing part of this fix. A
 // reader who believes the close/claim ordering is the bug would "fix" it by
@@ -147,8 +150,9 @@ func TestCloseBetweenClaimAndApplyKeepsTheClaimedSession(t *testing.T) {
 	// reference; the apply's claimed copy is what keeps the session alive.
 	lane.admitClose()
 
-	if err := awaitSettled(t, settled, "a resize closed between its claim and its apply"); err != nil {
-		t.Fatalf("the cancelled resize was answered with an error: %v", err)
+	err = awaitSettled(t, settled, "a resize closed between its claim and its apply")
+	if !errors.Is(err, errResizeCancelled) {
+		t.Fatalf("the cancelled resize error = %v, want cancelled", err)
 	}
 	select {
 	case <-gated.returned:
@@ -201,13 +205,14 @@ func TestCloseLaneRacingAResizeNeverKillsTheBackend(t *testing.T) {
 			if !ws.laneFor(raced, sess).enqueue(op) {
 				// Refused by the tombstone: the request is the caller's to
 				// answer, and that is what the handler does.
-				op.done(nil)
+				op.done(errResizeCancelled)
 			}
 		}()
 		wg.Wait()
 
-		if err := awaitSettled(t, settled, fmt.Sprintf("iteration %d", i)); err != nil {
-			t.Fatalf("iteration %d: the resize was answered with an error: %v", i, err)
+		err = awaitSettled(t, settled, fmt.Sprintf("iteration %d", i))
+		if err != nil && !errors.Is(err, errResizeCancelled) {
+			t.Fatalf("iteration %d: unexpected resize error: %v", i, err)
 		}
 	}
 }

@@ -144,6 +144,13 @@ export const CONNECT_ATTEMPT_TIMEOUT_MS = 10_000
 
 type TimerHandle = ReturnType<typeof setTimeout>
 
+/** What the caller means by its request, in the vocabulary ADR-0032's
+ *  amendment already gave the resolver: an OPERATION wants vault material and
+ *  may raise the unlock, while a REPORT is a passive read whose sealed answer
+ *  is a fact to show the person, never a prompt to interrupt them. Renderer
+ *  only — the intent never crosses the control plane. */
+export type RpcIntent = 'operation' | 'report'
+
 interface PendingCall {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
@@ -151,6 +158,7 @@ interface PendingCall {
   // fresh id) after the vault layer raises the unlock prompt.
   method: string
   params: unknown
+  intent: RpcIntent
   sealedRetried: boolean
   sent: boolean
   settled: boolean
@@ -437,16 +445,24 @@ export class Dispatcher {
   // --- RPC -----------------------------------------------------------------
 
   /**
-   * Installed by the vault layer. When set, a response reporting the vault
-   * sealed defers the caller's promise until this hook resolves (the vault
-   * was unsealed), then retries the request exactly once. The hook may
-   * reject (user cancelled) — that rejection replaces the caller's error.
+   * Installed by the vault layer. When set, a sealed response to an OPERATION
+   * defers the caller's promise until this hook resolves (the vault was
+   * unsealed), then retries the request exactly once. The hook may reject
+   * (user cancelled) — that rejection replaces the caller's error.
+   *
    * This is the ONE seam where a sealed vault raises the unlock prompt; no
-   * call site wraps its own vault calls.
+   * call site wraps its own vault calls. A REPORT never reaches it: its
+   * refusal goes back to the caller intact, because a surface being on screen
+   * is not somebody asking to unlock anything (nocx-76wyh).
    */
   onVaultSealed?: (method: string) => Promise<void>
 
-  call<T = unknown>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
+  call<T = unknown>(
+    method: string,
+    params: unknown,
+    signal?: AbortSignal,
+    intent: RpcIntent = 'operation',
+  ): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = this.nextID++
       const pending: PendingCall = {
@@ -454,6 +470,7 @@ export class Dispatcher {
         reject,
         method,
         params,
+        intent,
         sealedRetried: false,
         sent: false,
         settled: false,
@@ -614,6 +631,7 @@ export class Dispatcher {
       p.removeAbortListener?.()
       if (msg.error) {
         if (
+          p.intent === 'operation' &&
           this.onVaultSealed &&
           !p.sealedRetried &&
           msg.error.data &&

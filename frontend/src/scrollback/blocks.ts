@@ -2334,14 +2334,6 @@ export class BlockManager {
     this._moveLive(block, null)
   }
 
-  /** The last element belonging to `el`: its live output when the live
-   *  region is this block's, the block itself otherwise. What anything
-   *  seated after a block anchors on — the other half of `_liveFollows`,
-   *  read from the seating side (nocx-hp8p2.8). */
-  tailOf(el: HTMLElement): ChildNode {
-    return el.nextSibling === this._liveContainer ? this._liveContainer : el
-  }
-
   /** Put a COMMAND block in the next seat: inside the turn that claimed it
    *  (ADR-0040), or — nobody claimed it — at the tail of the scrollback,
    *  where every block a person opens goes.

@@ -7928,13 +7928,9 @@ export class TerminalContent extends BasePaneContent {
       if (readingAnswerTail) settle?.scrollToTail()
       else settle?.scrollToBottomIfFollowing()
     }
-    // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
-    // element: while the command still runs its output is in the live
-    // region, which BlockManager keeps immediately after the block
-    // (nocx-hp8p2.8). Anchoring on the element alone seated the reply
-    // between `top`'s header and `top`'s own screen.
-    const manager = this.scrollback?.blockManager
-    const commandTail = manager ? manager.tailOf(command.el) : command.el
+    // The layout owner knows whether this command's live output is inside
+    // its qualified card or in the whole-terminal projection beside it.
+    const commandTail = this.scrollback?.tailOf(command.el) ?? command.el
     const seat = () => {
       let anchor: ChildNode = commandTail.parentNode === parent ? commandTail : command.el
       for (const answer of owned) {

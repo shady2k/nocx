@@ -658,8 +658,15 @@
   display: block;
 }
 
+/* Keep archived cards hidden, but not answers seated after the current live
+   output. Their order is established by the controller's projection tail. */
 .scrollback-inner.inner-terminal-history
-  > :not(.terminal-live-container, .live-history, .cell-metric-probe) {
+  > :not(
+    .terminal-live-container,
+    .live-history,
+    .cell-metric-probe,
+    .terminal-live-container ~ [data-block-kind='ask']
+  ) {
   display: none;
 }
 

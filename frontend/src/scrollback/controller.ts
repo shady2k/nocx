@@ -611,6 +611,19 @@ export class ScrollbackController {
     this._updateSeparator()
   }
 
+  /** The command's complete visible presence. An unqualified primary window
+   *  is seated outside its card, with emulator history before the live grid;
+   *  answers still belong after that output, not before its first row. */
+  tailOf(command: HTMLElement): ChildNode {
+    if (
+      this._historyPresentation === 'terminal' &&
+      this._blockManager.runningBlock?.el === command
+    ) {
+      return this.terminalLiveContainer
+    }
+    return command.nextSibling === this.terminalLiveContainer ? this.terminalLiveContainer : command
+  }
+
   private _seatLive(): void {
     const terminal = this._historyPresentation === 'terminal' && this._mode !== 'fullscreen'
     if (this._mode === 'running' && !terminal) this._blockManager.holdLiveInRunningBlock()

@@ -480,7 +480,13 @@ export class ScrollbackController {
       this._fillPane()
       return
     }
-    if (this._mode !== 'running') return
+    if (this._mode === 'idle') {
+      // Leaving whole-terminal review must return sizing to the idle CSS,
+      // even when the lifecycle mode itself has not changed.
+      this.terminalLiveContainer.style.height = ''
+      this.terminalLiveViewport.style.height = ''
+      return
+    }
     this._lastLiveHeightPx = px
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even

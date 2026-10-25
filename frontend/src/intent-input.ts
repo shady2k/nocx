@@ -233,9 +233,15 @@ export interface IntentInputOptions {
    *  Absent means the whole surface is live, as for a bare grid. */
   isLiveTarget?: (target: EventTarget | null) => boolean
   /** Claim local scrolling in normalized CSS pixels. Returning false leaves
-   * the native default to archived/nested scroll areas; the classification
-   * lets a local owner distinguish the live grid without a second hit-test. */
-  scrollLocal?: (deltaX: number, deltaY: number, overLive: boolean) => boolean
+   * the native default to archived/nested scroll areas. The classification
+   * identifies the live grid; the target lets the owner distinguish blank
+   * scrollback background from archive content without changing that identity. */
+  scrollLocal?: (
+    deltaX: number,
+    deltaY: number,
+    overLive: boolean,
+    target: EventTarget | null,
+  ) => boolean
   /** The pane's row pitch in CSS pixels — the painter's accepted cell height,
    *  read here so a pixel-delta wheel can be counted in LINES (nocx-1ebrs.26).
    *  The pointer's geometry is the painter's (see `cellAt`), and a value of
@@ -572,7 +578,7 @@ export class IntentInput {
 
     if (!liveTarget || e.shiftKey || (!tracking && buffer === 'normal')) {
       this.resetWheel()
-      if (this.scrollLocal?.(deltaX, deltaY, liveTarget)) e.preventDefault()
+      if (this.scrollLocal?.(deltaX, deltaY, liveTarget, e.target)) e.preventDefault()
       return
     }
 

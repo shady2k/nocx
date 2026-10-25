@@ -16782,6 +16782,101 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  it.each([
+    { target: 'area', buffer: 'normal', entersHistory: true },
+    { target: 'inner', buffer: 'normal', entersHistory: true },
+    { target: 'archive', buffer: 'normal', entersHistory: false },
+    { target: 'nested', buffer: 'normal', entersHistory: false },
+    { target: 'area', buffer: 'alternate', entersHistory: false },
+    { target: 'inner', buffer: 'alternate', entersHistory: false },
+  ] as const)(
+    'routes idle upward wheel on $target with $buffer buffer without stealing archive input',
+    async ({ target, buffer, entersHistory }) => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const style = document.createElement('style')
+      style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+      document.head.append(style)
+      try {
+        content.setVisible(true)
+        const scrollback = scrollbackFor(content)
+        // JSDOM has no layout; whole-terminal review fills the measured pane.
+        Object.defineProperties(scrollback.scrollbackArea, {
+          clientHeight: { configurable: true, value: 400 },
+          scrollHeight: { configurable: true, value: 400 },
+        })
+        const handler = startCommand(client)
+        const frame = screenFrame(1, ['RETAINED-0001', 'RETAINED-0002', 'shell prompt'])
+        sessionOf(content).fireScreenFrame(frame)
+        await vi.waitFor(() =>
+          expect(scrollback.terminalLiveContainer.textContent).toContain('RETAINED-0001'),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-run',
+            state: 'completed',
+            exitCode: 0,
+            fence: commandFence,
+            completedAt: '2026-10-25T01:00:00Z',
+          },
+        })
+        blockClosedHandler(client)('att-run')
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const archive = scrollback.scrollbackInner.querySelector<HTMLElement>(
+          '[data-entry-id="att-run"]',
+        )!
+        expect(getComputedStyle(archive).display).not.toBe('none')
+        expect(getComputedStyle(scrollback.terminalLiveContainer).height).toBe('0px')
+        // An archived card and a nested scroller are not blank terminal background.
+        const nested = document.createElement('div')
+        nested.style.overflow = 'auto'
+        archive.append(nested)
+        if (buffer === 'alternate') {
+          const alternate = screenFrame(2, ['ALTERNATE'])
+          alternate.state.bufferKind = 'alternate'
+          sessionOf(content).fireScreenFrame(alternate)
+        }
+        const wheelTarget =
+          target === 'area'
+            ? scrollback.scrollbackArea
+            : target === 'inner'
+              ? scrollback.scrollbackInner
+              : target === 'archive'
+                ? archive
+                : nested
+        const event = new WheelEvent('wheel', {
+          deltaY: -120,
+          bubbles: true,
+          cancelable: true,
+        })
+        wheelTarget.dispatchEvent(event)
+        expect(event.defaultPrevented).toBe(entersHistory)
+        if (entersHistory) {
+          expect(getComputedStyle(archive).display).toBe('none')
+          expect(getComputedStyle(scrollback.terminalLiveContainer).height).not.toBe('0px')
+          expect(scrollback.terminalLiveContainer.textContent).toContain('RETAINED-0001')
+        } else if (buffer === 'normal') {
+          expect(getComputedStyle(archive).display).not.toBe('none')
+          expect(getComputedStyle(scrollback.terminalLiveContainer).height).toBe('0px')
+        }
+        expect(
+          sessionOf(content).intent.mock.calls.filter(([kind]) => kind === 'mouse'),
+        ).toHaveLength(0)
+      } finally {
+        teardown()
+        style.remove()
+      }
+    },
+  )
+
   // Answers follow the live output in both qualified command windows and
   // whole-terminal history; opening the next command preserves that order.
   it.each([false, true])('seats answers below output (qualified=%s)', async (qualified) => {

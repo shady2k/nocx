@@ -319,6 +319,41 @@ describe('live projection changes preserve the input owner', () => {
     }
   })
 
+  it('collapses the idle live grid when terminal-history review returns to the archive', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    try {
+      const command = controller.blockManager.startBlock('completed command', '~', 0)
+      closeRunningBlock(controller.blockManager)
+      controller.setIdle()
+      const live = controller.terminalLiveContainer
+      expect(getComputedStyle(live).height).toBe('0px')
+      expect(visible(command.el)).toBe(true)
+
+      controller.setHistoryPresentation('terminal', history, null)
+      expect(getComputedStyle(live).height).toBe('360px')
+      expect(visible(command.el)).toBe(false)
+
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+      expect(getComputedStyle(live).height).toBe('0px')
+      expect(visible(command.el)).toBe(true)
+      // Later grid measurements must not reopen the idle box.
+      controller.setLiveHeight(240)
+      expect(getComputedStyle(live).height).toBe('0px')
+    } finally {
+      controller.dispose()
+      pane.remove()
+      style.remove()
+    }
+  })
+
   it('keeps an older nested command answer before a later program sharing its turn', () => {
     const { controller } = makeController()
     const turn = controller.blockManager.addAnswerBlock('run two programs', '~')

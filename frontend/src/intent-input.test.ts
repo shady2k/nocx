@@ -498,6 +498,46 @@ describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)',
     expect(intents).toEqual([{ kind: 'mouse', payload: 'press wheel-down 2 3' }])
   })
 
+  it('lets a local owner scroll background without treating it as a reporting grid', () => {
+    const surface = document.createElement('div')
+    const grid = document.createElement('div')
+    const archive = document.createElement('div')
+    surface.append(grid, archive)
+    document.body.append(surface)
+    surface.scrollTop = 100
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({
+      surface,
+      emit: (intent) => intents.push(intent),
+      cellAt: () => ({ x: 2, y: 3 }),
+      mouseTracking: () => true,
+      isLiveTarget: (target) => target === grid,
+      scrollLocal: (_x, y, overLive, target) => {
+        if (overLive || target !== surface) return false
+        surface.scrollTop += y
+        return true
+      },
+    })
+    live.push(input)
+    const backgroundWheel = new WheelEvent('wheel', {
+      deltaY: -40,
+      bubbles: true,
+      cancelable: true,
+    })
+    surface.dispatchEvent(backgroundWheel)
+    expect(surface.scrollTop).toBe(60)
+    expect(backgroundWheel.defaultPrevented).toBe(true)
+    const archiveWheel = new WheelEvent('wheel', {
+      deltaY: -40,
+      bubbles: true,
+      cancelable: true,
+    })
+    archive.dispatchEvent(archiveWheel)
+    expect(surface.scrollTop).toBe(60)
+    expect(archiveWheel.defaultPrevented).toBe(false)
+    expect(intents).toEqual([])
+  })
+
   it('leaves nested archived scrolling native when the local owner declines the event', () => {
     const { wheel, history, intents } = wheelPane('native')
     const event = wheel(40, {}, history)

@@ -38,6 +38,8 @@ interface Frame {
    *  frame. The box's own departure is one frame (that is the fix); the
    *  ink the person sees fade is on this copy. */
   gOp: number
+  /** The submitted attempt's terminal outcome, never an unrelated prompt. */
+  outcome: string | null
 }
 
 async function sampleAcrossSubmit(page: import('@playwright/test').Page, command: string) {
@@ -47,19 +49,36 @@ async function sampleAcrossSubmit(page: import('@playwright/test').Page, command
   const input = page.locator(INPUT)
   await expect(input).toBeVisible({ timeout: 8000 })
   await input.fill(command)
+  const blocks = page.locator('.pane.active').getByRole('group', {
+    name: `command block: ${command}`,
+    exact: true,
+  })
+  // A restored block for the same command must not satisfy this submit.
+  const previousCount = await blocks.count()
 
-  await page.evaluate(() => {
+  const fullH = await page.evaluate(() => {
     const pane = document.querySelector('.pane.active') as HTMLElement
     const editor = pane.querySelector<HTMLElement>('.nocx-editor') as HTMLElement
     const area = pane.querySelector<HTMLElement>('.scrollback-area') as HTMLElement
     const inner = pane.querySelector<HTMLElement>('.scrollback-inner') as HTMLElement
-    const w = window as unknown as { __frames: unknown[]; __t0: number; __stop?: boolean }
+    const full = editor.getBoundingClientRect().height
+    const w = window as unknown as {
+      __frames: Frame[]
+      __t0: number
+      __stop: boolean
+      __finishAttempt?: string
+    }
     w.__frames = []
     w.__t0 = performance.now()
+    w.__stop = false
+    let previousSettled = false
     const sample = (): void => {
       if (w.__stop) return
       const ghost = document.querySelector('[data-nocx-motion-ghost]')
-      w.__frames.push({
+      const block = w.__finishAttempt
+        ? pane.querySelector(`[data-entry-id="${CSS.escape(w.__finishAttempt)}"]`)
+        : null
+      const frame: Frame = {
         t: +(performance.now() - w.__t0).toFixed(1),
         disp: getComputedStyle(editor).display,
         eH: +editor.getBoundingClientRect().height.toFixed(1),
@@ -72,18 +91,33 @@ async function sampleAcrossSubmit(page: import('@playwright/test').Page, command
         glDurations: inner
           .getAnimations()
           .filter((animation) => animation.playState === 'running')
-          .map((animation) => animation.effect?.getComputedTiming().duration ?? Number.NaN),
+          .map((animation) => {
+            const duration = animation.effect?.getComputedTiming().duration
+            return typeof duration === 'number' ? duration : Number.NaN
+          }),
         gOp: ghost ? +getComputedStyle(ghost).opacity.slice(0, 5) : -1,
-      })
+        outcome: block?.getAttribute('data-outcome') ?? null,
+      }
+      w.__frames.push(frame)
+      // Read completion and painted ink together. A prompt can return while
+      // the submitted attempt is still open (CI run 40170384878), and a
+      // separate stop callback can land in the next departure or return.
+      const settled =
+        frame.outcome === 'success' &&
+        frame.disp !== 'none' &&
+        frame.eH >= full - 1 &&
+        frame.op >= 0.95 &&
+        frame.gl === 0
+      if (settled && previousSettled) {
+        w.__stop = true
+        return
+      }
+      previousSettled = settled
       requestAnimationFrame(sample)
     }
     requestAnimationFrame(sample)
+    return full
   })
-
-  // The panel's resting height and ink, read before anything moves.
-  const fullH = await page.evaluate(
-    () => document.querySelector('.pane.active .nocx-editor')?.getBoundingClientRect().height ?? 0,
-  )
 
   // An idle page paints on its own clock: without this wait the sampler's
   // first tick can land after the submit (measured: a first frame already
@@ -100,32 +134,26 @@ async function sampleAcrossSubmit(page: import('@playwright/test').Page, command
 
   await page.keyboard.press('Enter')
 
-  // The hand-back: the box is back at its full height and its full ink. NOT
-  // toBeVisible — a mid-fade box is non-empty and Playwright-visible.
+  // Bind the new command block to its backend-minted attempt identity before
+  // accepting any hand-back. The text selects this submit, not its outcome:
+  // only this new block's terminal state can finish the sampler.
+  const submitted = blocks.nth(previousCount)
+  await expect(submitted).toHaveAttribute('data-entry-id', /.+/, { timeout: 15000 })
+  const attemptId = await submitted.getAttribute('data-entry-id')
+  await page.evaluate((id) => {
+    // This is the sampler state installed above, on the same page.
+    const w = window as unknown as { __finishAttempt: string | null }
+    w.__finishAttempt = id
+  }, attemptId)
   await page.waitForFunction(
-    (full) => {
-      const ed = document.querySelector('.pane.active .nocx-editor')
-      return (
-        ed !== null &&
-        getComputedStyle(ed).display !== 'none' &&
-        ed.getBoundingClientRect().height >= full * 0.9 &&
-        Number(getComputedStyle(ed).opacity) >= 0.95
-      )
+    () => {
+      // The sampler publishes this only after recording its final frame.
+      const w = window as unknown as { __stop: boolean }
+      return w.__stop
     },
-    fullH,
+    undefined,
     { timeout: 15000 },
   )
-  await page.waitForFunction(
-    () =>
-      (document.querySelector('.pane.active .scrollback-inner')?.getAnimations().length ?? 0) === 0,
-  )
-  await page.evaluate(() => {
-    const w = window as unknown as { __stop?: boolean }
-    requestAnimationFrame(() => {
-      w.__stop = true
-    })
-  })
-  await page.waitForTimeout(120)
   return {
     fullH,
     frames: (await page.evaluate(
@@ -168,6 +196,7 @@ test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
       ghostDecayed
     expect(dipped, `panel ink dipped during the hand-off: ${dump}`).toBe(true)
     const last = frames[frames.length - 1]
+    expect(last.outcome, `submitted attempt completed: ${dump}`).toBe('success')
     expect(last.op, `panel back at full ink: ${dump}`).toBeGreaterThanOrEqual(0.95)
     expect(last.eH, `panel back at full height: ${dump}`).toBeGreaterThanOrEqual(fullH - 1)
   })
@@ -267,10 +296,10 @@ test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
     // CI Chromium shard 2 (run 39830472460, job 120005304954) sampled only
     // two distinct positions over eleven frames. The animation can still
     // reach its settled state correctly; requiring four samples made frame
-    // scheduling part of the contract. sampleAcrossSubmit waits until the
-    // inner element has no active animations, then records another frame.
-    // Its last two painted positions must therefore agree: no late scroll
-    // jump after the hand-off has settled.
+    // scheduling part of the contract. sampleAcrossSubmit records two
+    // consecutive frames with this attempt complete, full ink and no inner
+    // animations. Their painted positions must agree: no late scroll jump
+    // after the hand-off has settled.
     // The composer can become fully opaque before the settle glide finishes.
     // Keep sampling through animation completion, not only through restoredAt.
     const restoredGlideFrames = frames
@@ -289,6 +318,7 @@ test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
     ).toBeGreaterThan(1)
     const settledPair = frames.slice(-2)
     expect(settledPair.length, `two settled frames were recorded: ${dump}`).toBe(2)
+    expect(settledPair.map((frame) => frame.outcome)).toEqual(['success', 'success'])
     expect(
       Math.abs(settledPair[1].iT - settledPair[0].iT),
       `scroll position changed after the hand-off settled: ${JSON.stringify(settledPair)}; all: ${dump}`,

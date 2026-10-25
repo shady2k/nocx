@@ -3015,10 +3015,18 @@ export class TerminalContent extends BasePaneContent {
         mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
         bufferKind: () => this._cellModel?.current()?.state.bufferKind ?? 'normal',
         isLiveTarget: insideLiveRegion,
-        scrollLocal: (deltaX, deltaY, overLive) => {
-          if (!overLive) return false
-          if (this._cellModel?.current()?.state.bufferKind === 'alternate') return true
-          if (deltaY < 0 && this.scrollback?.mode === 'idle') {
+        scrollLocal: (deltaX, deltaY, overLive, target) => {
+          const sb = this.scrollback
+          // The idle grid is clipped away. Only the scrollback background
+          // itself can open review; archive cards and nested scrollers keep
+          // their native wheel behavior and never become application input.
+          const overIdleBackground =
+            sb?.mode === 'idle' &&
+            (target === sb.scrollbackArea || target === sb.scrollbackInner) &&
+            (deltaY < 0 || this._historyReview)
+          if (!overLive && !overIdleBackground) return false
+          if (this._cellModel?.current()?.state.bufferKind === 'alternate') return overLive
+          if (deltaY < 0 && sb?.mode === 'idle') {
             this._historyReview = true
             this._syncLiveHistoryPresentation()
           }

@@ -91,6 +91,57 @@ test('primary history survives disabled recording and a renderer reload', async 
       .poll(() => scroller.evaluate((el) => el.scrollTop + el.clientHeight >= el.scrollHeight - 2))
       .toBe(true)
     await expect(page.locator(`${GRID} .term-grid-row`, { hasText: READY })).toBeInViewport()
+
+    // Completion restores the archive and clips the idle live grid to zero
+    // height. The next review must start on reachable background, not that grid.
+    writeFileSync(finish, 'finish\n')
+    await expect(input).toBeVisible()
+    const live = page.locator('.pane.active .terminal-live-container')
+    await expect.poll(() => live.evaluate((el) => el.getBoundingClientRect().height)).toBe(0)
+    const background = await scroller.evaluate((el) => {
+      const rect = el.getBoundingClientRect()
+      const inner = el.querySelector('.scrollback-inner')
+      for (let y = rect.top + 2; y < rect.bottom - 2; y += 8) {
+        for (let x = rect.left + 2; x < rect.right - 2; x += 8) {
+          const target = document.elementFromPoint(x, y)
+          if (target === el || target === inner) return { x, y }
+        }
+      }
+      return null
+    })
+    expect(background, 'idle scrollback offers reachable background').not.toBeNull()
+    await page.mouse.move(background!.x, background!.y)
+    await page.mouse.wheel(0, -4000)
+    await expect
+      .poll(() => live.evaluate((el) => el.getBoundingClientRect().height))
+      .toBeGreaterThan(0)
+    // Entry exposes the retained tier before its asynchronous pages arrive.
+    // Keep the gesture on the scroller's inset rather than hovering a grid
+    // whose position and hit target change as older pages are prepended.
+    await expect
+      .poll(async () => {
+        await scroller.hover({ position: { x: 2, y: 2 } })
+        await page.mouse.wheel(0, -4000)
+        return scroller.evaluate((el) => {
+          const first = Array.from(el.querySelectorAll('.live-history .term-grid-row')).find(
+            (row) => row.textContent?.includes('PRIMARY-TUI-0001'),
+          )
+          if (!first) return false
+          const clip = el.getBoundingClientRect()
+          const rect = first.getBoundingClientRect()
+          return rect.bottom > clip.top && rect.top < clip.bottom
+        })
+      })
+      .toBe(true)
+    const firstRetained = page.locator(`${SCROLLER} .live-history .term-grid-row`, {
+      hasText: 'PRIMARY-TUI-0001',
+    })
+    await expect(firstRetained).toBeInViewport()
+    await expect(page.locator('.pane.active .cmd-output .term-grid-row')).toHaveCount(0)
+    await firstRetained.hover()
+    await page.mouse.wheel(0, 100_000)
+    await expect.poll(() => live.evaluate((el) => el.getBoundingClientRect().height)).toBe(0)
+    await expect(input).toBeVisible()
   } finally {
     writeFileSync(finish, 'finish\n')
     wire?.close()

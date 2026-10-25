@@ -5149,7 +5149,10 @@ export class TerminalContent extends BasePaneContent {
             result.snapshot.state.bufferKind === 'alternate' &&
             this._bufferType !== 'alternate'
           ) {
-            this._switchPresents = true
+            // Retiring primary history can reparent the input and restore its
+            // focus before _applyBufferKind runs. Those intents owe the same
+            // applied-resize barrier as input from the fullscreen layout.
+            this._openAlternateScreenFence()
           }
           this.scrollback?.blockManager.acceptOutputStartFrame(result.snapshot)
           this.scrollback?.outputAnchorChanged()
@@ -5784,7 +5787,9 @@ export class TerminalContent extends BasePaneContent {
     // that can open the fence. Leaving it to the timer would send AFTER the
     // input the fence is holding, which is the order this bead is about.
     if (this._fence !== null) {
-      this._requestFenceResize()
+      // An armed fence has no measured request until fullscreen fitting
+      // completes. Only that explicit first send may start its resize stream.
+      if (this._fence.sent !== null) this._requestFenceResize()
       return
     }
     clearTimeout(this.resizeTimer)

@@ -463,10 +463,11 @@ test.describe('connection overlay survives backend loss', () => {
       .poll(async () => liveScreenText(page), { timeout: 30_000 })
       .toContain('NOCX_SCROLLBACK_DONE')
 
-    // This is the default integrated local shell, so its visible history owner
-    // is the command-block transcript (not the unstructured `.live-history`
-    // surface). Select this exact command by its unique marker, then inspect
-    // only its output rows so the echoed command cannot satisfy the checks.
+    // Reconnection can invalidate the command's coordinate qualification.
+    // Read the currently painted output, whether it belongs to the command,
+    // the whole-terminal history projection, or the live grid. The markers
+    // are deliberately absent from the echoed command, so it cannot satisfy
+    // these checks; the overlapping, hidden archive cannot satisfy them either.
     const commandBlock = page
       .locator('.pane.active .scrollback-inner > .cmd-block[data-block-kind="command"]')
       .filter({ hasText: 'release-scrollback-producer' })
@@ -474,25 +475,44 @@ test.describe('connection overlay survives backend loss', () => {
     const entryId = await commandBlock.getAttribute('data-entry-id')
     expect(entryId).toBeTruthy()
     const scrollback = page.locator('.pane.active .scrollback-area')
+    const outputRows =
+      '.live-history .term-grid-row, .terminal-live-grid .term-grid-row, .cmd-output .term-line, .cmd-output .term-grid-row'
     const visibleOutputRows = async (): Promise<string[]> =>
-      page.evaluate((id) => {
-        const area = document.querySelector('.pane.active .scrollback-area')
-        const block = document.querySelector(
-          `.pane.active .scrollback-inner > .cmd-block[data-entry-id="${id}"]`,
-        )
-        if (!(area instanceof HTMLElement) || !(block instanceof HTMLElement)) {
-          throw new Error('scrollback area or command block is missing')
-        }
-        const clip = area.getBoundingClientRect()
-        return Array.from(
-          block.querySelectorAll('.cmd-output .term-line, .cmd-output .term-grid-row'),
-        )
-          .filter((row) => {
-            const bounds = row.getBoundingClientRect()
-            return bounds.bottom > clip.top && bounds.top < clip.bottom
-          })
-          .map((row) => (row.textContent ?? '').trim())
-      }, entryId!)
+      page.evaluate(
+        ({ id, selector }) => {
+          const area = document.querySelector('.pane.active .scrollback-area')
+          const block = document.querySelector(
+            `.pane.active .scrollback-inner > .cmd-block[data-entry-id="${id}"]`,
+          )
+          if (!(area instanceof HTMLElement) || !(block instanceof HTMLElement)) {
+            throw new Error('scrollback area or command block is missing')
+          }
+          const clip = area.getBoundingClientRect()
+          return Array.from(area.querySelectorAll<HTMLElement>(selector))
+            .filter((row) => {
+              const bounds = row.getBoundingClientRect()
+              // Match the live-row probe's clipping rule while keeping all
+              // metrics and extracted text in this one DOM snapshot.
+              let top = clip.top
+              let bottom = clip.bottom
+              for (let node = row.parentElement; node; node = node.parentElement) {
+                if (getComputedStyle(node).overflowY !== 'visible') {
+                  const ancestor = node.getBoundingClientRect()
+                  top = Math.max(top, ancestor.top)
+                  bottom = Math.min(bottom, ancestor.bottom)
+                }
+              }
+              return (
+                row.checkVisibility() &&
+                bounds.height > 0 &&
+                bounds.bottom > top + 0.5 &&
+                bounds.top < bottom - 0.5
+              )
+            })
+            .map((row) => (row.textContent ?? '').trim())
+        },
+        { id: entryId!, selector: outputRows },
+      )
     const scrollUntilOutputShows = async (marker: string, deltaY: number): Promise<void> => {
       await scrollback.hover()
       try {
@@ -507,35 +527,39 @@ test.describe('connection overlay survives backend loss', () => {
           )
           .toBe(true)
       } catch (error) {
-        const diagnostic = await page.evaluate((id) => {
-          const area = document.querySelector('.pane.active .scrollback-area')
-          const block = document.querySelector(
-            `.pane.active .scrollback-inner > .cmd-block[data-entry-id="${id}"]`,
-          )
-          const output = block?.querySelector<HTMLElement>('.cmd-output')
-          const clip = area?.getBoundingClientRect()
-          return {
-            outputText: (output?.textContent ?? '').slice(0, 800),
-            outputTextLength: output?.textContent?.length ?? 0,
-            outputClass: output?.className ?? null,
-            areaScrollTop: area instanceof HTMLElement ? area.scrollTop : null,
-            areaClientHeight: area instanceof HTMLElement ? area.clientHeight : null,
-            areaScrollHeight: area instanceof HTMLElement ? area.scrollHeight : null,
-            areaBounds: clip ? { top: clip.top, bottom: clip.bottom } : null,
-            rows: Array.from(
-              block?.querySelectorAll('.cmd-output .term-line, .cmd-output .term-grid-row') ?? [],
-            ).map((row) => {
-              const bounds = row.getBoundingClientRect()
-              return {
-                className: row.className,
-                text: (row.textContent ?? '').slice(0, 100),
-                top: bounds.top,
-                bottom: bounds.bottom,
-                visible: clip !== undefined && bounds.bottom > clip.top && bounds.top < clip.bottom,
-              }
-            }),
-          }
-        }, entryId!)
+        const diagnostic = await page.evaluate(
+          ({ id, selector }) => {
+            const area = document.querySelector('.pane.active .scrollback-area')
+            const block = document.querySelector(
+              `.pane.active .scrollback-inner > .cmd-block[data-entry-id="${id}"]`,
+            )
+            const output = block?.querySelector<HTMLElement>('.cmd-output')
+            const clip = area?.getBoundingClientRect()
+            return {
+              outputText: (output?.textContent ?? '').slice(0, 800),
+              outputTextLength: output?.textContent?.length ?? 0,
+              outputClass: output?.className ?? null,
+              outputVisible: output?.checkVisibility() ?? false,
+              areaScrollTop: area instanceof HTMLElement ? area.scrollTop : null,
+              areaClientHeight: area instanceof HTMLElement ? area.clientHeight : null,
+              areaScrollHeight: area instanceof HTMLElement ? area.scrollHeight : null,
+              areaBounds: clip ? { top: clip.top, bottom: clip.bottom } : null,
+              rows: Array.from(area?.querySelectorAll<HTMLElement>(selector) ?? []).map((row) => {
+                const bounds = row.getBoundingClientRect()
+                return {
+                  className: row.className,
+                  text: (row.textContent ?? '').slice(0, 100),
+                  top: bounds.top,
+                  painted: row.checkVisibility(),
+                  bottom: bounds.bottom,
+                  visible:
+                    clip !== undefined && bounds.bottom > clip.top && bounds.top < clip.bottom,
+                }
+              }),
+            }
+          },
+          { id: entryId!, selector: outputRows },
+        )
         throw new Error(
           `scrollback output ${marker} not visible: ${JSON.stringify(diagnostic)}; ${String(error)}`,
         )

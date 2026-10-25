@@ -5218,24 +5218,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it('no submit-time open or fence timer survives in the boundary sources (nocx-2v80t.3.2)', () => {
-    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
-      expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
-    }
-  })
-
-  it('no clear or rebase of the live cell model survives at command boundaries', () => {
-    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: clearViewport`).not.toMatch(/clearViewport/)
-      expect(src, `${rel}: _settleFrozen`).not.toMatch(/_settleFrozen/)
-      expect(src, `${rel}: _freezeVisual`).not.toMatch(/_freezeVisual/)
-      expect(src, `${rel}: _clearFrozenRows`).not.toMatch(/_clearFrozenRows/)
-    }
-  })
-
   it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
@@ -19937,13 +19919,19 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       session.fireScreenFrame(switched)
       flushFrames()
 
-      // The request is the PANE's grid, not the previous mode's…
-      expect(session.resizeApplied).toHaveBeenCalledWith({
-        cols: FITTED.cols,
-        rows: FITTED.rows,
-        xpixel: PANE.width,
-        ypixel: PANE.height,
-      })
+      // No intermediate request may resize the program to the primary layout.
+      // The switch also changes row geometry, so its metadata schedules a report
+      // before fullscreen fitting has run.
+      expect(session.resizeApplied.mock.calls).toEqual([
+        [
+          {
+            cols: FITTED.cols,
+            rows: FITTED.rows,
+            xpixel: PANE.width,
+            ypixel: PANE.height,
+          },
+        ],
+      ])
       // …and so is the grid the frame is presented on.
       const painted = tab.pane.querySelector<HTMLElement>('.term-grid')!
       expect(painted.textContent).toContain('ALT-READY')

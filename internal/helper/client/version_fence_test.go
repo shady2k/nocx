@@ -1,20 +1,15 @@
 package client_test
 
-// THE HELLO FENCE, PROVEN IN BOTH DIRECTIONS (nocx-xn63t.6.56).
+// THE HELLO FENCE, PROVEN IN BOTH DIRECTIONS.
 //
-// `screenCell` gained a field — whether a cell was drawn faint — and a field on
-// a shared shape is the half of a wire change that cannot be added politely:
-// both ends are `additionalProperties: false`, so a peer that does not know the
-// field does not ignore it, and a peer that knows it cannot tell an older
-// answer from a malformed one. `proto.Version` therefore moved to 23, and this
-// file is the evidence that the numbers on either side of this one refuse each
-// other rather than decode a shape they do not know.
+// Mouse intents gained key-style modifier prefixes on their action token
+// (nocx-if2d8, nocx-3y64b). A protocol-23 runtime rejects these payloads, so a
+// coordinator must not recover an old generation and route the new vocabulary
+// into it. These tests exercise the actual client/host hello fence, not a
+// literal assertion about this build's version number.
 //
-// The two peers below are deliberately NOT the same as this build's: one speaks
-// the previous generation's number, and one is this build's real host fed the
-// hello a previous-generation coordinator sends. Both numbers are written out
-// LITERALLY here — a test that read proto.Version on both sides would pass at
-// every version and fence nothing.
+// The old peer's version stays literal: deriving both peers' versions from
+// proto.Version would let the compatibility boundary disappear unnoticed.
 
 import (
 	"bytes"
@@ -35,7 +30,7 @@ import (
 
 // previousGeneration is the protocol version this bump fences off. It is a
 // literal because that is the fact being asserted.
-const previousGeneration = "22"
+const previousGeneration = "23"
 
 // previousHelperPeer answers a hello the way a helper SPEAKING version does: it
 // compares what arrived with its own number, and where the two disagree it
@@ -80,21 +75,24 @@ func previousHelperPeer(version string, received chan<- string) func(io.Reader, 
 	}
 }
 
-// TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello is the direction a
-// person meets first: the coordinator is this build's, and the helper on the
-// host is a generation behind. The helper says nothing on stdout and exits 42;
-// the coordinator answers ErrVersionMismatch, which is a state the product
+// TestThisCoordinatorAndThePreviousHelperRefuseEachOtherAtHello is the
+// direction a person meets first: the coordinator is this build's, and the
+// helper on the host is a generation behind. It says nothing on stdout and
+// exits 42; the coordinator answers ErrVersionMismatch, which is a state the product
 // renders ("this machine's helper is older than this app") rather than a
 // generic launch failure.
-func TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello(t *testing.T) {
+func TestThisCoordinatorAndThePreviousHelperRefuseEachOtherAtHello(t *testing.T) {
 	received := make(chan string, 1)
 	conn := newFakeConn(previousHelperPeer(previousGeneration, received))
 
-	_, err := client.Dial(context.Background(), client.Config{
+	c, err := client.Dial(context.Background(), client.Config{
 		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
 	})
 	if !errors.Is(err, client.ErrVersionMismatch) {
 		t.Fatalf("dialling a %s helper answered %v, want ErrVersionMismatch", previousGeneration, err)
+	}
+	if c != nil {
+		t.Fatal("an incompatible helper returned an input-capable client")
 	}
 	if got := <-received; got != proto.Version {
 		t.Fatalf("the %s helper read hello version %q, want %q — the coordinator must say which protocol it speaks",
@@ -102,14 +100,14 @@ func TestA23CoordinatorAndA22HelperRefuseEachOtherAtHello(t *testing.T) {
 	}
 }
 
-// TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello is the reverse
+// TestThePreviousCoordinatorAndThisHelperRefuseEachOtherAtHello is the reverse
 // pair, and it drives the REAL host: the hello is the one a
 // previous-generation coordinator sends, written by hand because the client is
 // this build's and sends this build's number. The helper refuses it and writes
 // NOTHING to stdout — the sentinel is written only after the version check
 // passes (D5) — so a coordinator cannot read a sentinel and believe it found a
 // helper it agrees with.
-func TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *testing.T) {
+func TestThePreviousCoordinatorAndThisHelperRefuseEachOtherAtHello(t *testing.T) {
 	hello := proto.Hello{Version: previousGeneration, Nonce: "n", Corr: "c"}
 	raw, err := json.Marshal(hello)
 	if err != nil {
@@ -134,14 +132,14 @@ func TestA22CoordinatorAndThisBuildsHelperRefuseEachOtherAtHello(t *testing.T) {
 	}
 }
 
-// TestA23CoordinatorRefusesAHelloOKThatNamesAnotherGeneration closes the third
+// TestThisCoordinatorRefusesAHelloOKThatNamesAnotherGeneration closes the third
 // corner. The coordinator's own handshake has two version-bearing halves and
 // both are checked: the SENTINEL line spells the protocol version, so a helper
 // of another generation never matches it and is classified by its exit status
 // (the case above), and the hello-ok ECHO names the version too — a peer that
 // printed this build's sentinel and then answered with another generation's
 // number is refused rather than believed.
-func TestA23CoordinatorRefusesAHelloOKThatNamesAnotherGeneration(t *testing.T) {
+func TestThisCoordinatorRefusesAHelloOKThatNamesAnotherGeneration(t *testing.T) {
 	conn := newFakeConn(func(in io.Reader, out io.Writer) int {
 		answered := false
 		dec := proto.NewDecoder(func(ty proto.FrameType, _, _ uint32, payload []byte) {
@@ -170,10 +168,13 @@ func TestA23CoordinatorRefusesAHelloOKThatNamesAnotherGeneration(t *testing.T) {
 		}
 	})
 
-	_, err := client.Dial(context.Background(), client.Config{
+	c, err := client.Dial(context.Background(), client.Config{
 		Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash", SentinelTTL: time.Second,
 	})
 	if !errors.Is(err, client.ErrVersionMismatch) {
 		t.Fatalf("a hello-ok naming %s answered %v, want ErrVersionMismatch", previousGeneration, err)
+	}
+	if c != nil {
+		t.Fatal("an incompatible hello-ok returned an input-capable client")
 	}
 }

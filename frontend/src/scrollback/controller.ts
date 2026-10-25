@@ -638,6 +638,11 @@ export class ScrollbackController {
   }
 
   private _seatLive(): void {
+    // A projection changes both the live surface's parent and which archive
+    // cards are hidden. BlockManager preserves focus across a DOM move alone,
+    // but cannot restore it into a destination the old projection still hides.
+    const focused = document.activeElement
+    const heldFocus = focused instanceof HTMLElement && this.terminalLiveContainer.contains(focused)
     const terminal = this._historyPresentation === 'terminal' && this._mode !== 'fullscreen'
     if (this._mode === 'running' && !terminal) this._blockManager.holdLiveInRunningBlock()
     else this._blockManager.releaseLiveRegion()
@@ -656,6 +661,7 @@ export class ScrollbackController {
     if (history !== null && history.nextSibling !== this.terminalLiveContainer) {
       this.terminalLiveContainer.before(history)
     }
+    if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
   /** Apply the echo shift to the grid, or clear it. The write is guarded:

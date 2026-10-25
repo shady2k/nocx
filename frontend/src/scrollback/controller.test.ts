@@ -9,7 +9,10 @@ import {
   type Mock,
   type MockInstance,
 } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ScrollbackController } from './controller'
+import { IntentInput, type SessionIntent } from '../intent-input'
 import { LIVE_REGION_SELECTOR, insideLiveRegion } from '../live-region'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
@@ -56,6 +59,66 @@ function makeController() {
   })
   return { pane, controller }
 }
+
+describe('live projection changes preserve the input owner', () => {
+  it('keeps stdin focus through qualification and leaves another control alone', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({ emit: (intent) => intents.push(intent) })
+    controller.terminalLiveInner.append(input.element)
+    const other = document.createElement('button')
+    document.body.append(other)
+    const nativeFocus = input.element.focus.bind(input.element)
+    // jsdom models the blur caused by reparenting, but not the browser's
+    // refusal to focus an element while an ancestor is display:none.
+    const focus = vi.spyOn(input.element, 'focus').mockImplementation((options) => {
+      for (let node: HTMLElement | null = input.element; node !== null; node = node.parentElement) {
+        if (getComputedStyle(node).display === 'none') return
+      }
+      nativeFocus(options)
+    })
+    try {
+      const command = controller.blockManager.startBlock('read reply', '~', 0)
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      controller.setHistoryPresentation('terminal', history, command)
+      input.focus()
+      expect(document.activeElement).toBe(input.element)
+
+      // A late accepted anchor qualifies the running body. The destination
+      // card starts hidden by the opaque projection, not by the input owner.
+      controller.setHistoryPresentation('block', history, command)
+      expect(document.activeElement).toBe(input.element)
+      intents.length = 0
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(intents).toEqual([{ kind: 'key', payload: 'enter' }])
+
+      other.focus()
+      controller.setHistoryPresentation('terminal', history, command)
+      expect(document.activeElement).toBe(other)
+    } finally {
+      focus.mockRestore()
+      input.destroy()
+      controller.dispose()
+      pane.remove()
+      other.remove()
+      style.remove()
+    }
+  })
+})
 
 /** What the follow sentinel delivers, through the port the controller listens
  *  on. A NEGATIVE delivery counts only for a scroller that can be measured

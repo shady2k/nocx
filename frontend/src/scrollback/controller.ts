@@ -98,7 +98,10 @@ export class ScrollbackController {
   private _mode: LiveRegionMode = 'idle'
   private _historyPresentation: 'none' | 'block' | 'terminal' = 'none'
   private _historyElement: HTMLElement | null = null
-  private _historyBlock: HTMLElement | null = null
+  /** The projection owns this stable record through its visual freeze and
+   *  post-completion review, not only while the running slot is occupied. */
+  private _historyBlock: BlockRecord | null = null
+  private _historyMarkedBlock: HTMLElement | null = null
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -601,7 +604,18 @@ export class ScrollbackController {
    * The live tier replaces a running card's durable body only while its
    * command window is qualified. An opaque window belongs to the terminal,
    * outside all cards; the stylesheet removes the archive layer atomically. */
-  setHistoryPresentation(kind: 'none' | 'block' | 'terminal', element: HTMLElement): void {
+  setHistoryPresentation(
+    kind: 'none' | 'block' | 'terminal',
+    element: HTMLElement,
+    owner: BlockRecord | null | undefined,
+  ): void {
+    // Undefined continues the current projection's ownership; null explicitly
+    // retires it. A new command supplies its record, even in an opaque view.
+    if (kind === 'none') owner = null
+    if (owner !== undefined) this._historyBlock = owner
+    if (this._historyBlock !== null && !this.scrollbackInner.contains(this._historyBlock.el)) {
+      this._historyBlock = null
+    }
     this._historyPresentation = kind
     this._historyElement = element
     if (kind === 'terminal') this.terminalLiveViewport.style.height = ''
@@ -615,11 +629,10 @@ export class ScrollbackController {
    *  is seated outside its card, with emulator history before the live grid;
    *  answers still belong after that output, not before its first row. */
   tailOf(command: HTMLElement): ChildNode {
-    if (
-      this._historyPresentation === 'terminal' &&
-      this._blockManager.runningBlock?.el === command
-    ) {
-      return this.terminalLiveContainer
+    if (this._historyPresentation !== 'none') {
+      return this._historyPresentation === 'terminal' && this._historyBlock?.el === command
+        ? this.terminalLiveContainer
+        : command
     }
     return command.nextSibling === this.terminalLiveContainer ? this.terminalLiveContainer : command
   }
@@ -630,11 +643,11 @@ export class ScrollbackController {
     else this._blockManager.releaseLiveRegion()
     const block =
       this._historyPresentation === 'block' && this._mode === 'running'
-        ? (this._blockManager.runningBlock?.el ?? null)
+        ? (this._historyBlock?.el ?? null)
         : null
-    if (this._historyBlock !== block) {
-      if (this._historyBlock !== null) delete this._historyBlock.dataset.liveHistory
-      this._historyBlock = block
+    if (this._historyMarkedBlock !== block) {
+      if (this._historyMarkedBlock !== null) delete this._historyMarkedBlock.dataset.liveHistory
+      this._historyMarkedBlock = block
       if (block !== null) block.dataset.liveHistory = 'true'
     }
     this.scrollbackInner.classList.toggle('inner-terminal-history', terminal)

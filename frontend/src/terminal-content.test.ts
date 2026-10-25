@@ -16569,7 +16569,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('seats a dismissed streamed answer after opaque output from a nested tool command', async () => {
+  it.each(['dismissed', 'completed'])('seats nested tool answers when %s', async (ending) => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -16593,7 +16593,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     try {
       content.setVisible(true)
       const olderTurn = claimToolCommand(content)
-      startCommand(client)
+      const handler = startCommand(client)
       const scrollback = scrollbackFor(content)
       expect(olderTurn.contains(scrollback.blockManager.runningBlock!.el)).toBe(true)
       await summon(content)
@@ -16604,9 +16604,35 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       )?.[1] as ((params: unknown) => void) | undefined
       delta!({ runId: 42, entryId: 'entry-42', text: 'nested tool explanation' })
       sessionOf(content).fireScreenFrame(screenFrame(2, ['TOOL OUTPUT'], { revision: 1 }))
-      document.body.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('TOOL OUTPUT'),
       )
+      if (ending === 'completed') {
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-run',
+            state: 'completed',
+            exitCode: 0,
+            fence: commandFence,
+            completedAt: '2026-08-27T12:00:00Z',
+          },
+        })
+        blockClosedHandler(client)('att-run')
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        expect(answer.closest('.nocx-summon-answers')).not.toBeNull()
+        const state = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'agent.runState',
+        )?.[1] as ((params: unknown) => void) | undefined
+        state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      } else {
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+        )
+      }
 
       const live = scrollback.terminalLiveContainer
       await vi.waitFor(() => expect(live.textContent).toContain('TOOL OUTPUT'))

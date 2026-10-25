@@ -4783,6 +4783,9 @@ export class TerminalContent extends BasePaneContent {
     this._unqualifiedHistoryBlock = null
     this._liveHistory?.setActive(false)
     this._liveHistory?.setStart(null)
+    if (this._liveHistory !== null) {
+      this.scrollback?.setHistoryPresentation('none', this._liveHistory.el, null)
+    }
     this._liveHistory?.bind(session)
     // What the reclaim could NOT give back, said where a person will see it
     // (nocx-fz4qa). The recovered bytes are already queued for the terminal
@@ -6916,7 +6919,7 @@ export class TerminalContent extends BasePaneContent {
         !this._historyReview)
     ) {
       history.setActive(false)
-      sb.setHistoryPresentation('none', history.el)
+      sb.setHistoryPresentation('none', history.el, null)
       return
     }
     const anchor = block?.outputAnchor ?? null
@@ -6930,7 +6933,7 @@ export class TerminalContent extends BasePaneContent {
       this._syncLiveHistoryPresentation()
     })
     this._historyOpaque = !qualified
-    sb.setHistoryPresentation(qualified ? 'block' : 'terminal', history.el)
+    sb.setHistoryPresentation(qualified ? 'block' : 'terminal', history.el, block ?? undefined)
     history.setActive(true)
   }
 

@@ -761,7 +761,9 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       (second, expected) => {
         const inner = second.parentElement
         if (!inner) return null
-        const children = Array.from(inner.children)
+        const children = Array.from(inner.children).filter(
+          (el) => el.checkVisibility() && el.getBoundingClientRect().height > 0,
+        )
         const command = children.find((el) => el.textContent?.includes(expected.command))
         const first = children.find((el) => el.textContent?.includes(expected.first))
         const secondAnswer = children.find((el) => el.textContent?.includes(expected.second))
@@ -771,10 +773,6 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
           command: commandAt,
           first: firstAt,
           second: secondAnswer ? children.indexOf(secondAnswer) : -1,
-          between:
-            commandAt >= 0 && firstAt > commandAt
-              ? children.slice(commandAt + 1, firstAt).map((el) => el.className)
-              : ['unseated'],
           firstCount: children.filter((el) => el.textContent?.includes(expected.first)).length,
           secondCount: children.filter((el) => el.textContent?.includes(expected.second)).length,
         }
@@ -783,13 +781,10 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     )
     expect(seating).not.toBeNull()
     expect(seating).toMatchObject({ firstCount: 1, secondCount: 1 })
-    // The answers follow the command, in ask order, with nothing of their own
-    // between them. The one thing that may sit between the command and the
-    // first answer is the live region: it is that command's output seat and
-    // rides with the block it belongs to, and the freeze empties it in place
-    // rather than moving it (nocx-hp8p2.8).
+    expect(seating!.command).toBeGreaterThanOrEqual(0)
+    // The answers are consecutive rendered cards after the command, in ask
+    // order. Hidden projection hosts are not additional transcript entries.
     expect(seating!.first).toBeGreaterThan(seating!.command)
-    for (const cls of seating!.between) expect(cls).toContain('terminal-live-container')
     expect(seating!.second).toBe(seating!.first + 1)
 
     await expect

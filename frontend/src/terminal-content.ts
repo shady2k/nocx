@@ -2730,6 +2730,7 @@ export class TerminalContent extends BasePaneContent {
         },
         onTailFollow: (following) => {
           if (following) {
+            if (this.scrollback?.mode === 'idle') this._historyReview = false
             this._syncLiveHistoryPresentation()
             this._liveHistory?.tailReengaged()
           }
@@ -6904,7 +6905,7 @@ export class TerminalContent extends BasePaneContent {
     const block = sb.blockManager.runningBlock
     const blockId = block?.id ?? null
     if (blockId !== this._historyBlockId) {
-      this._historyReview = block === null && this._historyOpaque
+      this._historyReview = block === null && this._historyOpaque && !sb.followsTail
       this._historyBlockId = blockId
       this._unqualifiedHistoryBlock = null
     }

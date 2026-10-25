@@ -16636,11 +16636,83 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       const live = scrollback.terminalLiveContainer
       await vi.waitFor(() => expect(live.textContent).toContain('TOOL OUTPUT'))
-      expect(getComputedStyle(olderTurn).display).toBe('none')
-      expect(live.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      const output =
+        ending === 'completed'
+          ? olderTurn.querySelector<HTMLElement>('[data-entry-id="att-run"]')!
+          : live
+      expect(output.isConnected).toBe(true)
+      expect(output.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
       expect(answer.textContent).toContain('nested tool explanation')
       expect(answer.isConnected).toBe(true)
       for (let node: HTMLElement | null = answer; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+    } finally {
+      teardown()
+      style.remove()
+    }
+  })
+
+  it('returns completed command controls at the tail after an unqualified live window', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      const scrollback = scrollbackFor(content)
+      Object.defineProperties(scrollback.scrollbackArea, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 400 },
+      })
+      scrollback.blockManager.startBlock('earlier command', '~', 0)
+      scrollback.blockManager.bindAttempt('att-earlier')
+      const earlier = closeRunningBlock(scrollback.blockManager, 0)!.el
+      sessionOf(content).fireScreenFrame(screenFrame(1, ['shell prompt']))
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('shell prompt'),
+      )
+      const handler = startCommand(client)
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['command output']))
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('command output'),
+      )
+      // The stack grows during freeze without the reader leaving the tail.
+      // A raw mid-layout measurement must not turn that into history review.
+      Object.defineProperty(scrollback.scrollbackArea, 'scrollHeight', {
+        configurable: true,
+        value: 800,
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-10-25T01:00:00Z',
+        },
+      })
+      blockClosedHandler(client)('att-run')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const header = scrollback.scrollbackInner.querySelector<HTMLElement>(
+        '[data-entry-id="att-run"] > .cmd-header',
+      )!
+      expect(header.isConnected).toBe(true)
+      expect(header.textContent).toContain('top')
+      for (let node: HTMLElement | null = header; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+      expect(earlier.isConnected).toBe(true)
+      for (let node: HTMLElement | null = earlier; node !== null; node = node.parentElement) {
         expect(getComputedStyle(node).display).not.toBe('none')
       }
     } finally {
@@ -16708,8 +16780,6 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(getComputedStyle(answer).display).not.toBe('none')
       expect(answer.textContent).toContain('overlay prose')
       expect(getComputedStyle(live).display).not.toBe('none')
-      if (qualified) expect(getComputedStyle(command!).display).not.toBe('none')
-      else expect(getComputedStyle(command!).display).toBe('none')
 
       // The order a person watched during the run is the order they keep.
       handler({
@@ -16747,7 +16817,6 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           command: 'ls',
         },
       })
-      expect(getComputedStyle(answer).display).toBe('none')
       const nextOutput = screenFrame(3, ['NEXT OUTPUT'])
       anchorOutputAt(client, 'att-run-2', nextOutput)
       sessionOf(content).fireScreenFrame(nextOutput)

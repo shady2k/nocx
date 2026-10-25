@@ -557,40 +557,22 @@
   position: relative;
 }
 
-/* ONE BODY, ONE BOX, AND ITS PADDING PAID ONCE (nocx-zg3k3.14.26, ADR-0091).
-
-   A running command's rows come from two owners and always will: the block
-   paints the rows the durable record has already taken — the ones that left the
-   screen — into its own `.cmd-output`, and the controller's live region paints
-   the screen the command is still writing (ADR-0078's two tiers). Since
-   ADR-0091 the live region is that block's BODY rather than a sibling under it,
-   so the block's box — and therefore its ground, its hover and its trailing
-   space — covers every row the command has written.
-
-   What follows for the padding is that the body is ONE body across the joint:
-   `.cmd-output` is not where it ends, and the live region is not where it
-   starts. Each used to pay the whole body padding at that joint, so two
-   CONSECUTIVE rows of one body were separated by both — 6px + 2px = 8px, one
-   extra half-row, measured on the owner's stand as a 25px step where every
-   other row pair steps 17px, with 6px of bare block body under the block's last
-   row. Both edges stop paying. The body's two OUTER edges keep exactly what
-   they had — the 2px top, paid by whichever box holds the body's first row, and
-   the bottom's `--cmd-output-pad-bottom` + `--terminal-block-trailing-space`,
-   paid by the live region that ends it — so the running region still freezes
-   into a body of the same height (the rule these paddings came from,
-   `.cmd-output` above). */
+/* A qualified running command has one body across its historical/live joint
+   (ADR-0091, ADR-0104). The visible past is the emulator's page, not the hidden
+   durable artifact. Only the selected past can decide which box pays the
+   body's top padding; the live region still pays its bottom edge once. */
 .cmd-block.cmd-block-running > .cmd-output {
   /* This output is not the end of the body while the command runs. */
   padding-bottom: 0;
 }
 
-/* ... and the live region that continues it is not the body's start either.
-   Asked of the DOM rather than of a second flag: the block's own `.cmd-output`
-   IS the fact, and a class set beside it could only drift from it
-   (`paintStoredRows` replaces that element on every growth). A command that has
-   printed nothing past its screen has no `.cmd-output`, and there the live
-   region holds the body's first row and keeps its top padding. */
-.cmd-block.cmd-block-running:has(> .cmd-output) > .terminal-live-container.live-running {
+/* A source change must not leave padding owned by a hidden artifact. */
+.cmd-block.cmd-block-running:not([data-live-history='true']):has(> .cmd-output)
+  > .terminal-live-container.live-running,
+.cmd-block.cmd-block-running[data-live-history='true']:has(> .live-history .term-grid-row)
+  > .terminal-live-container.live-running,
+.scrollback-inner.inner-terminal-history:has(> .live-history .term-grid-row)
+  > .terminal-live-container.live-running {
   padding-top: 0;
 }
 
@@ -650,6 +632,10 @@
   display: none;
   flex: none;
   font-family: var(--font-family-mono);
+}
+
+.cmd-block[data-live-history='true'] > .live-history:has(.term-grid-row) {
+  padding-top: var(--cmd-output-pad-top);
 }
 
 .scrollback-inner.inner-unstructured > .live-history:not([hidden]),
@@ -780,7 +766,8 @@
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
-.scrollback-inner.inner-fullscreen-mode > :not(.terminal-live-container, .cell-metric-probe) {
+.scrollback-inner.inner-fullscreen-mode:not(.inner-terminal-history)
+  > :not(.terminal-live-container, .cell-metric-probe) {
   display: none;
 }
 

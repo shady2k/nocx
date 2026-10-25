@@ -7903,8 +7903,17 @@ export class TerminalContent extends BasePaneContent {
       this._removeSummonStackIfEmpty()
       return
     }
-    const parent = command?.el.parentElement ?? null
-    if (command === null || parent === null) {
+    // Use the projection's tail and its parent as one seat. A nested tool
+    // command can live in an archived Ask while opaque output sits at root.
+    const commandTail =
+      command === null ? null : (this.scrollback?.tailOf(command.el) ?? command.el)
+    const parent = commandTail?.parentElement ?? null
+    if (
+      command === null ||
+      commandTail === null ||
+      parent === null ||
+      !this.scrollback?.scrollbackInner.contains(command.el)
+    ) {
       // Clear/reset can remove the running command before its terminal fact.
       // Its overlay answers belong to that command and must not be resurrected
       // by a later summon or lifecycle transition.
@@ -7928,11 +7937,8 @@ export class TerminalContent extends BasePaneContent {
       if (readingAnswerTail) settle?.scrollToTail()
       else settle?.scrollToBottomIfFollowing()
     }
-    // The layout owner knows whether this command's live output is inside
-    // its qualified card or in the whole-terminal projection beside it.
-    const commandTail = this.scrollback?.tailOf(command.el) ?? command.el
     const seat = () => {
-      let anchor: ChildNode = commandTail.parentNode === parent ? commandTail : command.el
+      let anchor: ChildNode = commandTail
       for (const answer of owned) {
         parent.insertBefore(answer.el, anchor.nextSibling)
         answer.el.classList.remove('nocx-answer-overlay')

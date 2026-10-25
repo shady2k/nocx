@@ -15449,6 +15449,18 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     return handler
   }
 
+  function claimToolCommand(content: TerminalContent): HTMLElement {
+    const turn = scrollbackFor(content).blockManager.addAnswerBlock('run top', FIXTURE_CWD)
+    turn.append('Running the requested program')
+    turn.toolCall({
+      callId: 'older-call',
+      tool: 'run',
+      effect: 'mutate-destructive',
+      opensBlock: true,
+    })
+    return turn.el
+  }
+
   function dispatchSummon(content: TerminalContent): KeyboardEvent {
     const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
       .terminalLiveContainer
@@ -16103,7 +16115,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('does not resurrect answers after their running command is cleared', async () => {
+  it.each([false, true])('does not revive cleared answers (nested=%s)', async (nested) => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
@@ -16122,6 +16134,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     )
     try {
       content.setVisible(true)
+      if (nested) claimToolCommand(content)
       const handler = startCommand(client)
       await summon(content)
       const answer = await submitQuestion(content, client, 'answer removed with clear')
@@ -16553,6 +16566,60 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     } finally {
       teardown()
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('seats a dismissed streamed answer after opaque output from a nested tool command', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      const olderTurn = claimToolCommand(content)
+      startCommand(client)
+      const scrollback = scrollbackFor(content)
+      expect(olderTurn.contains(scrollback.blockManager.runningBlock!.el)).toBe(true)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'explain this running tool')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'nested tool explanation' })
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['TOOL OUTPUT'], { revision: 1 }))
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      const live = scrollback.terminalLiveContainer
+      await vi.waitFor(() => expect(live.textContent).toContain('TOOL OUTPUT'))
+      expect(getComputedStyle(olderTurn).display).toBe('none')
+      expect(live.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(answer.textContent).toContain('nested tool explanation')
+      expect(answer.isConnected).toBe(true)
+      for (let node: HTMLElement | null = answer; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+    } finally {
+      teardown()
+      style.remove()
     }
   })
 

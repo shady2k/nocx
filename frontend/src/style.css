@@ -658,15 +658,25 @@
   display: block;
 }
 
-/* Keep archived cards hidden, but not answers seated after the current live
-   output. Their order is established by the controller's projection tail. */
+/* Opaque rows belong to the terminal, not a command card. Keep the active
+   execution's controls/question ancestry and answers seated after its output;
+   neither may disappear merely because the output anchor is unavailable. */
 .scrollback-inner.inner-terminal-history
   > :not(
     .terminal-live-container,
     .live-history,
     .cell-metric-probe,
+    [data-live-context='true'],
     .terminal-live-container ~ [data-block-kind='ask']
   ) {
+  display: none;
+}
+
+/* Context cards expose metadata only. Their durable bodies and sibling
+   outputs cannot duplicate rows now owned by the whole-terminal projection. */
+.scrollback-inner.inner-terminal-history
+  [data-live-context='true']
+  > :not(.cmd-header, [data-live-context='true']) {
   display: none;
 }
 

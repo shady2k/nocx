@@ -29,7 +29,7 @@ package coordinator
 // the discovery shapes, so a frame that gains a field fails the tripwire until
 // this number moves and a new golden is written with it (ADR-0101, and
 // protocol_surface_internal_test.go for the mechanism).
-const ProtocolVersion = 4
+const ProtocolVersion = 5
 
 // RequestHello is the one request this socket answers today. Naming it
 // rather than serving whatever arrives is what lets an unknown request be

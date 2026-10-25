@@ -206,6 +206,7 @@ test.describe('command editor (nocx-4ff)', () => {
         const area = document.querySelector<HTMLElement>('.pane.active .scrollback-area')
         const block = document.querySelector<HTMLElement>('.pane.active .cmd-block')
         const inner = document.querySelector<HTMLElement>('.pane.active .scrollback-inner')
+        const grid = inner?.querySelector('.terminal-live-grid')
         if (editor === null || area === null || inner === null) {
           throw new Error('terminal layout is incomplete')
         }
@@ -222,6 +223,13 @@ test.describe('command editor (nocx-4ff)', () => {
           ),
           areaHeight: area.clientHeight,
           blockTop: block ? Math.round(block.getBoundingClientRect().top - areaRect.top) : -1,
+          commandOwnsLive:
+            block !== null && grid !== undefined && grid !== null && block.contains(grid),
+          wholeTerminal:
+            grid !== undefined &&
+            grid !== null &&
+            grid.closest('.inner-terminal-history') !== null &&
+            grid.closest('.cmd-block') === null,
           display: editor.style.display,
           visibility: editor.style.visibility,
           settling: area.classList.contains('is-settling'),
@@ -268,32 +276,15 @@ test.describe('command editor (nocx-4ff)', () => {
         running.areaHeight + running.processBarHeight - (before.areaHeight + before.editorHeight),
       ),
     ).toBeLessThanOrEqual(1)
-    // A short command starts where the prompt was, not at the top of the pane.
-    if (running.blockTop <= running.areaHeight / 2) {
-      console.error('running command geometry at failure:', JSON.stringify(running))
-      // The block sits as high as the live region below it is tall, and that
-      // height is the grid's text rows less the echo shift. Six CI failures
-      // since 2026-10-12 put 10-20 extra rows there and none reproduced
-      // locally (nocx-zg3k3.25), so the next one says which half it was:
-      // rows the grid should not have held, or a shift that was not applied.
-      const live = await page.evaluate(() => {
-        const inner = document.querySelector<HTMLElement>('.pane.active .terminal-live-inner')
-        return {
-          transform: inner?.style.transform ?? null,
-          innerHeight: inner ? Math.round(inner.getBoundingClientRect().height) : null,
-          viewportHeight: Math.round(
-            document
-              .querySelector<HTMLElement>('.pane.active .terminal-live-viewport')
-              ?.getBoundingClientRect().height ?? 0,
-          ),
-          rows: [...(inner?.querySelectorAll<HTMLElement>('.term-grid-row') ?? [])].map((row) =>
-            (row.textContent ?? '').trimEnd(),
-          ),
-        }
-      })
-      console.error('live region at failure:', JSON.stringify(live))
+    // Only a qualified command window starts at the prompt. ADR-0104 keeps
+    // an unqualified screen whole and outside every command card instead;
+    // shrinking it to the printed rows would crop a primary-buffer TUI.
+    if (running.commandOwnsLive) {
+      expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)
+    } else {
+      expect(running.wholeTerminal).toBe(true)
     }
-    expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)
+    await expect(page.locator('.pane.active .ui-process-bar:not([hidden])')).toBeInViewport()
 
     // Release the shell-side hold only after observing the running geometry.
     await expect(page.locator('.pane.active .ui-terminal-input')).toBeFocused()
@@ -324,15 +315,13 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(after.editorHeight).toBe(before.editorHeight)
     expect(after.areaHeight).toBe(before.areaHeight)
 
-    // THE FREEZE MUST NOT PUSH THE HEADER BACK DOWN — not by a row, not at
-    // all. The frozen body is the same box as the live region it replaces:
-    // same row pitch, same body padding, and the same rows, because the live
-    // region stopped reserving the one the cursor moved to (it is below the
-    // fence the block ends at, and belongs to no block). Upward movement is
-    // unbounded on purpose: output arriving pushes the header up, exactly as
-    // a terminal scrolls. One pixel of rounding is all that is allowed back.
+    // A qualified command keeps its header when its body freezes. A
+    // whole-terminal review can instead return to the shorter archive at
+    // completion; those headers belong to different projections.
     expect(after.cell).toBeGreaterThan(0)
-    expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(1)
+    if (running.commandOwnsLive) {
+      expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(1)
+    }
   })
 
   // THE COMPOSER IS ONE HEIGHT, EMPTY OR NOT. Typing the first character

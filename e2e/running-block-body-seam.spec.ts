@@ -1,40 +1,14 @@
 /**
- * A running block's own rows are ONE BODY, in ONE BOX (nocx-zg3k3.14.26,
- * ADR-0091).
+ * A qualified running block's historical and live rows share one body
+ * (ADR-0091, narrowed by ADR-0104).
  *
- * With shell integration on the normal screen every row of a running command's
- * output is inside its block: the block's surface runs unbroken from its header,
- * through its status and Stop, through the rows the durable record holds and the
- * rows still live, to its last row and its trailing space. A separate live grid
- * exists only where there are NO blocks — an alternate-screen program, or a
- * session with no shell integration — and both of those are asserted here too,
- * because they are the test of the rule rather than an exception to it.
+ * Its visible past is now the emulator's own history page, independent of
+ * durable capture. The record's overlapping body stays hidden. Measure the
+ * source a person actually sees: consecutive rows have one pitch, no extra
+ * padding at their joint, and one outer trailing space.
  *
- * The owner, 2026-10-19: "Нет, так не должно быть. Нет никакой живой
- * поверхности, у нас блок. Вот если блоков нет (полноэкранный режим или без
- * интеграции) тогда да."
- *
- *
- * The owner saw this twice on the stand while a command ran, and described it
- * twice: the running block's background ended after one row of its output and
- * the rest was painted below it, with an extra half-row of space exactly at
- * that boundary; then, with plain `seq`, the same extra half-row at the same
- * place with no block edge in view.
- *
- * The rows come from two owners and always will: the block paints the rows the
- * durable record has already taken — the ones that left the screen — into its
- * own `.cmd-output`, and the controller's live region paints the screen the
- * command is still writing (ADR-0078's two tiers). What changed is WHERE the
- * live region sits: it is the running block's body, inside the block's own box,
- * not a sibling under it (ADR-0091, which supersedes the mockup decision's
- * sentence that fixed it as a sibling). The seam the owner saw was the first
- * half of that: each box wore the WHOLE body padding, so the joint between two
- * consecutive rows of one body carried both — 6px + 2px = 8px. Measured on this
- * spec's own scenario at the default pane, in that state:
- * `{"blockRows":30,"blockPitch":17,"blockTail":6,"jointGap":8,"jointStep":25}`.
- *
- * The scenario is the owner's own: sixty rows of `printf`, then a wait long
- * enough to look at them.
+ * Unknown coordinate epochs use an explicit whole-terminal projection,
+ * outside command cards, rather than assigning earlier rows to a command.
  */
 
 import type { Page } from '@playwright/test'
@@ -44,8 +18,7 @@ const SCENARIO =
   'w=$(tput cols); for i in $(seq 1 60); do printf \'%*s|\\n\' $((w-1)) "$i"; done; sleep 60'
 
 interface Geometry {
-  /** How many rows the block paints in its own body: the ones the durable
-   *  record has taken, i.e. the rows that left the screen. */
+  /** How many historical rows are painted inside the qualified body. */
   blockRows: number
   /** The pitch of those rows, from their own boxes. */
   blockPitch: number
@@ -92,7 +65,7 @@ async function geometry(page: Page): Promise<Geometry> {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     const pane = document.querySelector<HTMLElement>('.pane.active')!
     const running = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')
-    const body = running?.querySelector<HTMLElement>(':scope > .cmd-output') ?? null
+    const body = running?.querySelector<HTMLElement>(':scope > .live-history:not([hidden])') ?? null
     const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')
     // Not painted yet: the poll below waits for this state rather than for a
     // duration, so an absent block or grid is a zero, not a throw.
@@ -197,12 +170,10 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     await promptReady(page)
   })
 
-  test('keeps one row pitch across the rows the record holds and the rows still live', async ({
-    page,
-  }) => {
+  test('keeps one row pitch across emulator history and the live screen', async ({ page }) => {
     await run(page, SCENARIO)
-    // The state this is about: the command has printed past the screen, so the
-    // block paints rows of its own body and the live region paints the rest.
+    // The command has printed past the screen: emulator pages paint its
+    // historical rows and the live region paints the rest of the same body.
     // Waited on the state, never on a duration.
     await expect
       .poll(async () => (await geometry(page)).blockRows, { timeout: 20_000 })
@@ -246,6 +217,8 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     })
     const g = await geometry(page)
     expect(g.blockRows, `block rows: ${JSON.stringify(g)}`).toBe(0)
+    // Inspect the body's start, not the next row left visible by tail-follow.
+    await page.locator('.pane.active .cmd-block-running > .cmd-header').scrollIntoViewIfNeeded()
     const top = await page.evaluate(async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
       const pane = document.querySelector<HTMLElement>('.pane.active')!

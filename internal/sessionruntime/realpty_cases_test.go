@@ -1,8 +1,11 @@
 package sessionruntime
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/emulator"
 )
 
 // The six verification cases, on a REAL PTY (nocx-ygxjv.9).
@@ -186,6 +189,65 @@ func TestMouseModesOnARealPTY(t *testing.T) {
 	// sequence instead, and the value below would not be 67.
 	p.typed("g")
 	p.wait("MOUSE2:67")
+}
+
+const alternateWheelProgram = rawPreamble + `
+printf '\033[?1049h'
+printf 'WHEEL-NORMAL\n'
+printf 'NORMAL:%s\n' "$(readhex 3)"
+printf '\033[?1h'
+printf 'WHEEL-APPLICATION\n'
+printf 'APPLICATION:%s\n' "$(readhex 3)"
+printf '\033[?1007l'
+printf 'WHEEL-DISABLED\n'
+printf 'DISABLED:%s\n' "$(readhex 1)"
+printf '\033[?1007h\033[?1000h\033[?1006h'
+printf 'WHEEL-REPORTING\n'
+printf 'REPORTING:%s\n' "$(readhex 10)"
+printf '\033[?1007l'
+printf 'WHEEL-REPORTING-NO-1007\n'
+printf 'REPORTING-NO-1007:%s\n' "$(readhex 10)"
+# Keep the alternate screen visible until the test has observed its last reply.
+readhex 1 >/dev/null
+printf '\033[?1000l\033[?1006l\033[?1007h\033[?1049l'
+printf 'WHEEL-PRIMARY\n'
+printf 'PRIMARY:%s\n' "$(readhex 1)"
+`
+
+func TestAlternateWheelAndMouseModifiersOnARealPTY(t *testing.T) {
+	p := startProgram(t, alternateWheelProgram, harnessGeometry(80, 24))
+	p.wait("WHEEL-NORMAL")
+	p.mustSend(IntentKindMouse, []byte("press wheel-up 2 3"))
+	p.wait("NORMAL:1b5b41")
+
+	p.wait("WHEEL-APPLICATION")
+	// Surface alternate-scroll semantics ignore physical wheel modifiers.
+	p.mustSend(IntentKindMouse, []byte("Ctrl+Alt+Shift+press wheel-down 2 3"))
+	p.wait("APPLICATION:1b4f42")
+
+	p.wait("WHEEL-DISABLED")
+	for _, payload := range []string{"press wheel-up 2 3", "press wheel-left 2 3"} {
+		if state, err := p.send(IntentKindMouse, []byte(payload)); state != IntentStateRefused || !errors.Is(err, emulator.ErrUnsupported) {
+			t.Fatalf("disabled alternate scroll %q: state=%s err=%v, want refused and ErrUnsupported", payload, intentStateName(state), err)
+		}
+	}
+	p.typed("g")
+	p.wait("DISABLED:67")
+
+	p.wait("WHEEL-REPORTING")
+	p.mustSend(IntentKindMouse, []byte("Ctrl+Alt+Shift+press wheel-up 2 3"))
+	p.wait("REPORTING:1b5b3c39323b333b344d")
+	p.wait("WHEEL-REPORTING-NO-1007")
+	p.mustSend(IntentKindMouse, []byte("Ctrl+Alt+Shift+press wheel-down 2 3"))
+	p.wait("REPORTING-NO-1007:1b5b3c39333b333b344d")
+	p.typed("g")
+
+	p.wait("WHEEL-PRIMARY")
+	if state, err := p.send(IntentKindMouse, []byte("press wheel-up 2 3")); state != IntentStateRefused || !errors.Is(err, emulator.ErrUnsupported) {
+		t.Fatalf("primary wheel: state=%s err=%v, want refused and ErrUnsupported", intentStateName(state), err)
+	}
+	p.typed("g")
+	p.wait("PRIMARY:67")
 }
 
 // ---------------------------------------------------------------------------

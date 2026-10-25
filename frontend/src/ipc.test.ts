@@ -1203,11 +1203,14 @@ describe('inputStalled notification', () => {
 
 describe('sendResize', () => {
   it('sends the new grid size for the open session', async () => {
-    const { session, ws } = await connectedSession()
-    session.sendResize({ cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
+    const { client, session, ws } = await connectedSession()
+    const receipt = session.sendResize({ cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
 
     const resize = ws.requests().find((r) => r.method === 'resize')
     expect(resize?.params).toEqual({ sessionId: SID, cols: 100, rows: 30, xpixel: 0, ypixel: 0 })
+    ws.deliverText({ jsonrpc: '2.0', id: resize!.id, result: {} })
+    await expect(receipt).resolves.toBe('applied')
+    client.close()
   })
 
   // A ZOOM IS A RESIZE (nocx-zg3k3.2.9): a different cell metric at the same
@@ -1215,10 +1218,15 @@ describe('sendResize', () => {
   // WHOLE report and never on the grid alone. The pair: the same metric
   // twice commits nothing new — the second identical report sends nothing.
   it('sends a zoom at the same grid, and nothing for a repeated metric', async () => {
-    const { session, ws } = await connectedSession()
+    const { client, session, ws } = await connectedSession()
     const resizes = () => ws.requests().filter((r) => r.method === 'resize')
 
-    session.sendResize({ cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 800, ypixel: 480 })
+    const receipt = session.sendResize({
+      cols: OPEN_COLS,
+      rows: OPEN_ROWS,
+      xpixel: 800,
+      ypixel: 480,
+    })
     expect(resizes()).toHaveLength(1)
     expect(resizes()[0].params).toEqual({
       sessionId: SID,
@@ -1228,8 +1236,13 @@ describe('sendResize', () => {
       ypixel: 480,
     })
 
-    session.sendResize({ cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 800, ypixel: 480 })
+    expect(
+      session.sendResize({ cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 800, ypixel: 480 }),
+    ).toBeNull()
     expect(resizes()).toHaveLength(1)
+    ws.deliverText({ jsonrpc: '2.0', id: resizes()[0].id, result: {} })
+    await expect(receipt).resolves.toBe('applied')
+    client.close()
   })
 })
 
@@ -1377,13 +1390,15 @@ describe('resizeApplied', () => {
     client.close()
   })
 
-  it('shares report bookkeeping with sendResize without changing its boolean contract', async () => {
+  it('returns the changed report receipt and shares deduplication with forced requests', async () => {
     const { client, session, ws } = await connectedSession()
-    expect(session.sendResize(size)).toBe(true)
+    const reported = session.sendResize(size)
     const pending = session.resizeApplied(size)
     const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
     expect(requests).toHaveLength(2)
-    expect(session.sendResize(size)).toBe(false)
+    expect(session.sendResize(size)).toBeNull()
+    ws.deliverText({ jsonrpc: '2.0', id: requests[0].id, result: {} })
+    await expect(reported).resolves.toBe('applied')
     ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
     await expect(pending).resolves.toBe('applied')
     client.close()
@@ -1728,9 +1743,10 @@ describe('reconnect and reattach', () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
-    session.sendResize({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
+    const pending = session.sendResize({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
 
     firstWS.serverHangsUp()
+    await expect(pending).resolves.toBe('closed')
     vi.advanceTimersByTime(475)
     await Promise.resolve()
 

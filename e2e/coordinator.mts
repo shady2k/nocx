@@ -40,9 +40,9 @@ import { basename } from 'node:path'
  * The daemon makes no decision on a client's stated version today, so a
  * mismatch here would not be refused — it would be accepted and mean the
  * wrong thing, which is why the constant carries the reference rather than
- * being written as a bare 1.
+ * an unrelated version.
  */
-const PROTOCOL_VERSION = 1
+const PROTOCOL_VERSION = 5
 
 /** What the backend is and where it answers. */
 export interface CoordinatorEndpoint {

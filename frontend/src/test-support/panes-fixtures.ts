@@ -186,7 +186,7 @@ export interface SessionFake {
    *  order requires. */
   awaitsIntegration: boolean
   send: ReturnType<typeof vi.fn>
-  sendResize: Mock<(size: SessionSize) => boolean>
+  sendResize: Mock<(size: SessionSize) => Promise<'applied' | 'superseded' | 'closed'> | null>
   resizeApplied: Mock<(size: SessionSize) => Promise<'applied' | 'superseded' | 'closed'>>
   /** Hand one session intent to the pane's helper (nocx-zg3k3.3.1). What a
    *  person typed, pasted or clicked lands here now, as the kind and payload
@@ -294,7 +294,9 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     awaitsIntegration: false,
     recovered: null,
     send: vi.fn(),
-    sendResize: vi.fn<(size: SessionSize) => boolean>(),
+    sendResize: vi.fn<(size: SessionSize) => Promise<'applied' | 'superseded' | 'closed'> | null>(
+      () => null,
+    ),
     resizeApplied: vi.fn(() => Promise.resolve('applied' as const)),
     intent: vi.fn<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>(() =>
       Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),

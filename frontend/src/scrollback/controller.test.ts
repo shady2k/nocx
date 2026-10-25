@@ -9,7 +9,10 @@ import {
   type Mock,
   type MockInstance,
 } from 'vitest'
-import { ScrollbackController } from './controller'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { ScrollbackController, type ScrollbackControllerOpts } from './controller'
+import { IntentInput, type SessionIntent } from '../intent-input'
 import { LIVE_REGION_SELECTOR, insideLiveRegion } from '../live-region'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
@@ -18,6 +21,9 @@ import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { PetOverlay } from '../pets/overlay'
 import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
 import { closeRunningBlock } from '../test-support/block-close'
+import { paintStoredRows, type StoredBlockRows } from './block-rows'
+import { DEFAULT_SNAPSHOT } from './serializer'
+import { wireRowOf, type CellSpec } from '../painter/fixtures'
 
 function makeRenderer() {
   let cellWidth = 0
@@ -40,13 +46,16 @@ function makeRenderer() {
   }
 }
 
-function makeController() {
+function makeController(
+  options: Pick<ScrollbackControllerOpts, 'runningActions' | 'paintStoredRows'> = {},
+) {
   const pane = document.createElement('div')
   const controller = new ScrollbackController({
     pane,
     liveContentHeight: () => null,
     cellMetrics: () => null,
     snapshotStore: new CommandSnapshotStore(),
+    ...options,
   })
   // jsdom does no layout: give the scrollback area a real height so the
   // fill-the-pane sizing has something to read.
@@ -56,6 +65,381 @@ function makeController() {
   })
   return { pane, controller }
 }
+
+function visible(element: HTMLElement | null): boolean {
+  if (element === null || !element.isConnected) return false
+  for (let node: HTMLElement | null = element; node !== null; node = node.parentElement) {
+    const css = getComputedStyle(node)
+    if (node.hidden || css.display === 'none' || css.visibility === 'hidden') return false
+  }
+  return true
+}
+
+describe('live projection changes preserve the input owner', () => {
+  it('keeps stdin focus through qualification and leaves another control alone', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({ emit: (intent) => intents.push(intent) })
+    controller.terminalLiveInner.append(input.element)
+    const other = document.createElement('button')
+    document.body.append(other)
+    const nativeFocus = input.element.focus.bind(input.element)
+    // jsdom models the blur caused by reparenting, but not the browser's
+    // refusal to focus an element while an ancestor is display:none.
+    const focus = vi.spyOn(input.element, 'focus').mockImplementation((options) => {
+      for (let node: HTMLElement | null = input.element; node !== null; node = node.parentElement) {
+        if (getComputedStyle(node).display === 'none') return
+      }
+      nativeFocus(options)
+    })
+    try {
+      const command = controller.blockManager.startBlock('read reply', '~', 0)
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      controller.setHistoryPresentation('terminal', history, command)
+      input.focus()
+      expect(document.activeElement).toBe(input.element)
+
+      // A late accepted anchor qualifies the running body. The destination
+      // card starts hidden by the opaque projection, not by the input owner.
+      controller.setHistoryPresentation('block', history, command)
+      expect(document.activeElement).toBe(input.element)
+      intents.length = 0
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(intents).toEqual([{ kind: 'key', payload: 'enter' }])
+
+      other.focus()
+      controller.setHistoryPresentation('terminal', history, command)
+      expect(document.activeElement).toBe(other)
+    } finally {
+      focus.mockRestore()
+      input.destroy()
+      controller.dispose()
+      pane.remove()
+      other.remove()
+      style.remove()
+    }
+  })
+
+  it('preserves uninterrupted text input while stored output and accepted layouts update', () => {
+    const { pane, controller } = makeController({
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    document.body.append(pane)
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({ emit: (intent) => intents.push(intent) })
+    controller.terminalLiveInner.append(input.element)
+    try {
+      const command = controller.blockManager.startBlock('read reply', '~', 0)
+      controller.blockManager.bindAttempt('read-entry')
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      controller.setHistoryPresentation('block', history, command)
+      input.focus()
+      let lostFocus = false
+      input.element.addEventListener('blur', () => {
+        lostFocus = true
+      })
+      intents.length = 0
+      const text = "GRID 'NOCX''-INPUT-REACHED' "
+      const lines: Array<StoredBlockRows['lines'][number]> = []
+      for (const [index, character] of [...text].entries()) {
+        document.activeElement!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: character, bubbles: true, cancelable: true }),
+        )
+        lines.push({
+          from: index,
+          row: wireRowOf(Array.from(`output ${index}`, (ch) => [ch, 1, true] as CellSpec)),
+        })
+        // Backend rows and an accepted-frame layout can land between a native
+        // keydown and its text commit. Neither may interrupt that editor.
+        controller.blockManager.applyStoredRows('read-entry', {
+          lines: [...lines],
+          droppedRows: 0,
+          lostRows: 0,
+          truncated: null,
+        })
+        controller.setHistoryPresentation('block', history, command)
+        expect(input.element.isConnected).toBe(true)
+        expect(document.activeElement).toBe(input.element)
+        input.element.value = character
+        document.activeElement!.dispatchEvent(
+          new InputEvent('input', {
+            data: character,
+            inputType: 'insertText',
+            bubbles: true,
+          }),
+        )
+      }
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(lostFocus).toBe(false)
+      expect(intents).toEqual([
+        ...Array.from(text, (character) => ({ kind: 'text', payload: character })),
+        { kind: 'key', payload: 'enter' },
+      ])
+      const output = command.el.querySelector<HTMLElement>(':scope > .cmd-output')!
+      expect(
+        output.compareDocumentPosition(input.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(
+        [...output.querySelectorAll('.term-grid-row')].map((row) => row.textContent?.trimEnd()),
+      ).toEqual(Array.from(text, (_, index) => `output ${index}`))
+    } finally {
+      input.destroy()
+      controller.dispose()
+      pane.remove()
+    }
+  })
+
+  it('preserves execution chrome without duplicate rows through freeze and projection changes', () => {
+    const stop = vi.fn()
+    const { pane, controller } = makeController({
+      runningActions: {
+        stop,
+        isActive: (el) => controller.blockManager.runningBlock?.el === el,
+      },
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const stored: StoredBlockRows = {
+      lines: [
+        {
+          from: 0,
+          row: wireRowOf(Array.from('SAME OUTPUT', (ch) => [ch, 1, true] as CellSpec)),
+        },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
+    const unrelated = controller.blockManager.addAnswerBlock('older archived question', '~')
+    const turn = controller.blockManager.addAnswerBlock('run the program', '~')
+    turn.toolCall({
+      callId: 'context-run',
+      tool: 'run',
+      effect: 'mutate-destructive',
+      opensBlock: true,
+    })
+    const command = controller.blockManager.startBlock('read reply', '~', 0, 'agent')
+    controller.blockManager.bindAttempt('context-command')
+    controller.blockManager.applyStoredRows('context-command', stored)
+    controller.setRunning()
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    const globalRow = document.createElement('div')
+    globalRow.className = 'term-grid-row'
+    globalRow.textContent = 'SAME OUTPUT'
+    history.append(globalRow)
+    const header = (block: HTMLElement): HTMLElement | null =>
+      block.querySelector(':scope > .cmd-header')
+    const body = (block: HTMLElement): HTMLElement | null =>
+      block.querySelector(':scope > .cmd-output')
+    const visibleCopies = (): number =>
+      [...controller.scrollbackInner.querySelectorAll<HTMLElement>('.term-grid-row')].filter(
+        (row) => visible(row) && row.textContent?.trim() === 'SAME OUTPUT',
+      ).length
+    try {
+      controller.setHistoryPresentation('terminal', history, command)
+      expect(header(turn.el)?.textContent).toContain('run the program')
+      expect(visible(header(turn.el))).toBe(true)
+      expect(header(command.el)?.textContent).toContain('read reply')
+      expect(visible(header(command.el))).toBe(true)
+      const stopButton = command.el.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')
+      expect(visible(stopButton)).toBe(true)
+      stopButton!.click()
+      expect(stop).toHaveBeenCalledOnce()
+      expect(visible(header(unrelated.el))).toBe(false)
+      expect(body(command.el)?.textContent).toContain('SAME OUTPUT')
+      expect(visible(body(command.el))).toBe(false)
+      expect(visible(globalRow)).toBe(true)
+      expect(visibleCopies()).toBe(1)
+
+      const runningHeader = header(command.el)
+      closeRunningBlock(controller.blockManager)
+      controller.setHistoryPresentation('terminal', history, undefined)
+      expect(visible(runningHeader)).toBe(false)
+      expect(visible(header(command.el))).toBe(true)
+      expect(visible(header(turn.el))).toBe(true)
+      expect(visible(body(command.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
+
+      const next = controller.blockManager.startBlock('next command', '~', 0)
+      controller.setHistoryPresentation('terminal', history, next)
+      expect(visible(header(next.el))).toBe(true)
+      expect(visible(header(command.el))).toBe(false)
+      expect(visible(header(turn.el))).toBe(false)
+      expect(visible(header(unrelated.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
+
+      // Retiring terminal review restores the independent recorded cards.
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+      expect(visible(body(command.el))).toBe(true)
+      expect(visible(header(turn.el))).toBe(true)
+      expect(visible(globalRow)).toBe(false)
+
+      // Starting an unowned review must not resurrect the old context chrome.
+      history.hidden = false
+      controller.setHistoryPresentation('terminal', history, null)
+      expect(visible(header(next.el))).toBe(false)
+      expect(visible(header(turn.el))).toBe(false)
+      expect(visible(body(command.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
+    } finally {
+      controller.dispose()
+      pane.remove()
+      style.remove()
+    }
+  })
+
+  it('collapses the idle live grid when terminal-history review returns to the archive', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    try {
+      const command = controller.blockManager.startBlock('completed command', '~', 0)
+      closeRunningBlock(controller.blockManager)
+      controller.setIdle()
+      const live = controller.terminalLiveContainer
+      expect(getComputedStyle(live).height).toBe('0px')
+      expect(visible(command.el)).toBe(true)
+
+      controller.setHistoryPresentation('terminal', history, null)
+      expect(getComputedStyle(live).height).toBe('360px')
+      expect(visible(command.el)).toBe(false)
+
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+      expect(getComputedStyle(live).height).toBe('0px')
+      expect(visible(command.el)).toBe(true)
+      // Later grid measurements must not reopen the idle box.
+      controller.setLiveHeight(240)
+      expect(getComputedStyle(live).height).toBe('0px')
+    } finally {
+      controller.dispose()
+      pane.remove()
+      style.remove()
+    }
+  })
+
+  it('keeps an older nested command answer before a later program sharing its turn', () => {
+    const { controller } = makeController()
+    const turn = controller.blockManager.addAnswerBlock('run two programs', '~')
+    turn.toolCall({ callId: 'old', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    const old = controller.blockManager.startBlock('old program', '~', 0, 'agent')
+    closeRunningBlock(controller.blockManager)
+    turn.toolCall({ callId: 'new', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    const current = controller.blockManager.startBlock('current program', '~', 0, 'agent')
+    controller.setRunning()
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    try {
+      controller.setHistoryPresentation('terminal', history, current)
+      controller.enterFullscreen()
+      controller.setHistoryPresentation('none', history, null)
+      const answer = controller.blockManager.addAnswerBlock('old program follow-up', '~')
+      answer.append('the old program finished')
+      const tail = controller.tailOf(old.el)
+      tail.parentNode!.insertBefore(answer.el, tail.nextSibling)
+      expect(old.el.compareDocumentPosition(answer.el) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+        0,
+      )
+      expect(
+        answer.el.compareDocumentPosition(controller.terminalLiveContainer) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(answer.el.textContent).toContain('the old program finished')
+    } finally {
+      controller.dispose()
+    }
+  })
+
+  it('keeps seated answers after terminal output when fullscreen completes into opaque review', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    try {
+      const command = controller.blockManager.startBlock('full-screen program', '~', 0)
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      history.textContent = 'primary history'
+      controller.setHistoryPresentation('terminal', history, command)
+      controller.enterFullscreen()
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+
+      const first = controller.blockManager.addAnswerBlock('first question', '~')
+      first.append('first answer')
+      const second = controller.blockManager.addAnswerBlock('follow-up question', '~')
+      second.append('second answer')
+      const overlay = document.createElement('div')
+      pane.append(overlay)
+      overlay.append(first.el, second.el)
+      // Dismissing the summon seats the same streamed nodes through the one
+      // projection-tail contract; it does not rebuild or search their text.
+      let tail = controller.tailOf(command.el)
+      const parent = tail.parentNode!
+      for (const answer of [first, second]) {
+        parent.insertBefore(answer.el, tail.nextSibling)
+        tail = answer.el
+      }
+
+      closeRunningBlock(controller.blockManager)
+      controller.exitFullscreen()
+      history.hidden = false
+      controller.setHistoryPresentation('terminal', history, command)
+      const live = controller.terminalLiveContainer
+      expect(live.compareDocumentPosition(first.el) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(
+        first.el.compareDocumentPosition(second.el) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(visible(first.el)).toBe(true)
+      expect(visible(second.el)).toBe(true)
+      expect(first.el.textContent).toContain('first answer')
+      expect(second.el.textContent).toContain('second answer')
+    } finally {
+      controller.dispose()
+      pane.remove()
+      style.remove()
+    }
+  })
+})
 
 /** What the follow sentinel delivers, through the port the controller listens
  *  on. A NEGATIVE delivery counts only for a scroller that can be measured

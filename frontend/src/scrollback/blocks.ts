@@ -2250,11 +2250,8 @@ export class BlockManager {
     // Held by a block: its seat is that block's body, and moving it out here
     // would take the rows away from the box whose output they are.
     if (this._liveContainer.parentElement !== this._scrollbackInner) return
-    let seat: HTMLElement = el
-    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
-      seat = seat.parentElement
-    }
-    if (seat.parentElement !== this._scrollbackInner) return
+    const seat = this.rootFlowOwner(el)
+    if (seat === null) return
     // A move is a removal and an insertion, and a removal drops the focus of
     // anything inside the region to <body>. The region is re-seated at the
     // authenticated start, when the grid has held the keyboard since the
@@ -2262,10 +2259,17 @@ export class BlockManager {
     // started — so every key between this move and the next focus call was
     // lost (nocx-askcb). The focus goes back where it was, in the same task,
     // and only if the region held it.
-    const focused = document.activeElement
-    const heldFocus = focused instanceof HTMLElement && this._liveContainer.contains(focused)
-    this._scrollbackInner.insertBefore(this._liveContainer, seat.nextSibling)
-    if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
+    this._moveLive(this._scrollbackInner, seat.nextSibling)
+  }
+
+  /** The root-flow seat already used when positioning a command's live grid.
+   *  A nested tool command shares its enclosing turn's root seat. */
+  rootFlowOwner(el: HTMLElement): HTMLElement | null {
+    let seat = el
+    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
+      seat = seat.parentElement
+    }
+    return seat.parentElement === this._scrollbackInner ? seat : null
   }
 
   /** THE LIVE REGION'S SEAT, IN TWO ANSWERS (ADR-0091).
@@ -2317,29 +2321,26 @@ export class BlockManager {
    *  running right now, so the focus goes back in the same task
    *  (nocx-askcb). */
   private _moveLive(parent: HTMLElement, before: ChildNode | null): void {
+    if (
+      this._liveContainer.parentElement === parent &&
+      (before === this._liveContainer || this._liveContainer.nextSibling === before)
+    ) {
+      return
+    }
     const focused = document.activeElement
     const heldFocus = focused instanceof HTMLElement && this._liveContainer.contains(focused)
     parent.insertBefore(this._liveContainer, before)
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
-  /** The body's order is header, the rows the record holds, then the live
-   *  region — and `paintStoredRows` REPLACES `.cmd-output` on every growth, so
-   *  each paint appends it after the region and the order has to be restored
-   *  here. One rule, one place: the manager paints and the manager holds the
-   *  region's seat. */
+  /** Keep newly painted body rows/notices before the attached live editor.
+   *  Moving that editor to the end would blur it between keydown and native
+   *  input, cancelling pending text even if focus is restored immediately. */
   private _keepLiveBodyLast(block: HTMLElement): void {
     if (this._liveContainer.parentElement !== block) return
-    if (block.lastElementChild === this._liveContainer) return
-    this._moveLive(block, null)
-  }
-
-  /** The last element belonging to `el`: its live output when the live
-   *  region is this block's, the block itself otherwise. What anything
-   *  seated after a block anchors on — the other half of `_liveFollows`,
-   *  read from the seating side (nocx-hp8p2.8). */
-  tailOf(el: HTMLElement): ChildNode {
-    return el.nextSibling === this._liveContainer ? this._liveContainer : el
+    while (this._liveContainer.nextSibling !== null) {
+      block.insertBefore(this._liveContainer.nextSibling, this._liveContainer)
+    }
   }
 
   /** Put a COMMAND block in the next seat: inside the turn that claimed it

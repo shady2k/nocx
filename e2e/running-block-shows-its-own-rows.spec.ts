@@ -91,7 +91,7 @@ test.describe('a running block', () => {
     await page.keyboard.press('Control+C')
   })
 
-  test('that waits keeps its own line and none of the previous output after the pane gets shorter', async ({
+  test('keeps its own line without misattributing earlier rows after the pane gets shorter', async ({
     page,
   }) => {
     await run(page, "printf 'OWN-LINE\\n'; read x")
@@ -101,14 +101,42 @@ test.describe('a running block', () => {
     const gridRows = page.locator('.pane.active .terminal-live-grid .term-grid-row')
     const before = await gridRows.count()
     const size = page.viewportSize()!
-    // Three rows shorter: the emulator pushes the top of the screen into
-    // history, and the output start moves up with it. Wait for the frame of
-    // the new size, or the read below sees the old one.
+    // A known height-only commit preserves the command window. If accepted
+    // geometry was coalesced, ADR-0104 instead exposes whole-terminal history
+    // outside the card; neither path may attribute old rows to this command.
     await page.setViewportSize({ width: size.width, height: size.height - 51 })
     await expect.poll(async () => gridRows.count(), { timeout: 15_000 }).toBeLessThan(before)
     await expect
-      .poll(async () => (await visibleLiveRows(page)).join('|'), { timeout: 5_000 })
-      .toMatch(/^OWN-LINE(\|)?$/)
+      .poll(async () => visibleLiveRows(page), { timeout: 5_000 })
+      .toEqual(expect.arrayContaining(['OWN-LINE']))
+    const ownership = await page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>('.pane.active')!
+      const command = pane.querySelector<HTMLElement>('.cmd-block-running')!
+      const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')!
+      const visibleRows = [...pane.querySelectorAll<HTMLElement>('.term-grid-row')].filter((row) =>
+        row.checkVisibility(),
+      )
+      return {
+        qualified: command.contains(grid),
+        wholeTerminal:
+          grid.closest('.inner-terminal-history') !== null &&
+          grid.closest('.cmd-block') === null &&
+          grid
+            .closest('.terminal-live-container')
+            ?.parentElement?.classList.contains('scrollback-inner') === true,
+        commandRows: visibleRows
+          .filter((row) => command.contains(row))
+          .map((row) => (row.textContent ?? '').trim()),
+        ownCopies: visibleRows.filter((row) => row.textContent?.trim() === 'OWN-LINE').length,
+      }
+    })
+    expect(ownership.commandRows.filter((row) => /^\d+$/.test(row))).toEqual([])
+    expect(ownership.ownCopies).toBe(1)
+    if (ownership.qualified) {
+      expect((await visibleLiveRows(page)).join('|')).toMatch(/^OWN-LINE(\|)?$/)
+    } else {
+      expect(ownership.wholeTerminal).toBe(true)
+    }
     await page.keyboard.press('Enter')
   })
 })

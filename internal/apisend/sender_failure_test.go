@@ -60,10 +60,10 @@ func TestSend_DNSFailureIsReported(t *testing.T) {
 }
 
 // TestSend_DNSFailureOnAnOrdinaryMachine is the same failure without a fake:
-// .invalid is reserved never to resolve (RFC 2606).
+// The absolute .invalid name cannot be rewritten by a DNS search suffix.
 func TestSend_DNSFailureOnAnOrdinaryMachine(t *testing.T) {
 	ex, err := New().Send(context.Background(),
-		apicollGet("http://nocx-no-such-host.invalid/v1"), Key{})
+		apicollGet("http://nocx-no-such-host.invalid./v1"), Key{})
 	fail := failedAt(t, ex, err, PhaseResolve)
 	if !strings.Contains(fail.Reason, "resolving") {
 		t.Fatalf("reason = %q, want it to name the resolve step", fail.Reason)

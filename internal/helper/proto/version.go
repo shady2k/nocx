@@ -5,8 +5,8 @@ package proto
 // helper writes anything to stdout (D5).
 //
 // It covers the whole wire contract, not the envelope alone: the frame types,
-// the services, their ops, and the shape of every result. A reader that
-// switches on any of those is reasoning about this number.
+// the services, their ops, the accepted input vocabulary, and the shape of every
+// result. A reader that switches on any of those is reasoning about this number.
 //
 // # When it must be bumped (nocx-k6p18.11)
 //
@@ -18,9 +18,10 @@ package proto
 // deployed to gain it against.
 //
 // From the first publish that argument is spent, and the rule is the strict
-// one: ANY change to a frame type, a service, an op or a result shape gets a
-// bump. Installs are content-addressed and immutable, two generations are
-// resident at once, and one lingers as long as it holds a session — months.
+// one: ANY change to a frame type, a service, an op, the accepted input
+// vocabulary or a result shape gets a bump. Installs are content-addressed and
+// immutable, two generations are resident at once, and one lingers as long as
+// it holds a session — months.
 // So a published number is a fact other binaries reason about, and anything
 // added under it silently redefines what they think they agreed to.
 //
@@ -330,4 +331,9 @@ package proto
 // directions, which is what makes the number the whole of the compatibility
 // story, and no shim reads one shape as the other: a generation that cannot
 // state the rendering does not answer this coordinator at all.
-const Version = "23"
+// This is 24 rather than 23 because mouse intent actions now accept key-style
+// modifier prefixes, and alternate-screen wheel input follows mode 1007
+// (nocx-if2d8, nocx-3y64b). A 23-helper rejects "Ctrl+press" and cannot apply
+// the new wheel semantics. The hello fence must refuse that runtime before
+// input can be routed to a persisted generation after coordinator replacement.
+const Version = "24"

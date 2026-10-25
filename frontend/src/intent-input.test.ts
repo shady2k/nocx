@@ -436,6 +436,282 @@ describe('a wheel gesture is counted in lines, not in events (nocx-1ebrs.26)', (
   })
 })
 
+describe('the wheel has one owner before any delta is accumulated (nocx-tdncs)', () => {
+  function wheelPane(localScrolling: boolean | 'native' = true) {
+    const intents: SessionIntent[] = []
+    const localScrolls: Array<[number, number]> = []
+    const surface = document.createElement('div')
+    const grid = document.createElement('div')
+    const history = document.createElement('div')
+    surface.append(grid, history)
+    document.body.append(surface)
+    Object.defineProperty(surface, 'clientHeight', { value: 170 })
+    const state = {
+      tracking: true,
+      buffer: 'normal' as 'normal' | 'alternate',
+      hit: true,
+      lineHeight: 17,
+    }
+    const input = new IntentInput({
+      emit: (intent) => intents.push(intent),
+      surface,
+      cellAt: () => (state.hit ? { x: 2, y: 3 } : null),
+      mouseTracking: () => state.tracking,
+      bufferKind: () => state.buffer,
+      isLiveTarget: (target) => target instanceof Node && grid.contains(target),
+      scrollLocal: localScrolling
+        ? (x, y, overLive) => {
+            if (localScrolling === 'native') return false
+            localScrolls.push([x, y])
+            const scroller = overLive ? grid : history
+            scroller.scrollLeft += x
+            scroller.scrollTop += y
+            return true
+          }
+        : undefined,
+      lineHeight: () => state.lineHeight,
+    })
+    document.body.append(input.element)
+    live.push(input)
+    function wheel(deltaY: number, init: WheelEventInit = {}, target = grid): WheelEvent {
+      const event = new WheelEvent('wheel', {
+        deltaY,
+        clientX: 10,
+        clientY: 20,
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      })
+      target.dispatchEvent(event)
+      return event
+    }
+    return { input, surface, grid, history, intents, localScrolls, state, wheel }
+  }
+
+  it('retires fractions when the accepted input binding changes between wheel events', () => {
+    const { input, wheel, intents } = wheelPane()
+    wheel(10)
+    input.resetWheel()
+    wheel(7)
+    expect(intents).toEqual([])
+    wheel(10)
+    expect(intents).toEqual([{ kind: 'mouse', payload: 'press wheel-down 2 3' }])
+  })
+
+  it('lets a local owner scroll background without treating it as a reporting grid', () => {
+    const surface = document.createElement('div')
+    const grid = document.createElement('div')
+    const archive = document.createElement('div')
+    surface.append(grid, archive)
+    document.body.append(surface)
+    surface.scrollTop = 100
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({
+      surface,
+      emit: (intent) => intents.push(intent),
+      cellAt: () => ({ x: 2, y: 3 }),
+      mouseTracking: () => true,
+      isLiveTarget: (target) => target === grid,
+      scrollLocal: (_x, y, overLive, target) => {
+        if (overLive || target !== surface) return false
+        surface.scrollTop += y
+        return true
+      },
+    })
+    live.push(input)
+    const backgroundWheel = new WheelEvent('wheel', {
+      deltaY: -40,
+      bubbles: true,
+      cancelable: true,
+    })
+    surface.dispatchEvent(backgroundWheel)
+    expect(surface.scrollTop).toBe(60)
+    expect(backgroundWheel.defaultPrevented).toBe(true)
+    const archiveWheel = new WheelEvent('wheel', {
+      deltaY: -40,
+      bubbles: true,
+      cancelable: true,
+    })
+    archive.dispatchEvent(archiveWheel)
+    expect(surface.scrollTop).toBe(60)
+    expect(archiveWheel.defaultPrevented).toBe(false)
+    expect(intents).toEqual([])
+  })
+
+  it('leaves nested archived scrolling native when the local owner declines the event', () => {
+    const { wheel, history, intents } = wheelPane('native')
+    const event = wheel(40, {}, history)
+    expect(event.defaultPrevented).toBe(false)
+    expect(intents).toEqual([])
+    expect(history.scrollTop).toBe(0)
+  })
+
+  // Reproduced failures: Shift and historical targets reached the program,
+  // and sub-line captured deltas still reached the browser's scroller.
+  it.each(['normal', 'alternate'] as const)(
+    'scrolls Shift-wheel locally exactly once on the %s buffer, never as app input',
+    (buffer) => {
+      const { state, wheel, grid, history, intents, localScrolls } = wheelPane()
+      state.buffer = buffer
+      const event = wheel(-2, {
+        deltaX: 1,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        shiftKey: true,
+        ctrlKey: true,
+      })
+      expect(localScrolls).toEqual([[17, -34]])
+      expect(grid.scrollLeft).toBe(17)
+      expect(grid.scrollTop).toBe(-34)
+      expect(history.scrollTop).toBe(0)
+      expect(intents).toEqual([])
+      expect(event.defaultPrevented).toBe(true)
+    },
+  )
+
+  it('keeps historical deltas local and clears app residuals on both target transitions', () => {
+    const { wheel, grid, history, intents, localScrolls } = wheelPane()
+    wheel(10, { deltaX: 10 })
+    const historical = wheel(100, { deltaX: 100 }, history)
+    wheel(7, { deltaX: 7 })
+    expect(localScrolls).toEqual([[100, 100]])
+    expect(history.scrollLeft).toBe(100)
+    expect(history.scrollTop).toBe(100)
+    expect(grid.scrollTop).toBe(0)
+    expect(intents).toEqual([])
+    expect(historical.defaultPrevented).toBe(true)
+    wheel(10, { deltaX: 10 })
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-down 2 3' },
+      { kind: 'mouse', payload: 'press wheel-right 2 3' },
+    ])
+  })
+
+  it('captures every fractional app event immediately and counts both axes independently', () => {
+    const { wheel, intents, localScrolls } = wheelPane()
+    expect(wheel(10, { deltaX: -8 }).defaultPrevented).toBe(true)
+    expect(intents).toEqual([])
+    expect(wheel(7, { deltaX: -8 }).defaultPrevented).toBe(true)
+    expect(intents).toEqual([{ kind: 'mouse', payload: 'press wheel-down 2 3' }])
+    expect(wheel(0, { deltaX: -1 }).defaultPrevented).toBe(true)
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-down 2 3' },
+      { kind: 'mouse', payload: 'press wheel-left 2 3' },
+    ])
+    expect(localScrolls).toEqual([])
+  })
+
+  it('does not accumulate outside the live cell grid and forgets both old residuals', () => {
+    const { state, wheel, intents } = wheelPane()
+    wheel(10, { deltaX: 10 })
+    state.hit = false
+    wheel(100, { deltaX: 100 })
+    state.hit = true
+    wheel(7, { deltaX: 7 })
+    expect(intents).toEqual([])
+    wheel(10, { deltaX: 10 })
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-down 2 3' },
+      { kind: 'mouse', payload: 'press wheel-right 2 3' },
+    ])
+  })
+
+  it('leaves primary non-reporting wheel local but forwards alternate wheel for mode 1007', () => {
+    const { state, wheel, intents, localScrolls } = wheelPane()
+    state.tracking = false
+    expect(wheel(17).defaultPrevented).toBe(true)
+    expect(localScrolls).toEqual([[0, 17]])
+    expect(intents).toEqual([])
+    state.buffer = 'alternate'
+    expect(wheel(-17, { deltaX: 17 }).defaultPrevented).toBe(true)
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-up 2 3' },
+      { kind: 'mouse', payload: 'press wheel-right 2 3' },
+    ])
+    expect(localScrolls).toEqual([[0, 17]])
+  })
+
+  it('preserves native local scrolling when no local collaborator is supplied', () => {
+    const { state, wheel, history, intents, localScrolls } = wheelPane(false)
+    expect(wheel(17, { shiftKey: true }).defaultPrevented).toBe(false)
+    expect(wheel(17, {}, history).defaultPrevented).toBe(false)
+    state.tracking = false
+    expect(wheel(17).defaultPrevented).toBe(false)
+    expect(localScrolls).toEqual([])
+    expect(intents).toEqual([])
+  })
+
+  it('normalizes page and line units once for each owner', () => {
+    const { wheel, intents, localScrolls } = wheelPane()
+    wheel(-0.2, { deltaX: 0.1, deltaMode: WheelEvent.DOM_DELTA_PAGE })
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-up 2 3' },
+      { kind: 'mouse', payload: 'press wheel-up 2 3' },
+      { kind: 'mouse', payload: 'press wheel-right 2 3' },
+    ])
+    wheel(-0.2, { deltaX: 0.1, deltaMode: WheelEvent.DOM_DELTA_PAGE, shiftKey: true })
+    wheel(2, { deltaX: -1, deltaMode: WheelEvent.DOM_DELTA_LINE, shiftKey: true })
+    expect(localScrolls).toEqual([
+      [17, -34],
+      [-17, 34],
+    ])
+  })
+
+  it.each(['tracking', 'buffer', 'modifiers', 'delta mode', 'local owner', 'pointerleave'])(
+    'discards both residual axes when %s changes',
+    (transition) => {
+      const { state, surface, wheel, intents } = wheelPane()
+      wheel(10, { deltaX: 10 })
+      let init: WheelEventInit = { deltaX: 7 }
+      if (transition === 'tracking') {
+        state.buffer = 'alternate'
+        wheel(0) // Establish alternate/reporting ownership before the transition.
+        wheel(10, { deltaX: 10 })
+        state.tracking = false
+      } else if (transition === 'buffer') {
+        state.buffer = 'alternate'
+      } else if (transition === 'modifiers') {
+        init = { ...init, altKey: true }
+      } else if (transition === 'delta mode') {
+        init = { deltaX: 7 / 17, deltaMode: WheelEvent.DOM_DELTA_LINE }
+      } else if (transition === 'local owner') {
+        wheel(1, { shiftKey: true })
+      } else {
+        surface.dispatchEvent(new PointerEvent('pointerleave'))
+      }
+      wheel(transition === 'delta mode' ? 7 / 17 : 7, init)
+      expect(intents).toEqual([])
+      wheel(
+        transition === 'delta mode' ? 10 / 17 : 10,
+        transition === 'delta mode' ? { ...init, deltaX: 10 / 17 } : { ...init, deltaX: 10 },
+      )
+      const prefix = transition === 'modifiers' ? 'Alt+' : ''
+      expect(intents).toEqual([
+        { kind: 'mouse', payload: `${prefix}press wheel-down 2 3` },
+        { kind: 'mouse', payload: `${prefix}press wheel-right 2 3` },
+      ])
+    },
+  )
+
+  it('preserves non-Shift wheel modifiers in the existing key prefix order', () => {
+    const { wheel, intents } = wheelPane()
+    wheel(-17, { deltaX: -17, ctrlKey: true, altKey: true, metaKey: true })
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'Ctrl+Alt+Super+press wheel-up 2 3' },
+      { kind: 'mouse', payload: 'Ctrl+Alt+Super+press wheel-left 2 3' },
+    ])
+  })
+
+  it('preserves horizontal input without a committed row pitch', () => {
+    const { state, wheel, intents } = wheelPane()
+    state.lineHeight = 0
+    expect(wheel(-1, { deltaX: 1 }).defaultPrevented).toBe(true)
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'press wheel-up 2 3' },
+      { kind: 'mouse', payload: 'press wheel-right 2 3' },
+    ])
+  })
+})
+
 describe('mouse intent follows the accepted backend tracking mode', () => {
   it('leaves ordinary clicks and wheel events to selection and scrolling', () => {
     const intents: SessionIntent[] = []
@@ -486,6 +762,45 @@ describe('mouse intent follows the accepted backend tracking mode', () => {
       { kind: 'mouse', payload: 'press wheel-up 2 3' },
     ])
     expect(trackedWheel.defaultPrevented).toBe(true)
+  })
+
+  it('reports modified pointer actions without taking selection away from the DOM', () => {
+    const intents: SessionIntent[] = []
+    const surface = document.createElement('div')
+    document.body.append(surface)
+    const input = new IntentInput({
+      emit: (intent) => intents.push(intent),
+      surface,
+      mouseTracking: () => true,
+      cellAt: () => ({ x: 2, y: 3 }),
+    })
+    live.push(input)
+    const events = ['pointerdown', 'pointermove', 'pointerup'].map(
+      (type) =>
+        new MouseEvent(type, {
+          button: 0,
+          buttons: type === 'pointerup' ? 0 : 1,
+          ctrlKey: true,
+          altKey: true,
+          shiftKey: true,
+          metaKey: true,
+          cancelable: true,
+        }),
+    )
+    const selected: string[] = []
+    for (const event of events) {
+      surface.addEventListener(event.type, (seen) => {
+        if (!seen.defaultPrevented) selected.push(seen.type)
+      })
+      surface.dispatchEvent(event)
+    }
+    expect(intents).toEqual([
+      { kind: 'mouse', payload: 'Ctrl+Alt+Shift+Super+press left 2 3' },
+      { kind: 'mouse', payload: 'Ctrl+Alt+Shift+Super+motion left 2 3' },
+      { kind: 'mouse', payload: 'Ctrl+Alt+Shift+Super+release left 2 3' },
+    ])
+    expect(selected).toEqual(['pointerdown', 'pointermove', 'pointerup'])
+    expect(events.every((event) => !event.defaultPrevented)).toBe(true)
   })
 
   it('clears a held drag when tracking turns off before release', () => {

@@ -467,7 +467,7 @@ async function configureAssistant(page: Page, endpointName: string): Promise<voi
   await answerPermission(page, 'observe', 'Allowed')
 }
 
-function answerFromPinnedFrame(body: string): string[] {
+function answerFromPinnedFrame(body: string, marker = INITIAL): string[] {
   let seen = ''
   try {
     const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
@@ -478,12 +478,12 @@ function answerFromPinnedFrame(body: string): string[] {
   } catch {
     seen = ''
   }
-  if (!seen.includes(INITIAL) || seen.includes(DURING)) {
+  if (!seen.includes(marker) || seen.includes(DURING)) {
     return ['The pinned screen was not the expected frame.']
   }
   return Array.from(
     { length: 80 },
-    (_, index) => `The pinned screen shows ${INITIAL} (line ${index + 1}).\n`,
+    (_, index) => `The pinned screen shows ${marker} (line ${index + 1}).\n`,
   )
 }
 
@@ -761,7 +761,9 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       (second, expected) => {
         const inner = second.parentElement
         if (!inner) return null
-        const children = Array.from(inner.children)
+        const children = Array.from(inner.children).filter(
+          (el) => el.checkVisibility() && el.getBoundingClientRect().height > 0,
+        )
         const command = children.find((el) => el.textContent?.includes(expected.command))
         const first = children.find((el) => el.textContent?.includes(expected.first))
         const secondAnswer = children.find((el) => el.textContent?.includes(expected.second))
@@ -771,10 +773,6 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
           command: commandAt,
           first: firstAt,
           second: secondAnswer ? children.indexOf(secondAnswer) : -1,
-          between:
-            commandAt >= 0 && firstAt > commandAt
-              ? children.slice(commandAt + 1, firstAt).map((el) => el.className)
-              : ['unseated'],
           firstCount: children.filter((el) => el.textContent?.includes(expected.first)).length,
           secondCount: children.filter((el) => el.textContent?.includes(expected.second)).length,
         }
@@ -783,13 +781,10 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     )
     expect(seating).not.toBeNull()
     expect(seating).toMatchObject({ firstCount: 1, secondCount: 1 })
-    // The answers follow the command, in ask order, with nothing of their own
-    // between them. The one thing that may sit between the command and the
-    // first answer is the live region: it is that command's output seat and
-    // rides with the block it belongs to, and the freeze empties it in place
-    // rather than moving it (nocx-hp8p2.8).
+    expect(seating!.command).toBeGreaterThanOrEqual(0)
+    // The answers are consecutive rendered cards after the command, in ask
+    // order. Hidden projection hosts are not additional transcript entries.
     expect(seating!.first).toBeGreaterThan(seating!.command)
-    for (const cls of seating!.between) expect(cls).toContain('terminal-live-container')
     expect(seating!.second).toBe(seating!.first + 1)
 
     await expect
@@ -916,5 +911,107 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     expect(signal?.outcome, JSON.stringify(fourFacts)).toBe('delivered')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 20_000 })
+  })
+
+  test('keeps nested fullscreen answers after output when the program returns to primary', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000)
+    const nestedScript = join(fixtureDir, 'nested-screen-job.sh')
+    const thaw = join(fixtureDir, 'nested-primary')
+    const finish = join(fixtureDir, 'nested-finish')
+    const primaryReady = `nested-primary-ready-${nonce}`
+    const nestedInitial = `NOCX-NESTED-${nonce}`
+    writeFileSync(
+      nestedScript,
+      [
+        `trap 'printf "\\033[?1049l"; exit 0' HUP INT TERM`,
+        `printf '\\033[?1049h\\033[2J\\033[H%s' '${nestedInitial}'`,
+        `while [ ! -e '${thaw}' ]; do sleep 0.1; done`,
+        `printf '\\033[?1049l\\033[2J\\033[H'`,
+        `i=1; while [ "$i" -le 120 ]; do printf 'NESTED-PRIMARY-%03d\\r\\n' "$i"; i=$((i+1)); done`,
+        `printf '\\033]9;%s\\007' '${primaryReady}'`,
+        `while [ ! -e '${finish}' ]; do sleep 0.1; done`,
+        '',
+      ].join('\n'),
+    )
+    try {
+      await recordFrames(page)
+      await openApp(page)
+      await configureAssistant(page, `${ENDPOINT_NAME} — nested`)
+      await backToTerminal(page)
+      await promptReady(page)
+      fake.setScript({
+        chunks: [],
+        toolCalls: [{ name: 'session.run', arguments: { command: `sh '${nestedScript}'` } }],
+      })
+      await useTarget(page, 'agent')
+      const launch = 'Start the interactive screen program'
+      await page.locator(INPUT).fill(launch)
+      await page.keyboard.press('Enter')
+      await page
+        .getByRole('dialog', { name: 'This action needs your approval' })
+        .getByRole('button', { name: 'Allow once — this proposal only', exact: true })
+        .click()
+      const command = answerBlock(page, launch).locator(
+        ':scope > .cmd-children > .cmd-block[data-block-kind="command"]',
+      )
+      await expect(command).toHaveClass(/cmd-block-running/, { timeout: 30_000 })
+      await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/, { timeout: 20_000 })
+      await expect(page.locator(GRID)).toContainText(nestedInitial)
+
+      // A real width change makes the old primary anchor inapplicable. The
+      // later normal screen must be a terminal view, not a guessed card body.
+      const columns = (await renderedGridSize(page)).split(' ')[1]
+      expect(columns).not.toBe('')
+      const viewport = page.viewportSize()!
+      await page.setViewportSize({ width: viewport.width - 72, height: viewport.height })
+      await expect.poll(async () => (await renderedGridSize(page)).split(' ')[1]).not.toBe(columns)
+      await page.locator(GRID).click()
+      await page.keyboard.press('ControlOrMeta+Enter')
+      await expect(page.locator(FREEZE)).toContainText(nestedInitial)
+      const questions = ['Explain the nested screen', 'Explain that same nested screen again']
+      for (const question of questions) {
+        fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
+        fake.setScript({ chunks: (body) => answerFromPinnedFrame(body, nestedInitial).slice(0, 1) })
+        await page.locator(INPUT).fill(question)
+        await page.keyboard.press('Enter')
+        await answerFinished(page, question)
+        await expect(answerBlock(page, question).locator('[data-answer-body]')).toContainText(
+          nestedInitial,
+        )
+      }
+      await page.keyboard.press('Escape')
+      await expect(page.locator(FREEZE)).toHaveCount(0)
+      writeFileSync(thaw, 'primary\n')
+      await expect.poll(async () => (await recorded(page)).raised.includes(primaryReady)).toBe(true)
+      await expect(command).toHaveClass(/cmd-block-running/)
+      await expect(page.locator(GRID)).not.toHaveClass(/live-fullscreen/)
+      const first = page.getByRole('group', { name: `ask block: ${questions[0]}`, exact: true })
+      const second = page.getByRole('group', { name: `ask block: ${questions[1]}`, exact: true })
+      await expect(first).toBeVisible()
+      await expect(second).toBeVisible()
+      const seating = await first.evaluate((answer, followUp) => {
+        const pane = answer.closest('.pane')!
+        const live = pane.querySelector<HTMLElement>('.terminal-live-container')!
+        const next = [...pane.querySelectorAll<HTMLElement>('[data-block-kind="ask"]')].find(
+          (node) => node.getAttribute('aria-label') === `ask block: ${followUp}`,
+        )!
+        return {
+          globalOutput:
+            live.closest('.cmd-block') === null &&
+            live.parentElement?.classList.contains('scrollback-inner') === true,
+          afterOutput: Boolean(
+            live.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
+          ),
+          askOrder: Boolean(
+            answer.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING,
+          ),
+        }
+      }, questions[1])
+      expect(seating).toEqual({ globalOutput: true, afterOutput: true, askOrder: true })
+    } finally {
+      writeFileSync(finish, 'finish\n')
+    }
   })
 })

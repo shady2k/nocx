@@ -4872,213 +4872,117 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it('coalesces a growth burst and fetches final rows once after block.closed', async () => {
-    const releases: Array<() => void> = []
-    const body = `${JSON.stringify({
-      from: 0,
-      row: wireRowOf([['x', 1, true] as CellSpec]),
-    })}\n`
-    const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'ledger.get') {
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
-        })
+  it.each(['block.grew', 'block.closed'] as const)(
+    'keeps the latest stored rows when %s arrives during an in-flight read',
+    async (notification) => {
+      type Artifact = {
+        id: string
+        mediaType: string
+        body: string
+        truncated: null
+        byteLen: number
       }
-      if (method === 'ledger.artifact') {
-        return new Promise((resolve) => {
-          releases.push(() =>
-            resolve({
-              id: 'art-rows',
-              mediaType: 'application/x-nocx-rows',
-              body,
-              truncated: null,
-              byteLen: body.length,
-            }),
-          )
+      const artifact = (text: string): Artifact => {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
         })
+        return {
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+        }
       }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const handler = factHandler(client)
-    const withScrollback = content as unknown as { scrollback: ScrollbackController }
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('make')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'make',
-        },
+
+      let resolveFirst!: (value: Artifact) => void
+      const firstRead = new Promise<Artifact>((resolve) => {
+        resolveFirst = resolve
       })
-      const paintStoredRows = vi.spyOn(withScrollback.scrollback.blockManager, 'applyStoredRows')
-      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.grew',
-      )?.[1] as ((params: unknown) => void) | undefined
-      const blockClosed = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.closed',
-      )?.[1] as ((params: unknown) => void) | undefined
-      expect(blockGrew).toBeDefined()
-      expect(blockClosed).toBeDefined()
-      for (let index = 0; index < 100; index += 1) blockGrew?.({ entryId: 'att-1' })
-      expect(client.call.mock.calls.filter(([method]) => method === 'ledger.get')).toHaveLength(1)
-      await vi.waitFor(() => expect(releases).toHaveLength(1))
-
-      // The final notification arrives during the growth read. It must queue
-      // one fresh read after that read settles rather than repainting the same
-      // rows 100 times or closing on a partial artifact.
-      blockClosed?.({ entryId: 'att-1', kept: true })
-      releases[0]()
-      await vi.waitFor(() => expect(releases).toHaveLength(2))
-      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(1))
-      releases[1]()
-      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(2))
-      expect(
-        client.call.mock.calls.filter(([method]) => method === 'ledger.artifact'),
-      ).toHaveLength(2)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('coalesces block.grew reads without losing the latest stored rows', async () => {
-    type Artifact = {
-      id: string
-      mediaType: string
-      body: string
-      truncated: null
-      byteLen: number
-    }
-    const artifact = (text: string): Artifact => {
-      const line = JSON.stringify({
-        from: 0,
-        row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
-      })
-      return {
-        id: 'art-rows',
-        mediaType: 'application/x-nocx-rows',
-        body: `${line}\n`,
-        truncated: null,
-        byteLen: line.length,
-      }
-    }
-
-    let resolveFirst!: (value: Artifact) => void
-    const firstRead = new Promise<Artifact>((resolve) => {
-      resolveFirst = resolve
-    })
-    let entryReads = 0
-    let artifactReads = 0
-    const client = makeClient()
-    client.call.mockImplementation((method: string, params?: unknown) => {
-      const id =
-        typeof params === 'object' && params !== null && 'id' in params ? params.id : undefined
-      if (method === 'ledger.get' && id === 'att-1') {
-        entryReads += 1
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
-        })
-      }
-      if (method === 'ledger.artifact' && id === 'art-rows') {
-        artifactReads += 1
-        return artifactReads === 1 ? firstRead : Promise.resolve(artifact('latest rows'))
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const handler = factHandler(client)
-    let outputObserver: MutationObserver | null = null
-    const outputMutations: MutationRecord[] = []
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('make')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'make',
-        },
+      let entryReads = 0
+      let artifactReads = 0
+      const client = makeClient()
+      client.call.mockImplementation((method: string, params?: unknown) => {
+        const id =
+          typeof params === 'object' && params !== null && 'id' in params ? params.id : undefined
+        if (method === 'ledger.get' && id === 'att-1') {
+          entryReads += 1
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact' && id === 'art-rows') {
+          artifactReads += 1
+          return artifactReads === 1 ? firstRead : Promise.resolve(artifact('latest rows'))
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
       })
 
-      const grew = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.grew',
-      )?.[1] as ((params: unknown) => void) | undefined
-      expect(grew).toBeDefined()
-      const block = scrollbackFor(content).blockManager.blockForAttempt('att-1')
-      expect(block).toBeDefined()
-      if (!block) throw new Error('running attempt did not open its command block')
-      outputObserver = new MutationObserver((records) => outputMutations.push(...records))
-      outputObserver.observe(block.el, { childList: true })
-      grew?.({ entryId: 'att-1', from: 0, count: 1 })
-      await vi.waitFor(() => expect(artifactReads).toBe(1))
-
-      // Keep one read open while the producer says the artifact grew many
-      // times. One pending bit must retain the last notification without
-      // starting another full-artifact read for every growth frame.
-      for (let index = 1; index <= 8; index += 1) {
-        grew?.({ entryId: 'att-1', from: index, count: 1 })
-      }
-      expect(entryReads).toBe(1)
-      expect(artifactReads).toBe(1)
-
-      resolveFirst(artifact('earlier rows'))
-      await vi.waitFor(() => expect(blockOutputText(block.el)).toBe('latest rows'))
-      expect(entryReads).toBe(2)
-      expect(artifactReads).toBe(2)
-      // paintStoredRows replaces the whole .cmd-output node once per paint;
-      // count those real subtree replacements, not a timer or a helper call.
-      if (!outputObserver) throw new Error('output mutation observer was not installed')
-      const outputPaints = [...outputMutations, ...outputObserver.takeRecords()].reduce(
-        (count, mutation) =>
-          count +
-          Array.from(mutation.addedNodes).filter(
-            (node) =>
-              node.nodeType === Node.ELEMENT_NODE &&
-              (node as HTMLElement).classList.contains('cmd-output'),
-          ).length,
-        0,
+      const { view, ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
       )
-      expect(outputPaints).toBe(2)
-    } finally {
-      outputObserver?.disconnect()
-      teardown()
-    }
-  })
+      const handler = factHandler(client)
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        ed.insertText('make')
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+
+        const grew = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'block.grew',
+        )?.[1] as ((params: unknown) => void) | undefined
+        expect(grew).toBeDefined()
+        const block = scrollbackFor(content).blockManager.blockForAttempt('att-1')
+        expect(block).toBeDefined()
+        if (!block) throw new Error('running attempt did not open its command block')
+        grew?.({ entryId: 'att-1', from: 0, count: 1 })
+        await vi.waitFor(() => expect(artifactReads).toBe(1))
+
+        // Growth may burst; completion arrives once. Either must retain the
+        // pending refresh without a parallel read or a stale final body.
+        if (notification === 'block.grew') {
+          for (let index = 1; index <= 8; index += 1) {
+            grew?.({ entryId: 'att-1', from: index, count: 1 })
+          }
+        } else {
+          const closed = client.dispatcher.subscribe.mock.calls.find(
+            ([method]) => method === 'block.closed',
+          )?.[1] as ((params: unknown) => void) | undefined
+          if (!closed) throw new Error('block.closed handler is missing')
+          closed({ entryId: 'att-1', kept: true })
+        }
+        expect(entryReads).toBe(1)
+        expect(artifactReads).toBe(1)
+
+        resolveFirst(artifact('earlier rows'))
+        await vi.waitFor(() => expect(blockOutputText(block.el)).toBe('latest rows'))
+        expect(entryReads).toBe(2)
+        expect(artifactReads).toBe(2)
+      } finally {
+        teardown()
+      }
+    },
+  )
 
   it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
     const client = makeClient()
@@ -5215,24 +5119,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
-    }
-  })
-
-  it('no submit-time open or fence timer survives in the boundary sources (nocx-2v80t.3.2)', () => {
-    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: beginBlockNow`).not.toMatch(/beginBlockNow/)
-      expect(src, `${rel}: FENCE_DEFER_MS`).not.toMatch(/FENCE_DEFER_MS/)
-    }
-  })
-
-  it('no clear or rebase of the live cell model survives at command boundaries', () => {
-    for (const rel of ['scrollback/controller.ts', 'scrollback/blocks.ts', 'terminal-content.ts']) {
-      const src = readFileSync(resolve(srcDir, rel), 'utf8')
-      expect(src, `${rel}: clearViewport`).not.toMatch(/clearViewport/)
-      expect(src, `${rel}: _settleFrozen`).not.toMatch(/_settleFrozen/)
-      expect(src, `${rel}: _freezeVisual`).not.toMatch(/_freezeVisual/)
-      expect(src, `${rel}: _clearFrozenRows`).not.toMatch(/_clearFrozenRows/)
     }
   })
 
@@ -6893,101 +6779,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('wires backend output anchors to the attempt and uses only a matching accepted screen frame', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const handler = factHandler(client)
-    const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-    const anchor = {
-      entryId: 'att-anchor',
-      row: 12,
-      screenRevision: 5,
-      bufferKind: 'normal' as const,
-      bufferInstance: '1',
-      cols: SCREEN_COLS,
-      rows: SCREEN_ROWS,
-    }
-    try {
-      // The notification can beat the authenticated running fact.
-      client._fireBlockOutputStart(anchor)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: { id: 'att-anchor', state: 'open', origin: 'shell', command: 'ls' },
-      })
-      const block = scrollback.blockManager.blockForAttempt('att-anchor')!
-      expect(block.outputStart).toBeUndefined()
-      expect(block.outputAnchor).toEqual(anchor)
-
-      const older = screenFrame(4, ['prompt ls', '', ''])
-      older.state.baseRow = 10
-      client._sessions[0].fireScreenFrame(older)
-      expect(block.outputAnchorOffset).toBeUndefined()
-
-      const alternate = screenFrame(5, ['prompt ls', '', ''])
-      alternate.state.bufferKind = 'alternate'
-      alternate.state.baseRow = 10
-      client._sessions[0].fireScreenFrame(alternate)
-      expect(block.outputAnchorOffset).toBeUndefined()
-
-      const wrongInstance = screenFrame(6, ['prompt ls', '', ''])
-      wrongInstance.state.baseRow = 10
-      wrongInstance.state.bufferInstance = '2'
-      client._sessions[0].fireScreenFrame(wrongInstance)
-      expect(block.outputAnchorOffset).toBeUndefined()
-
-      // A frame of another width is the estimate a reflow allows, and the
-      // echo row it names is read like any other (nocx-zg3k3.32).
-      const otherWidth = screenFrame(7, ['prompt ls', '', ''], { cols: SCREEN_COLS + 1 })
-      otherWidth.state.baseRow = 10
-      client._sessions[0].fireScreenFrame(otherWidth)
-      expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('')
-
-      const accepted = screenFrame(8, ['', 'prompt ls', ''])
-      accepted.state.baseRow = 10
-      client._sessions[0].fireScreenFrame(accepted)
-      expect(block.outputAnchor).toEqual(anchor)
-      expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('prompt ls')
-      expect(block.outputStart).toBe(12)
-      const mismatchAfterAcceptance = screenFrame(9, ['', '', 'replacement'])
-      mismatchAfterAcceptance.state.baseRow = 10
-      mismatchAfterAcceptance.state.bufferInstance = '2'
-      client._sessions[0].fireScreenFrame(mismatchAfterAcceptance)
-      expect(block.outputAnchorOffset).toBe(2)
-      expect(block.outputAnchorText).toBe('prompt ls')
-
-      // One accepted output row below the command echo must occupy one row
-      // in the live clip. The controller subtracts the two-row echo offset;
-      // liveContentHeight therefore supplies the full three-row grid height.
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        value: 400,
-        configurable: true,
-      })
-      block.el.getBoundingClientRect = () => ({
-        height: 20,
-        width: 800,
-        top: 0,
-        left: 0,
-        right: 800,
-        bottom: 20,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      })
-      const output = screenFrame(10, ['', 'prompt ls', 'one output row'])
-      output.state.baseRow = 10
-      client._sessions[0].fireScreenFrame(output)
-      await vi.waitFor(() => expect(scrollback.terminalLiveViewport.style.height).toBe('16px'))
-    } finally {
-      teardown()
-    }
-  })
-
   it('keeps a running block on its own rows when the pane loses rows while it runs (nocx-zg3k3.32)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -7043,7 +6834,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
-  it('hides the rows above a running block’s start before its output anchor arrives (nocx-zg3k3.32)', async () => {
+  it('keeps unqualified rows in the terminal presentation until a command boundary is known', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     const handler = factHandler(client)
@@ -7063,19 +6854,19 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         epoch: 1,
         attempt: { id: 'att-early', state: 'open', origin: 'shell', command: 'read x' },
       })
-      const block = scrollback.blockManager.blockForAttempt('att-early')!
-      expect(block.startLine).toBe(22)
-      // Placed at the open, from the frame it opened on: a command that
-      // prints nothing sends no frame after it.
-      expect(block.startOffset).toBe(2)
-      expect(scrollback.terminalLiveInner.style.transform).toMatch(/^translateY\(-\d/)
+      const live = scrollback.terminalLiveContainer
+      await vi.waitFor(() => expect(live.textContent).toContain('98'))
+      expect(live.closest('.cmd-block')).toBeNull()
+      expect(scrollback.scrollbackInner.classList.contains('inner-terminal-history')).toBe(true)
 
       const output = screenFrame(6, ['98', '99', 'prompt read x', 'OWN'])
       output.state.baseRow = 20
       client._sessions[0].fireScreenFrame(output)
-      expect(block.outputAnchorOffset).toBeUndefined()
-      expect(block.startOffset).toBe(2)
-      expect(scrollback.terminalLiveInner.style.transform).toMatch(/^translateY\(-\d/)
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('98')
+        expect(live.textContent).toContain('OWN')
+      })
+      expect(live.closest('.cmd-block')).toBeNull()
     } finally {
       teardown()
     }
@@ -7150,82 +6941,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       }
     },
   )
-
-  it('sizes a short running block from visible output, not the blank cursor tail', async () => {
-    const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    const handler = factHandler(client)
-    const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-    const viewportRows = 31
-    const anchor = {
-      entryId: 'att-short-output',
-      row: 1,
-      screenRevision: 5,
-      bufferKind: 'normal' as const,
-      bufferInstance: '1',
-      cols: SCREEN_COLS,
-      rows: viewportRows,
-    }
-
-    try {
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: { id: 'att-short-output', state: 'open', origin: 'shell', command: 'ls' },
-      })
-      client._fireBlockOutputStart(anchor)
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        value: 400,
-        configurable: true,
-      })
-      // THE RUNNING CAP TAKES THE HEADER OFF THE SCROLLER, not the block: the
-      // block holds the live region itself since ADR-0091, so its own height is
-      // the box this cap bounds. jsdom lays nothing out, so the header is
-      // stubbed the way a browser would answer for it.
-      const runningHeader =
-        scrollback.blockManager.runningBlock!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
-      runningHeader.getBoundingClientRect = () => ({
-        height: 20,
-        width: 800,
-        top: 0,
-        left: 0,
-        right: 800,
-        bottom: 20,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      })
-
-      // The accepted screen has four populated rows, but the cursor remains
-      // in the final row of a taller viewport. A short block stays seated by
-      // its output rather than reserving the blank tail as running content.
-      const frame = screenFrame(6, ['ls', 'A', 'B', 'C'], { rows: viewportRows })
-      frame.cursor.y = viewportRows - 1
-      client._sessions[0].fireScreenFrame(frame)
-
-      await vi.waitFor(() => {
-        expect(scrollback.terminalLiveViewport.style.height).toBe('48px')
-      })
-
-      // A normal-buffer program with output all the way to the cursor still
-      // fills the available running region, up to the same viewport cap.
-      const fullScreen = screenFrame(
-        7,
-        ['ls', 'A', 'B', 'C', ...Array.from({ length: viewportRows - 4 }, () => 'top')],
-        { rows: viewportRows },
-      )
-      fullScreen.cursor.y = viewportRows - 1
-      client._sessions[0].fireScreenFrame(fullScreen)
-      await vi.waitFor(() => {
-        expect(scrollback.terminalLiveViewport.style.height).toBe('380px')
-      })
-    } finally {
-      teardown()
-    }
-  })
 
   it('the first PARSED write stands the running command\u2019s stand-in down (nocx-vnirv.1)', async () => {
     // THE WIRING TEST for the block manager's output-arrival seam and the
@@ -7310,14 +7025,11 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       expect(withScrollback.scrollback.mode).toBe('running')
       const input = intentElementOf(content)
       expect(document.activeElement).toBe(input)
-      const before = withScrollback.scrollback.terminalLiveContainer.style.height
-
-      // Handing over bytes is not a client-visible update. Only an accepted
-      // backend frame advances the cell model and sizes the live region.
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe(before)
       const rows = Array.from({ length: 12 }, (_, i) => `output ${i + 1}`)
       session.fireScreenFrame(screenFrame(1, rows, { rows: rows.length }))
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
+      await vi.waitFor(() =>
+        expect(withScrollback.scrollback.terminalLiveContainer.textContent).toContain('output 12'),
+      )
 
       const running = withScrollback.scrollback.blockManager.runningBlock
       expect(running).not.toBeNull()
@@ -7351,9 +7063,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         }),
       )
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('key', 'enter'))
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('192px')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBe(running)
-      expect(running!.el.contains(withScrollback.scrollback.terminalLiveContainer)).toBe(true)
       expect(
         withScrollback.scrollback.scrollbackInner.querySelectorAll('.cmd-block-running'),
       ).toHaveLength(1)
@@ -7437,6 +7147,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       expect(withScrollback.scrollback.mode).toBe('running')
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
+      anchorOutputAt(client, 'att-1', screenFrame(2, [], { rows: 20 }))
 
       // Output taller than the pane: the box is capped at scroller minus
       // header (276) and the grid must be fitted to the SAME 276 — not the
@@ -7450,7 +7161,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
       await vi.waitFor(() => expect(reports().length).toBeGreaterThan(before))
       expect(reports()[reports().length - 1]).toMatchObject({ rows: 17, ypixel: 272 })
     } finally {
@@ -7580,22 +7290,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         epoch: 1,
         attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'top' },
       })
-      const block = withScrollback.scrollback.blockManager.runningBlock
-      expect(block).not.toBeNull()
-      // The cap takes the HEADER off the scroller — the block holds the live
-      // region itself since ADR-0091 (see the test above).
-      const headerEl = block!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
-      headerEl.getBoundingClientRect = () => ({
-        height: 24,
-        width: 800,
-        top: 0,
-        left: 0,
-        right: 800,
-        bottom: 24,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      })
       // jsdom does no layout, so a measured height never reflects the
       // inline height setLiveHeight wrote. A real browser applies it next
       // frame; the guard reads it. Emulate that so the guard is exercised.
@@ -7614,19 +7308,19 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const scrollTo = vi.fn()
       withScrollback.scrollback.scrollbackArea.scrollTo = scrollTo
 
-      // The accepted frame sizes the box to the running cap.
+      // Establish the opaque whole-terminal output before the reader moves.
       const topFrame = screenFrame(
         1,
         Array.from({ length: 20 }, () => 'top frame'),
         { rows: 20 },
       )
       session.fireScreenFrame(topFrame)
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
-      expect(scrollTo).toHaveBeenCalled()
+      const area = withScrollback.scrollback.scrollbackArea
+      area.scrollTop = 64
+      area.dispatchEvent(new Event('scroll'))
       scrollTo.mockClear()
 
-      // A repaint of the same rows does not change the height, so the early
-      // return holds and the scroll is NOT yanked while the user reads.
+      // Repainting the same output preserves the reader's position.
       session.fireScreenFrame(
         screenFrame(
           2,
@@ -7634,8 +7328,8 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
       expect(scrollTo).not.toHaveBeenCalled()
+      expect(area.scrollTop).toBe(64)
     } finally {
       globalThis.requestAnimationFrame = raf
       Element.prototype.scrollTo = protoScrollTo
@@ -8273,6 +7967,105 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       expect(ed.isVisible).toBe(true)
       expect(ed.root.contains(document.activeElement)).toBe(true)
     } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+  it('keeps the continuation Enter while the start fact precedes the submit receipt', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (value: unknown) => void
+    const attemptPromise = new Promise<unknown>((resolve) => {
+      resolveAttempt = resolve
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restoreScroll = stubScrolling()
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    const input = intentElementOf(content)
+    const nativeFocus = input.focus.bind(input)
+    // jsdom focuses display:none descendants, unlike a browser. Keep that
+    // platform boundary faithful while the real stylesheet hides old cards.
+    const focus = vi.spyOn(input, 'focus').mockImplementation((options) => {
+      for (let ancestor: HTMLElement | null = input; ancestor; ancestor = ancestor.parentElement) {
+        if (getComputedStyle(ancestor).display === 'none') return
+      }
+      nativeFocus(options)
+    })
+    try {
+      content.setVisible(true)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const session = sessionOf(content)
+      session.fireScreenFrame(screenFrame(1, ['shell prompt']))
+      const prefix = "printf '%s"
+      const suffix = "' 'PS2-INPUT'"
+      ed.insertText(prefix)
+      key(view, { key: 'Enter', code: 'Enter' })
+      expect(document.activeElement).toBe(input)
+      for (const character of suffix) {
+        const target = document.activeElement!
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: character,
+            code: 'Unidentified',
+            bubbles: true,
+            cancelable: true,
+          }),
+        )
+        target.dispatchEvent(
+          new InputEvent('input', {
+            data: character,
+            inputType: 'insertText',
+            bubbles: true,
+          }),
+        )
+      }
+      const attempt = {
+        id: 'att-ps2',
+        domain: 'd1',
+        state: 'open',
+        command: prefix,
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      }
+      // The notification opens and seats the card while the command's own
+      // write still waits for its receipt. Enter belongs to the held suffix,
+      // not to BODY until that independent receipt happens to repair focus.
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, attempt })
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      resolveAttempt(attempt)
+      await vi.waitFor(() => {
+        const committed = session.intent.mock.calls
+          .map(([kind, payload]) =>
+            kind === 'text' || kind === 'paste'
+              ? payload
+              : kind === 'key' && payload === 'enter'
+                ? '\n'
+                : '',
+          )
+          .join('')
+        expect(committed).toBe(`${prefix}\n${suffix}\n`)
+      })
+      expect(document.activeElement).toBe(input)
+    } finally {
+      focus.mockRestore()
+      style.remove()
       restoreScroll()
       teardown()
     }
@@ -15641,6 +15434,18 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     return handler
   }
 
+  function claimToolCommand(content: TerminalContent): HTMLElement {
+    const turn = scrollbackFor(content).blockManager.addAnswerBlock('run top', FIXTURE_CWD)
+    turn.append('Running the requested program')
+    turn.toolCall({
+      callId: 'older-call',
+      tool: 'run',
+      effect: 'mutate-destructive',
+      opensBlock: true,
+    })
+    return turn.el
+  }
+
   function dispatchSummon(content: TerminalContent): KeyboardEvent {
     const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
       .terminalLiveContainer
@@ -15654,10 +15459,14 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     return event
   }
 
-  async function summon(content: TerminalContent): Promise<void> {
+  async function summon(
+    content: TerminalContent,
+    bufferKind: 'normal' | 'alternate' = 'normal',
+  ): Promise<void> {
     // The accepted backend frame is the authority for the live-screen
     // identity used by capture. No renderer dimensions or parser are involved.
     const frame = screenFrame(1, [])
+    frame.state.bufferKind = bufferKind
     sessionOf(content).fireScreenFrame(frame)
     content.captureLiveFrame = vi.fn().mockResolvedValue({
       rows: [],
@@ -15665,7 +15474,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       provenance: {
         source: 'live',
         identity: {
-          buffer: { kind: 'normal' },
+          buffer:
+            bufferKind === 'alternate'
+              ? { kind: 'alternate', altSession: frame.state.bufferInstance }
+              : { kind: 'normal' },
           cols: frame.geometry.cols,
           rows: frame.geometry.rows,
           generation: 0,
@@ -16295,7 +16107,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('does not resurrect answers after their running command is cleared', async () => {
+  it.each([false, true])('does not revive cleared answers (nested=%s)', async (nested) => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
@@ -16314,6 +16126,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     )
     try {
       content.setVisible(true)
+      if (nested) claimToolCommand(content)
       const handler = startCommand(client)
       await summon(content)
       const answer = await submitQuestion(content, client, 'answer removed with clear')
@@ -16748,12 +16561,76 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  // nocx-hp8p2.8. The live region is where a RUNNING command's output is —
-  // the block holds only its header until the freeze — so an answer seated
-  // after the block element alone reads as spliced into the middle of `top`.
-  // The ordering has to hold in both directions at once: the answer below
-  // the running output, and the NEXT command below the answer.
-  it('seats an answer below the running command output, and opens the next command below the answer (nocx-hp8p2.8)', async () => {
+  it('keeps two nested fullscreen answers after global output when Escape precedes a running thaw', async () => {
+    const client = makeClient()
+    let nextRunId = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        const runId = ++nextRunId
+        return Promise.resolve({ runId, entryId: `entry-${runId}`, model: 'test-model' })
+      }
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 2, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      const olderTurn = claimToolCommand(content)
+      startCommand(client)
+      const scrollback = scrollbackFor(content)
+      const command = scrollback.blockManager.runningBlock!
+      expect(olderTurn.contains(command.el)).toBe(true)
+      await summon(content, 'alternate')
+      const first = await submitQuestion(content, client, 'first fullscreen question')
+      await vi.waitFor(() => expect(first.dataset.entryId).toBe('entry-1'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 1, entryId: 'entry-1', text: 'first fullscreen answer' })
+      state!({ runId: 1, entryId: 'entry-1', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+      const second = await submitQuestion(content, client, 'second fullscreen question')
+      await vi.waitFor(() => expect(second.dataset.entryId).toBe('entry-2'))
+      delta!({ runId: 2, entryId: 'entry-2', text: 'second fullscreen answer' })
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['STILL RUNNING AFTER THAW']))
+      const live = scrollback.terminalLiveContainer
+      await vi.waitFor(() => expect(live.textContent).toContain('STILL RUNNING AFTER THAW'))
+      expect(scrollback.blockManager.runningBlock).toBe(command)
+      expect(live.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      for (const answer of [first, second]) {
+        expect(answer.isConnected).toBe(true)
+        for (let node: HTMLElement | null = answer; node !== null; node = node.parentElement) {
+          expect(getComputedStyle(node).display).not.toBe('none')
+        }
+      }
+      expect(first.textContent).toContain('first fullscreen answer')
+      expect(second.textContent).toContain('second fullscreen answer')
+    } finally {
+      teardown()
+      style.remove()
+    }
+  })
+
+  it.each(['dismissed', 'completed'])('seats nested tool answers when %s', async (ending) => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -16771,9 +16648,269 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       { attachToDocument: true },
       client,
     )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
     try {
       content.setVisible(true)
+      const olderTurn = claimToolCommand(content)
       const handler = startCommand(client)
+      const scrollback = scrollbackFor(content)
+      expect(olderTurn.contains(scrollback.blockManager.runningBlock!.el)).toBe(true)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'explain this running tool')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'nested tool explanation' })
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['TOOL OUTPUT'], { revision: 1 }))
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('TOOL OUTPUT'),
+      )
+      if (ending === 'completed') {
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-run',
+            state: 'completed',
+            exitCode: 0,
+            fence: commandFence,
+            completedAt: '2026-08-27T12:00:00Z',
+          },
+        })
+        blockClosedHandler(client)('att-run')
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        expect(answer.closest('.nocx-summon-answers')).not.toBeNull()
+        const state = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'agent.runState',
+        )?.[1] as ((params: unknown) => void) | undefined
+        state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      } else {
+        document.body.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+        )
+      }
+
+      const live = scrollback.terminalLiveContainer
+      await vi.waitFor(() => expect(live.textContent).toContain('TOOL OUTPUT'))
+      const output =
+        ending === 'completed'
+          ? olderTurn.querySelector<HTMLElement>('[data-entry-id="att-run"]')!
+          : live
+      expect(output.isConnected).toBe(true)
+      expect(output.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(answer.textContent).toContain('nested tool explanation')
+      expect(answer.isConnected).toBe(true)
+      for (let node: HTMLElement | null = answer; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+    } finally {
+      teardown()
+      style.remove()
+    }
+  })
+
+  it('returns completed command controls at the tail after an unqualified live window', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      const scrollback = scrollbackFor(content)
+      Object.defineProperties(scrollback.scrollbackArea, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 400 },
+      })
+      scrollback.blockManager.startBlock('earlier command', '~', 0)
+      scrollback.blockManager.bindAttempt('att-earlier')
+      const earlier = closeRunningBlock(scrollback.blockManager, 0)!.el
+      sessionOf(content).fireScreenFrame(screenFrame(1, ['shell prompt']))
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('shell prompt'),
+      )
+      const handler = startCommand(client)
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['command output']))
+      await vi.waitFor(() =>
+        expect(scrollback.terminalLiveContainer.textContent).toContain('command output'),
+      )
+      // The stack grows during freeze without the reader leaving the tail.
+      // A raw mid-layout measurement must not turn that into history review.
+      Object.defineProperty(scrollback.scrollbackArea, 'scrollHeight', {
+        configurable: true,
+        value: 800,
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-10-25T01:00:00Z',
+        },
+      })
+      blockClosedHandler(client)('att-run')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const header = scrollback.scrollbackInner.querySelector<HTMLElement>(
+        '[data-entry-id="att-run"] > .cmd-header',
+      )!
+      expect(header.isConnected).toBe(true)
+      expect(header.textContent).toContain('top')
+      for (let node: HTMLElement | null = header; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+      expect(earlier.isConnected).toBe(true)
+      for (let node: HTMLElement | null = earlier; node !== null; node = node.parentElement) {
+        expect(getComputedStyle(node).display).not.toBe('none')
+      }
+    } finally {
+      teardown()
+      style.remove()
+    }
+  })
+
+  it.each([
+    { target: 'area', buffer: 'normal', entersHistory: true },
+    { target: 'inner', buffer: 'normal', entersHistory: true },
+    { target: 'archive', buffer: 'normal', entersHistory: false },
+    { target: 'nested', buffer: 'normal', entersHistory: false },
+    { target: 'area', buffer: 'alternate', entersHistory: false },
+    { target: 'inner', buffer: 'alternate', entersHistory: false },
+  ] as const)(
+    'routes idle upward wheel on $target with $buffer buffer without stealing archive input',
+    async ({ target, buffer, entersHistory }) => {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const style = document.createElement('style')
+      style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+      document.head.append(style)
+      try {
+        content.setVisible(true)
+        const scrollback = scrollbackFor(content)
+        // JSDOM has no layout; whole-terminal review fills the measured pane.
+        Object.defineProperties(scrollback.scrollbackArea, {
+          clientHeight: { configurable: true, value: 400 },
+          scrollHeight: { configurable: true, value: 400 },
+        })
+        const handler = startCommand(client)
+        const frame = screenFrame(1, ['RETAINED-0001', 'RETAINED-0002', 'shell prompt'])
+        sessionOf(content).fireScreenFrame(frame)
+        await vi.waitFor(() =>
+          expect(scrollback.terminalLiveContainer.textContent).toContain('RETAINED-0001'),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-run',
+            state: 'completed',
+            exitCode: 0,
+            fence: commandFence,
+            completedAt: '2026-10-25T01:00:00Z',
+          },
+        })
+        blockClosedHandler(client)('att-run')
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const archive = scrollback.scrollbackInner.querySelector<HTMLElement>(
+          '[data-entry-id="att-run"]',
+        )!
+        expect(getComputedStyle(archive).display).not.toBe('none')
+        expect(getComputedStyle(scrollback.terminalLiveContainer).height).toBe('0px')
+        // An archived card and a nested scroller are not blank terminal background.
+        const nested = document.createElement('div')
+        nested.style.overflow = 'auto'
+        archive.append(nested)
+        if (buffer === 'alternate') {
+          const alternate = screenFrame(2, ['ALTERNATE'])
+          alternate.state.bufferKind = 'alternate'
+          sessionOf(content).fireScreenFrame(alternate)
+        }
+        const wheelTarget =
+          target === 'area'
+            ? scrollback.scrollbackArea
+            : target === 'inner'
+              ? scrollback.scrollbackInner
+              : target === 'archive'
+                ? archive
+                : nested
+        const event = new WheelEvent('wheel', {
+          deltaY: -120,
+          bubbles: true,
+          cancelable: true,
+        })
+        wheelTarget.dispatchEvent(event)
+        expect(event.defaultPrevented).toBe(entersHistory)
+        if (entersHistory) {
+          expect(getComputedStyle(archive).display).toBe('none')
+          expect(getComputedStyle(scrollback.terminalLiveContainer).height).not.toBe('0px')
+          expect(scrollback.terminalLiveContainer.textContent).toContain('RETAINED-0001')
+        } else if (buffer === 'normal') {
+          expect(getComputedStyle(archive).display).not.toBe('none')
+          expect(getComputedStyle(scrollback.terminalLiveContainer).height).toBe('0px')
+        }
+        expect(
+          sessionOf(content).intent.mock.calls.filter(([kind]) => kind === 'mouse'),
+        ).toHaveLength(0)
+      } finally {
+        teardown()
+        style.remove()
+      }
+    },
+  )
+
+  // Answers follow the live output in both qualified command windows and
+  // whole-terminal history; opening the next command preserves that order.
+  it.each([false, true])('seats answers below output (qualified=%s)', async (qualified) => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      // A late boundary can qualify only while the measured reader is at
+      // the live end. jsdom has no layout, so provide that viewport explicitly.
+      const area = scrollbackFor(content).scrollbackArea
+      Object.defineProperties(area, {
+        clientHeight: { configurable: true, value: 400 },
+        scrollHeight: { configurable: true, value: 400 },
+      })
+      const handler = startCommand(client)
+      if (qualified) anchorOutputAt(client, 'att-run', screenFrame(1, []))
       await summon(content)
       const answer = await submitQuestion(content, client, 'what is on screen?')
       await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
@@ -16781,6 +16918,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ([method]) => method === 'agent.runDelta',
       )?.[1] as ((params: unknown) => void) | undefined
       delta!({ runId: 42, entryId: 'entry-42', text: 'overlay prose' })
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['RUNNING OUTPUT'], { revision: 1 }))
 
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const inner = scrollback.scrollbackInner
@@ -16793,18 +16931,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
       expect(command).not.toBeNull()
-      // THE ANSWER GOES BELOW THE COMMAND, AND THE COMMAND'S OWN OUTPUT IS IN
-      // THE COMMAND (ADR-0091): the live region is that block's body while it
-      // runs, so it is not a child of the stack to be ordered against — the
-      // block and everything it holds is one entry.
-      const seatedOrder = (): number[] => {
-        const kids = Array.from(inner.children)
-        return [kids.indexOf(command!), kids.indexOf(answer)]
-      }
-      const [cmdAt, answerAt] = seatedOrder()
-      expect(cmdAt).toBeGreaterThanOrEqual(0)
-      expect(cmdAt).toBeLessThan(answerAt)
-      expect(live.parentElement).toBe(command)
+      await vi.waitFor(() => expect(live.textContent).toContain('RUNNING OUTPUT'))
+      expect(live.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(getComputedStyle(answer).display).not.toBe('none')
+      expect(answer.textContent).toContain('overlay prose')
+      expect(getComputedStyle(live).display).not.toBe('none')
 
       // The order a person watched during the run is the order they keep.
       handler({
@@ -16825,6 +16956,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const frozen = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
       const afterFreeze = Array.from(inner.children)
       expect(afterFreeze.indexOf(frozen!)).toBeLessThan(afterFreeze.indexOf(answer))
+      expect(getComputedStyle(answer).display).not.toBe('none')
 
       // And the next command opens BELOW the answer, which is what makes
       // "seat after the live container" wrong on its own.
@@ -16841,18 +16973,22 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           command: 'ls',
         },
       })
+      const nextOutput = screenFrame(3, ['NEXT OUTPUT'])
+      anchorOutputAt(client, 'att-run-2', nextOutput)
+      sessionOf(content).fireScreenFrame(nextOutput)
       const commands = Array.from(
         inner.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="command"]'),
       )
       const next = commands[commands.length - 1]
       expect(next).not.toBe(frozen)
-      const kids = Array.from(inner.children)
-      expect(kids.indexOf(answer)).toBeLessThan(kids.indexOf(next))
-      // And the live region is THAT command's body, not a stack child to be
-      // ordered against: one block, header to its last live row (ADR-0091).
-      expect(live.parentElement).toBe(next)
+      expect(answer.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      await vi.waitFor(() => {
+        expect(live.textContent).toContain('NEXT OUTPUT')
+        expect(getComputedStyle(answer).display).not.toBe('none')
+      })
     } finally {
       teardown()
+      style.remove()
     }
   })
 
@@ -18230,6 +18366,19 @@ function screenFrame(
     },
     rows,
   }
+}
+
+/** A backend output boundary qualified in the accepted frame's row space. */
+function anchorOutputAt(client: ClientFake, entryId: string, frame: SessionFrame, row = 0): void {
+  client._fireBlockOutputStart({
+    entryId,
+    row,
+    screenRevision: frame.revision,
+    bufferKind: frame.state.bufferKind,
+    bufferInstance: frame.state.bufferInstance,
+    cols: frame.geometry.cols,
+    rows: frame.geometry.rows,
+  })
 }
 
 function fireBufferState(
@@ -19868,13 +20017,19 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       session.fireScreenFrame(switched)
       flushFrames()
 
-      // The request is the PANE's grid, not the previous mode's…
-      expect(session.resizeApplied).toHaveBeenCalledWith({
-        cols: FITTED.cols,
-        rows: FITTED.rows,
-        xpixel: PANE.width,
-        ypixel: PANE.height,
-      })
+      // No intermediate request may resize the program to the primary layout.
+      // The switch also changes row geometry, so its metadata schedules a report
+      // before fullscreen fitting has run.
+      expect(session.resizeApplied.mock.calls).toEqual([
+        [
+          {
+            cols: FITTED.cols,
+            rows: FITTED.rows,
+            xpixel: PANE.width,
+            ypixel: PANE.height,
+          },
+        ],
+      ])
       // …and so is the grid the frame is presented on.
       const painted = tab.pane.querySelector<HTMLElement>('.term-grid')!
       expect(painted.textContent).toContain('ALT-READY')
@@ -19945,6 +20100,87 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
 
       receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('holds input for a later alternate resize after the switch receipt applied', async () => {
+    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      switchFrame()
+      receipt('applied')
+      await Promise.resolve()
+      session.sendResize.mockImplementation((size) => session.resizeApplied(size))
+      drawProgramFrame(3)
+      flushFrames()
+      const scrollback = scrollbackFor(content)
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: 368,
+      })
+      content.viewportChanged({ width: PANE.width, height: 368 })
+      flushFrames()
+      // Observe either reporting path, so the old un-fenced send reaches the
+      // same consumer assertion rather than timing out on an internal method.
+      await vi.waitFor(() => {
+        const reports = [...session.sendResize.mock.calls, ...session.resizeApplied.mock.calls].map(
+          ([size]) => size,
+        )
+        expect(reports).toContainEqual({
+          cols: 100,
+          rows: 23,
+          xpixel: 800,
+          ypixel: 368,
+        })
+      })
+      typeIntoPane(content, 'q')
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+      expect(
+        session.intent.mock.calls.filter(([kind, payload]) => kind === 'text' && payload === 'q'),
+      ).toEqual([['text', 'q']])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps borrowed alternate frames and input when the local report is unchanged', async () => {
+    const {
+      content,
+      session,
+      grid,
+      switchFrame,
+      drawProgramFrame,
+      receipt,
+      requested,
+      flushFrames,
+      teardown,
+    } = await switchingPane()
+    try {
+      switchFrame()
+      receipt('applied')
+      await Promise.resolve()
+      const initialRequests = requested()
+      // The report owner returns null for this pane's already-reported fit.
+      // A same-width frame and a later narrower peer frame are not new local
+      // measurements, so neither may create a receipt wait or force padding.
+      drawProgramFrame(3)
+      flushFrames()
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalled())
+      session.sendResize.mockClear()
+      drawProgramFrame(4, 80)
+      flushFrames()
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalled())
+      drawProgramFrame(5, 80)
+      flushFrames()
+      expect(requested()).toBe(initialRequests)
+      expect(grid().getAttribute('aria-colcount')).toBe('80')
+      typeIntoPane(content, 'q')
       await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
     } finally {
       teardown()

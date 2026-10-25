@@ -153,7 +153,7 @@ import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { blockColumnsOf, paintStoredRows, repaintStoredRows } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
 import { toolCallTitle } from './scrollback/tool-call-title'
-import { TailFollow } from './scrollback/tail-follow'
+import { isAtTail, TailFollow } from './scrollback/tail-follow'
 import { fromITheme, type TerminalSnapshot } from './scrollback/serializer'
 import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapter'
 import { subscribeTerminalFontChanges } from './terminal-font'
@@ -1743,11 +1743,12 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
-  /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
-   *  the live rectangle in a session with no shell integration. Created at
-   *  mount beside the painter it shares its painter and its measuring
-   *  authority with; bound to the page seam per session below. */
+  /** The emulator-owned live tier, independent of durable command output. */
   private _liveHistory: LiveHistorySurface | null = null
+  private _historyBlockId: number | null = null
+  private _historyReview = false
+  private _historyOpaque = false
+  private _unqualifiedHistoryBlock: number | null = null
   /** The committed columns of the last frame this pane applied, so a
    *  reflow — the one event that renumbers the emulator's history under
    *  the reader (ADR-0078) — is seen by the one watcher frames flow
@@ -2816,11 +2817,8 @@ export class TerminalContent extends BasePaneContent {
         // bytes (nocx-hp8p2.13).
         toolResult: (actionEntryId: string) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
-        // The live tier's surface follows the pane's hands (nocx-zg3k3.10.4):
-        // it is the unstructured mode's alone, and a return to the live end
-        // is what drops a stale past so the next scroll-up reads the head.
         onModeChanged: (mode) => {
-          this._liveHistory?.setMode(mode === 'unstructured' ? 'unstructured' : 'other')
+          this._syncLiveHistoryPresentation()
           // A scroller width that moved under a running program is fitted at
           // the prompt, where every other width decision is taken.
           if (
@@ -2833,7 +2831,11 @@ export class TerminalContent extends BasePaneContent {
           }
         },
         onTailFollow: (following) => {
-          if (following) this._liveHistory?.tailReengaged()
+          if (following) {
+            if (this.scrollback?.mode === 'idle') this._historyReview = false
+            this._syncLiveHistoryPresentation()
+            this._liveHistory?.tailReengaged()
+          }
         },
       })
 
@@ -2926,6 +2928,7 @@ export class TerminalContent extends BasePaneContent {
         scroller: this.scrollback.scrollbackArea,
         stack: this.scrollback.scrollbackInner,
         columns: () => this._cellModel?.current()?.geometry.cols ?? null,
+        screen: () => this._cellModel?.current() ?? null,
         metric: () => {
           const fit = this._cellFit
           if (fit === null || !fit.begin()) return null
@@ -2935,6 +2938,7 @@ export class TerminalContent extends BasePaneContent {
         palette: livePalette,
       })
       this._liveHistory = liveHistory
+      this._syncLiveHistoryPresentation()
 
       // THE GRID'S WIDTH IS THE SCROLLER'S, AND THE SCROLLER CAN CHANGE IT
       // ALONE (nocx-zg3k3.30). usableViewport reads `.scrollback-area`'s
@@ -3009,6 +3013,26 @@ export class TerminalContent extends BasePaneContent {
         // backend frame; with no accepted mode the pointer remains available
         // to selection and native scrollback.
         mouseTracking: () => this._cellModel?.current()?.state.mouseTracking ?? false,
+        bufferKind: () => this._cellModel?.current()?.state.bufferKind ?? 'normal',
+        isLiveTarget: insideLiveRegion,
+        scrollLocal: (deltaX, deltaY, overLive, target) => {
+          const sb = this.scrollback
+          // The idle grid is clipped away. Only the scrollback background
+          // itself can open review; archive cards and nested scrollers keep
+          // their native wheel behavior and never become application input.
+          const overIdleBackground =
+            sb?.mode === 'idle' &&
+            (target === sb.scrollbackArea || target === sb.scrollbackInner) &&
+            (deltaY < 0 || this._historyReview)
+          if (!overLive && !overIdleBackground) return false
+          if (this._cellModel?.current()?.state.bufferKind === 'alternate') return overLive
+          if (deltaY < 0 && sb?.mode === 'idle') {
+            this._historyReview = true
+            this._syncLiveHistoryPresentation()
+          }
+          this._liveHistory?.scrollBy(deltaX, deltaY)
+          return true
+        },
         // The wheel is counted in LINES, so it needs the row pitch: the
         // painter's accepted cell height, which is the same number the caret,
         // the selection and hit-testing are placed by (nocx-1ebrs.26). A
@@ -3793,6 +3817,7 @@ export class TerminalContent extends BasePaneContent {
           // enter through the projection, and fullscreen keeps its own guard.
           this.scrollback.setRunning()
         }
+        this._syncLiveHistoryPresentation()
       })
 
       // ── The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7) ──
@@ -4826,8 +4851,10 @@ export class TerminalContent extends BasePaneContent {
         'sessionId' in params && typeof params.sessionId === 'string' ? params.sessionId : null
       if (clearedSession !== null && this.session?.sessionId === clearedSession) {
         this._liveHistory?.cleared()
+        this._unqualifiedHistoryBlock = this.scrollback?.blockManager.runningBlock?.id ?? null
       }
       this.scrollback?.onClearBoundary(keepEntryId)
+      this._syncLiveHistoryPresentation()
     }
     this._blockRowsUnsubs.push(
       this.client.dispatcher.subscribe('block.grew', refreshBlockRows),
@@ -4836,6 +4863,7 @@ export class TerminalContent extends BasePaneContent {
       this.client.onBlockOutputStart((anchor) => {
         this.scrollback?.blockManager.setOutputStartAnchor(anchor.entryId, anchor)
         this.scrollback?.outputAnchorChanged()
+        this._syncLiveHistoryPresentation()
       }),
     )
     const session = await this.openSessionWithHostKeyRecovery(signal)
@@ -4862,10 +4890,20 @@ export class TerminalContent extends BasePaneContent {
     this.snapshotStore.reset()
     this.session = session
     this._resetFrameMetadataSession(session.sessionId)
+    this._intentInput?.resetWheel()
     // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
     // historyPage call and its rows carrier, handed to the surface in one
     // bind. A rebind replaces both with the new session's — a new session
     // is a new history space, and the bind forgets the painted past.
+    this._historyBlockId = null
+    this._historyReview = false
+    this._historyOpaque = false
+    this._unqualifiedHistoryBlock = null
+    this._liveHistory?.setActive(false)
+    this._liveHistory?.setStart(null)
+    if (this._liveHistory !== null) {
+      this.scrollback?.setHistoryPresentation('none', this._liveHistory.el, null)
+    }
     this._liveHistory?.bind(session)
     // What the reclaim could NOT give back, said where a person will see it
     // (nocx-fz4qa). The recovered bytes are already queued for the terminal
@@ -5119,7 +5157,10 @@ export class TerminalContent extends BasePaneContent {
             result.snapshot.state.bufferKind === 'alternate' &&
             this._bufferType !== 'alternate'
           ) {
-            this._switchPresents = true
+            // Retiring primary history can reparent the input and restore its
+            // focus before _applyBufferKind runs. Those intents owe the same
+            // applied-resize barrier as input from the fullscreen layout.
+            this._openAlternateScreenFence()
           }
           this.scrollback?.blockManager.acceptOutputStartFrame(result.snapshot)
           this.scrollback?.outputAnchorChanged()
@@ -5163,6 +5204,15 @@ export class TerminalContent extends BasePaneContent {
             previous.geometry.rows !== geometry.rows ||
             previous.geometry.cellWidthPx !== geometry.cellWidthPx ||
             previous.geometry.cellHeightPx !== geometry.cellHeightPx
+          if (
+            geometryChanged ||
+            (previous !== null &&
+              (previous.state.bufferKind !== result.snapshot.state.bufferKind ||
+                previous.state.bufferInstance !== result.snapshot.state.bufferInstance ||
+                previous.state.mouseTracking !== result.snapshot.state.mouseTracking))
+          ) {
+            this._intentInput?.resetWheel()
+          }
           if (geometryChanged) {
             this.scrollback?.cellMetricsChanged()
             this._scheduleResizeReport()
@@ -5174,6 +5224,7 @@ export class TerminalContent extends BasePaneContent {
             }
           }
           this.scrollback?.blockManager.noteCommandOutput()
+          this._syncLiveHistoryPresentation()
           this._liveHistory?.noteOutput()
           // Only normal-buffer output can be unread work in another tab.
           // Alternate-buffer frames are commonly full-screen redraws; an
@@ -5744,7 +5795,9 @@ export class TerminalContent extends BasePaneContent {
     // that can open the fence. Leaving it to the timer would send AFTER the
     // input the fence is holding, which is the order this bead is about.
     if (this._fence !== null) {
-      this._requestFenceResize()
+      // An armed fence has no measured request until fullscreen fitting
+      // completes. Only that explicit first send may start its resize stream.
+      if (this._fence.sent !== null) this._requestFenceResize()
       return
     }
     clearTimeout(this.resizeTimer)
@@ -5756,8 +5809,18 @@ export class TerminalContent extends BasePaneContent {
       // its activity indicator for something the user did to the WINDOW
       // rather than to any tab (nocx-6w4z). A DEDUPED report sent nothing,
       // so it opens no echo window either — output then is output.
-      const sent = this.session?.sendResize(this._reportedSize()) ?? false
-      if (sent) this.echoUntil = Date.now() + RESIZE_ECHO_MS
+      const size = this._reportedSize()
+      const receipt = this.session?.sendResize(size) ?? null
+      if (receipt === null) return
+      this.echoUntil = Date.now() + RESIZE_ECHO_MS
+      if (this._bufferType === 'alternate') {
+        // Layout can settle again after the switch's first applied size.
+        // Adopt only the canonical owner's actual changed-report receipt.
+        this._openAlternateScreenFence()
+        this._watchFenceResize(size, receipt)
+      } else {
+        void receipt.catch(() => {})
+      }
     }, RESIZE_SETTLE_MS)
   }
 
@@ -7074,6 +7137,49 @@ export class TerminalContent extends BasePaneContent {
     this.env?.recordCwd(path)
   }
 
+  /** Select one projection from backend-qualified screen coordinates.
+   * A missing/invalid boundary exposes the whole retained terminal, not a
+   * guessed command interval or an overlap with durable row-stream cursors. */
+  private _syncLiveHistoryPresentation(): void {
+    const history = this._liveHistory
+    const sb = this.scrollback
+    if (history === null || sb === null) return
+    const block = sb.blockManager.runningBlock
+    const blockId = block?.id ?? null
+    if (blockId !== this._historyBlockId) {
+      this._historyReview = block === null && this._historyOpaque && !sb.followsTail
+      this._historyBlockId = blockId
+      this._unqualifiedHistoryBlock = null
+    }
+    const snapshot = this._cellModel?.current()
+    if (
+      !snapshot ||
+      snapshot.state.bufferKind !== 'normal' ||
+      sb.mode === 'fullscreen' ||
+      (block === null &&
+        this.lifecycle.state.kind !== 'running' &&
+        sb.mode !== 'unstructured' &&
+        !this._historyReview)
+    ) {
+      history.setActive(false)
+      sb.setHistoryPresentation('none', history.el, null)
+      return
+    }
+    const anchor = block?.outputAnchor ?? null
+    const candidate =
+      this._unqualifiedHistoryBlock !== blockId &&
+      (!this._historyOpaque || isAtTail(sb.scrollbackArea))
+        ? anchor
+        : null
+    const qualified = history.setStart(candidate, () => {
+      this._unqualifiedHistoryBlock = this.scrollback?.blockManager.runningBlock?.id ?? null
+      this._syncLiveHistoryPresentation()
+    })
+    this._historyOpaque = !qualified
+    sb.setHistoryPresentation(qualified ? 'block' : 'terminal', history.el, block ?? undefined)
+    history.setActive(true)
+  }
+
   // ── The alternate-screen size fence (nocx-1ebrs.10) ──────────────────
   //
   // WHAT IT IS FOR. A full-screen program learns its grid from TIOCSWINSZ, so
@@ -7147,13 +7253,21 @@ export class TerminalContent extends BasePaneContent {
     ) {
       return
     }
+    this._watchFenceResize(size, session.resizeApplied(size))
+  }
+
+  private _watchFenceResize(
+    size: SessionSize,
+    receipt: Promise<'applied' | 'superseded' | 'closed'>,
+  ): void {
+    const fence = this._fence
+    if (fence === null) return
     fence.sent = size
     const generation = ++fence.generation
     fence.newest = generation
     clearTimeout(this.resizeTimer)
     this.resizeTimer = undefined
     this._armFenceDeadline(fence, generation)
-    const receipt = session.resizeApplied(size)
     void receipt.then(
       (outcome) => {
         if (this._fence !== fence || generation !== fence.newest) return
@@ -7171,7 +7285,7 @@ export class TerminalContent extends BasePaneContent {
         // A real failure, or the socket gone under the request. Either way
         // the pane cannot hold the person's input for a size it will never
         // learn: log it and let the input through at the size the pty has.
-        log.warn('nocx: the resize at an alternate-screen switch did not apply', {
+        log.warn('nocx: alternate-screen resize did not apply', {
           pane: this.pane.paneId,
           error: err instanceof Error ? err.message : String(err),
         })
@@ -8231,8 +8345,17 @@ export class TerminalContent extends BasePaneContent {
       this._removeSummonStackIfEmpty()
       return
     }
-    const parent = command?.el.parentElement ?? null
-    if (command === null || parent === null) {
+    // Use the projection's tail and its parent as one seat. A nested tool
+    // command can live in an archived Ask while opaque output sits at root.
+    const commandTail =
+      command === null ? null : (this.scrollback?.tailOf(command.el) ?? command.el)
+    const parent = commandTail?.parentElement ?? null
+    if (
+      command === null ||
+      commandTail === null ||
+      parent === null ||
+      !this.scrollback?.scrollbackInner.contains(command.el)
+    ) {
       // Clear/reset can remove the running command before its terminal fact.
       // Its overlay answers belong to that command and must not be resurrected
       // by a later summon or lifecycle transition.
@@ -8256,15 +8379,8 @@ export class TerminalContent extends BasePaneContent {
       if (readingAnswerTail) settle?.scrollToTail()
       else settle?.scrollToBottomIfFollowing()
     }
-    // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
-    // element: while the command still runs its output is in the live
-    // region, which BlockManager keeps immediately after the block
-    // (nocx-hp8p2.8). Anchoring on the element alone seated the reply
-    // between `top`'s header and `top`'s own screen.
-    const manager = this.scrollback?.blockManager
-    const commandTail = manager ? manager.tailOf(command.el) : command.el
     const seat = () => {
-      let anchor: ChildNode = commandTail.parentNode === parent ? commandTail : command.el
+      let anchor: ChildNode = commandTail
       for (const answer of owned) {
         parent.insertBefore(answer.el, anchor.nextSibling)
         answer.el.classList.remove('nocx-answer-overlay')
@@ -9927,6 +10043,7 @@ export class TerminalContent extends BasePaneContent {
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
     this._lastFrozenBlock = rec
+    this._syncLiveHistoryPresentation()
     if (this.lifecycle.state.kind !== 'prompt_ready') {
       this._screenHandbackAwaitingBoundary = true
     }

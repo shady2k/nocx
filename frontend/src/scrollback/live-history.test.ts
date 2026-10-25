@@ -9,6 +9,7 @@ import {
   HEAD_REFRESH_MS,
   LiveHistorySurface,
   type LiveHistoryPageSource,
+  type LiveHistoryOptions,
 } from './live-history'
 import type { SessionHistoryPage } from '../generated/session.historyPage'
 import type { SessionHistoryPageRows } from '../generated/session.historyPageRows'
@@ -123,7 +124,35 @@ function pageOf(
 
 const ROW_PX = 20
 
-function mount(palette: () => TerminalSnapshot = () => DEFAULT_SNAPSHOT): {
+function screenAt(
+  baseRow: number,
+  {
+    revision = 1,
+    geometryRevision = 1,
+    cols = 80,
+    rows = 24,
+  }: { revision?: number; geometryRevision?: number; cols?: number; rows?: number } = {},
+) {
+  return {
+    revision,
+    geometry: { cols, rows, cellWidthPx: 1, cellHeightPx: 1, revision: geometryRevision },
+    state: {
+      bufferKind: 'normal' as const,
+      bufferInstance: '1',
+      baseRow,
+      bracketedPaste: false,
+      mouseTracking: false,
+      pointerShape: null,
+      title: null,
+      cwd: null,
+    },
+  }
+}
+
+function mount(
+  palette: () => TerminalSnapshot = () => DEFAULT_SNAPSHOT,
+  screen?: LiveHistoryOptions['screen'],
+): {
   surface: LiveHistorySurface
   scroller: HTMLElement
 } {
@@ -136,17 +165,22 @@ function mount(palette: () => TerminalSnapshot = () => DEFAULT_SNAPSHOT): {
   const surface = new LiveHistorySurface({
     scroller,
     stack,
-    columns: () => 80,
+    columns: () => screen?.()?.geometry.cols ?? 80,
+    screen,
     metric: () => null,
     palette,
   })
-  // jsdom lays nothing out; the surface reads exactly three numbers off
-  // the scroller, so the geometry the anchor math needs is named here:
-  // the viewport is fixed and the content is the live pane's box plus one
-  // ROW_PX per painted history row.
+  // jsdom lays nothing out: the viewport is fixed and the layout stack is
+  // the live pane's box plus one ROW_PX per painted history row. Scrollable
+  // overflow normally matches it; a settle transform can extend it without
+  // moving the layout end.
   const VIEWPORT_PX = 240
   Object.defineProperty(scroller, 'clientHeight', { value: VIEWPORT_PX, configurable: true })
   Object.defineProperty(scroller, 'scrollHeight', {
+    configurable: true,
+    get: () => stack.offsetHeight,
+  })
+  Object.defineProperty(stack, 'offsetHeight', {
     configurable: true,
     get: () => VIEWPORT_PX + surface.el.querySelectorAll('.term-grid-row').length * ROW_PX,
   })
@@ -227,6 +261,74 @@ describe('live-history', () => {
     pane.remove()
   })
 
+  it('keeps a running command window above its live screen without including the previous command', async () => {
+    const { surface, scroller } = mount()
+    surface.setStart({
+      entryId: 'running-command',
+      row: 50,
+      screenRevision: 1,
+      bufferKind: 'normal',
+      bufferInstance: '1',
+      cols: 80,
+      rows: 24,
+    })
+    surface.setActive(true)
+    const page = pageOf('a'.repeat(32), 32, 64, 0, true)
+    // Height-only resizing moves the live base, not the primary row space.
+    page.result.rows = 30
+    const source = scriptedSource([page])
+    surface.bind(source)
+    await settle()
+    scrollNearTop(scroller, 0)
+    await settle()
+
+    const rows = Array.from(surface.el.querySelectorAll('.term-grid-row'), (row) => row.textContent)
+    expect(rows[0]).toContain('L000050')
+    expect(rows[rows.length - 1]).toContain('L000095')
+    expect(rows).toHaveLength(46)
+    expect(rows.join('\n')).not.toContain('L000049')
+    expect(source.requested).toEqual([null])
+    surface.dispose()
+  })
+
+  it('never applies a block boundary to a different buffer instance', async () => {
+    const { surface } = mount()
+    const unqualified = vi.fn()
+    surface.setStart(
+      {
+        entryId: 'running-command',
+        row: 50,
+        screenRevision: 1,
+        bufferKind: 'normal',
+        bufferInstance: '9',
+        cols: 80,
+        rows: 24,
+      },
+      unqualified,
+    )
+    surface.setActive(true)
+    surface.bind(scriptedSource([pageOf('b'.repeat(32), 32, 64, 0, false)]))
+    await settle()
+
+    expect(unqualified).toHaveBeenCalledOnce()
+    const rows = surface.el.querySelectorAll('.term-grid-row')
+    expect(rows[0].textContent).toContain('L000032')
+    expect(rows).toHaveLength(64)
+    surface.dispose()
+  })
+
+  it('does not expose alternate-buffer rows through the primary-history surface', async () => {
+    const { surface } = mount()
+    const page = pageOf('c'.repeat(32), 10, 5, 0, false, 13)
+    page.result.bufferKind = 'alternate'
+    surface.setActive(true)
+    surface.bind(scriptedSource([page]))
+    await settle()
+    expect(surface.el.textContent).not.toContain('L000010')
+    expect(surface.el.querySelector('.term-grid-row')).toBeNull()
+    surface.dispose()
+  })
+
   it('pages the emulator to the floor: every row that left the screen is found, oldest painted first', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
@@ -236,7 +338,7 @@ describe('live-history', () => {
       pageOf('a'.repeat(32), 32, 64, 0, true),
       pageOf('b'.repeat(32), 0, 32, 0, false),
     ])
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(source)
     await settle()
     expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(64)
@@ -263,7 +365,7 @@ describe('live-history', () => {
     const second = pageOf('B'.repeat(32), 22, 10, 0, false)
     second.result.bufferInstance = '2'
     const source = scriptedSource([pageOf('A'.repeat(32), 32, 10, 0, true), second])
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(source)
     await settle()
     expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(10)
@@ -281,9 +383,8 @@ describe('live-history', () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
     const page = pageOf('a'.repeat(32), 10, 5, 0, false, 13)
-    page.result.bufferKind = 'alternate'
     page.result.bufferInstance = '2'
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(scriptedSource([page]))
     await settle()
 
@@ -300,7 +401,7 @@ describe('live-history', () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
     expect(scroller.scrollTop).toBe(0)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(scriptedSource([pageOf('c'.repeat(32), 0, 30, 0, false)]))
     await settle()
 
@@ -317,7 +418,7 @@ describe('live-history', () => {
       holdRows: true,
     })
     const { surface } = mount()
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(source)
     await settle()
 
@@ -328,29 +429,10 @@ describe('live-history', () => {
     expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(10)
   })
 
-  it('shows the surface only in the unstructured mode', async () => {
-    const { surface } = mount()
-    expect(surface.el.hidden).toBe(true)
-    surface.setMode('unstructured')
-    expect(surface.el.hidden).toBe(false)
-    surface.bind(scriptedSource([pageOf('e'.repeat(32), 0, 5, 0, false)]))
-    await settle()
-    expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(5)
-
-    // A full-screen program takes the pane: the surface hides what it
-    // keeps (the painted rows stay, the mode class and the hidden flag
-    // take the element out of the flow). The cascade half — that a
-    // full-screen program's pane really shows nothing of the primary's
-    // history — is the real browser's to prove, and the e2e spec does.
-    surface.setMode('other')
-    expect(surface.el.hidden).toBe(true)
-    expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(5)
-  })
-
   it('a sighted erase-saved-lines drops everything painted and invents no boundary', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(scriptedSource([pageOf('f'.repeat(32), 0, 20, 0, false)]))
     await settle()
     expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(20)
@@ -366,7 +448,7 @@ describe('live-history', () => {
     // The head page [64,128), painted. The emulator then erased its saved
     // lines; the next answer — asked at before=64 — is the empty interval
     // at the cursor with the floor stated at the head (128), more=false.
-    surface.setMode('unstructured')
+    surface.setActive(true)
     surface.bind(
       scriptedSource([
         pageOf('g'.repeat(32), 64, 64, 0, true),
@@ -389,7 +471,7 @@ describe('live-history', () => {
   it('output arriving while the reader is away re-arms paging on the return to the live end', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     // Two head reads: the one that painted the past, and the one the
     // return to the live end asks for after output moved the head.
     const source = scriptedSource([
@@ -416,7 +498,7 @@ describe('live-history', () => {
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       // The pane bound against an empty history: the head page answers
       // empty, the surface is exhausted, and nothing is scrollable.
       const source = scriptedSource([
@@ -453,7 +535,7 @@ describe('live-history', () => {
     vi.useFakeTimers()
     try {
       const { surface } = mount()
-      surface.setMode('unstructured')
+      surface.setActive(true)
       // The bind's head read A is on the wire, held there — and it will
       // answer for the buffer AS IT WAS: empty.
       const source = scriptedSource(
@@ -499,7 +581,7 @@ describe('live-history', () => {
     vi.useFakeTimers()
     try {
       const { surface, scroller } = mount()
-      surface.setMode('unstructured')
+      surface.setActive(true)
       const first = pageOf('v'.repeat(32), 64, 30, 0, true)
       const second = pageOf('w'.repeat(32), 94, 30, 0, true)
       const source = scriptedSource([first, second], { holdResult: true })
@@ -511,7 +593,7 @@ describe('live-history', () => {
       // page result is outstanding. The first scroll crosses the live end.
       // The read must not make that departure invisible just because its
       // promise has not settled yet.
-      Object.defineProperty(scroller, 'scrollHeight', {
+      Object.defineProperty(scroller.firstElementChild!, 'offsetHeight', {
         configurable: true,
         get: () =>
           scroller.clientHeight +
@@ -544,7 +626,7 @@ describe('live-history', () => {
     vi.useFakeTimers()
     try {
       const { surface, scroller } = mount()
-      surface.setMode('unstructured')
+      surface.setActive(true)
       // Both pages keep their rows documents: the first result waits for
       // one forever, until the watchdog gives the page back.
       const source = scriptedSource(
@@ -579,7 +661,7 @@ describe('live-history', () => {
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       // The session binds against an empty history; the first burst of
       // output arms the refresh, which paints the head as it then was.
       const source = scriptedSource([
@@ -633,7 +715,7 @@ describe('live-history', () => {
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       const source = scriptedSource([
         pageOf('v'.repeat(32), 0, 0, 0, false), // the bind's head read: empty
         pageOf('w'.repeat(32), 30, 64, 0, true), // the refresh: rows 30..93, floor 0
@@ -694,7 +776,7 @@ describe('live-history', () => {
       let theme: TerminalSnapshot = DEFAULT_SNAPSHOT
       const { surface, scroller } = mount(() => theme)
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       const source = scriptedSource([
         pageOf('v'.repeat(32), 0, 0, 0, false),
         pageOf('w'.repeat(32), 30, 64, 0, true),
@@ -725,7 +807,7 @@ describe('live-history', () => {
   it('a request the drop left behind owns nothing: the new history pages, the old answer is ignored', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     // The first session's head request is on the wire, and held there.
     const first = scriptedSource([pageOf('y'.repeat(32), 64, 10, 0, true)], {
       holdResult: true,
@@ -775,7 +857,7 @@ describe('live-history', () => {
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       // The head read A is on the wire, held. It answers for the buffer as
       // it WAS: rows 0..9, nothing below.
       const source = scriptedSource(
@@ -821,12 +903,57 @@ describe('live-history', () => {
     }
   })
 
+  it.each([0, 60])(
+    'a page spanning a settle glide preserves the reader’s real %ipx departure',
+    async (departure) => {
+      vi.useFakeTimers()
+      const { surface, scroller } = mount()
+      try {
+        const stack = scroller.firstElementChild as HTMLElement
+        let visualOverflow = 0
+        Object.defineProperty(scroller, 'scrollHeight', {
+          configurable: true,
+          get: () => stack.offsetHeight + visualOverflow,
+        })
+        surface.setActive(true)
+        const source = scriptedSource(
+          [pageOf('glide-before', 32, 8, 32, false), pageOf('glide-after', 40, 8, 40, false)],
+          { holdResult: true },
+        )
+        surface.bind(source)
+        source.resolveResult('glide-before')
+        await settle()
+        atBottom(scroller)
+
+        // A positive settle transform extends scrollable overflow, but neither
+        // the layout end nor the reader moves. A real wheel may move them too.
+        visualOverflow = 180
+        surface.noteOutput()
+        scrollNearTop(scroller, 8 * ROW_PX - departure)
+        await settle()
+
+        // The response arrives after the visual displacement has finished.
+        visualOverflow = 0
+        vi.advanceTimersByTime(HEAD_REFRESH_MS)
+        await settle()
+        source.resolveResult('glide-after')
+        await settle()
+
+        expect(surface.el.textContent).toContain('L000047')
+        expect(scroller.scrollTop).toBe(8 * ROW_PX - departure)
+      } finally {
+        surface.dispose()
+        vi.useRealTimers()
+      }
+    },
+  )
+
   it('output while the reader is AWAY rebuilds nothing: their rows do not move under them', async () => {
     vi.useFakeTimers()
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       const source = scriptedSource([pageOf('E'.repeat(32), 0, 30, 0, false)])
       surface.bind(source)
       await settle()
@@ -867,7 +994,7 @@ describe('live-history', () => {
     try {
       const { surface, scroller } = mount()
       atBottom(scroller)
-      surface.setMode('unstructured')
+      surface.setActive(true)
       const source = scriptedSource([pageOf('H'.repeat(32), 0, 30, 0, false)])
       surface.bind(source)
       await settle()
@@ -912,45 +1039,101 @@ describe('live-history', () => {
     }
   })
 
-  it('the wheel over the live screen reaches the scroller in the unstructured mode, and only there', async () => {
-    const { surface, scroller } = mount()
-    atBottom(scroller)
-    surface.setMode('unstructured')
-    const source = scriptedSource([pageOf('F'.repeat(32), 0, 40, 0, false)])
+  it('does not duplicate live rows when a history read is newer than the accepted screen', async () => {
+    const { surface } = mount(undefined, () => screenAt(50))
+    surface.setActive(true)
+    // The runtime has advanced to 70, but rows 50 onward are still live on
+    // this client. Only [32,50) belongs above its live grid.
+    surface.bind(scriptedSource([pageOf('F'.repeat(32), 32, 40, 32, false, 70)]))
+    await settle()
+    const rows = Array.from(surface.el.querySelectorAll('.term-grid-row'), (row) => row.textContent)
+    expect(rows).toHaveLength(18)
+    expect(rows[0]).toContain('L000032')
+    expect(rows[rows.length - 1]).toContain('L000049')
+    expect(rows.join('\n')).not.toContain('L000050')
+    surface.dispose()
+  })
+
+  it('does not reuse a pre-geometry command boundary when columns happen to match again', async () => {
+    const { surface } = mount(undefined, () => screenAt(96, { revision: 20, geometryRevision: 15 }))
+    surface.setStart({
+      entryId: 'old-command',
+      row: 50,
+      screenRevision: 5,
+      bufferKind: 'normal',
+      bufferInstance: '1',
+      cols: 80,
+      rows: 24,
+    })
+    surface.setActive(true)
+    surface.bind(scriptedSource([pageOf('M'.repeat(32), 32, 64, 0, false)]))
+    await settle()
+    const rows = Array.from(surface.el.querySelectorAll('.term-grid-row'), (row) => row.textContent)
+    expect(rows).toHaveLength(64)
+    expect(rows[0]).toContain('L000032')
+    surface.dispose()
+  })
+
+  it('removes an installed suffix pulled into the live screen without moving a reader in older rows', async () => {
+    let screen = screenAt(37, { revision: 9 })
+    const { surface, scroller } = mount(undefined, () => screen)
+    const anchor = {
+      entryId: 'height-only',
+      row: 0,
+      screenRevision: 8,
+      bufferKind: 'normal' as const,
+      bufferInstance: '1',
+      cols: 80,
+      rows: 24,
+    }
+    expect(surface.setStart(anchor)).toBe(true)
+    surface.setActive(true)
+    const source = scriptedSource([
+      pageOf('N'.repeat(32), 20, 17, 0, true),
+      pageOf('O'.repeat(32), 0, 20, 0, false, 37),
+    ])
     surface.bind(source)
     await settle()
-    expect(scroller.scrollTop).toBe(40 * ROW_PX)
+    scrollNearTop(scroller, 0)
+    await settle()
+    scrollNearTop(scroller, 40)
 
-    // the terminal input layer above the live screen consumes the gesture's default
-    // action; the scroller's own owner still sees the event (a
-    // preventDefault cancels the default, never the propagation) and
-    // applies the delta itself — the person's wheel moves the history.
-    const wheel = new WheelEvent('wheel', { deltaY: -240, cancelable: true, bubbles: true })
-    scroller.dispatchEvent(wheel)
-    expect(scroller.scrollTop).toBe(40 * ROW_PX - 240)
+    screen = screenAt(13, { revision: 10, geometryRevision: 10, rows: 48 })
+    expect(surface.setStart(anchor)).toBe(true)
+    surface.noteOutput()
+    const rows = Array.from(surface.el.querySelectorAll('.term-grid-row'), (row) => row.textContent)
+    expect(rows).toHaveLength(13)
+    expect(rows[0]).toContain('L000000')
+    expect(rows[rows.length - 1]).toContain('L000012')
+    expect(rows.join('\n')).not.toContain('L000013')
+    expect(scroller.scrollTop).toBe(40)
+    expect(source.requested).toEqual([null, 20])
+    surface.dispose()
+  })
 
-    // A wheel the clamp holds (down at the live end) claims nothing and
-    // cancels nothing.
-    scroller.scrollTop = 40 * ROW_PX
-    const atTail = scroller.scrollTop
-    const pinned = new WheelEvent('wheel', { deltaY: 240, cancelable: true, bubbles: true })
-    scroller.dispatchEvent(pinned)
-    expect(scroller.scrollTop).toBe(atTail)
-    expect(pinned.defaultPrevented).toBe(false)
-
-    // The alternate screen is not this surface's: the wheel goes wherever
-    // the input path sends it, and the scroller is not translated.
-    surface.setMode('other')
-    const other = new WheelEvent('wheel', { deltaY: -240, cancelable: true, bubbles: true })
-    scroller.dispatchEvent(other)
-    expect(scroller.scrollTop).toBe(atTail)
-    expect(other.defaultPrevented).toBe(false)
+  it('a reflow retires an in-flight first page, not just already painted rows', async () => {
+    const { surface } = mount()
+    surface.setActive(true)
+    const first = pageOf('K'.repeat(32), 0, 30, 0, false)
+    const second = pageOf('L'.repeat(32), 100, 30, 100, false)
+    const source = scriptedSource([first, second], { holdResult: true })
+    surface.bind(source)
+    surface.reflowed()
+    source.resolveResult(second.pageId)
+    await settle()
+    source.resolveResult(first.pageId)
+    await settle()
+    const rows = Array.from(surface.el.querySelectorAll('.term-grid-row'), (row) => row.textContent)
+    expect(rows).toHaveLength(30)
+    expect(rows[0]).toContain('L000100')
+    expect(rows.join('\n')).not.toContain('L000000')
+    surface.dispose()
   })
 
   it('a column reflow drops the painted past and asks for the head again at once', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     const source = scriptedSource([
       pageOf('G'.repeat(32), 0, 30, 0, false),
       pageOf('H'.repeat(32), 0, 30, 0, false),
@@ -973,8 +1156,8 @@ describe('live-history', () => {
   it('a clamped wheel on an empty surface is still the gesture a lost page waits on', async () => {
     vi.useFakeTimers()
     try {
-      const { surface, scroller } = mount()
-      surface.setMode('unstructured')
+      const { surface } = mount()
+      surface.setActive(true)
       // The first page's rows document never arrives; the watchdog gives
       // the page back, and the surface is empty with no exhaustion latched.
       const source = scriptedSource(
@@ -990,8 +1173,7 @@ describe('live-history', () => {
       // The live rectangle fills the scroller exactly, so the wheel-up
       // moves nothing — clamped at zero — and the retry it stands for must
       // still run: the gesture counts even when the pixels do not.
-      const wheel = new WheelEvent('wheel', { deltaY: -240, cancelable: true, bubbles: true })
-      scroller.dispatchEvent(wheel)
+      surface.scrollBy(0, -240)
       await settle()
       expect(source.requested).toEqual([null, null])
     } finally {
@@ -1002,7 +1184,7 @@ describe('live-history', () => {
   it('a stale rebuild honors the gesture that left: the reader lands the same distance from the tail', async () => {
     const { surface, scroller } = mount()
     atBottom(scroller)
-    surface.setMode('unstructured')
+    surface.setActive(true)
     const source = scriptedSource([
       pageOf('K'.repeat(32), 0, 30, 0, false),
       pageOf('L'.repeat(32), 0, 30, 0, false),
@@ -1024,7 +1206,7 @@ describe('live-history', () => {
 
   it('a drop cancels what was in flight: a stale answer installs nothing', async () => {
     const { surface } = mount()
-    surface.setMode('unstructured')
+    surface.setActive(true)
     const source = scriptedSource([pageOf('j'.repeat(32), 0, 10, 0, false)], {
       holdRows: true,
     })

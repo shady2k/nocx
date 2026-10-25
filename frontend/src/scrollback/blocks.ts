@@ -2259,10 +2259,7 @@ export class BlockManager {
     // started — so every key between this move and the next focus call was
     // lost (nocx-askcb). The focus goes back where it was, in the same task,
     // and only if the region held it.
-    const focused = document.activeElement
-    const heldFocus = focused instanceof HTMLElement && this._liveContainer.contains(focused)
-    this._scrollbackInner.insertBefore(this._liveContainer, seat.nextSibling)
-    if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
+    this._moveLive(this._scrollbackInner, seat.nextSibling)
   }
 
   /** The root-flow seat already used when positioning a command's live grid.
@@ -2324,21 +2321,26 @@ export class BlockManager {
    *  running right now, so the focus goes back in the same task
    *  (nocx-askcb). */
   private _moveLive(parent: HTMLElement, before: ChildNode | null): void {
+    if (
+      this._liveContainer.parentElement === parent &&
+      (before === this._liveContainer || this._liveContainer.nextSibling === before)
+    ) {
+      return
+    }
     const focused = document.activeElement
     const heldFocus = focused instanceof HTMLElement && this._liveContainer.contains(focused)
     parent.insertBefore(this._liveContainer, before)
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
-  /** The body's order is header, the rows the record holds, then the live
-   *  region — and `paintStoredRows` REPLACES `.cmd-output` on every growth, so
-   *  each paint appends it after the region and the order has to be restored
-   *  here. One rule, one place: the manager paints and the manager holds the
-   *  region's seat. */
+  /** Keep newly painted body rows/notices before the attached live editor.
+   *  Moving that editor to the end would blur it between keydown and native
+   *  input, cancelling pending text even if focus is restored immediately. */
   private _keepLiveBodyLast(block: HTMLElement): void {
     if (this._liveContainer.parentElement !== block) return
-    if (block.lastElementChild === this._liveContainer) return
-    this._moveLive(block, null)
+    while (this._liveContainer.nextSibling !== null) {
+      block.insertBefore(this._liveContainer.nextSibling, this._liveContainer)
+    }
   }
 
   /** Put a COMMAND block in the next seat: inside the turn that claimed it

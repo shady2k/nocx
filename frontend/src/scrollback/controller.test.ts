@@ -134,6 +134,85 @@ describe('live projection changes preserve the input owner', () => {
     }
   })
 
+  it('preserves uninterrupted text input while stored output and accepted layouts update', () => {
+    const { pane, controller } = makeController({
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    document.body.append(pane)
+    const intents: SessionIntent[] = []
+    const input = new IntentInput({ emit: (intent) => intents.push(intent) })
+    controller.terminalLiveInner.append(input.element)
+    try {
+      const command = controller.blockManager.startBlock('read reply', '~', 0)
+      controller.blockManager.bindAttempt('read-entry')
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      controller.setHistoryPresentation('block', history, command)
+      input.focus()
+      let lostFocus = false
+      input.element.addEventListener('blur', () => {
+        lostFocus = true
+      })
+      intents.length = 0
+      const text = "GRID 'NOCX''-INPUT-REACHED' "
+      const lines: Array<StoredBlockRows['lines'][number]> = []
+      for (const [index, character] of [...text].entries()) {
+        document.activeElement!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: character, bubbles: true, cancelable: true }),
+        )
+        lines.push({
+          from: index,
+          row: wireRowOf(Array.from(`output ${index}`, (ch) => [ch, 1, true] as CellSpec)),
+        })
+        // Backend rows and an accepted-frame layout can land between a native
+        // keydown and its text commit. Neither may interrupt that editor.
+        controller.blockManager.applyStoredRows('read-entry', {
+          lines: [...lines],
+          droppedRows: 0,
+          lostRows: 0,
+          truncated: null,
+        })
+        controller.setHistoryPresentation('block', history, command)
+        expect(input.element.isConnected).toBe(true)
+        expect(document.activeElement).toBe(input.element)
+        input.element.value = character
+        document.activeElement!.dispatchEvent(
+          new InputEvent('input', {
+            data: character,
+            inputType: 'insertText',
+            bubbles: true,
+          }),
+        )
+      }
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(lostFocus).toBe(false)
+      expect(intents).toEqual([
+        ...Array.from(text, (character) => ({ kind: 'text', payload: character })),
+        { kind: 'key', payload: 'enter' },
+      ])
+      const output = command.el.querySelector<HTMLElement>(':scope > .cmd-output')!
+      expect(
+        output.compareDocumentPosition(input.element) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(
+        [...output.querySelectorAll('.term-grid-row')].map((row) => row.textContent?.trimEnd()),
+      ).toEqual(Array.from(text, (_, index) => `output ${index}`))
+    } finally {
+      input.destroy()
+      controller.dispose()
+      pane.remove()
+    }
+  })
+
   it('preserves execution chrome without duplicate rows through freeze and projection changes', () => {
     const stop = vi.fn()
     const { pane, controller } = makeController({

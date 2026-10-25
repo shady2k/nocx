@@ -170,13 +170,17 @@ function mount(
     metric: () => null,
     palette,
   })
-  // jsdom lays nothing out; the surface reads exactly three numbers off
-  // the scroller, so the geometry the anchor math needs is named here:
-  // the viewport is fixed and the content is the live pane's box plus one
-  // ROW_PX per painted history row.
+  // jsdom lays nothing out: the viewport is fixed and the layout stack is
+  // the live pane's box plus one ROW_PX per painted history row. Scrollable
+  // overflow normally matches it; a settle transform can extend it without
+  // moving the layout end.
   const VIEWPORT_PX = 240
   Object.defineProperty(scroller, 'clientHeight', { value: VIEWPORT_PX, configurable: true })
   Object.defineProperty(scroller, 'scrollHeight', {
+    configurable: true,
+    get: () => stack.offsetHeight,
+  })
+  Object.defineProperty(stack, 'offsetHeight', {
     configurable: true,
     get: () => VIEWPORT_PX + surface.el.querySelectorAll('.term-grid-row').length * ROW_PX,
   })
@@ -589,7 +593,7 @@ describe('live-history', () => {
       // page result is outstanding. The first scroll crosses the live end.
       // The read must not make that departure invisible just because its
       // promise has not settled yet.
-      Object.defineProperty(scroller, 'scrollHeight', {
+      Object.defineProperty(scroller.firstElementChild!, 'offsetHeight', {
         configurable: true,
         get: () =>
           scroller.clientHeight +
@@ -898,6 +902,51 @@ describe('live-history', () => {
       vi.useRealTimers()
     }
   })
+
+  it.each([0, 60])(
+    'a page spanning a settle glide preserves the reader’s real %ipx departure',
+    async (departure) => {
+      vi.useFakeTimers()
+      const { surface, scroller } = mount()
+      try {
+        const stack = scroller.firstElementChild as HTMLElement
+        let visualOverflow = 0
+        Object.defineProperty(scroller, 'scrollHeight', {
+          configurable: true,
+          get: () => stack.offsetHeight + visualOverflow,
+        })
+        surface.setActive(true)
+        const source = scriptedSource(
+          [pageOf('glide-before', 32, 8, 32, false), pageOf('glide-after', 40, 8, 40, false)],
+          { holdResult: true },
+        )
+        surface.bind(source)
+        source.resolveResult('glide-before')
+        await settle()
+        atBottom(scroller)
+
+        // A positive settle transform extends scrollable overflow, but neither
+        // the layout end nor the reader moves. A real wheel may move them too.
+        visualOverflow = 180
+        surface.noteOutput()
+        scrollNearTop(scroller, 8 * ROW_PX - departure)
+        await settle()
+
+        // The response arrives after the visual displacement has finished.
+        visualOverflow = 0
+        vi.advanceTimersByTime(HEAD_REFRESH_MS)
+        await settle()
+        source.resolveResult('glide-after')
+        await settle()
+
+        expect(surface.el.textContent).toContain('L000047')
+        expect(scroller.scrollTop).toBe(8 * ROW_PX - departure)
+      } finally {
+        surface.dispose()
+        vi.useRealTimers()
+      }
+    },
+  )
 
   it('output while the reader is AWAY rebuilds nothing: their rows do not move under them', async () => {
     vi.useFakeTimers()

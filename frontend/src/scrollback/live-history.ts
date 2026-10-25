@@ -120,6 +120,7 @@ interface InstalledPage {
 export class LiveHistorySurface {
   readonly el: HTMLElement
   private readonly _scroller: HTMLElement
+  private readonly _geometry: Pick<HTMLElement, 'scrollTop' | 'scrollHeight' | 'clientHeight'>
   private readonly _columns: () => number | null
   private readonly _metric: () => RunMetric | null
   private readonly _warm: ((candidates: Iterable<FitCandidate>) => void) | undefined
@@ -193,7 +194,23 @@ export class LiveHistorySurface {
   private readonly _docs = new Map<string, SessionHistoryPageRows>()
 
   constructor(opts: LiveHistoryOptions) {
-    this._scroller = opts.scroller
+    const { scroller, stack } = opts
+    this._scroller = scroller
+    // Follow and page anchors belong to layout, just like the controller's
+    // sentinel outside the animated stack. scrollHeight includes a positive
+    // settle transform; remembering that visual overflow as a departure
+    // strands the live rows when a pending page arrives after the glide.
+    this._geometry = {
+      get scrollTop() {
+        return scroller.scrollTop
+      },
+      get scrollHeight() {
+        return Math.max(scroller.clientHeight, stack.offsetHeight)
+      },
+      get clientHeight() {
+        return scroller.clientHeight
+      },
+    }
     this._columns = opts.columns
     this._screen = opts.screen
     this._metric = opts.metric
@@ -410,7 +427,7 @@ export class LiveHistorySurface {
       // as the moment they wheeled.
       const gap = Math.max(
         0,
-        this._scroller.scrollHeight - this._scroller.clientHeight - this._scroller.scrollTop,
+        this._geometry.scrollHeight - this._geometry.clientHeight - this._geometry.scrollTop,
       )
       this._forget()
       this._rebuildTailGap = gap
@@ -562,7 +579,7 @@ export class LiveHistorySurface {
     // keys are not this: they move no caret the engine has to reveal.
     if (ev.key.length !== 1) return
     if (!this._active) return
-    const el = this._scroller
+    const el = this._geometry
     // Nothing to hold: a scroller with no layout box, or with nothing to
     // scroll, has no place the reader could lose — and one already at its
     // live end has no place the reveal could take them from. The GEOMETRY
@@ -608,7 +625,7 @@ export class LiveHistorySurface {
     // This must precede the in-flight guards: a scroll event is how we learn
     // that a reader left while a page was outstanding, and dropping that
     // event lets its completion rebuild the past under the reader.
-    if (!this._away && !isAtTail(this._scroller)) {
+    if (!this._away && !isAtTail(this._geometry)) {
       this.leftTail()
       if (this._inflight || this._awaitingRows !== null) return
     }
@@ -620,7 +637,7 @@ export class LiveHistorySurface {
     // EMPTY surface stays eligible — its reader has nowhere to be but
     // the tail, and the wheel needs the first page to have anywhere to
     // go at all.
-    if (this._pages.length > 0 && isAtTail(this._scroller)) return
+    if (this._pages.length > 0 && isAtTail(this._geometry)) return
     if (this._dirty) return
     if (this._exhausted) return
     if (this._scroller.scrollTop > this._scroller.clientHeight) return
@@ -665,7 +682,7 @@ export class LiveHistorySurface {
     // rebuilding under a departing reader would eat the very gesture that
     // left (nocx-zg3k3.10.4: the first wheel-up moved nothing).
     this._refreshPending = false
-    if (!this._away && isAtTail(this._scroller) && this._dirty) {
+    if (!this._away && isAtTail(this._geometry) && this._dirty) {
       this._forget()
       this._request()
     }
@@ -864,9 +881,9 @@ export class LiveHistorySurface {
     // this — and the reader's anchor is paid back the height removed.
     const keep = oldest.rows.slice(floor - oldest.start)
     const el = this._paintPageRows(floor, keep, oldest.palette)
-    const before = this._scroller.scrollHeight
+    const before = this._geometry.scrollHeight
     oldest.el.replaceWith(el)
-    const removed = before - this._scroller.scrollHeight
+    const removed = before - this._geometry.scrollHeight
     // Ours, not the engine's: a reveal has nothing left to undo here.
     this._releaseHold()
     if (removed > 0) this._scroller.scrollTop = Math.max(0, this._scroller.scrollTop - removed)
@@ -947,9 +964,9 @@ export class LiveHistorySurface {
     // scrollTop in the same task: a reader at the live end stays at it, a
     // reader mid-history keeps their rows, and output arriving below moves
     // nothing at all because the live rectangle is one fixed box.
-    const before = this._scroller.scrollHeight
+    const before = this._geometry.scrollHeight
     this.el.insertBefore(pageEl, this.el.firstChild)
-    const added = this._scroller.scrollHeight - before
+    const added = this._geometry.scrollHeight - before
     // Ours, not the engine's: a reveal has nothing left to undo here.
     this._releaseHold()
     if (added > 0) this._scroller.scrollTop += added
@@ -961,7 +978,7 @@ export class LiveHistorySurface {
       this._rebuildTailGap = null
       this._scroller.scrollTop = Math.max(
         0,
-        this._scroller.scrollHeight - this._scroller.clientHeight - gap,
+        this._geometry.scrollHeight - this._geometry.clientHeight - gap,
       )
     }
     this._pages.unshift({

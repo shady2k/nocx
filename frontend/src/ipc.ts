@@ -537,11 +537,11 @@ export class SessionHandle {
    * DEVICE pixels (TIOCSWINSZ's units; the helper decodes it into the
    * per-cell metric the frames carry, nocx-zg3k3.2.9, review round 1).
    *
-   * False when the client deduped it — the same report the backend already
-   * holds — so the caller marks the resize-echo window only around a
-   * resize that actually went out.
+   * Null means no report was sent (deduped or unavailable). Otherwise the
+   * receipt belongs to that exact request, so callers can fence input or
+   * mark the resize-echo window without issuing another resize.
    */
-  sendResize(size: SessionSize): boolean {
+  sendResize(size: SessionSize): Promise<'applied' | 'superseded' | 'closed'> | null {
     return this.client.sendResize(this.sessionId, size)
   }
 
@@ -1889,17 +1889,20 @@ export class WSClient {
    * THE DEDUPE IS ON THE WHOLE REPORT, never on the grid alone: a zoom that
    * changes the cell metric at the same cols and rows must still reach the
    * backend, and a report identical to the last one must commit nothing
-   * new. False means the report was deduped; true means a resize went out.
+   * new. Null means no request; a receipt belongs only to an issued resize.
    *
    * Sent whatever the backend answers, and recorded BEFORE it is sent: the
    * report is what THIS client measured, and it is what the next attach
    * has to carry to take the session's size back (nocx-eidfb.2).
    */
-  sendResize(sessionId: string, size: SessionSize): boolean {
+  sendResize(
+    sessionId: string,
+    size: SessionSize,
+  ): Promise<'applied' | 'superseded' | 'closed'> | null {
     const ws = this.dispatcher.socket
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    if (!ws || ws.readyState !== WebSocket.OPEN) return null
     const state = this.sessions.get(sessionId)
-    if (!state) return false
+    if (!state) return null
     const last = state.reported
     if (
       last !== null &&
@@ -1908,12 +1911,9 @@ export class WSClient {
       last.xpixel === size.xpixel &&
       last.ypixel === size.ypixel
     ) {
-      return false
+      return null
     }
-    state.reported = { ...size }
-    // Fire-and-forget — response is silently dropped.
-    void this.dispatcher.call('resize', { sessionId, ...size }).catch(() => {})
-    return true
+    return this.resizeApplied(sessionId, size)
   }
 
   /** The receipt-bearing resize path for the renderer's input fence.

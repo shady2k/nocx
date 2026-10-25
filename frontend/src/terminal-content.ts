@@ -5801,8 +5801,18 @@ export class TerminalContent extends BasePaneContent {
       // its activity indicator for something the user did to the WINDOW
       // rather than to any tab (nocx-6w4z). A DEDUPED report sent nothing,
       // so it opens no echo window either — output then is output.
-      const sent = this.session?.sendResize(this._reportedSize()) ?? false
-      if (sent) this.echoUntil = Date.now() + RESIZE_ECHO_MS
+      const size = this._reportedSize()
+      const receipt = this.session?.sendResize(size) ?? null
+      if (receipt === null) return
+      this.echoUntil = Date.now() + RESIZE_ECHO_MS
+      if (this._bufferType === 'alternate') {
+        // Layout can settle again after the switch's first applied size.
+        // Adopt only the canonical owner's actual changed-report receipt.
+        this._openAlternateScreenFence()
+        this._watchFenceResize(size, receipt)
+      } else {
+        void receipt.catch(() => {})
+      }
     }, RESIZE_SETTLE_MS)
   }
 
@@ -7235,13 +7245,21 @@ export class TerminalContent extends BasePaneContent {
     ) {
       return
     }
+    this._watchFenceResize(size, session.resizeApplied(size))
+  }
+
+  private _watchFenceResize(
+    size: SessionSize,
+    receipt: Promise<'applied' | 'superseded' | 'closed'>,
+  ): void {
+    const fence = this._fence
+    if (fence === null) return
     fence.sent = size
     const generation = ++fence.generation
     fence.newest = generation
     clearTimeout(this.resizeTimer)
     this.resizeTimer = undefined
     this._armFenceDeadline(fence, generation)
-    const receipt = session.resizeApplied(size)
     void receipt.then(
       (outcome) => {
         if (this._fence !== fence || generation !== fence.newest) return
@@ -7259,7 +7277,7 @@ export class TerminalContent extends BasePaneContent {
         // A real failure, or the socket gone under the request. Either way
         // the pane cannot hold the person's input for a size it will never
         // learn: log it and let the input through at the size the pty has.
-        log.warn('nocx: the resize at an alternate-screen switch did not apply', {
+        log.warn('nocx: alternate-screen resize did not apply', {
           pane: this.pane.paneId,
           error: err instanceof Error ? err.message : String(err),
         })

@@ -20011,6 +20011,87 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   })
 
+  it('holds input for a later alternate resize after the switch receipt applied', async () => {
+    const { content, session, switchFrame, drawProgramFrame, receipt, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      switchFrame()
+      receipt('applied')
+      await Promise.resolve()
+      session.sendResize.mockImplementation((size) => session.resizeApplied(size))
+      drawProgramFrame(3)
+      flushFrames()
+      const scrollback = scrollbackFor(content)
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: 368,
+      })
+      content.viewportChanged({ width: PANE.width, height: 368 })
+      flushFrames()
+      // Observe either reporting path, so the old un-fenced send reaches the
+      // same consumer assertion rather than timing out on an internal method.
+      await vi.waitFor(() => {
+        const reports = [...session.sendResize.mock.calls, ...session.resizeApplied.mock.calls].map(
+          ([size]) => size,
+        )
+        expect(reports).toContainEqual({
+          cols: 100,
+          rows: 23,
+          xpixel: 800,
+          ypixel: 368,
+        })
+      })
+      typeIntoPane(content, 'q')
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+      expect(
+        session.intent.mock.calls.filter(([kind, payload]) => kind === 'text' && payload === 'q'),
+      ).toEqual([['text', 'q']])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps borrowed alternate frames and input when the local report is unchanged', async () => {
+    const {
+      content,
+      session,
+      grid,
+      switchFrame,
+      drawProgramFrame,
+      receipt,
+      requested,
+      flushFrames,
+      teardown,
+    } = await switchingPane()
+    try {
+      switchFrame()
+      receipt('applied')
+      await Promise.resolve()
+      const initialRequests = requested()
+      // The report owner returns null for this pane's already-reported fit.
+      // A same-width frame and a later narrower peer frame are not new local
+      // measurements, so neither may create a receipt wait or force padding.
+      drawProgramFrame(3)
+      flushFrames()
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalled())
+      session.sendResize.mockClear()
+      drawProgramFrame(4, 80)
+      flushFrames()
+      await vi.waitFor(() => expect(session.sendResize).toHaveBeenCalled())
+      drawProgramFrame(5, 80)
+      flushFrames()
+      expect(requested()).toBe(initialRequests)
+      expect(grid().getAttribute('aria-colcount')).toBe('80')
+      typeIntoPane(content, 'q')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+    } finally {
+      teardown()
+    }
+  })
+
   it('keeps holding on a superseded receipt and releases on the newer resize', async () => {
     const { content, session, tab, switchFrame, receipt, flushFrames, teardown } =
       await switchingPane()

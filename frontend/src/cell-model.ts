@@ -447,6 +447,63 @@ interface LiveSelectionEndpoint {
   readonly offset: number
 }
 
+/** The same revision, presented on a WIDER grid than the frame declared.
+ *
+ *  A frame says what the PROGRAM's grid is; a pane shows the rectangle it has
+ *  measured. Those are the same number in the steady state and differ for one
+ *  round trip after the pane changes size — an alternate-screen program is
+ *  told its new `TIOCSWINSZ` by a request, and until that request applies the
+ *  frames it publishes still describe the previous mode's width. Presenting
+ *  that width painted a 70-column grid inside a 199-column pane: the strip
+ *  the owner saw (nocx-1ebrs.10).
+ *
+ *  Widening is the model's own padding rule, applied to the presentation
+ *  rather than to the intake: every row keeps its cells and gains blank
+ *  default-styled ones to `cols`. Content is never dropped, no row is added
+ *  or removed (the frame's row count is the pane's height decision, not
+ *  this one's), and nothing is measured here — the caller passes the grid it
+ *  fitted. A caller asking for FEWER columns than the frame carries gets the
+ *  frame back unchanged: cells would have to be discarded to do otherwise,
+ *  and a presented grid may not lose the program's output. */
+export function padSnapshotToColumns(snapshot: ScreenSnapshot, cols: number): ScreenSnapshot {
+  const presentCols = Math.max(snapshot.geometry.cols, Math.floor(cols))
+  if (presentCols === snapshot.geometry.cols) return snapshot
+  const rows: ModelRow[] = snapshot.rows.map((row) => {
+    if (row.cells.length >= presentCols) return row
+    const cells: ModelCell[] = [...row.cells]
+    for (let column = cells.length; column < presentCols; column++) {
+      cells.push(
+        Object.freeze({
+          grapheme: '',
+          width: 1 as const,
+          hasText: false,
+          style: DEFAULT_MODEL_STYLE,
+          column,
+          span: 1,
+        }),
+      )
+    }
+    Object.freeze(cells)
+    return Object.freeze({
+      ...row,
+      cells,
+      cellAt: (c: number): ModelCell | null => (c >= 0 && c < cells.length ? cells[c] : null),
+    })
+  })
+  Object.freeze(rows)
+  const rowAt = (index: number): ModelRow | null =>
+    index >= 0 && index < rows.length ? rows[index] : null
+  return Object.freeze({
+    revision: snapshot.revision,
+    geometry: Object.freeze({ ...snapshot.geometry, cols: presentCols }),
+    cursor: snapshot.cursor,
+    state: snapshot.state,
+    rows,
+    rowAt,
+    cellAt: (row: number, column: number): ModelCell | null => rowAt(row)?.cellAt(column) ?? null,
+  })
+}
+
 /** Plain text for one active-grid row, or null when the requested row is not
  * in the installed frame. Text and column widths come from the backend's
  * accepted frame; non-text spacer/blank cells do not invent characters. */

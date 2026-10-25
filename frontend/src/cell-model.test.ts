@@ -32,6 +32,7 @@ import {
   captureLiveSelection,
   columnSpan,
   createCellModel,
+  padSnapshotToColumns,
   snapshotRowText,
   type ApplyResult,
   type CellModel,
@@ -999,5 +1000,88 @@ describe('snapshot row text', () => {
 
     expect(snapshotRowText(snapshot, 0)).toBe('A界B')
     expect(snapshotRowText(snapshot, 1)).toBeNull()
+  })
+})
+
+// THE PANE'S RECTANGLE IS NOT THE PROGRAM'S GRID (nocx-1ebrs.10). A frame
+// carries the width the PROGRAM runs at; a pane presents the width IT has
+// measured, until the program's own grid catches up. The two are the same
+// number in the steady state, which is why the widening is a presentation
+// detail and not an intake one — the model still holds the frame the backend
+// published.
+describe('a revision presented on a wider grid', () => {
+  function twoRows(cols: number): ScreenSnapshot {
+    return applied(
+      createCellModel(),
+      frame(
+        1,
+        [
+          [
+            ['A', 1, true],
+            ['B', 1, true],
+          ],
+          [
+            ['C', 1, true],
+            ['界', 2, true],
+            ['', 3, false],
+          ],
+        ],
+        cols,
+      ),
+    )
+  }
+
+  it('keeps every cell, adds blank default-styled columns, and reads the same text', () => {
+    const narrow = twoRows(3)
+    expect(narrow.rows[0].cells).toHaveLength(3)
+
+    const wide = padSnapshotToColumns(narrow, 80)
+
+    expect(wide.geometry.cols).toBe(80)
+    for (const row of wide.rows) {
+      expect(row.cells).toHaveLength(80)
+      // The content is untouched, in place, and every added column is the
+      // model's own blank.
+      expect(row.cells.slice(0, 3)).toEqual(narrow.rows[row.index].cells.slice(0, 3))
+      expect(row.cells.slice(3).every((cell) => !cell.hasText && cell.grapheme === '')).toBe(true)
+      // A blank column carries the DEFAULT style, never the last run's: a
+      // background must not bleed into the pane's empty rectangle.
+      expect(row.cells[79].style).toEqual({
+        foreground: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+        background: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+        underlineColor: { kind: 0, palette: 0, rgb: { r: 0, g: 0, b: 0 } },
+        attributes: 0,
+        underline: 0,
+      })
+    }
+    expect(snapshotRowText(wide, 0)).toBe('AB')
+    expect(snapshotRowText(wide, 1)).toBe('C界')
+  })
+
+  it('reads cells past the program’s last column as blank positions, not as content', () => {
+    const wide = padSnapshotToColumns(twoRows(3), 80)
+    expect(wide.rowAt(0)?.cellAt(40)?.hasText).toBe(false)
+    expect(wide.rowAt(0)?.cellAt(80)).toBeNull()
+    expect(wide.cellAt(1, 79)?.grapheme).toBe('')
+  })
+
+  it('never drops a row and never invents one', () => {
+    const wide = padSnapshotToColumns(twoRows(3), 80)
+    expect(wide.rows).toHaveLength(2)
+    // The geometry's row count stays the program's: the pane's height is a
+    // different decision, and a frame may legitimately be shorter.
+    expect(wide.geometry.rows).toBe(2)
+    expect(wide.revision).toBe(1)
+    expect(wide.state).toEqual(twoRows(3).state)
+    expect(wide.cursor).toEqual(twoRows(3).cursor)
+  })
+
+  it('returns the frame itself when the request would drop the program’s columns', () => {
+    const wide = twoRows(80)
+    // A presented grid may not lose cells: a narrower request is the
+    // frame's own geometry, unchanged and by identity.
+    expect(padSnapshotToColumns(wide, 40)).toBe(wide)
+    expect(padSnapshotToColumns(wide, 80)).toBe(wide)
+    expect(padSnapshotToColumns(wide, 120).geometry.cols).toBe(120)
   })
 })

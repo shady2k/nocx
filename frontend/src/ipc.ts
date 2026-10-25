@@ -545,6 +545,12 @@ export class SessionHandle {
     return this.client.sendResize(this.sessionId, size)
   }
 
+  /** Wait for application, not admission or a locally deduped report. The
+   *  renderer's input fence must not release input on a superseded resize. */
+  resizeApplied(size: SessionSize): Promise<'applied' | 'superseded' | 'closed'> {
+    return this.client.resizeApplied(this.sessionId, size)
+  }
+
   /** Address a signal to the command running in this session (nocx-23rph).
    *  See WSClient.signalSession — this is the same call, spelled where a
    *  surface that already holds the handle can reach it. */
@@ -1908,6 +1914,35 @@ export class WSClient {
     // Fire-and-forget — response is silently dropped.
     void this.dispatcher.call('resize', { sessionId, ...size }).catch(() => {})
     return true
+  }
+
+  /** The receipt-bearing resize path for the renderer's input fence.
+   *  Always submit, even at the last reported size: a report is not evidence
+   *  of application. Keep the same reconnect report as sendResize, and let
+   *  the dispatcher own response correlation and disconnect rejection. */
+  async resizeApplied(
+    sessionId: string,
+    size: SessionSize,
+  ): Promise<'applied' | 'superseded' | 'closed'> {
+    const ws = this.dispatcher.socket
+    const state = this.sessions.get(sessionId)
+    if (!ws || ws.readyState !== WebSocket.OPEN || !state) return 'closed'
+    const closed = (): boolean =>
+      this.dispatcher.socket !== ws ||
+      ws.readyState !== WebSocket.OPEN ||
+      this.sessions.get(sessionId) !== state
+    state.reported = { ...size }
+    try {
+      await this.dispatcher.call('resize', { sessionId, ...size })
+      return closed() ? 'closed' : 'applied'
+    } catch (err) {
+      // Superseded and cancelled resizes share this wire code. Neither is
+      // an application receipt, and their JSON-RPC error is not the fence's
+      // vocabulary. Other failures remain errors unless this binding closed.
+      if (err instanceof RpcError && err.code === -32013) return 'superseded'
+      if (closed()) return 'closed'
+      throw err
+    }
   }
 
   /**

@@ -19672,3 +19672,576 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The alternate-screen size fence (nocx-1ebrs.10)
+// ═══════════════════════════════════════════════════════════════════════════
+// Measured on the tree before this fix: the first alternate-screen frames
+// carried the PREVIOUS mode's geometry (192 columns with the pane settled
+// wider; 70 columns in a 1394 px pane), the program read the person's keys
+// while its own stty still reported the old width, and the resize request
+// went out 87–234 ms after the first fullscreen frame and always behind the
+// post-switch input.
+//
+// So the pane now does three things at the switch, and these tests are the
+// three statements: it asks for its own measured grid immediately, it presents
+// the frames that arrive before that request applies on the pane's grid rather
+// than the program's, and it holds what the person produces until the request
+// answers that it APPLIED — never until a frame, which can depend on the input
+// being held.
+describe('an alternate-screen switch holds input for its applied grid (nocx-1ebrs.10)', () => {
+  const PANE = { width: 800, height: 400 }
+  const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
+  /** 800 / 8 by 400 / 16 — the grid this pane measures for itself. */
+  const FITTED = { cols: 100, rows: 25 }
+
+  /** Mount a pane, give it a measured box and a live normal-buffer frame, then
+   * fire the frame that switches to the alternate screen.
+   *
+   * The switch frame carries the geometry the defect recorded: the PREVIOUS
+   * mode's 40 columns in a pane that has measured 100. */
+  async function switchingPane(): Promise<{
+    content: TerminalContent
+    session: SessionFake
+    tab: Pane
+    grid: () => HTMLElement
+    receipt: (outcome: 'applied' | 'superseded' | 'closed') => void
+    /** Answer the request at `index` (0 is the switch's own), for a test that
+     *  needs an OLDER answer to arrive while a newer request is in flight. */
+    receiptAt: (index: number, outcome: 'applied' | 'superseded' | 'closed') => void
+    fail: (error: Error) => void
+    switchFrame: () => SessionFrame
+    drawProgramFrame: (revision: number, cols?: number) => SessionFrame
+    /** The number of resize requests this pane has issued. */
+    requested: () => number
+    /** Run every animation frame the pane has scheduled, in order. */
+    flushFrames: () => void
+    teardown: () => void
+  }> {
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
+    const { content, tab } = mounted
+    // The painter's only ordering boundary is an animation frame. The frames
+    // are COLLECTED and run on demand (flushFrames) rather than run inline:
+    // inline would paint inside the frame handler, before the mode change the
+    // same handler makes a moment later — an order the browser never
+    // produces, and the one that hid the real defect (a paint on the fit from
+    // before the switch). Installed after the mount, because the editor
+    // measures through the same frame callback.
+    const raf = globalThis.requestAnimationFrame
+    let queued: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      queued.push(cb)
+      return queued.length
+    }
+    const flushFrames = (): void => {
+      // A callback may schedule the next one (the paint schedules the refit),
+      // so the queue is drained rather than run once. The bound is a guard
+      // against a scheduling loop in the code under test, not a frame count
+      // anything depends on.
+      for (let pass = 0; queued.length > 0 && pass < 50; pass++) {
+        const frame = queued
+        queued = []
+        for (const cb of frame) cb(0)
+      }
+    }
+    const teardown = (): void => {
+      queued = []
+      globalThis.requestAnimationFrame = raf
+      mounted.teardown()
+    }
+    tab.pane.classList.add('active')
+    const session = sessionOf(content)
+    const scrollback = scrollbackFor(content)
+    Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+      configurable: true,
+      value: PANE.width,
+    })
+    Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: PANE.height,
+    })
+    // The pane's own box, delivered the way the presentation host delivers it.
+    content.viewportChanged({ width: PANE.width, height: PANE.height })
+    // A first frame in the normal buffer gives the pane a committed cell
+    // metric, which is what its fit measures with.
+    session.fireScreenFrame(screenFrame(1, ['$ prompt'], CELL))
+    flushFrames()
+    await vi.waitFor(() =>
+      expect(session.sendResize).toHaveBeenCalledWith({
+        cols: FITTED.cols,
+        rows: FITTED.rows,
+        xpixel: PANE.width,
+        ypixel: PANE.height,
+      }),
+    )
+    session.sendResize.mockClear()
+    const grid = () => tab.pane.querySelector<HTMLElement>('.term-grid')!
+    const receipts: Array<(outcome: 'applied' | 'superseded' | 'closed') => void> = []
+    const failures: Array<(error: Error) => void> = []
+    session.resizeApplied.mockImplementation(
+      () =>
+        new Promise<'applied' | 'superseded' | 'closed'>((resolve, reject) => {
+          receipts.push(resolve)
+          failures.push(reject)
+        }),
+    )
+    const switchFrame = (): SessionFrame => {
+      const frame = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
+      frame.state.bufferKind = 'alternate'
+      frame.state.mouseTracking = true
+      session.fireScreenFrame(frame)
+      return frame
+    }
+    const drawProgramFrame = (revision: number, cols = 100): SessionFrame => {
+      const frame = screenFrame(revision, ['ALT-READY'], { ...CELL, cols, rows: 20 })
+      frame.state.bufferKind = 'alternate'
+      frame.state.mouseTracking = true
+      session.fireScreenFrame(frame)
+      return frame
+    }
+    return {
+      content,
+      session,
+      tab,
+      grid,
+      // `receipt`/`fail` answer the NEWEST request, the way the transport's
+      // newest request owns the pending slot.
+      receipt: (outcome) => receipts[receipts.length - 1]?.(outcome),
+      receiptAt: (index, outcome) => receipts[index]?.(outcome),
+      fail: (error) => failures[failures.length - 1]?.(error),
+      switchFrame,
+      drawProgramFrame,
+      requested: () => receipts.length,
+      flushFrames,
+      teardown,
+    }
+  }
+
+  it('asks for the pane’s measured grid as the switch is accepted, not the frame’s', async () => {
+    const { session, switchFrame, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      // Synchronously: the switch is a known moment, and there is nothing
+      // to settle. The frame the pane just accepted says 40 columns; the
+      // pane says 100, and the pane is the one that knows its box.
+      expect(session.resizeApplied).toHaveBeenCalledWith({
+        cols: FITTED.cols,
+        rows: FITTED.rows,
+        xpixel: PANE.width,
+        ypixel: PANE.height,
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('holds an intent the mode change itself produces, behind the resize', async () => {
+    // The mode change seats the keyboard surface, and seating it emits a focus
+    // intent. That intent is produced by the switch, so it belongs behind the
+    // resize like everything else the switch produces — which is only true if
+    // the fence is armed BEFORE the mode change, not after it. The real stack
+    // measured the failure this prevents: an intent 3 ms ahead of the request.
+    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
+    try {
+      const input = intentElementOf(content)
+      const scrollback = scrollbackFor(content)
+      /* eslint-disable @typescript-eslint/unbound-method */
+      const enter = scrollback.enterFullscreen
+      /* eslint-enable @typescript-eslint/unbound-method */
+      const seated = vi.spyOn(scrollback, 'enterFullscreen').mockImplementation(() => {
+        enter.call(scrollback)
+        input.dispatchEvent(new FocusEvent('focus'))
+      })
+
+      switchFrame()
+      // The focus intent was produced inside the mode change and did NOT go
+      // out; the resize did.
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(session.resizeApplied).toHaveBeenCalledTimes(1)
+
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('focus', 'in'))
+      expect(seated).toHaveBeenCalledTimes(1)
+      // And in that order on the wire: the resize first, the held intent after.
+      expect(session.resizeApplied.mock.invocationCallOrder[0]).toBeLessThan(
+        session.intent.mock.invocationCallOrder[0],
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('presents the pane’s FULLSCREEN fit, not the fit the previous mode had', async () => {
+    // THE CASE THE REAL STACK MEASURED, and the one the jsdom-default fixture
+    // cannot see: in the normal buffer the live region wears the prose gutter,
+    // and entering fullscreen zeroes it. So the pane's own grid is a WIDER
+    // rectangle the instant the mode changes — 94 columns before, 100 after,
+    // for an 800 px pane with an 8 px cell — and on the real page the frame
+    // that switches carries the 94 the pty still has. Presenting the fit the
+    // pane had BEFORE the switch (94) is what the e2e caught: 192 columns
+    // where the pane admitted 199.
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
+    const { content, tab } = mounted
+    const raf = globalThis.requestAnimationFrame
+    let queued: FrameRequestCallback[] = []
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      queued.push(cb)
+      return queued.length
+    }
+    // Frames run AFTER the handler that scheduled them, as the browser runs
+    // them — the order in which the mode change and its refit precede the
+    // paint.
+    const flushFrames = (): void => {
+      for (let pass = 0; queued.length > 0 && pass < 50; pass++) {
+        const frame = queued
+        queued = []
+        for (const cb of frame) cb(0)
+      }
+    }
+    try {
+      tab.pane.classList.add('active')
+      const session = sessionOf(content)
+      const scrollback = scrollbackFor(content)
+      // The stylesheet's own rule, stated where jsdom cannot read it: the
+      // inset is the mode class's (`.live-fullscreen { padding-inline: 0 }`).
+      Object.defineProperty(scrollback, 'liveInlineInsetPx', {
+        configurable: true,
+        get: () =>
+          scrollback.terminalLiveContainer.classList.contains('live-fullscreen') ? 0 : 48,
+      })
+      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+        configurable: true,
+        value: PANE.width,
+      })
+      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
+        configurable: true,
+        value: PANE.height,
+      })
+      content.viewportChanged({ width: PANE.width, height: PANE.height })
+      session.fireScreenFrame(screenFrame(1, ['$ prompt'], { ...CELL, cols: 94, rows: 25 }))
+      flushFrames()
+      await vi.waitFor(() =>
+        expect(session.sendResize).toHaveBeenCalledWith({
+          cols: 94,
+          rows: FITTED.rows,
+          xpixel: 94 * CELL.cellWidthPx,
+          ypixel: PANE.height,
+        }),
+      )
+      session.sendResize.mockClear()
+      session.resizeApplied.mockImplementation(() => Promise.resolve('applied'))
+
+      // The switch frame says 94 — the width the program still has.
+      const switched = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 94, rows: 20 })
+      switched.state.bufferKind = 'alternate'
+      session.fireScreenFrame(switched)
+      flushFrames()
+
+      // The request is the PANE's grid, not the previous mode's…
+      expect(session.resizeApplied).toHaveBeenCalledWith({
+        cols: FITTED.cols,
+        rows: FITTED.rows,
+        xpixel: PANE.width,
+        ypixel: PANE.height,
+      })
+      // …and so is the grid the frame is presented on.
+      const painted = tab.pane.querySelector<HTMLElement>('.term-grid')!
+      expect(painted.textContent).toContain('ALT-READY')
+      expect(painted.getAttribute('aria-colcount')).toBe(String(FITTED.cols))
+      expect(painted.querySelectorAll('.term-grid-row')).toHaveLength(20)
+    } finally {
+      queued = []
+      globalThis.requestAnimationFrame = raf
+      mounted.teardown()
+    }
+  })
+
+  it('presents the switch frame on the pane’s grid, keeping its text and its row count', async () => {
+    const { grid, switchFrame, flushFrames, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      flushFrames()
+      const painted = grid()
+      expect(painted.textContent).toContain('ALT-READY')
+      // The size is the pane's…
+      expect(painted.getAttribute('aria-colcount')).toBe(String(FITTED.cols))
+      // …and only the size: the program's rows are the program's, so no
+      // row is invented to fill the box, and the frame's own rows are all
+      // still there.
+      expect(painted.querySelectorAll('.term-grid-row')).toHaveLength(20)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('holds what the person produces and releases it on the applied receipt', async () => {
+    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'q')
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+      expect(session.intent).not.toHaveBeenCalledWith('key', 'q')
+      // The request went out before the input did: the resize is what the
+      // program needs before the key can mean anything.
+      expect(session.resizeApplied.mock.invocationCallOrder[0]).toBeLessThan(
+        session.intent.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+      )
+
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+      // Delivered ONCE, in the order produced: the queue is replayed, not
+      // re-decided.
+      const delivered = session.intent.mock.calls
+        .map(([kind, payload]) => `${kind}:${String(payload)}`)
+        .filter((call) => call.endsWith(':q'))
+      expect(delivered).toEqual(['text:q'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not release on a painted frame — only on the receipt', async () => {
+    const { content, session, switchFrame, drawProgramFrame, receipt, teardown } =
+      await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'q')
+      // The program repaints at the grid it was told, twice: output is not
+      // an answer to a question about the pty's size.
+      drawProgramFrame(3)
+      drawProgramFrame(4)
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps holding on a superseded receipt and releases on the newer resize', async () => {
+    const { content, session, tab, switchFrame, receipt, flushFrames, teardown } =
+      await switchingPane()
+    try {
+      switchFrame()
+      flushFrames()
+      typeIntoPane(content, 'q')
+      // Superseded is not this pane's failure: a newer resize owns the
+      // session's pending slot, so the grid is still on its way. No toast
+      // (nothing failed) and no retry (a retry is a resize storm).
+      receipt('superseded')
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+      // No toast: nothing failed, a newer resize is simply in flight.
+      const announced = vi
+        .mocked(showToast)
+        .mock.calls.map(([toast]) => JSON.stringify(toast))
+        .filter((toast) => /resiz/i.test(toast))
+      expect(announced).toEqual([])
+
+      // The pane widens while the switch is still in flight: this is the
+      // newer request, and ITS receipt opens the fence.
+      const scrollback = scrollbackFor(content)
+      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
+        configurable: true,
+        value: 960,
+      })
+      content.viewportChanged({ width: 960, height: PANE.height })
+      await vi.waitFor(() =>
+        expect(session.resizeApplied).toHaveBeenLastCalledWith({
+          cols: 120,
+          rows: FITTED.rows,
+          xpixel: 960,
+          ypixel: PANE.height,
+        }),
+      )
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+
+      receipt('applied')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+      // The pointer and the keyboard both read the grid the receipt named.
+      expect(session.resizeApplied).toHaveBeenLastCalledWith({
+        cols: 120,
+        rows: FITTED.rows,
+        xpixel: 960,
+        ypixel: PANE.height,
+      })
+      expect(tab.pane.querySelector('.term-grid')?.textContent).toContain('ALT-READY')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('releases on a failed request rather than holding the keys for a size it cannot get', async () => {
+    const { content, session, switchFrame, fail, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'q')
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+
+      fail(new Error('the session is no longer attached'))
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'q'))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('releases on a closed session without delivering input to it', async () => {
+    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'q')
+      receipt('closed')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('maps the pointer through the grid the applied receipt reported', async () => {
+    const { content, session, switchFrame, receipt, flushFrames, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      flushFrames()
+      const input = intentElementOf(content)
+      // Column 50 exists in this pane (100 columns) and not in the program's
+      // 40 — the click that landed on empty space before.
+      input.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: 50 * CELL.cellWidthPx,
+          clientY: 2 * CELL.cellHeightPx,
+        }),
+      )
+      expect(session.intent).not.toHaveBeenCalledWith('mouse', expect.anything())
+
+      receipt('applied')
+      await vi.waitFor(() =>
+        expect(session.intent).toHaveBeenCalledWith('mouse', 'press left 50 2'),
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  /** What the person did, in the order the session was told about it. Only the
+   *  input kinds: a `focus` intent is bookkeeping around them. */
+  function deliveredActs(session: SessionFake): string[] {
+    return session.intent.mock.calls
+      .filter(([kind]) => kind === 'text' || kind === 'key')
+      .map(([kind, payload]) => `${kind}:${String(payload)}`)
+  }
+
+  it('releases on its own bound when the receipt never arrives, delivering everything held', async () => {
+    const { content, session, switchFrame, teardown } = await switchingPane()
+    // Fake timers AFTER the mount: the mount's own settle timers must not be
+    // part of this test, and the fence's bound is armed at the switch.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      switchFrame()
+      typeIntoPane(content, 'a', '\r', 'b')
+      expect(deliveredActs(session)).toEqual([])
+
+      // THE INTERVAL'S MISSING END: the socket is alive and the request is
+      // simply never answered. Nothing in the client bounds it — a pending
+      // call is settled by its answer, a socket close or an abort, and the
+      // connection's heartbeat keeps a socket that answers PINGS alive — so
+      // without the fence's own bound this is where the keys would stay.
+      await vi.advanceTimersByTimeAsync(1_499)
+      expect(deliveredActs(session)).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(1)
+      // Delivered, not dropped: a key typed at the old width is a rendering
+      // problem, a key swallowed forever is lost work.
+      expect(deliveredActs(session)).toEqual(['text:a', 'key:enter', 'text:b'])
+      // And the forced release is observable rather than silent.
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('no resize receipt at an alternate-screen switch'),
+      )
+    } finally {
+      warn.mockRestore()
+      vi.useRealTimers()
+      teardown()
+    }
+  })
+
+  it('delivers a key produced while the release loop runs, once and behind the held ones', async () => {
+    const { content, session, switchFrame, receipt, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'a', '\r', 'b')
+      const input = intentElementOf(content)
+      // A key produced FROM INSIDE the release: the last held intent reaches
+      // the session and the pane is asked for another one before the queue it
+      // was walking has drained. A key that arrived while the release was in
+      // flight must land BEHIND everything that was held, exactly once — the
+      // shape that doubled characters once before.
+      let reentered = false
+      session.intent.mockImplementation((kind, payload) => {
+        if (!reentered && kind === 'text' && payload === 'b') {
+          reentered = true
+          input.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              code: 'ArrowDown',
+              key: 'ArrowDown',
+              bubbles: true,
+              cancelable: true,
+            }),
+          )
+        }
+        return Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 })
+      })
+
+      receipt('applied')
+      await vi.waitFor(() => expect(deliveredActs(session)).toHaveLength(4))
+      const acts = deliveredActs(session)
+      // Every act exactly once, and the one that arrived mid-release is
+      // behind the ones that were waiting rather than inside their run.
+      expect(acts).toEqual(['text:a', 'key:enter', 'text:b', 'key:down'])
+      expect(new Set(acts).size).toBe(4)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps a second switch holding after the first switch’s late receipt arrives', async () => {
+    const { content, session, switchFrame, receiptAt, requested, teardown } = await switchingPane()
+    try {
+      switchFrame()
+      typeIntoPane(content, 'a')
+      expect(requested()).toBe(1)
+
+      // The program leaves the alternate screen and comes back — a second
+      // switch, with the first one's receipt still outstanding.
+      const thawed = screenFrame(3, ['$ prompt'], { ...CELL, cols: 40, rows: 20 })
+      session.fireScreenFrame(thawed)
+      await vi.waitFor(() => expect(deliveredActs(session)).toEqual(['text:a']))
+      const resumed = screenFrame(4, ['ALT-READY'], { ...CELL, cols: 40, rows: 20 })
+      resumed.state.bufferKind = 'alternate'
+      session.fireScreenFrame(resumed)
+      expect(requested()).toBe(2)
+      typeIntoPane(content, 'b')
+      await Promise.resolve()
+      expect(deliveredActs(session)).toEqual(['text:a'])
+
+      // The FIRST switch's answer arrives late. It describes a fence that is
+      // gone, and it may not open the one that replaced it.
+      receiptAt(0, 'applied')
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(deliveredActs(session)).toEqual(['text:a'])
+
+      // The second switch's own receipt does.
+      receiptAt(1, 'applied')
+      await vi.waitFor(() => expect(deliveredActs(session)).toEqual(['text:a', 'text:b']))
+    } finally {
+      teardown()
+    }
+  })
+})

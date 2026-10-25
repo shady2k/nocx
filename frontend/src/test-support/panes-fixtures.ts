@@ -187,6 +187,7 @@ export interface SessionFake {
   awaitsIntegration: boolean
   send: ReturnType<typeof vi.fn>
   sendResize: Mock<(size: SessionSize) => boolean>
+  resizeApplied: Mock<(size: SessionSize) => Promise<'applied' | 'superseded' | 'closed'>>
   /** Hand one session intent to the pane's helper (nocx-zg3k3.3.1). What a
    *  person typed, pasted or clicked lands here now, as the kind and payload
    *  the wire carries — never as bytes. Resolves `executed` by default: the
@@ -294,6 +295,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     recovered: null,
     send: vi.fn(),
     sendResize: vi.fn<(size: SessionSize) => boolean>(),
+    resizeApplied: vi.fn(() => Promise.resolve('applied' as const)),
     intent: vi.fn<(kind: SessionIntentKind, payload: string) => Promise<SessionIntentResult>>(() =>
       Promise.resolve({ state: 'executed', bytesWritten: 1, fenceAfter: 0 }),
     ),

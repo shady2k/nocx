@@ -1233,6 +1233,163 @@ describe('sendResize', () => {
   })
 })
 
+describe('resizeApplied', () => {
+  const size = { cols: 100, rows: 30, xpixel: 800, ypixel: 480 }
+
+  it('submits immediately and waits for the backend application receipt', async () => {
+    const { client, session, ws } = await connectedSession()
+    const settled = vi.fn()
+    const pending = session.resizeApplied(size)
+    void pending.then(settled)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')
+    expect(request?.params).toEqual({ sessionId: SID, ...size })
+    await flushMicrotasks()
+    expect(settled).not.toHaveBeenCalled()
+
+    ws.deliverText({ jsonrpc: '2.0', id: request!.id, result: {} })
+    await expect(pending).resolves.toBe('applied')
+    client.close()
+  })
+
+  it('does not treat the opening size or an identical pending report as applied', async () => {
+    const { client, session, ws } = await connectedSession()
+    const openingSize = { cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 0, ypixel: 0 }
+    const first = session.resizeApplied(openingSize)
+    const second = session.resizeApplied(openingSize)
+    const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+    expect(requests).toHaveLength(2)
+    expect(requests[0].id).not.toBe(requests[1].id)
+    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    await expect(second).resolves.toBe('applied')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: requests[0].id,
+      error: { code: -32013, message: 'a newer resize owns the pending slot' },
+    })
+    await expect(first).resolves.toBe('superseded')
+    client.close()
+  })
+
+  it.each(['replaced', 'cancelled by close', 'unrelated wording'])(
+    'maps the supersession code to a narrow result regardless of message: %s',
+    async (message) => {
+      const { client, session, ws } = await connectedSession()
+      const pending = session.resizeApplied(size)
+      const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+      ws.deliverText({ jsonrpc: '2.0', id: request.id, error: { code: -32013, message } })
+      await expect(pending).resolves.toBe('superseded')
+      client.close()
+    },
+  )
+
+  it.each([-32603, -32602])(
+    'rejects other RPC errors, even with supersession prose: %s',
+    async (code) => {
+      const { client, session, ws } = await connectedSession()
+      const pending = session.resizeApplied(size)
+      const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: request.id,
+        error: { code, message: 'resize superseded', data: { detail: 'failure' } },
+      })
+      await expect(pending).rejects.toMatchObject({ code, data: { detail: 'failure' } })
+      client.close()
+    },
+  )
+
+  it('rejects non-RPC failures while the socket and session remain live', async () => {
+    const { client, session } = await connectedSession()
+    const failure = new Error('resize superseded')
+    vi.spyOn(client.dispatcher, 'call').mockRejectedValueOnce(failure)
+    await expect(session.resizeApplied(size)).rejects.toBe(failure)
+    client.close()
+  })
+
+  it.each(['close', 'detach'] as const)(
+    'returns closed without submitting after session %s',
+    async (action) => {
+      const { client, session, ws } = await connectedSession()
+      session[action]()
+      await expect(session.resizeApplied(size)).resolves.toBe('closed')
+      expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(0)
+      client.close()
+    },
+  )
+
+  it('returns closed without submitting when the socket is closed', async () => {
+    const { client, session, ws } = await connectedSession()
+    ws.serverHangsUp()
+    await expect(session.resizeApplied(size)).resolves.toBe('closed')
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(0)
+    client.close()
+  })
+
+  it('settles every pending receipt as closed on dispatcher disconnect', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const second = session.resizeApplied({ ...size, cols: 120 })
+    ws.serverHangsUp()
+    await expect(first).resolves.toBe('closed')
+    await expect(second).resolves.toBe('closed')
+    client.close()
+  })
+
+  it('returns closed for a failed receipt after the session exits', async () => {
+    const { client, session, ws } = await connectedSession()
+    const pending = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, ...OPEN_IDENTITY, cause: 'interrupted' },
+    })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      error: { code: -32602, message: 'the session is no longer attached' },
+    })
+    await expect(pending).resolves.toBe('closed')
+    client.close()
+  })
+
+  it('does not report application after its local attachment closes', async () => {
+    const { client, session, ws } = await connectedSession()
+    const pending = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    session.close()
+    ws.deliverText({ jsonrpc: '2.0', id: request.id, result: {} })
+    await expect(pending).resolves.toBe('closed')
+    client.close()
+  })
+
+  it('keeps cancellation typed as superseded even after the local session closes', async () => {
+    const { client, session, ws } = await connectedSession()
+    const pending = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    session.close()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      error: { code: -32013, message: 'cancelled' },
+    })
+    await expect(pending).resolves.toBe('superseded')
+    client.close()
+  })
+
+  it('shares report bookkeeping with sendResize without changing its boolean contract', async () => {
+    const { client, session, ws } = await connectedSession()
+    expect(session.sendResize(size)).toBe(true)
+    const pending = session.resizeApplied(size)
+    const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+    expect(requests).toHaveLength(2)
+    expect(session.sendResize(size)).toBe(false)
+    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    await expect(pending).resolves.toBe('applied')
+    client.close()
+  })
+})
+
 describe('close', () => {
   it('tells the server about the session, then forgets it', async () => {
     const { session, ws } = await connectedSession()
@@ -1584,6 +1741,27 @@ describe('reconnect and reattach', () => {
     const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
     expect(attaches).toHaveLength(1)
     expect(attaches[0].params).toMatchObject({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
+  })
+
+  it('reattaches with the receipt path report even when its socket drops before application', async () => {
+    const client = new WSClient(mockDispatcher())
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+    const size = { cols: 132, rows: 43, xpixel: 1056, ypixel: 688 }
+    const pending = session.resizeApplied(size)
+    // The caller may reuse its measurement object; the reconnect report must
+    // retain what was actually sent, not the next measurement.
+    size.cols = 160
+    firstWS.serverHangsUp()
+    await expect(pending).resolves.toBe('closed')
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+    const attach = reconnectedWS.requests().find((request) => request.method === 'attach')!
+    expect(attach.params).toMatchObject({ cols: 132, rows: 43, xpixel: 1056, ypixel: 688 })
+    client.close()
   })
 
   it('sends attach with the last received byte offset', async () => {

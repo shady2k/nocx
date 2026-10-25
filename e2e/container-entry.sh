@@ -20,6 +20,13 @@ set -euo pipefail
 # different from everywhere else.
 git config --global --add safe.directory /work
 
+# The real SSH full-screen regression drives htop rather than a VT mock.
+# Install it here so changing the probe needs no separate build of its stand.
+if ! command -v htop >/dev/null 2>&1; then
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends htop
+fi
+
 echo "=== npm ci (root + frontend) ==="
 # NOT --silent: it hides the reason the install died, and the install is where
 # this script fails when it fails. A registry timeout used to reach the reader

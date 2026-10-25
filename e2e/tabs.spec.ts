@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test'
 import { appReadyForInput, test, expect, clickIntoEditor } from './harness'
 
 // Regression guard for the layout regression fixed in 2314a2a: the gutter no
@@ -40,6 +41,18 @@ const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 const TAB = '.nocx-tab'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 
+async function openPlacementSettings(page: Page): Promise<void> {
+  await page.keyboard.press('Meta+,')
+  const section = page.locator('.ui-grouped-nav__item[data-item="Interface"] button')
+  // Resolve through a pointer action: loading can replace catalogue nodes.
+  // Observe its viewport before clicking; WebKit can acknowledge scrolling
+  // before the compositor paints the target.
+  await section.hover()
+  await expect(section).toBeInViewport()
+  await section.click()
+  await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
+}
+
 test.describe('vertical tab placement', () => {
   // Reset placement to horizontal before every test so persisted state
   // does not contaminate the next test or the horizontal-only spec above.
@@ -55,11 +68,7 @@ test.describe('vertical tab placement', () => {
     // any other section is present in the DOM and hidden. Waiting for it to
     // become visible without navigating times out on a control that is right
     // there — which reads like a broken selector and is not one.
-    await page.keyboard.press('Meta+,')
-    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+    await openPlacementSettings(page)
     await page.selectOption(PLACEMENT_SELECT, 'horizontal')
     await page.keyboard.press('Meta+w')
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, {
@@ -69,15 +78,8 @@ test.describe('vertical tab placement', () => {
 
   /** Open Settings, switch placement, close Settings, and wait for the
    *  DOM to reflect the new placement. */
-  const switchPlacement = async (
-    page: import('@playwright/test').Page,
-    value: 'horizontal' | 'vertical',
-  ) => {
-    await page.keyboard.press('Meta+,')
-    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+  const switchPlacement = async (page: Page, value: 'horizontal' | 'vertical') => {
+    await openPlacementSettings(page)
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')
     // Each orientation mounts into its own host:
@@ -330,11 +332,7 @@ test.describe('vertical tab placement', () => {
   // or the next full-suite run.  beforeEach also resets, but this is
   // the last line of defense — it runs even if the test body fails.
   test.afterEach(async ({ page }) => {
-    await page.keyboard.press('Meta+,')
-    await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+    await openPlacementSettings(page)
     await page.selectOption(PLACEMENT_SELECT, 'horizontal')
     await page.keyboard.press('Meta+w')
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, {

@@ -11,7 +11,7 @@ import {
 } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { ScrollbackController } from './controller'
+import { ScrollbackController, type ScrollbackControllerOpts } from './controller'
 import { IntentInput, type SessionIntent } from '../intent-input'
 import { LIVE_REGION_SELECTOR, insideLiveRegion } from '../live-region'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -21,6 +21,9 @@ import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 import { PetOverlay } from '../pets/overlay'
 import { mountWindowPet, unmountWindowPet } from '../pets/window-pet'
 import { closeRunningBlock } from '../test-support/block-close'
+import { paintStoredRows, type StoredBlockRows } from './block-rows'
+import { DEFAULT_SNAPSHOT } from './serializer'
+import { wireRowOf, type CellSpec } from '../painter/fixtures'
 
 function makeRenderer() {
   let cellWidth = 0
@@ -43,13 +46,16 @@ function makeRenderer() {
   }
 }
 
-function makeController() {
+function makeController(
+  options: Pick<ScrollbackControllerOpts, 'runningActions' | 'paintStoredRows'> = {},
+) {
   const pane = document.createElement('div')
   const controller = new ScrollbackController({
     pane,
     liveContentHeight: () => null,
     cellMetrics: () => null,
     snapshotStore: new CommandSnapshotStore(),
+    ...options,
   })
   // jsdom does no layout: give the scrollback area a real height so the
   // fill-the-pane sizing has something to read.
@@ -58,6 +64,15 @@ function makeController() {
     configurable: true,
   })
   return { pane, controller }
+}
+
+function visible(element: HTMLElement | null): boolean {
+  if (element === null || !element.isConnected) return false
+  for (let node: HTMLElement | null = element; node !== null; node = node.parentElement) {
+    const css = getComputedStyle(node)
+    if (node.hidden || css.display === 'none' || css.visibility === 'hidden') return false
+  }
+  return true
 }
 
 describe('live projection changes preserve the input owner', () => {
@@ -119,8 +134,32 @@ describe('live projection changes preserve the input owner', () => {
     }
   })
 
-  it('keeps only the stable owner context path through freeze, replacement and retirement', () => {
-    const { controller } = makeController()
+  it('preserves execution chrome without duplicate rows through freeze and projection changes', () => {
+    const stop = vi.fn()
+    const { pane, controller } = makeController({
+      runningActions: {
+        stop,
+        isActive: (el) => controller.blockManager.runningBlock?.el === el,
+      },
+      paintStoredRows: (block, rows) =>
+        paintStoredRows(block, rows, { metric: null, palette: DEFAULT_SNAPSHOT }),
+    })
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    const stored: StoredBlockRows = {
+      lines: [
+        {
+          from: 0,
+          row: wireRowOf(Array.from('SAME OUTPUT', (ch) => [ch, 1, true] as CellSpec)),
+        },
+      ],
+      droppedRows: 0,
+      lostRows: 0,
+      truncated: null,
+    }
     const unrelated = controller.blockManager.addAnswerBlock('older archived question', '~')
     const turn = controller.blockManager.addAnswerBlock('run the program', '~')
     turn.toolCall({
@@ -130,58 +169,128 @@ describe('live projection changes preserve the input owner', () => {
       opensBlock: true,
     })
     const command = controller.blockManager.startBlock('read reply', '~', 0, 'agent')
-    const children = turn.el.querySelector<HTMLElement>(':scope > .cmd-children')!
-    expect(children.contains(command.el)).toBe(true)
+    controller.blockManager.bindAttempt('context-command')
+    controller.blockManager.applyStoredRows('context-command', stored)
     controller.setRunning()
     const history = document.createElement('div')
     history.className = 'live-history'
-    const changes = new MutationObserver(() => {})
+    const globalRow = document.createElement('div')
+    globalRow.className = 'term-grid-row'
+    globalRow.textContent = 'SAME OUTPUT'
+    history.append(globalRow)
+    const header = (block: HTMLElement): HTMLElement | null =>
+      block.querySelector(':scope > .cmd-header')
+    const body = (block: HTMLElement): HTMLElement | null =>
+      block.querySelector(':scope > .cmd-output')
+    const visibleCopies = (): number =>
+      [...controller.scrollbackInner.querySelectorAll<HTMLElement>('.term-grid-row')].filter(
+        (row) => visible(row) && row.textContent?.trim() === 'SAME OUTPUT',
+      ).length
     try {
       controller.setHistoryPresentation('terminal', history, command)
-      for (const node of [command.el, children, turn.el]) {
-        expect(node.dataset.liveContext).toBe('true')
-      }
-      expect(unrelated.el.dataset.liveContext).toBeUndefined()
-      expect(controller.scrollbackInner.dataset.liveContext).toBeUndefined()
-      expect(command.el.contains(history)).toBe(false)
-      expect(command.el.contains(controller.terminalLiveContainer)).toBe(false)
+      expect(header(turn.el)?.textContent).toContain('run the program')
+      expect(visible(header(turn.el))).toBe(true)
+      expect(header(command.el)?.textContent).toContain('read reply')
+      expect(visible(header(command.el))).toBe(true)
+      const stopButton = command.el.querySelector<HTMLButtonElement>('button[aria-label="Stop"]')
+      expect(visible(stopButton)).toBe(true)
+      stopButton!.click()
+      expect(stop).toHaveBeenCalledOnce()
+      expect(visible(header(unrelated.el))).toBe(false)
+      expect(body(command.el)?.textContent).toContain('SAME OUTPUT')
+      expect(visible(body(command.el))).toBe(false)
+      expect(visible(globalRow)).toBe(true)
+      expect(visibleCopies()).toBe(1)
 
-      // Repeated accepted frames keep the same context without attribute writes.
-      changes.observe(controller.scrollbackInner, {
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['data-live-context'],
-      })
-      controller.setHistoryPresentation('terminal', history, command)
-      expect(changes.takeRecords()).toHaveLength(0)
-
-      const runningElement = command.el
+      const runningHeader = header(command.el)
       closeRunningBlock(controller.blockManager)
-      expect(command.el).not.toBe(runningElement)
-      expect(controller.blockManager.runningBlock).toBeNull()
       controller.setHistoryPresentation('terminal', history, undefined)
-      expect(runningElement.dataset.liveContext).toBeUndefined()
-      for (const node of [command.el, children, turn.el]) {
-        expect(node.dataset.liveContext).toBe('true')
-      }
+      expect(visible(runningHeader)).toBe(false)
+      expect(visible(header(command.el))).toBe(true)
+      expect(visible(header(turn.el))).toBe(true)
+      expect(visible(body(command.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
 
-      // A new root command retires the previous nested ancestry completely.
       const next = controller.blockManager.startBlock('next command', '~', 0)
       controller.setHistoryPresentation('terminal', history, next)
-      expect(next.el.dataset.liveContext).toBe('true')
-      for (const node of [command.el, children, turn.el]) {
-        expect(node.dataset.liveContext).toBeUndefined()
+      expect(visible(header(next.el))).toBe(true)
+      expect(visible(header(command.el))).toBe(false)
+      expect(visible(header(turn.el))).toBe(false)
+      expect(visible(header(unrelated.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
+
+      // Retiring terminal review restores the independent recorded cards.
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+      expect(visible(body(command.el))).toBe(true)
+      expect(visible(header(turn.el))).toBe(true)
+      expect(visible(globalRow)).toBe(false)
+
+      // Starting an unowned review must not resurrect the old context chrome.
+      history.hidden = false
+      controller.setHistoryPresentation('terminal', history, null)
+      expect(visible(header(next.el))).toBe(false)
+      expect(visible(header(turn.el))).toBe(false)
+      expect(visible(body(command.el))).toBe(false)
+      expect(visibleCopies()).toBe(1)
+    } finally {
+      controller.dispose()
+      pane.remove()
+      style.remove()
+    }
+  })
+
+  it('keeps seated answers after terminal output when fullscreen completes into opaque review', () => {
+    const { pane, controller } = makeController()
+    document.body.append(pane)
+    const style = document.createElement('style')
+    const source = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
+    style.textContent = readFileSync(resolve(source, '../style.css'), 'utf8')
+    document.head.append(style)
+    try {
+      const command = controller.blockManager.startBlock('full-screen program', '~', 0)
+      controller.setRunning()
+      const history = document.createElement('div')
+      history.className = 'live-history'
+      history.textContent = 'primary history'
+      controller.setHistoryPresentation('terminal', history, command)
+      controller.enterFullscreen()
+      history.hidden = true
+      controller.setHistoryPresentation('none', history, null)
+
+      const first = controller.blockManager.addAnswerBlock('first question', '~')
+      first.append('first answer')
+      const second = controller.blockManager.addAnswerBlock('follow-up question', '~')
+      second.append('second answer')
+      const overlay = document.createElement('div')
+      pane.append(overlay)
+      overlay.append(first.el, second.el)
+      // Dismissing the summon seats the same streamed nodes through the one
+      // projection-tail contract; it does not rebuild or search their text.
+      let tail = controller.tailOf(command.el)
+      const parent = tail.parentNode!
+      for (const answer of [first, second]) {
+        parent.insertBefore(answer.el, tail.nextSibling)
+        tail = answer.el
       }
 
-      controller.setHistoryPresentation('none', history, null)
-      expect(next.el.dataset.liveContext).toBeUndefined()
-      controller.setHistoryPresentation('terminal', history, next)
-      next.el.remove()
-      controller.setHistoryPresentation('terminal', history, undefined)
-      expect(next.el.dataset.liveContext).toBeUndefined()
+      closeRunningBlock(controller.blockManager)
+      controller.exitFullscreen()
+      history.hidden = false
+      controller.setHistoryPresentation('terminal', history, command)
+      const live = controller.terminalLiveContainer
+      expect(live.compareDocumentPosition(first.el) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(
+        first.el.compareDocumentPosition(second.el) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(visible(first.el)).toBe(true)
+      expect(visible(second.el)).toBe(true)
+      expect(first.el.textContent).toContain('first answer')
+      expect(second.el.textContent).toContain('second answer')
     } finally {
-      changes.disconnect()
       controller.dispose()
+      pane.remove()
+      style.remove()
     }
   })
 })

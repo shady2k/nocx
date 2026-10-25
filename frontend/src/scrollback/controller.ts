@@ -312,6 +312,10 @@ export class ScrollbackController {
     return this._mode
   }
 
+  get followsTail(): boolean {
+    return this._followIntent()
+  }
+
   // ── Live region visibility ────────────────────────────────────────────
 
   /** Collapse the live region only once no finished block still waits for
@@ -636,7 +640,12 @@ export class ScrollbackController {
         ? this.terminalLiveContainer
         : command
     }
-    return command.nextSibling === this.terminalLiveContainer ? this.terminalLiveContainer : command
+    // In alternate-screen/closing layout the history companion stays mounted
+    // but hidden immediately before the live grid. It is part of that seat,
+    // not a boundary where answers may split the command from its output.
+    let next = command.nextSibling
+    if (next !== null && next === this._historyElement) next = next.nextSibling
+    return next === this.terminalLiveContainer ? this.terminalLiveContainer : command
   }
 
   private _seatLive(): void {

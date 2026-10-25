@@ -118,6 +118,72 @@ describe('live projection changes preserve the input owner', () => {
       style.remove()
     }
   })
+
+  it('keeps only the stable owner context path through freeze, replacement and retirement', () => {
+    const { controller } = makeController()
+    const unrelated = controller.blockManager.addAnswerBlock('older archived question', '~')
+    const turn = controller.blockManager.addAnswerBlock('run the program', '~')
+    turn.toolCall({
+      callId: 'context-run',
+      tool: 'run',
+      effect: 'mutate-destructive',
+      opensBlock: true,
+    })
+    const command = controller.blockManager.startBlock('read reply', '~', 0, 'agent')
+    const children = turn.el.querySelector<HTMLElement>(':scope > .cmd-children')!
+    expect(children.contains(command.el)).toBe(true)
+    controller.setRunning()
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    const changes = new MutationObserver(() => {})
+    try {
+      controller.setHistoryPresentation('terminal', history, command)
+      for (const node of [command.el, children, turn.el]) {
+        expect(node.dataset.liveContext).toBe('true')
+      }
+      expect(unrelated.el.dataset.liveContext).toBeUndefined()
+      expect(controller.scrollbackInner.dataset.liveContext).toBeUndefined()
+      expect(command.el.contains(history)).toBe(false)
+      expect(command.el.contains(controller.terminalLiveContainer)).toBe(false)
+
+      // Repeated accepted frames keep the same context without attribute writes.
+      changes.observe(controller.scrollbackInner, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['data-live-context'],
+      })
+      controller.setHistoryPresentation('terminal', history, command)
+      expect(changes.takeRecords()).toHaveLength(0)
+
+      const runningElement = command.el
+      closeRunningBlock(controller.blockManager)
+      expect(command.el).not.toBe(runningElement)
+      expect(controller.blockManager.runningBlock).toBeNull()
+      controller.setHistoryPresentation('terminal', history, undefined)
+      expect(runningElement.dataset.liveContext).toBeUndefined()
+      for (const node of [command.el, children, turn.el]) {
+        expect(node.dataset.liveContext).toBe('true')
+      }
+
+      // A new root command retires the previous nested ancestry completely.
+      const next = controller.blockManager.startBlock('next command', '~', 0)
+      controller.setHistoryPresentation('terminal', history, next)
+      expect(next.el.dataset.liveContext).toBe('true')
+      for (const node of [command.el, children, turn.el]) {
+        expect(node.dataset.liveContext).toBeUndefined()
+      }
+
+      controller.setHistoryPresentation('none', history, null)
+      expect(next.el.dataset.liveContext).toBeUndefined()
+      controller.setHistoryPresentation('terminal', history, next)
+      next.el.remove()
+      controller.setHistoryPresentation('terminal', history, undefined)
+      expect(next.el.dataset.liveContext).toBeUndefined()
+    } finally {
+      changes.disconnect()
+      controller.dispose()
+    }
+  })
 })
 
 /** What the follow sentinel delivers, through the port the controller listens

@@ -102,6 +102,8 @@ export class ScrollbackController {
    *  post-completion review, not only while the running slot is occupied. */
   private _historyBlock: BlockRecord | null = null
   private _historyMarkedBlock: HTMLElement | null = null
+  /** Reused ancestor path for the opaque projection's context-only chrome. */
+  private readonly _historyContextPath: HTMLElement[] = []
   /** A ready prompt asked for the idle layout while a completed block was
    *  still waiting for its block.closed; applied when the close lands, and
    *  dropped the moment a command owns the live region again. */
@@ -655,6 +657,7 @@ export class ScrollbackController {
       this._historyMarkedBlock = block
       if (block !== null) block.dataset.liveHistory = 'true'
     }
+    this._markHistoryContext(terminal)
     this.scrollbackInner.classList.toggle('inner-terminal-history', terminal)
     this.terminalLiveContainer.classList.toggle('live-terminal-history', terminal)
     const history = this._historyElement
@@ -662,6 +665,30 @@ export class ScrollbackController {
       this.terminalLiveContainer.before(history)
     }
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
+  }
+
+  private _markHistoryContext(terminal: boolean): void {
+    const owner = terminal ? (this._historyBlock?.el ?? null) : null
+    const path = this._historyContextPath
+    let node = owner
+    let length = 0
+    while (node !== null && node !== this.scrollbackInner && path[length] === node) {
+      length++
+      node = node.parentElement
+    }
+    if ((node === null || node === this.scrollbackInner) && length === path.length) return
+
+    // Keep shared ancestors marked even when the new path has another depth.
+    // Reuse the path storage; accepted frames with an unchanged path do no work.
+    for (const previous of path) {
+      if (owner === null || !previous.contains(owner)) delete previous.dataset.liveContext
+    }
+    length = 0
+    for (node = owner; node !== null && node !== this.scrollbackInner; node = node.parentElement) {
+      path[length++] = node
+      if (node.dataset.liveContext !== 'true') node.dataset.liveContext = 'true'
+    }
+    path.length = length
   }
 
   /** Apply the echo shift to the grid, or clear it. The write is guarded:
@@ -1270,6 +1297,7 @@ export class ScrollbackController {
     this._followObserver = null
     this._boxResizeObserver?.disconnect()
     this._boxResizeObserver = null
+    this._markHistoryContext(false)
     this._blockManager.dispose()
     this.scrollbackLayout.remove()
   }

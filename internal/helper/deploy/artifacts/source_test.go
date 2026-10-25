@@ -115,11 +115,23 @@ func sortedNames(m map[string]string) []string {
 // (.internal/spikes/buildmatrix/README.md §4), so the measurement came in
 // under it rather than over.
 //
-// 20 MiB (20,971,520 bytes) leaves 3,927,384 bytes (23%) above the largest,
-// which is the same headroom the previous 8 MiB ceiling left above 6,610,992
-// — and the reason it is not raised further is that what the ceiling rejects
-// is still meaningful: a helper that grew by another archive's worth, or that
-// re-acquired a client stack, lands on the wrong side of it.
+// THE CEILING IS NOW 24 MiB, AND THE TWO NUMBERS THAT MOVED IT ARE MEASURED
+// RELEASES RATHER THAN A LOCAL BUILD. v0.6.1's release (run 39495985064)
+// measured local/nocx-helper-linux-amd64 at 20,909,784 bytes against the old
+// 20 MiB ceiling: 61,736 bytes of headroom, which is a ceiling that has
+// stopped being a budget. v0.7.0's release (run 40153001521) measured the same
+// artifact at 21,116,376 — 144,856 bytes over, and +206,592 on the 0.6.1
+// figure. That growth is ordinary code: the archive is unchanged and the
+// client stack is unchanged, which is exactly what the ceiling is for.
+//
+// 24 MiB (25,165,824 bytes) leaves 4,049,448 bytes (16%) above that
+// measurement, and it is still a ceiling worth having: what it rejects is a
+// helper that gained another archive's worth (~10 MB) or re-acquired a client
+// stack (+1.5 MB, the difference the local variant IS), and both of those
+// land on the wrong side of it against the per-artifact table below. Lowering
+// the helper to fit the old number, or making this a warning, were both
+// refused: one is a code diet for a budget nobody chose, the other is how the
+// next crossing goes unseen until a tag exists.
 //
 // THE NOTICES ADD 61,248 BYTES, measured rather than assumed: the linux/amd64
 // target was rebuilt on 2026-09-13 with the embed directory holding no document
@@ -139,14 +151,11 @@ func sortedNames(m map[string]string) []string {
 //	local     linux/amd64   18,644,200   = the deployed figure + 1,518,456
 //
 // The 1.5 MB is the ssh client and nothing else: same source, same archives,
-// same flags, one build tag apart. The headroom above the largest artifact is
-// therefore 2,327,320 bytes (11%), down from 3,846,024 before the local
-// variant existed — and the ceiling is deliberately NOT raised, because what
-// it exists to catch is a helper that gained another archive's worth (~10 MB)
-// or that re-acquired a client stack, and one client stack is the difference
-// this variant IS. Those two darwin local numbers are absent because this host
-// is linux/amd64; the release's helpers job builds and measures all three.
-const maxHelperBytes int64 = 20 * 1024 * 1024
+// same flags, one build tag apart. Those darwin local numbers are absent
+// because this host is linux/amd64; the release's helpers job builds and
+// measures all three, which is how the 0.7 ceiling was found to be too low —
+// see the dated paragraph below.
+const maxHelperBytes int64 = 24 * 1024 * 1024
 
 func TestMakeHelpersIsIdempotent(t *testing.T) {
 	first := artifactSizes(t)

@@ -183,6 +183,8 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
     The whole-terminal projection retains the active execution's existing controls and question ancestry as metadata, without moving global rows into those cards or showing their overlapping stored bodies. An integrated command finishing at the followed prompt returns to the archive presentation; a reader already away retains review until returning to the tail. Follow intent has one owner across layout mutations. An already-focused live editor is preserved across authenticated block opening and restored only after visibility and reparenting complete; stored-output repaints move rows rather than detaching that editor. Summoned answers follow the command's actual output seat rather than a guessed immediate DOM sibling.
 
+    Live-history paging measures the untransformed stack's layout height for follow decisions and page anchors. A settle transform can extend browser scrollable overflow without moving the reader; that temporary extension must never become a saved distance from the tail when an asynchronous page arrives.
+
     At an idle primary prompt, an upward wheel gesture on empty scrollback background reopens retained terminal history. Archive cards and nested scroll areas keep their native scrolling; they are not live application targets. Returning to the tail retires the review projection and restores the zero-height idle grid.
 
     An unqualified live view preserves the full accepted primary-grid geometry, including blank rows used by cursor-addressed applications. Its metadata header can change position when the terminal view returns to the shorter archive; only a qualified command window has command-card geometry to preserve at completion.

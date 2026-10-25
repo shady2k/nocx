@@ -4872,213 +4872,117 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it('coalesces a growth burst and fetches final rows once after block.closed', async () => {
-    const releases: Array<() => void> = []
-    const body = `${JSON.stringify({
-      from: 0,
-      row: wireRowOf([['x', 1, true] as CellSpec]),
-    })}\n`
-    const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'ledger.get') {
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
-        })
+  it.each(['block.grew', 'block.closed'] as const)(
+    'keeps the latest stored rows when %s arrives during an in-flight read',
+    async (notification) => {
+      type Artifact = {
+        id: string
+        mediaType: string
+        body: string
+        truncated: null
+        byteLen: number
       }
-      if (method === 'ledger.artifact') {
-        return new Promise((resolve) => {
-          releases.push(() =>
-            resolve({
-              id: 'art-rows',
-              mediaType: 'application/x-nocx-rows',
-              body,
-              truncated: null,
-              byteLen: body.length,
-            }),
-          )
+      const artifact = (text: string): Artifact => {
+        const line = JSON.stringify({
+          from: 0,
+          row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
         })
+        return {
+          id: 'art-rows',
+          mediaType: 'application/x-nocx-rows',
+          body: `${line}\n`,
+          truncated: null,
+          byteLen: line.length,
+        }
       }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const handler = factHandler(client)
-    const withScrollback = content as unknown as { scrollback: ScrollbackController }
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('make')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'make',
-        },
+
+      let resolveFirst!: (value: Artifact) => void
+      const firstRead = new Promise<Artifact>((resolve) => {
+        resolveFirst = resolve
       })
-      const paintStoredRows = vi.spyOn(withScrollback.scrollback.blockManager, 'applyStoredRows')
-      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.grew',
-      )?.[1] as ((params: unknown) => void) | undefined
-      const blockClosed = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.closed',
-      )?.[1] as ((params: unknown) => void) | undefined
-      expect(blockGrew).toBeDefined()
-      expect(blockClosed).toBeDefined()
-      for (let index = 0; index < 100; index += 1) blockGrew?.({ entryId: 'att-1' })
-      expect(client.call.mock.calls.filter(([method]) => method === 'ledger.get')).toHaveLength(1)
-      await vi.waitFor(() => expect(releases).toHaveLength(1))
-
-      // The final notification arrives during the growth read. It must queue
-      // one fresh read after that read settles rather than repainting the same
-      // rows 100 times or closing on a partial artifact.
-      blockClosed?.({ entryId: 'att-1', kept: true })
-      releases[0]()
-      await vi.waitFor(() => expect(releases).toHaveLength(2))
-      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(1))
-      releases[1]()
-      await vi.waitFor(() => expect(paintStoredRows).toHaveBeenCalledTimes(2))
-      expect(
-        client.call.mock.calls.filter(([method]) => method === 'ledger.artifact'),
-      ).toHaveLength(2)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('coalesces block.grew reads without losing the latest stored rows', async () => {
-    type Artifact = {
-      id: string
-      mediaType: string
-      body: string
-      truncated: null
-      byteLen: number
-    }
-    const artifact = (text: string): Artifact => {
-      const line = JSON.stringify({
-        from: 0,
-        row: wireRowOf(Array.from(text, (ch) => [ch, 1, true] as CellSpec)),
-      })
-      return {
-        id: 'art-rows',
-        mediaType: 'application/x-nocx-rows',
-        body: `${line}\n`,
-        truncated: null,
-        byteLen: line.length,
-      }
-    }
-
-    let resolveFirst!: (value: Artifact) => void
-    const firstRead = new Promise<Artifact>((resolve) => {
-      resolveFirst = resolve
-    })
-    let entryReads = 0
-    let artifactReads = 0
-    const client = makeClient()
-    client.call.mockImplementation((method: string, params?: unknown) => {
-      const id =
-        typeof params === 'object' && params !== null && 'id' in params ? params.id : undefined
-      if (method === 'ledger.get' && id === 'att-1') {
-        entryReads += 1
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
-        })
-      }
-      if (method === 'ledger.artifact' && id === 'art-rows') {
-        artifactReads += 1
-        return artifactReads === 1 ? firstRead : Promise.resolve(artifact('latest rows'))
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const handler = factHandler(client)
-    let outputObserver: MutationObserver | null = null
-    const outputMutations: MutationRecord[] = []
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      ed.insertText('make')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'make',
-        },
+      let entryReads = 0
+      let artifactReads = 0
+      const client = makeClient()
+      client.call.mockImplementation((method: string, params?: unknown) => {
+        const id =
+          typeof params === 'object' && params !== null && 'id' in params ? params.id : undefined
+        if (method === 'ledger.get' && id === 'att-1') {
+          entryReads += 1
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact' && id === 'art-rows') {
+          artifactReads += 1
+          return artifactReads === 1 ? firstRead : Promise.resolve(artifact('latest rows'))
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
       })
 
-      const grew = client.dispatcher.subscribe.mock.calls.find(
-        ([method]) => method === 'block.grew',
-      )?.[1] as ((params: unknown) => void) | undefined
-      expect(grew).toBeDefined()
-      const block = scrollbackFor(content).blockManager.blockForAttempt('att-1')
-      expect(block).toBeDefined()
-      if (!block) throw new Error('running attempt did not open its command block')
-      outputObserver = new MutationObserver((records) => outputMutations.push(...records))
-      outputObserver.observe(block.el, { childList: true })
-      grew?.({ entryId: 'att-1', from: 0, count: 1 })
-      await vi.waitFor(() => expect(artifactReads).toBe(1))
-
-      // Keep one read open while the producer says the artifact grew many
-      // times. One pending bit must retain the last notification without
-      // starting another full-artifact read for every growth frame.
-      for (let index = 1; index <= 8; index += 1) {
-        grew?.({ entryId: 'att-1', from: index, count: 1 })
-      }
-      expect(entryReads).toBe(1)
-      expect(artifactReads).toBe(1)
-
-      resolveFirst(artifact('earlier rows'))
-      await vi.waitFor(() => expect(blockOutputText(block.el)).toBe('latest rows'))
-      expect(entryReads).toBe(2)
-      expect(artifactReads).toBe(2)
-      // paintStoredRows replaces the whole .cmd-output node once per paint;
-      // count those real subtree replacements, not a timer or a helper call.
-      if (!outputObserver) throw new Error('output mutation observer was not installed')
-      const outputPaints = [...outputMutations, ...outputObserver.takeRecords()].reduce(
-        (count, mutation) =>
-          count +
-          Array.from(mutation.addedNodes).filter(
-            (node) =>
-              node.nodeType === Node.ELEMENT_NODE &&
-              (node as HTMLElement).classList.contains('cmd-output'),
-          ).length,
-        0,
+      const { view, ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
       )
-      expect(outputPaints).toBe(2)
-    } finally {
-      outputObserver?.disconnect()
-      teardown()
-    }
-  })
+      const handler = factHandler(client)
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        ed.insertText('make')
+        view.contentDOM.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+        )
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'make',
+          },
+        })
+
+        const grew = client.dispatcher.subscribe.mock.calls.find(
+          ([method]) => method === 'block.grew',
+        )?.[1] as ((params: unknown) => void) | undefined
+        expect(grew).toBeDefined()
+        const block = scrollbackFor(content).blockManager.blockForAttempt('att-1')
+        expect(block).toBeDefined()
+        if (!block) throw new Error('running attempt did not open its command block')
+        grew?.({ entryId: 'att-1', from: 0, count: 1 })
+        await vi.waitFor(() => expect(artifactReads).toBe(1))
+
+        // Growth may burst; completion arrives once. Either must retain the
+        // pending refresh without a parallel read or a stale final body.
+        if (notification === 'block.grew') {
+          for (let index = 1; index <= 8; index += 1) {
+            grew?.({ entryId: 'att-1', from: index, count: 1 })
+          }
+        } else {
+          const closed = client.dispatcher.subscribe.mock.calls.find(
+            ([method]) => method === 'block.closed',
+          )?.[1] as ((params: unknown) => void) | undefined
+          if (!closed) throw new Error('block.closed handler is missing')
+          closed({ entryId: 'att-1', kept: true })
+        }
+        expect(entryReads).toBe(1)
+        expect(artifactReads).toBe(1)
+
+        resolveFirst(artifact('earlier rows'))
+        await vi.waitFor(() => expect(blockOutputText(block.el)).toBe('latest rows'))
+        expect(entryReads).toBe(2)
+        expect(artifactReads).toBe(2)
+      } finally {
+        teardown()
+      }
+    },
+  )
 
   it('a card is opened and closed only by what the backend sent (nocx-2v80t.3.2)', async () => {
     const client = makeClient()

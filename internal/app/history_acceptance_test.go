@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -416,8 +418,16 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// History is recorded only after the real command completes. Keep the
+	// curl and its Bearer argument real, but own its destination so DNS,
+	// public-network access and inherited proxy settings cannot hold this
+	// masking/restart acceptance open.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
 	rawKey := "sk-proj-abcdef1234567890"
-	command := `curl -H "Authorization: Bearer ` + rawKey + `" https://api.example.com`
+	command := `curl --noproxy '*' -H "Authorization: Bearer ` + rawKey + `" ` + server.URL
 
 	a, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
@@ -481,7 +491,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 		t.Fatalf("entries = %+v, want one row after restart", q.Entries)
 	}
 	e := q.Entries[0]
-	if e.Command != `curl -H "Authorization: Bearer sk-p...7890" https://api.example.com` {
+	if e.Command != `curl --noproxy '*' -H "Authorization: Bearer sk-p...7890" `+server.URL {
 		t.Errorf("command = %q, want the masked row", e.Command)
 	}
 	if e.MaskedCount != 1 || len(e.MaskedKinds) != 1 || e.MaskedKinds[0] != "openai" {

@@ -2250,11 +2250,8 @@ export class BlockManager {
     // Held by a block: its seat is that block's body, and moving it out here
     // would take the rows away from the box whose output they are.
     if (this._liveContainer.parentElement !== this._scrollbackInner) return
-    let seat: HTMLElement = el
-    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
-      seat = seat.parentElement
-    }
-    if (seat.parentElement !== this._scrollbackInner) return
+    const seat = this.rootFlowOwner(el)
+    if (seat === null) return
     // A move is a removal and an insertion, and a removal drops the focus of
     // anything inside the region to <body>. The region is re-seated at the
     // authenticated start, when the grid has held the keyboard since the
@@ -2266,6 +2263,16 @@ export class BlockManager {
     const heldFocus = focused instanceof HTMLElement && this._liveContainer.contains(focused)
     this._scrollbackInner.insertBefore(this._liveContainer, seat.nextSibling)
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
+  }
+
+  /** The root-flow seat already used when positioning a command's live grid.
+   *  A nested tool command shares its enclosing turn's root seat. */
+  rootFlowOwner(el: HTMLElement): HTMLElement | null {
+    let seat = el
+    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
+      seat = seat.parentElement
+    }
+    return seat.parentElement === this._scrollbackInner ? seat : null
   }
 
   /** THE LIVE REGION'S SEAT, IN TWO ANSWERS (ADR-0091).

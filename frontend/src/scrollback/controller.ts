@@ -643,7 +643,14 @@ export class ScrollbackController {
     // In alternate-screen/closing layout the history companion stays mounted
     // but hidden immediately before the live grid. It is part of that seat,
     // not a boundary where answers may split the command from its output.
-    let next = command.nextSibling
+    // Only the current command can extend through its enclosing turn's root
+    // seat. An older command in that same turn must not claim a new program's
+    // live grid merely because both commands share an ancestor.
+    const seat =
+      this._blockManager.runningBlock?.el === command
+        ? this._blockManager.rootFlowOwner(command)
+        : command
+    let next = seat?.nextSibling ?? null
     if (next !== null && next === this._historyElement) next = next.nextSibling
     return next === this.terminalLiveContainer ? this.terminalLiveContainer : command
   }

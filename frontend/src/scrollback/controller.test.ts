@@ -240,6 +240,38 @@ describe('live projection changes preserve the input owner', () => {
     }
   })
 
+  it('keeps an older nested command answer before a later program sharing its turn', () => {
+    const { controller } = makeController()
+    const turn = controller.blockManager.addAnswerBlock('run two programs', '~')
+    turn.toolCall({ callId: 'old', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    const old = controller.blockManager.startBlock('old program', '~', 0, 'agent')
+    closeRunningBlock(controller.blockManager)
+    turn.toolCall({ callId: 'new', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    const current = controller.blockManager.startBlock('current program', '~', 0, 'agent')
+    controller.setRunning()
+    const history = document.createElement('div')
+    history.className = 'live-history'
+    try {
+      controller.setHistoryPresentation('terminal', history, current)
+      controller.enterFullscreen()
+      controller.setHistoryPresentation('none', history, null)
+      const answer = controller.blockManager.addAnswerBlock('old program follow-up', '~')
+      answer.append('the old program finished')
+      const tail = controller.tailOf(old.el)
+      tail.parentNode!.insertBefore(answer.el, tail.nextSibling)
+      expect(old.el.compareDocumentPosition(answer.el) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(
+        0,
+      )
+      expect(
+        answer.el.compareDocumentPosition(controller.terminalLiveContainer) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).not.toBe(0)
+      expect(answer.el.textContent).toContain('the old program finished')
+    } finally {
+      controller.dispose()
+    }
+  })
+
   it('keeps seated answers after terminal output when fullscreen completes into opaque review', () => {
     const { pane, controller } = makeController()
     document.body.append(pane)

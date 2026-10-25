@@ -15474,10 +15474,14 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     return event
   }
 
-  async function summon(content: TerminalContent): Promise<void> {
+  async function summon(
+    content: TerminalContent,
+    bufferKind: 'normal' | 'alternate' = 'normal',
+  ): Promise<void> {
     // The accepted backend frame is the authority for the live-screen
     // identity used by capture. No renderer dimensions or parser are involved.
     const frame = screenFrame(1, [])
+    frame.state.bufferKind = bufferKind
     sessionOf(content).fireScreenFrame(frame)
     content.captureLiveFrame = vi.fn().mockResolvedValue({
       rows: [],
@@ -15485,7 +15489,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       provenance: {
         source: 'live',
         identity: {
-          buffer: { kind: 'normal' },
+          buffer:
+            bufferKind === 'alternate'
+              ? { kind: 'alternate', altSession: frame.state.bufferInstance }
+              : { kind: 'normal' },
           cols: frame.geometry.cols,
           rows: frame.geometry.rows,
           generation: 0,
@@ -16566,6 +16573,75 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     } finally {
       teardown()
       vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps two nested fullscreen answers after global output when Escape precedes a running thaw', async () => {
+    const client = makeClient()
+    let nextRunId = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        const runId = ++nextRunId
+        return Promise.resolve({ runId, entryId: `entry-${runId}`, model: 'test-model' })
+      }
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 2, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const style = document.createElement('style')
+    style.textContent = readFileSync(STYLE_ENTRY, 'utf8')
+    document.head.append(style)
+    try {
+      content.setVisible(true)
+      const olderTurn = claimToolCommand(content)
+      startCommand(client)
+      const scrollback = scrollbackFor(content)
+      const command = scrollback.blockManager.runningBlock!
+      expect(olderTurn.contains(command.el)).toBe(true)
+      await summon(content, 'alternate')
+      const first = await submitQuestion(content, client, 'first fullscreen question')
+      await vi.waitFor(() => expect(first.dataset.entryId).toBe('entry-1'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 1, entryId: 'entry-1', text: 'first fullscreen answer' })
+      state!({ runId: 1, entryId: 'entry-1', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+      const second = await submitQuestion(content, client, 'second fullscreen question')
+      await vi.waitFor(() => expect(second.dataset.entryId).toBe('entry-2'))
+      delta!({ runId: 2, entryId: 'entry-2', text: 'second fullscreen answer' })
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      sessionOf(content).fireScreenFrame(screenFrame(2, ['STILL RUNNING AFTER THAW']))
+      const live = scrollback.terminalLiveContainer
+      await vi.waitFor(() => expect(live.textContent).toContain('STILL RUNNING AFTER THAW'))
+      expect(scrollback.blockManager.runningBlock).toBe(command)
+      expect(live.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+      for (const answer of [first, second]) {
+        expect(answer.isConnected).toBe(true)
+        for (let node: HTMLElement | null = answer; node !== null; node = node.parentElement) {
+          expect(getComputedStyle(node).display).not.toBe('none')
+        }
+      }
+      expect(first.textContent).toContain('first fullscreen answer')
+      expect(second.textContent).toContain('second fullscreen answer')
+    } finally {
+      teardown()
+      style.remove()
     }
   })
 

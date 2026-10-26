@@ -3225,7 +3225,7 @@ describe('a pane whose integration bundle was not copied says so (nocx-1kejz.4)'
 // output cannot become PTY input, while a person's key and committed text
 // arrive as structured session intents.
 describe('terminal input uses session intents, never renderer bytes', () => {
-  it('ignores renderer onData and forwards the person’s actions as intents', async () => {
+  it('forwards the person’s actions as intents without echoing screen output', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -3233,9 +3233,7 @@ describe('terminal input uses session intents, never renderer bytes', () => {
       session.send.mockClear()
       session.intent.mockClear()
 
-      // This is the old xterm protocol-reply/input seam. It has no route to the
-      // session; only the input element below can submit a user's action.
-      session.fireData('backend data-plane bytes')
+      session.fireScreenFrame(screenFrame(1, ['backend output']))
       expect(session.send).not.toHaveBeenCalled()
       expect(session.intent).not.toHaveBeenCalled()
 
@@ -10707,16 +10705,111 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
     cb({ sessionId: session.sessionId, cause: 'interrupted' })
   }
 
+  it('keeps a refused attachment recoverable without opening another shell', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const session = client._sessions[0]
+      session.intent.mockClear()
+      session.fireAttachment({ kind: 'unavailable', message: 'Replay is unavailable' })
+      const card = tab.pane.querySelector('.nocx-attach-offer')
+      expect(card).not.toBeNull()
+      expect(tab.pane.querySelector('.nocx-reconnect-offer')).toBeNull()
+      expect(content.sessionLost()).toBe(false)
+      expect(intentElementOf(content).disabled).toBe(true)
+      typeIntoPane(content, 'must not send', '\r')
+      expect(session.intent).not.toHaveBeenCalled()
+      expect(await content.reconnect()).toBe(false)
+      expect(client._sessions).toHaveLength(1)
+
+      // The project targets ES2021, before Promise.withResolvers.
+      let finish!: (ok: boolean) => void
+      session.retryAttach.mockImplementation(() => {
+        session.fireAttachment({ kind: 'attaching' })
+        return new Promise<boolean>((resolve) => {
+          finish = resolve
+        })
+      })
+      card!.querySelector<HTMLButtonElement>('button')!.click()
+      expect(session.retryAttach).toHaveBeenCalledTimes(1)
+      expect(card!.querySelector('button')).toBeNull()
+      expect(intentElementOf(content).disabled).toBe(true)
+      session.fireAttachment({ kind: 'unavailable', message: 'Still unavailable' })
+      finish(false)
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBe(card)
+      expect(card!.querySelector('button')).not.toBeNull()
+      card!.querySelector<HTMLButtonElement>('button')!.click()
+      expect(session.retryAttach).toHaveBeenCalledTimes(2)
+      session.fireAttachment({ kind: 'attached' })
+      finish(true)
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      expect(intentElementOf(content).disabled).toBe(false)
+      typeIntoPane(content, 'ok')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalled())
+      expect(client._sessions).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not offer attachment recovery after a replacement shell fails to open', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const previous = client._sessions[0]
+      previous.fireAttachment({ kind: 'attaching' })
+      // This is the pane-facing outcome of an authoritative unknown-session
+      // attach refusal; IPC's wire-level regression checks that classification.
+      loseSession(previous)
+      expect(content.sessionLost()).toBe(true)
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+
+      client.openSession.mockRejectedValueOnce(new Error('replacement open refused'))
+      tab.pane.querySelector<HTMLButtonElement>('.nocx-reconnect-offer button')!.click()
+      await vi.waitFor(() => {
+        expect(client.openSession).toHaveBeenCalledTimes(2)
+        expect(tab.pane.querySelector('.nocx-reconnect-offer button')).not.toBeNull()
+      })
+      expect(content.sessionLost()).toBe(true)
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      expect(previous.retryAttach).not.toHaveBeenCalled()
+
+      tab.pane.querySelector<HTMLButtonElement>('.nocx-reconnect-offer button')!.click()
+      await vi.waitFor(() => {
+        expect(content.sessionLost()).toBe(false)
+        expect(client._sessions).toHaveLength(2)
+        expect(tab.pane.querySelector('.nocx-reconnect-offer')).toBeNull()
+      })
+      expect(tab.pane.querySelector('.nocx-attach-offer')).toBeNull()
+      expect(intentElementOf(content).disabled).toBe(false)
+      const replacement = client._sessions[1]
+      replacement.intent.mockClear()
+      typeIntoPane(content, 'ok')
+      await vi.waitFor(() => expect(replacement.intent).toHaveBeenCalled())
+    } finally {
+      teardown()
+    }
+  })
+
   // THE POINT OF THE WHOLE THING: the tab is not closed and the work stays
   // readable. Everything else in this block is about not lying to the person
   // whose work it is.
-  it('gets a new session without losing what the old one printed', async () => {
+  it('gets a new usable session after an authoritative loss', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       content.setVisible(true)
       const first: SessionFake = client._sessions[0]
-      first.fireData('what the old shell printed\r\n')
 
       loseSession(first)
       expect(content.connectionCondition()).toBe('lost')
@@ -18266,10 +18359,7 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
   const WORKER_GRID = { cols: 120, rows: 40 }
   const RECOVERED = 'what the session printed while this window was away'
 
-  /** A pane that takes back a live session running at SESSION_GRID, with the
-   *  recovered scrollback waiting to be flushed the moment the surface
-   *  registers its data callback — which is what WSClient.onSessionData does
-   *  with the bytes reclaimSession queued ahead of the live stream. */
+  /** A pane that takes back a live session running at SESSION_GRID. */
   const reclaimingPane = async () => {
     const session = makeSession({ recovered: { produced: 0, gaps: [] } })
     const mounted = await mountTerminal(makeClipboard(), {
@@ -18530,7 +18620,6 @@ describe('a reclaimed pane is still named after where it is (nocx-07cf4)', () =>
     const session = makeSession({
       cwd: '',
       recovered: { produced: 0, gaps: [] },
-      pendingData: 'the screen this window was away for',
     })
     const mounted = await mountTerminal(makeClipboard(), {
       hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },

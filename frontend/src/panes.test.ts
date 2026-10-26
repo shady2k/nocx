@@ -1047,7 +1047,7 @@ describe('PaneManager', () => {
 
     // Fire terminal output on the active session.
     const session = client._sessions[0]
-    session.fireData('some command output')
+    session.fireScreenFrame(screenFrameWithText(1, 'some command output'))
 
     // Terminal output should NOT trigger activity.
     expect(activity).not.toHaveBeenCalled()

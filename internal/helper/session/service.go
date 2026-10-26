@@ -992,7 +992,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// from the field after unlocking is a read of shared state that another
 		// spawn may already have changed, which is a data race whatever it
 		// prints.
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d of %d bytes reserved for output windows and row buffers. Close sessions you no longer need to release their reservations. Lower \"Output buffer on the shell's machine\" in Settings for smaller future reservations; changing it does not free existing ones", ErrBudget, committed, s.limits.BudgetBytes)
 	}
 	reserved += rowBuffer
 	s.budget += reserved
@@ -1157,7 +1157,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// from the field after unlocking is a read of shared state that another
 		// spawn may already have changed, which is a data race whatever it
 		// prints.
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %d of %d bytes reserved for output windows and row buffers. Close sessions you no longer need to release their reservations. Lower \"Output buffer on the shell's machine\" in Settings for smaller future reservations; changing it does not free existing ones", ErrBudget, committed, s.limits.BudgetBytes)
 	}
 	reserved += rowBuffer
 	s.budget += reserved

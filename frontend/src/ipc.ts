@@ -116,19 +116,13 @@ function intentPayload(text: string): string {
  *  other incarnation of it to claim. */
 const FOREIGN_BINDING_REFUSALS = new Set(['foreign-instance', 'foreign-incarnation'])
 
-/** Whether this is one of those refusals. A claim is refused as -32602 with
- *  `data.reason`; anything else — a timeout, a refused socket, an error with
- *  no data at all — is not a verdict about the claim and settles nothing. */
-function isForeignBindingRefusal(err: unknown): boolean {
-  if (!(err instanceof RpcError)) return false
+/** Only a typed claim verdict establishes absence; transport and replay
+ * failures say nothing about whether the helper's shell still exists. */
+function claimRefusalReason(err: unknown): string | undefined {
+  if (!(err instanceof RpcError) || err.code !== -32602) return undefined
   const data = err.data
-  return (
-    typeof data === 'object' &&
-    data !== null &&
-    'reason' in data &&
-    typeof data.reason === 'string' &&
-    FOREIGN_BINDING_REFUSALS.has(data.reason)
-  )
+  if (typeof data !== 'object' || data === null || !('reason' in data)) return undefined
+  return typeof data.reason === 'string' ? data.reason : undefined
 }
 
 /** The kinds of input a person produces, as the wire spells them
@@ -172,18 +166,6 @@ function paneParam(anchor: OpenAnchor): { paneId?: string } {
 // the AD-9 trimming budget without needless chatter.
 const ACK_INTERVAL_MS = 100
 
-// UTF8StreamDecoder is a zero-delay replacement for TextDecoder with
-// stream:true. It decodes and emits every COMPLETE UTF-8 character
-// immediately — no timer, no buffering of trailing bytes that are already
-// a valid character. Only genuinely incomplete multi-byte sequences (a
-// leading byte without enough continuation bytes at the frame boundary)
-// are held for the next frame.
-//
-// TextDecoder in stream:true mode can hold back the final byte(s) of a
-// frame indefinitely in WebKitGTK, making the last typed character
-// invisible until more output arrives. This decoder eliminates that class
-// of bug by construction: if the bytes form a complete character, it is
-// returned now, not later.
 /** Metadata the pane can explain after reclaim. The screen itself comes from
  *  the backend's accepted frame/history sources, never replayed terminal bytes. */
 export interface SessionRecovery {
@@ -216,106 +198,12 @@ function isRecoveryRevision(raw: Record<string, unknown>): boolean {
   })
 }
 
-class UTF8StreamDecoder {
-  private tail: number[] = [] // incomplete multi-byte leftovers (0–3 bytes)
+export type SessionAttachment =
+  { kind: 'attached' } | { kind: 'attaching' } | { kind: 'unavailable'; message: string }
 
-  decode(input: Uint8Array): string {
-    if (input.length === 0 && this.tail.length === 0) return ''
-
-    // Merge any leftover bytes from the previous chunk with the new input
-    // into a single flat byte array so we can scan it linearly.
-    const all = new Uint8Array(this.tail.length + input.length)
-    if (this.tail.length > 0) all.set(this.tail)
-    all.set(input, this.tail.length)
-    this.tail = []
-
-    let out = ''
-    let i = 0
-    const len = all.length
-
-    while (i < len) {
-      const b0 = all[i]
-
-      if (b0 < 0x80) {
-        // ASCII — one byte, one character. Emit immediately.
-        out += String.fromCharCode(b0)
-        i++
-        continue
-      }
-
-      // Determine the expected sequence length and continuation mask.
-      let seqLen: number
-      if ((b0 & 0xe0) === 0xc0) seqLen = 2
-      else if ((b0 & 0xf0) === 0xe0) seqLen = 3
-      else if ((b0 & 0xf8) === 0xf0) seqLen = 4
-      else {
-        // Invalid leading byte — emit U+FFFD and skip.
-        out += '\uFFFD'
-        i++
-        continue
-      }
-
-      if (i + seqLen > len) {
-        // Not enough continuation bytes in this chunk — save the partial
-        // sequence for the next decode() call. This is the ONLY case
-        // where bytes are held back, and it only happens when a frame
-        // boundary splits a multi-byte character, which is rare.
-        this.tail = Array.from(all.slice(i))
-        break
-      }
-
-      // Validate continuation bytes (must be 10xxxxxx).
-      let valid = true
-      for (let j = 1; j < seqLen; j++) {
-        if ((all[i + j] & 0xc0) !== 0x80) {
-          valid = false
-          break
-        }
-      }
-      if (!valid) {
-        out += '\uFFFD'
-        i++
-        continue
-      }
-
-      // Decode the codepoint and emit.
-      let cp: number
-      if (seqLen === 2) {
-        cp = ((b0 & 0x1f) << 6) | (all[i + 1] & 0x3f)
-      } else if (seqLen === 3) {
-        cp = ((b0 & 0x0f) << 12) | ((all[i + 1] & 0x3f) << 6) | (all[i + 2] & 0x3f)
-      } else {
-        cp =
-          ((b0 & 0x07) << 18) |
-          ((all[i + 1] & 0x3f) << 12) |
-          ((all[i + 2] & 0x3f) << 6) |
-          (all[i + 3] & 0x3f)
-      }
-
-      // Surrogate pairs for codepoints > 0xFFFF.
-      if (cp > 0xffff) {
-        cp -= 0x10000
-        out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff))
-      } else {
-        out += String.fromCharCode(cp)
-      }
-      i += seqLen
-    }
-
-    return out
-  }
-
-  // reset clears any held partial bytes. Called when the stream position
-  // jumps (reattach reset) so stale leading bytes are not spliced onto a
-  // new stream position.
-  reset(): void {
-    this.tail = []
-  }
-}
+type AttachOutcome = 'resumed' | 'lost' | 'unavailable'
 
 interface SessionState {
-  decoder: UTF8StreamDecoder
-
   // The session's incarnation identity (nocx-3oupk), as minted by the
   // backend at open (AD-7): instanceId + sessionEpoch. Every observation
   // of this session — exit, integrationChanged, lifecycle.changed — is
@@ -344,27 +232,12 @@ interface SessionState {
   // leaves the session at the size it is running at.
   reported: SessionSize | null
 
-  // dataCallback receives decoded PTY output for the caller (Tab → renderer).
-  // May be null briefly between session creation (open response) and the
-  // first onSessionData() call — binary frames arriving in that window are
-  // buffered in pendingData and flushed when the callback is attached.
-  dataCallback: ((data: string) => void) | null
-
-  // pendingData holds decoded output that arrived before dataCallback was
-  // registered. The server starts ringToConn immediately after the open
-  // response, so the initial shell prompt can race the caller's
-  // session.onData() — without this buffer the prompt is silently lost.
-  pendingData: string
-
   // screenFrameCallback receives one parsed session.frame document per
   // metadata frame (msg-type 0x02, the screen plane) for this session. It is
   // the byte path's sibling, not its part: a frame is a full snapshot, so it
-  // never touches offset, pendingData or acks (AD-9 counts PTY bytes only),
-  // and a frame that lands in the window before registration is dropped —
-  // the next revision repaints whole, which is the same policy the
-  // backend's own queue-full drop answers to. There is no pendingData
-  // equivalent on purpose: buffering would only move the same superseded
-  // snapshot one hop.
+  // never touches offset or acks (AD-9 counts PTY bytes only).
+  // A frame arriving before registration is dropped: the next revision
+  // repaints whole, without buffering superseded snapshots.
   screenFrameCallback: ((frame: SessionFrame) => void) | null
   effectCallback: ((effect: SessionEffect) => void) | null
   seenEffects: Set<string>
@@ -387,6 +260,9 @@ interface SessionState {
   protocolErrorCallback: ((message: string) => void) | null
   pendingProtocolErrors: string[]
   protocolBlocked: boolean
+  attachment: SessionAttachment
+  attachmentCallback: ((attachment: SessionAttachment) => void) | null
+  attachAttempt: Promise<AttachOutcome> | null
   seenOutputGaps: Set<string>
 
   // Fires when the backend reports that this session's write queue refused
@@ -566,17 +442,21 @@ export class SessionHandle {
     this.client.detachSession(this.sessionId)
   }
 
-  onData(cb: (data: string) => void): void {
-    this.client.onSessionData(this.sessionId, cb)
+  onAttachment(cb: (attachment: SessionAttachment) => void): void {
+    this.client.onSessionAttachment(this.sessionId, cb)
+  }
+
+  /** Explicitly retry the existing session, never open a replacement shell. */
+  retryAttach(): Promise<boolean> {
+    return this.client.retrySessionAttach(this.sessionId)
   }
 
   onExit(cb: (exit: Exit) => void): void {
     this.client.onSessionExit(this.sessionId, cb)
   }
 
-  // onReset registers a callback that fires when a reattach returns
-  // {reset:true} — the ring has advanced past the client offset and the
-  // renderer must clear its display before new data arrives.
+  // A reattach reset moves the transport cursor and resynchronizes
+  // projections; screen contents still come from runtime frames.
   onReset(cb: () => void): void {
     this.client.onSessionReset(this.sessionId, cb)
   }
@@ -807,21 +687,10 @@ export class WSClient {
             const state = this.sessions.get(frame.sessionId)
             if (state) {
               if (state.protocolBlocked) return
-              // Count payload bytes for the per-session offset (AD-9
-              // reconnect). Use byteLength, not decoded string length,
-              // because every byte counts on the wire.
+              // Raw output carries only the transport cursor here. The
+              // runtime owns decoding; screen frames and effects carry all
+              // presentation. Never retain or decode this payload.
               state.offset += frame.payload.byteLength
-              const text = state.decoder.decode(new Uint8Array(frame.payload))
-              if (state.dataCallback) {
-                state.dataCallback(text)
-              } else {
-                // dataCallback is not registered yet — the server starts
-                // ringToConn immediately after the open response, so the
-                // initial shell prompt can arrive before the caller has
-                // a chance to call session.onData(). Buffer until the
-                // callback is attached, then flush.
-                state.pendingData += text
-              }
               this._scheduleAck(frame.sessionId, state.offset)
             }
           }
@@ -834,67 +703,23 @@ export class WSClient {
       // listener can state what became of the sessions on this reconnect
       // (nocx-gbhwh): resumed, or gone — the backend no longer has them.
       const reattached = [...this.sessions.entries()].map(([sid, state]) =>
-        this._sendAttach(sid, state.offset, state, state.reported)
-          .then((result) => {
-            state.protocolBlocked = false
-            if (result.reset) {
-              state.offset = result.from ?? 0
-              // A reset means the client fell out of the ring — there
-              // is a byte gap in the stream. If the last frame before
-              // the drop ended mid-rune, the decoder is holding the
-              // leading bytes of a multi-byte character. Reusing those
-              // bytes would splice stale leading bytes onto bytes from
-              // a different stream position, producing a wrong character
-              // or U+FFFD (bead nocx-ao7 reborn).
-              // Reset the decoder so the stream starts clean.
-              state.decoder.reset()
-              state.resetCallback?.()
-            }
-            return 'resumed' as const
-          })
-          .catch((err: unknown) => {
-            // A CLAIM REFUSED BECAUSE IT NAMES ANOTHER INSTANCE IS NOT A LOST
-            // SESSION (nocx-xn63t.6.33). A coordinator can be replaced under
-            // an open window, and the replacement is a NEW backend instance
-            // (session.InstanceID is minted per start), so every binding this
-            // window holds is refused — correctly, and as a fact about the
-            // BINDING rather than about the session (judgeClaim,
-            // internal/transport/ws_reclaim.go). The session itself goes on:
-            // the helper owns the shell and the replacement re-adopts it
-            // under its own identity. So the client asks the one authority on
-            // that identity — `sessions.live`, the same list a window with no
-            // memory of its own reclaims from — and claims the session again
-            // as it is actually held.
-            //
-            // The refusal is judged HERE rather than inside the helper so that
-            // one that is not about the binding — the ordinary "no such
-            // session" — settles in the same microtask it always did: the
-            // helper is only entered when there is something to ask the
-            // backend, and asking nothing must not cost a turn.
-            if (isForeignBindingRefusal(err)) {
-              return this._reclaimReAdopted(sid, state).then((reclaimed) =>
-                reclaimed ? ('resumed' as const) : this._loseSession(sid, state),
-              )
-            }
-            // Everything else is a loss, not an exit: the backend no longer
-            // holds the session, and the tab must be marked, never
-            // destroyed (nocx-ictcq). Delivered through the SAME callback
-            // as the backend's exit notification, with the same closed-set
-            // cause, so a fix that only touches the notification's sender
-            // leaves this path uncaused and the tab still dies on it.
-            return this._loseSession(sid, state)
-          }),
+        this._reattachSession(sid, state),
       )
       // Report once every attach has settled — the socket is back before
       // this fires, never the other way round. Zero sessions resolves
       // immediately with { resumed: 0, lost: 0 }.
       void Promise.all(reattached).then((outcomes) => {
         const resumed = outcomes.filter((o) => o === 'resumed').length
-        const lost = outcomes.length - resumed
+        const lost = outcomes.filter((o) => o === 'lost').length
         for (const h of this.reconnectResultHandlers) {
           h({ resumed, lost })
         }
       })
+    })
+    this.dispatcher.onDisconnect(() => {
+      for (const state of this.sessions.values()) {
+        this._setAttachment(state, { kind: 'attaching' })
+      }
     })
 
     // Handle server-initiated exit notifications. The cause is the closed
@@ -951,7 +776,7 @@ export class WSClient {
 
       // A reset may have reached a new browser after its restored cursor has
       // already passed the hole. It is still a fact to show, but it is not a
-      // stream transition: the decoder, cursor and ack have already moved on.
+      // stream transition: the cursor and ack have already moved on.
       if (end <= state.offset) {
         state.seenOutputGaps.add(gapKey)
         if (state.outputGapCallback) state.outputGapCallback(gap)
@@ -969,7 +794,6 @@ export class WSClient {
       }
 
       state.seenOutputGaps.add(gapKey)
-      state.decoder.reset()
       state.offset = end
       this._flushAck(sessionId)
       this._sendAck(sessionId, end)
@@ -1571,16 +1395,13 @@ export class WSClient {
     reported: SessionSize | null = null,
   ): void {
     this.sessions.set(sessionId, {
-      decoder: new UTF8StreamDecoder(),
       offset,
       reported,
-      dataCallback: null,
       screenFrameCallback: null,
       effectCallback: null,
       seenEffects: new Set(),
       pendingEffects: [],
       historyPageCallback: null,
-      pendingData: '',
       exitCallback: null,
       resetCallback: null,
       outputGapCallback: null,
@@ -1588,6 +1409,9 @@ export class WSClient {
       protocolErrorCallback: null,
       pendingProtocolErrors: [],
       protocolBlocked: false,
+      attachment: { kind: 'attached' },
+      attachmentCallback: null,
+      attachAttempt: null,
       seenOutputGaps: new Set(),
       inputStalledCallback: null,
       integrationChangedCallback: null,
@@ -1604,15 +1428,61 @@ export class WSClient {
 
   // --- reattach -----------------------------------------------------------
 
-  /** The verdict a session this client cannot reach is reported as.
-   *
-   *  A LOSS, NEVER AN EXIT (nocx-ictcq): the tab is marked and kept, with its
-   *  scrollback, rather than closed. Delivered through the SAME callback the
-   *  backend's exit notification uses and with the same closed-set cause, so a
-   *  fix that only touches the notification's sender leaves this path uncaused
-   *  and the tab still dies on it. The identity echoed is the pair this client
-   *  last held for the session — the backend's word, never minted here
-   *  (nocx-3oupk, AD-7). */
+  onSessionAttachment(sessionId: string, cb: (attachment: SessionAttachment) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (!state) return
+    state.attachmentCallback = cb
+    cb(state.attachment)
+  }
+
+  async retrySessionAttach(sessionId: string): Promise<boolean> {
+    const state = this.sessions.get(sessionId)
+    if (!state) return false
+    if (state.attachment.kind === 'attached') return true
+    if (state.attachAttempt) return (await state.attachAttempt) === 'resumed'
+    const outcome = await this._reattachSession(sessionId, state)
+    // The same consumers refresh durable history/readiness after either an
+    // explicit same-session retry or a socket-driven attach pass.
+    for (const handler of this.reconnectResultHandlers) {
+      handler({ resumed: outcome === 'resumed' ? 1 : 0, lost: outcome === 'lost' ? 1 : 0 })
+    }
+    return outcome === 'resumed'
+  }
+
+  private _setAttachment(state: SessionState, attachment: SessionAttachment): void {
+    state.attachment = attachment
+    state.attachmentCallback?.(attachment)
+  }
+
+  private _reattachSession(sessionId: string, state: SessionState): Promise<AttachOutcome> {
+    if (state.attachAttempt) return state.attachAttempt
+    this._setAttachment(state, { kind: 'attaching' })
+    const attempt = this._sendAttach(sessionId, state.offset, state, state.reported)
+      .then((result): AttachOutcome => {
+        state.protocolBlocked = false
+        if (result.reset) {
+          state.offset = result.from ?? 0
+          state.resetCallback?.()
+        }
+        return 'resumed'
+      })
+      .catch((err: unknown) => {
+        const reason = claimRefusalReason(err)
+        if (reason && FOREIGN_BINDING_REFUSALS.has(reason)) {
+          return this._reclaimReAdopted(sessionId, state)
+        }
+        return this._attachFailed(sessionId, state, err)
+      })
+      .then((outcome) => {
+        state.attachAttempt = null
+        if (outcome === 'resumed') this._setAttachment(state, { kind: 'attached' })
+        return outcome
+      })
+    state.attachAttempt = attempt
+    return attempt
+  }
+
+  /** An authoritative absence keeps the pane's history, but ends this binding. */
   private _loseSession(sessionId: string, state: SessionState): 'lost' {
     state.exitCallback?.({
       sessionId,
@@ -1624,63 +1494,47 @@ export class WSClient {
     return 'lost'
   }
 
-  /**
-   * Claim a session again, under the incarnation the coordinator that replaced
-   * this client's one is holding it under, or answer false and leave the
-   * caller its ordinary verdict (nocx-xn63t.6.33).
-   *
-   * WHY THE ONLY WAY IN IS A REFUSAL. Nothing here asks the backend ahead of
-   * time who it is: an ordinary reconnect — a socket that dropped, a laptop
-   * that slept, a network that blinked — reaches a coordinator whose instance
-   * is the one this binding already names, and paying a round trip per
-   * reconnect to rule that out would buy nothing. The refusal is what carries
-   * the fact, and the fact is machine-readable on purpose: `data.reason` is
-   * "foreign-instance" or "foreign-incarnation" when the CLAIM is wrong and
-   * "unknown-session" when the SESSION is gone (refuseClaim's closed
-   * vocabulary, ws_reclaim.go). The caller judges that verdict
-   * (isForeignBindingRefusal) and reaches this only for the first two.
-   *
-   * WHY THE OFFSET CHANGES WITH THE IDENTITY. The byte offset this client last
-   * acked is a position in a ring that died with the coordinator it belonged
-   * to. AD-9's byte accounting is continuous within one incarnation and never
-   * across two, so the re-claim attaches where THAT ring's replay starts — the
-   * `replayFrom` a fresh window reclaims from — and takes the frontier the ack
-   * answers with. Anything the new ring no longer holds is the ring's own
-   * reset to report, and the client's screen is painted from frames either
-   * way.
-   *
-   * FALSE IS THE HONEST ANSWER for every way this can fail: the session is not
-   * in the list (the replacement really does not hold it), the list could not
-   * be read, or the re-claim itself is refused. Each of those leaves a session
-   * this client cannot reach, which is exactly what the caller's loss says.
-   */
-  private async _reclaimReAdopted(sessionId: string, state: SessionState): Promise<boolean> {
+  private _attachFailed(
+    sessionId: string,
+    state: SessionState,
+    err: unknown,
+  ): 'lost' | 'unavailable' {
+    if (claimRefusalReason(err) === 'unknown-session') return this._loseSession(sessionId, state)
+    return this._attachUnavailable(state, err)
+  }
+
+  private _attachUnavailable(state: SessionState, err: unknown): 'unavailable' {
+    const detail = err instanceof Error ? err.message : String(err)
+    const message = `Could not reattach this session: ${detail}. The shell has not been confirmed ended.`
+    this._setAttachment(state, { kind: 'unavailable', message })
+    return 'unavailable'
+  }
+
+  /** Reclaim only after a foreign binding verdict, using the authoritative
+   * live identity and that incarnation's replay cursor (nocx-xn63t.6.33).
+   * A failed list or attach is not evidence that the session ended. */
+  private async _reclaimReAdopted(
+    sessionId: string,
+    state: SessionState,
+  ): Promise<'resumed' | 'lost' | 'unavailable'> {
     let entry: LiveSession | undefined
     try {
       entry = (await this.listLiveSessions()).find((s) => s.sessionId === sessionId)
-    } catch {
-      return false
+    } catch (err) {
+      return this._attachUnavailable(state, err)
     }
-    if (!entry) return false
+    if (!entry) return this._loseSession(sessionId, state)
     const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
     try {
       const result = await this._sendAttach(sessionId, entry.replayFrom, identity, state.reported)
-      // The incarnation is the backend's word (AD-7) and every later
-      // session-scoped fact is compared against it, so it is re-seated here:
-      // a client left holding the dead coordinator's pair would drop the
-      // lifecycle, integration and liveness facts of the session it has just
-      // taken back.
       state.instanceId = identity.instanceId
       state.sessionEpoch = identity.sessionEpoch
       state.offset = result.from ?? entry.replayFrom
       state.protocolBlocked = false
-      if (result.reset) {
-        state.decoder.reset()
-        state.resetCallback?.()
-      }
-      return true
-    } catch {
-      return false
+      if (result.reset) state.resetCallback?.()
+      return 'resumed'
+    } catch (err) {
+      return this._attachFailed(sessionId, state, err)
     }
   }
 
@@ -1737,9 +1591,8 @@ export class WSClient {
       .then((result) => result.sessions)
   }
 
-  /** Read only the offset and gap metadata used for the reclaim notice. The
-   *  byte recording remains a backend-owned recovery source and is still fed
-   *  through this session's decoder. */
+  /** Read only offset and gap metadata for the reclaim notice. The visible
+   *  terminal comes from runtime screen frames, never decoded recording bytes. */
   private readSessionRecoveryStatus(
     sessionId: string,
     identity: { instanceId: string; sessionEpoch: number },
@@ -1776,7 +1629,6 @@ export class WSClient {
       const attach = this._sendAttach(entry.sessionId, attachAt, identity).then((result) => {
         const attached = this.sessions.get(entry.sessionId)
         if (attached) {
-          if (result.from > attachAt) attached.decoder.reset()
           attached.offset = result.from
         }
         return result
@@ -1875,6 +1727,8 @@ export class WSClient {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!this.sessions.has(sessionId)) return
+    const error = this._sessionInputError(sessionId)
+    if (error) throw error
     const payload = new TextEncoder().encode(data)
     const frame = encodeFrame(sessionId, payload)
     ws.send(frame)
@@ -1960,7 +1814,14 @@ export class WSClient {
    * "delivered" is the one answer that must never be given.
    */
   signalSession(sessionId: string, signal: SessionSignal['signal']): Promise<SessionSignal> {
+    const error = this._sessionInputError(sessionId)
+    if (error) return Promise.reject(error)
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
+  }
+  private _sessionInputError(sessionId: string): Error | null {
+    const state = this.sessions.get(sessionId)
+    if (!state || state.attachment.kind === 'attached') return null
+    return new Error('Session is not attached. Retry the existing session before sending input.')
   }
 
   /** Sends a control-plane session intent for the pane's renderer. Payload is
@@ -1971,6 +1832,8 @@ export class WSClient {
     kind: SessionIntentKind,
     payload: string,
   ): Promise<SessionIntentResult> {
+    const error = this._sessionInputError(sessionId)
+    if (error) return Promise.reject(error)
     // The epoch is omitted rather than defaulted when the caller has none:
     // the session refuses an intent presented under a number nobody observed,
     // and it answers with the epoch in force, so the absence is a question
@@ -2025,21 +1888,6 @@ export class WSClient {
   }
 
   // --- session callbacks --------------------------------------------------
-
-  onSessionData(sessionId: string, cb: (data: string) => void): void {
-    const state = this.sessions.get(sessionId)
-    if (state) {
-      state.dataCallback = cb
-      // Flush any output that arrived between session creation (open
-      // response) and this call — the initial shell prompt can race
-      // onSessionData() because the server starts ringToConn immediately.
-      if (state.pendingData) {
-        const buffered = state.pendingData
-        state.pendingData = ''
-        cb(buffered)
-      }
-    }
-  }
 
   onSessionExit(sessionId: string, cb: (exit: Exit) => void): void {
     const state = this.sessions.get(sessionId)
@@ -2137,10 +1985,9 @@ export class WSClient {
     }
   }
 
-  /** Report the aggregate outcome of one reconnect's session-reattach pass:
-   *  how many known sessions came back and how many are gone (the backend
-   *  no longer has them). Fires once per onConnect, after every attach
-   *  attempt has settled — never before the socket is back (nocx-gbhwh).
+  /** Report how many sessions resumed and how many are authoritatively absent.
+   *  Unavailable sessions remain registered and count as neither. Fires after
+   *  a socket's attach pass or an explicit same-session retry settles.
    *  Returns an unsubscribe. */
   onReconnectResult(cb: (r: { resumed: number; lost: number }) => void): () => void {
     this.reconnectResultHandlers.add(cb)

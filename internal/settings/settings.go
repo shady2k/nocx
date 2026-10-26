@@ -840,7 +840,7 @@ var HistoryHelperBufferMB = MustRegisterNumber(NumberSpec{
 	Key:         "history.helperBufferMB",
 	Section:     "History",
 	Label:       "Output buffer on the shell's machine",
-	Description: "How much command output the machine running the shell holds for nocx while the connection is slow, per session. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies to sessions opened after the change.",
+	Description: "How much command output the machine running the shell holds for nocx while the connection is slow, per session. This reserves part of the helper's shared 512 MB budget alongside output windows; larger values leave room for fewer sessions. Past it the command running at that moment is kept as \"Output incomplete\", and output is kept again from the next command. Applies only to newly opened sessions; existing reservations do not shrink.",
 	DataClass:   PublicConfig,
 	Default:     20,
 	Min:         fp(4),

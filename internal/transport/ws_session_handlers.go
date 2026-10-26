@@ -911,11 +911,12 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 
 		rx := h.machine.getRx(sid)
 		if rx == nil {
-			// The registry holds the session and the transport does not hold
-			// its ring: a teardown in flight, or an open that has not reached
-			// its ring yet. Same word as an unknown session, because the same
-			// thing is true of the claim — there is no stream to give it.
-			_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
+			// The registry still holds this session. An unavailable stream
+			// is not proof that its helper-owned shell ended.
+			_ = r.TryError(req.ID, RPCError{
+				Code:    -32000,
+				Message: "Session output is not available for attachment; the session has not been declared ended",
+			})
 			return nil
 		}
 		// Serialize the overflow check and ring snapshot against helper-hole

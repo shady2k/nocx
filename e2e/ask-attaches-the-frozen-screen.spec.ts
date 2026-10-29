@@ -418,3 +418,15 @@ test.describe('the assistant is told the frozen screen came with the question (n
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
   })
 })
+
+// The fixture this file leans on hardest, pinned where the dependency lives.
+// The alternates' ask reuses the connection the endpoint's connection check
+// left in the backend's pool, and it cannot come sooner than the person's
+// journey — 4.9s here, 6.0s on the CI runner that failed. A fake that inherits
+// node's 5s keep-alive default hangs up in between, and a POST cannot be
+// replayed, so the ask fails and its waitForRequests times out. The long
+// version lives in e2e/fake-openai.ts (start); this is the number it holds
+// (nocx-1ebrs.66.1.33).
+test('the fake provider does not hang up on an idle connection', () => {
+  expect(fake.idleReapMs(), 'the fake reaped the connection the ask had to reuse').toBe(0)
+})

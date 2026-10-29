@@ -189,6 +189,37 @@ export class FakeOpenAI {
   start(): Promise<string> {
     const { promise, resolve, reject } = Promise.withResolvers<string>()
     const server = createServer((req, res) => this.handle(req, res))
+    // THE FAKE NEVER HANGS UP ON AN IDLE CONNECTION (nocx-1ebrs.66.1.33).
+    //
+    // Node closes a keep-alive connection 5s after its last response — the
+    // default of server.keepAliveTimeout, which this server used to inherit
+    // without saying so. The backend keeps that connection in its pool: the
+    // endpoint's own connection check (GET /v1/models, internal/assistant/
+    // connection.go) and the ask (POST /v1/chat/completions, engine.go) ride
+    // ONE guarded client (httpguard.go:newGuardedHTTPClient). The ask cannot
+    // come sooner than the person's own journey, and this spec's journey is
+    // long: create the endpoint, start a full-screen program, wait for it to
+    // paint, freeze the screen, read the chip, drag the seam. Measured from
+    // the connection check's last byte to the ask's first: 4932ms on a fast
+    // laptop and 6003ms on the CI runner that failed (404… webkit shard 2).
+    //
+    // So the fixture killed the socket between 0 and 1 second before the
+    // backend came back to it — and when the reap landed in the instant of
+    // reuse, the client got EPIPE while writing its 42KB body. net/http does
+    // NOT replay that: Request.isReplayable is false for a POST without an
+    // Idempotency-Key, because a second ask is a second charge. The ask then
+    // fails with "nocx could not reach the model endpoint", and the spec
+    // waits out its 30s for a request the fake never received ("timed out
+    // waiting for 2 request(s)").
+    //
+    // That is the fixture inventing a provider that no endpoint is: an idle
+    // connection is not a failure, and a model server does not hang up five
+    // seconds after it answers and leave the client holding the socket. The
+    // fake's job is the WIRE — what goes to the provider and what comes back
+    // — not a lifetime shorter than the test that uses it. 0 disables the
+    // timeout (node's documented meaning); stop() still closes the listener
+    // and, with it, every idle connection.
+    server.keepAliveTimeout = 0
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       this.server = server
@@ -197,6 +228,13 @@ export class FakeOpenAI {
       resolve(this.baseUrl_)
     })
     return promise
+  }
+
+  /** The idle window this fixture declares for its own connections, in ms.
+   *  0 — never reap — and it is the whole answer to nocx-1ebrs.66.1.33: see
+   *  the comment in start(). Read by e2e/fake-openai.unit.mts. */
+  idleReapMs(): number {
+    return this.server?.keepAliveTimeout ?? 0
   }
 
   /** The base URL the endpoint form should be given

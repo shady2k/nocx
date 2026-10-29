@@ -24,6 +24,7 @@
 // same stale interval before the fix.
 import { test, expect, promptReady, type Page } from './harness'
 import { switchFenceWindow, type SwitchTraceEvent } from './alt-switch-fence.mts'
+import { clickGesture } from './pointer-click.mts'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -34,6 +35,14 @@ function read(path: string): string {
   } catch {
     return ''
   }
+}
+
+/** The bytes the fixture's program printed, one hex chunk per read. */
+function programBytes(log: string): string[] {
+  return log
+    .split('\n')
+    .filter((line) => line.includes(' BYTE '))
+    .map((line) => line.trim().split(/\s+/).at(-1) ?? '')
 }
 
 type TraceEvent = SwitchTraceEvent
@@ -378,6 +387,19 @@ setInterval(() => {
           })
           .toBe(true)
         if (probeDone) await probeDone
+        // THE CLICK IS STILL TRAVELLING when the mouse returns: the pane
+        // sends one intent at a time, and the fence holds them until the
+        // switch's resize applies. A wire snapshot taken here can hold the
+        // press alone, or neither, while the program goes on to receive both
+        // — and taking that snapshot for the gesture reports as lost a
+        // release the program already has (nocx-1ebrs.66.1.26). The
+        // program's bytes say the click got through; the wire is read after
+        // them, not instead.
+        await expect
+          .poll(() => clickGesture(programBytes(read(events))), {
+            message: 'the program received the whole click: a press and its release',
+          })
+          .not.toBeNull()
         const trace = await page.evaluate(() => (window as unknown as SwitchHost).__altTrace ?? [])
         const window = switchFenceWindow(trace)
         const { switchIndex, firstResize, firstInput } = window
@@ -473,7 +495,7 @@ setInterval(() => {
               `\x1b[<0;${Number(x) + 1};${Number(y) + 1}${action === 'press' ? 'M' : 'm'}`,
             )
         }
-        expect(pointerReports).toHaveLength(2)
+        expect(pointerReports, 'the wire spells the click the program received').toHaveLength(2)
         // THE FIRST FRAME PRESENTED IS THE PANE'S OWN GRID.
         const painted = trace.find((event) => event.kind === 'first-presented')
         expect(painted, 'an alternate-screen frame is actually presented').toBeDefined()
@@ -486,12 +508,7 @@ setInterval(() => {
           byte.toString(16).padStart(2, '0'),
         )
         await expect
-          .poll(() =>
-            read(events)
-              .split('\n')
-              .filter((line) => line.includes(' BYTE '))
-              .flatMap((line) => line.trim().split(/\s+/).at(-1)!.match(/.{2}/g) ?? []),
-          )
+          .poll(() => programBytes(read(events)).flatMap((chunk) => chunk.match(/.{2}/g) ?? []))
           .toEqual(expected)
         observations.receiptsComplete = true
       } catch (err) {

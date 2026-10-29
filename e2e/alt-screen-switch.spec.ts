@@ -23,6 +23,7 @@
 // three ways a pane changes size around a mode switch; all three ended in the
 // same stale interval before the fix.
 import { test, expect, promptReady, type Page } from './harness'
+import { switchFenceWindow, type SwitchTraceEvent } from './alt-switch-fence.mts'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -35,7 +36,7 @@ function read(path: string): string {
   }
 }
 
-type TraceEvent = Record<string, unknown> & { at: number; kind: string }
+type TraceEvent = SwitchTraceEvent
 interface SwitchHost {
   __altTrace?: TraceEvent[]
   __altArm?: boolean
@@ -341,6 +342,18 @@ setInterval(() => {
             await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
               /live-fullscreen/,
             )
+            // THE SWITCH IS PRESENTED BEFORE THE PANE GROWS, or this variant
+            // does not exist: `.live-fullscreen` is set when the frame is
+            // ACCEPTED, while the first alternate paint is queued for the next
+            // animation frame. Widening at acceptance raced that paint, and
+            // the snapshot below then read the NEW pane width beside the grid
+            // of the width it had been painted at — a pane the product never
+            // produced and a failure this spec reported as the product's
+            // (nocx-1ebrs.66.1.25). ALT-READY in the live grid is the
+            // observable "the switch is on screen".
+            await expect(page.locator('.pane.active .terminal-live-grid')).toContainText(
+              'ALT-READY',
+            )
             observations.resizeAfterAt = Date.now()
             await page.setViewportSize({ width: 1700, height: 800 })
           }
@@ -366,26 +379,14 @@ setInterval(() => {
           .toBe(true)
         if (probeDone) await probeDone
         const trace = await page.evaluate(() => (window as unknown as SwitchHost).__altTrace ?? [])
-        const switchIndex = trace.findIndex(
-          (event) =>
-            event.kind === 'frame' &&
-            (event.state as { bufferKind?: string })?.bufferKind === 'alternate',
-        )
+        const window = switchFenceWindow(trace)
+        const { switchIndex, firstResize, firstInput } = window
         expect(switchIndex, 'the runtime accepted alternate-screen mode').toBeGreaterThanOrEqual(0)
-        const postSwitch = trace.slice(switchIndex + 1)
-        const firstResize = postSwitch.findIndex(
-          (event) => event.kind === 'send' && event.method === 'resize',
-        )
-        const firstInput = postSwitch.findIndex(
-          (event) => event.kind === 'send' && event.method === 'session.intent',
-        )
-        // THE ORDER THE SWITCH OWES: the size request first, the person's
-        // input behind it.
         // WHAT THE SWITCH DID, in the message: a failure here used to say only
         // "expected > 1, received 0", which names neither the send that beat
         // the resize nor the method it carried.
-        const shape = postSwitch
-          .slice(0, 8)
+        const shape = trace
+          .slice(switchIndex + 1, switchIndex + 9)
           .map((event) =>
             event.kind === 'send'
               ? `${String(event.method)}${
@@ -429,42 +430,36 @@ setInterval(() => {
         //
         // THE GUARANTEE IS UNCHANGED: no input may reach the program before an
         // applied receipt released the fence, whatever request carried it.
-        const switchResizeId = postSwitch[firstResize].id
-        const fenceRelease = postSwitch.findIndex(
-          (event, index) =>
-            index > firstResize &&
-            event.kind === 'resize-receipt' &&
-            'result' in event &&
-            !event.error,
-        )
-        expect(fenceRelease, 'an applied resize receipt released the switch fence').toBeGreaterThan(
-          firstResize,
-        )
+        //
+        // …and WHATEVER REQUEST CARRIED IT, IT IS ONE THE SWITCH SENT
+        // (nocx-1ebrs.66.1.25). The window used to admit ANY applied receipt
+        // after the switch's request, including the settle timer's resize that
+        // left the socket BEFORE the buffer became alternate. That answer can
+        // land between the switch's own send and its answer, and then the
+        // reading named the old request as the release and demanded that the
+        // switch's request be answered inside a gap it had not been answered
+        // in yet — a red runner with the product holding the input correctly.
+        // The fence opens on the frame, so its requests are the resizes sent
+        // at or after it; `switchFenceWindow` reads exactly those.
         expect(
-          postSwitch
-            .slice(firstResize + 1, fenceRelease)
-            .filter((event) => event.kind === 'send' && event.method === 'session.intent'),
+          window.release,
+          'an applied resize receipt released the switch fence',
+        ).toBeGreaterThan(firstResize)
+        expect(
+          window.inputsBeforeRelease,
           'no input may reach the program between the switch resize and the applied receipt that released it',
         ).toHaveLength(0)
         // And when the switch's own request was superseded, say so explicitly
         // rather than tolerating it: the release belongs to a newer request and
         // the earlier one was answered without a result.
-        if (postSwitch[fenceRelease].id !== switchResizeId) {
-          const superseded = postSwitch.findIndex(
-            (event, index) =>
-              index > firstResize &&
-              index < fenceRelease &&
-              event.kind === 'resize-receipt' &&
-              event.id === switchResizeId &&
-              ('error' in event || !('result' in event)),
-          )
+        if (window.releaseId !== window.switchResizeId) {
           expect(
-            superseded,
+            window.answered,
             'a superseded switch resize is answered, not silently dropped',
           ).toBeGreaterThan(firstResize)
         }
         const pointerReports: string[] = []
-        for (const event of postSwitch) {
+        for (const event of trace.slice(switchIndex + 1)) {
           if (event.kind !== 'send' || event.method !== 'session.intent') continue
           const params = event.params as { kind: string; payload: string }
           if (params.kind !== 'mouse') continue

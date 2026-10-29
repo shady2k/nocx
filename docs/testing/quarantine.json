@@ -3,7 +3,7 @@
   "tests": [
     {
       "test": "go:TestZshAgentWrapperCancelsTheLaunchOnCtrlC",
-      "bead": "nocx-xn63t.6.29"
+      "bead": "nocx-6o5xe"
     },
     {
       "test": "go:TestCrossProcessAtMostOneCommitPerDigest",
@@ -24,6 +24,10 @@
     {
       "test": "e2e:e2e/tab-strip-lead.spec.ts › the tab strip carries no update offer at all",
       "bead": "nocx-1ebrs.66.1.31"
+    },
+    {
+      "test": "job:ci-backlog#557",
+      "bead": "nocx-1ebrs.66.1.32"
     }
   ]
 }

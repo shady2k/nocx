@@ -13,6 +13,7 @@ import {
   updateCask,
   failedTests,
   readQuarantine,
+  runBelongsTo,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
@@ -519,6 +520,13 @@ test('only an open bead quarantines; a closed one protects nothing; an unknown o
   )
   assert.throws(() => readQuarantine(doc([{ test: 'go:TestA', bead: 'nocx-z' }]), issues), /exist/)
   assert.throws(() => readQuarantine(doc([{ test: 'TestA', bead: 'nocx-a' }]), issues), /entry/)
+  assert.deepEqual(readQuarantine(doc([{ test: 'job:ci-backlog#557', bead: 'nocx-a' }]), issues), {
+    'job:ci-backlog#557': 'nocx-a',
+  })
+  assert.throws(
+    () => readQuarantine(doc([{ test: 'job:ci-backlog', bead: 'nocx-a' }]), issues),
+    /entry/,
+  )
   assert.throws(() => readQuarantine('{"schema":2,"tests":[]}', issues), /quarantine/)
 })
 
@@ -570,6 +578,27 @@ test('a red required job passes only on quarantined tests or a retry that classi
       e.attempts[1].jobs[i].failures = []
     }),
   )
+  // The same nameless failure in every attempt, quarantined for exactly this
+  // job of exactly this PR: green; for another PR's number: red.
+  const nameless = (e, i) => {
+    for (const a of e.attempts) a.jobs[i].failures = []
+  }
+  verifyCI(
+    red((e, i) => {
+      nameless(e, i)
+      e.quarantine['job:ci-e2e (webkit, 2)#12'] = 'nocx-b'
+    }),
+  )
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          nameless(e, i)
+          e.quarantine['job:ci-e2e (webkit, 2)#13'] = 'nocx-b'
+        }),
+      ),
+    /never passed/,
+  )
   // A cancelled job is never a flake.
   assert.throws(
     () =>
@@ -590,4 +619,21 @@ test('a red required job passes only on quarantined tests or a retry that classi
       ),
     /not green/,
   )
+})
+
+test('a run is its PR by number, or after the branch is deleted by branch, repository and head', () => {
+  const repo = 'shady2k/nocx'
+  const pr = { number: 529, head: { ref: 'chore/setup-skills-056', repo: { full_name: repo } } }
+  const run = (over) => ({
+    pull_requests: [],
+    head_branch: 'chore/setup-skills-056',
+    head_repository: { full_name: repo },
+    ...over,
+  })
+  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 529 }] }), pr, repo), true)
+  assert.equal(runBelongsTo(run({}), pr, repo), true)
+  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 530 }] }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ head_branch: 'other' }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ head_repository: { full_name: 'fork/nocx' } }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ pull_requests: undefined }), pr, repo), false)
 })

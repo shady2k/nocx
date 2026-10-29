@@ -164,6 +164,51 @@ func TestSplitScreenFrameReassemblesToTheOriginalBytes(t *testing.T) {
 	}
 }
 
+func TestDeliveredScreenSurvivesInputReuseAndLaterRevisions(t *testing.T) {
+	for _, count := range []uint32{1, 2} {
+		name := "single-part"
+		if count == 2 {
+			name = "multipart"
+		}
+		t.Run(name, func(t *testing.T) {
+			a := NewScreenAssembler()
+			session, subscriber := newID(0xa0), newID(0xb0)
+			input := make([]byte, 8)
+			deliver := func(revision uint64, text string) *AssembledScreenFrame {
+				t.Helper()
+				var result *AssembledScreenFrame
+				for part := range count {
+					start, end := int(part)*len(text)/int(count), int(part+1)*len(text)/int(count)
+					payload := input[:copy(input, text[start:end])]
+					var err error
+					result, err = a.Feed(ScreenDataFrame{
+						Session: session, Subscriber: subscriber, Revision: revision,
+						PartIndex: part, PartCount: count, Payload: payload,
+					})
+					if err != nil {
+						t.Fatalf("revision %d part %d: %v", revision, part, err)
+					}
+					clear(input)
+				}
+				if result == nil || string(result.Payload) != text {
+					t.Fatalf("revision %d lost its document after input reuse: %v", revision, result)
+				}
+				return result
+			}
+			first := deliver(1, "original")
+			second := deliver(2, "updated")
+			a.Abandon(first.Key)
+			if string(first.Payload) != "original" {
+				t.Fatalf("later revision changed an already delivered screen: %q", first.Payload)
+			}
+			first.Payload[0] = 'X'
+			if string(second.Payload) != "updated" {
+				t.Fatalf("editing an older document changed the next screen: %q", second.Payload)
+			}
+		})
+	}
+}
+
 // TestAnAssemblerRefusesAnUnassemblablePartCount is the bound named before
 // anything is buffered: a part that declares more parts than the carrier
 // will ever assemble is dropped at first contact, and nothing grows.

@@ -92,6 +92,13 @@ composition, preserving the bridge's no-child-process boundary
 
 **Frontend**:
 
+The live painter follows pane visibility, not keyboard focus (`nocx-4y8mb`).
+Hidden terminal panes continue accepting frames and processing correlated effects,
+title/cwd, selection invalidation, buffer transitions and history/reflow bookkeeping.
+Only the live painter pass is deferred: hiding cancels its pending animation callback,
+and showing schedules the latest accepted snapshot. Theme and font repaint requests
+use the same visibility gate; visible unfocused splits still paint.
+
 | Module     | SRP responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `terminal` | Paint the screen the session runtime sends: a passive cell model of its frames and the painter that draws the live grid from it ([ADR-0072](decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md), `nocx-zg3k3.2`). xterm.js stays only as the invisible input layer — it parses the bytes for input encoding and surfaces OSC events via `parser.registerOscHandler`, and paints nothing — until `nocx-zg3k3.8` removes it ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |

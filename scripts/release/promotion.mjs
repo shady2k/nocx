@@ -136,7 +136,7 @@ export function readQuarantine(json, issuesJsonl) {
   for (const entry of doc.tests) {
     requireThat(
       typeof entry?.test === 'string' &&
-        /^(go:Test\w+|e2e:e2e\/\S+ › .+)$/.test(entry.test) &&
+        /^(go:Test\w+|e2e:e2e\/\S+ › .+|job:[^#\n]+#[1-9]\d*)$/.test(entry.test) &&
         typeof entry.bead === 'string',
       `invalid test quarantine entry ${JSON.stringify(entry)}`,
     )
@@ -182,8 +182,12 @@ function quarantinedJob(entry, label, name) {
   for (const job of failed) {
     requireThat(job.conclusion === 'failure', `${label}: ${name} was not green`)
     const tests = job.failures ?? []
+    // A failure that names no test is not a flake anyone can quarantine by
+    // test name. It passes only when the same job passed in another attempt,
+    // or when a bead quarantines exactly this job of exactly this PR
+    // (`job:<name>#<PR>`): a known defect of the check itself, never a class.
     requireThat(
-      tests.length > 0 || passed,
+      tests.length > 0 || passed || entry.quarantine[`job:${name}#${entry.number}`] !== undefined,
       `${label}: ${name} failed without naming a test and never passed`,
     )
     for (const test of tests)
@@ -195,12 +199,46 @@ function quarantinedJob(entry, label, name) {
   return failed.flatMap((job) => job.failures ?? [])
 }
 
+// GitHub names a pull_request run's PR in run.pull_requests only while the
+// head branch exists; deleting the branch after the merge empties it (PR #529's
+// run 40283573725, 2026-10-29). The run is then the PR's by the branch and
+// repository it ran on, on that PR's exact head commit.
+export function runBelongsTo(run, pr, repo) {
+  if (run.pull_requests?.some((p) => p.number === pr.number)) return true
+  return (
+    Array.isArray(run.pull_requests) &&
+    run.pull_requests.length === 0 &&
+    typeof pr.head?.ref === 'string' &&
+    run.head_branch === pr.head.ref &&
+    run.head_repository?.full_name === repo &&
+    pr.head.repo?.full_name === repo
+  )
+}
+
 export function verifyCI(evidence) {
   requireThat(
     Array.isArray(evidence) && evidence.length > 0,
     'CI evidence is empty: no merged PR heads were verified',
   )
   for (const entry of evidence) {
+    if (entry.direct) {
+      // Judged by the collector against the PRs after it; here only its record
+      // is checked: a product commit must name the green PR that covers it.
+      requireThat(shaPattern.test(entry.commit), 'CI: invalid direct commit')
+      requireThat(
+        !entry.product ||
+          evidence.some(
+            (other) =>
+              !other.direct &&
+              other.number === entry.coveredBy &&
+              other.product &&
+              other.run?.conclusion === 'success' &&
+              !other.attempts,
+          ),
+        `CI: direct commit ${entry.commit} touches product and no later green PR covers it`,
+      )
+      continue
+    }
     const { number, head, run, jobs, requiredJobs } = entry
     const label = `CI for PR #${number} head ${head}`
     requireThat(Number.isInteger(number) && shaPattern.test(head), `${label}: invalid PR identity`)
@@ -210,7 +248,11 @@ export function verifyCI(evidence) {
         run.head_sha === head &&
         run.path === '.github/workflows/ci.yml' &&
         run.status === 'completed' &&
-        run.pull_requests?.some((pr) => pr.number === number),
+        runBelongsTo(
+          run,
+          { number, head: { ref: entry.headRef, repo: { full_name: entry.headRepo } } },
+          entry.headRepo,
+        ),
       `${label}: no completed CI workflow run on its PR-head SHA`,
     )
     requireThat(

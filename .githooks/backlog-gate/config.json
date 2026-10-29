@@ -1,7 +1,7 @@
 {
   "strength": "block-new",
-  "currentMilestone": "v0-8",
-  "milestoneLabels": ["v0-5", "v0-6", "v0-7", "v0-8"],
+  "currentMilestone": "busy-terminal",
+  "milestoneLabels": ["v0-5", "v0-6", "v0-7", "v0-8", "busy-terminal"],
   "areaLabels": [
     "transport",
     "session",
@@ -37,7 +37,7 @@
   "ideaLabels": ["idea"],
   "ideaTitlePrefixes": ["Brainstorming:", "Brainstorm:"],
   "findingLabels": ["finding"],
-  "findingBudget": 10,
+  "findingBudget": 5,
   "staleDays": 14,
   "holdDays": 2,
   "bulkCluster": 20,

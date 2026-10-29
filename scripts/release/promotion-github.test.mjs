@@ -132,6 +132,57 @@ test('CI adapter refuses API errors, uncovered main commits, foreign PRs, no CI,
   }
 })
 
+test('a red CI run is read whole: earlier attempts and each failed job log, quarantine attached', async () => {
+  const f = fixture()
+  f.run.conclusion = 'failure'
+  f.run.run_attempt = 2
+  const latest = f.jobs.map((job, i) => ({ ...job, id: 100 + i }))
+  latest[0] = { ...latest[0], conclusion: 'failure' }
+  const first = latest.map((job) => ({ ...job, id: job.id + 50 }))
+  f.responses.set(`repos/${repo}/actions/runs/22/attempts/2/jobs`, latest)
+  f.responses.set(`repos/${repo}/actions/runs/22/attempts/1/jobs`, first)
+  const logs = []
+  f.options.github.gh = (args) => {
+    logs.push(args.join(' '))
+    return '2026-10-29T00:00:00Z --- FAIL: TestFlaky (1.0s)\n'
+  }
+  f.options.quarantine = { 'go:TestFlaky': 'nocx-x' }
+  const [entry] = await collectCI(f.options)
+  assert.deepEqual(entry.quarantine, { 'go:TestFlaky': 'nocx-x' })
+  assert.deepEqual(
+    entry.attempts.map((a) => a.attempt),
+    [1, 2],
+  )
+  assert.deepEqual(entry.attempts[1].jobs[0].failures, ['go:TestFlaky'])
+  assert.deepEqual(logs, [
+    `api --allow-escape-sequences repos/${repo}/actions/jobs/150/logs`,
+    `api --allow-escape-sequences repos/${repo}/actions/jobs/100/logs`,
+  ])
+})
+
+test('a direct push is judged by the later green PR that covers it, or by being supporting', async () => {
+  const direct = 'd'.repeat(40)
+  const build = (product, ancestor) => {
+    const f = fixture()
+    f.options.commits = [direct, commit]
+    f.responses.set(`repos/${repo}/commits/${direct}/pulls`, [])
+    f.options.commitFiles = () => (product ? ['.github/workflows/ci.yml'] : ['.beads/issues.jsonl'])
+    f.options.touchesProduct = (files) => files.some((name) => !name.startsWith('.beads/'))
+    f.options.isAncestor = () => ancestor
+    return f
+  }
+  const supporting = await collectCI(build(false, false).options)
+  assert.equal(supporting[0].direct, true)
+  assert.equal(supporting[0].product, false)
+  const covered = await collectCI(build(true, true).options)
+  assert.equal(covered[0].coveredBy, 12)
+  await assert.rejects(() => collectCI(build(true, false).options), /no later green PR/)
+  const noRecord = fixture()
+  noRecord.options.commits = [direct, commit]
+  noRecord.responses.set(`repos/${repo}/commits/${direct}/pulls`, [])
+  await assert.rejects(() => collectCI(noRecord.options), /exactly one merged main PR/)
+})
+
 test('GitHub list reader follows every page and propagates a missing next page', () => {
   const calls = []
   const client = githubClient((_program, args) => {
@@ -163,7 +214,7 @@ test('post-upload verification downloads fresh bytes; changed digest, extra asse
   }
   const plan = { tag: 'v0.8.0', assets: [asset] }
   let serial = 0
-  for (const failure of [null, 'changed', 'extra', 'api']) {
+  for (const failure of [null, 'changed', 'extra', 'api', 'twice']) {
     const github = {
       gh: (args) => {
         assert.equal(args[0], 'release')
@@ -173,9 +224,23 @@ test('post-upload verification downloads fresh bytes; changed digest, extra asse
           failure === 'changed' ? 'rebuilt bytes' : bytes,
         )
       },
-      api: () => {
+      // The release list, not releases/tags/<tag>: that endpoint 404s for a
+      // draft, which is the state this check first runs in.
+      pages: (path) => {
+        assert.equal(path, `repos/${repo}/releases`)
         if (failure === 'api') throw new Error('GitHub unavailable')
-        return { assets: failure === 'extra' ? [asset, { name: 'extra' }] : [asset] }
+        return [
+          { tag_name: 'v0.7.2', assets: [] },
+          {
+            tag_name: 'v0.8.0',
+            draft: true,
+            assets: failure === 'extra' ? [asset, { name: 'extra' }] : [asset],
+          },
+          ...(failure === 'twice' ? [{ tag_name: 'v0.8.0', assets: [asset] }] : []),
+        ]
+      },
+      api: () => {
+        throw new Error('releases/tags/<tag> 404s for a draft and must not be asked')
       },
     }
     const run = () => verifyUploaded(github, repo, plan, join(root, String(serial++)))
@@ -215,19 +280,25 @@ test('publishing explicitly pins the tag, verifies draft downloads before latest
     writeFileSync(join(location, 'stable', asset.name), body)
     writeFileSync(join(location, 'plan.json'), JSON.stringify(plan))
     const calls = []
+    // GitHub's state: the release exists, as a draft and then published, only
+    // once `release create` has run; the list is where verifyUploaded reads it.
+    let created = false
     const github = {
-      pages: (url) =>
-        url.includes('matching-refs') && failure === 'conflict'
-          ? [{ ref: `refs/tags/${plan.tag}` }]
-          : [],
+      pages: (url) => {
+        if (url.includes('matching-refs'))
+          return failure === 'conflict' ? [{ ref: `refs/tags/${plan.tag}` }] : []
+        return created ? [{ tag_name: plan.tag, assets: [asset] }] : []
+      },
       api: (url) =>
         url.includes('git/ref/')
           ? { object: { type: 'commit', sha: commit } }
           : { assets: [asset] },
       gh: (args) => {
         calls.push(args)
-        if (args[0] === 'release' && args[1] === 'create' && failure === 'upload')
-          throw new Error('upload failed')
+        if (args[0] === 'release' && args[1] === 'create') {
+          if (failure === 'upload') throw new Error('upload failed')
+          created = true
+        }
         if (args[0] === 'release' && args[1] === 'edit' && failure === 'publish')
           throw new Error('publish failed')
         if (args[0] === 'release' && args[1] === 'download')

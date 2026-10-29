@@ -43,6 +43,23 @@ nocx-sky-test "$PWD" 'node --test --test-reporter=tap scripts/release/promotion*
    CI on it (close/reopen as the owner, because `GITHUB_TOKEN` cannot trigger CI),
    then merge it before the next nightly. The workflow never merges it.
 
+### What the CI gate accepts
+
+Every first-parent commit since the last stable is checked:
+
+- **A merged PR** needs its head commit's `ci.yml` run. Each required job is green, a
+  supporting-only skip, or — under [ADR-xf4p9fzd](../decisions/xf4p9fzd-a-flaky-test-is-quarantined-by-its-open-bead.md)
+  — red only on tests `docs/testing/quarantine.json` holds under an open bead (or a
+  nameless failure that passed in another attempt, or a `job:<name>#<PR>` entry). A run
+  is the PR's by `pull_requests`, or, once the branch is deleted and GitHub empties that
+  list, by its head commit, branch and repository.
+- **A direct push to `main`** (the owner may push directly) has no run of its own. It
+  passes if it touches no product file, or if a later PR in the range ran the product
+  suites fully green — nothing quarantined — on a head that contains it.
+
+`.beads/issues.jsonl` is read at the candidate (about 14 MB), so the promotion's `git`
+reads carry a 256 MiB buffer.
+
 ### GitHub and real-secret acceptance
 
 Fixtures cannot establish Actions permissions or GitHub's live behavior. The

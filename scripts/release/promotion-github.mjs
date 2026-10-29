@@ -6,9 +6,12 @@ import { fileURLToPath } from 'node:url'
 import {
   authorize,
   ciJobNames,
+  failedTests,
   isNewerVersion,
   prepareStable,
   readKeyring,
+  readQuarantine,
+  runBelongsTo,
   signedRunNumber,
   signingKey,
   updateCask,
@@ -38,7 +41,16 @@ export function githubClient(run = execFileSync) {
   return { gh, api, pages }
 }
 
-export async function collectCI({ repo, commits, github, loadWorkflow, touchesProduct }) {
+export async function collectCI({
+  repo,
+  commits,
+  github,
+  loadWorkflow,
+  touchesProduct,
+  quarantine = {},
+  commitFiles,
+  isAncestor,
+}) {
   fail(commits.length > 0, 'CI: promoted range is empty')
   const evidence = []
   const seen = new Set()
@@ -51,6 +63,13 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
         pr.base?.ref === 'main' &&
         pr.base.repo?.full_name === repo,
     )
+    // The owner may push to main directly (AGENTS.md). Such a commit has no PR
+    // and no CI run of its own; it is recorded here and judged after the loop,
+    // against the later PRs whose CI ran over it.
+    if (merged.length === 0 && commitFiles) {
+      evidence.push({ direct: true, commit, product: touchesProduct(commitFiles(commit)) })
+      continue
+    }
     fail(merged.length === 1, `CI: commit ${commit} must map to exactly one merged main PR`)
     const pr = merged[0]
     fail(!seen.has(pr.number), `CI: duplicate PR #${pr.number} in promoted range`)
@@ -67,7 +86,7 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
         run.head_sha === pr.head.sha &&
         run.event === 'pull_request' &&
         run.path === '.github/workflows/ci.yml' &&
-        run.pull_requests?.some((p) => p.number === pr.number),
+        runBelongsTo(run, pr, repo),
     )
     // A failed newer attempt must not be hidden by an older successful run.
     matching.sort((a, b) => b.id - a.id)
@@ -80,19 +99,88 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
     const entry = {
       number: pr.number,
       head: pr.head.sha,
+      headRef: pr.head.ref,
+      headRepo: pr.head.repo?.full_name,
       product: touchesProduct(files.map((f) => f.filename)),
       run,
       jobs,
       requiredJobs: ciJobNames(loadWorkflow(pr.head.sha)),
     }
+    // A run that is not plainly green is read whole: every attempt, and the
+    // log of every failed job, so the policy can tell a quarantined flake
+    // from a real failure (promotion.mjs verifyCI).
+    if (run.conclusion !== 'success' || jobs.some((job) => job.conclusion === 'failure')) {
+      entry.quarantine = quarantine
+      entry.attempts = []
+      for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
+        const attemptJobs =
+          attempt === run.run_attempt
+            ? jobs
+            : github.pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
+        entry.attempts.push({
+          attempt,
+          jobs: attemptJobs.map((job) => ({
+            name: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            ...(job.conclusion === 'failure'
+              ? {
+                  failures: failedTests(
+                    github.gh([
+                      'api',
+                      // Job logs carry ANSI colour; gh refuses them without this.
+                      '--allow-escape-sequences',
+                      `repos/${repo}/actions/jobs/${job.id}/logs`,
+                    ]),
+                  ),
+                }
+              : {}),
+          })),
+        })
+      }
+    }
     verifyCI([entry])
     evidence.push(entry)
   }
+  // A direct product commit is accepted only when a later PR in the range ran
+  // the full product suites green, with nothing quarantined, on a head that
+  // contains it. A direct supporting commit (tracker rows, documents) owes no
+  // product run, as the classifier already says of a PR.
+  evidence.forEach((entry, index) => {
+    if (!entry.direct || !entry.product) return
+    const cover = evidence
+      .slice(index + 1)
+      .find(
+        (later) =>
+          !later.direct &&
+          later.product &&
+          later.run.conclusion === 'success' &&
+          !later.attempts &&
+          isAncestor(entry.commit, later.head),
+      )
+    fail(cover, `CI: direct commit ${entry.commit} touches product and no later green PR covers it`)
+    entry.coveredBy = cover.number
+  })
   return evidence
 }
 
+// The tracker export the quarantine is checked against is ~14 MB (2026-10-29),
+// far past execFileSync's 1 MiB default, which throws ENOBUFS rather than
+// truncating. 256 MiB leaves room for growth and still fails loudly beyond it.
 const git = (...args) =>
-  execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  execFileSync('git', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 256 * 1024 * 1024,
+  }).trim()
+// The quarantine is optional: a commit with no file quarantines nothing.
+const showIfPresent = (sha, path) => {
+  try {
+    return git('show', `${sha}:${path}`)
+  } catch {
+    return undefined
+  }
+}
 const readJSON = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const saveJSON = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 
@@ -176,14 +264,31 @@ async function collect(directory, github) {
     .filter(Boolean)
   // This is CI's own classifier, shared with nightly (not copied into promotion).
   const { touchesProduct } = await import('../product-change.mjs')
+  const quarantine = readQuarantine(
+    showIfPresent(sha, 'docs/testing/quarantine.json'),
+    git('show', `${sha}:.beads/issues.jsonl`),
+  )
   const ci = await collectCI({
     repo,
     commits,
     github,
+    quarantine,
     touchesProduct,
     loadWorkflow: (head) => {
       git('fetch', '--no-tags', 'origin', head)
       return git('show', `${head}:.github/workflows/ci.yml`)
+    },
+    commitFiles: (commit) =>
+      git('diff-tree', '--no-commit-id', '--name-only', '-r', `${commit}^`, commit)
+        .split('\n')
+        .filter(Boolean),
+    isAncestor: (ancestor, head) => {
+      try {
+        git('merge-base', '--is-ancestor', ancestor, head)
+        return true
+      } catch {
+        return false
+      }
     },
   })
   const readme = git('show', `${sha}:README.md`)
@@ -213,7 +318,13 @@ export function verifyUploaded(github, repo, plan, directory) {
   mkdirSync(directory)
   github.gh(['release', 'download', plan.tag, '--repo', repo, '--dir', directory])
   verifyFiles(directory, plan.assets)
-  const release = github.api(`repos/${repo}/releases/tags/${plan.tag}`)
+  // releases/tags/<tag> answers 404 for a DRAFT, and this runs first on the
+  // draft (Release run 40924528670 refused there after uploading it). The
+  // authenticated release list includes drafts, so the release is found there,
+  // by tag, and exactly once.
+  const matches = github.pages(`repos/${repo}/releases`).filter((r) => r.tag_name === plan.tag)
+  fail(matches.length === 1, `expected exactly one release ${plan.tag}, found ${matches.length}`)
+  const release = matches[0]
   fail(
     release.assets.length === plan.assets.length &&
       release.assets.every((a) => plan.assets.some((p) => p.name === a.name && p.size === a.size)),

@@ -65,8 +65,9 @@ function fixture(t) {
     sha,
     version,
     tag,
-    runId: 42,
-    runAttempt: 1,
+    // The producer's own shape (publish-nightly.mjs): GitHub's env strings.
+    runId: '42',
+    runAttempt: '1',
     artifacts: [...payloads, 'manifest.json', 'manifest.json.sig'].map(describe),
   }
   const nightlyBody = Buffer.from(JSON.stringify(nightly))
@@ -170,6 +171,26 @@ test('a verified candidate promotes the exact payload bytes and signs the stable
     plan.macSHA256,
     digest(readFileSync(join(source, 'nocx-0.8.0-darwin-universal.zip'))),
   )
+})
+
+test('the signed run id and attempt are read in the form the producer signs them', (t) => {
+  const { input } = fixture(t)
+  assert.doesNotThrow(() => verifyCandidate(input))
+  for (const [field, value] of [
+    ['runId', 42],
+    ['runId', '042'],
+    ['runId', '4.2'],
+    ['runId', ''],
+    ['runId', 'x42'],
+    ['runId', String(2 ** 60)],
+    ['runAttempt', 1],
+    ['runAttempt', '0'],
+  ]) {
+    const { input: changed, nightly } = fixture(t)
+    nightly[field] = value
+    resign(changed, nightly)
+    assert.throws(() => verifyCandidate(changed), /nightly/i, `${field} ${JSON.stringify(value)}`)
+  }
 })
 
 test('an unverified nightly and mismatched commit/run/attempt are refused', (t) => {
@@ -304,6 +325,27 @@ test('stable cask pins the promoted zip and preserves unrelated cask text; malfo
   assert.match(result, /auto_updates true/)
   assert.throws(() =>
     updateCask(text.replace(/sha256.*/, 'sha256 :no_check'), '0.8.0', 'b'.repeat(64)),
+  )
+})
+
+test('a release key whose base64 holds "//" is read whole, beside a real comment', async () => {
+  const { readKeyring } = await import('./promotion.mjs')
+  // Base64 uses "/", so roughly one key in a hundred contains "//". Draw keys
+  // until one does: the outcome is fixed even though the key is not.
+  let raw
+  do {
+    raw = generateKeyPairSync('ed25519')
+      .publicKey.export({ format: 'der', type: 'spki' })
+      .subarray(-32)
+      .toString('base64')
+  } while (!raw.includes('//'))
+  const keys = readKeyring(
+    `package update\nvar releaseKeys = []string{\n\t// a comment // with slashes\n\t"${raw}", // trailing\n}\n`,
+  )
+  assert.equal(keys.length, 1)
+  assert.equal(
+    keys[0].export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
+    raw,
   )
 })
 

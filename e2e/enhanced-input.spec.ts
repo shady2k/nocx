@@ -128,6 +128,71 @@ test.describe('enhanced input raw routing', () => {
     })
   })
 
+  test('unclaimed keys during submit reach the command after its write', async ({ page }) => {
+    // Hold the real submit RPC at the socket boundary. This makes the interval
+    // before its response and the command write observable without a timer.
+    await page.addInitScript(() => {
+      const state = window as unknown as {
+        __heldSubmit?: { socket: WebSocket; data: string }
+        __submitKeys: string[]
+      }
+      state.__submitKeys = []
+      const send = WebSocket.prototype.send
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === 'string') {
+          const message = JSON.parse(data) as { method?: string }
+          if (message.method === 'lifecycle.submitAttempt' && !state.__heldSubmit) {
+            state.__heldSubmit = { socket: this, data }
+            return
+          }
+        }
+        send.call(this, data)
+      }
+      document.addEventListener(
+        'keydown',
+        (event) => {
+          if (state.__heldSubmit) {
+            state.__submitKeys.push(
+              document.activeElement === document.body ? event.key : `claimed:${event.key}`,
+            )
+          }
+        },
+        true,
+      )
+    })
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await promptReady(page)
+    await page.keyboard.type('read x; printf \'got-%s\\n\' "$x"')
+    await page.keyboard.press('Enter')
+    await page.waitForFunction(() =>
+      Boolean((window as unknown as { __heldSubmit?: unknown }).__heldSubmit),
+    )
+
+    // The RPC has not left the renderer: neither its running fact nor its
+    // deferred focus repair can overtake this blur or these keystrokes.
+    await page.evaluate(() => {
+      const holder = document.activeElement
+      if (holder instanceof HTMLElement) holder.blur()
+    })
+    await page.keyboard.type('hello')
+    await page.keyboard.press('Enter')
+    const keys = await page.evaluate(
+      () => (window as unknown as { __submitKeys: string[] }).__submitKeys,
+    )
+    expect(keys[0]).toBe('h')
+
+    // Let the actual backend process the held request. The answer must have
+    // been adopted and queued behind the command, not lost or sent before it.
+    await page.evaluate(() => {
+      const state = window as unknown as { __heldSubmit: { socket: WebSocket; data: string } }
+      state.__heldSubmit.socket.send(state.__heldSubmit.data)
+    })
+    await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
+      timeout: 5000,
+    })
+  })
+
   test('Ctrl-C at a prompt does not trap input', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)

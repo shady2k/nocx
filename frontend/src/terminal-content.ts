@@ -31,6 +31,7 @@ import { AgentInputTarget } from './agent-ask'
 import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
 import { AgentReadiness, modelChipState } from './agent-readiness'
+import { onAiConfigChanged } from './ai-config'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
@@ -1478,6 +1479,11 @@ export class TerminalContent extends BasePaneContent {
    *  itself. */
   private readiness: AgentReadiness | null = null
   private _readinessUnsub: (() => void) | null = null
+  /** Unsubscribe from the renderer's own configuration writes
+   *  (nocx-1ebrs.66.1.28): a default model set on the Settings pane while
+   *  this pane is already in front has no show to catch up on, and the chip
+   *  would go on naming the model from before it. */
+  private _aiConfigUnsub: (() => void) | null = null
   /** Unsubscribe from the reconnect report for the readiness refresh — its
    *  own registration rather than a second statement inside the restore's,
    *  so removing either leaves the other alone. */
@@ -3157,6 +3163,11 @@ export class TerminalContent extends BasePaneContent {
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
+      // And a write to the configuration behind that chip, whenever it lands
+      // (nocx-1ebrs.66.1.28). The show seam below covers the writes this pane
+      // cannot see; this covers the ones that are still in flight when it
+      // arrives, which the show cannot.
+      this._aiConfigUnsub = onAiConfigChanged(() => this.refreshReadinessIfShown())
 
       this.inputTargets = createRegistry((target) => {
         // The per-target draft swap (nocx-4ff.7): snapshot the editor
@@ -6231,15 +6242,18 @@ export class TerminalContent extends BasePaneContent {
     // chip can have changed: an endpoint is created, a role assigned and a
     // default set on the SETTINGS pane, which is a different pane — so the
     // person cannot see this chip while they do it, and this is the moment
-    // it must catch up. Named triggers per write (endpoints.create,
-    // roles.assign, roles.setDefault) would each have to be installed in a
-    // surface this task does not own, and there is no backend notification
-    // for them; the show is the one seam that covers all of them at once
-    // and is not a poll. Only while Enter goes to the assistant — a Run
-    // pane has no chip to refresh, and pays no call for one.
-    if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
-      this.refreshReadiness()
-    }
+    // it must catch up. Only while Enter goes to the assistant — a Run pane
+    // has no chip to refresh, and pays no call for one.
+    //
+    // The show alone is not enough, and a flake proved it
+    // (nocx-1ebrs.66.1.28): a write can still be IN FLIGHT when the person
+    // is back, the read issued here then answers with the pair from before
+    // it, and nothing asks again — so the chip goes on naming a model that
+    // will not answer. A write made by this renderer therefore announces its
+    // own landing (ai-config.ts), which closes that window without a poll;
+    // the show stays for the writes this renderer does not make — another
+    // client, a restored profile.
+    if (visible) this.refreshReadinessIfShown()
     // The mark affordance is portaled to body, so pane CSS cannot hide it.
     // Reconcile on return from the current selection; hide immediately when
     // this pane leaves the front.
@@ -6258,6 +6272,19 @@ export class TerminalContent extends BasePaneContent {
     // blocks is four hundred blocks of DOM before the first frame, and a pane
     // nobody has opened has not been read.
     if (visible) void this.restorePast()
+  }
+
+  /**
+   * Ask again about the chip's facts, but only where there is a chip: the
+   * pane is in front and Enter goes to the assistant. The two seams that
+   * call it — the pane coming to the front, and a configuration write
+   * landing while it already is (nocx-1ebrs.66.1.28) — share this one rule,
+   * so a Run pane pays no readiness call at either.
+   */
+  private refreshReadinessIfShown(): void {
+    if (!this._active) return
+    if (this.inputTargets?.active().id !== this.agentTarget?.id) return
+    this.refreshReadiness()
   }
 
   /**
@@ -9431,6 +9458,8 @@ export class TerminalContent extends BasePaneContent {
     this._readinessRetryUnsub = null
     this._readinessUnsub?.()
     this._readinessUnsub = null
+    this._aiConfigUnsub?.()
+    this._aiConfigUnsub = null
     this.readiness = null
     this._projections = null
     this.env?.detach()

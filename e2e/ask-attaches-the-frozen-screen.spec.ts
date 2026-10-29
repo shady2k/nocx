@@ -316,12 +316,50 @@ test.describe('the assistant is told the frozen screen came with the question (n
 
       // HALF TWO: what the model reads. No tool call is scripted — this is a
       // model that answers rather than looking, which is the owner's model.
+      // Warm the real assistant client immediately before the boundary
+      // probe. Both questions must finish in the UI; the fake's connection
+      // identities distinguish a fresh request from a replay of the POST.
+      fake.setScript({ chunks: ['The connection is ready.'] })
+      await page.locator(INPUT).fill('Are you ready?')
+      await page.keyboard.press('Enter')
+      const warmup = answers.locator('[data-turn-state]').last()
+      await expect(warmup).toHaveAttribute('data-turn-state', 'success')
+      await expect(warmup).toContainText('The connection is ready.')
+      const priorConnections = fake.closeOnNextReuse()
+      const rejectedBefore = fake.rejectedReuses().length
       fake.setScript({ chunks: ['I can see the pinned screen.'] })
       const base = fake.requests().length
       await page.locator(INPUT).fill('What is this?')
       await page.keyboard.press('Enter')
-      const requests = await fake.waitForRequests(base + 1, 30_000)
-      const body = requests.at(-1)!.body
+      const answer = answers
+        .locator('[data-turn-state]')
+        .filter({ hasText: 'What is this?' })
+        .last()
+      try {
+        await expect(answer).toHaveAttribute('data-turn-state', 'success', { timeout: 30_000 })
+        await expect(answer).toContainText('I can see the pinned screen.')
+      } finally {
+        await test.info().attach('provider-connection-lifecycle', {
+          contentType: 'application/json',
+          body: JSON.stringify({
+            priorConnections,
+            rejected: fake.rejectedReuses(),
+            delivered: fake
+              .requests()
+              .slice(base)
+              .map((request) => ({
+                connectionId: request.connectionId,
+                path: request.path,
+              })),
+          }),
+        })
+      }
+      const requests = fake.requests()
+      const delivered = requests.slice(base)
+      expect(delivered).toHaveLength(1)
+      expect(priorConnections).not.toContain(delivered[0].connectionId)
+      expect(fake.rejectedReuses()).toHaveLength(rejectedBefore)
+      const body = delivered[0].body
       const parsed = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
       const system = (parsed.messages ?? []).find((m) => m.role === 'system')?.content ?? ''
       expect(system).toContain('A frozen screen was attached automatically')
@@ -417,16 +455,4 @@ test.describe('the assistant is told the frozen screen came with the question (n
     writeFileSync(exitPath, 'release\n')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
   })
-})
-
-// The fixture this file leans on hardest, pinned where the dependency lives.
-// The alternates' ask reuses the connection the endpoint's connection check
-// left in the backend's pool, and it cannot come sooner than the person's
-// journey — 4.9s here, 6.0s on the CI runner that failed. A fake that inherits
-// node's 5s keep-alive default hangs up in between, and a POST cannot be
-// replayed, so the ask fails and its waitForRequests times out. The long
-// version lives in e2e/fake-openai.ts (start); this is the number it holds
-// (nocx-1ebrs.66.1.33).
-test('the fake provider does not hang up on an idle connection', () => {
-  expect(fake.idleReapMs(), 'the fake reaped the connection the ask had to reuse').toBe(0)
 })

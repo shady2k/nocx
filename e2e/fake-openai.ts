@@ -37,10 +37,12 @@
  * never a timing bet.
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 
 export interface FakeRequest {
   readonly id: number
+  /** Server-side TCP connection identity, stable across keep-alive requests. */
+  readonly connectionId: number
   /** The raw request body the backend sent (the OpenAI chat-completions
    *  request: model, messages, stream). */
   readonly body: string
@@ -183,43 +185,24 @@ export class FakeOpenAI {
   private readonly requests_: FakeRequest[] = []
   private readonly releases = new Map<number, () => void>()
   private nextId = 1
+  private nextConnectionId = 1
+  private readonly connections = new Map<Socket, number>()
+  private readonly closeOnReuse = new Set<number>()
+  private readonly rejectedReuses_: { connectionId: number; path: string }[] = []
 
   /** Bind 127.0.0.1:0 (OS-assigned port). Resolves with the base URL the
    *  endpoint form should be given: http://127.0.0.1:<port>/v1. */
   start(): Promise<string> {
     const { promise, resolve, reject } = Promise.withResolvers<string>()
     const server = createServer((req, res) => this.handle(req, res))
-    // THE FAKE NEVER HANGS UP ON AN IDLE CONNECTION (nocx-1ebrs.66.1.33).
-    //
-    // Node closes a keep-alive connection 5s after its last response — the
-    // default of server.keepAliveTimeout, which this server used to inherit
-    // without saying so. The backend keeps that connection in its pool: the
-    // endpoint's own connection check (GET /v1/models, internal/assistant/
-    // connection.go) and the ask (POST /v1/chat/completions, engine.go) ride
-    // ONE guarded client (httpguard.go:newGuardedHTTPClient). The ask cannot
-    // come sooner than the person's own journey, and this spec's journey is
-    // long: create the endpoint, start a full-screen program, wait for it to
-    // paint, freeze the screen, read the chip, drag the seam. Measured from
-    // the connection check's last byte to the ask's first: 4932ms on a fast
-    // laptop and 6003ms on the CI runner that failed (404… webkit shard 2).
-    //
-    // So the fixture killed the socket between 0 and 1 second before the
-    // backend came back to it — and when the reap landed in the instant of
-    // reuse, the client got EPIPE while writing its 42KB body. net/http does
-    // NOT replay that: Request.isReplayable is false for a POST without an
-    // Idempotency-Key, because a second ask is a second charge. The ask then
-    // fails with "nocx could not reach the model endpoint", and the spec
-    // waits out its 30s for a request the fake never received ("timed out
-    // waiting for 2 request(s)").
-    //
-    // That is the fixture inventing a provider that no endpoint is: an idle
-    // connection is not a failure, and a model server does not hang up five
-    // seconds after it answers and leave the client holding the socket. The
-    // fake's job is the WIRE — what goes to the provider and what comes back
-    // — not a lifetime shorter than the test that uses it. 0 disables the
-    // timeout (node's documented meaning); stop() still closes the listener
-    // and, with it, every idle connection.
-    server.keepAliveTimeout = 0
+    server.on('connection', (socket) => {
+      const id = this.nextConnectionId++
+      this.connections.set(socket, id)
+      socket.once('close', () => {
+        this.connections.delete(socket)
+        this.closeOnReuse.delete(id)
+      })
+    })
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       this.server = server
@@ -230,11 +213,21 @@ export class FakeOpenAI {
     return promise
   }
 
-  /** The idle window this fixture declares for its own connections, in ms.
-   *  0 — never reap — and it is the whole answer to nocx-1ebrs.66.1.33: see
-   *  the comment in start(). Read by e2e/fake-openai.unit.mts. */
-  idleReapMs(): number {
-    return this.server?.keepAliveTimeout ?? 0
+  /** Reject the next request that reuses any previously accepted socket,
+   *  before reading its body or consuming a response script. No timeout:
+   *  this models a peer close racing with reuse, only when the spec arms it.
+   *  A client opening a fresh connection is unaffected. */
+  closeOnNextReuse(): readonly number[] {
+    if (!this.server) throw new Error('fake-openai: not started')
+    this.closeOnReuse.clear()
+    for (const request of this.requests_) this.closeOnReuse.add(request.connectionId)
+    if (this.closeOnReuse.size === 0) throw new Error('fake-openai: no previous request')
+    return [...this.closeOnReuse]
+  }
+
+  /** Requests rejected at the reuse boundary, not accepted model calls. */
+  rejectedReuses(): readonly { connectionId: number; path: string }[] {
+    return this.rejectedReuses_.map((r) => ({ ...r }))
   }
 
   /** The base URL the endpoint form should be given
@@ -344,6 +337,13 @@ export class FakeOpenAI {
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
+    const connectionId = this.connections.get(req.socket)!
+    if (this.closeOnReuse.has(connectionId)) {
+      this.closeOnReuse.clear()
+      this.rejectedReuses_.push({ connectionId, path: req.url ?? '' })
+      req.socket.destroy()
+      return
+    }
     const id = this.nextId++
     let body = ''
     req.on('data', (chunk: Buffer) => {
@@ -352,6 +352,7 @@ export class FakeOpenAI {
     req.on('end', () => {
       const record: FakeRequest = {
         id,
+        connectionId,
         body,
         authorization: req.headers.authorization ?? '',
         path: req.url ?? '',

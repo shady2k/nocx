@@ -1,0 +1,1370 @@
+# Shared artifact build used by the nightly channel (ADR-0097).
+# No CI workflow call. The original release build and its artifact checks live here.
+name: Release artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build and verify only; this workflow never publishes
+        type: boolean
+        default: true
+      linux-only:
+        description: Iterate Linux first, without macOS signing secrets
+        type: boolean
+        default: true
+      version:
+        description: Next stable version
+        type: string
+        default: '0.8.0'
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      sha:
+        required: true
+        type: string
+      release-tag:
+        required: true
+        type: string
+      linux-only:
+        required: false
+        type: boolean
+        default: false
+      dry-run:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      MACOS_SIGNING_P12:
+        required: true
+      MACOS_SIGNING_P12_PASSWORD:
+        required: true
+      RELEASE_SIGNING_KEY:
+        required: true
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build-date: ${{ steps.v.outputs.build-date }}
+    steps:
+      - id: v
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha || github.sha }}
+          TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$TAG" =~ ^(nightly-[0-9]{8}-[0-9]+|v[0-9]+\.[0-9]+\.[0-9]+)$ ]]
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # One identity for both platforms and their signed manifest. A
+          # publication or promotion time is not the time these bytes were built.
+          echo "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+  helpers:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUILD_SHA: ${{ inputs.sha || github.sha }}
+      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # THE PINNED ZIG, because `make helpers` cross-compiles all four helper
+      # targets with it — the two darwin ones included, from this Linux runner
+      # (Makefile). The VERSION comes from the committed manifest, which is the
+      # one place it is pinned; the sha256 is the official tarball's. A drift
+      # cannot ship quietly: `make helpers` runs `vtfetch zig`, which refuses
+      # any compiler but the pinned version, and a wrong tarball fails the
+      # sha256 check right here.
+      - name: Install the pinned Zig
+        run: |
+          set -euo pipefail
+          version="$(go run ./cmd/vtfetch meta | sed -n 's/^zig=//p')"
+          [ -n "$version" ] || { echo "::error::no Zig version in third_party/libghostty-vt/MANIFEST.json"; exit 1; }
+          url="https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz"
+          sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/zig.tar.xz"
+          echo "${sha}  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
+
+      # `make helpers` fetches and verifies the pinned archives itself — the
+      # Makefile's `vt-archives` is its prerequisite — because the helper links
+      # libghostty-vt statically and a Linux helper must stay static. That is
+      # asserted on the built artifact, not assumed from a flag.
+      - name: Build the remote helpers
+        run: make helpers
+
+      # THE VARIANT THIS MACHINE RUNS, and the list is the whole of "which
+      # platforms can run this release": the darwin pair because the macOS
+      # bundle is universal and either slice may be the one executing, and
+      # linux/amd64 because that is the AppImage. It is the same Makefile
+      # definition as the four above with the one tag that links an ssh client
+      # (nocx_local_ssh), and it is built HERE for the same reason they are:
+      # one origin, so the bytes both build jobs embed are the bytes this job
+      # built.
+      #
+      # `require-local-helper` and not `helper-local`: it builds the list and
+      # then asserts every one of them landed in the directory //go:embed
+      # reads, which is the half a build step cannot see. Since
+      # internal/helper/local stopped falling back to the deployable artifact
+      # (nocx-50w7p.7), an app built with the embed empty installs no helper
+      # and opens no pane.
+      - name: Build this machine's helpers
+        run: make require-local-helper HELPER_LOCAL_TARGETS="linux/amd64 darwin/amd64 darwin/arm64"
+
+      # -v because the ceiling test LOGS each target's measured size and the
+      # headroom (source_test.go): the budget for a helper that links
+      # libghostty-vt has to be derived from a real one, and this step's
+      # output is where those numbers are.
+      #
+      # The notices check is in this list because this is the only job that
+      # holds all four artifacts: it decompresses each one and asserts the
+      # pinned THIRD_PARTY_LICENSES is inside, then runs the host's artifact
+      # with `--licenses` and compares what it prints byte for byte. All three
+      # checks cover the local variants too — same three questions asked of the
+      # second directory, because an artifact that ships without its licences
+      # or past the ceiling does not become acceptable by being installed
+      # locally.
+      # Named rather than covered by a bare `-run 'Test'` so that a check
+      # added to this package is a decision about THIS job.
+      - name: Verify helper build output is stable, bounded and licensed
+        run: go test -v -tags helperacceptance ./internal/helper/deploy/artifacts -run 'TestMakeHelpersIsIdempotent|TestHelperArtifactsStayBelowSizeCeiling|TestHelperArtifactsCarryThePinnedThirdPartyNotices' -count=1
+
+      # The COMPRESSED artefacts, exactly as `make helpers` leaves them:
+      # //go:embed all:bin takes the .gz files, so these are what the
+      # build jobs download back into place before the Go build that embeds
+      # them.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts/bin/*.gz
+          retention-days: 7
+
+      # THE LOCAL VARIANTS TRAVEL SEPARATELY, and that separation is the safety
+      # property rather than tidiness: `bin/*.gz` above does not match
+      # `bin/local/*.gz`, so the ssh-linked bytes are embedded in the app and
+      # never published as a downloadable helper. They still travel from ONE
+      # origin — this job — because the build jobs may not rebuild them: the
+      # macOS runner has no pinned Zig, and two toolchains are two different
+      # binaries.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local/*.gz
+          retention-days: 7
+
+      - name: Stage the helper binaries for publication
+        run: |
+          set -euo pipefail
+          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` gzips, and
+          # gzip stamps the source file's mtime into its header, so the .gz
+          # bytes differ between two runs even when the binary inside is
+          # identical. The DECOMPRESSED bytes are what
+          # internal/helper/deploy/install.go hashes to key the install
+          # directory, so publishing those makes "the same bytes the ssh
+          # path would have sent" a checkable claim: a hand-installed
+          # helper lands in the same directory name, and no
+          # reinstall-on-hash-mismatch follows.
+          #
+          # The loop takes the platforms from the artifacts on disk rather
+          # than from a list written here, so the matrix can grow (it goes
+          # 2x2 in nocx-psjfb) without this step being edited to match.
+          #
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+          # both, and one spelling that works in either job is worth more
+          # than the shorter one.
+          mkdir -p dist
+          : > helper-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="dist/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            chmod +x "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
+          done
+          sort -o helper-hashes.txt helper-hashes.txt
+          cat helper-hashes.txt
+
+      # THE LOCAL VARIANTS ARE NOT PUBLISHED, so there is no dist/ copy of them
+      # and no manifest entry — but the build jobs' embeddings are still held
+      # against this job, because it is the one origin for every helper byte a
+      # release embeds and a variant rebuilt in a build job is one this workflow
+      # cannot account for. Uncompressed and hashed the same way as the
+      # published ones above, for the reason stated there: a .gz differs
+      # between two runs on its header's mtime, and the decompressed bytes are
+      # what install.go keys a generation by.
+      #
+      # It writes into a directory of its own and never into dist/: that
+      # directory is what the build jobs upload, and `helper-binaries` is
+      # published from `dist/nocx-helper-*` — a local variant landing there
+      # would offer a hand-installable copy of the ssh-linked helper, which is
+      # the one thing the second directory exists to keep off a remote host.
+      - name: Hash the local helpers the build jobs must have embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/local-stage"
+          mkdir -p "$stage"
+          : > helper-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-local-hashes.txt
+          done
+          sort -o helper-local-hashes.txt helper-local-hashes.txt
+          cat helper-local-hashes.txt
+
+      # The published binaries, for `publish`, and for `sign` to size in
+      # the manifest. They come from this job and from nowhere else: no
+      # build job stages a helper under dist/ any more, so one file name
+      # cannot arrive twice in one download directory and let step
+      # ordering decide which bytes users get.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-binaries
+          path: dist/nocx-helper-*
+          retention-days: 7
+
+      # The hashes of those same bytes — what `sign` holds both build jobs
+      # against, and what the manifest publishes as each helper's sha256. The
+      # local variants' hashes travel in this one artifact rather than a second
+      # one: they are read by the same step, in the same directory, one file
+      # apart, and a separate artifact would be a second download for a check
+      # that never looks at them alone.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-hashes
+          path: |
+            helper-hashes.txt
+            helper-local-hashes.txt
+          retention-days: 7
+
+  # Named for its platform, like build-linux. It was `build` back when macOS was
+  # the only target and the qualifier carried no information; once ADR-0007
+  # reversed D1 and added the AppImage, an unqualified `build` next to a
+  # `build-linux` read as "the build" and hid which platform had failed.
+  build-macos:
+    if: ${{ !inputs.linux-only }}
+    needs: [validate, helpers]
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUILD_SHA: ${{ inputs.sha || github.sha }}
+      BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      # WHICH PLATFORMS THIS APP CAN RUN ON, stated by the job that knows: the
+      # macOS bundle is universal, so either slice may be the one executing and
+      # its embed must carry BOTH darwin local variants. The gate step below
+      # fails the build when one of them is missing, which is the only place a
+      # shipped app without its own helper can still be stopped.
+      NOCX_REQUIRE_LOCAL_ARTIFACTS: darwin/amd64 darwin/arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # Pinned to the version in go.mod, like the e2e job. The macOS job still
+      # needs the CLI (build-assets generates the Info.plist and icon bundle;
+      # the Linux job builds with plain go build and does not).
+      # THE PINNED EMULATOR BYTES, BEFORE THIS JOB BUILDS ANYTHING THAT LINKS
+      # THEM. The app links libghostty-vt statically (ADR-0065), so the CGo
+      # links below need this platform's archive and its matched headers, and
+      # need them to be the pinned bytes; fetch-and-verify refuses a
+      # substituted archive rather than linking it.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
+
+      - name: Generate macOS bundle assets
+        run: |
+          set -euo pipefail
+          # v3 has no wails.json; the version that used to be patched into it
+          # (info.productVersion -> CFBundleShortVersionString/CFBundleVersion)
+          # is now a build-assets flag. The CLI also embeds the icon and
+          # generates the Info.plist template the .app assembly copies.
+          # THE FLAG NAMES ARE THE STRUCT FIELDS, LOWERCASED, and nothing
+          # else: clir derives them with `strings.ToLower(field.Name)`
+          # whenever the field carries no `name:` tag (clir@v1.3.0
+          # command.go:258), and BuildAssetsOptions tags only `description:`
+          # and `default:`. So there are no word separators to insert —
+          # `-binary-name` is not a spelling of `-binaryname`, it is a flag
+          # that does not exist, and parsing stops at the first unknown one.
+          # The icons step below is the same convention read correctly.
+          #
+          # EVERY IDENTITY FLAG IS NAMED, because an unnamed one ships the
+          # template's default and the About window prints it (nocx-1ebrs.43):
+          # 0.6.1's app menu > About nocx read "© now, My Company" out of the
+          # bundle's NSHumanReadableCopyright — the exact string
+          # BuildAssetsOptions falls back to when no -productcopyright is
+          # passed. The copyright is the LICENSE's own line, and the comments
+          # (Finder's Get Info string, CFBundleGetInfoString) are the
+          # description main.go hands application.Options. Both must move with
+          # their owners; TestReleaseBundleCarriesNocxOwnAboutIdentity holds
+          # the flags themselves against this call.
+          wails3 generate build-assets \
+            -dir build/assets \
+            -binaryname nocx \
+            -productname nocx \
+            -productidentifier dev.nocx \
+            -productversion "$VERSION" \
+            -productcopyright "Copyright © 2026 shady2k" \
+            -productcomments "A local-first, Warp-style terminal"
+
+      - name: Generate macOS icon bundle
+        run: |
+          set -euo pipefail
+          # build/appicon.png is the ONE committed icon in the repository, and
+          # the Linux job already derives its AppImage icon from it. macOS
+          # derives its .icns from the same master here rather than expecting a
+          # second asset to exist: `generate build-assets` above writes plists
+          # and never an icon, so the assembly step below used to copy a file
+          # that nothing in the pipeline had produced.
+          #
+          # -windowsfilename "" is load-bearing rather than tidiness: the flag
+          # defaults to build/windows/icon.ico and the generator writes it with
+          # a plain os.WriteFile, so leaving the default in place fails this
+          # step on a directory this repo does not have.
+          #
+          # icons.icns, not the tool's default icon.icns: the Info.plist sets
+          # CFBundleIconFile to "icons", so that is the name the bundle has to
+          # carry. Wails' own Taskfile passes the same override.
+          wails3 generate icons \
+            -input build/appicon.png \
+            -macfilename build/darwin/icons.icns \
+            -windowsfilename ""
+          test -s build/darwin/icons.icns
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
+
+      # The code-signing key is present in a job that runs build tooling, and
+      # unlike the manifest key (§5, the `sign` job) it cannot be anywhere
+      # else: codesign works on the assembled bundle, on macOS, in the job
+      # that assembles it. The two keys stay distinct, so the manifest key's
+      # isolation is exactly as strong as it was.
+      - name: Import the signing certificate
+        env:
+          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$MACOS_SIGNING_P12" ] || { echo "::error::MACOS_SIGNING_P12 is empty — the release cannot sign, and it must not fall back to ad-hoc"; exit 1; }
+          [ -n "$MACOS_SIGNING_P12_PASSWORD" ] || { echo "::error::MACOS_SIGNING_P12_PASSWORD is empty"; exit 1; }
+          kc_pass="$(openssl rand -hex 32)"
+          echo "::add-mask::$kc_pass"
+          security create-keychain -p "$kc_pass" build.keychain
+          # -lut: no auto-lock during the job. A keychain that relocks
+          # mid-run makes codesign prompt, and a prompt on a runner is a
+          # six-hour hang rather than a failure.
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "$kc_pass" build.keychain
+          printf '%s' "$MACOS_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security import "$RUNNER_TEMP/signing.p12" -k build.keychain \
+            -P "$MACOS_SIGNING_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          # SELF-SIGNED MEANS UNTRUSTED, and `find-identity -v` lists only
+          # VALID identities — an untrusted certificate is not one. The
+          # first run of this step reported "0 valid identities found" and
+          # codesign failed 90 seconds later with "The specified item could
+          # not be found in the keychain". Trusting our own certificate for
+          # code signing is what makes the identity resolvable, and it
+          # grants nothing beyond this ephemeral runner VM.
+          openssl pkcs12 -in "$RUNNER_TEMP/signing.p12" -clcerts -nokeys \
+            -passin "pass:$MACOS_SIGNING_P12_PASSWORD" -out "$RUNNER_TEMP/signing.crt"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.crt"
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/signing.crt"
+          # WITHOUT THIS LINE codesign asks for the keychain password
+          # interactively and the job hangs instead of failing. -T on the
+          # import grants codesign the ACL entry; the partition list is the
+          # second half of the same permission on modern macOS.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pass" build.keychain >/dev/null
+          security list-keychains -d user -s build.keychain login.keychain
+          # The SHA-1 is matched as a 40-hex field wherever it appears,
+          # never by column on line 1: that parse read `0 valid identities
+          # found` and yielded the word "valid", which is non-empty, so the
+          # guard below passed and the failure surfaced in codesign instead
+          # of here. A guard that cannot reject a wrong answer is not one.
+          id="$(security find-identity -v -p codesigning build.keychain | awk '{ if (match($0, /[0-9A-F]{40}/)) { print substr($0, RSTART, RLENGTH); exit } }')"
+          if ! printf '%s' "$id" | grep -Eq '^[0-9A-F]{40}$'; then
+            echo "::error::no code-signing identity in the imported keychain (got '$id')"
+            security find-identity -p codesigning build.keychain
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning build.keychain
+
+      # The helpers are EMBEDDED in the app (//go:embed all:bin), so
+      # they must exist before the Go build that embeds them. Until
+      # nocx-mchgh no step put them there at all and every published
+      # release answered ErrArtifactsNotBuilt for every platform: remote
+      # git could not work in any release, and worked from a checkout,
+      # which is why nothing reported it (Makefile:125 makes build-release
+      # depend on helpers; release.yml never did).
+      #
+      # They are DOWNLOADED rather than built here since nocx-6de7c — see
+      # the `helpers` job for why two `make helpers` runs are not two
+      # copies of one binary.
+      - name: Download the helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts/bin
+
+      # AND THE LOCAL VARIANT, into the second directory //go:embed reads. It
+      # comes from the same job for the same reason the four above do, and it is
+      # the whole of this job's local bytes: neither build job installs the
+      # pinned Zig, so a variant built here would be a second origin AND a build
+      # that cannot even run.
+      - name: Download this machine's helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+
+      # The gate, expressed as a test rather than as a file listing: a
+      # build that embedded nothing answers ErrArtifactsNotBuilt for every
+      # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
+      # protects a fresh checkout into the failure a release needs.
+      #
+      # Since nocx-6de7c it asserts THE DOWNLOAD LANDED AND WAS EMBEDDED,
+      # not that `make helpers` ran in this job — and that is exactly the
+      # failure a download step can produce silently. An artefact that
+      # arrives empty, or under a path //go:embed does not read, leaves a
+      # build that compiles cleanly and ships an app with no helper for
+      # any platform.
+      - name: The built binary embeds a helper for every matrix platform
+        run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      # THE SAME GATE FOR THE SECOND DIRECTORY, and this one decides whether the
+      # app opens a terminal at all: since internal/helper/local stopped falling
+      # back to the deployable artifact (nocx-50w7p.7), a binary whose bin/local
+      # holds nothing for a platform it runs on installs no helper and refuses
+      # every pane. NOCX_REQUIRE_LOCAL_ARTIFACTS is the job's own platform list
+      # and turns that skip into a failure, exactly as the variable above does
+      # for the four — the difference is that it carries the platforms, so a
+      # universal bundle is checked on both of its slices rather than on the
+      # runner's architecture.
+      - name: The built binary embeds this machine's helper for every platform this app runs on
+        run: go test -v ./internal/helper/deploy/artifacts -count=1
+
+      - name: Build universal bundle
+        run: |
+          set -euo pipefail
+          # THE SHELL'S OWN VERSION IS STAMPED, NOT READ (nocx-1ebrs.11).
+          # app.about is answered by nocx-server, which is built below without
+          # cgo and without a window: its module list has no wails entry, so the
+          # About page said "Wails: unknown" in every shipped 0.6.x build. The
+          # number is the pin in go.mod — the same source the module list would
+          # have answered from.
+          WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
+          [ -n "$WAILS_VERSION" ] || { echo "::error::cannot read the pinned wails version from go.mod"; exit 1; }
+          LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${BUILD_SHA}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Wails=${WAILS_VERSION}"
+          # v3 has no -platform flag: build each slice and join with lipo (§4).
+          #
+          # CGO_ENABLED=1 AND THE -arch FLAGS ARE BOTH REQUIRED, and leaving
+          # them out is not a slow build, it is a broken one. Naming GOARCH
+          # explicitly makes this a CROSS build even on a Mac building for a
+          # Mac, and Go turns cgo OFF for a cross build unless told otherwise
+          # — so wails v3's darwin implementation, which is Objective-C
+          # behind cgo, was excluded from the compile and the package it
+          # belongs to failed on every symbol it defines: `undefined:
+          # macosApp`, `undefined: newPlatformApp`, `undefined:
+          # smAppServiceRegister`.
+          #
+          # With cgo back on, the C half still has to be told which slice it
+          # is building; clang defaults to the host's architecture and would
+          # otherwise hand arm64 objects to the amd64 link. Apple's clang
+          # cross-compiles both from either host, so `-arch` on the CFLAGS
+          # and the LDFLAGS is the whole of what it needs.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-amd64/nocx .
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-arm64/nocx .
+          # The coordinator is a SECOND executable in the bundle: the desktop
+          # app finds, spawns and attaches to it, so installing the app is
+          # what installs the server (design §4, "Where the binary lives").
+          # It is built here rather than fetched or generated later because
+          # of the codesign line at the end of this step — see below.
+          #
+          # CGO_ENABLED=0 and no wails tags: cmd/nocx-server has no window.
+          # It still needs both slices, because the app it is spawned by is
+          # universal and a user on either architecture runs the same bundle.
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -tags release -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-amd64/nocx-server ./cmd/nocx-server
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -tags release -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-arm64/nocx-server ./cmd/nocx-server
+          mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
+          lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
+            build/bin/darwin-amd64/nocx build/bin/darwin-arm64/nocx
+          lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx-server \
+            build/bin/darwin-amd64/nocx-server build/bin/darwin-arm64/nocx-server
+          cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
+          cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
+          # THE PINNED THIRD-PARTY NOTICES, AND BEFORE THE SIGNATURE BELOW.
+          # The bundle is how our distribution reaches a user: it carries the
+          # app, the coordinator, and the helper artifacts the app embeds —
+          # and the HELPER is the binary that links libghostty-vt statically
+          # (ADR-0065; `go list -deps ./cmd/nocx-helper` is the check, and the
+          # app itself does not import the adapter today). What a user receives
+          # owes the licences of what is inside it, and the signature SEALS
+          # this tree: a file written after `codesign … nocx.app` is an
+          # unsealed resource and fails verification. Contents/Resources is
+          # where macOS keeps what a bundle carries.
+          #
+          # The bytes are the pin's own document, staged by the one script
+          # that owns where the notices come from; the step after this one
+          # reads it back out of the bundle and hashes it against the pin.
+          third_party/libghostty-vt/scripts/stage-notices.sh \
+            build/bin/nocx.app/Contents/Resources/THIRD_PARTY_LICENSES.txt
+          # Sign inside-out. --deep is NOT used to sign: Apple deprecated it
+          # for signing because it applies the outer options to nested code,
+          # and here it would sign the coordinator as a by-product of signing
+          # the app rather than as its own decision. It survives only in
+          # --verify --deep --strict below, where it means "check nested code
+          # too".
+          #
+          # -i on the coordinator because a bare Mach-O takes its identifier
+          # from its FILE NAME, and the identifier is part of the designated
+          # requirement the keychain matches on (ADR-0050 step 3). A
+          # defaulted identifier is a requirement that can change without
+          # anyone deciding to change it. The bundle needs no -i: it takes
+          # CFBundleIdentifier from Info.plist.
+          #
+          # Order matters and the bundle is last: its signature seals
+          # Info.plist, the icon and both executables, so anything that
+          # touches the tree afterwards invalidates it.
+          codesign --force --sign "$SIGN_IDENTITY" -i com.nocx.server \
+            build/bin/nocx.app/Contents/MacOS/nocx-server
+          codesign --force --sign "$SIGN_IDENTITY" build/bin/nocx.app
+
+      # THE BUNDLE CARRIES THE PINNED NOTICES, asserted off the bundle that was
+      # just signed rather than off the staging step that was supposed to put
+      # them there. A staging call that was dropped, or that wrote somewhere
+      # the bundle does not carry, leaves a shippable app with no licences in
+      # it — and nothing else in this job would notice, because the app links
+      # libghostty-vt with no runtime trace of it.
+      #
+      # The expectation is the PIN's sha256 out of MANIFEST.json (through
+      # vtfetch, the one reader of that file), not a hash written here: a
+      # hand-copied value would be a second statement of the pin, and this
+      # check exists to catch exactly that kind of drift.
+      #
+      # The check runs after the signature above, so a file added to the
+      # bundle later is both outside the seal and outside this file's
+      # presence — the requirement to stage before signing is stated at the
+      # staging call, and the `codesign --verify --deep --strict` later in
+      # this job is what proves the seal covers everything in the tree.
+      - name: The bundle carries the pinned third-party notices
+        run: |
+          set -euo pipefail
+          shipped="build/bin/nocx.app/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+          pinned="$(go run ./cmd/vtfetch meta | sed -n 's/^licenses_sha256=//p')"
+          [ -n "$pinned" ] || { echo "::error::no licenses sha256 in third_party/libghostty-vt/MANIFEST.json"; exit 1; }
+          [ -f "$shipped" ] || { echo "::error::$shipped is not in the bundle: the app links libghostty-vt and owes its licences"; exit 1; }
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has both.
+          got="$(shasum -a 256 "$shipped" | awk '{print $1}')"
+          [ "$got" = "$pinned" ] || { echo "::error::$shipped is not the pinned document: $got != $pinned"; exit 1; }
+          echo "bundle notices: $shipped ($got) is the pinned document"
+
+      # WHAT THIS JOB ACTUALLY EMBEDDED, hashed and thrown away. The
+      # `helpers` job is the one origin for the bytes; this file is the
+      # evidence that the origin is what landed here, and `sign` holds it
+      # against that job's helper-hashes.txt. A build job that quietly
+      # built helpers of its own, or that received a stale artefact, is red
+      # there instead of shipping an app whose embedded helper is not the
+      # published one — which is the whole reason a check survives in
+      # `sign` at all.
+      #
+      # Staged under $RUNNER_TEMP and never under dist/, because dist/* is
+      # what this job uploads, and the helper binaries are published from
+      # the `helpers` job alone. One file name arriving twice in one
+      # download directory would let step ordering decide which bytes users
+      # get.
+      #
+      # UNCOMPRESSED, deliberately. `make helpers` gzips, and gzip stamps
+      # the source file's mtime into its header, so the .gz bytes differ
+      # between runs even when the binary inside is identical — hashing
+      # those would compare the wrong thing. The DECOMPRESSED bytes are
+      # what internal/helper/deploy/install.go hashes to key the install
+      # directory, so they are what both this comparison and the published
+      # asset are about.
+      #
+      # The loop takes the platforms from the artifacts on disk rather
+      # than from a list written here, so the matrix can grow (it goes
+      # 2x2 in nocx-psjfb) without this step being edited to match.
+      #
+      # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+      # both, and one spelling that works in either job is worth more
+      # than the shorter one.
+      - name: Hash the helper bytes this job embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/helper-stage"
+          mkdir -p "$stage"
+          : > embedded-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-hashes.txt
+          done
+          sort -o embedded-hashes.txt embedded-hashes.txt
+          cat embedded-hashes.txt
+          # AND THE SECOND DIRECTORY, which answers a different question from
+          # the gate above: the gate says "this platform's variant is in the
+          # embed", and this file is what `sign` diffs against the helpers job
+          # to prove the bytes came from there and not from this job. Same loop
+          # over what is on disk, so a fourth local target needs no edit here.
+          mkdir -p "$stage/local"
+          : > embedded-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/local/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-local-hashes.txt
+          done
+          sort -o embedded-local-hashes.txt embedded-local-hashes.txt
+          cat embedded-local-hashes.txt
+
+      # Read the assembled app, not a source template: macOS keys notification
+      # authorization to this identifier (ADR-0103, nocx-1ebrs.51).
+      - name: Verify macOS bundle identifier
+        run: |
+          set -euo pipefail
+          plist="build/bin/nocx.app/Contents/Info.plist"
+          identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")"
+          echo "bundle identifier: $identifier"
+          [ "$identifier" = "dev.nocx" ] || { echo "::error::CFBundleIdentifier=$identifier != dev.nocx"; exit 1; }
+
+      - name: Smoke checks
+        run: |
+          set -euo pipefail
+          APP="build/bin/nocx.app"
+          BIN="$APP/Contents/MacOS/nocx"
+          # 1. A universal Mach-O must carry both slices. This is not proof they
+          #    both launch (§13 verifies that on hardware), only that lipo joined
+          #    two architectures.
+          archs="$(lipo -archs "$BIN")"
+          echo "archs: $archs"
+          echo "$archs" | grep -qw x86_64
+          echo "$archs" | grep -qw arm64
+          # 2. The plist version must match the linked Go version — both keys.
+          plist="$APP/Contents/Info.plist"
+          short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          [ "$short" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString=$short != $VERSION"; exit 1; }
+          [ "$bundle" = "$VERSION" ] || { echo "::error::CFBundleVersion=$bundle != $VERSION"; exit 1; }
+          # 3. The About window's identity is nocx's own, not the Wails
+          #    template's. The app menu's About item is
+          #    orderFrontStandardAboutPanel:, which prints
+          #    NSHumanReadableCopyright out of the assembled bundle verbatim —
+          #    and 0.6.1 shipped the build-assets default "© now, My Company"
+          #    there (nocx-1ebrs.43). Get Info (CFBundleGetInfoString) had the
+          #    same defect with the template's comments, so both keys are held
+          #    against the boilerplate markers the defaults carry.
+          copyright="$(/usr/libexec/PlistBuddy -c 'Print :NSHumanReadableCopyright' "$plist")"
+          echo "about copyright: $copyright"
+          case "$copyright" in
+            *shady2k*) ;;
+            *) echo "::error::NSHumanReadableCopyright='$copyright' names no nocx identity; the About window prints it"; exit 1 ;;
+          esac
+          for key in NSHumanReadableCopyright CFBundleGetInfoString; do
+            value="$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist")"
+            case "$value" in
+              *"My Company"*|"My Product"*|"This is a comment"*|*"© now"*)
+                echo "::error::$key='$value' is the Wails template default, not nocx's own (nocx-1ebrs.43)"; exit 1 ;;
+            esac
+          done
+          # 4. The linked binary must report the same version.
+          reported="$("$BIN" --version)"
+          echo "reported: $reported"
+          echo "$reported" | grep -qw "$VERSION"
+          # 5. The signature must be intact — the baseline the payload round
+          #    trip (§9) asserts is preserved through packaging. It is the
+          #    project certificate's, not the ad-hoc one Wails used to apply:
+          #    what changed is the signer, not the check.
+          codesign --verify --deep --strict "$APP"
+          # 6. The coordinator ships in the bundle, carries both slices, and
+          #    carries a signature of its own — its own codesign call above,
+          #    not a by-product of the bundle's.
+          #
+          #    There is deliberately no `--version` check here to match the
+          #    one on nocx above: cmd/nocx-server takes no flags, and running
+          #    it in CI would start a daemon rather than print a line. The
+          #    two binaries are linked in the same step from the same
+          #    $LDFLAGS, so the version they report cannot differ; when the
+          #    coordinator grows a --version, assert it here and delete this
+          #    paragraph.
+          SRV="$APP/Contents/MacOS/nocx-server"
+          test -x "$SRV"
+          srv_archs="$(lipo -archs "$SRV")"
+          echo "nocx-server archs: $srv_archs"
+          echo "$srv_archs" | grep -qw x86_64
+          echo "$srv_archs" | grep -qw arm64
+          codesign --verify --strict "$SRV"
+
+      - name: The designated requirement is the one we committed
+        run: |
+          set -euo pipefail
+          # This string is what the keychain matches a process against
+          # (ADR-0050 step 3). Committing it and comparing every build
+          # against it is what turns "stable across releases" from a claim
+          # into a gate: replace, rotate or mis-import the certificate and
+          # this step is red, instead of the release quietly shipping an
+          # identity no existing install recognises.
+          #
+          # The file cannot be written by hand: its content is what the real
+          # certificate produces, read out of a dry run's log. An absent or
+          # empty file is therefore an unfinished setup, not a passing
+          # build, and it says so rather than comparing against "".
+          # The built string is read FIRST and printed on the failure path,
+          # because the run that has no committed file is exactly the run
+          # somebody has to copy the string out of. Exiting without printing
+          # it would cost a second full dry run to learn what this one
+          # already knew.
+          got="$(codesign -d -r- "build/bin/nocx.app/Contents/MacOS/nocx-server" 2>/dev/null)"
+          [ -s build/darwin/requirement.txt ] || {
+            echo "::error::build/darwin/requirement.txt is absent or empty — this build's requirement is the line below; commit it to that file and re-run"
+            echo "$got"
+            exit 1; }
+          want="$(cat build/darwin/requirement.txt)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::designated requirement changed"
+            echo "committed: $want"
+            echo "built:     $got"
+            exit 1
+          fi
+          echo "requirement matches: $got"
+
+      - name: The requirement survives a rebuild, and the code hash does not
+        run: |
+          set -euo pipefail
+          # ADR-0050 recorded this property from one measurement on a
+          # laptop. It is the property the entire design rests on, so it is
+          # asserted on the artefact, every build: an ad-hoc signature's
+          # requirement IS the code hash, and the whole point of the
+          # certificate is that ours is not.
+          LD="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
+          for stamp in A B; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -tags release \
+              -ldflags "$LD -X github.com/shady2k/nocx/internal/version.Date=stamp-$stamp" \
+              -o "$RUNNER_TEMP/srv-$stamp" ./cmd/nocx-server
+            codesign --force --sign "$SIGN_IDENTITY" -i com.nocx.server "$RUNNER_TEMP/srv-$stamp"
+          done
+          req_a="$(codesign -d -r- "$RUNNER_TEMP/srv-A" 2>/dev/null)"
+          req_b="$(codesign -d -r- "$RUNNER_TEMP/srv-B" 2>/dev/null)"
+          cd_a="$(codesign -d --verbose=4 "$RUNNER_TEMP/srv-A" 2>&1 | sed -n 's/^CDHash=//p')"
+          cd_b="$(codesign -d --verbose=4 "$RUNNER_TEMP/srv-B" 2>&1 | sed -n 's/^CDHash=//p')"
+          [ "$req_a" = "$req_b" ] || { echo "::error::requirement changed between two builds:"; echo "$req_a"; echo "$req_b"; exit 1; }
+          [ "$cd_a" != "$cd_b" ] || { echo "::error::the two builds have the same cdhash ($cd_a) — the check proves nothing as written"; exit 1; }
+          echo "requirement stable across a rebuild; cdhash moved from $cd_a to $cd_b"
+
+      - name: Package .dmg and .zip
+        run: |
+          set -euo pipefail
+          APP="build/bin/nocx.app"
+          base="nocx-${VERSION}-darwin-universal"
+          mkdir -p dist
+          # The .zip is the updater payload: ditto (not zip) preserves the
+          # bundle's symlinks, executable bits and signature; --noqtn so no
+          # quarantine attribute can ride along (§5).
+          ditto -c -k --keepParent --noqtn "$APP" "dist/${base}.zip"
+          # The .dmg is the human install path: a staging folder holding the app
+          # and an /Applications symlink, compressed with plain hdiutil (§2).
+          staging="$(mktemp -d)"
+          cp -R "$APP" "$staging/"
+          ln -s /Applications "$staging/Applications"
+          # `hdiutil create` fails with "Resource busy" on GitHub's macOS
+          # runners while a background indexer or XProtect briefly holds the
+          # image we have just written (actions/runner-images). The fault is the
+          # RUNNER's and it is transient - run 39283960973 lost the 0.6 dry run
+          # to it after `ci` and every other release job had passed - so it is
+          # retried here. The retry is narrow on purpose: ONLY that message, a
+          # BOUNDED number of attempts, every attempt logged, and any other
+          # failure exits on its first occurrence. Retrying a failure that is
+          # deterministic would only make it slower to read.
+          attempt=1
+          max_attempts=4
+          log="$RUNNER_TEMP/hdiutil.log"
+          until hdiutil create -volname "nocx" -srcfolder "$staging" -ov -format UDZO "dist/${base}.dmg" > "$log" 2>&1; do
+            rc=$?
+            if [ "$rc" -eq 0 ]; then break; fi
+            if ! grep -q 'Resource busy' "$log" || [ "$attempt" -ge "$max_attempts" ]; then
+              cat "$log"
+              echo "::error::hdiutil create failed on attempt $attempt/$max_attempts and this is not the runner's transient 'Resource busy'"
+              exit "$rc"
+            fi
+            echo "attempt $attempt/$max_attempts: hdiutil reports 'Resource busy' - retrying"
+            cat "$log"
+            sleep $((attempt * 10))
+            attempt=$((attempt + 1))
+          done
+          cat "$log"
+          shasum -a 256 dist/*
+          # The updater verifies the EXTRACTED bundle, not the one we
+          # assembled (internal/update/platform_darwin.go:81), and the
+          # signature is the thing packaging is most likely to damage —
+          # assembling the bundle by hand is what dropped the signature in
+          # the first place. So verify what we are about to upload, the way
+          # the updater will.
+          probe="$(mktemp -d)"
+          ditto -x -k "dist/${base}.zip" "$probe"
+          codesign --verify --deep --strict "$probe/nocx.app"
+          got="$(codesign -d -r- "$probe/nocx.app/Contents/MacOS/nocx-server" 2>/dev/null)"
+          [ "$got" = "$(cat build/darwin/requirement.txt)" ] || {
+            echo "::error::the packaged coordinator's requirement is not the committed one: $got"; exit 1; }
+          rm -rf "$probe"
+
+      - name: Refuse packaged darwin identity, About or updater drift
+        run: |
+          python3 scripts/verify-built-artifact.py \
+            --artifact "dist/nocx-${VERSION}-darwin-universal.zip" \
+            --version "$VERSION" --commit "$BUILD_SHA" \
+            --report dist/verified-darwin.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/*
+          retention-days: 7
+
+      # The hash file, and from this job nothing else: `macos-universal`
+      # above carries no helper binaries, because the step that unpacked
+      # them staged them under $RUNNER_TEMP for exactly that reason. The
+      # `helpers` job's copies are the published ones; this is only this
+      # job's account of what it embedded.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: embedded-hashes-macos
+          path: |
+            embedded-hashes.txt
+            embedded-local-hashes.txt
+          retention-days: 7
+
+      # The keychain outlives the job's success or failure, so its removal
+      # must too. A hosted runner is discarded anyway; a self-hosted one is
+      # where this line earns its keep.
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
+
+  # Build a self-contained Linux AppImage on a pinned glibc floor.
+  # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
+  # promises (see ADR-0007 and the Linux section in README.md).
+  build-linux:
+    needs: [validate, helpers]
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUILD_SHA: ${{ inputs.sha || github.sha }}
+      BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+      # The AppImage is amd64 and nothing else, so one local variant. See the
+      # macOS job's line for why this is a job-level fact.
+      NOCX_REQUIRE_LOCAL_ARTIFACTS: linux/amd64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # imagemagick resizes the one committed icon master to a resolution
+          # linuxdeploy accepts (see the Package AppImage step). Installed
+          # rather than assumed present on the runner image, so the job does
+          # not depend on something GitHub can drop.
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev imagemagick
+
+      # THE PINNED EMULATOR BYTES, BEFORE THIS JOB BUILDS ANYTHING THAT LINKS
+      # THEM. The app links libghostty-vt statically (ADR-0065), so the CGo
+      # links below need this platform's archive and its matched headers, and
+      # need them to be the pinned bytes; fetch-and-verify refuses a
+      # substituted archive rather than linking it.
+      - name: Fetch and verify the pinned libghostty-vt archives
+        run: make vt-archives
+
+      # The Linux job builds with plain `go build` — v3 has no build wrapper
+      # without a Taskfile, which this repo does not use — so no Wails CLI is
+      # needed here.
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
+
+      # The helpers are EMBEDDED in the app (//go:embed all:bin), so
+      # they must exist before the Go build that embeds them. Until
+      # nocx-mchgh no step put them there at all and every published
+      # release answered ErrArtifactsNotBuilt for every platform: remote
+      # git could not work in any release, and worked from a checkout,
+      # which is why nothing reported it (Makefile:125 makes build-release
+      # depend on helpers; release.yml never did).
+      #
+      # They are DOWNLOADED rather than built here since nocx-6de7c — see
+      # the `helpers` job for why two `make helpers` runs are not two
+      # copies of one binary.
+      - name: Download the helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts/bin
+
+      # AND THE LOCAL VARIANT, into the second directory //go:embed reads. It
+      # comes from the same job for the same reason the four above do, and it is
+      # the whole of this job's local bytes: neither build job installs the
+      # pinned Zig, so a variant built here would be a second origin AND a build
+      # that cannot even run.
+      - name: Download this machine's helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+
+      # The gate, expressed as a test rather than as a file listing: a
+      # build that embedded nothing answers ErrArtifactsNotBuilt for every
+      # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
+      # protects a fresh checkout into the failure a release needs.
+      #
+      # Since nocx-6de7c it asserts THE DOWNLOAD LANDED AND WAS EMBEDDED,
+      # not that `make helpers` ran in this job — and that is exactly the
+      # failure a download step can produce silently. An artefact that
+      # arrives empty, or under a path //go:embed does not read, leaves a
+      # build that compiles cleanly and ships an app with no helper for
+      # any platform.
+      - name: The built binary embeds a helper for every matrix platform
+        run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      # THE SAME GATE FOR THE SECOND DIRECTORY, and this one decides whether the
+      # app opens a terminal at all: since internal/helper/local stopped falling
+      # back to the deployable artifact (nocx-50w7p.7), a binary whose bin/local
+      # holds nothing for a platform it runs on installs no helper and refuses
+      # every pane. NOCX_REQUIRE_LOCAL_ARTIFACTS is the job's own platform list
+      # and turns that skip into a failure, exactly as the variable above does
+      # for the four — the difference is that it carries the platforms, so a
+      # universal bundle is checked on both of its slices rather than on the
+      # runner's architecture.
+      - name: The built binary embeds this machine's helper for every platform this app runs on
+        run: go test -v ./internal/helper/deploy/artifacts -count=1
+
+      - name: Build Linux binary
+        run: |
+          set -euo pipefail
+          # The shell's version, stamped for the same reason as the macOS job's
+          # (nocx-1ebrs.11): the coordinator answers app.about and links no window.
+          WAILS_VERSION="$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v3)"
+          [ -n "$WAILS_VERSION" ] || { echo "::error::cannot read the pinned wails version from go.mod"; exit 1; }
+          LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${BUILD_SHA}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Wails=${WAILS_VERSION}"
+          # `gtk3` is not optional here, it is what makes the step above
+          # mean anything: Wails v3 defaults to GTK4/WebKitGTK-6.0, so a job
+          # that installs libwebkit2gtk-4.1-dev and says nothing else links a
+          # different webkit than the envelope promises. 4.1 is the decided
+          # target — ADR-0007 and the README support envelope both name it —
+          # and the tag states the decision rather than the apt line implying
+          # it (nocx-xy9z, nocx-v3yw). `production` is v3's tag for
+          # production semantics; `release` selects the shipped profile
+          # directory (appdir.go).
+          go build -tags "release production gtk3" -ldflags "$LDFLAGS" -o build/bin/nocx .
+          # The coordinator, which the AppImage must carry: on Linux the
+          # daemon is copied out of the image on first run and spawned from a
+          # versioned path, because the image's FUSE mount goes away with the
+          # process that started it (internal/update/serverbin). An AppImage
+          # that does not contain it has nothing to copy.
+          #
+          # CGO_ENABLED=0: no GTK, no WebKit, and a static binary is one the
+          # AppImage's bundled library set is irrelevant to.
+          CGO_ENABLED=0 go build -tags release -ldflags "$LDFLAGS" -o build/bin/nocx-server ./cmd/nocx-server
+
+      # WHAT THIS JOB ACTUALLY EMBEDDED, hashed and thrown away. The
+      # `helpers` job is the one origin for the bytes; this file is the
+      # evidence that the origin is what landed here, and `sign` holds it
+      # against that job's helper-hashes.txt. A build job that quietly
+      # built helpers of its own, or that received a stale artefact, is red
+      # there instead of shipping an app whose embedded helper is not the
+      # published one — which is the whole reason a check survives in
+      # `sign` at all.
+      #
+      # Staged under $RUNNER_TEMP and never under dist/, because dist/* is
+      # what this job uploads, and the helper binaries are published from
+      # the `helpers` job alone. One file name arriving twice in one
+      # download directory would let step ordering decide which bytes users
+      # get.
+      #
+      # UNCOMPRESSED, deliberately. `make helpers` gzips, and gzip stamps
+      # the source file's mtime into its header, so the .gz bytes differ
+      # between runs even when the binary inside is identical — hashing
+      # those would compare the wrong thing. The DECOMPRESSED bytes are
+      # what internal/helper/deploy/install.go hashes to key the install
+      # directory, so they are what both this comparison and the published
+      # asset are about.
+      #
+      # The loop takes the platforms from the artifacts on disk rather
+      # than from a list written here, so the matrix can grow (it goes
+      # 2x2 in nocx-psjfb) without this step being edited to match.
+      #
+      # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+      # both, and one spelling that works in either job is worth more
+      # than the shorter one.
+      - name: Hash the helper bytes this job embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/helper-stage"
+          mkdir -p "$stage"
+          : > embedded-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-hashes.txt
+          done
+          sort -o embedded-hashes.txt embedded-hashes.txt
+          cat embedded-hashes.txt
+          # AND THE SECOND DIRECTORY, which answers a different question from
+          # the gate above: the gate says "this platform's variant is in the
+          # embed", and this file is what `sign` diffs against the helpers job
+          # to prove the bytes came from there and not from this job. Same loop
+          # over what is on disk, so a fourth local target needs no edit here.
+          mkdir -p "$stage/local"
+          : > embedded-local-hashes.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/local/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-local-hashes.txt
+          done
+          sort -o embedded-local-hashes.txt embedded-local-hashes.txt
+          cat embedded-local-hashes.txt
+
+      - name: Smoke checks (binary)
+        run: |
+          set -euo pipefail
+          BIN="build/bin/nocx"
+          test -x "$BIN"
+          file "$BIN" | grep -q 'ELF 64-bit'
+          reported="$("$BIN" --version)"
+          echo "reported: $reported"
+          echo "$reported" | grep -qw "$VERSION"
+          # The coordinator is not run here: it takes no flags and would
+          # start a daemon. Same $LDFLAGS, same step — see the macOS job's
+          # smoke check for the whole of the reasoning.
+          SRV="build/bin/nocx-server"
+          test -x "$SRV"
+          file "$SRV" | grep -q 'ELF 64-bit'
+          file "$SRV" | grep -q 'statically linked'
+
+      # The packaging itself lives in scripts/appimage/package-appimage.sh so it
+      # can be run against a real build outside a tag push. Packaging that only
+      # exists inside a workflow cannot be tested before it ships, and this step
+      # is exactly where nocx-azxe.7 shipped from.
+      - name: Package AppImage
+        run: scripts/appimage/package-appimage.sh
+
+      - name: Verify the AppImage on a foreign distribution
+        run: scripts/appimage/verify-appimage.sh "dist/nocx-${VERSION}-linux-amd64.AppImage"
+
+      - name: Refuse packaged linux identity, About or updater drift
+        run: |
+          python3 scripts/verify-built-artifact.py \
+            --artifact "dist/nocx-${VERSION}-linux-amd64.AppImage" \
+            --version "$VERSION" --commit "$BUILD_SHA" \
+            --report dist/verified-linux.json
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-amd64
+          path: dist/*
+          retention-days: 7
+
+      # `linux-amd64` above carries no helper binaries either: since
+      # nocx-6de7c they are staged and published by the `helpers` job
+      # alone. This upload is this job's account of what it embedded, for
+      # the check in `sign`.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: embedded-hashes-linux
+          path: |
+            embedded-hashes.txt
+            embedded-local-hashes.txt
+          retention-days: 7
+
+  # Separate from build so the signing key is never present in a job that runs
+  # build tooling (§5). Manifest work, so it runs on ubuntu.
+  #
+  # Deliberately NOT gated on a tag. This job holds the one check nocx-1d54
+  # exists for — that RELEASE_SIGNING_KEY's public half is in the keyring the
+  # artefact ships — and while it lived inside the tag-gated publish job that
+  # check had never once run: every dry run reported publish "skipped" while
+  # the file's own header claimed a manual run "builds, signs and verifies
+  # everything and publishes nothing". The first execution would have been the
+  # release (nocx-94kl).
+  #
+  # Only `contents: write` and `gh release create` need the tag, and they stay
+  # behind it in the job below. This job keeps the workflow's read-only default.
+  sign:
+    if: ${{ !inputs.linux-only }}
+    needs: [validate, helpers, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      BUILD_SHA: ${{ inputs.sha || github.sha }}
+      BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-universal
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-amd64
+          path: dist
+
+      # The published helper binaries, from their one origin. `sign` needs
+      # them for their size in the manifest; `publish` uploads them.
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-binaries
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-hashes
+          path: hashes/published
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: embedded-hashes-macos
+          path: hashes/macos
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: embedded-hashes-linux
+          path: hashes/linux
+
+      - name: Both build jobs embedded the published helper bytes
+        run: |
+          set -euo pipefail
+          # There is one origin for the helper bytes now (nocx-6de7c), so
+          # this is no longer two toolchains being asked to agree — it is
+          # the check that the origin is what each build job actually
+          # embedded. A job that quietly built helpers of its own, or that
+          # received a stale artefact from a previous run, produces an app
+          # whose embedded helper is NOT the published one: a macOS-built
+          # app and a Linux-built app would then deploy different binaries
+          # to one host under one version, and D6's "exactly one automatic
+          # reinstall" would fire on every connection, forever, silently.
+          # That is the failure this step still exists to catch.
+          # BOTH DIRECTORIES, and the second one for a reason the first does not
+          # have: the local variants are never published, so nothing downstream
+          # would notice an app carrying a helper this workflow cannot account
+          # for. It is the same claim — one origin, and each build job's account
+          # of what it embedded is held against it.
+          for sfx in '' '-local'; do
+            want="hashes/published/helper${sfx}-hashes.txt"
+            [ -s "$want" ] || { echo "::error::the helpers job published no helper${sfx}-hashes.txt"; exit 1; }
+            for job in macos linux; do
+              got="hashes/$job/embedded${sfx}-hashes.txt"
+              [ -s "$got" ] || { echo "::error::build-$job uploaded no embedded${sfx}-hashes.txt"; exit 1; }
+              if ! diff -u "$want" "$got"; then
+                echo "::error::build-$job embedded helper${sfx} bytes that are not the ones the helpers job produced"
+                exit 1
+              fi
+            done
+          done
+          echo "both build jobs embedded the bytes the helpers job produced, in both directories"
+
+      - name: Generate manifest.json
+        run: |
+          set -euo pipefail
+
+          # ── macOS artefact ───────────────────────────────────────────
+          mac_base="nocx-${VERSION}-darwin-universal"
+          mac_zip="dist/${mac_base}.zip"
+          mac_sha="$(sha256sum "$mac_zip" | awk '{print $1}')"
+          mac_size="$(stat -c%s "$mac_zip")"
+          mac_url="https://github.com/shady2k/nocx/releases/download/${RELEASE_TAG}/${mac_base}.zip"
+
+          # ── Linux artefact ───────────────────────────────────────────
+          linux_base="nocx-${VERSION}-linux-amd64"
+          linux_appimage="dist/${linux_base}.AppImage"
+          linux_sha="$(sha256sum "$linux_appimage" | awk '{print $1}')"
+          linux_size="$(stat -c%s "$linux_appimage")"
+          linux_url="https://github.com/shady2k/nocx/releases/download/${RELEASE_TAG}/${linux_base}.AppImage"
+
+          # ── helpers ──────────────────────────────────────────────────
+          # Read from hashes/published, because THE HELPERS JOB'S BINARIES
+          # ARE THE ONES PUBLISHED, and they are the only ones that exist:
+          # neither build job stages a helper under dist/, so
+          # dist/nocx-helper-* here came from `helper-binaries` and from
+          # nowhere else. The step above has already proved both build jobs
+          # embedded exactly these bytes.
+          #
+          # sha256 here is the content hash install.go keys the install
+          # directory by (D7), so a hand-installed helper and an
+          # ssh-delivered one resolve to the same directory.
+          #
+          # The loop is driven by the hash file, so the array is however
+          # many helpers the matrix built — no count is written here.
+          helpers_json="$(
+            while read -r plat sha; do
+              os="${plat%-*}"; arch="${plat#*-}"
+              f="dist/nocx-helper-${VERSION}-${plat}"
+              jq -n --arg os "$os" --arg arch "$arch" \
+                --arg url "https://github.com/shady2k/nocx/releases/download/${RELEASE_TAG}/nocx-helper-${VERSION}-${plat}" \
+                --arg sha "$sha" --argjson size "$(stat -c%s "$f")" \
+                '{os: $os, arch: $arch, url: $url, sha256: $sha, size: $size}'
+            done < hashes/published/helper-hashes.txt | jq -s .
+          )"
+
+          released="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          jq -n \
+            --arg v "$VERSION" \
+            --arg commit "$BUILD_SHA" \
+            --arg built_at "$BUILD_DATE" \
+            --arg r "$released" \
+            --arg notes "https://github.com/shady2k/nocx/releases/tag/${RELEASE_TAG}" \
+            --arg mac_url "$mac_url" \
+            --arg mac_sha "$mac_sha" \
+            --argjson mac_size "$mac_size" \
+            --arg linux_url "$linux_url" \
+            --arg linux_sha "$linux_sha" \
+            --argjson linux_size "$linux_size" \
+            --argjson helpers "$helpers_json" \
+            '{version: $v, released: $r, notesUrl: $notes,
+              build: {commit: $commit, builtAt: $built_at},
+              artifacts: [
+                {os: "darwin", arch: "universal", format: "zip",
+                 url: $mac_url, sha256: $mac_sha, size: $mac_size},
+                {os: "linux", arch: "amd64", format: "AppImage",
+                 url: $linux_url, sha256: $linux_sha, size: $linux_size}
+              ],
+              helpers: $helpers}' > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: The landing page keeps the version markers deployment rewrites
+        run: scripts/check-site.sh
+
+      - name: Sign manifest.json
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: go run ./cmd/manifest-sign -in dist/manifest.json -out dist/manifest.json.sig
+
+      # The only check that proves the two halves are a pair. Signing shows the
+      # secret is present and well-formed; it says nothing about whether the
+      # artefact we are about to publish can check the result. If
+      # RELEASE_SIGNING_KEY and internal/update/keyring.go drift apart, every
+      # step here still succeeds and every user's update check then fails
+      # against a manifest no key in their build validates.
+      #
+      # No secret in this step: it verifies against the keyring compiled from
+      # the same commit that produced the artefacts (nocx-1d54).
+      - name: Verify the signature against the keyring the release ships
+        run: go run ./cmd/manifest-sign -verify -in dist/manifest.json -sig dist/manifest.json.sig
+
+      - name: Bind every public byte to the candidate and workflow run
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { writeFileSync } from 'node:fs';
+          const input = { dir: 'dist', sha: process.env.BUILD_SHA, version: process.env.VERSION,
+            tag: process.env.RELEASE_TAG, runId: process.env.RUN_ID, runAttempt: process.env.RUN_ATTEMPT };
+          writeFileSync('nightly-input.json', JSON.stringify(input));
+          JS
+          node scripts/publish-nightly.mjs attest nightly-input.json
+      - name: Sign candidate provenance
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          go run ./cmd/manifest-sign -in dist/nightly.json -out dist/nightly.json.sig
+          go run ./cmd/manifest-sign -verify -in dist/nightly.json -sig dist/nightly.json.sig
+
+      # Carried to publish rather than regenerated there: the bytes that were
+      # verified above must be the bytes that get uploaded, or the verification
+      # attested to a different file.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/manifest.json
+            dist/manifest.json.sig
+            dist/nightly.json
+            dist/nightly.json.sig
+          retention-days: 7

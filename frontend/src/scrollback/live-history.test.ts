@@ -821,6 +821,60 @@ describe('live-history', () => {
     }
   })
 
+  it('output that lands after the reader left does not make the rows below them unreachable', async () => {
+    // nocx-1ebrs.66.1.15. A reader wheels up and the page below them is on
+    // the wire when output departs. That page arrives stale at its NEWEST
+    // end — and that is all it is: the rows below the oldest painted row
+    // are still the emulator's, addressed by an unchanged cursor. A surface
+    // that stopped paging while the past was 'dirty' made the oldest rows
+    // unreachable for as long as the reader stayed away from the tail,
+    // which is the whole of the rows that left the screen.
+    vi.useFakeTimers()
+    try {
+      const { surface, scroller } = mount()
+      atBottom(scroller)
+      surface.setMode('unstructured')
+      const source = scriptedSource(
+        [
+          pageOf('N'.repeat(32), 128, 64, 0, true), // head: rows 128..191
+          pageOf('O'.repeat(32), 64, 64, 0, true), // chained: rows 64..127
+          pageOf('P'.repeat(32), 0, 64, 0, false), // the floor: rows 0..63
+        ],
+        { holdResult: true },
+      )
+      surface.bind(source)
+      source.resolveResult('N'.repeat(32))
+      await settle()
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(64)
+
+      // The reader walks up: the page below the head is asked for and held.
+      scrollNearTop(scroller, 0)
+      await settle()
+      expect(source.requested).toEqual([null, 128])
+
+      // Output departs while that page is on the wire. Its answer is about
+      // the buffer as it was, so the install cannot vouch for the head — but
+      // the page it returns is still rows 64..127, and rows 0..63 remain
+      // below the cursor it names.
+      surface.noteOutput()
+      source.resolveResult('O'.repeat(32))
+      await settle()
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(128)
+
+      // The reader keeps wheeling up to the top of what is painted. There
+      // is more below, and the gesture must find it.
+      scrollNearTop(scroller, 0)
+      await settle()
+      expect(source.requested).toEqual([null, 128, 64])
+      source.resolveResult('P'.repeat(32))
+      await settle()
+      expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(192)
+      expect(surface.el.querySelector('.live-history-page')?.getAttribute('data-start')).toBe('0')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('output while the reader is AWAY rebuilds nothing: their rows do not move under them', async () => {
     vi.useFakeTimers()
     try {

@@ -15,11 +15,27 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+
+// stampedTestBuild stands for a release binary; dev defaults cannot certify
+// a signed update. Tests that simulate a restart restore these process stamps.
+func stampedTestBuild() version.BuildIdentity {
+	return version.BuildIdentity{Commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", BuiltAt: "2026-10-28T10:00:00Z"}
+}
+
+func useStampedTestBuild(t *testing.T) {
+	t.Helper()
+	old := version.Identity()
+	build := stampedTestBuild()
+	version.Commit, version.Date = build.Commit, build.BuiltAt
+	t.Cleanup(func() { version.Commit, version.Date = old.Commit, old.BuiltAt })
+}
 
 // mockFetcher returns a ManifestFetcher that serves the given body and
 // signature, both base64-decoded from their string representations
@@ -29,8 +45,8 @@ type mockFetcher struct {
 	sig  []byte
 }
 
-func (f *mockFetcher) Fetch(_ context.Context) ([]byte, []byte, error) {
-	return f.body, f.sig, nil
+func (f *mockFetcher) Fetch(_ context.Context) (FetchedManifest, error) {
+	return FetchedManifest{Body: f.body, Signature: f.sig}, nil
 }
 
 // makeTestKeyring generates n ed25519 keypairs and returns the public
@@ -54,6 +70,7 @@ func makeTestKeyring(n int) ([]ed25519.PublicKey, ed25519.PrivateKey) {
 func newTestManifest(version string, artifacts []Artifact, priv ed25519.PrivateKey) ([]byte, []byte) {
 	m := Manifest{
 		Version:   version,
+		Build:     stampedTestBuild(),
 		Released:  "2026-07-22T10:00:00Z",
 		NotesURL:  "https://example.com/releases/v" + version,
 		Artifacts: artifacts,
@@ -549,6 +566,7 @@ func TestReconcile_AutoRollback_AfterThreeLaunches(t *testing.T) {
 }
 
 func TestReportHealthy_FinalisesUpdate(t *testing.T) {
+	useStampedTestBuild(t)
 	dir := t.TempDir()
 	installPath := filepath.Join(dir, "nocx.AppImage")
 	makeMinimalAppImage(t, installPath)
@@ -564,6 +582,7 @@ func TestReportHealthy_FinalisesUpdate(t *testing.T) {
 		NewBundleID:    currentID,
 		FromVersion:    "0.1.0",
 		ToVersion:      "0.2.0",
+		ToBuild:        version.Identity(),
 		ArtifactSHA256: "abc",
 		LaunchAttempts: 1,
 	}
@@ -728,6 +747,7 @@ func serveAppImageFixture(t *testing.T) (url string, sha256Hex string, size int6
 // flow end-to-end against the linux Platform using a synthetic AppImage served
 // over httptest.
 func TestUpdater_Apply_HappyPath(t *testing.T) {
+	useStampedTestBuild(t)
 	dir := t.TempDir()
 	ctx := context.Background()
 

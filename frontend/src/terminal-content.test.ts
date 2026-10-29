@@ -6597,6 +6597,228 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a running command reclaims the keyboard from an unclaimed <body> (nocx-1ebrs.66.1.16)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const input = intentElementOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(document.activeElement).toBe(input)
+
+      // The commit hands the keyboard over synchronously, but nothing says
+      // it STAYS there across the lifecycle.submitAttempt round trip: the
+      // editor's display:none host and the live region's move are both
+      // focus-changing DOM operations. If the keyboard is on <body> when
+      // the authenticated start lands, the command is running and nobody
+      // owns the keys typed before the deferred focusGrid repair — the
+      // letters are lost while the Enter that follows them is not
+      // (nocx-1ebrs.66.1.16). The running fact must reclaim an UNCLAIMED
+      // keyboard; a control's focus is still its own.
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read x',
+        },
+      })
+      expect(document.activeElement).toBe(input)
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('keys typed at an unclaimed keyboard during the submit reach the pty BEHIND it (nocx-1ebrs.66.1.19)', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, visibleBeforeMount: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const session = sessionOf(content)
+      const input = intentElementOf(content)
+      /** What the program receives as INPUT, in the order it was produced.
+       *  The focus reports are events a program sees too, but the subject
+       *  here is the bytes: a keystroke that reached <body> and one that
+       *  reached the grid must be indistinguishable at the pty. */
+      const sent = (): unknown[] => session.intent.mock.calls.filter((call) => call[0] !== 'focus')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(document.activeElement).toBe(input)
+      // The commit's handoff does not survive the round trip: the editor's
+      // display:none host and the live region's move are focus-changing DOM
+      // operations, and on WebKit either can land AFTER the synchronous
+      // focus. What is left is a keyboard nobody owns, and no repair until
+      // the running fact — which is the other end of this RPC
+      // (nocx-1ebrs.66.1.19).
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+
+      // THE PERSON TYPES. This keydown is delivered at <body>, so no element
+      // reads it and NO INPUT EVENT FOLLOWS: the character exists only in
+      // this event. Losing it is the defect — the letters go and the Enter
+      // after them stays, so a program reading stdin is answered with an
+      // empty line, silently.
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'h', code: 'KeyH', bubbles: true, cancelable: true }),
+      )
+      // The keyboard came with the key, so what follows is ordinary typing.
+      typeIntoPane(content, 'i', '\r')
+
+      // Held, all of it: the command it answers has not been sent yet, and
+      // the answer must not arrive before the question. (The one intent so
+      // far is the commit's own handoff focus — not input.)
+      expect(sent()).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+
+      resolveAttempt({
+        id: 'att-read',
+        domain: 'd1',
+        state: 'open',
+        command: 'read x',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      // Behind the command, in the order they were produced — the focus
+      // reports included, because they are what the program would have seen
+      // had the keyboard never been dropped.
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('a key typed after the running fact reaches the pty when the keyboard is dropped again (nocx-1ebrs.66.1.19)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, visibleBeforeMount: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      const session = sessionOf(content)
+      const input = intentElementOf(content)
+      /** What the program receives as INPUT, in the order it was produced.
+       *  The focus reports are events a program sees too, but the subject
+       *  here is the bytes: a keystroke that reached <body> and one that
+       *  reached the grid must be indistinguishable at the pty. */
+      const sent = (): unknown[] => session.intent.mock.calls.filter((call) => call[0] !== 'focus')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+        ]),
+      )
+
+      // The command is running and the fact reclaimed the keyboard — that is
+      // 66.1.16's repair, and it works. What it cannot cover is the SAME
+      // focus drop arriving after it: one more display:none or live-region
+      // move, and no further fact is coming to repair anything
+      // (nocx-1ebrs.66.1.19).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-0',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read x',
+        },
+      })
+      expect(document.activeElement).toBe(input)
+
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'h', code: 'KeyH', bubbles: true, cancelable: true }),
+      )
+      typeIntoPane(content, 'i', '\r')
+
+      // Routed, not buffered: nothing is in flight, so the keys are the
+      // program's the moment they are typed. The out/in pair is not noise —
+      // it is the program being told the keyboard came back.
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('keeps session intents ordered when the control call is still in flight', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard())
     try {
@@ -7214,6 +7436,81 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       expect(block.outputAnchorOffset).toBeUndefined()
       expect(block.startOffset).toBe(2)
       expect(scrollback.terminalLiveInner.style.transform).toMatch(/^translateY\(-\d/)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('shows none of a screen that cannot place the output anchor (nocx-1ebrs.66.1.24)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    const ROWS = 30
+    try {
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // The previous command filled the screen and its last frames are still
+      // in flight when the next command starts, so the running fact is
+      // handled on a screen that is still two screens behind: the block is
+      // minted on THAT screen's cursor row while the command's own row is a
+      // hundred rows further down.
+      const stale = screenFrame(5, ['1', '2', '3', '4'], { rows: ROWS })
+      stale.state.baseRow = 0
+      stale.cursor = { x: 0, y: ROWS - 1, visible: true }
+      client._sessions[0].fireScreenFrame(stale)
+
+      // The backend's anchor names the command's first output row, which is
+      // below this screen's bottom edge.
+      client._fireBlockOutputStart({
+        entryId: 'att-lag',
+        row: 102,
+        screenRevision: 16,
+        bufferKind: 'normal',
+        bufferInstance: '1',
+        cols: SCREEN_COLS,
+        rows: ROWS,
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-lag', state: 'open', origin: 'shell', command: 'sleep 30' },
+      })
+      const block = scrollback.blockManager.blockForAttempt('att-lag')!
+      // The anchor's own revision has not been accepted yet, so the row the
+      // block was minted on still governs the shift.
+      expect(block.startOffset).toBe(29)
+      expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-464px)')
+
+      // The screen catches up: base row 72, the command's echo on the last
+      // row. The minted start is now above the screen and the anchor is one
+      // row past its bottom edge — still nothing of the command's on it.
+      const caught = screenFrame(
+        16,
+        [...Array.from({ length: ROWS - 1 }, (_, i) => String(72 + i)), 'sleep 30'],
+        { rows: ROWS },
+      )
+      caught.state.baseRow = 72
+      caught.cursor = { x: 0, y: ROWS - 1, visible: true }
+      client._sessions[0].fireScreenFrame(caught)
+      expect(block.startOffset).toBe(0)
+      expect(block.outputAnchorOffset).toBe(ROWS)
+      expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-480px)')
+
+      // One more row written puts the anchor on the screen, and then it
+      // places like any other: the echo above it is what the shift hides.
+      const placed = screenFrame(
+        17,
+        [...Array.from({ length: ROWS - 2 }, (_, i) => String(73 + i)), 'sleep 30', ''],
+        { rows: ROWS },
+      )
+      placed.state.baseRow = 73
+      placed.cursor = { x: 0, y: ROWS - 1, visible: true }
+      client._sessions[0].fireScreenFrame(placed)
+      expect(block.outputAnchorOffset).toBe(29)
+      expect(block.outputAnchorText).toBe('sleep 30')
+      expect(scrollback.terminalLiveInner.style.transform).toBe('translateY(-464px)')
     } finally {
       teardown()
     }
@@ -13477,6 +13774,106 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         await settleAttachment()
 
         expect(targetNamed(ed)).toBe('agent')
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+      } finally {
+        teardown()
+      }
+    })
+
+    // THE WEBKIT CI FLAKE (nocx-1ebrs.66.1.13). notify.raise is an OSC 9
+    // effect delivered when the marker is INGESTED, not when its screen frame
+    // is ACCEPTED and painted by this pane. The spec presses the chord on
+    // that effect, so under load the chord can arrive while the accepted
+    // screen is still the prompt. The attachment is decided once, at the
+    // chord; without a later offer the finished command stays unattached
+    // forever even as its marker is painted.
+    it('attaches the frozen screen when the repaint that makes it eligible is accepted after the chord', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'sh put-marker-on-screen.sh &')
+        await promptPainted(content)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        content.captureLiveFrame = captureLiveFrame
+        const session = sessionOf(content)
+
+        // The gesture lands while the accepted screen is still the prompt.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        await settleAttachment()
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+
+        // The background writer's next repaint is accepted after the gesture.
+        // It is the state the attachment reads, so it must still attach the
+        // frozen command rather than being refused once and forgotten.
+        session.fireScreenFrame(screenFrame(2, ['NOCX-SCREEN-00000000']))
+        await settleAttachment()
+
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+      } finally {
+        teardown()
+      }
+    })
+
+    // The same early chord, but here the prompt boundary is the last state
+    // transition. The marker repaint was accepted while the boundary was
+    // still in flight, so only applying that boundary can make the frozen
+    // block eligible.
+    it('attaches the frozen screen when the prompt boundary that makes it eligible arrives after the chord', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'sh put-marker-on-screen.sh &')
+        const session = sessionOf(content)
+        session.fireScreenFrame(screenFrame(1, ['$ ']))
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        content.captureLiveFrame = captureLiveFrame
+
+        // The gesture lands while the block still awaits its boundary.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('agent')
+        await settleAttachment()
+        expect(
+          ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+
+        // The marker repaint is accepted before the boundary, so the accepted
+        // screen has moved on but the block is not yet eligible.
+        session.fireScreenFrame(screenFrame(2, ['NOCX-SCREEN-00000000']))
+        await settleAttachment()
+        expect(captureLiveFrame).not.toHaveBeenCalled()
+
+        // The boundary names the prompt revision, not the marker repaint. The
+        // pending offer must still attach the screen the person asked about.
+        session.fireEffect({
+          sessionId: session.sessionId,
+          generation: '1',
+          effectId: '2',
+          kind: 'promptBoundary',
+          screenRevision: 1,
+          title: '',
+          body: '',
+        })
+        await settleAttachment()
+
         expect(
           ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label'),
         ).toContain('frozen screen attached automatically')

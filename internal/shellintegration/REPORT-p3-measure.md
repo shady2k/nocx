@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **91,008**.
+- Maximum bytes written per publish: **92,030**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -89,3 +89,14 @@ replacement plus sweep with the launch carrier absent, at fault `remove#4`.
 `TestInjectedBashStartupPreservesUserExitTrap` and all other functional tests
 in this job passed; only the stale byte constant failed. This report and the
 constant are updated together from that observed final-tree measurement.
+
+The 2026-10-29 measurement on branch `fix/nocx-1ebrs-66-1-18-lane-diagnostics`
+is **1,022 bytes above** that 91,008-byte figure, at **92,030**, and keeps the
+**63**-call maximum. The growth is the Bash tier's prompt-hook probe
+(nocx-1ebrs.66.1.18): a `PROMPT_COMMAND` element installed after ours runs
+outside the prompt window, where the command-start latch is armed, so the
+preexec wrapper now asks whether the line it is about to announce is one of
+the prompt hooks and returns without spending the latch when it is. Only
+`nocx.bash` moved; `nocx.zsh` and `nocx.posix` publish the same bytes, and the
+worst path is unchanged. The source file grew by more than the measured
+figure because the comment explaining the probe is stripped at publish time.

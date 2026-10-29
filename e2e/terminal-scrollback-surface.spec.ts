@@ -368,11 +368,13 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
     }
 
     // ── Clause 5: a full-screen program's pane reveals no primary rows ──
-    // Fresh history first. The person must be able to wheel back to its first
-    // row before the program takes the pane.
+    // Fresh history first, and enough of it that the reader is still several
+    // pages from the floor when the staged line below lands. The person must
+    // be able to wheel back to its first row before the program takes the
+    // pane.
     await pane.locator('.terminal-live-container').click()
-    await type_(`for i in $(seq 1 120); do echo ${'SCROLLBK-'}$(printf '%03d' $i); done`)
-    await expect.poll(async () => liveRows(), { timeout: 30_000 }).toContain(label(120))
+    await type_(`for i in $(seq 1 200); do echo ${'SCROLLBK-'}$(printf '%03d' $i); done`)
+    await expect.poll(async () => liveRows(), { timeout: 30_000 }).toContain(label(200))
     await expect
       .poll(
         async () => {
@@ -428,6 +430,42 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       )
       .toBe(true)
     expect(await pane.getAttribute('data-session-id')).toBe(sessionId)
+
+    // THE PANE IS BACK, on its own account, before the reader's first
+    // wheel: the surface is on again in the unstructured mode. A wheel sent
+    // while the program still owns the pane reaches nothing at all, and a
+    // gesture the surface swallowed is not a scroll the reader made — the
+    // poll below would then be timing its own ability to be heard.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const stack = document.querySelector('.pane.active .scrollback-inner')
+            const surface = document.querySelector(
+              '.pane.active .live-history',
+            ) as HTMLElement | null
+            return (
+              stack !== null &&
+              stack.classList.contains('inner-unstructured') &&
+              surface !== null &&
+              !surface.hidden
+            )
+          }),
+        { timeout: 20_000 },
+      )
+      .toBe(true)
+
+    // AND THE SHELL SPEAKS WHILE THE READER IS IN THE PAST. This is the
+    // everyday shape of the gesture, not a contrivance: a background job
+    // prints one line a fraction of a second after the reader wheels up.
+    // The line makes the painted coverage stale at its YOUNG end, which the
+    // surface answers without touching a reader who is not at the tail —
+    // and it must not stop that reader reaching the rows BELOW the oldest
+    // painted one. The gesture below is the assertion either way: the
+    // oldest label, in view, while the new line lands somewhere above.
+    await pane.locator('.terminal-live-container').click()
+    await type_(`( sleep 0.4; echo SPOKEN-${nonce} ) & echo ARMED-${nonce}`)
+    await expect.poll(async () => liveRows(), { timeout: 20_000 }).toContain(`ARMED-${nonce}`)
     await expect
       .poll(
         async () => {

@@ -108,3 +108,25 @@ is the same class of bug as `nocx-25k9.14` and would have thrown on the renderer
   frame the data plane carries as JSON on its metadata frame is not bytes, and it is
   pinned here as `session.frame.schema.json` ([ADR-0073](../docs/decisions/0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md)).
 - **Runtime validation in production.** Both ends of this socket are ours.
+
+## Signed update manifest
+
+`update/manifest.schema.json` declares the signed HTTP release manifest, not a
+JSON-RPC method. The `update/` namespace stays outside the renderer/OpenRPC
+generation surface and the window/coordinator protocol fingerprint. Artifact
+identity is not a window/coordinator compatibility requirement.
+`TestUpdateManifest_DTOConformsToContract` validates its Go DTO, and
+`TestUpdateManifest_OverTheWireConformsToContract` validates signed bytes fetched
+from the real HTTP socket and the verifier's returned DTO.
+
+The required `build` identity is the full commit SHA and the canonical UTC build
+time (`builtAt`). Both platform builders and the signing job consume one timestamp
+from the artifact workflow's validation job. `internal/version.Identity()` reads
+the binary's existing `Commit` and `Date` stamps. `released` is a publication time,
+not build time: promotion must preserve the source `build` unchanged.
+
+Nightly publication validates the identity against this schema and binds it to
+all four packaged executable descriptors. As with the RPC contracts above, this
+is not runtime JSON Schema validation: old signed stable manifests remain
+readable, and a nightly with absent or invalid identity cannot offer a
+same-version replacement. Stable continues to compare semver only.

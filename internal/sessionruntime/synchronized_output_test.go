@@ -58,8 +58,12 @@ type frameTally struct {
 	// notify is replaced and closed on every take, so a wait wakes on the
 	// next frame rather than on a clock.
 	notify chan struct{}
-	stop   chan struct{}
-	done   chan struct{}
+	// beforePark, when set, runs after a wait has read the frames it is about
+	// to judge and before it parks. The pump can take a frame in exactly that
+	// window; a test that has to pin the window sets this.
+	beforePark func()
+	stop       chan struct{}
+	done       chan struct{}
 }
 
 // tallyFrames attaches a draining consumer to s and starts its pump.
@@ -145,35 +149,100 @@ func (f *frameTally) reset() {
 // it. It parks on the tally's own signal, so the wait ends on the delivery and
 // never on a duration; the limit only ends a wait that can no longer be
 // satisfied.
+//
+// The signal is read BEFORE the frames it guards. take() appends and then
+// replaces notify under the same lock, so a take that lands after this read
+// closes the channel this wait parks on; reading it afterwards would park on
+// the replacement and miss the frame until the limit. The deadline reads the
+// frames once more before failing, and the message prints those same frames,
+// so the match and the diagnostic always describe one state.
 func (f *frameTally) waitForHolding(want string) tallyFrame {
 	f.t.Helper()
 	deadline := time.NewTimer(hangLimit)
 	defer deadline.Stop()
 	for {
-		for _, frame := range f.taken() {
+		f.mu.Lock()
+		next := f.notify
+		f.mu.Unlock()
+		frames := f.taken()
+		for _, frame := range frames {
 			if strings.Contains(frame.text, want) {
 				return frame
 			}
 		}
-		f.mu.Lock()
-		next := f.notify
-		f.mu.Unlock()
+		if f.beforePark != nil {
+			f.beforePark()
+		}
 		select {
 		case <-next:
 		case <-deadline.C:
-			f.t.Fatalf("no frame holding %q arrived within %s; the frames taken read %v", want, hangLimit, f.texts())
+			frames = f.taken()
+			for _, frame := range frames {
+				if strings.Contains(frame.text, want) {
+					return frame
+				}
+			}
+			f.t.Fatalf("no frame holding %q arrived within %s; the frames taken read %v", want, hangLimit, frameTexts(frames))
 		}
 	}
 }
 
-// texts is what every frame taken so far reads, for a failure message.
-func (f *frameTally) texts() []string {
-	frames := f.taken()
-	out := make([]string, 0, len(frames))
-	for _, frame := range frames {
-		out = append(out, frame.text)
+// oneFrameConsumer holds at most one frame and hands it over once. It is the
+// consumer side of the wait test below: the take happens where the test says,
+// not on a pump goroutine of its own.
+type oneFrameConsumer struct {
+	frame FrameDelivery
+	ready chan struct{}
+}
+
+func (c *oneFrameConsumer) Pending() int      { return 0 }
+func (c *oneFrameConsumer) HeldBytes() int    { return 0 }
+func (c *oneFrameConsumer) Coalesced() uint64 { return 0 }
+func (c *oneFrameConsumer) EffectsLost() uint64 {
+	return 0
+}
+func (c *oneFrameConsumer) Stale() bool            { return false }
+func (c *oneFrameConsumer) Effects() []Effect      { return nil }
+func (c *oneFrameConsumer) Ready() <-chan struct{} { return c.ready }
+
+func (c *oneFrameConsumer) Take() []FrameDelivery {
+	if c.frame.Bytes == nil {
+		return nil
 	}
-	return out
+	frame := c.frame
+	c.frame = FrameDelivery{}
+	return []FrameDelivery{frame}
+}
+
+// A take that lands between the frames a wait reads and the signal it parks on
+// must still wake it: the pump runs on its own goroutine, so that window is an
+// ordinary interleaving and not a contrived one. The old wait read f.notify
+// AFTER checking the frames, so a take in the window replaced the channel it
+// was about to park on and the delivery was lost until the hang limit — while
+// the failure message, which re-read the frames, printed the very frame the
+// wait had said never arrived.
+func TestWaitForHoldingWakesForAFrameTakenWhileItChecks(t *testing.T) {
+	raw, err := json.Marshal(Frame{Revision: 7, Rows: []frameRow{{Text: "ARMED"}}})
+	if err != nil {
+		t.Fatalf("encode the frame the wait is for: %v", err)
+	}
+	f := &frameTally{
+		t:      t,
+		c:      &oneFrameConsumer{frame: FrameDelivery{Revision: 7, Bytes: raw}, ready: make(chan struct{})},
+		notify: make(chan struct{}),
+	}
+	taken := false
+	f.beforePark = func() {
+		if taken {
+			return
+		}
+		taken = true
+		f.take()
+	}
+	got := f.waitForHolding("ARMED")
+	if got.rev != 7 || !strings.Contains(got.text, "ARMED") {
+		t.Fatalf("the wait returned revision %d reading %q, want the ARMED frame it was woken for", got.rev, got.text)
+	}
 }
 
 // decodeTallyFrame reads the materialised frame — the wire shape this runtime

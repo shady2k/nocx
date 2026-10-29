@@ -138,30 +138,35 @@ jobs:
             exit 0
           fi
           files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
-          # An empty diff is not evidence of safety.
-          product=false
-          [ -n "$files" ] || product=true
-          while IFS= read -r f; do
-            [ -n "$f" ] || continue
-            case "$f" in
-              .beads/*|docs/*|.internal/*|.githooks/backlog-gate/*) ;;
-              .githooks/pre-commit|.githooks/commit-msg|.githooks/pre-merge-commit|.githooks/pre-push) ;;
-              scripts/connect-clone.sh) ;;
-              # The decision-record checks read documents and no code, and the
-              # job that runs them always runs (ci-backlog), so a change to them
-              # owes that job and not the product suites (nocx-hyh2p).
-              .githooks/adr-*.mjs|.githooks/check-adr-identifiers*) ;;
-              scripts/install/*) product=true ;;
-              */*) product=true ;;
-              *.md) ;;
-              *) product=true ;;
-            esac
-          done <<EOF_FILES
-          $files
-          EOF_FILES
+          product="$(printf '%s\n' "$files" | node --input-type=module -e '
+            import { touchesProduct } from "./scripts/product-change.mjs";
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            console.log(touchesProduct(input.trim().split("\n").filter(Boolean)));
+          ')"
           printf '%s\n' "$files" | sed 's/^/changed: /'
           echo "product=$product"
           echo "product=$product" >> "$GITHUB_OUTPUT"
+  # Supporting release-pipeline edits still owe their executable checks.
+  # Always run, independent of changes.product and draft status.
+  ci-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Workflow decision and refusal tests
+        run: |
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs
+          python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
+          node --test .githooks/check-log-context.test.mjs
+      - name: Promotion and cask fixtures by path
+        run: |
+          shopt -s nullglob
+          tests=(scripts/release/*.test.*)
+          if [ "${#tests[@]}" -gt 0 ]; then node --test "${tests[@]}"; fi
+
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

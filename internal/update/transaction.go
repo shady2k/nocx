@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,19 +24,20 @@ func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	// Fetch manifest + signature.
-	body, sig, err := u.fetcher.Fetch(ctx)
+	fetched, err := u.fetcher.Fetch(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("update check: fetch manifest: %w", err)
 	}
 
 	// Verify signature before parsing.
-	m, err := VerifyManifest(body, string(sig), u.keyring)
+	m, err := VerifyManifest(fetched.Body, string(fetched.Signature), u.keyring)
 	if err != nil {
 		return nil, fmt.Errorf("update check: manifest verification: %w", err)
 	}
 
-	// Semver comparison.
-	if !IsNewer(u.currentVersion, m.Version) {
+	// Stable stays semver-only. Nightly also admits a later distinct build
+	// within the same valid version; it never admits a downgrade.
+	if !IsNewer(u.currentVersion, m.Version) && !u.newerNightly(fetched.Channel, m) {
 		u.log.Debug("update check: already current",
 			"current", u.currentVersion, "remote", m.Version)
 		return nil, nil
@@ -48,12 +51,12 @@ func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	return &UpdateInfo{
-		Version:     m.Version,
-		NotesURL:    m.NotesURL,
-		URL:         art.URL,
-		SHA256:      art.SHA256,
-		Size:        art.Size,
-		manifestRaw: body,
+		Version:  m.Version,
+		NotesURL: m.NotesURL,
+		URL:      art.URL,
+		SHA256:   art.SHA256,
+		Size:     art.Size,
+		build:    m.Build,
 	}, nil
 }
 
@@ -106,6 +109,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		OldBundleID:    oldID,
 		FromVersion:    u.currentVersion,
 		ToVersion:      info.Version,
+		ToBuild:        info.build,
 		ArtifactSHA256: info.SHA256,
 	}
 	if err = writeJournal(jp, rec); err != nil {
@@ -315,7 +319,7 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 			return fmt.Errorf("reconcile: update launch count: %w", err)
 		}
 		if rec.LaunchAttempts >= 3 {
-			return u.rollback(jp, rec)
+			return u.rollback(ctx, jp, rec)
 		}
 		u.log.Info("reconcile: waiting for health confirmation", "attempt", rec.LaunchAttempts)
 		return nil
@@ -351,7 +355,7 @@ func (u *updater) State(ctx context.Context) UpdateState {
 
 // rollback exchanges the swap bundle back into the install path,
 // deleting the journal afterward.
-func (u *updater) rollback(jp string, rec *journalRecord) error {
+func (u *updater) rollback(ctx context.Context, jp string, rec *journalRecord) error {
 	if rec.OldBundleID.isZero() {
 		return errors.New("rollback: this was a first installation, with no previous target to restore; launch the original copy or install a known-good release")
 	}
@@ -371,7 +375,8 @@ func (u *updater) rollback(jp string, rec *journalRecord) error {
 		return fmt.Errorf("rollback: exchange back failed: %w", err)
 	}
 
-	u.log.Warn("rollback: reverted to previous version", "from", rec.ToVersion, "to", rec.FromVersion)
+	log.From(ctx).Warn("rollback: reverted to previous version", "from", rec.ToVersion, "to", rec.FromVersion,
+		"fromCommit", rec.ToBuild.Commit, "fromBuiltAt", rec.ToBuild.BuiltAt)
 
 	// Clean up journal and extraction debris.
 	if err := deleteJournal(jp); err != nil {
@@ -469,10 +474,11 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 	return nil
 }
 
-// certifyPair refuses to certify anything but the exact pair this update
-// installed: the UI reporting health and the coordinator answering it must
-// both be rec.ToVersion. It never deletes, renames or writes anything —
-// its whole job is to say no before the caller does.
+// certifyPair requires the reporting window's version AND build identity to
+// match the signed target recorded in the journal. The coordinator must match
+// the version, not the identity: ADR-0104 permits a compatible same-version
+// coordinator to be kept across nightly builds. It never deletes, renames or
+// writes anything — its whole job is to say no before the caller does.
 //
 // TWO halves, and each was its own hole.
 //
@@ -502,6 +508,20 @@ func (u *updater) certifyPair(ctx context.Context, rec *journalRecord) error {
 				"health is reported by the NEW build after a restart, not by the one that applied the update; "+
 				"the rollback journal is left intact",
 			ErrPairMismatch, u.currentVersion, rec.ToVersion)
+	}
+
+	if _, valid := buildTime(rec.ToBuild); !valid {
+		return fmt.Errorf("report healthy: %w: the journal has no complete installed build identity; "+
+			"the rollback journal is left intact — restart to roll back or install a known-good release",
+			ErrPairUnverifiable)
+	}
+	if u.currentBuild != rec.ToBuild {
+		log.From(ctx).Warn("report healthy: refused — the reporting identity is not the installed build",
+			"reportingCommit", u.currentBuild.Commit, "reportingBuiltAt", u.currentBuild.BuiltAt,
+			"installedCommit", rec.ToBuild.Commit, "installedBuiltAt", rec.ToBuild.BuiltAt)
+		return fmt.Errorf("report healthy: %w: this window reports %s built at %s but the update installed %s built at %s — "+
+			"restart into the installed build; the rollback journal is left intact",
+			ErrPairMismatch, u.currentBuild.Commit, u.currentBuild.BuiltAt, rec.ToBuild.Commit, rec.ToBuild.BuiltAt)
 	}
 
 	if u.coordinator == nil {

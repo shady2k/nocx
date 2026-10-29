@@ -60,13 +60,13 @@ func TestFetcherFetchesTheSelectedChannelsManifest(t *testing.T) {
 	f.BaseURL = srv.URL + "/stable"
 	f.NightlyBaseURL = srv.URL + "/nightly"
 
-	_, _, _ = f.Fetch(context.Background())
+	_, _ = f.Fetch(context.Background())
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("stable fetch made %d requests, want 1", got)
 	}
 
 	f.SetChannel(ChannelNightly)
-	_, _, _ = f.Fetch(context.Background())
+	_, _ = f.Fetch(context.Background())
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("nightly fetch made %d requests total, want 2", got)
 	}

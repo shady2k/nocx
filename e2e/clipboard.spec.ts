@@ -101,13 +101,20 @@ test.describe('copy-on-select', () => {
     await page.keyboard.type(`printf '\\033]0;${marker}\\007' && echo ${marker}`)
     await page.keyboard.press('Enter')
 
-    // Find the scrollback block containing the marker.
-    const block = page.locator('.cmd-block', { hasText: marker }).first()
-    await expect(block).toBeVisible({ timeout: 5000 })
-
-    // Let Playwright wait for the block's position to settle before selecting;
-    // measuring coordinates first can race the next prompt block being added.
-    await block.click({ clickCount: 3 })
+    // THE MARKER IN THE COMMAND LINE IS NOT THE OUTPUT. A `.cmd-block`
+    // filtered by text is satisfied by the RUNNING block, whose centre is the
+    // live grid (whose triple click belongs to the painter) or the
+    // non-selectable header; and the freeze replaces the element between the
+    // three presses, taking the browser's range with it (measured: 1 run in
+    // 40 left window.getSelection() empty although the marker was on screen).
+    // `.cmd-output` exists only once the block has frozen, and the prompt says
+    // the composer is back, so neither the click nor its selection races the
+    // end of the command.
+    const output = page.locator('.cmd-block .cmd-output', { hasText: marker }).first()
+    await expect(output).toBeVisible({ timeout: 5000 })
+    await promptReady(page)
+    await output.scrollIntoViewIfNeeded()
+    await output.click({ clickCount: 3 })
     await expect
       .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''), { timeout: 3000 })
       .toContain(marker)

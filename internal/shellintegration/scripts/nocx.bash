@@ -1631,6 +1631,11 @@ __nocx_nested_launch() {
 
 __nocx_first_prompt=
 __nocx_in_prompt_command=0
+# Set while __nocx_is_prompt_hook decides whether a command came from the
+# prompt cycle. The wrapper consults it exactly as it consults
+# __nocx_in_prompt_command, so the decision's own commands (extdebug fires the
+# trap inside them) are never announced as the person's.
+__nocx_in_prompt_hook=0
 # Latch so the command-start (C) marker fires once per entered line, not once
 # per simple command — a pipeline or list fires the DEBUG trap for each element.
 #
@@ -1675,8 +1680,11 @@ __nocx_precmd() {
         "$(__nocx_encode_url "${HOSTNAME%%.*}")" \
         "$(__nocx_encode_url "$PWD")"
     __nocx_first_prompt=1
-    # Arm the command-start marker for the next command line.
+    # Arm the command-start marker for the next command line. The prompt-hook
+    # probe's own flag is cleared here too, so a probe interrupted mid-way
+    # cannot leave it set and silence every later command.
     __nocx_preexec_done=0
+    __nocx_in_prompt_hook=0
 }
 
 # Emit one OSC 133 lifecycle marker — \e]133;A, \e]133;B, \e]133;C or
@@ -2021,17 +2029,73 @@ __nocx_arm_extdebug() {
     return 0
 }
 
+# A command the prompt cycle runs is prompt bytes, not a command line
+# (nocx-1ebrs.66.1.18). The wrapper is installed last, so after the install
+# PROMPT_COMMAND is exactly `__nocx_prompt_command` (ADR-0006) — but a
+# configuration loaded AFTER it can still append to that list, and both
+# `PROMPT_COMMAND+=(hook)` and `PROMPT_COMMAND="$PROMPT_COMMAND; hook"` are
+# ordinary things for a framework or a tool's `init` to do. bash runs the list
+# it read for this prompt, so an appended element runs AFTER
+# __nocx_prompt_command returned: __nocx_in_prompt_command is 0 and
+# __nocx_precmd has just armed the latch — byte for byte the state a typed line
+# is in. Announced, the hook is a phantom command: its `start` opens an attempt
+# nothing ever completes unless the person types something, the lane sits in
+# running at a ready prompt, and the next line is attributed to the hook's
+# attempt instead of getting one of its own. That is the live-sshd failure
+# (accepted `start` after prompt_ready, no `complete`, lane stuck running),
+# and it is not specific to that fixture: any host whose prompt hooks are
+# registered late meets it.
+#
+# The list itself is the discriminator, because the list is what bash ran: a
+# command it runs now is either one of that text's simple commands, or a
+# function the text names — the latch is deliberately NOT consumed, so the
+# hook's body reaches the trap too, and under extdebug the caller's name is in
+# FUNCNAME. Both comparisons are delimited by a shell separator or space, so
+# `hook` cannot match inside `prefix_hook_suffix`. Not consuming the latch is
+# the other half of the fix: the person's next line still gets its own start.
+__nocx_is_prompt_hook() {
+    __nocx_in_prompt_hook=1
+    local __nocx_cmd="$1" __nocx_pc __nocx_frame __nocx_rc=1
+    # The delimiters a command can sit between in a PROMPT_COMMAND text. Held
+    # in a variable because bash's case lexer will not read a literal `;` or
+    # `&` inside a bracket expression — it ends the pattern at them. Expanded
+    # unquoted, it is the bracket expression again.
+    local __nocx_sep='[[:space:];&|(){}]'
+    __nocx_pc=" ${PROMPT_COMMAND[*]} "
+    if [[ -n "$__nocx_cmd" && "$__nocx_pc" != " __nocx_prompt_command " ]]; then
+        case "$__nocx_pc" in
+            *${__nocx_sep}"$__nocx_cmd"${__nocx_sep}*) __nocx_rc=0 ;;
+        esac
+        for __nocx_frame in "${FUNCNAME[@]}"; do
+            if [[ "$__nocx_rc" == 0 ]]; then
+                break
+            fi
+            case "$__nocx_frame" in
+                ''|__nocx_is_prompt_hook|__nocx_preexec_wrapper) continue ;;
+            esac
+            case "$__nocx_pc" in
+                *${__nocx_sep}"$__nocx_frame"${__nocx_sep}*) __nocx_rc=0 ;;
+            esac
+        done
+    fi
+    __nocx_in_prompt_hook=0
+    return "$__nocx_rc"
+}
+
 __nocx_preexec_wrapper() {
     local __nocx_current_command=${BASH_COMMAND}
     # Fire the command-start marker once per entered line. Skip our own
     # internal commands, anything that runs while servicing PROMPT_COMMAND,
     # every command after the first (the DEBUG trap fires per simple
     # command, so a pipeline/list would otherwise emit several C markers),
-    # and commands inside the nested launch itself.
+    # commands inside the nested launch itself, and commands a prompt hook
+    # appended after our install is running (__nocx_is_prompt_hook).
     if [[ "$__nocx_current_command" != __nocx_* ]] \
         && [[ "${__nocx_in_prompt_command:-0}" != "1" ]] \
         && [[ "${__nocx_in_nested_launch:-0}" != "1" ]] \
-        && [[ "${__nocx_preexec_done:-0}" != "1" ]]; then
+        && [[ "${__nocx_in_prompt_hook:-0}" != "1" ]] \
+        && [[ "${__nocx_preexec_done:-0}" != "1" ]] \
+        && ! __nocx_is_prompt_hook "$__nocx_current_command"; then
         __nocx_preexec_done=1
         __nocx_preexec "$__nocx_current_command" || :
         # Nested environment: the parent requests a child domain and runs

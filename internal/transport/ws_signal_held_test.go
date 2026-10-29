@@ -863,6 +863,19 @@ func TestHeldStop_AStalledWriterStillSettlesExactlyOnce(t *testing.T) {
 	if n := stand.recorder.interrupts(); n != 1 {
 		t.Fatalf("interrupts = %d, want exactly the one held byte", n)
 	}
+	// THE NOTICE IS A SECOND CARRIER, NOT THE SETTLEMENT. settleHeldStop
+	// settles the record first (the wait above is on that) and calls
+	// notifySignalUndelivered afterwards; TryNotify then queues the frame and
+	// the tap counts it only when its own reader goroutine has read it off the
+	// socket. Reading the count straight after the settlement was therefore a
+	// read past an asynchronous delivery — "notices = 0" in four of thirty
+	// runs, the only failure that test produced. The frame's arrival is the
+	// state to wait for; "exactly one" is then an assertion about a count that
+	// cannot grow.
+	notice := stand.awaitUndelivered(t)
+	if notice.Attempt != stand.appAttemptID || notice.Signal != signalStop {
+		t.Fatalf("notice = %+v, want attempt=%q signal=%q", notice, stand.appAttemptID, signalStop)
+	}
 	if n := stand.notices(); n != 1 {
 		t.Fatalf("undelivered notices = %d, want exactly the one that says the stop did not take", n)
 	}
@@ -873,6 +886,12 @@ func TestHeldStop_AStalledWriterStillSettlesExactlyOnce(t *testing.T) {
 	if got := stand.stop(t, 7); got == string(foregroundHeld) {
 		t.Fatal("a Stop after the start was held; the retry must take the ordinary path")
 	}
+	// The retry's byte is written by the session's writer, and the response
+	// above returns once its wait for the attempt is over, not when the write
+	// lands: wait for the write itself and then count.
+	waittest.WaitForTimeout(t, "the retry's interrupt byte", wantWithin, func() bool {
+		return stand.recorder.interrupts() >= 2
+	})
 	if n := stand.recorder.interrupts(); n != 2 {
 		t.Fatalf("interrupts after the retry = %d, want 2", n)
 	}

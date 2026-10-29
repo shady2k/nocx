@@ -17,7 +17,7 @@ Tabs, command output, notes and interface layout restore after restart; running 
 
 **Stack:** Go backend (PTY, SSH, session, transport) + client-painted cell renderer + Wails v3 desktop shell. Wails uses the platform WebView (WKWebView on macOS and WebKitGTK on Linux; the Linux AppImage carries WebKitGTK).
 
-**Status:** `v0.7.2`, early release, no formal support. macOS (universal) and Linux (x86_64 AppImage). See the [0.7.2 release notes](docs/release-notes/v0.7.2.md).
+**Status:** `v0.8.0`, early release, no formal support. macOS (universal) and Linux (x86_64 AppImage). See the [0.8.0 release notes](docs/release-notes/v0.8.0.md).
 
 ## What makes it different
 
@@ -77,8 +77,9 @@ It links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
 It is self-contained in its **application** stack, not independent of a Linux
 desktop: fonts and text shaping come from the host, deliberately, so that text
 renders in your fonts rather than ours. In practice that means `fontconfig`,
-`freetype`, `fribidi` and `harfbuzz` — present on every desktop install, absent
-in a bare container, where the app will not start.
+`freetype`, `fribidi` and `harfbuzz`, and the GL stack (Mesa's `libEGL` and
+`libGLESv2`) that WebKitGTK renders through — present on every desktop install,
+absent in a bare container, where the app will not start.
 
 **This means it runs on distributions at or above that baseline**, including
 Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, and Arch (rolling). It is

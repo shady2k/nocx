@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -57,15 +59,19 @@ func (b bundleID) equal(o bundleID) bool { return b == o }
 // The schema version is included so future format changes can be
 // recognised and a legible error produced instead of guessing.
 type journalRecord struct {
-	SchemaVersion  int      `json:"schemaVersion"`
-	TxID           string   `json:"txID"`
-	InstallPath    string   `json:"installPath"`
-	OldBundleID    bundleID `json:"oldBundleID"`
-	NewBundleID    bundleID `json:"newBundleID"` // zeroID until the staged swap file exists
-	FromVersion    string   `json:"fromVersion"`
-	ToVersion      string   `json:"toVersion"`
-	ArtifactSHA256 string   `json:"artifactSHA256"`
-	LaunchAttempts int      `json:"launchAttempts"`
+	SchemaVersion int      `json:"schemaVersion"`
+	TxID          string   `json:"txID"`
+	InstallPath   string   `json:"installPath"`
+	OldBundleID   bundleID `json:"oldBundleID"`
+	NewBundleID   bundleID `json:"newBundleID"` // zeroID until the staged swap file exists
+	FromVersion   string   `json:"fromVersion"`
+	ToVersion     string   `json:"toVersion"`
+	// ToBuild is the identity in the signed manifest, recorded before any
+	// download or exchange. Missing identities in older journals remain
+	// readable for rollback, but cannot certify a build by version alone.
+	ToBuild        version.BuildIdentity `json:"toBuild"`
+	ArtifactSHA256 string                `json:"artifactSHA256"`
+	LaunchAttempts int                   `json:"launchAttempts"`
 
 	// HeldByCoordinator records that a healthy window reported against a
 	// protocol-compatible OLDER coordinator kept under ADR-0101 (new

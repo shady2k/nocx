@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,7 +23,15 @@ import (
 // ManifestFetcher fetches the signed release manifest from a remote source.
 // The production implementation hits GitHub Releases; tests inject a fake.
 type ManifestFetcher interface {
-	Fetch(ctx context.Context) (body []byte, sig []byte, err error)
+	Fetch(ctx context.Context) (FetchedManifest, error)
+}
+
+// FetchedManifest binds signed bytes to the channel selected before either HTTP
+// request. A settings change affects the next check, never the one in flight.
+type FetchedManifest struct {
+	Body      []byte
+	Signature []byte
+	Channel   Channel
 }
 
 // ---------------------------------------------------------------------------
@@ -30,15 +39,15 @@ type ManifestFetcher interface {
 // ---------------------------------------------------------------------------
 
 // UpdateInfo describes an available update. It is returned by [Updater.Check]
-// after manifest verification, semver comparison, and artefact matching.
+// after manifest verification, channel-aware build comparison, and artefact matching.
 // The caller passes it to [Updater.Apply].
 type UpdateInfo struct {
-	Version     string
-	NotesURL    string
-	URL         string
-	SHA256      string
-	Size        int64
-	manifestRaw []byte // retained so Apply can re-verify
+	Version  string
+	NotesURL string
+	URL      string
+	SHA256   string
+	Size     int64
+	build    version.BuildIdentity // target identity from the verified manifest; not renderer input
 }
 
 // ---------------------------------------------------------------------------
@@ -51,7 +60,7 @@ type UpdateInfo struct {
 // crash-consistency transaction (§7 of the distribution-and-updates design).
 type Updater interface {
 	// Check fetches the signed manifest, verifies it against the
-	// keyring, compares semver, and matches an artefact for the
+	// keyring, compares semver (or a later distinct nightly build), and matches an artefact for the
 	// current platform. It returns nil, nil when already current.
 	Check(ctx context.Context) (*UpdateInfo, error)
 
@@ -69,8 +78,9 @@ type Updater interface {
 	// renderer mounted and its PTY session opened.
 	//
 	// Health is a claim about a PAIR: it finalises only when the UI
-	// making the claim AND the coordinator answering it are both the
-	// version this update installed. A report against a protocol-
+	// making the claim matches the installed version and build identity.
+	// The coordinator must match the version; same-version different-commit
+	// reuse remains allowed (ADR-0104). A report against a protocol-
 	// compatible OLDER coordinator is the accepted held state
 	// retained for already attached ADR-0101 windows (new launches take
 	// over across Versions, ADR-0104): refused as certification, held, and
@@ -155,6 +165,7 @@ type updater struct {
 	fetcher        ManifestFetcher
 	keyring        []ed25519.PublicKey
 	currentVersion string
+	currentBuild   version.BuildIdentity
 	installPath    string
 	stateDir       string
 	coordinator    CoordinatorProbe
@@ -179,6 +190,7 @@ func NewUpdater(cfg UpdaterConfig) Updater {
 		fetcher:        cfg.Fetcher,
 		keyring:        cfg.Keyring,
 		currentVersion: cfg.CurrentVersion,
+		currentBuild:   version.Identity(),
 		installPath:    cfg.InstallPath,
 		stateDir:       cfg.StateDir,
 		coordinator:    cfg.Coordinator,
@@ -234,24 +246,21 @@ func NewGitHubManifestFetcher(client *http.Client) *GitHubManifestFetcher {
 // in flight; the one that is running keeps the channel it started with.
 func (f *GitHubManifestFetcher) SetChannel(c Channel) { f.selected.set(c) }
 
-// baseURL resolves the base the current selection fetches from.
-func (f *GitHubManifestFetcher) baseURL() string {
-	if f.selected.get() == ChannelNightly {
-		return f.NightlyBaseURL
+func (f *GitHubManifestFetcher) Fetch(ctx context.Context) (FetchedManifest, error) {
+	selected := f.selected.get()
+	base := f.BaseURL
+	if selected == ChannelNightly {
+		base = f.NightlyBaseURL
 	}
-	return f.BaseURL
-}
-
-func (f *GitHubManifestFetcher) Fetch(ctx context.Context) ([]byte, []byte, error) {
-	body, err := f.get(ctx, f.baseURL()+"/manifest.json")
+	body, err := f.get(ctx, base+"/manifest.json")
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch manifest: %w", err)
+		return FetchedManifest{}, fmt.Errorf("fetch manifest: %w", err)
 	}
-	sig, err := f.get(ctx, f.baseURL()+"/manifest.json.sig")
+	sig, err := f.get(ctx, base+"/manifest.json.sig")
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetch manifest signature: %w", err)
+		return FetchedManifest{}, fmt.Errorf("fetch manifest signature: %w", err)
 	}
-	return body, sig, nil
+	return FetchedManifest{Body: body, Signature: sig, Channel: selected}, nil
 }
 
 func (f *GitHubManifestFetcher) get(ctx context.Context, url string) ([]byte, error) {

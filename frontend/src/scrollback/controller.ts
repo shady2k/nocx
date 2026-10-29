@@ -587,8 +587,19 @@ export class ScrollbackController {
     // a screen nothing clears (nocx-zg3k3.32). The echo itself stays visible
     // for that moment; the anchor is what knows where it ends.
     if (rec.outputAnchorOffset === undefined) return (rec.startOffset ?? 0) * cell
+    // A placed anchor carries the echo row's reading, and the shift is
+    // released only when that reading no longer ends with the command — a
+    // reflow can renumber the row it names (nocx-zg3k3.30). An anchor this
+    // screen cannot place carries no reading at all, because it names no
+    // visible row: its offset is already the whole grid (nocx-1ebrs.66.1.24).
     const command = rec.command.trim()
-    if (command !== '' && !(rec.outputAnchorText ?? '').endsWith(command)) return 0
+    if (
+      rec.outputAnchorText !== undefined &&
+      command !== '' &&
+      !rec.outputAnchorText.endsWith(command)
+    ) {
+      return 0
+    }
     return rec.outputAnchorOffset * cell
   }
 

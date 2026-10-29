@@ -106,7 +106,7 @@ func TestInfoPrefersTheStampedShellVersion(t *testing.T) {
 // must stamp Wails in the same chain, so a second build step cannot be added
 // later with half the stamps.
 func TestReleaseBuildStampsTheShellVersion(t *testing.T) {
-	path := filepath.Join("..", "..", ".github", "workflows", "release.yml")
+	path := filepath.Join("..", "..", ".github", "workflows", "release-build.yml")
 	raw, err := os.ReadFile(path) //nolint:gosec // this repository's own tracked workflow file
 	if err != nil {
 		t.Fatalf("the release workflow is the only place a release is linked: %v", err)
@@ -131,7 +131,7 @@ func TestReleaseBuildStampsTheShellVersion(t *testing.T) {
 			}
 		}
 		if !stamped {
-			t.Errorf("release.yml line %d builds a release without stamping version.Wails", i+1)
+			t.Errorf("release-build.yml line %d builds a release without stamping version.Wails", i+1)
 		}
 	}
 	if chains == 0 {
@@ -149,7 +149,7 @@ func TestReleaseBuildStampsTheShellVersion(t *testing.T) {
 // the bundle as flags on that one call, and a flag the workflow stops passing
 // is the defect returning — asserted here the same way the Wails stamp is.
 func TestReleaseBundleCarriesNocxOwnAboutIdentity(t *testing.T) {
-	path := filepath.Join("..", "..", ".github", "workflows", "release.yml")
+	path := filepath.Join("..", "..", ".github", "workflows", "release-build.yml")
 	raw, err := os.ReadFile(path) //nolint:gosec // this repository's own tracked workflow file
 	if err != nil {
 		t.Fatalf("the release workflow is the only place the bundle plist is generated: %v", err)

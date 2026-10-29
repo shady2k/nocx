@@ -64,7 +64,7 @@ export default tseslint.config(
     // lint runs only in the pre-commit hook, and it had been crashing on the
     // e2e container's root-owned .e2e/ before it linted anything. Nineteen
     // errors accumulated behind that crash (nocx-z9s9.8).
-    files: ['e2e/**/*.mjs', '.githooks/**/*.mjs', 'scripts/*.mjs'],
+    files: ['e2e/**/*.mjs', '.githooks/**/*.mjs', 'scripts/*.mjs', 'scripts/release/*.mjs'],
     languageOptions: { globals: globals.node },
   },
   prettier,

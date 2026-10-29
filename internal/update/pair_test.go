@@ -2,10 +2,15 @@ package update
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -37,6 +42,7 @@ func (p *stubProbe) AnsweringCoordinator(context.Context) (CoordinatorBuild, err
 // Returned: the install path and the journal path.
 func pendingUpdate(t *testing.T, from, to string) (installPath, jp string) {
 	t.Helper()
+	useStampedTestBuild(t)
 	dir := t.TempDir()
 	installPath = filepath.Join(dir, "nocx.AppImage")
 	makeMinimalAppImage(t, installPath)
@@ -56,6 +62,7 @@ func pendingUpdate(t *testing.T, from, to string) (installPath, jp string) {
 		NewBundleID:    newID,
 		FromVersion:    from,
 		ToVersion:      to,
+		ToBuild:        version.Identity(),
 		ArtifactSHA256: "abc",
 		LaunchAttempts: 1,
 	}
@@ -377,5 +384,162 @@ func TestReportHealthy_NoTransaction_AsksNothing(t *testing.T) {
 	}
 	if probe.calls != 0 {
 		t.Errorf("the coordinator was asked %d times with no update in flight", probe.calls)
+	}
+}
+
+// A nightly transaction must be certified by the window it installed, not an
+// older window whose semver happens to match. ADR-0104 still permits that new
+// window to keep the compatible same-version coordinator.
+func TestReportHealthy_SameVersionInstalledIdentity(t *testing.T) {
+	oldStamp := version.Identity()
+	t.Cleanup(func() { version.Commit, version.Date = oldStamp.Commit, oldStamp.BuiltAt })
+	older := version.BuildIdentity{Commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", BuiltAt: "2026-10-27T10:00:00Z"}
+	installed := version.BuildIdentity{Commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", BuiltAt: "2026-10-28T10:00:00Z"}
+	for _, tc := range []struct {
+		name         string
+		reporter     version.BuildIdentity
+		wantMismatch bool
+	}{
+		{"older pair refused", older, true},
+		{"installed commit with older build time refused", version.BuildIdentity{Commit: installed.Commit, BuiltAt: older.BuiltAt}, true},
+		{"older commit with installed build time refused", version.BuildIdentity{Commit: older.Commit, BuiltAt: installed.BuiltAt}, true},
+		{"installed window keeps compatible older coordinator", installed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			version.Commit, version.Date = older.Commit, older.BuiltAt
+			installPath := filepath.Join(t.TempDir(), "nocx.AppImage")
+			makeMinimalAppImage(t, installPath)
+			fixtureURL, sha, size, artifact := serveAppImageFixture(t)
+			defer artifact.Close()
+			private := channelTestKey(t)
+			body, err := json.Marshal(Manifest{
+				Version: "0.8.0", Build: installed,
+				Artifacts: []Artifact{{OS: "linux", Arch: "amd64", Format: "AppImage", URL: fixtureURL, SHA256: sha, Size: size}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			relay := signedChannelRelay(t, body, private)
+			fetch := NewGitHubManifestFetcher(nil)
+			fetch.NightlyBaseURL = relay.URL
+			fetch.SetChannel(ChannelNightly)
+			probe := &stubProbe{build: CoordinatorBuild{Version: "0.8.0", Commit: older.Commit, Compatible: true}}
+			ctx, logger := logtest.New(t)
+			cfg := UpdaterConfig{
+				Platform: newFakePlatform(), Fetcher: fetch,
+				Keyring:        []ed25519.PublicKey{ed25519.PublicKey(private[ed25519.SeedSize:])},
+				CurrentVersion: "0.8.0", InstallPath: installPath,
+				StateDir: filepath.Join(filepath.Dir(installPath), "state"), Coordinator: probe, Logger: logger,
+			}
+			applying := NewUpdater(cfg)
+			info, err := applying.Check(ctx)
+			if err != nil || info == nil {
+				t.Fatalf("Check = %v, %v; want a later nightly", info, err)
+			}
+			if err = applying.Apply(ctx, info); err != nil {
+				t.Fatal(err)
+			}
+			jp := journalPath(cfg.StateDir)
+			rec, err := readJournal(jp)
+			if err != nil || rec == nil {
+				t.Fatalf("journal after Apply: %+v, %v", rec, err)
+			}
+			if rec.ToBuild != installed {
+				t.Fatalf("journal target = %+v, want signed identity %+v", rec.ToBuild, installed)
+			}
+
+			// The constructor captures the running binary's link-time identity.
+			// Neither swapping the file nor another window changes that fact.
+			version.Commit, version.Date = tc.reporter.Commit, tc.reporter.BuiltAt
+			reporting := NewUpdater(cfg)
+			if err = reporting.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(jp) //nolint:gosec // journal path is inside t.TempDir.
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = reporting.ReportHealthy(ctx)
+			if tc.wantMismatch {
+				if !errors.Is(err, ErrPairMismatch) {
+					t.Fatalf("same-version older window must not certify the installed build, got %v", err)
+				}
+				assertNotFinalised(t, installPath, jp)
+				after, readErr := os.ReadFile(jp) //nolint:gosec // journal path is inside t.TempDir.
+				if readErr != nil || string(before) != string(after) {
+					t.Fatalf("a stale report changed the rollback counter or hold: %s, %v", after, readErr)
+				}
+				if probe.calls != 0 {
+					t.Fatal("wrong reporting identity must be refused before asking the coordinator")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ADR-0104: installed window with kept same-version coordinator must certify: %v", err)
+			}
+			if probe.calls != 1 {
+				t.Fatalf("coordinator calls = %d, want 1", probe.calls)
+			}
+			if _, err := os.Stat(jp); !os.IsNotExist(err) {
+				t.Fatalf("certified journal survived: %v", err)
+			}
+			if _, err := os.Stat(backupPath(installPath)); err != nil {
+				t.Fatalf("rollback copy not promoted to backup: %v", err)
+			}
+		})
+	}
+}
+
+func TestReportHealthy_MissingInstalledIdentityCannotCertify(t *testing.T) {
+	for _, target := range []version.BuildIdentity{
+		{},
+		{Commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		{BuiltAt: "2026-10-28T10:00:00Z"},
+		{Commit: "none", BuiltAt: "unknown"},
+	} {
+		t.Run(target.Commit+target.BuiltAt, func(t *testing.T) {
+			installPath, jp := pendingUpdate(t, "0.7.0", "0.8.0")
+			// Write the persisted shape rather than a new Go field, so the
+			// no-identity case includes journals written by older binaries.
+			raw, err := os.ReadFile(jp) //nolint:gosec // journal path is inside t.TempDir.
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record map[string]any
+			if err = json.Unmarshal(raw, &record); err != nil {
+				t.Fatal(err)
+			}
+			if target == (version.BuildIdentity{}) {
+				delete(record, "toBuild") // a journal written before build identity was recorded
+			} else {
+				record["toBuild"] = target
+			}
+			raw, err = json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(jp, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, logger := logtest.New(t)
+			u := NewUpdater(UpdaterConfig{
+				Platform: newFakePlatform(), CurrentVersion: "0.8.0", InstallPath: installPath, StateDir: filepath.Dir(jp),
+				Coordinator: &stubProbe{build: CoordinatorBuild{Version: "0.8.0", Compatible: true}}, Logger: logger,
+			})
+			if err := u.ReportHealthy(ctx); !errors.Is(err, ErrPairUnverifiable) {
+				t.Fatalf("an absent or incomplete installed identity must not certify: %v", err)
+			}
+			assertNotFinalised(t, installPath, jp)
+			// A legacy journal can still reconcile and roll back. Refusing
+			// identity proof must not strand the installed transaction.
+			for launch := 0; launch < 2; launch++ {
+				if err := u.Reconcile(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := os.Stat(jp); !os.IsNotExist(err) {
+				t.Fatalf("unverifiable build did not roll back: %v", err)
+			}
+		})
 	}
 }

@@ -24,10 +24,10 @@ import (
 // from a path or a file's mtime — a binary on disk is not the binary
 // running, which is the whole defect this file exists for.
 //
-// Commit is carried because the handshake carries it and a bug report
-// needs it. It is deliberately NOT compared: the release manifest names a
-// version and no commit, so the journal has no expected commit to compare
-// against, and a check against a fact nobody recorded is theatre.
+// Commit is carried for diagnostics, not compared for certification:
+// ADR-0104 permits a compatible same-version coordinator from an earlier
+// nightly. The reporting window, however, must match the installed build
+// identity recorded from the signed manifest in the transaction journal.
 //
 // Compatible reports the launcher's wire predicate: true when the attached
 // coordinator speaks this build's protocol. It does not grant cross-Version
@@ -74,7 +74,7 @@ var (
 	// different build from the one this update installed — the mixed
 	// pair. Same consequence, different cause, and a user reading the
 	// message needs to be told which of the two happened.
-	ErrPairMismatch = errors.New("update: the coordinator answering is not the version this update installed")
+	ErrPairMismatch = errors.New("update: the reporting pair does not match the build this update installed")
 
 	// ErrPairHeld retains the ADR-0101 held state for already attached
 	// windows; new launches take over across Version changes (ADR-0104). The

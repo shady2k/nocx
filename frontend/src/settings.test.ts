@@ -781,6 +781,77 @@ describe('SettingsContent', () => {
     })
   })
 
+  // A row's visible label has to name the CONTROL the row draws, not the row.
+  // `<label for>` resolves against labelable elements only, so a `for` aimed at
+  // the row's own <div> binds the label to nothing: the row reads as labelled
+  // while the control is announced as unnamed. That is where the Linux update
+  // proof (nocx-1ebrs.35.6) stopped — its driver asks AT-SPI for a combo box
+  // named "Update channel", and the name WebKit computes comes from here.
+  it("names the control a row draws with the row's own label (nocx-1ebrs.35.6)", async () => {
+    mockReady(client, {
+      declarations: [
+        ...TEST_DECLARATIONS,
+        {
+          key: 'update.channel',
+          section: 'Updates',
+          label: 'Update channel',
+          description: 'Stable follows the latest release. Nightly follows tonight build.',
+          control: 'select',
+          dataClass: 'publicConfig',
+          default: 'stable',
+          options: [
+            { value: 'stable', label: 'Stable' },
+            { value: 'nightly', label: 'Nightly' },
+          ],
+        },
+      ],
+      sectionGroups: { ...TEST_SECTION_GROUPS, Updates: 'application' },
+    })
+    await content.mount(target, host, signal)
+
+    // The name a screen reader (and therefore AT-SPI) announces: the text of
+    // the <label> whose `for` is the control's id.
+    const nameOf = (control: Element | null, what: string): string => {
+      if (control === null) throw new Error(`no ${what} rendered`)
+      const id = control.id
+      if (id === '') throw new Error(`${what} has no id for a label to point at`)
+      const label = target.querySelector<HTMLLabelElement>(`label[for="${id}"]`)
+      if (label === null) throw new Error(`${what} is not named by any label`)
+      return String(label.textContent).trim()
+    }
+
+    openSection(target, 'Updates')
+    const channel = await vi.waitFor(() => {
+      const el = target.querySelector('[data-key="update.channel"] select')
+      if (!el) throw new Error('channel select not rendered yet')
+      return el
+    })
+    expect(nameOf(channel, 'channel select')).toBe('Update channel')
+
+    openSection(target, 'Terminal')
+    const fontFamily = await vi.waitFor(() => {
+      const el = target.querySelector('[data-key="terminal.fontFamily"] input')
+      if (!el) throw new Error('font family field not rendered yet')
+      return el
+    })
+    expect(nameOf(fontFamily, 'font family field')).toBe('Font Family')
+    expect(
+      nameOf(target.querySelector('[data-key="terminal.fontSize"] input'), 'font size field'),
+    ).toBe('Font Size')
+    expect(
+      nameOf(
+        target.querySelector('[data-key="terminal.cursorStyle"] select'),
+        'cursor style select',
+      ),
+    ).toBe('Cursor Style')
+
+    // The row keeps its own id: `scrollToKey` and deep links address the row,
+    // so naming the control must not move that id onto the control.
+    expect(
+      document.getElementById('st-setting-terminal.fontFamily')?.getAttribute('data-key'),
+    ).toBe('terminal.fontFamily')
+  })
+
   // The count belongs to the section, so it has to follow the rows onto the
   // page that owns them — a dot on a rail row for a page that no longer
   // exists reports a change nobody can find.

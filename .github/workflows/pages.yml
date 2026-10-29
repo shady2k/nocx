@@ -83,7 +83,8 @@ jobs:
       - name: stamp the released version
         run: |
           set -euo pipefail
-          tag="$(git describe --tags --abbrev=0)"
+          tag="$(git tag --list | scripts/latest-stable-tag.sh)"
+          [ -n "$tag" ] || { echo "::error::no stable release tag"; exit 1; }
           date="$(git log -1 --format=%cs "$tag")"
           echo "stamping $tag ($date)"
           for f in site/index.html site/ru/index.html; do

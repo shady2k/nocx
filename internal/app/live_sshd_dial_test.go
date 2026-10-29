@@ -209,6 +209,38 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 	return ch, out
 }
 
+// laneFailureContext is the block a wait that times out over the lane prints
+// (nocx-1ebrs.66.1.18): the kernel's own read model and the tail of the frames
+// it was given, plus the lane→session bindings the transport was told about.
+// The CI failure this was built for printed only "timed out waiting for lane
+// back at PromptReady" at ~12 s, on six of ten jobs, and every question worth
+// asking about it — which lane, which attempt was still open, whether the
+// transport had been told about the lane at all, and what the last frame was
+// and what the kernel said about it — was in the process and printed nowhere.
+func (fx *liveSshd) laneFailureContext(kernel *recordingKernel) string {
+	return kernel.laneReport() +
+		fmt.Sprintf("lanes registered with the transport: %v\n", fx.registeredLanes)
+}
+
+// terminalTail is the pane's own last bytes, quoted because what a fence
+// journey is looking for is control sequences: a missing fence is unreadable
+// in a rendered terminal and unmistakable in %q.
+// terminalTailBytes is how much of the pty a failure block prints. The
+// failure this was built for spans a whole prompt cycle — the previous
+// command's D, [J, A, OSC 7, a preexec C, whatever a prompt hook printed, the
+// prompt's ?2004h and PS1's B — and 400 bytes cut it off before the C that
+// names the suspect (nocx-1ebrs.66.1.18).
+const terminalTailBytes = 1200
+
+func terminalTail(out *outputBuffer, limit int) string {
+	all := out.String()
+	tail := all
+	if len(tail) > limit {
+		tail = tail[len(tail)-limit:]
+	}
+	return fmt.Sprintf("terminal tail (%d of %d bytes): %q", len(tail), len(all), tail)
+}
+
 // The proofs.
 
 // TestLiveSshd_BashReachesAcceptedDomain proves the primary path (nocx-u7uh.4
@@ -221,15 +253,17 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
-	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
+	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
+		func() string { return fx.laneFailureContext(kernel) },
+		func() bool {
+			kernel.mu.Lock()
+			defer kernel.mu.Unlock()
+			if kernel.minted != 1 {
+				return false
+			}
+			d, ok := kernel.Domain(kernel.domain)
+			return ok && d.State == lifecycle.DomainEstablished
+		})
 
 	// The minted lane reached the session that owns it: the production
 	// RegisterLifecycleLane wiring (without it, every published fact is
@@ -244,24 +278,28 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	// The render fence the kernel recorded must be the exact bytes the shell
 	// wrote to the terminal (protocol doc §8).
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att0.Fence)
-	waittest.WaitForTimeout(t, "sentinel output and fence", 10*time.Second, func() bool {
-		return strings.Contains(out.String(), "PROOF_BASH_123") &&
-			strings.Contains(out.String(), fence)
-	})
+	waittest.WaitForTimeoutDetail(t, "sentinel output and fence", 10*time.Second,
+		func() string { return fx.laneFailureContext(kernel) + terminalTail(out, terminalTailBytes) },
+		func() bool {
+			return strings.Contains(out.String(), "PROOF_BASH_123") &&
+				strings.Contains(out.String(), fence)
+		})
 
 	// Line 2: a failing command completes with exit status 1.
 	runLine(t, ch, kernel, "sh -c 'sleep 0.3; exit 1'", 1)
 
 	// The lane is back at a ready prompt for the domain.
-	waittest.WaitForTimeout(t, "lane back at PromptReady", 10*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		st, err := kernel.State(kernel.lane)
-		if err != nil {
-			return false
-		}
-		return st.Lifecycle == lifecycle.LifecyclePromptReady && st.Domain == kernel.domain
-	})
+	waittest.WaitForTimeoutDetail(t, "lane back at PromptReady", 10*time.Second,
+		func() string { return fx.laneFailureContext(kernel) + terminalTail(out, terminalTailBytes) },
+		func() bool {
+			kernel.mu.Lock()
+			defer kernel.mu.Unlock()
+			st, err := kernel.State(kernel.lane)
+			if err != nil {
+				return false
+			}
+			return st.Lifecycle == lifecycle.LifecyclePromptReady && st.Domain == kernel.domain
+		})
 
 	// The session ends with the shell. domain_closed is deliberately
 	// best-effort (the hook's own contract: the process exit may race the
@@ -271,14 +309,16 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waittest.WaitForTimeout(t, "session end after exit", 15*time.Second, func() bool {
-		select {
-		case <-ch.Done():
-			return true
-		default:
-			return false
-		}
-	})
+	waittest.WaitForTimeoutDetail(t, "session end after exit", 15*time.Second,
+		func() string { return fx.laneFailureContext(kernel) },
+		func() bool {
+			select {
+			case <-ch.Done():
+				return true
+			default:
+				return false
+			}
+		})
 
 	// Nothing installed: the session home holds only the fixture .bashrc and
 	// the launcher's own ~/.nocx bundle, and no file carries the capability.
@@ -750,26 +790,30 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 	// the kernel mints the attempt id on start, and the test needs it to
 	// follow the completion.
 	var att lifecycle.ExecutionAttempt
-	waittest.WaitForTimeout(t, "an open attempt for "+line, 15*time.Second, func() bool {
-		a, ok := kernel.OpenAttempt(domain)
-		if ok {
-			att = a
-		}
-		return ok
-	})
-	waittest.WaitForTimeout(t, "completion of "+line, 15*time.Second, func() bool {
-		a, ok := kernel.Attempt(att.ID)
-		if !ok {
-			return false
-		}
-		if a.State != lifecycle.AttemptCompleted {
-			return false
-		}
-		if a.ExitCode == nil || *a.ExitCode != wantExit {
-			t.Fatalf("attempt %s completed with exit %v, want %d", att.ID, a.ExitCode, wantExit)
-		}
-		att = a // the completed record: the fence it carries is the one on the wire
-		return true
-	})
+	waittest.WaitForTimeoutDetail(t, "an open attempt for "+line, 15*time.Second,
+		kernel.laneReport,
+		func() bool {
+			a, ok := kernel.OpenAttempt(domain)
+			if ok {
+				att = a
+			}
+			return ok
+		})
+	waittest.WaitForTimeoutDetail(t, "completion of "+line, 15*time.Second,
+		kernel.laneReport,
+		func() bool {
+			a, ok := kernel.Attempt(att.ID)
+			if !ok {
+				return false
+			}
+			if a.State != lifecycle.AttemptCompleted {
+				return false
+			}
+			if a.ExitCode == nil || *a.ExitCode != wantExit {
+				t.Fatalf("attempt %s completed with exit %v, want %d", att.ID, a.ExitCode, wantExit)
+			}
+			att = a // the completed record: the fence it carries is the one on the wire
+			return true
+		})
 	return att
 }

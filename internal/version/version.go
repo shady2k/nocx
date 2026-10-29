@@ -1,7 +1,7 @@
 // Package version carries build metadata stamped into the binary at link time.
 //
-// The three vars are set with `-ldflags -X` during a release build
-// (.github/workflows/release.yml); a plain `go build` leaves the defaults. The
+// The build vars are set with `-ldflags -X` during an artifact build
+// (.github/workflows/release-build.yml); a plain `go build` leaves the defaults. The
 // defaults are load-bearing rather than cosmetic: the updater treats
 // Version == "dev" as "this is a development build, never check for updates"
 // (§7.7 of docs/superpowers/specs/2026-07-22-distribution-and-updates-design.md),
@@ -59,4 +59,17 @@ func Requested(args []string) bool {
 		}
 	}
 	return false
+}
+
+// BuildIdentity distinguishes builds within one release version. BuiltAt is the
+// canonical UTC build time, not a manifest's publication or promotion time.
+// The signed manifest uses this same shape as the running binary.
+type BuildIdentity struct {
+	Commit  string `json:"commit"`
+	BuiltAt string `json:"builtAt"`
+}
+
+// Identity reads the existing link-time stamps; it owns no second copy.
+func Identity() BuildIdentity {
+	return BuildIdentity{Commit: Commit, BuiltAt: Date}
 }

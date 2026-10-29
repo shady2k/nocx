@@ -50,6 +50,13 @@ const appName = "nocx"
 const launchTimeout = 45 * time.Second
 
 func main() {
+	if handled, err := releaseDiagnostic(context.Background(), os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Checked before any window exists so CI's release smoke check
 	// (distribution design §5) and a user's `nocx --version` print the linked
 	// build metadata and exit, never opening a terminal.
@@ -474,31 +481,20 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	// decode costs the user their update check and nothing else: the app
 	// starts, and VerifyManifest then refuses every manifest, which is the
 	// direction to fail in.
-	keyring, err := update.ReleaseKeyring()
-	if err != nil {
-		w.logger.Error("release keyring unusable; updates cannot be verified on this build", "error", err)
-	}
 	execPath, err := os.Executable()
 	if err != nil {
 		w.logger.Warn("cannot determine executable path", "error", err)
 	}
-	// The pair probe (D4). This window's backend is another process, so the
-	// only honest answer to "which coordinator is serving me" is the one the
-	// discovery handshake gives — and that answer does not exist yet, because
-	// the updater has to Reconcile before the launcher runs (see
-	// coordinator.LaunchProbe). So it is constructed empty here and attached
-	// after the launch below. Until it is attached it refuses to certify,
-	// which is the direction to fail in; once it is attached it must exist,
-	// or the window would certify nothing and every update would roll back.
+	// Construct the pair probe before reconciliation and attach it only after
+	// launch. Until then it refuses to certify health (D4).
 	w.probe = coordinator.NewLaunchProbe()
-	fetch := update.NewGitHubManifestFetcher(nil)
+	cfg, fetch, _, keyringErr := productionWindowUpdaterConfig(log.NewSlogAdapter(w.logger), w.probe)
+	if keyringErr != nil {
+		w.logger.Error("release keyring unusable; updates cannot be verified on this build", "error", keyringErr)
+	}
 	updatePaths, updatePathsErr := storage.NewAppPaths()
 	if updatePathsErr == nil {
-		w.updater, w.updateInstallPath, updatePathsErr = newWindowUpdater(execPath, updatePaths.DataDir(), update.UpdaterConfig{
-			Platform: update.NewPlatform(), Fetcher: fetch, Keyring: keyring,
-			CurrentVersion: version.Version, Coordinator: w.probe,
-			Logger: log.NewSlogAdapter(w.logger),
-		})
+		w.updater, w.updateInstallPath, updatePathsErr = newWindowUpdater(execPath, updatePaths.DataDir(), cfg)
 	}
 	if updatePathsErr != nil {
 		w.updatePlacementErr = updatePathsErr

@@ -326,8 +326,18 @@ export class LiveHistorySurface {
     // a coverage that ends below the head the emulator holds now. An empty
     // surface with a stale cursor has nothing to rebuild — its next read
     // is the head anyway.
+    //
+    // EXHAUSTION IS ABOUT THE FLOOR, WHICH OUTPUT CANNOT MOVE. A fresh page
+    // that said `more=false` placed the oldest row the emulator still
+    // holds; output departs rows at the YOUNG end, so it cannot open a row
+    // below that floor. Keeping the latch is what stops an away reader who
+    // has reached the floor from asking for a page that cannot exist — the
+    // head's staleness is `_dirty`'s, and the rebuild answers that. An
+    // EMPTY surface's exhausted answer is the head's own ("no history
+    // yet"), so output must clear it there: the rows it just pushed into
+    // history are what the next read is for.
     if (this._pages.length > 0) this._dirty = true
-    this._exhausted = false
+    else this._exhausted = false
     // Both shapes ask for the head again, one burst at a time: the EMPTY
     // surface so the wheel has somewhere to go, and the STALE one so the
     // past is replaced while the reader still sits at the live end — the
@@ -568,7 +578,22 @@ export class LiveHistorySurface {
     // the tail, and the wheel needs the first page to have anywhere to
     // go at all.
     if (this._pages.length > 0 && isAtTail(this._scroller)) return
-    if (this._dirty) return
+    // A STALE HEAD IS NOT A HOLE BELOW THE READER (nocx-1ebrs.66.1.15).
+    // `_dirty` says the painted coverage no longer reaches the head the
+    // emulator holds now — the young end is stale, and the refresh that
+    // replaces it belongs to a reader at the live end. It says nothing
+    // about the rows BELOW `_cursor`: those are still the emulator's own,
+    // the page that ended there still names the same absolute interval,
+    // and the chain from it is exactly what a reader who keeps wheeling
+    // up is asking for. Gating paging on `_dirty` therefore stranded an
+    // AWAY reader: output that departed after they left (or while the
+    // page they asked for was on the wire, which makes that page stale)
+    // left the flag set, the trailing refresh did nothing because a
+    // rebuild must not move them, and every further gesture was refused —
+    // the old primary rows unreachable for as long as they stayed away.
+    // The guard still holds for a reader AT the live end, whose past the
+    // refresh is about to replace.
+    if (this._dirty && !this._away) return
     if (this._exhausted) return
     if (this._scroller.scrollTop > this._scroller.clientHeight) return
     this._request()

@@ -58,41 +58,34 @@ func seedCollection(t *testing.T) string {
 // AGENTS.md forbids, asked of this folder: a directory that can be TRAVERSED
 // but not LISTED (mode 0o300, which is what `chmod 0300` gives you) lets the
 // manifest and every known file be read while WalkDir's ReadDir on the root
-// refuses. listContents drops that refusal on the floor — its walkErr branch
-// records a bad path only when `rel != "."` (internal/apicoll/folder.go:171)
-// — so the caller is handed a collection that says it has no requests while
-// ReadRequest still reads them by name.
-//
-// SKIPPED, NOT DELETED, and skipped rather than rewritten to assert what the
-// code does: a test written from the implementation cannot report a missing
-// feature. Delete the t.Skip line to see it fail. The fix is one branch in
-// listContents — the root's own walkErr is an error from the listing, or a
-// MalformedRef named "." — and it is outside this task's ownership, so it is
-// reported to the coordinator instead of made here (REPORT-failures-4f8e.md).
+// refuses. Open and List must report that failure, not claim that the
+// request still on disk is absent (nocx-cpok3).
 func TestOpen_AnUnlistableFolderIsReportedNotAnsweredAsEmpty(t *testing.T) {
-	t.Skip("DEFECT nocx-unfiled: an unlistable collection folder is answered as an EMPTY collection; " +
-		"fix belongs in internal/apicoll/folder.go listContents, which this task does not own")
 	skipIfRoot(t)
 	root := seedCollection(t)
 	chmodDir(t, root, 0o300) // write + traverse, no read: openable, not listable
 
+	if _, err := newService().Open(root); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("Open on an unlistable folder = %v, want the listing permission error", err)
+	}
+}
+
+// List must also report a listing failure after the collection was opened.
+// Traverse permission still lets ReadRequest read the known request by name.
+func TestList_AnUnlistableFolderIsReportedNotAnsweredAsEmpty(t *testing.T) {
+	skipIfRoot(t)
+	root := seedCollection(t)
 	svc := newService()
 	op, err := svc.Open(root)
 	if err != nil {
-		if errors.Is(err, ErrNoManifest) {
-			t.Errorf("an unlistable folder was reported as having no manifest: %v", err)
-		}
-		return // reported as an error: that is one honest answer
+		t.Fatalf("Open: %v", err)
 	}
-	h, coll := op.Handle, op.Collection
-	if len(coll.Requests) == 0 && len(coll.Malformed) == 0 {
-		t.Fatal("Open answered with an EMPTY collection for a folder it could not list; " +
-			"the request that is still on disk was reported as absent")
+	chmodDir(t, root, 0o300)
+	if _, err := svc.ReadRequest(op.Handle, "req.json"); err != nil {
+		t.Fatalf("ReadRequest by name in an unlistable folder: %v", err)
 	}
-	if _, err := svc.List(h); err == nil {
-		if c, _ := svc.List(h); len(c.Requests) == 0 && len(c.Malformed) == 0 {
-			t.Fatal("List answered with an EMPTY collection for a folder it could not list")
-		}
+	if _, err := svc.List(op.Handle); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("List on an unlistable folder = %v, want the listing permission error", err)
 	}
 }
 
@@ -112,15 +105,14 @@ func TestOpen_AFolderThatCannotBeTraversedIsReported(t *testing.T) {
 	}
 }
 
-// TestOpen_ListsTheFolderOnceItIsReadable is the pair both of the above need:
-// the SAME folder, the same manifest and the same request, with the modes an
-// ordinary machine has.
+// TestOpen_ListsTheFolderOnceItIsReadable pairs the unlistable case above
+// with the SAME folder, manifest and request once listing is permitted.
 func TestOpen_ListsTheFolderOnceItIsReadable(t *testing.T) {
 	skipIfRoot(t)
 	root := seedCollection(t)
-	chmodDir(t, root, 0o000)
+	chmodDir(t, root, 0o300)
 	if _, err := newService().Open(root); err == nil {
-		t.Fatal("Open succeeded on an unreadable folder; the pair below would prove nothing")
+		t.Fatal("Open succeeded on an unlistable folder; the pair below would prove nothing")
 	}
 
 	//nolint:gosec // G302 is about files; a directory needs its execute bit.
@@ -135,6 +127,16 @@ func TestOpen_ListsTheFolderOnceItIsReadable(t *testing.T) {
 	h, coll := op.Handle, op.Collection
 	if len(coll.Requests) != 1 || coll.Requests[0].RelPath != "req.json" {
 		t.Fatalf("Requests = %+v, want the one request on disk", coll.Requests)
+	}
+	if len(coll.Malformed) != 0 {
+		t.Fatalf("Malformed = %+v, want no malformed refs in a listable folder", coll.Malformed)
+	}
+	listed, err := svc.List(h)
+	if err != nil {
+		t.Fatalf("List on a readable folder: %v", err)
+	}
+	if len(listed.Requests) != 1 || listed.Requests[0].RelPath != "req.json" || len(listed.Malformed) != 0 {
+		t.Fatalf("List = %+v, want the one request and no malformed refs", listed)
 	}
 	got, err := svc.ReadRequest(h, "req.json")
 	if err != nil {

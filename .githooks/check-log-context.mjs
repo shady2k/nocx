@@ -67,6 +67,23 @@ const CALL_RE = /(?:^|[^.\w])([A-Za-z_]\w*)\.(Debug|Info|Warn|Error)\(/g
 const IMPORT_RE =
   /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"github\.com\/shady2k\/nocx\/internal\/log"\s*$/
 
+// version.Info is build metadata, not a log method. Resolve this exact
+// package import rather than exempting every receiver called "version". If
+// that name is also declared locally anywhere in the file, keep the stricter
+// scan: this lexical ratchet cannot prove which scope a receiver belongs to.
+const VERSION_IMPORT_RE =
+  /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"github\.com\/shady2k\/nocx\/internal\/version"\s*$/
+
+function metadataAlias(lines, text) {
+  const imported = lines.map((line) => VERSION_IMPORT_RE.exec(line)).find(Boolean)
+  if (!imported) return null
+  const alias = imported[1] || 'version'
+  const declaration = new RegExp(
+    `\\b${alias}\\s*(?::=|=(?!=))|\\bvar\\s+${alias}\\b|[,(]\\s*${alias}\\s+(?:\\*?[A-Za-z_]|\\[)`,
+  )
+  return declaration.test(text) ? null : alias
+}
+
 /** repo-relative, tracked, non-test *.go files, '/'-separated. */
 export function trackedGoFiles() {
   const out = execFileSync('git', ['ls-files', '-z', '--', '*.go'], {
@@ -102,6 +119,7 @@ function resolveAlias(lines) {
 export function violationsInText(file, text) {
   const lines = text.split('\n')
   const alias = resolveAlias(lines)
+  const buildMetadataAlias = metadataAlias(lines, text)
 
   const fromRe = new RegExp(`\\b(\\w+)\\s*(?::=|=)[^\\n]*\\b${alias}\\.From\\(`)
   const startRe = new RegExp(
@@ -133,7 +151,8 @@ export function violationsInText(file, text) {
     CALL_RE.lastIndex = 0
     let m
     while ((m = CALL_RE.exec(line))) {
-      const [, receiver] = m
+      const [, receiver, method] = m
+      if (receiver === buildMetadataAlias && method === 'Info') continue
       if (compliant.has(receiver)) continue
       violations.push({ file, line: idx + 1, text: line.trim() })
     }

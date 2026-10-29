@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1557,6 +1558,196 @@ func TestBlockClearBoundary_NoOpenBlockKeepsNothing(t *testing.T) {
 	}
 	if params.KeepEntryID != nil {
 		t.Fatalf("keepEntryId = %q, want null: nothing was open", *params.KeepEntryID)
+	}
+}
+
+// TestBlockClearBoundary_AnEndedBlockIsNotTheErasuresInterval
+// (nocx-1ebrs.66.1.17): the rows tier can state an interval's end before the
+// lifecycle has published the completion that names it, and an erase sighted
+// after that end happened in the interval that FOLLOWS — not in the block
+// whose end the stream already holds. Naming the ended block as keepEntryId
+// tells every attached client to keep exactly the block the erase hides,
+// which is the block too many the e2e spec caught after `clear`.
+func TestBlockClearBoundary_AnEndedBlockIsNotTheErasuresInterval(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	// The block on screen before the erase, with its rows.
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	// Its end marker reaches the rows tier now; the completion that names
+	// it — the fence — has not been ingested, so the end is parked and the
+	// block is still the current one.
+	fence := lifecycleFence(0x61)
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	msg, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID != nil {
+		t.Fatalf("keepEntryId = %q, want null: the erase was sighted after block %q's own end marker, so it happened in the interval that follows, and %q is one of the blocks the erase hides",
+			*params.KeepEntryID, before, before)
+	}
+}
+
+// TestBlockClearBoundary_AnEndedBlockIsHiddenEvenBeforeItSeals is the same
+// sighting read back from the store: the block whose end marker had already
+// reached the rows stream is hidden even though its own completion had not
+// sealed its entry yet. A cursor scoped to sealed entries alone leaves that
+// block to reappear on the next pane read, and the record is never deleted
+// either way (nocx-zg3k3.10.3).
+func TestBlockClearBoundary_AnEndedBlockIsHiddenEvenBeforeItSeals(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	fence := lifecycleFence(0x62)
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	// The completion lands after the sighting, sealing the ended block. The
+	// boundary is already written: it had to cover `before` when it was.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(before), 0, fence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+
+	page, err := db.Ledger().QueryEntries(context.Background(), content.LedgerQuery{
+		Scope: content.ScopePane, PaneID: "01930000-0000-7000-8000-0000000000a1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	var ids []string
+	for _, entry := range page.Entries {
+		ids = append(ids, entry.ID)
+	}
+	for _, id := range ids {
+		if id == before {
+			t.Fatalf("the block %q whose end marker preceded the erase is still shown after the clear boundary: %v", before, ids)
+		}
+	}
+	if _, err := db.Ledger().Entry(context.Background(), before); err != nil {
+		t.Fatalf("the hidden entry is no longer readable by id — it must never be deleted: %v", err)
+	}
+}
+
+// TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock is the
+// same interleaving with the interval that follows already open: the ended
+// block's close is still writing to the store when `clear` is submitted and
+// installed behind it. The erase happened inside THAT interval, so that is
+// the one kept — the ended block is hidden, and the `clear` block a person
+// is watching stays.
+func TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	createSessionRow(t, db, sid)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	e.ws.blockStream.mu.Lock()
+	block := e.ws.blockStream.current[session.ID(sid)]
+	e.ws.blockStream.mu.Unlock()
+	if block == nil {
+		t.Fatal("the command's block never opened")
+	}
+	// The block's own row is held in the stream, and the flush that would
+	// hand it to the store is started by this test and genuinely blocked in
+	// storage — a gate the test holds, not a timing assumption.
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	e.ws.blockStream.mu.Unlock()
+	e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, "")
+	e.ws.blockStream.mu.Lock()
+	pending := e.ws.blockStream.pending[session.ID(sid)]
+	delete(e.ws.blockStream.pending, session.ID(sid))
+	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
+	e.ws.blockStream.mu.Unlock()
+	if len(pending) == 0 {
+		t.Fatal("the streamed row never reached the pending batch")
+	}
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("the flush never reached the store")
+	}
+	var once sync.Once
+	release := func() { once.Do(func() { close(store.release) }) }
+	t.Cleanup(func() {
+		release()
+		deadline := time.Now().Add(wantWithin)
+		for {
+			e.ws.blockStream.mu.Lock()
+			flushing := e.ws.blockStream.flushing[session.ID(sid)]
+			e.ws.blockStream.mu.Unlock()
+			if !flushing {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Error("the flush never finished after the store was released")
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	})
+
+	// The command finishes: its fence is published and its prompt is ready,
+	// but its close parks behind the blocked append — the block is still the
+	// current one, with its own end stated.
+	fence := lifecycleFence(0x63)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(before), 0, fence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+	e.ws.BlockIntervalEnded(session.ID(sid), fence, 1, []emulator.Row{aStreamRow("final screen")}, false)
+
+	// `clear` runs: its block is installed behind the current one, inside
+	// the window where the ended block has not left the stream yet.
+	next := startsACommand(t, e, pub, lane, h, 5, "clear")
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	msg, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID == nil || *params.KeepEntryID != next {
+		got := "null"
+		if params.KeepEntryID != nil {
+			got = *params.KeepEntryID
+		}
+		t.Fatalf("keepEntryId = %q, want %q: the erase was sighted inside the interval submitted behind the ended block %q, and the ended block is one of the blocks the erase hides",
+			got, next, before)
 	}
 }
 

@@ -7,11 +7,10 @@
  * the declaration's row renders above this component exactly as it would on a
  * generated page — same control, same description, same search and modified
  * dot (settings-rail-pages.ts). What the declaration cannot say is a fact
- * about THIS BUILD: on Linux the in-app updater cannot yet replace a mounted
- * AppImage (nocx-azxe.8), and a control that quietly cannot do its job is the
- * dead update control the bead forbids. That fact is said here, on the page
- * the control lives on, from the platform the wire reports — not guessed from
- * the user agent and not buried in a log.
+ * about THIS BUILD: AppImage installs can self-update, while deb and rpm
+ * installs update through their package manager. The distinction is said here,
+ * on the page the update controls live on, from the platform the wire reports —
+ * not guessed from the user agent and not buried in a log.
  */
 
 import { Show, createResource } from 'solid-js'
@@ -37,8 +36,8 @@ export function UpdatesSection(props: UpdatesSectionProps) {
       <PageSection title="Installing updates on Linux">
         <StatusCard
           tone="warning"
-          title="This build is install-only on Linux"
-          description="Checks still run and will say when a new build exists, but the in-app updater cannot yet replace a mounted AppImage — that fix is tracked. Until it lands, installing a new build means downloading it."
+          title="Linux updates"
+          description="AppImage installs can update themselves in nocx. deb and rpm installs update through their package manager; that is a different install from the AppImage."
         />
       </PageSection>
     </Show>

@@ -42,7 +42,8 @@ func TestGitHubManifestFetcherBuiltAsMainBuildsItFetches(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	body, sig, err := f.Fetch(ctx)
+	fetched, err := f.Fetch(ctx)
+	body, sig := fetched.Body, fetched.Signature
 	if err != nil {
 		t.Fatalf("fetch through the construction main.go uses: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestGitHubManifestFetcherBuiltAsMainBuildsItReportsAServerError(t *testing.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, _, err := f.Fetch(ctx)
+	_, err := f.Fetch(ctx)
 	if err == nil {
 		t.Fatal("a server error must surface as an error, not a nil")
 	}

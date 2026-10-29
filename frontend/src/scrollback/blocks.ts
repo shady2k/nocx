@@ -2681,7 +2681,16 @@ export class BlockManager {
         continue
       }
       if (index >= snapshot.geometry.rows) {
-        rec.outputAnchorOffset = undefined
+        // THE ANCHOR IS BELOW THE BOTTOM EDGE (nocx-1ebrs.66.1.24). The row
+        // is the command's FIRST output row, so this screen holds none of
+        // that output: every row on it was written before the command,
+        // including the rows a screen that lags the echo is still painting
+        // after the running fact. Hiding the whole grid is what says so.
+        // Dropping the anchor left the shift to `startOffset` — the row the
+        // block was minted on, minted from this same lagging screen — and
+        // once the base moved past that row it read as "no shift", which
+        // painted the previous command's output into the running block.
+        rec.outputAnchorOffset = snapshot.geometry.rows
         rec.outputAnchorText = undefined
         continue
       }

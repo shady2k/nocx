@@ -128,8 +128,10 @@ func discoveryShapes() []string {
 	return lines
 }
 
-// contractJSONs reads every *.json under contracts/, recursively — the
-// schemas, the tools/ subschemas and the OpenRPC manifest alike.
+// contractJSONs reads the window/coordinator JSON contracts recursively:
+// wire schemas, tools/ subschemas and OpenRPC. contracts/update is the signed
+// artifact channel, not this protocol: build identity cannot require a
+// window/coordinator compatibility bump (nocx-1ebrs.66.1.11).
 func contractJSONs(t *testing.T) map[string][]byte {
 	t.Helper()
 	files := map[string][]byte{}
@@ -137,7 +139,13 @@ func contractJSONs(t *testing.T) map[string][]byte {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(path, ".json") {
+		if d.IsDir() {
+			if path == filepath.Join(contractsDir, "update") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".json") {
 			return nil
 		}
 		rel, relErr := filepath.Rel(contractsDir, path)
@@ -596,5 +604,39 @@ func TestTheDiscoveryShapesCoverTheHandshakeTypes(t *testing.T) {
 	}
 	if fields == 0 {
 		t.Fatal("the handshake types carry no fields?")
+	}
+}
+
+// Artifact contracts live beside the wire schemas for conformance checks, not
+// on the window/coordinator protocol. Changing a nightly's identity must never
+// demand a discovery protocol bump; an actual wire schema still must.
+func TestArtifactManifestIsOutsideTheCoordinatorProtocol(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "update"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	wire := filepath.Join(dir, "session.schema.json")
+	artifact := filepath.Join(dir, "update", "manifest.schema.json")
+	if err := os.WriteFile(wire, []byte(`{"type":"object"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte(`{"build":"yesterday"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := contractsDir
+	contractsDir = dir
+	t.Cleanup(func() { contractsDir = old })
+	baseline := surfaceDigest(contractJSONs(t), nil)
+	if err := os.WriteFile(artifact, []byte(`{"build":"tonight"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if surfaceDigest(contractJSONs(t), nil) != baseline {
+		t.Fatal("artifact identity changed the window/coordinator protocol fingerprint")
+	}
+	if err := os.WriteFile(wire, []byte(`{"type":"array"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if surfaceDigest(contractJSONs(t), nil) == baseline {
+		t.Fatal("actual wire contract no longer changes the protocol fingerprint")
 	}
 }

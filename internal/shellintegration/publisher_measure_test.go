@@ -256,9 +256,15 @@ import (
 // CI run 40226370660 measured 91008 bytes (+412), still 63 calls, at
 // 452281925: the reserved loader latch, sourced version marker and Bash's
 // shell-decoded trap capture (nocx-1kejz.2).
+// The prompt-hook probe measured 92030 bytes (+1022), still 63 calls, on
+// branch fix/nocx-1ebrs-66-1-18-lane-diagnostics: a PROMPT_COMMAND element
+// installed after ours fires the preexec latch outside the prompt window, so
+// the wrapper now asks whether the line it is about to announce is one of the
+// prompt hooks before it spends the latch (nocx-1ebrs.66.1.18). Only the Bash
+// tier moved; zsh and posix publish the same bytes.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 91008
+	measuredMaxPublishBytes = 92030
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

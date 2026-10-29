@@ -1374,6 +1374,15 @@ const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
 // never be found again from the durable side restore reads through.
 type RecordClearBoundary struct {
 	SessionID string
+	// ThroughEntryID, when set, is the newest entry the sighting is known
+	// to be AFTER while the interval the erase happened inside cannot be
+	// named — the block whose own end marker had already reached the rows
+	// stream when the erase was sighted (nocx-1ebrs.66.1.17). It is hidden
+	// whether or not its completion had sealed it: it stood on screen before
+	// the erase and goes with it. Empty when the sighting named its own
+	// interval (nothing before it is unsealed in that case) or named none
+	// at all.
+	ThroughEntryID string
 }
 
 // ClearBoundaryRecorded is what recording one answered: the boundary's own
@@ -1381,12 +1390,12 @@ type RecordClearBoundary struct {
 // boundary is still recorded, for provenance, but an ordinary read has
 // nothing to apply it against until a pane exists), and the cursor itself.
 //
-// IngestSeq is the highest ingest_seq among this pane's entries that had
-// already SEALED (phase = 'closed') at the instant of the sighting — never
-// the session's newest entry outright, because the command whose own output
-// triggered the erase (`clear` itself, ordinarily) already has an open entry
-// by the time its output runs, and a boundary that bounded its own command
-// would hide the very block reporting the clear. The record never deletes
+// IngestSeq is the highest ingest_seq among this pane's entries that stood
+// BEFORE the interval the erase happened inside — never the session's newest
+// entry outright, because the command whose own output triggered the erase
+// (`clear` itself, ordinarily) already has an open entry by the time its
+// output runs, and a boundary that bounded its own command would hide the
+// very block reporting the clear. The record never deletes
 // (nocx-zg3k3.10.3's decision): this is a CURSOR a reader applies, not a
 // mark on the entries themselves, and revealing past it is a later
 // question this type does not answer.

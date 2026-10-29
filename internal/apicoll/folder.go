@@ -243,11 +243,13 @@ func listContents(root string) ([]RequestRef, []string, []string, []MalformedRef
 		rel = filepath.ToSlash(rel)
 
 		if walkErr != nil {
+			// The root must be listable before we can answer what it holds.
+			if rel == "." {
+				return walkErr
+			}
 			// An unreadable subdirectory is one unreadable subdirectory, not
 			// a collection that will not list.
-			if rel != "." {
-				bad = append(bad, MalformedRef{RelPath: rel, Reason: walkErr.Error()})
-			}
+			bad = append(bad, MalformedRef{RelPath: rel, Reason: walkErr.Error()})
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}

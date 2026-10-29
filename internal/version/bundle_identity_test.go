@@ -27,7 +27,7 @@ func TestMacOSTemplateAgreesWithReleaseIdentity(t *testing.T) {
 // its arguments still have to read the identifier from the assembled app, and
 // the shell must refuse both an old identity and a failed plist read.
 func TestReleaseRejectsWrongAssembledBundleIdentifier(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release-build.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

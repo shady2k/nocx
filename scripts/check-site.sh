@@ -136,9 +136,15 @@ for f in $pages; do
     echo "       the header link, the install version line and the notes link."
     fail=1
   fi
+  for marker in '<span data-released>[^<]+</span>' '<span data-version>[^<]*v[0-9]+\.[0-9]+\.[0-9]+</span>'; do
+    if ! grep -qE "$marker" "$f"; then
+      echo "FAIL: ${f#$root/} has no $marker marker"
+      fail=1
+    fi
+  done
 done
 
-tag="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
+tag="$(git -C "$root" tag --list | "$root/scripts/latest-stable-tag.sh" 2>/dev/null || true)"
 if [ -n "$tag" ]; then
   for f in $pages; do
     shown="$(grep -oE '<b data-version>[^<]+</b>' "$f" |

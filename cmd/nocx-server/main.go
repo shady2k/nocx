@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -33,6 +34,16 @@ import (
 )
 
 func main() {
+	// The same descriptor supplied to app.about by app.New. No app, profile,
+	// socket or keystore is opened for packaged-artifact metadata inspection.
+	if len(os.Args) == 2 && os.Args[1] == "--build-info" {
+		if err := json.NewEncoder(os.Stdout).Encode(version.Info()); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Answered before anything is constructed: no app, no socket, no lock.
 	// A release smoke check needs the COORDINATOR's version, and asking the
 	// application for it answers a different question — today the two are

@@ -4,7 +4,10 @@ import { test, expect, promptReady } from './harness'
 // submit — the editor must stay hidden while a program runs, and typed keys
 // must reach the PTY rather than the editor.
 
-const INPUT = '.nocx-editor-input'
+const INPUT = '.pane.active .nocx-editor-input'
+/** The grid's own input element: where the pane reads keys while a program
+ *  holds the pty and the composer is hidden. */
+const GRID_INPUT = '.pane.active .ui-terminal-input'
 
 test.describe('enhanced input raw routing', () => {
   test('read command receives input after enhanced submit', async ({ page }) => {
@@ -20,12 +23,64 @@ test.describe('enhanced input raw routing', () => {
     await page.keyboard.press('Enter')
     await expect(page.locator(INPUT)).not.toBeVisible({ timeout: 5000 })
 
+    // A HIDDEN COMPOSER IS NOT A KEYBOARD OWNER. The composer's display:none
+    // and the authenticated start that makes the grid writable are two
+    // different facts, and the handoff that focuses the grid crosses the
+    // submitAttempt round trip (nocx-yb5y). When a key is typed before that
+    // focus lands it reaches <body> and is gone — the letters are lost while
+    // the Enter after them is kept (measured in CI shard 1: this spec's
+    // `read x` never received `hello`). The observable a keystroke needs is
+    // focus, not visibility, so the premise is established rather than
+    // assumed. Same gate as e2e/snippets.spec.ts.
+    await expect(page.locator(GRID_INPUT)).toBeFocused({ timeout: 5000 })
+
     // The `read` builtin is now waiting for stdin. Typing must reach the running
     // program (RUNNING_RAW → editor hidden), not the editor.
     await page.keyboard.type('hello')
     await page.keyboard.press('Enter')
 
     // The completed block proves the input reached `read`, not the editor.
+    await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
+      timeout: 5000,
+    })
+  })
+
+  // nocx-1ebrs.66.1.19: the residual of 66.1.16. That fix reclaims the keyboard
+  // when the lifecycle publishes `running`; between the submit and that fact the
+  // pane still relies on the focus handoff the commit makes synchronously, and
+  // the same commit's display:none host (and the live region's move) can undo it
+  // on WebKit. A letter typed in that window reaches <body> and is gone while the
+  // Enter after it is kept — the command never sees the answer a person typed.
+  //
+  // THIS TEST DOES NOT WAIT FOR FOCUS, and that is its subject: the assertion is
+  // that the keys reach the program wherever the keyboard happens to be. The
+  // unclaimed state is made certain rather than hoped for — on WebKit it is what
+  // the engine's own timing produces, and a test that waited for the accident
+  // would be the test that stopped exercising the window.
+  test('keys typed while the keyboard is unclaimed still reach the program', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+
+    await promptReady(page)
+
+    await page.keyboard.type('read x; printf \'got-%s\\n\' "$x"')
+    await page.keyboard.press('Enter')
+
+    // The keyboard was handed to the grid at commit; take it away again before
+    // the running fact lands, exactly as a display:none host or the live
+    // region's move does. NO FOCUS GATE AFTER THIS — the person believes the
+    // keys are theirs, and the product is what has to be right about it.
+    await page.evaluate(() => {
+      const holder = document.activeElement
+      if (holder instanceof HTMLElement) holder.blur()
+    })
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+
+    await page.keyboard.type('hello')
+    await page.keyboard.press('Enter')
+
+    // The completed block proves `read` saw the letters, not that a DOM
+    // property moved: the bytes a person typed reached the pty.
     await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
       timeout: 5000,
     })

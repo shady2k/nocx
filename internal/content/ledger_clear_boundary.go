@@ -63,14 +63,11 @@ func (s *sqliteContent) RecordClearBoundary(ctx context.Context, in RecordClearB
 
 		var ingestSeq int64
 		if paneID.Valid {
-			// Only SEALED entries count — see the file header's argument for
-			// why the command whose own output triggered this sighting must
-			// never be the entry the boundary bounds.
-			if err := tx.QueryRowContext(ctx,
-				`SELECT COALESCE(MAX(ingest_seq), 0) FROM entries WHERE pane_id = ? AND phase = 'closed'`,
-				paneID.String).Scan(&ingestSeq); err != nil {
+			bounded, err := clearBoundaryThrough(ctx, tx, paneID.String, in)
+			if err != nil {
 				return err
 			}
+			ingestSeq = bounded
 		}
 
 		// sql.NullString implements driver.Valuer, so it binds directly as
@@ -92,4 +89,46 @@ func (s *sqliteContent) RecordClearBoundary(ctx context.Context, in RecordClearB
 		return ClearBoundaryRecorded{}, err
 	}
 	return out, nil
+}
+
+// clearBoundaryThrough computes the highest ingest_seq this boundary hides.
+//
+// ThroughEntryID bounds it exactly: the sighting said which entry stood
+// before the erase, so that entry is hidden even when its own completion had
+// not sealed it yet (nocx-1ebrs.66.1.17). Without it only SEALED entries
+// count — the file header's argument for why the command whose own output
+// triggered this sighting must never be the entry the boundary bounds, which
+// is structural when the sighting names no entry of its own.
+func clearBoundaryThrough(ctx context.Context, tx *sql.Tx, paneID string, in RecordClearBoundary) (int64, error) {
+	if in.ThroughEntryID != "" {
+		var through int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT ingest_seq FROM entries WHERE id = ? AND pane_id = ?`,
+			in.ThroughEntryID, paneID).Scan(&through)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			// Not this pane's entry (a restore, a reaped session): fall back
+			// to the sealed rule rather than bound nothing.
+		case err != nil:
+			return 0, err
+		default:
+			var bound sql.NullInt64
+			if err := tx.QueryRowContext(ctx,
+				`SELECT MAX(ingest_seq) FROM entries WHERE pane_id = ? AND ingest_seq <= ?`,
+				paneID, through).Scan(&bound); err != nil {
+				return 0, err
+			}
+			if !bound.Valid {
+				return 0, nil
+			}
+			return bound.Int64, nil
+		}
+	}
+	var sealed int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(ingest_seq), 0) FROM entries WHERE pane_id = ? AND phase = 'closed'`,
+		paneID).Scan(&sealed); err != nil {
+		return 0, err
+	}
+	return sealed, nil
 }

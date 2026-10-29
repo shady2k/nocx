@@ -1134,12 +1134,25 @@ type countingProvider struct {
 	filesystem.Provider
 	mu    sync.Mutex
 	lists map[string]int
+	// onList, when set, is told about every listing at its entry, before the
+	// provider is asked for anything. A test uses it to timestamp the
+	// dispatches it cares about instead of inferring them from a sleep.
+	onList func(path string)
 
 	blockNextList bool
 	listStarted   chan struct{}
 	listRelease   chan struct{}
 	listFinished  chan struct{}
 	failNextList  error
+}
+
+// setOnList installs the listing hook. It is read under the same mutex the
+// hook is installed with, so the wiring is free of a data race even when the
+// poll loop is already running.
+func (p *countingProvider) setOnList(fn func(path string)) {
+	p.mu.Lock()
+	p.onList = fn
+	p.mu.Unlock()
 }
 
 func (p *countingProvider) blockNext() {
@@ -1159,6 +1172,12 @@ func (p *countingProvider) List(
 	path string,
 	page filesystem.Page,
 ) (filesystem.Listing, error) {
+	p.mu.Lock()
+	hook := p.onList
+	p.mu.Unlock()
+	if hook != nil {
+		hook(path)
+	}
 	p.mu.Lock()
 	p.lists[path]++
 	fail := p.failNextList
@@ -1639,11 +1658,24 @@ func newBlockingCountingFilesEnv(t *testing.T) (*filesTestEnv, func() *countingP
 	}
 }
 
-// TestFilesPoll_ArmsTimerAfterPoll proves that a slow scan does not leave a
-// pending tick that starts the next scan immediately when the first returns.
+// TestFilesPoll_ArmsTimerAfterPoll proves that a poll which outlasts its
+// interval leaves no overdue tick behind: the next dispatch is scheduled from
+// the end of the work, so it cannot begin before a full interval has passed
+// since the previous listing returned.
+//
+// The assertion is on the loop's own behaviour, in the product's own unit:
+// the listing is held until it has provably outlasted the interval (the
+// scenario named), and the next dispatch's start is compared with the instant
+// the previous listing returned. The earlier version slept exactly one
+// interval and required the listing count not to have moved — a stopwatch,
+// not a state. The timer's first rung after a quiet scan is two intervals, so
+// any delay that stretched the 10 ms sleep past 20 ms failed a correct
+// watcher; under -race here that was 4 runs in 20, always as "count=3 want 2"
+// at the wall-clock check, never as a second listing overlapping the first.
 func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
 	e, provider := newBlockingCountingFilesEnv(t)
-	e.ws.filesPollInterval = 10 * time.Millisecond
+	const base = 10 * time.Millisecond
+	e.ws.filesPollInterval = base
 	sid := e.openSession(t, 1)
 	root := t.TempDir()
 	dir := filepath.Join(root, "watched")
@@ -1651,15 +1683,46 @@ func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	bid := e.openBinding(t, sid, root, 2)
-	e.watchDir(t, bid, []string{dir}, 3)
+	w := e.watchDir(t, bid, []string{dir}, 3)
 	p := provider()
-	p.blockNext()
 
+	var mu sync.Mutex
+	var starts []time.Time
+	p.setOnList(func(path string) {
+		if path != dir {
+			return
+		}
+		mu.Lock()
+		starts = append(starts, time.Now())
+		mu.Unlock()
+	})
+	startCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(starts)
+	}
+	startAt := func(i int) time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return starts[i]
+	}
+
+	p.blockNext()
 	select {
 	case <-p.listStarted:
 	case <-time.After(wantWithin):
 		t.Fatal("poll did not reach the deliberately slow listing")
 	}
+	if got := startCount(); got != 1 {
+		t.Fatalf("listings started = %d, want 1 (the slow poll)", got)
+	}
+	// Hold the scan past the interval it is scheduled on: work longer than
+	// one tick is the scenario in which a tick armed before the work would
+	// still be waiting when the work returns.
+	waittest.WaitForTimeout(t, "the slow scan to outlast its interval", wantWithin, func() bool {
+		return time.Since(startAt(0)) > base
+	})
+
 	beforeRelease := p.count(dir)
 	close(p.listRelease)
 	select {
@@ -1667,19 +1730,33 @@ func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
 	case <-time.After(wantWithin):
 		t.Fatal("slow listing did not finish")
 	}
+	finishedAt := time.Now()
 	afterRelease := p.count(dir)
 	if afterRelease != beforeRelease {
 		t.Fatalf("listing count changed while the slow poll was completing: before=%d after=%d",
 			beforeRelease, afterRelease)
 	}
 
-	time.Sleep(e.ws.filesPollInterval)
-	if got := p.count(dir); got != afterRelease {
-		t.Fatalf("next poll started immediately after slow work: count=%d want %d", got, afterRelease)
+	// The entry's due time is the loop's only tick source, and
+	// resetTimer waits for it: a schedule anchored before the work would
+	// already be in the past here, and the next scan would start the
+	// instant the loop re-armed.
+	w.mu.Lock()
+	entry := w.paths[dir]
+	observedAt, dueAt := entry.lastSuccessfulObservation, entry.dueAt
+	w.mu.Unlock()
+	if !dueAt.After(observedAt) {
+		t.Fatalf("next dispatch is due at %s, not after the scan was recorded at %s",
+			dueAt.Format(time.RFC3339Nano), observedAt.Format(time.RFC3339Nano))
 	}
-	waittest.WaitForTimeout(t, "the next poll after the post-work wait", 5*time.Second, func() bool {
-		return p.count(dir) > afterRelease
+
+	waittest.WaitForTimeout(t, "the next scheduled scan", wantWithin, func() bool {
+		return startCount() >= 2
 	})
+	if gap := startAt(1).Sub(finishedAt); gap < base {
+		t.Fatalf("next scan started %s after the slow listing returned, want at least %s",
+			gap, base)
+	}
 }
 
 func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {

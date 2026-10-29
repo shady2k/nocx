@@ -2426,23 +2426,101 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 	// Closing event: the one store write below, nothing held past it — the
 	// same shape BlockRowsArrived's own AppendBlockRows call has.
 	ctx := log.WithLogger(context.Background(), s.log)
+	bs := s.blockStream
+	// WHICH INTERVAL THE ERASE WAS INSIDE is read here, in the one lock hold
+	// that agrees with where the sighting landed on the rows stream — not
+	// after the store write below, which the lifecycle plane can outrun
+	// (nocx-1ebrs.66.1.17).
+	bs.mu.Lock()
+	keepEntryID, endedEntryID := bs.erasingIntervalLocked(sid)
+	bs.mu.Unlock()
+	var keep *string
+	if keepEntryID != "" {
+		keep = &keepEntryID
+		// A named interval bounds the durable cursor by itself: everything
+		// started before it is hidden.
+		endedEntryID = ""
+	}
 	if store := s.blockStore(); store != nil {
-		if _, err := store.RecordClearBoundary(ctx,
-			content.RecordClearBoundary{SessionID: string(sid)}); err != nil {
+		if _, err := store.RecordClearBoundary(ctx, content.RecordClearBoundary{
+			SessionID: string(sid),
+			// Only reached when no interval can be named: the block the
+			// sighting is known to be after is hidden all the same, though
+			// its own completion had not sealed its entry yet.
+			ThroughEntryID: endedEntryID,
+		}); err != nil {
 			log.From(ctx).Warn("clear boundary not recorded; the client is not told it happened",
 				"session", sid, "error", err)
 			return
 		}
 	}
-	bs := s.blockStream
-	bs.mu.Lock()
-	var keepEntryID *string
-	if block := bs.current[sid]; block != nil && block.entry != "" {
-		id := block.entry
-		keepEntryID = &id
+	s.notifyBlockSubscriber(ctx, sid, "block.cleared", blockClearedParams{SessionID: string(sid), KeepEntryID: keep})
+}
+
+// erasingIntervalLocked answers which authenticated interval the erase a
+// sighting reports happened inside (keep), and — when that interval cannot
+// be named — the block the sighting is known to be AFTER (ended)
+// (nocx-1ebrs.66.1.17).
+//
+// PRECEDENCE, the rows stream's own. A current block whose interval end has
+// already been stated on this stream — its close writing to the store, its
+// close parked behind a flush, or its end parked for the completion that
+// names it — is NOT the interval the erase happened inside: that end marker
+// reached this stream BEFORE the sighting, so the sighting belongs to the
+// interval that follows. Naming the ended block as the keep (what this did
+// whenever a block was current) tells every attached client to keep exactly
+// the block the erase hides — the e2e run that caught it saw one block too
+// many after `clear`, for as long as the assertion waited.
+//
+// The interval that follows may not be nameable yet — its submit has not
+// reached this stream — and then nothing is kept: `clearAll` removes
+// everything on screen, which is also what a reload has to show.
+func (bs *blockStream) erasingIntervalLocked(sid session.ID) (keep, ended string) {
+	cur := bs.current[sid]
+	if cur != nil && !bs.endStatedLocked(sid, cur.attempt) {
+		return cur.entry, ""
 	}
-	bs.mu.Unlock()
-	s.notifyBlockSubscriber(ctx, sid, "block.cleared", blockClearedParams{SessionID: string(sid), KeepEntryID: keepEntryID})
+	if cur != nil {
+		ended = cur.entry
+	}
+	// The interval that follows: installed behind the current block
+	// (queued), still opening, or waiting for its open.
+	for _, next := range []string{bs.queued[sid], bs.opening[sid]} {
+		if next != "" && (cur == nil || next != cur.attempt) {
+			return next, ended
+		}
+	}
+	for _, next := range bs.reopen[sid] {
+		if cur == nil || next != cur.attempt {
+			return next, ended
+		}
+	}
+	return "", ended
+}
+
+// endStatedLocked answers whether the block `attempt` is current for has
+// already had its interval end stated on this stream: its close is writing
+// to the store right now, its close is parked behind a flush, or its end
+// marker is parked for the completion that names it. A sighting that
+// arrives after any of those is not inside this block.
+func (bs *blockStream) endStatedLocked(sid session.ID, attempt string) bool {
+	if bs.closing[sid] {
+		return true
+	}
+	// A parked end is anonymous until its completion names it (the fence is
+	// what attributes it), and the rows stream is ordered: the only interval
+	// open when it was sighted is this one.
+	for _, end := range bs.ends[sid] {
+		if end.attempt == "" || end.attempt == attempt {
+			return true
+		}
+	}
+	for _, end := range bs.pendingCloses[sid] {
+		if end.attempt == attempt {
+			return true
+		}
+	}
+	return false
 }
 
 // closeBlockRows appends the closing rows and seals the block an interval

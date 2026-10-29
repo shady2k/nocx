@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
-import { IntentInput, type SessionIntent } from './intent-input'
+import { IntentInput, type IntentInputOptions, type SessionIntent } from './intent-input'
 import { NATIVE_RESTORE_COMMAND } from './native-mode'
 
 // The pane's input element is where a person's actions become SESSION INTENT
@@ -12,10 +12,14 @@ import { NATIVE_RESTORE_COMMAND } from './native-mode'
 
 const live: IntentInput[] = []
 
-function makeInput(): { input: IntentInput; intents: SessionIntent[] } {
+function makeInput(options: Omit<IntentInputOptions, 'emit'> = {}): {
+  input: IntentInput
+  intents: SessionIntent[]
+} {
   const intents: SessionIntent[] = []
   const input = new IntentInput({
     emit: (intent) => intents.push(intent),
+    ...options,
   })
   document.body.append(input.element)
   live.push(input)
@@ -783,5 +787,61 @@ describe('paste, focus and the element itself', () => {
     input.element.dispatchEvent(inputEvent('a', 'insertText'))
 
     expect(intents).toEqual([])
+  })
+})
+
+describe('a key the browser delivered to nobody (nocx-1ebrs.66.1.19)', () => {
+  // The keyboard can be unclaimed for a moment: the commit hides the composer,
+  // the browser's focus lands on <body>, and the next keydown is dispatched
+  // there — no element to read it, and no `input` event to follow it, so the
+  // character exists only in that event. When the product says that keyboard is
+  // this pane's (mayAdoptUnclaimedKey), the element reads the key exactly as it
+  // reads one that landed on it, and keeps the keyboard for what follows.
+  it('reads a key dispatched at <body> as the text a focused element would report', () => {
+    const { input, intents } = makeInput({ mayAdoptUnclaimedKey: () => true })
+
+    document.body.dispatchEvent(keydown('KeyH', { key: 'h' }))
+
+    expect(intents).toEqual([
+      { kind: 'focus', payload: 'in' },
+      { kind: 'text', payload: 'h' },
+    ])
+    expect(document.activeElement).toBe(input.element)
+  })
+
+  it('takes a named key as its intent, and every key after it is the element’s own', () => {
+    const { input, intents } = makeInput({ mayAdoptUnclaimedKey: () => true })
+
+    const enter = keydown('Enter', { key: 'Enter' })
+    document.body.dispatchEvent(enter)
+    input.element.dispatchEvent(keydown('KeyI', { key: 'i' }))
+    input.element.dispatchEvent(inputEvent('i', 'insertText'))
+
+    expect(intents).toEqual([
+      { kind: 'focus', payload: 'in' },
+      { kind: 'key', payload: 'enter' },
+      { kind: 'text', payload: 'i' },
+    ])
+    expect(enter.defaultPrevented).toBe(true)
+  })
+
+  it('adopts nothing when the product declines, nor a key another owner claimed', () => {
+    const declined = makeInput({ mayAdoptUnclaimedKey: () => false })
+    document.body.dispatchEvent(keydown('KeyH', { key: 'h' }))
+    expect(declined.intents).toEqual([])
+    expect(document.activeElement).not.toBe(declined.input.element)
+
+    // The pane's own document listeners answer first — Ctrl+C addressed to the
+    // running block, the copy chord — so a prevented key already has an owner.
+    const { input, intents } = makeInput({ mayAdoptUnclaimedKey: () => true })
+    const claim = (e: Event): void => e.preventDefault()
+    document.addEventListener('keydown', claim, true)
+    try {
+      document.body.dispatchEvent(keydown('KeyC', { key: 'c', ctrlKey: true }))
+    } finally {
+      document.removeEventListener('keydown', claim, true)
+    }
+    expect(intents).toEqual([])
+    expect(document.activeElement).not.toBe(input.element)
   })
 })

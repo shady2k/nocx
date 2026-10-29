@@ -216,6 +216,18 @@ function isDeadKey(e: KeyboardEvent): boolean {
   return e.key === 'Dead'
 }
 
+/** The text a keydown would have inserted, for a key the browser delivered to
+ *  nobody: `producesCharacter`'s answer, plus the AltGr character the layout
+ *  resolves — that one is reported as ctrl+alt and is TEXT rather than a
+ *  chord, the same reading keyIntentOf makes of it (nocx-1ebrs.66.1.19).
+ *  Null when the key inserts nothing on its own: a composition in progress, a
+ *  dead key, or a non-printing key. */
+function textOfUnclaimedKey(e: KeyboardEvent): string | null {
+  if (e.isComposing || isDeadKey(e)) return null
+  if (e.getModifierState?.('AltGraph')) return e.key.length === 1 ? e.key : null
+  return producesCharacter(e) ? e.key : null
+}
+
 export interface IntentInputOptions {
   /** Where intents go, in the order they were produced. */
   emit: IntentSink
@@ -246,6 +258,21 @@ export interface IntentInputOptions {
    *  which is the behaviour before the accumulator and never the intended
    *  one. */
   lineHeight?: () => number
+  /** Whether an UNCLAIMED keyboard is this element's to read
+   *  (nocx-1ebrs.66.1.19).
+   *
+   *  A keydown delivered while nothing in the document holds the keyboard is
+   *  dispatched at the body, and no element hears it: there is nothing for
+   *  the character that follows it to be inserted into. Whether that
+   *  keystroke BELONGS to the program is a product question — is this the
+   *  active pane, is an overlay up, does the program own the keyboard right
+   *  now — and the product answers it here. What the key MEANS stays this
+   *  element's answer, exactly as for a keydown that lands on it (AD-8: one
+   *  owner per input, and this element is the owner of the reading).
+   *
+   *  Absent means the element never adopts: a surface that is not the
+   *  keyboard's fallback must not become one. */
+  mayAdoptUnclaimedKey?: (e: KeyboardEvent) => boolean
 }
 
 const MOUSE_BUTTONS: Readonly<Record<number, string>> = {
@@ -268,6 +295,7 @@ export class IntentInput {
     ((clientX: number, clientY: number) => { x: number; y: number } | null) | null
   private readonly mouseTracking: (() => boolean) | null
   private readonly lineHeight: (() => number) | null
+  private readonly mayAdoptUnclaimedKey: ((e: KeyboardEvent) => boolean) | null
   private readonly listeners: Array<() => void> = []
 
   /** The wheel's running total per axis, in CSS pixels, and the tracking state
@@ -312,6 +340,7 @@ export class IntentInput {
     this.cellAt = options.cellAt ?? null
     this.mouseTracking = options.mouseTracking ?? null
     this.lineHeight = options.lineHeight ?? null
+    this.mayAdoptUnclaimedKey = options.mayAdoptUnclaimedKey ?? null
 
     const element = createTerminalInput()
     this.element = element
@@ -331,6 +360,12 @@ export class IntentInput {
     this.listen(element, 'compositionend', (e) => this.onCompositionEnd(e as CompositionEvent))
     this.listen(element, 'focus', () => this.emit({ kind: 'focus', payload: 'in' }))
     this.listen(element, 'blur', () => this.emit({ kind: 'focus', payload: 'out' }))
+    // A keystroke can be delivered while the keyboard has no owner at all;
+    // see mayAdoptUnclaimedKey and onUnclaimedKeydown. Registered only when
+    // the product has said such a keyboard can be this element's.
+    if (this.mayAdoptUnclaimedKey !== null) {
+      this.listen(document, 'keydown', (e) => this.onUnclaimedKeydown(e as KeyboardEvent))
+    }
     this.listenPointer()
   }
 
@@ -435,6 +470,55 @@ export class IntentInput {
     // the focus out of the pane.
     e.preventDefault()
     this.emit(intent)
+  }
+
+  /** A keydown the DOCUMENT delivered to nobody: no element held the
+   *  keyboard, so the browser dispatched it at the body and there is no
+   *  target for the character that follows (nocx-1ebrs.66.1.19).
+   *
+   *  BUBBLE PHASE, and registered after the pane's own document listeners on
+   *  purpose: a chord one of them took (Ctrl+C addressed to the running block,
+   *  the copy chord, the target chord) is already prevented, and a key another
+   *  surface owns must not be read a second time here.
+   *
+   *  The three conditions are the ones the product's predicate cannot see:
+   *  that the event was not already claimed, that it did not land on this
+   *  element, and that the keyboard really is unclaimed. */
+  private onUnclaimedKeydown(e: KeyboardEvent): void {
+    if (e.defaultPrevented) return
+    if (e.target === this.element) return
+    const holder = document.activeElement
+    if (holder !== null && holder !== document.body && holder !== document.documentElement) return
+    if (this.mayAdoptUnclaimedKey?.(e) !== true) return
+    this.adoptUnclaimedKey(e)
+  }
+
+  /** Read a keydown that reached no element as if it had reached this one.
+   *
+   *  THE KEYBOARD COMES WITH THE KEY: one focus, and every keystroke after
+   *  this one is read by the element's own listener, so nothing is adopted
+   *  twice and nothing has to be adopted again. */
+  private adoptUnclaimedKey(e: KeyboardEvent): void {
+    this.focus()
+    const text = textOfUnclaimedKey(e)
+    if (text !== null) {
+      // Nothing follows this keydown with an `input` event: it was routed at
+      // the body, so the character it would have inserted has nowhere to
+      // land. Emitting it here is the text intent the input event would have
+      // produced — and the default is prevented so a second copy cannot land
+      // in the element that was just focused.
+      e.preventDefault()
+      this.suppressText = false
+      this.freshKeySinceCommit = true
+      this.emit({ kind: 'text', payload: text })
+      return
+    }
+    // Everything else means what it means ON the element: a named key or a
+    // Ctrl/Meta chord becomes a key intent (and is prevented), the physical
+    // paste chord is left to the browser — whose default now pastes into the
+    // element this key focused — and a dead key or a composition is left
+    // alone.
+    this.onKeydown(e)
   }
 
   private onInput(e: Event): void {

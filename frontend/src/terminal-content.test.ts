@@ -6650,6 +6650,175 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('keys typed at an unclaimed keyboard during the submit reach the pty BEHIND it (nocx-1ebrs.66.1.19)', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, visibleBeforeMount: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const session = sessionOf(content)
+      const input = intentElementOf(content)
+      /** What the program receives as INPUT, in the order it was produced.
+       *  The focus reports are events a program sees too, but the subject
+       *  here is the bytes: a keystroke that reached <body> and one that
+       *  reached the grid must be indistinguishable at the pty. */
+      const sent = (): unknown[] => session.intent.mock.calls.filter((call) => call[0] !== 'focus')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(document.activeElement).toBe(input)
+      // The commit's handoff does not survive the round trip: the editor's
+      // display:none host and the live region's move are focus-changing DOM
+      // operations, and on WebKit either can land AFTER the synchronous
+      // focus. What is left is a keyboard nobody owns, and no repair until
+      // the running fact — which is the other end of this RPC
+      // (nocx-1ebrs.66.1.19).
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+
+      // THE PERSON TYPES. This keydown is delivered at <body>, so no element
+      // reads it and NO INPUT EVENT FOLLOWS: the character exists only in
+      // this event. Losing it is the defect — the letters go and the Enter
+      // after them stays, so a program reading stdin is answered with an
+      // empty line, silently.
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'h', code: 'KeyH', bubbles: true, cancelable: true }),
+      )
+      // The keyboard came with the key, so what follows is ordinary typing.
+      typeIntoPane(content, 'i', '\r')
+
+      // Held, all of it: the command it answers has not been sent yet, and
+      // the answer must not arrive before the question. (The one intent so
+      // far is the commit's own handoff focus — not input.)
+      expect(sent()).toEqual([])
+      expect(session.send).not.toHaveBeenCalled()
+
+      resolveAttempt({
+        id: 'att-read',
+        domain: 'd1',
+        state: 'open',
+        command: 'read x',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        submitId: submitToken(client),
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      // Behind the command, in the order they were produced — the focus
+      // reports included, because they are what the program would have seen
+      // had the keyboard never been dropped.
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('a key typed after the running fact reaches the pty when the keyboard is dropped again (nocx-1ebrs.66.1.19)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, visibleBeforeMount: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      const session = sessionOf(content)
+      const input = intentElementOf(content)
+      /** What the program receives as INPUT, in the order it was produced.
+       *  The focus reports are events a program sees too, but the subject
+       *  here is the bytes: a keystroke that reached <body> and one that
+       *  reached the grid must be indistinguishable at the pty. */
+      const sent = (): unknown[] => session.intent.mock.calls.filter((call) => call[0] !== 'focus')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+        ]),
+      )
+
+      // The command is running and the fact reclaimed the keyboard — that is
+      // 66.1.16's repair, and it works. What it cannot cover is the SAME
+      // focus drop arriving after it: one more display:none or live-region
+      // move, and no further fact is coming to repair anything
+      // (nocx-1ebrs.66.1.19).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-0',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'read x',
+        },
+      })
+      expect(document.activeElement).toBe(input)
+
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'h', code: 'KeyH', bubbles: true, cancelable: true }),
+      )
+      typeIntoPane(content, 'i', '\r')
+
+      // Routed, not buffered: nothing is in flight, so the keys are the
+      // program's the moment they are typed. The out/in pair is not noise —
+      // it is the program being told the keyboard came back.
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('keeps session intents ordered when the control call is still in flight', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard())
     try {

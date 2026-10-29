@@ -45,6 +45,47 @@ test.describe('enhanced input raw routing', () => {
     })
   })
 
+  // nocx-1ebrs.66.1.19: the residual of 66.1.16. That fix reclaims the keyboard
+  // when the lifecycle publishes `running`; between the submit and that fact the
+  // pane still relies on the focus handoff the commit makes synchronously, and
+  // the same commit's display:none host (and the live region's move) can undo it
+  // on WebKit. A letter typed in that window reaches <body> and is gone while the
+  // Enter after it is kept — the command never sees the answer a person typed.
+  //
+  // THIS TEST DOES NOT WAIT FOR FOCUS, and that is its subject: the assertion is
+  // that the keys reach the program wherever the keyboard happens to be. The
+  // unclaimed state is made certain rather than hoped for — on WebKit it is what
+  // the engine's own timing produces, and a test that waited for the accident
+  // would be the test that stopped exercising the window.
+  test('keys typed while the keyboard is unclaimed still reach the program', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+
+    await promptReady(page)
+
+    await page.keyboard.type('read x; printf \'got-%s\\n\' "$x"')
+    await page.keyboard.press('Enter')
+
+    // The keyboard was handed to the grid at commit; take it away again before
+    // the running fact lands, exactly as a display:none host or the live
+    // region's move does. NO FOCUS GATE AFTER THIS — the person believes the
+    // keys are theirs, and the product is what has to be right about it.
+    await page.evaluate(() => {
+      const holder = document.activeElement
+      if (holder instanceof HTMLElement) holder.blur()
+    })
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+
+    await page.keyboard.type('hello')
+    await page.keyboard.press('Enter')
+
+    // The completed block proves `read` saw the letters, not that a DOM
+    // property moved: the bytes a person typed reached the pty.
+    await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
+      timeout: 5000,
+    })
+  })
+
   test('Ctrl-C at a prompt does not trap input', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)

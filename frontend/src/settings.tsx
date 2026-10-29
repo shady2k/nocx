@@ -1537,11 +1537,20 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // Null whenever nothing is being dragged, which is every other control.
     const [dragValue, setDragValue] = createSignal<number | null>(null)
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
+    // A row is two elements and one name. The row itself is addressed by deep
+    // links and `scrollToKey`, and the control inside it is what Field's label
+    // has to name. They cannot share an id, and the label must point at the
+    // second one: `for` resolves against LABELABLE elements only, so pointing
+    // it at the row's <div> — which is what this did — bound the label to
+    // nothing and left every select and text field on this screen announced as
+    // unnamed. Field's contract is that the control inside wears `for`'s id.
+    const rowId = keyToDomId(decl.key)
+    const controlId = `${rowId}-control`
 
     return (
       <div
         class="ui-settings-row"
-        id={keyToDomId(decl.key)}
+        id={rowId}
         data-key={decl.key}
         classList={{
           'st-vis-hidden': !props.visible,
@@ -1549,7 +1558,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         }}
       >
         <Field
-          for={keyToDomId(decl.key)}
+          for={controlId}
           label={decl.label}
           labelMarker={
             // Always rendered, coloured only when modified. Under a `Show` the
@@ -1598,6 +1607,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                   that a length limit is stated, never discovered by losing
                   text to it. */}
               <TextField
+                id={controlId}
                 multiline={decl.multiline === true}
                 // A setting's paragraph is always prose. The kit's default
                 // is verbatim because its first caller pastes a private
@@ -1641,6 +1651,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
             <Show when={decl.control === 'number' && decl.slider !== true}>
               <TextField
+                id={controlId}
                 type="number"
                 value={displayValue(eff(), decl)}
                 min={decl.min}
@@ -1658,6 +1669,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
             <Show when={decl.control === 'select'}>
               <Select
+                id={controlId}
                 value={displayValue(eff(), decl)}
                 onChange={(v) => void saveSetting(decl.key, v)}
                 options={decl.options ?? []}

@@ -3060,6 +3060,11 @@ export class TerminalContent extends BasePaneContent {
           this.handleSnippetChord()
           return true
         },
+        // WHILE THE PROGRAM OWNS THE KEYBOARD, A KEY TYPED AT NOTHING IS THE
+        // PROGRAM'S (nocx-1ebrs.66.1.19). The pane answers WHO may read an
+        // unclaimed keyboard; the element answers what the key means, as it
+        // does for every other key (AD-8).
+        mayAdoptUnclaimedKey: (e) => this.adoptsUnclaimedKeys(e),
       })
       this.scrollback.mountTarget.append(intentInput.element)
       this._intentInput = intentInput
@@ -8874,6 +8879,44 @@ export class TerminalContent extends BasePaneContent {
    *  (IntentInput.focus). */
   private takeKeyboardToGridAfterSubmit(): void {
     if (this.keyboardOnGridOrUnclaimed()) this.takeKeyboardToGrid()
+  }
+
+  /** Whether a key typed at an UNCLAIMED keyboard belongs to the program
+   *  (nocx-1ebrs.66.1.19).
+   *
+   *  `keyboardOnGridOrUnclaimed` answers WHO holds the keyboard; this answers
+   *  whether the pane may ACT on it — the ownership half of the adoption rule
+   *  whose meaning half stays in IntentInput (AD-8).
+   *
+   *  The composer is the prompt's owner, so while it is on screen the keys
+   *  are the editor's and nothing is adopted here. While it is off screen the
+   *  program owns the keyboard, and this pane is entitled to the keys for
+   *  exactly the span a submitted command crosses: the submit window, whose
+   *  intents are held behind the command, and the command's own run. A REPAIR
+   *  CANNOT COVER THAT SPAN — `takeKeyboardToGridAfterSubmit` re-takes the
+   *  focus at the running fact, but the focus-losing DOM operation (a
+   *  display:none host, the live region's move) can land after it, and no
+   *  further fact comes to repair anything. Adopting the keys is what does
+   *  not depend on winning that race.
+   *
+   *  Overlays keep their own keyboard (ui/overlay/stack), and an inactive tab
+   *  is not addressed at all.
+   *
+   *  TWO CHORDS ARE NOT THE PROGRAM'S HERE, because the pane answers for them
+   *  from ANY focus: Ctrl+C is addressed to the running block by
+   *  `_globalKeydown`, and a Meta chord is the platform's (the copy chord, the
+   *  browser's own paste and edit gestures). One of those arriving unprevented
+   *  is a DECISION, not a gap — Ctrl+C over a live selection is a copy the
+   *  pane deliberately left to the browser — and reading it here would make
+   *  the program the second owner of one keystroke (AGENTS.md). Every other
+   *  Ctrl chord is the terminal's, exactly as it is when the grid has focus. */
+  private adoptsUnclaimedKeys(e: KeyboardEvent): boolean {
+    if (!this._active) return false
+    if (hasOpenOverlays()) return false
+    if (this.editor?.isVisible !== false) return false
+    if (e.metaKey) return false
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) return false
+    return this._heldRaw !== null || this.hasRunningCommand()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before

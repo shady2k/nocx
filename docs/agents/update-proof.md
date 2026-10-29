@@ -146,6 +146,18 @@ with neither an `id` nor an `aria-label` is announced unnamed, and
 found that the Update-channel row's label pointed at the row instead of at the
 control.
 
+Announced is not the same as reachable, and listed is not the same as chosen.
+The rail holds more rows than the default 1024x768 window shows, so its last
+rows are in the tree, `FOCUSABLE`, and not `SHOWING`; `rail_click` asks the
+engine to focus the row first, which is what Tab does and which scrolls the
+rail to it (measured on WebKitGTK 2.52), and refuses with the rail's own
+reading if that does not put the row on screen. A `<select>` exposes every
+option as a menu item at all times, so a row named Nightly proves nothing; the
+channel is the row the combo marks `SELECTED`, which is what
+`channel_settled` waits for. Both rules live in `controls.py`, with unit
+checks that need no display, so a future change to them fails somewhere other
+than a 20-minute nightly job.
+
 ## Shared macOS evidence collector
 
 `common.py` is consumed by the macOS proof. It contains no UI driver or updater:

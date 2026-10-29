@@ -432,6 +432,27 @@ the run that passed is the one that got lucky. Never "fix" it by widening a time
 adding a retry — that converts a report into silence, which is the failure mode the testing
 rules exist to prevent.
 
+**A known flake is quarantined by its bead, never by a retry**
+([ADR-xf4p9fzd](docs/decisions/xf4p9fzd-a-flaky-test-is-quarantined-by-its-open-bead.md)).
+File the flake, then add `{test, bead}` to `docs/testing/quarantine.json` with the key the
+suite printed (`go:<TestName>` or `e2e:<spec> › <title path>`, no line numbers). The
+promotion then accepts a red job whose every failed test is quarantined by a bead that is
+still open; closing the bead ends the protection by itself. The entry is not the fix — the
+bead still has to be worked, under every rule above. Measured 2026-10-29: 17 flakes fixed in
+one day and a fully green product run about one in five, which is what roughly 340 e2e tests
+at half a percent each predict.
+
+**After an asynchronous action, assert through a waiting matcher on what that action
+produces, never by reading a value once.** Eight of that day's seventeen were tests, not
+products, and all eight had this shape: sleeping one poll interval when the next poll is due
+two intervals later; counting notifications the moment the record that precedes them landed;
+reading `document.activeElement` in one browser round trip and typing in the next while the
+product's focus repair ran between them; reading the activity bar before the app had
+connected. No `sleep` appears in any of them — which is why "a test may not depend on timing"
+did not catch them. The rule is about the moment, not the clock: `expect(locator).toHave…`,
+`waitFor`, `waittest.WaitFor` on the observable the action causes, and an assertion about a
+premise made at the event that consumes it.
+
 **When you genuinely cannot fix it in this session** — the cause sits in a package another
 worker is mid-flight in, or the fix is an epic — say that IN THOSE WORDS, with what you
 found, what is left and what it would take, and ask. That is a report. "Not ours" is not.

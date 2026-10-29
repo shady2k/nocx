@@ -9,6 +9,7 @@ import {
   isNewerVersion,
   prepareStable,
   readKeyring,
+  signedRunNumber,
   signingKey,
   updateCask,
   verifyCandidate,
@@ -144,8 +145,9 @@ async function collect(directory, github) {
   const nightlyBody = readFileSync(join(source, 'nightly.json'))
   verifySignature(nightlyBody, readFileSync(join(source, 'nightly.json.sig'), 'utf8'), keys)
   const nightly = JSON.parse(nightlyBody)
-  fail(Number.isSafeInteger(nightly.runId) && nightly.runId > 0, 'invalid nightly workflow run id')
-  const run = github.api(`repos/${repo}/actions/runs/${nightly.runId}`)
+  const runId = signedRunNumber(nightly.runId)
+  fail(runId !== undefined, 'invalid nightly workflow run id')
+  const run = github.api(`repos/${repo}/actions/runs/${runId}`)
   // Download by an explicit authenticated inventory, never a mutable alias or build output.
   fail(Array.isArray(nightly.artifacts), 'missing nightly artifact inventory')
   for (const { name } of nightly.artifacts) {

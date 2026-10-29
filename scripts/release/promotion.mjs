@@ -30,6 +30,17 @@ function rawBase64(text, size, name) {
   return bytes
 }
 
+// The nightly producer signs its workflow run id and attempt as the decimal
+// strings GitHub hands it in GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT
+// (publish-nightly.mjs). The signed provenance is the contract, so this reads
+// that form and nothing else: a number here would be a document the producer
+// never wrote.
+export function signedRunNumber(value) {
+  const ok =
+    typeof value === 'string' && /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))
+  return ok ? Number(value) : undefined
+}
+
 // The candidate's Go keyring is the source of truth. No second public-key list.
 export function readKeyring(source) {
   const block = /var releaseKeys = \[\]string\{([\s\S]*?)\n\}/.exec(source)?.[1]
@@ -242,10 +253,10 @@ export function verifyCandidate(input) {
     `v${version} is not newer than stable v${input.previousVersion}`,
   )
   requireThat(
-    Number.isSafeInteger(nightly.runId) &&
-      Number.isSafeInteger(nightly.runAttempt) &&
-      run?.id === nightly.runId &&
-      run.run_attempt === nightly.runAttempt &&
+    signedRunNumber(nightly.runId) !== undefined &&
+      signedRunNumber(nightly.runAttempt) !== undefined &&
+      run?.id === signedRunNumber(nightly.runId) &&
+      run.run_attempt === signedRunNumber(nightly.runAttempt) &&
       run.head_sha === sha &&
       run.head_branch === 'main' &&
       ['schedule', 'workflow_dispatch'].includes(run.event) &&

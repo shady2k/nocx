@@ -65,8 +65,9 @@ function fixture(t) {
     sha,
     version,
     tag,
-    runId: 42,
-    runAttempt: 1,
+    // The producer's own shape (publish-nightly.mjs): GitHub's env strings.
+    runId: '42',
+    runAttempt: '1',
     artifacts: [...payloads, 'manifest.json', 'manifest.json.sig'].map(describe),
   }
   const nightlyBody = Buffer.from(JSON.stringify(nightly))
@@ -170,6 +171,26 @@ test('a verified candidate promotes the exact payload bytes and signs the stable
     plan.macSHA256,
     digest(readFileSync(join(source, 'nocx-0.8.0-darwin-universal.zip'))),
   )
+})
+
+test('the signed run id and attempt are read in the form the producer signs them', (t) => {
+  const { input } = fixture(t)
+  assert.doesNotThrow(() => verifyCandidate(input))
+  for (const [field, value] of [
+    ['runId', 42],
+    ['runId', '042'],
+    ['runId', '4.2'],
+    ['runId', ''],
+    ['runId', 'x42'],
+    ['runId', String(2 ** 60)],
+    ['runAttempt', 1],
+    ['runAttempt', '0'],
+  ]) {
+    const { input: changed, nightly } = fixture(t)
+    nightly[field] = value
+    resign(changed, nightly)
+    assert.throws(() => verifyCandidate(changed), /nightly/i, `${field} ${JSON.stringify(value)}`)
+  }
 })
 
 test('an unverified nightly and mismatched commit/run/attempt are refused', (t) => {

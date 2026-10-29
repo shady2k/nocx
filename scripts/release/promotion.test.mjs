@@ -11,6 +11,8 @@ import {
   verifyFiles,
   verifyCI,
   updateCask,
+  failedTests,
+  readQuarantine,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
@@ -65,8 +67,9 @@ function fixture(t) {
     sha,
     version,
     tag,
-    runId: 42,
-    runAttempt: 1,
+    // The producer's own shape (publish-nightly.mjs): GitHub's env strings.
+    runId: '42',
+    runAttempt: '1',
     artifacts: [...payloads, 'manifest.json', 'manifest.json.sig'].map(describe),
   }
   const nightlyBody = Buffer.from(JSON.stringify(nightly))
@@ -170,6 +173,26 @@ test('a verified candidate promotes the exact payload bytes and signs the stable
     plan.macSHA256,
     digest(readFileSync(join(source, 'nocx-0.8.0-darwin-universal.zip'))),
   )
+})
+
+test('the signed run id and attempt are read in the form the producer signs them', (t) => {
+  const { input } = fixture(t)
+  assert.doesNotThrow(() => verifyCandidate(input))
+  for (const [field, value] of [
+    ['runId', 42],
+    ['runId', '042'],
+    ['runId', '4.2'],
+    ['runId', ''],
+    ['runId', 'x42'],
+    ['runId', String(2 ** 60)],
+    ['runAttempt', 1],
+    ['runAttempt', '0'],
+  ]) {
+    const { input: changed, nightly } = fixture(t)
+    nightly[field] = value
+    resign(changed, nightly)
+    assert.throws(() => verifyCandidate(changed), /nightly/i, `${field} ${JSON.stringify(value)}`)
+  }
 })
 
 test('an unverified nightly and mismatched commit/run/attempt are refused', (t) => {
@@ -307,6 +330,27 @@ test('stable cask pins the promoted zip and preserves unrelated cask text; malfo
   )
 })
 
+test('a release key whose base64 holds "//" is read whole, beside a real comment', async () => {
+  const { readKeyring } = await import('./promotion.mjs')
+  // Base64 uses "/", so roughly one key in a hundred contains "//". Draw keys
+  // until one does: the outcome is fixed even though the key is not.
+  let raw
+  do {
+    raw = generateKeyPairSync('ed25519')
+      .publicKey.export({ format: 'der', type: 'spki' })
+      .subarray(-32)
+      .toString('base64')
+  } while (!raw.includes('//'))
+  const keys = readKeyring(
+    `package update\nvar releaseKeys = []string{\n\t// a comment // with slashes\n\t"${raw}", // trailing\n}\n`,
+  )
+  assert.equal(keys.length, 1)
+  assert.equal(
+    keys[0].export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
+    raw,
+  )
+})
+
 test('candidate keyring and seed interoperate with the raw detached Ed25519 contract', async () => {
   const { readKeyring, signingKey, verifySignature } = await import('./promotion.mjs')
   const rawPublic = publicKey
@@ -431,4 +475,119 @@ test('a signed manifest with wrong platform metadata is refused before stable re
     resign(input, nightly)
     assert.throws(() => verifyCandidate(input), /tuples/)
   }
+})
+
+// Real log lines (CI runs 40866954718 and 40893969284, 2026-10-29), with the
+// timestamp prefix the jobs/logs endpoint adds and Playwright's trailing rule.
+const goLog =
+  '2026-10-29T08:51:12.1Z === RUN   TestZshAgentWrapperCancelsTheLaunchOnCtrlC\n' +
+  '2026-10-29T08:51:23.8Z --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC (11.67s)\n' +
+  '2026-10-29T08:51:23.8Z     --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC/sub (0.1s)\n' +
+  '2026-10-29T08:51:24.0Z FAIL\tgithub.com/shady2k/nocx/internal/app\t300.1s\n'
+const e2eLog =
+  '2026-10-29T13:01:02.0Z   1) [webkit] › e2e/ask-attaches-the-frozen-screen.spec.ts:218:5 › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask ─────────\n' +
+  '2026-10-29T13:01:02.1Z     Error: fake-openai: timed out waiting for 2 request(s)\n'
+const askKey =
+  'e2e:e2e/ask-attaches-the-frozen-screen.spec.ts › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask'
+
+test('a failed job log names its failed tests in the quarantine key form, and nothing else', () => {
+  assert.deepEqual(failedTests(goLog), ['go:TestZshAgentWrapperCancelsTheLaunchOnCtrlC'])
+  assert.deepEqual(failedTests(e2eLog), [askKey])
+  assert.deepEqual(failedTests('2026-10-29T00:00:00Z panic: test timed out after 10m0s\n'), [])
+})
+
+test('only an open bead quarantines; a closed one protects nothing; an unknown one refuses', () => {
+  const issues = [
+    { id: 'nocx-a', status: 'open' },
+    { id: 'nocx-b', status: 'submitted' },
+    { id: 'nocx-c', status: 'closed' },
+  ]
+    .map((row) => JSON.stringify(row))
+    .join('\n')
+  const doc = (tests) => JSON.stringify({ schema: 1, tests })
+  assert.deepEqual(readQuarantine(undefined, issues), {})
+  assert.deepEqual(
+    readQuarantine(
+      doc([
+        { test: 'go:TestA', bead: 'nocx-a' },
+        { test: askKey, bead: 'nocx-b' },
+        { test: 'go:TestC', bead: 'nocx-c' },
+      ]),
+      issues,
+    ),
+    { 'go:TestA': 'nocx-a', [askKey]: 'nocx-b' },
+  )
+  assert.throws(() => readQuarantine(doc([{ test: 'go:TestA', bead: 'nocx-z' }]), issues), /exist/)
+  assert.throws(() => readQuarantine(doc([{ test: 'TestA', bead: 'nocx-a' }]), issues), /entry/)
+  assert.throws(() => readQuarantine('{"schema":2,"tests":[]}', issues), /quarantine/)
+})
+
+test('a red required job passes only on quarantined tests or a retry that classified an infrastructure flake', (t) => {
+  const { input } = fixture(t)
+  const base = structuredClone(input.ci[0])
+  const red = (mutate) => {
+    const entry = structuredClone(base)
+    entry.run.conclusion = 'failure'
+    entry.run.run_attempt = 2
+    const failedIndex = entry.jobs.findIndex((job) => job.name === 'ci-e2e (webkit, 2)')
+    entry.jobs[failedIndex] = { ...entry.jobs[failedIndex], conclusion: 'failure' }
+    entry.quarantine = { [askKey]: 'nocx-b' }
+    entry.attempts = [
+      { attempt: 1, jobs: structuredClone(entry.jobs) },
+      { attempt: 2, jobs: structuredClone(entry.jobs) },
+    ]
+    for (const attempt of entry.attempts) attempt.jobs[failedIndex].failures = [askKey]
+    mutate(entry, failedIndex)
+    return [entry]
+  }
+  // Every failure is a quarantined test: green.
+  verifyCI(red(() => {}))
+  // A test no open bead owns: red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          e.attempts[1].jobs[i].failures = [askKey, 'go:TestOther']
+        }),
+      ),
+    /quarantines/,
+  )
+  // A failure that names no test and never passed: red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          for (const a of e.attempts) a.jobs[i].failures = []
+        }),
+      ),
+    /never passed/,
+  )
+  // The same unnamed failure, but the job passed in another attempt: green.
+  verifyCI(
+    red((e, i) => {
+      e.attempts[0].jobs[i] = { ...e.attempts[0].jobs[i], conclusion: 'success' }
+      delete e.attempts[0].jobs[i].failures
+      e.attempts[1].jobs[i].failures = []
+    }),
+  )
+  // A cancelled job is never a flake.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          e.attempts[1].jobs[i].conclusion = 'cancelled'
+        }),
+      ),
+    /not green/,
+  )
+  // Without the attempts the collector reads, a red job stays red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e) => {
+          delete e.attempts
+        }),
+      ),
+    /not green/,
+  )
 })

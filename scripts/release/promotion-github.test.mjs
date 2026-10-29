@@ -132,6 +132,34 @@ test('CI adapter refuses API errors, uncovered main commits, foreign PRs, no CI,
   }
 })
 
+test('a red CI run is read whole: earlier attempts and each failed job log, quarantine attached', async () => {
+  const f = fixture()
+  f.run.conclusion = 'failure'
+  f.run.run_attempt = 2
+  const latest = f.jobs.map((job, i) => ({ ...job, id: 100 + i }))
+  latest[0] = { ...latest[0], conclusion: 'failure' }
+  const first = latest.map((job) => ({ ...job, id: job.id + 50 }))
+  f.responses.set(`repos/${repo}/actions/runs/22/attempts/2/jobs`, latest)
+  f.responses.set(`repos/${repo}/actions/runs/22/attempts/1/jobs`, first)
+  const logs = []
+  f.options.github.gh = (args) => {
+    logs.push(args.join(' '))
+    return '2026-10-29T00:00:00Z --- FAIL: TestFlaky (1.0s)\n'
+  }
+  f.options.quarantine = { 'go:TestFlaky': 'nocx-x' }
+  const [entry] = await collectCI(f.options)
+  assert.deepEqual(entry.quarantine, { 'go:TestFlaky': 'nocx-x' })
+  assert.deepEqual(
+    entry.attempts.map((a) => a.attempt),
+    [1, 2],
+  )
+  assert.deepEqual(entry.attempts[1].jobs[0].failures, ['go:TestFlaky'])
+  assert.deepEqual(logs, [
+    `api repos/${repo}/actions/jobs/150/logs`,
+    `api repos/${repo}/actions/jobs/100/logs`,
+  ])
+})
+
 test('GitHub list reader follows every page and propagates a missing next page', () => {
   const calls = []
   const client = githubClient((_program, args) => {

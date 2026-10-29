@@ -6,9 +6,12 @@ import { fileURLToPath } from 'node:url'
 import {
   authorize,
   ciJobNames,
+  failedTests,
   isNewerVersion,
   prepareStable,
   readKeyring,
+  readQuarantine,
+  signedRunNumber,
   signingKey,
   updateCask,
   verifyCandidate,
@@ -37,7 +40,14 @@ export function githubClient(run = execFileSync) {
   return { gh, api, pages }
 }
 
-export async function collectCI({ repo, commits, github, loadWorkflow, touchesProduct }) {
+export async function collectCI({
+  repo,
+  commits,
+  github,
+  loadWorkflow,
+  touchesProduct,
+  quarantine = {},
+}) {
   fail(commits.length > 0, 'CI: promoted range is empty')
   const evidence = []
   const seen = new Set()
@@ -84,6 +94,34 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
       jobs,
       requiredJobs: ciJobNames(loadWorkflow(pr.head.sha)),
     }
+    // A run that is not plainly green is read whole: every attempt, and the
+    // log of every failed job, so the policy can tell a quarantined flake
+    // from a real failure (promotion.mjs verifyCI).
+    if (run.conclusion !== 'success' || jobs.some((job) => job.conclusion !== 'success')) {
+      entry.quarantine = quarantine
+      entry.attempts = []
+      for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
+        const attemptJobs =
+          attempt === run.run_attempt
+            ? jobs
+            : github.pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
+        entry.attempts.push({
+          attempt,
+          jobs: attemptJobs.map((job) => ({
+            name: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            ...(job.conclusion === 'failure'
+              ? {
+                  failures: failedTests(
+                    github.gh(['api', `repos/${repo}/actions/jobs/${job.id}/logs`]),
+                  ),
+                }
+              : {}),
+          })),
+        })
+      }
+    }
     verifyCI([entry])
     evidence.push(entry)
   }
@@ -92,6 +130,14 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
 
 const git = (...args) =>
   execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+// The quarantine is optional: a commit with no file quarantines nothing.
+const showIfPresent = (sha, path) => {
+  try {
+    return git('show', `${sha}:${path}`)
+  } catch {
+    return undefined
+  }
+}
 const readJSON = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const saveJSON = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 
@@ -144,8 +190,9 @@ async function collect(directory, github) {
   const nightlyBody = readFileSync(join(source, 'nightly.json'))
   verifySignature(nightlyBody, readFileSync(join(source, 'nightly.json.sig'), 'utf8'), keys)
   const nightly = JSON.parse(nightlyBody)
-  fail(Number.isSafeInteger(nightly.runId) && nightly.runId > 0, 'invalid nightly workflow run id')
-  const run = github.api(`repos/${repo}/actions/runs/${nightly.runId}`)
+  const runId = signedRunNumber(nightly.runId)
+  fail(runId !== undefined, 'invalid nightly workflow run id')
+  const run = github.api(`repos/${repo}/actions/runs/${runId}`)
   // Download by an explicit authenticated inventory, never a mutable alias or build output.
   fail(Array.isArray(nightly.artifacts), 'missing nightly artifact inventory')
   for (const { name } of nightly.artifacts) {
@@ -174,10 +221,15 @@ async function collect(directory, github) {
     .filter(Boolean)
   // This is CI's own classifier, shared with nightly (not copied into promotion).
   const { touchesProduct } = await import('../product-change.mjs')
+  const quarantine = readQuarantine(
+    showIfPresent(sha, 'docs/testing/quarantine.json'),
+    git('show', `${sha}:.beads/issues.jsonl`),
+  )
   const ci = await collectCI({
     repo,
     commits,
     github,
+    quarantine,
     touchesProduct,
     loadWorkflow: (head) => {
       git('fetch', '--no-tags', 'origin', head)

@@ -81,6 +81,10 @@ type methodSpec struct {
 	method     string
 	submission control.Submission
 	build      func(w *wsConn, state *connState, r Responder) handlerFunc
+	// key optionally extracts the authoritative ordering key from validated
+	// params. Keyed methods validate before admission, so both the validator
+	// and extractor must do bounded, nonblocking ingress work.
+	key func(json.RawMessage) string
 	// available reports whether the method can answer at all — the domain
 	// it belongs to is wired. Optional: nil means "always available", which
 	// is true of most methods. Where it is NOT nil it is consulted BEFORE
@@ -202,6 +206,7 @@ func validateParams(v paramsValidator, raw json.RawMessage) string {
 type controlMethod struct {
 	submission control.Submission
 	handle     func(ctx context.Context, req jsonrpcRequest)
+	key        func(json.RawMessage) (string, *RPCError)
 }
 
 // buildMethodSpecs validates and indexes the registration set. It rejects
@@ -260,41 +265,53 @@ func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[s
 	for name, spec := range specs {
 		norm := newSealedNormalizer(w)
 		next := spec.build(w, state, norm)
-		m[name] = controlMethod{
+		method := controlMethod{
 			submission: spec.submission,
 			handle:     validated(spec, next, w),
 		}
+		if spec.key != nil {
+			// Validate once, before key allocation/admission rather than in
+			// the worker. Ownership remains a handler-time decision.
+			method.handle = next
+			method.key = func(raw json.RawMessage) (string, *RPCError) {
+				if refusal := paramsRefusal(spec, raw); refusal != nil {
+					return "", refusal
+				}
+				return spec.key(raw), nil
+			}
+		}
+		m[name] = method
 	}
 	return m
 }
 
-// validated is the params middleware: every control handler is wrapped in it,
-// here, at the one place a connection's handler set is built. A handler
-// therefore cannot be reached with params nobody checked — not because the
-// author remembered, but because there is no path around this function.
-//
-// A refusal is -32602 with the validator's message, answered before the
-// handler is entered, so a rejected request never touches a store, a vault or
-// a socket.
+// validated applies the shared params/availability gate on the worker for
+// ordinary methods. Keyed methods apply the same gate before admission, so a
+// rejected request never allocates ordering state. Both paths are wired by
+// connMethods: no handler is reachable without validation.
 func validated(spec methodSpec, next handlerFunc, r Responder) handlerFunc {
 	return func(ctx context.Context, req jsonrpcRequest) {
-		// Availability first. A method whose domain is not wired answers
-		// "method not found" whatever it was sent: the caller's next move is
-		// to stop calling it, not to fix its arguments.
-		if spec.available != nil && !spec.available() {
-			msg := spec.unavailableMessage
-			if msg == "" {
-				msg = "Method not found"
-			}
-			_ = r.TryError(req.ID, RPCError{Code: -32601, Message: msg})
-			return
-		}
-		if msg := validateParams(spec.validate, req.Params); msg != "" {
-			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+		if refusal := paramsRefusal(spec, req.Params); refusal != nil {
+			_ = r.TryError(req.ID, *refusal)
 			return
 		}
 		next(ctx, req)
 	}
+}
+
+func paramsRefusal(spec methodSpec, raw json.RawMessage) *RPCError {
+	// Availability first: an unwired method has nothing to say about params.
+	if spec.available != nil && !spec.available() {
+		msg := spec.unavailableMessage
+		if msg == "" {
+			msg = "Method not found"
+		}
+		return &RPCError{Code: -32601, Message: msg}
+	}
+	if msg := validateParams(spec.validate, raw); msg != "" {
+		return &RPCError{Code: -32602, Message: "Invalid params: " + msg}
+	}
+	return nil
 }
 
 // handlerFunc is the per-connection form of a control handler: the request

@@ -28,6 +28,46 @@
     {
       "test": "job:ci-backlog#557",
       "bead": "nocx-1ebrs.66.1.32"
+    },
+    {
+      "test": "e2e:e2e/running-block-body-seam.spec.ts › the body of a running block that has outgrown its screen › keeps one row pitch across the rows the record holds and the rows still live",
+      "bead": "nocx-atpw5.1.3"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 1 › the last row of a full-height program is visible in a 800px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 1 › the last row of a full-height program is visible in a 1027px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 1.8 › the last row of a full-height program is visible in a 800px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 1.8 › the last row of a full-height program is visible in a 1027px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 2 › the last row of a full-height program is visible in a 800px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/running-grid-fits-its-clip.spec.ts › at a display ratio of 2 › the last row of a full-height program is visible in a 1027px window",
+      "bead": "nocx-kylyl"
+    },
+    {
+      "test": "e2e:e2e/composer-submit-flicker.spec.ts › the submit hand-off (nocx-1ebrs.40) › a real command departs through a fade, and the tail never detaches",
+      "bead": "nocx-atpw5.1.4"
+    },
+    {
+      "test": "e2e:e2e/block-outcome.spec.ts › the quiet ⋮ is still reachable from the keyboard",
+      "bead": "nocx-atpw5.1.2"
+    },
+    {
+      "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
+      "bead": "nocx-atpw5.1.7"
     }
   ]
 }

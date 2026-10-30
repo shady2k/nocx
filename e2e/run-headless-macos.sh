@@ -90,4 +90,9 @@ if ! diff -q "$work/home-before.tsv" "$work/home-after.tsv" >/dev/null; then
   exit 1
 fi
 echo "=== boundary intact ==="
+# A complete Playwright report does not prove the wrapper's boundary check
+# passed. Give the CI helper a positive completion signal only AFTER it did.
+if [ -n "${NOCX_QUARANTINE_WRAPPER_STATUS:-}" ]; then
+  printf '%s\n' "$status" > "$NOCX_QUARANTINE_WRAPPER_STATUS"
+fi
 exit $status

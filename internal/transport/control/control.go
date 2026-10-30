@@ -82,5 +82,9 @@ type Shutdownable interface {
 // Task is a unit of control-plane work. Run is called with the context passed
 // to TrySubmit and must return when that context is cancelled.
 type Task struct {
+	// Key is the authoritative ordering identity for a keyed submission.
+	// Other submissions ignore it. Keyed submissions require a nonempty key;
+	// the caller validates and extracts it before admission.
+	Key string
 	Run func(context.Context)
 }

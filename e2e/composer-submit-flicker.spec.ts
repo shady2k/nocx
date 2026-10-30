@@ -53,9 +53,29 @@ async function sampleAcrossSubmit(page: import('@playwright/test').Page, command
     const editor = pane.querySelector<HTMLElement>('.nocx-editor') as HTMLElement
     const area = pane.querySelector<HTMLElement>('.scrollback-area') as HTMLElement
     const inner = pane.querySelector<HTMLElement>('.scrollback-inner') as HTMLElement
-    const w = window as unknown as { __frames: unknown[]; __t0: number; __stop?: boolean }
+    const w = window as unknown as {
+      __frames: unknown[]
+      __glides: unknown[]
+      __t0: number
+      __stop?: boolean
+    }
     w.__frames = []
+    w.__glides = []
     w.__t0 = performance.now()
+    // Capture the animation at its creation: a slow compositor can paint no
+    // frame during its lifetime, even when requestAnimationFrame samples.
+    const animate = inner.animate.bind(inner)
+    inner.animate = (...args: Parameters<HTMLElement['animate']>): Animation => {
+      const animation = animate(...args)
+      const effect = animation.effect as KeyframeEffect | null
+      w.__glides.push({
+        t: +(performance.now() - w.__t0).toFixed(1),
+        disp: getComputedStyle(editor).display,
+        duration: effect?.getComputedTiming().duration,
+        transforms: effect?.getKeyframes().map((keyframe) => keyframe.transform),
+      })
+      return animation
+    }
     const sample = (): void => {
       if (w.__stop) return
       const ghost = document.querySelector('[data-nocx-motion-ghost]')
@@ -131,6 +151,14 @@ async function sampleAcrossSubmit(page: import('@playwright/test').Page, command
     frames: (await page.evaluate(
       () => (window as unknown as { __frames: unknown[] }).__frames,
     )) as Frame[],
+    glides: (await page.evaluate(
+      () => (window as unknown as { __glides: unknown[] }).__glides,
+    )) as {
+      t: number
+      disp: string
+      duration: number | string | undefined
+      transforms: (string | undefined)[]
+    }[],
   }
 }
 
@@ -177,7 +205,7 @@ test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
   }, testInfo) => {
     // Long enough that the departure completes and the panel is genuinely
     // gone for a while — the shape the owner sees on any ordinary command.
-    const { fullH, frames } = await sampleAcrossSubmit(page, 'sleep 0.4')
+    const { fullH, frames, glides } = await sampleAcrossSubmit(page, 'sleep 0.4')
     const dump = JSON.stringify(frames)
     await testInfo.attach('frames', { body: dump, contentType: 'application/json' })
     expect(frames.length, `frames sampled: ${dump}`).toBeGreaterThan(6)
@@ -271,22 +299,28 @@ test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
     // inner element has no active animations, then records another frame.
     // Its last two painted positions must therefore agree: no late scroll
     // jump after the hand-off has settled.
-    // The composer can become fully opaque before the settle glide finishes.
-    // Keep sampling through animation completion, not only through restoredAt.
-    const restoredGlideFrames = frames
-      .slice(lastAbsent + 1)
-      .filter((frame) =>
-        frame.glDurations.some((duration) => Number.isFinite(duration) && duration > 0),
-      )
+    // Inspect the restore animation when it is created, not by counting
+    // rAF samples during its lifetime. A throttled compositor can skip all
+    // intermediate paints; this checks the configured glide, not those paints.
+    const restoreGlides = glides.filter(
+      (glide) => glide.t > frames[lastAbsent].t && glide.disp !== 'none',
+    )
+    expect(restoreGlides.length, `restore glide was created: ${dump}`).toBeGreaterThan(0)
     expect(
-      restoredGlideFrames.length,
-      `scrollbackInner restore glide ran with finite nonzero duration: ${dump}`,
-    ).toBeGreaterThan(0)
-    const restoredPositions = new Set(restoredGlideFrames.map((frame) => Math.round(frame.iT)))
-    expect(
-      restoredPositions.size,
-      `restore painted changing positions while the glide was running: ${dump}`,
-    ).toBeGreaterThan(1)
+      restoreGlides.some((glide) => {
+        const [from, to] = glide.transforms
+        const offset = /^translateY\((-?[\d.]+)px\)$/.exec(from ?? '')
+        return (
+          typeof glide.duration === 'number' &&
+          Number.isFinite(glide.duration) &&
+          glide.duration > 0 &&
+          offset !== null &&
+          Math.abs(Number(offset[1])) >= 1 &&
+          to === 'translateY(0px)'
+        )
+      }),
+      `restore has a finite nonzero glide to identity: ${JSON.stringify(restoreGlides)}; all: ${dump}`,
+    ).toBe(true)
     const settledPair = frames.slice(-2)
     expect(settledPair.length, `two settled frames were recorded: ${dump}`).toBe(2)
     expect(

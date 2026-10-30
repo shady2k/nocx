@@ -1,31 +1,14 @@
 package transport
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"runtime"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/transport/control"
-	"github.com/shady2k/nocx/internal/waittest"
 )
 
-func orderedWorkerCount() int {
-	for size := 1 << 20; ; size *= 2 {
-		buf := make([]byte, size)
-		n := runtime.Stack(buf, true)
-		if n < len(buf) {
-			return bytes.Count(buf[:n], []byte("control.(*orderedSubmission).worker"))
-		}
-		if size >= 1<<28 {
-			panic("goroutine stack dump exceeded 256 MiB")
-		}
-	}
-}
-
-func TestWSServerStopStopsOrderedSubmissionWorkers(t *testing.T) {
+func TestWSServerStopDrainsSessionWorkAndRejectsNewWork(t *testing.T) {
 	ws, db, stop := newAgentWSServer(t)
 	stopped := false
 	defer func() {
@@ -33,38 +16,70 @@ func TestWSServerStopStopsOrderedSubmissionWorkers(t *testing.T) {
 			stop()
 		}
 	}()
-
-	baseline := orderedWorkerCount()
-	var sub control.Submission
-	for _, spec := range ws.methods {
-		if _, ok := spec.submission.(control.Shutdownable); ok {
-			sub = spec.submission
-			break
+	sub := ws.methods["session.intent"].submission
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
 		}
+	}()
+	if rej := sub.TrySubmit(context.Background(), control.Task{Key: "session-A", Run: func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+	}}); rej != nil {
+		t.Fatalf("submit running task: %+v", rej)
 	}
-	if sub == nil {
-		t.Fatal("server has no ordered submission")
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("admitted task never started")
 	}
-	run := make(chan struct{})
-	if rejection := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { close(run) }}); rejection != nil {
-		t.Fatalf("TrySubmit: %v", rejection)
+	queued := make(chan error, 1)
+	if rej := sub.TrySubmit(context.Background(), control.Task{Key: "session-A", Run: func(ctx context.Context) {
+		queued <- ctx.Err()
+	}}); rej != nil {
+		t.Fatalf("submit queued task: %+v", rej)
 	}
-	<-run
-	afterSubmit := orderedWorkerCount()
-	t.Logf("ordered worker family before=%d after-submit=%d", baseline, afterSubmit)
-	if afterSubmit != baseline+1 {
-		t.Fatalf("worker family count after submission = %d, want %d", afterSubmit, baseline+1)
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- ws.Stop(context.Background()) }()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not cancel admitted session work")
 	}
-
-	if err := ws.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if rej := sub.TrySubmit(context.Background(), control.Task{Key: "session-B", Run: func(context.Context) { t.Error("post-Stop work ran") }}); rej == nil {
+		t.Fatal("Stop admitted new session work")
+	}
+	select {
+	case err := <-stopResult:
+		t.Fatalf("Stop returned before admitted work drained: %v", err)
+	default:
+	}
+	close(release)
+	released = true
+	select {
+	case err := <-stopResult:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after admitted work drained")
+	}
+	select {
+	case err := <-queued:
+		if err != context.Canceled {
+			t.Fatalf("queued task context error = %v, want canceled", err)
+		}
+	default:
+		t.Fatal("Stop discarded queued admitted session work")
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("content db close: %v", err)
 	}
 	stopped = true
-	waittest.WaitForTimeoutDetail(t, "ordered worker to exit after Stop", 5*time.Second,
-		func() string { return "worker family count " + fmt.Sprint(orderedWorkerCount()) },
-		func() bool { return orderedWorkerCount() == baseline })
-	t.Logf("ordered worker family after-stop=%d", orderedWorkerCount())
 }

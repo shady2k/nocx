@@ -71,7 +71,7 @@ func (p *blockingProcess) awaitEntered(t *testing.T) {
 // blocked, and every one after it, since the gate stays closed only once.
 func (p *blockingProcess) release() { p.once.Do(func() { close(p.gate) }) }
 
-// WaitReadable and RawReadUntilAgain give blockingProcess a read barrier
+// WaitReadable and RawReadChunk give blockingProcess a read barrier
 // (nocx-6q1uh.15): the [rawReader] shape hasReadBarrier (owner_ssh.go)
 // requires, over the same "serve the script, then park" read behaviour
 // scriptedProcess.Read already has. Every intent-bearing test in this file
@@ -100,19 +100,19 @@ func (p *blockingProcess) WaitReadable(ctx context.Context) error {
 	}
 }
 
-func (p *blockingProcess) RawReadUntilAgain(_ []byte, deliver func([]byte)) (eof bool, err error) {
+func (p *blockingProcess) RawReadChunk(buf []byte) (int, bool, error) {
 	p.scriptedProcess.mu.Lock()
-	chunk := p.scriptedProcess.script
-	p.scriptedProcess.script = nil
+	n := copy(buf, p.scriptedProcess.script)
+	p.scriptedProcess.script = p.scriptedProcess.script[n:]
 	p.scriptedProcess.mu.Unlock()
-	if len(chunk) > 0 {
-		deliver(chunk)
+	if n > 0 {
+		return n, false, nil
 	}
 	select {
 	case <-p.scriptedProcess.release:
-		return true, io.EOF
+		return 0, false, io.EOF
 	default:
-		return false, nil
+		return 0, true, nil
 	}
 }
 

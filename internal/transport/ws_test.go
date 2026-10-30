@@ -37,6 +37,13 @@ func newRegWithStub(logger log.Logger) *session.Reg {
 type realPTYFactory struct{ log log.Logger }
 
 func (f *realPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	// These transport stands submit POSIX shell commands and measure their
+	// effects, not account-shell discovery or the developer's startup files.
+	// Preserve explicit launch configurations used by integration tests.
+	if cfg.Command == "" {
+		cfg.Command = "/bin/bash"
+		cfg.Args = []string{"--noprofile", "--norc", "-i"}
+	}
 	return pty.NewLocal(f.log, cfg)
 }
 

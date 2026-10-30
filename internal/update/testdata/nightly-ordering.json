@@ -1,0 +1,357 @@
+[
+  {
+    "name": "same version newer build",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "patch increase",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.1",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "numeric patch",
+    "previous": {
+      "version": "0.8.9",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.10",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "numeric minor",
+    "previous": {
+      "version": "0.9.9",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.10.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "major increase",
+    "previous": {
+      "version": "0.9.9",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "1.0.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": true
+  },
+  {
+    "name": "lower version newer build",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.7.9",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "numeric patch decrease",
+    "previous": {
+      "version": "0.8.10",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.9",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "major decrease",
+    "previous": {
+      "version": "1.0.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.9.9",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "older build",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-24T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "equal build time",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "same commit",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "missing commit",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "short commit",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "abc",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "uppercase commit",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "missing time",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "offset time",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00+00:00"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "invalid time",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-02-30T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "invalid current version",
+    "previous": {
+      "version": "dev",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "invalid candidate version",
+    "previous": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "builtAt": "2026-10-25T04:00:00Z"
+      }
+    },
+    "candidate": {
+      "version": "dev",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  },
+  {
+    "name": "unstamped current build",
+    "previous": {
+      "version": "0.8.0",
+      "build": {}
+    },
+    "candidate": {
+      "version": "0.8.0",
+      "build": {
+        "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "builtAt": "2026-10-26T04:00:00Z"
+      }
+    },
+    "accepted": false
+  }
+]

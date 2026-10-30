@@ -5597,13 +5597,16 @@ export class TerminalContent extends BasePaneContent {
     // output that moved the row under a still pointer re-derives the hover,
     // before the frame paints it.
     this._detachLinks?.screenChanged()
+    // Hidden tabs still accept every frame and run the bookkeeping above.
+    // Only the live painter waits; showing the pane reads the current model.
+    if (!this._active || this._disposed) return
     this._pendingPaint = snapshot
     if (this._paintFrameHandle !== 0) return
     this._paintFrameHandle = requestAnimationFrame(() => {
       this._paintFrameHandle = 0
       const pending = this._pendingPaint
       this._pendingPaint = null
-      if (pending === null || this._disposed) return
+      if (pending === null || this._disposed || !this._active) return
       // THE RECTANGLE IS READ HERE, NOT WHEN THE FRAME ARRIVED. An alternate
       // switch moves the pane's usable box (the prose gutter goes away), and
       // that refit lands between accepting the frame and painting it — so a
@@ -6210,19 +6213,19 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * A pane is hidden with a CSS class rather than unmounted, so while it is
-   * hidden the WebGL texture atlas behind it goes stale and its glyphs come
-   * back drawn from coordinates that have moved (nocx-e27). Repaint on the
-   * way in.
-   *
-   * The repaint hangs off setVisible rather than off an activation call in
-   * PaneManager because visibility is owned here: the seam refactor 21fd7f6a
-   * carried the method across and left `tab.refreshAtlas()` behind, and the
-   * fix sat unreachable until the corruption was reported again (nocx-jfgb).
-   * A caller that has to remember is a caller that forgets.
+   * Visibility belongs to BasePaneContent, not keyboard focus: an unfocused
+   * split still paints. Hidden panes keep accepting state without painting;
+   * showing one schedules its latest accepted frame through the same batch.
    */
   setVisible(visible: boolean): void {
     super.setVisible(visible)
+    if (!visible) {
+      if (this._paintFrameHandle !== 0) {
+        cancelAnimationFrame(this._paintFrameHandle)
+        this._paintFrameHandle = 0
+      }
+      this._pendingPaint = null
+    }
     if (visible) {
       const current = this._cellModel?.current()
       if (current) this._paintFrame(current)

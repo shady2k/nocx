@@ -133,13 +133,19 @@ type integrationEnv struct {
 // that the next assertion reads instead of the transition it is waiting for.
 // Registering inside the open makes the count exactly one, always.
 type integrationPTYFactory struct {
-	stub *pty.Stub
-	ws   atomic.Pointer[WSServer]
+	stub                *pty.Stub
+	ws                  atomic.Pointer[WSServer]
+	disableStartupBound bool
 }
 
 func (f *integrationPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	if ws := f.ws.Load(); ws != nil && cfg.SessionID != "" {
 		ws.RegisterIntegration(session.ID(cfg.SessionID), "/bin/bash", IntegrationStarting, ssh.ReasonNone, "")
+		if f.disableStartupBound {
+			ws.integrationMu.Lock()
+			ws.stopStartupBoundLocked(session.ID(cfg.SessionID))
+			ws.integrationMu.Unlock()
+		}
 	}
 	return f.stub, nil
 }
@@ -156,10 +162,18 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 // open would arrive after the timer it was meant to shorten.
 func newIntegrationEnvTuned(t *testing.T, tune func(*WSServer)) *integrationEnv {
 	t.Helper()
+	return newIntegrationEnvWithFactory(t, tune, nil)
+}
+
+func newIntegrationEnvWithFactory(t *testing.T, tune func(*WSServer), configure func(*integrationPTYFactory)) *integrationEnv {
+	t.Helper()
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
 	logger := log.NewSlogAdapter(nil)
 	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	if configure != nil {
+		configure(f)
+	}
 	e := newLifecycleTestEnvWithReg(t, session.New(logger, f), WithLifecyclePublisher(pub))
 	f.ws.Store(e.ws)
 	pub.SetEmitter(e.ws)
@@ -932,7 +946,11 @@ func TestIntegration_AStoreRefusedLegIsAVisibleLoss(t *testing.T) {
 // harmless; re-sending a stale one over a newer one is not.
 func TestIntegration_AConcurrentResendNeverOutlivesTheConclusion(t *testing.T) {
 	for trial := 0; trial < 150; trial++ {
-		e := newIntegrationEnv(t)
+		// This check fences two explicit emitters, not startup liveness.
+		// The unrelated started-timer callback race is nocx-n85cu.
+		e := newIntegrationEnvWithFactory(t, nil, func(f *integrationPTYFactory) {
+			f.disableStartupBound = true
+		})
 		sid := session.ID(e.sid)
 		start := make(chan struct{})
 		var ready, done sync.WaitGroup
@@ -957,15 +975,35 @@ func TestIntegration_AConcurrentResendNeverOutlivesTheConclusion(t *testing.T) {
 		close(start)
 		done.Wait()
 
+		// Both emitters have returned, so every status they produced is
+		// already in this connection's refreshable FIFO. Put a fence behind
+		// them in that SAME FIFO and read through it: a critical-priority
+		// RPC response could overtake the statuses, and waiting for silence
+		// only guessed that they had all arrived.
+		wconn, _ := e.ws.getRx(sid).getSubscriber()
+		ctx, cancel := context.WithTimeout(context.Background(), wantWithin)
+		err := wconn.EnqueueOrderedNotify(ctx, "test.integrationDrained", nil)
+		cancel()
+		if err != nil {
+			t.Fatalf("enqueue the status fence: %v", err)
+		}
 		last := ""
+		deadline := time.Now().Add(wantWithin)
 		for {
-			raw := tryReadNotification(t, e.conn, "session.integrationChanged", 100*time.Millisecond)
-			if raw == nil {
+			raw, err := awaitFrame(e.conn, deadline, func(raw []byte) bool {
+				return isNotification("session.integrationChanged")(raw) ||
+					isNotification("test.integrationDrained")(raw)
+			})
+			if err != nil {
+				t.Fatalf("read through the status fence: %v", err)
+			}
+			frame, _ := decodeFrame(raw)
+			if frame.Method == "test.integrationDrained" {
 				break
 			}
 			var p integrationChangedParams
-			if err := json.Unmarshal(raw, &p); err != nil {
-				t.Fatalf("decode session.integrationChanged: %v\nraw: %s", err, raw)
+			if err := json.Unmarshal(frame.Params, &p); err != nil {
+				t.Fatalf("decode session.integrationChanged: %v\nraw: %s", err, frame.Params)
 			}
 			if p.SessionID == e.sid {
 				last = p.Status

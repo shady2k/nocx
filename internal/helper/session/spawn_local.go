@@ -75,9 +75,9 @@ type localPTY interface {
 	Process
 	Dir() string
 	SignalProcessGroup(pgid int, sig syscall.Signal) error
-	// InterruptWrite, WaitReadable and RawReadUntilAgain are the session I/O
+	// InterruptWrite, WaitReadable and RawReadChunk are the session I/O
 	// owner's local-PTY read/write seam (nocx-6q1uh.3, internal/pty's
-	// master_nonblock_{linux,darwin}.go and RawReadUntilAgain). Stated here
+	// master_nonblock_{linux,darwin}.go and RawReadChunk). Stated here
 	// for the same reason Dir and SignalProcessGroup already are: localPTY
 	// embeds Process, an INTERFACE, so a method the concrete *pty.LocalPty
 	// has but this interface does not name is never promoted to
@@ -86,7 +86,7 @@ type localPTY interface {
 	// session, never only for the ones that lack the seam.
 	InterruptWrite() error
 	WaitReadable(ctx context.Context) error
-	RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error)
+	RawReadChunk(buf []byte) (n int, barrier bool, err error)
 }
 
 // Shell pins what a LocalSpawner starts. Its ZERO VALUE means "ask

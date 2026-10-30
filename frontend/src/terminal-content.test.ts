@@ -37,6 +37,9 @@ import type { PaneIdentity, PaneScreenReading } from './terminal-content'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
+import type { CellPainter } from './painter/painter'
+import type { CellModel, ScreenSnapshot } from './cell-model'
+import { applyTerminalFont } from './terminal-font'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
@@ -86,7 +89,7 @@ import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
-import { _resetThemeState } from './renderers/theme-adapter'
+import { _resetThemeState, getCurrentTheme, setCurrentTheme } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
 import type { CapturedFrame } from './frame/types'
 import { createCapturedFrameView } from './frame/display'
@@ -376,7 +379,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(
@@ -408,7 +411,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(
@@ -502,7 +505,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(screenFrame(1, ['prompt'], { cellWidthPx: 0, cellHeightPx: 0 }))
@@ -544,7 +547,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(screenFrame(1, ['prompt']))
@@ -583,7 +586,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(screenFrame(1, ['prompt']))
@@ -616,7 +619,7 @@ describe('TerminalContent geometry follows accepted painter frames', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       session.fireScreenFrame(screenFrame(3, ['accepted'], { cellWidthPx: 10, cellHeightPx: 20 }))
@@ -10594,18 +10597,155 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   })
 })
 
-// ── The atlas repaint on becoming visible (nocx-e27, nocx-jfgb) ───────────
-//
-// Panes are hidden with a CSS class, not unmounted, so the WebGL texture
-// atlas of a hidden pane goes stale and its glyphs come back drawn from
-// wrong coordinates. nocx-e27 fixed that with a viewport-wide repaint on
-// activation; 21fd7f6a (the PaneContent seam) carried refreshAtlas() down
-// into TerminalContent and left the call behind in PaneManager, so the fix
-// became dead code and the corruption came back.
-//
-// The repaint therefore hangs off setVisible, which is where visibility is
-// owned — a caller that has to remember is a caller that forgets.
+// Visibility gates live painting, never acceptance or correlated processing.
 describe('TerminalContent visibility preserves the accepted painter frame', () => {
+  async function controlledPaintPane() {
+    const cwd = vi.fn()
+    const mounted = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+      hooks: { onPaneCwdChange: cwd },
+    })
+    const internals = mounted.content as unknown as {
+      _painter: CellPainter
+      _cellModel: CellModel
+      _selectionGesture: { screenChanged(snapshot: ScreenSnapshot): void }
+      _liveHistory: { reflowed(): void }
+      host: { contentSettled(): void }
+    }
+    const paint = vi.spyOn(internals._painter, 'apply')
+    const selection = vi.spyOn(internals._selectionGesture, 'screenChanged')
+    const reflow = vi.spyOn(internals._liveHistory, 'reflowed')
+    const settled = vi.spyOn(internals.host, 'contentSettled')
+    const queued = new Map<number, FrameRequestCallback>()
+    let next = 1
+    const raf = vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = next++
+      queued.set(id, cb)
+      return id
+    })
+    const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+      queued.delete(id)
+    })
+    const flush = (): void => {
+      for (let pass = 0; queued.size > 0 && pass < 50; pass++) {
+        const callbacks = [...queued.values()]
+        queued.clear()
+        for (const cb of callbacks) cb(0)
+      }
+      expect(queued.size).toBe(0)
+    }
+    return {
+      ...mounted,
+      session: sessionOf(mounted.content),
+      model: internals._cellModel,
+      paint,
+      selection,
+      reflow,
+      settled,
+      cwd,
+      cancel,
+      flush,
+      teardown: () => {
+        mounted.teardown()
+        raf.mockRestore()
+        cancel.mockRestore()
+      },
+    }
+  }
+
+  it('cancels a pending paint on hide and paints only the latest hidden state on show', async () => {
+    const p = await controlledPaintPane()
+    try {
+      p.content.setVisible(true)
+      p.session.fireScreenFrame(screenFrame(1, ['pending']))
+      p.content.setVisible(false)
+      expect(p.cancel).toHaveBeenCalled()
+      p.flush()
+      expect(p.paint).not.toHaveBeenCalled()
+
+      p.session.fireScreenFrame(screenFrame(2, ['hidden normal']))
+      const alternate = screenFrame(3, ['hidden alternate'], { cols: 60, rows: 6 })
+      alternate.state.bufferKind = 'alternate'
+      p.session.fireScreenFrame(alternate)
+      expect(scrollbackFor(p.content).mode).toBe('fullscreen')
+      const latest = screenFrame(4, ['latest normal'], { cols: 50, rows: 5 })
+      latest.state.title = 'hidden title'
+      latest.state.cwd = { host: '', path: '/hidden/project' }
+      p.session.fireScreenFrame(latest)
+      p.session.fireEffect({
+        sessionId: p.session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'promptBoundary',
+        title: '',
+        body: '',
+        screenRevision: 4,
+      })
+      p.flush()
+      expect(p.paint).not.toHaveBeenCalled()
+      expect(p.model.current()?.revision).toBe(4)
+      expect(p.model.current()?.geometry).toMatchObject({ cols: 50, rows: 5 })
+      expect(scrollbackFor(p.content).mode).toBe('unstructured')
+      expect(p.selection).toHaveBeenCalledTimes(4)
+      expect(p.reflow).toHaveBeenCalledTimes(3)
+      expect(p.settled).toHaveBeenCalledOnce()
+      expect(p.tab.title).toBe('hidden title')
+      expect(p.cwd).toHaveBeenCalledWith('/hidden/project')
+      expect(p.tab.pane.querySelectorAll('.term-grid-row')).toHaveLength(0)
+
+      p.content.setVisible(true)
+      p.flush()
+      expect(p.paint).toHaveBeenCalledOnce()
+      expect(p.paint.mock.calls[0][0]).toBe(p.model.current())
+      expect(p.tab.pane.querySelector('.term-grid')?.textContent).toContain('latest normal')
+      expect(p.tab.pane.querySelectorAll('.term-grid-row')).toHaveLength(5)
+    } finally {
+      p.teardown()
+    }
+  })
+
+  it('defers theme and font repaint requests while hidden but paints an unfocused visible pane', async () => {
+    const p = await controlledPaintPane()
+    const other = document.createElement('button')
+    document.body.append(other)
+    try {
+      p.session.fireScreenFrame(screenFrame(1, ['still live']))
+      setCurrentTheme({ ...getCurrentTheme() })
+      const root = document.createElement('div')
+      root.dataset.terminalFont = 'nordwand-mono'
+      await applyTerminalFont('default', root)
+      p.flush()
+      expect(p.paint).not.toHaveBeenCalled()
+      other.focus()
+      p.content.setVisible(true)
+      p.flush()
+      expect(document.activeElement).toBe(other)
+      expect(p.paint).toHaveBeenCalledOnce()
+      p.session.fireScreenFrame(screenFrame(2, ['unfocused output']))
+      p.flush()
+      expect(p.paint).toHaveBeenCalledTimes(2)
+      expect(p.tab.pane.querySelector('.term-grid')?.textContent).toContain('unfocused output')
+    } finally {
+      other.remove()
+      p.teardown()
+    }
+  })
+
+  it('does not revive a pending or hidden painter after disposal', async () => {
+    const p = await controlledPaintPane()
+    try {
+      p.content.setVisible(true)
+      p.session.fireScreenFrame(screenFrame(1, ['pending']))
+      p.tab.close()
+      p.flush()
+      p.content.setVisible(true)
+      p.flush()
+      expect(p.paint).not.toHaveBeenCalled()
+    } finally {
+      p.teardown()
+    }
+  })
+
   it('paints the accepted frame when the pane becomes visible', async () => {
     const client = makeClient()
     const { content, tab, teardown } = await mountTerminal(
@@ -18674,7 +18814,7 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
     })
     // Recovery communicates metadata, not bytes. The backend's accepted
     // frame is what supplies the visible screen and the grid dimensions.
-    mounted.tab.pane.classList.add('active')
+    mounted.tab.setActive(true)
     const frame = screenFrame(1, [RECOVERED], { cols: SESSION_GRID.cols, rows: SESSION_GRID.rows })
     session.fireScreenFrame(frame)
     return { ...mounted, session }
@@ -18732,7 +18872,7 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
     })
     const { content, tab, teardown } = mounted
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       // The real restore order: the viewport arrives first; the recovered
       // screen follows it.
       content.viewportChanged({ width: 1632, height: 832 })
@@ -18829,7 +18969,7 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
       vi.useFakeTimers()
       try {
         // The worker's tab comes to the front, and the pane is laid out.
-        tab.pane.classList.add('active')
+        tab.setActive(true)
         content.viewportChanged({ width: 1632, height: 832 })
         expect(content.cols).toBe(204)
         // AND THE WORKER KEEPS PAINTING. Its frame puts the session's own grid
@@ -19147,7 +19287,7 @@ describe('the pane screen mapping follows the session lifetime', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const first = sessionOf(content)
       tab.pane.setAttribute('data-session-id', first.sessionId)
       first.fireScreenFrame(screenFrame(1, ['prompt']))
@@ -19176,7 +19316,7 @@ describe('the pane screen mapping follows the session lifetime', () => {
     )
     const session = sessionOf(content)
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       tab.pane.setAttribute('data-session-id', session.sessionId)
       session.fireScreenFrame(screenFrame(1, ['prompt']))
       await vi.waitFor(() => expect(paneCellToPixel(1, 1)).toEqual({ x: 8, y: 16 }))
@@ -19200,7 +19340,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
       // Before the first accepted frame, the model has no committed cell
@@ -19250,7 +19390,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
       const accepted = screenFrame(3, ['restored screen'])
@@ -19279,7 +19419,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       const host = (content as unknown as { host: { contentSettled: () => void } }).host
@@ -19315,7 +19455,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session = sessionOf(content)
       const host = (content as unknown as { host: { contentSettled: () => void } }).host
@@ -19386,7 +19526,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
       // The backend commits a dense display's device cell (17x34 at dpr 2).
@@ -19437,7 +19577,7 @@ describe('the pane receives the screen plane into its cell model (nocx-zg3k3.2.8
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       await vi.waitFor(() => expect(paneScreen()).not.toBeNull())
       const session: SessionFake = client._sessions[0]
 
@@ -19485,7 +19625,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session: SessionFake = client._sessions[0]
       const live = liveRegionOf(tab.pane)
       // Before any frame nothing is PAINTED: the painter's surface exists
@@ -19532,7 +19672,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session: SessionFake = client._sessions[0]
       const live = liveRegionOf(tab.pane)
       session.fireScreenFrame(screenFrame(7, ['PROMPT$ ls', 'NOCX-REUSE-1']))
@@ -19568,7 +19708,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session: SessionFake = client._sessions[0]
       const live = liveRegionOf(tab.pane)
       session.fireScreenFrame(screenFrame(7, ['BURST-BASE-0']))
@@ -19599,7 +19739,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session = client._sessions[0]
       const frame = screenFrame(1, ['pointer target'])
       frame.state.mouseTracking = true
@@ -19667,7 +19807,7 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
       client,
     )
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session = client._sessions[0]
       const frame = screenFrame(1, ['selectable text'])
       frame.state.mouseTracking = false
@@ -20406,7 +20546,7 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
     const client = makeClient()
     const { tab, teardown } = await mountTerminal(clipboard, { attachToDocument: true }, client)
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session: SessionFake = client._sessions[0]
       const frame = screenFrame(1, ['selectable text'])
       frame.state.mouseTracking = false
@@ -20553,7 +20693,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       globalThis.requestAnimationFrame = raf
       mounted.teardown()
     }
-    tab.pane.classList.add('active')
+    tab.setActive(true)
     const session = sessionOf(content)
     const scrollback = scrollbackFor(content)
     Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
@@ -20703,7 +20843,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
       }
     }
     try {
-      tab.pane.classList.add('active')
+      tab.setActive(true)
       const session = sessionOf(content)
       const scrollback = scrollbackFor(content)
       // The stylesheet's own rule, stated where jsdom cannot read it: the

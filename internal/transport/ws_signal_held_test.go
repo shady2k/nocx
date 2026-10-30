@@ -105,6 +105,12 @@ func (f *ptyWriteRecorder) gateSnapshot() (chan struct{}, chan struct{}) {
 }
 
 func (f *ptyWriteRecorder) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	// Held-signal scenarios drive POSIX job-control commands, not the
+	// account shell's startup configuration.
+	if cfg.Command == "" {
+		cfg.Command = "/bin/bash"
+		cfg.Args = []string{"--noprofile", "--norc", "-i"}
+	}
 	p, err := pty.NewLocal(f.log, cfg)
 	if err != nil {
 		return nil, err

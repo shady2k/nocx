@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -103,6 +104,135 @@ func TestRealRegistry_OpenAndClose(t *testing.T) {
 	if len(reg.List()) != 0 {
 		t.Fatalf("expected 0 sessions after close, got %d", len(reg.List()))
 	}
+}
+
+// Both entry points remove the authoritative row before the helper can block
+// teardown. Preparing additionally returns the original incarnation, without
+// ending it or accounting its profile until the completion runs.
+func TestRealRegistry_EndSessionRemovesBeforeTeardown(t *testing.T) {
+	for _, prepared := range []bool{false, true} {
+		name := "direct"
+		if prepared {
+			name = "prepared"
+		}
+		for _, endErr := range []error{nil, errors.New("helper end failed")} {
+			outcome := "success"
+			if endErr != nil {
+				outcome = "failure"
+			}
+			t.Run(name+"/"+outcome, func(t *testing.T) {
+				logger := log.NewSlogAdapter(nil)
+				tracker := &stubUsageTracker{}
+				reg := New(logger, nil).WithProfileUsageTracker(tracker)
+				ch := &heldEndChannel{
+					Channel: pty.NewStub(logger),
+					entered: make(chan struct{}),
+					release: make(chan struct{}),
+					err:     endErr,
+				}
+				t.Cleanup(func() {
+					select {
+					case <-ch.release:
+					default:
+						close(ch.release)
+					}
+				})
+				sess, err := reg.Adopt(context.Background(), Config{ProfileID: "ssh:p1:1"}, NewID(), ch)
+				if err != nil {
+					t.Fatalf("Adopt: %v", err)
+				}
+				detached := false
+				real, ok := sess.(*realSession)
+				if !ok {
+					t.Fatalf("Adopt returned %T, want *realSession", sess)
+				}
+				real.SetLifecycleDetach(func() { detached = true })
+				assertAbsent := func() {
+					t.Helper()
+					if _, err := reg.Get(sess.ID()); err == nil {
+						t.Error("Get still exposes the ending session")
+					}
+					if got := reg.List(); len(got) != 0 {
+						t.Errorf("List still exposes %d sessions", len(got))
+					}
+					if removed, complete, err := reg.PrepareEndSession(sess.ID()); err == nil || removed != nil || complete != nil {
+						t.Errorf("PrepareEndSession for removed ID = (%v, completion present %t, %v)", removed, complete != nil, err)
+					}
+					if err := reg.EndSession(sess.ID()); err == nil {
+						t.Error("EndSession accepted the already removed ID")
+					}
+				}
+				complete := func() error { return reg.EndSession(sess.ID()) }
+				if prepared {
+					removed, finish, err := reg.PrepareEndSession(sess.ID())
+					if err != nil {
+						t.Fatalf("PrepareEndSession: %v", err)
+					}
+					complete = finish
+					if removed != sess || removed.Identity() != sess.Identity() {
+						t.Fatal("PrepareEndSession did not return the original session incarnation")
+					}
+					assertAbsent()
+					select {
+					case <-ch.entered:
+						t.Fatal("PrepareEndSession started teardown before completion")
+					default:
+					}
+				}
+				done := make(chan error, 1)
+				go func() { done <- complete() }()
+				select {
+				case <-ch.entered:
+				case <-time.After(time.Second):
+					t.Fatal("completion did not call the channel's EndSession")
+				}
+				assertAbsent()
+				if len(tracker.closed) != 0 {
+					t.Error("profile accounted before teardown completed")
+				}
+				close(ch.release)
+				select {
+				case err := <-done:
+					if !errors.Is(err, endErr) {
+						t.Errorf("completion error = %v, want %v", err, endErr)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("completion did not return after teardown was released")
+				}
+				if detached || ch.detached {
+					t.Error("EndSession detached instead of ending the session")
+				}
+				if len(tracker.closed) != 1 || tracker.closed[0] != "ssh:p1:1" {
+					t.Errorf("profile closures = %v, want [ssh:p1:1]", tracker.closed)
+				}
+				select {
+				case <-sess.Done():
+				default:
+					t.Error("completed teardown left the channel open")
+				}
+			})
+		}
+	}
+}
+
+type heldEndChannel struct {
+	Channel
+	entered  chan struct{}
+	release  chan struct{}
+	err      error
+	detached bool
+}
+
+func (c *heldEndChannel) Close() error {
+	c.detached = true
+	return c.Channel.Close()
+}
+
+func (c *heldEndChannel) EndSession(context.Context) error {
+	close(c.entered)
+	<-c.release
+	_ = c.Channel.Close()
+	return c.err
 }
 
 // The orderly handover runs BEFORE the channel closes (ADR-0076): the

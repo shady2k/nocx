@@ -156,7 +156,7 @@ func (o *operation) fail(_ error) {
 		return
 	}
 	if o.failure == nil {
-		o.failure = &assistant.StreamError{Message: RuntimeLostSentence}
+		o.failure = &assistant.RuntimeLostError{StreamError: assistant.StreamError{Message: RuntimeLostSentence}}
 	}
 	err := o.failure
 	o.mu.Unlock()
@@ -216,7 +216,7 @@ func (c *Client) Ask(ctx context.Context, p assistant.AskParams, onEvent func(as
 	o := c.runs[p.RunID]
 	if p.Resume && (p.RunID == "" || o == nil) {
 		c.mu.Unlock()
-		return &assistant.StreamError{Message: RuntimeLostSentence}
+		return &assistant.RuntimeLostError{StreamError: assistant.StreamError{Message: RuntimeLostSentence}}
 	}
 	if !p.Resume && o != nil {
 		c.mu.Unlock()
@@ -243,6 +243,14 @@ func (c *Client) Ask(ctx context.Context, p assistant.AskParams, onEvent func(as
 			o.fail(result)
 		}
 		o.mu.Lock()
+		// fail publishes its cause before cancelling the operation. An active
+		// host/event/launch path may return only cancellation; retain the same
+		// cause the asynchronous callback carries before Discard reaps it.
+		// A completed drive stays successful: a late losing callback must not
+		// retroactively take ownership of its command leases.
+		if result != nil && o.failure != nil {
+			result = o.failure
+		}
 		o.driving = false
 		o.host = nil
 		o.mu.Unlock()

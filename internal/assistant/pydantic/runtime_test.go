@@ -676,3 +676,72 @@ func TestRuntimeUnanswerableCallIDsFailBeforeSiblingEffects(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeLossCauseSurvivesActiveEventCancellation(t *testing.T) {
+	ctx, client, _ := realClient(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestJSON(t, r)
+		sseDelta(w, map[string]any{"content": "before runtime loss"}, nil)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	releaseEvent := sync.OnceFunc(func() { close(release) })
+	defer releaseEvent()
+	lost := make(chan error, 1)
+	p := assistant.AskParams{
+		BaseURL: server.URL, Model: "arbitrary/alias", RunID: "active-loss-cause",
+		Messages:      []assistant.Message{{Role: "user", Content: "hello"}},
+		OnRuntimeLost: func(err error) { lost <- err },
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Ask(ctx, p, func(e assistant.AskEvent) error {
+			if e.Kind == assistant.AskAnswer {
+				entered <- struct{}{}
+				<-release
+				return context.Canceled
+			}
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("native runtime did not reach the active event callback")
+	}
+	client.mu.Lock()
+	operation := client.runs[p.RunID]
+	client.mu.Unlock()
+	if err := operation.process.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	var callbackErr error
+	select {
+	case callbackErr = <-lost:
+	case <-ctx.Done():
+		t.Fatal("worker loss was not reported")
+	}
+	// Loss is published before the ordinary event path returns cancellation.
+	// Ask must preserve that cause even though its direct callee saw only Done.
+	releaseEvent()
+	select {
+	case err := <-done:
+		var returnedLoss, callbackLoss *assistant.RuntimeLostError
+		if !errors.As(err, &returnedLoss) || !errors.As(callbackErr, &callbackLoss) || returnedLoss != callbackLoss {
+			t.Fatalf("runtime cause was lost between callback and Ask: callback=%T %v, return=%T %v", callbackErr, callbackErr, err, err)
+		}
+		var stream *assistant.StreamError
+		if !errors.As(err, &stream) || stream.Message != RuntimeLostSentence {
+			t.Fatalf("runtime failure lost its safe presentation: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("failed native Ask did not return")
+	}
+	select {
+	case <-operation.process.reaped:
+	default:
+		t.Fatal("failed native child was not reaped before Ask returned")
+	}
+}

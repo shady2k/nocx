@@ -6,12 +6,15 @@ import (
 	"errors"
 	"strconv"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 func TestAgentAskReplayPrecedesChangedRoleAndRuntime(t *testing.T) {
@@ -370,5 +373,162 @@ func TestAgentStatusUnavailableRuntimeRetainsRoleAndCredentialPrecedence(t *test
 	status, code = decodeAgentStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
 	if code != 0 || status.Answering.Ready || status.Answering.Reason == nil || *status.Answering.Reason != reasonRuntimeUnavailable || status.Engine == nil || *status.Engine != assistant.EnginePydantic || status.RuntimeVersion != nil {
 		t.Fatalf("unavailable runtime guessed a usable engine: %+v code=%d", status, code)
+	}
+}
+
+type orderedRuntimeLossClient struct {
+	stubAssistantClient
+	entered   chan assistant.AskParams
+	result    chan error
+	discarded atomic.Int32
+}
+
+func (c *orderedRuntimeLossClient) Ask(ctx context.Context, p assistant.AskParams, emit func(assistant.AskEvent) error) error {
+	if err := emit(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "earned answer"}); err != nil {
+		return err
+	}
+	c.entered <- p
+	select {
+	case err := <-c.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *orderedRuntimeLossClient) Discard(string) { c.discarded.Add(1) }
+
+// Park through the real broker and quiet-bound supervisor, retaining the
+// command's registration exactly as RequestRun does. Only the renderer and
+// process-group boundary are fakes; cancellation must withdraw and signal.
+func parkedRuntimeLossLease(t *testing.T, control *agentRunControl) (*runLease, *fakeLeaseSession, *Broker) {
+	t.Helper()
+	ctx, logger := logtest.New(t)
+	sess := &fakeLeaseSession{dieOn: syscall.SIGINT}
+	lease := &runLease{
+		log: logger, sid: session.ID("runtime-owned-command"), sess: sess,
+		ring: newOutputRing(), parkC: make(chan struct{}),
+		cfg: RunLeaseConfig{Inactivity: time.Second, SignalGrace: time.Millisecond},
+	}
+	conn := &harnessConn{}
+	broker := NewBroker(
+		func() []Conn { return []Conn{conn} },
+		func(Conn, string, json.RawMessage) error { return nil },
+	)
+	server := &WSServer{broker: broker}
+	kind := runKind()
+	kind.Timeout = 0
+	kind.BeforeDeliver = func(id string) { broker.registerRunLease(id, lease) }
+	kind.AfterDeliver = func(string) {
+		lease.mu.Lock()
+		lease.submissionDelivered = true
+		lease.mu.Unlock()
+		lease.onAttemptStart()
+	}
+	if !control.attachRunLease(lease) {
+		t.Fatal("active run rejected its command lease")
+	}
+	var requestID string
+	var body json.RawMessage
+	err := lease.supervise(ctx, func(ctx context.Context) error {
+		var requestErr error
+		requestID, requestErr = broker.RequestParkable(ctx, kind,
+			runRequestParams{SessionID: string(lease.sid), Command: "owned-command"}, &body, lease.parkC)
+		return requestErr
+	})
+	if !errors.Is(err, errRunParked) || !lease.isParked() {
+		t.Fatalf("command did not quiet-park: %v", err)
+	}
+	server.parkRun(lease.sid, requestID, kind, lease)
+	t.Cleanup(func() {
+		termination, outcome, ended := server.endParkedRun(requestID, content.TermUserKilled)
+		if ended && (termination == nil || termination.Reason != content.TermUserKilled || outcome != foregroundDelivered) {
+			t.Errorf("parked fixture cleanup: termination=%v outcome=%s", termination, outcome)
+		}
+	})
+	if got := sess.got(); len(got) != 0 {
+		t.Fatalf("quiet parking signalled the command: %v", got)
+	}
+	return lease, sess, broker
+}
+
+func TestAgentRuntimeLossTerminalWinnerOwnsParkedCommand(t *testing.T) {
+	for _, winner := range []string{"return", "callback", "completed", "stop"} {
+		t.Run(winner, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, _ := logtest.New(t)
+				client := &orderedRuntimeLossClient{entered: make(chan assistant.AskParams, 1), result: make(chan error)}
+				service := &fakeAgentService{}
+				h := newGapHandlers(t, service, client, nil)
+				h.inflight = &inflight{}
+				rc := gapRunContext(t, h)
+				h.pendingRuns[rc.runID] = rc
+				lease, sess, broker := parkedRuntimeLossLease(t, rc.control)
+				responder := &gapResponder{}
+				done := make(chan struct{})
+				go func() {
+					h.runAskStream(ctx, rc, responder)
+					close(done)
+				}()
+				params := <-client.entered
+				loss := &assistant.RuntimeLostError{StreamError: assistant.StreamError{Message: "runtime unavailable"}}
+				wantState := content.RunFailed
+				switch winner {
+				case "return":
+					client.result <- loss
+					<-done
+					// The callback has not run: the ordinary terminal owner
+					// must already have stopped the parked command.
+					if got := sess.got(); len(got) != 1 || got[0] != syscall.SIGINT {
+						t.Errorf("ordinary loss return left its parked command running: %v", got)
+					}
+				case "callback":
+					params.OnRuntimeLost(loss)
+					<-done
+				case "completed":
+					client.result <- nil
+					<-done
+					wantState = content.RunCompleted
+				case "stop":
+					if !rc.control.beginCancel() {
+						t.Fatal("Stop did not acquire cancellation ownership")
+					}
+					client.result <- loss
+					synctest.Wait()
+					// Failure has won terminal admission but must join the
+					// person's still-in-flight Stop, not replace its outcome.
+					select {
+					case <-done:
+						t.Fatal("loss ignored the pending Stop settlement")
+					default:
+					}
+					if rc.control.cancelRunLeases() {
+						t.Fatal("owned local command could not be signalled")
+					}
+					rc.control.cancelContext()
+					rc.control.finishCancel(content.RunCancelled, content.TermUserKilled, "the person stopped this answer", false)
+					<-done
+					wantState = content.RunCancelled
+				}
+				params.OnRuntimeLost(loss) // The losing late callback must do nothing.
+				if service.finish == nil || service.finish.State != wantState {
+					t.Fatalf("terminal state = %+v, want %s", service.finish, wantState)
+				}
+				if responder.runState == nil || responder.runState.State != string(wantState) || client.discarded.Load() != 1 {
+					t.Fatalf("terminal notification/discard = %+v/%d", responder.runState, client.discarded.Load())
+				}
+				signals := sess.got()
+				broker.mu.Lock()
+				pending := len(broker.pending)
+				broker.mu.Unlock()
+				if winner == "completed" {
+					if len(signals) != 0 || !lease.isParked() || pending != 1 {
+						t.Fatalf("late loss changed completed run's command: signals=%v parked=%v pending=%d", signals, lease.isParked(), pending)
+					}
+				} else if len(signals) != 1 || signals[0] != syscall.SIGINT || pending != 0 {
+					t.Fatalf("failed/cancelled run left its parked command alive: signals=%v pending=%d", signals, pending)
+				}
+			})
+		})
 	}
 }

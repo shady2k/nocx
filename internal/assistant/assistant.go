@@ -366,9 +366,11 @@ type AskParams struct {
 	// an error, never permission to start a fresh model drive or repeat effects.
 	Resume bool
 	// OnRuntimeLost reports an unexpected subprocess or protocol loss once,
-	// including while a run is parked for approval. The transport owns its
-	// terminal transition and may synchronously Discard the run, so the callback
-	// must run outside a reaper that Discard joins. Eino never calls it.
+	// including while a run is parked for approval. Both this callback and a
+	// failed active Ask return carry *RuntimeLostError, even when cancellation
+	// wakes the active call first. The transport owns terminal arbitration and
+	// may synchronously Discard the run, so the callback must run outside a
+	// reaper that Discard joins. Eino never calls it.
 	OnRuntimeLost func(error)
 	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
 	// since ADR-0039, and what everything this run causes is joined to by a
@@ -418,6 +420,15 @@ type StreamError struct {
 }
 
 func (e *StreamError) Error() string { return e.Message }
+
+// RuntimeLostError identifies an unexpected assistant runtime loss independently
+// of its presentation. Both Ask and OnRuntimeLost carry this cause so either
+// terminal owner can stop the run's still-live command leases.
+type RuntimeLostError struct {
+	StreamError
+}
+
+func (e *RuntimeLostError) Unwrap() error { return &e.StreamError }
 
 // ProbeParams is the draft endpoint configuration the Test button probes:
 // what the form shows, not what the store holds.

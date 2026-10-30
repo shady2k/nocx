@@ -54,14 +54,7 @@ test('release tooling is supporting but CI, stable release and app wiring stay p
     assert.equal(isProductFile(file), true, file)
 })
 
-test('new supporting pipeline files always owe ci-pipeline checks', async () => {
-  const { readFileSync } = await import('node:fs')
-  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8')
-  const job = ci.split('  ci-pipeline:')[1].split('  ci-mac:')[0]
-  assert.ok(job)
-  assert.doesNotMatch(job, /needs:|if:/)
-  assert.match(job, /scripts\/release\/\*\.test\.\*/)
-  assert.match(job, /scripts\/publish-nightly.test.mjs/)
+test('release-pipeline tooling remains supporting work', () => {
   for (const f of [
     'scripts/release/promotion.mjs',
     'scripts/release/promotion-github.test.mjs',

@@ -1341,8 +1341,8 @@ type askRunContext struct {
 	// resumed is explicit because a fresh run can also have non-zero
 	// sequencing state after a later refactor; only the resume path sets it.
 	resumed bool
-	// runtimeLost belongs only to the terminal call made by OnRuntimeLost.
-	// The winning terminal owner stops this run's leases and active drive.
+	// runtimeLost is carried by both Ask's typed failure and OnRuntimeLost.
+	// Whichever terminal call wins stops this run's leases and active drive.
 	runtimeLost bool
 }
 
@@ -1776,6 +1776,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			h.suspendForApproval(ctx, rc, r, seq, prose, nil, egErr.Request)
 			return
 		}
+		var runtimeLoss *assistant.RuntimeLostError
+		rc.runtimeLost = errors.As(err, &runtimeLoss)
 		reason, sentence := classifyAskFailure(err, rc.model)
 		h.log.Warn("agent ask: the run failed",
 			"run", rc.runID, "reason", string(reason), "sentence", sentence,

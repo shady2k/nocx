@@ -341,7 +341,6 @@ export class ScrollbackController {
     this._idleRequested = false
     if (this._mode === 'fullscreen') return
     const entering = this._mode !== 'running'
-    if (entering) this._runningCap = undefined
     this._mode = 'running'
     if (entering) {
       this.terminalLiveContainer.style.height = ''
@@ -392,50 +391,19 @@ export class ScrollbackController {
     this._onModeChanged?.(this._mode)
   }
 
-  /**
-   * Maximum space available to running output: the scroller's client height
-   * less the running block's header, which share the viewport (nocx-6w4z).
-   * The measured content grows only up to this ceiling, and the grid is fitted
-   * to the same cap so tall inline TUIs keep their last rows reachable
-   * (nocx-zn4d). Null outside `running` or while unmeasurable.
-   */
-  /** The running cap while it is held; `undefined` means "measure it". */
-  private _runningCap: number | undefined = undefined
+  /** ADR-3kqrem7v: one fixed header cost in either buffer. The token is
+   * owned by the UI kit, not measured from a presentation-dependent seat. */
+  get runningHeaderHeightPx(): number {
+    const value = parseFloat(
+      getComputedStyle(this.scrollbackArea).getPropertyValue('--control-height-md'),
+    )
+    return Number.isFinite(value) && value > 0 ? value : 32
+  }
 
   get runningLiveCap(): number | null {
     if (this._mode !== 'running') return null
-    // HELD FOR THE COMMAND'S LIFETIME, not re-measured per chunk of output.
-    // The grid is fitted to this cap, and fitting the grid resizes the pty —
-    // so a cap that followed the header's live height sent a SIGWINCH into
-    // the middle of a program's repaint every time the running block's own
-    // chrome moved (it gains a duration, its echo wraps). omp came back with
-    // its box drawn at two different widths: the top border truncated
-    // mid-row, the bottom corners at the full width (nocx-oikdu).
-    //
-    // The cache is invalidated by the two things that legitimately change it
-    // — entering the mode, and the PANE changing size — and by nothing the
-    // running program does. A resize the user asked for is still a resize.
-    if (this._runningCap !== undefined) return this._runningCap
-    // THE RUNNING BLOCK'S HEADER, not the block: since ADR-0091 the block also
-    // holds the live region itself, so its own height grows with the very box
-    // this cap exists to bound — a number fed from its own output, which shrank
-    // the region by eight rows before it was read here. The chrome above the
-    // rows is the header; that is what the cap takes off.
-    const headerEl =
-      this._blockManager.runningBlock?.el.querySelector<HTMLElement>(':scope > .cmd-header') ?? null
-    const header = headerEl?.getBoundingClientRect().height ?? 0
-    const max = this.scrollbackArea.clientHeight - header
-    // Measured before layout (a zero-height scroller) the answer is not the
-    // cap, it is "not yet" — left uncached so the next chunk asks again.
-    if (max <= 0) return null
-    this._runningCap = max
-    return max
-  }
-
-  /** Forget the held cap: the pane changed size, so the ceiling really did
-   *  move. Called by the viewport driver, never by the output path. */
-  invalidateRunningCap(): void {
-    this._runningCap = undefined
+    const max = this.scrollbackArea.clientHeight - this.runningHeaderHeightPx
+    return max > 0 ? max : null
   }
 
   /**
@@ -467,6 +435,7 @@ export class ScrollbackController {
       return
     }
     if (this._mode !== 'running') return
+    this._sizeRunningSeat()
     this._lastLiveHeightPx = px
     // The backend anchor and its accepted frame decide the echo shift. Apply
     // it before height guards so a frame update can release the shift even
@@ -525,54 +494,6 @@ export class ScrollbackController {
     return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)
   }
 
-  /** The vertical padding the live region wears as the running block's body,
-   *  answered in any mode (nocx-g6hnk). The grid's rows must fit INSIDE that
-   *  padding: the region is sized to content + padding under the running cap
-   *  (sizeRunningLive), so a grid fitted to the whole cap had about a row and
-   *  a half below the clip — the bottom of an inline TUI such as omp was cut
-   *  off. At the prompt the region is not wearing the running class yet, so
-   *  the answer is read off a hidden clone that is. */
-  get runningBodyPaddingPx(): number {
-    if (this._mode === 'running') return this._bodyPaddingPx()
-    const probe = this.terminalLiveContainer.ownerDocument.createElement('div')
-    probe.className = 'terminal-live-container live-running'
-    probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;height:0'
-    this.scrollbackInner.appendChild(probe)
-    const cs = getComputedStyle(probe)
-    const top = parseFloat(cs.paddingTop)
-    const bottom = parseFloat(cs.paddingBottom)
-    probe.remove()
-    return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)
-  }
-
-  /** The inline inset the live row wears (nocx-9bpeq.8): the pane gutter
-   *  moved from `.pane` into every row so a row can paint to the edge. The grid
-   *  is drawn inside that inset, so the fit must not count it — read off the
-   *  DOM, like `_bodyPaddingPx`, so the stylesheet stays the one place the
-   *  number lives. Zero wherever there is no layout to read (jsdom without
-   *  inline styles).
-   *
-   *  THE WHOLE CHAIN, not this element's own padding: while the region is a
-   *  running block's body (ADR-0091) the gutter is the BLOCK's, and this
-   *  element's own padding is nothing — a sum of its own would fit the grid to
-   *  the scroller's full width and put the last columns under the clip, which
-   *  is nocx-vydj returning. Walking up to the scroller answers the same number
-   *  in both arrangements, and in a turn's indent too. */
-  get liveInlineInsetPx(): number {
-    let inset = 0
-    for (
-      let el: HTMLElement | null = this.terminalLiveContainer;
-      el !== null && !el.classList.contains('scrollback-area');
-      el = el.parentElement
-    ) {
-      const cs = getComputedStyle(el)
-      const left = parseFloat(cs.paddingLeft)
-      const right = parseFloat(cs.paddingRight)
-      inset += (Number.isFinite(left) ? left : 0) + (Number.isFinite(right) ? right : 0)
-    }
-    return inset
-  }
-
   /** The vertical offset that hides the shell echo at the backend-anchored
    * screen row. Both row text and offset are supplied only by an accepted,
    * identity-matching CellModel snapshot. */
@@ -603,21 +524,73 @@ export class ScrollbackController {
     return rec.outputAnchorOffset * cell
   }
 
-  /** WHERE THE LIVE REGION SITS, as the mode decides it (ADR-0091).
-   *
-   *  A running command's output is ONE block: while a command runs on the
-   *  normal screen the region is that block's body, inside the block's own box,
-   *  so its ground and its trailing space cover every row the command has
-   *  written. Everywhere there are no blocks — the prompt, a session with no
-   *  shell integration, an alternate-screen program — it is the stack's own
-   *  child, which is where the fullscreen rule and the idle height address it.
-   *
-   *  One input, the mode, and one answer, the manager's seat: the controller
-   *  builds and sizes this element but does not own the block elements it is
-   *  seated beside or inside (AD-8). */
+  /** Keep an assistant-owned command inside its turn while extending ONLY
+   * its active rectangle through the transcript's retained ancestor insets.
+   * This is placement, not a second desired-grid calculation (ADR-3kqrem7v).
+   * Freeze replaces this element, so history keeps its normal indentation. */
+  private _sizeRunningSeat(): void {
+    const block = this._blockManager.runningBlock?.el
+    const width = this.scrollbackArea.clientWidth
+    if (!block || width <= 0) return
+    let left = 0
+    for (
+      let ancestor = block.parentElement;
+      ancestor && ancestor !== this.scrollbackArea;
+      ancestor = ancestor.parentElement
+    ) {
+      const style = getComputedStyle(ancestor)
+      left += (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.borderLeftWidth) || 0)
+    }
+    const seatWidth = `${width}px`
+    const offset = `${-left}px`
+    if (block.style.width !== seatWidth) block.style.width = seatWidth
+    if (block.style.marginLeft !== offset) block.style.marginLeft = offset
+  }
+
+  private _fullscreenHeader: HTMLElement | null = null
+
+  private _restoreRunningHeader(): void {
+    const header = this._fullscreenHeader
+    if (!header) return
+    this._blockManager.runningBlock?.el.prepend(header)
+    this._fullscreenHeader = null
+  }
+
   private _seatLive(): void {
-    if (this._mode === 'running') this._blockManager.holdLiveInRunningBlock()
-    else this._blockManager.releaseLiveRegion()
+    // Restore the SAME header before the block manager can freeze/update it.
+    // DOM focus is preserved across a seat move; it is not a second keyboard
+    // state and never changes the desired PTY geometry (ADR-3kqrem7v).
+    const focused = document.activeElement
+    const header = this._fullscreenHeader
+    const movingHeader = header ?? this._blockManager.runningBlock?.header ?? null
+    const heldHeaderFocus =
+      focused instanceof HTMLElement && movingHeader?.contains(focused) === true
+    if (header !== null && this._mode !== 'fullscreen') {
+      const block = this._blockManager.runningBlock?.el
+      if (block) block.prepend(header)
+      else header.remove()
+      this._fullscreenHeader = null
+    }
+    if (this._mode === 'running') {
+      this._blockManager.holdLiveInRunningBlock()
+      this._sizeRunningSeat()
+    } else this._blockManager.releaseLiveRegion()
+    if (this._mode === 'fullscreen' && this._fullscreenHeader === null) {
+      const active =
+        this._blockManager.runningBlock?.el.querySelector<HTMLElement>(':scope > .cmd-header')
+      if (active) {
+        this.scrollbackInner.insertBefore(active, this.terminalLiveContainer)
+        this._fullscreenHeader = active
+      }
+    }
+    if (
+      heldHeaderFocus &&
+      focused instanceof HTMLElement &&
+      focused.isConnected &&
+      document.activeElement !== focused
+    ) {
+      focused.focus({ preventScroll: true })
+    }
   }
 
   /** Apply the echo shift to the grid, or clear it. The write is guarded:
@@ -666,46 +639,20 @@ export class ScrollbackController {
     this._scrollToBottom()
   }
 
-  /**
-   * Hide the block chrome, or bring it back.
-   *
-   * Driven by the ALTERNATE BUFFER and nothing else. A rule was tried that hid
-   * the chrome whenever the live region reached the top of the pane, on the
-   * reasoning that a header has nowhere to live once a program fills the
-   * screen. Warp does not do that: `top` runs there with its block header, its
-   * duration and its actions intact, and only a true alt-screen program such as
-   * `htop` takes the pane bare. Filling the pane is something a long `ls` does
-   * too, and it is not a reason to take away the only handle on the block.
-   *
-   * So there is no classifier here, and no heuristic anywhere in this file: the
-   * program's choice of buffer decides the chrome, and its output decides the
-   * height (nocx-6w4z).
-   */
+  /** ADR-3kqrem7v: alternate mode hides transcript rows, not the shared
+   * running header. Buffer identity is still authoritative and immediate;
+   * it changes presentation, never desired geometry. */
   private _setFilledPane(on: boolean): void {
     if (on && this._filledPane) return
     this._filledPane = on
     this.scrollbackInner.classList.toggle('inner-fullscreen-mode', on)
   }
 
-  /**
-   * Alt-screen: the program takes the PANE.
-   *
-   * It used to take the viewport — `position: fixed` with all four insets —
-   * which covered the tab strip and the activity bar, so `htop` erased the
-   * window's own chrome while `top` (same kind of program, different buffer)
-   * did not. Two programs doing the same thing looked like two different
-   * products.
-   *
-   * The two paths are one treatment now: the live region grows to the
-   * scroller, the block chrome steps aside, and the editor gives up its
-   * reserved box. Which buffer the program chose stops being a layout
-   * decision and goes back to being what it is — a detail of how the program
-   * preserves your scrollback (nocx-6w4z).
-   */
+  /** Show the alternate grid beneath the same one-line running header
+   * (ADR-3kqrem7v), preserving the actual header node and its controls. */
   enterFullscreen(): void {
     this._idleRequested = false
     this._mode = 'fullscreen'
-    this._runningCap = undefined
     this.terminalLiveViewport.style.height = ''
     this.terminalLiveContainer.className =
       'terminal-live-container terminal-live-container live-fullscreen'
@@ -717,7 +664,7 @@ export class ScrollbackController {
     // the filled-pane exclusion hides it (nocx-zg3k3.10.4).
     this.scrollbackInner.classList.remove('inner-unstructured')
     // OUT OF THE BLOCK BEFORE THE PANE IS THE PROGRAM'S (ADR-0091): the
-    // fullscreen rule hides every block-layer child, so a region inside one
+    // fullscreen rule hides transcript blocks, so a region inside one
     // would take the terminal down with it. The seat goes first and the class
     // second, in one task, so no frame sees both.
     this._seatLive()
@@ -744,14 +691,14 @@ export class ScrollbackController {
    *  by its overflow — `top` drawing 34 of the 40 rows it had been given.
    *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
-    const max = this.scrollbackArea.clientHeight
+    const max =
+      this.scrollbackArea.clientHeight - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
     if (max > 0) this.terminalLiveContainer.style.height = `${max}px`
   }
 
   /** Exit alt-screen: restore normal layout. */
   exitFullscreen(): void {
     this._mode = 'idle'
-    this._runningCap = undefined
     this.terminalLiveContainer.style.height = ''
     this.terminalLiveViewport.style.height = ''
     this._setFilledPane(false)
@@ -1169,6 +1116,7 @@ export class ScrollbackController {
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const followIntent = this._followIntent()
+    this._restoreRunningHeader()
     const rec = this._blockManager.freezeFromAttempt(attempt, endLine)
     if (rec) {
       this._finishFreeze(rec, followIntent)
@@ -1181,6 +1129,7 @@ export class ScrollbackController {
    *  freezes as abandoned — never successful (ADR-0024 §5). */
   abandonAttempt(attempt: ExecutionAttempt, endLine: number, sessionGone = false): boolean {
     const followIntent = this._followIntent()
+    this._restoreRunningHeader()
     const rec = this._blockManager.abandonAttempt(attempt, endLine, sessionGone)
     if (rec) {
       this._finishFreeze(rec, followIntent)
@@ -1194,6 +1143,7 @@ export class ScrollbackController {
    *  (nocx-mlyu). Unknown, never successful. */
   abandonUnbound(endLine: number): boolean {
     const followIntent = this._followIntent()
+    this._restoreRunningHeader()
     const rec = this._blockManager.abandonUnbound(endLine)
     if (rec) {
       this._finishFreeze(rec, followIntent)
@@ -1207,6 +1157,7 @@ export class ScrollbackController {
    *  failure, and the running slot is freed for the blocks that follow. */
   enterBlock(endLine: number): boolean {
     const followIntent = this._followIntent()
+    this._restoreRunningHeader()
     const rec = this._blockManager.freezeEntered(endLine)
     if (rec) {
       this._finishFreeze(rec, followIntent)

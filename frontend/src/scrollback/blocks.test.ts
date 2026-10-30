@@ -1919,6 +1919,27 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     rows = 24,
   ) => ({ row, screenRevision, bufferKind, bufferInstance, cols, rows })
 
+  it('reclaims an alternate-seated header before a deferred visual freeze', () => {
+    const rec = manager.startBlock('make', '~', 3)
+    manager.bindAttempt('att-1')
+    const header = rec.el.querySelector<HTMLElement>('.cmd-header')!
+    inner.prepend(header)
+    expect(manager.freezeFromAttempt(attempt(), 8)).toBeNull()
+    expect(header.isConnected).toBe(true)
+    manager.blockClosed('att-1')
+    expect(header.isConnected).toBe(false)
+    expect(inner.querySelectorAll('.cmd-header')).toHaveLength(1)
+    expect(rec.el.querySelector('.cmd-header')?.hasAttribute('data-variant')).toBe(false)
+  })
+
+  it('removes an alternate-seated header when scrollback is cleared', () => {
+    const rec = manager.startBlock('make', '~', 3)
+    const header = rec.el.querySelector<HTMLElement>('.cmd-header')!
+    inner.prepend(header)
+    manager.clearAll()
+    expect(header.isConnected).toBe(false)
+  })
+
   it('bindAttempt ties the running block to the attempt; freezeFromAttempt freezes it with the authenticated status', () => {
     const start = screenAnchor(3, 1)
     const rec = manager.startBlock('make', '~', 3, 'shell', start)
@@ -4449,14 +4470,16 @@ describe('the command row sigil', () => {
 })
 
 // ── The running block's Stop control (spec 2026-09-15 §4, nocx-9bpeq.12) ──
-describe('the running block header Stop control', () => {
+describe('the running block header controls', () => {
   it('is absent when no running actions were injected', () => {
     const container = document.createElement('div')
     const el = createRunningBlock(1, 'sleep 10', '~', '', () => container, noopSelect, freshStore())
-    expect(el.querySelector(':scope > .cmd-header .cmd-header-right > .ui-button')).toBeNull()
+    expect(
+      el.querySelector(':scope > .cmd-header .cmd-header-right > [data-control="stop"]'),
+    ).toBeNull()
   })
 
-  it('is present, with the square icon and the word Stop, while the block is active', () => {
+  it('is a native small IconButton with the Stop name while active', () => {
     const container = document.createElement('div')
     const stop = vi.fn()
     const el = createRunningBlock(
@@ -4471,15 +4494,13 @@ describe('the running block header Stop control', () => {
       { stop, isActive: () => true },
     )
     const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
-    const btn = right.querySelector<HTMLButtonElement>(':scope > .ui-button')
+    const btn = right.querySelector<HTMLButtonElement>('[data-control="stop"]')
     expect(btn).not.toBeNull()
     expect(btn?.querySelector('svg')).not.toBeNull()
-    expect(btn?.textContent).toBe('Stop')
-    // A kit Button, not an IconButton: command-block-frame.css's hover/
-    // selection-only opacity rule keys on `.ui-icon-button` (the ⋮'s own
-    // identity), so this control never inherits that treatment and stays
-    // always visible.
-    expect(btn?.classList.contains('ui-icon-button')).toBe(false)
+    expect(btn?.getAttribute('aria-label')).toBe('Stop')
+    expect(btn?.dataset.size).toBe('sm')
+    expect(btn?.tabIndex).toBe(0)
+    expect(btn?.classList.contains('ui-icon-button')).toBe(true)
   })
 
   it('is present even when isActive is false AT CONSTRUCTION — the real manager assigns runningBlock only after this call returns (round 4, nocx-9bpeq.12)', () => {
@@ -4509,7 +4530,7 @@ describe('the running block header Stop control', () => {
     assigned = true
 
     const btn = el.querySelector<HTMLButtonElement>(
-      ':scope > .cmd-header .cmd-header-right > .ui-button',
+      ':scope > .cmd-header .cmd-header-right > [data-control="stop"]',
     )
     expect(btn).not.toBeNull()
     btn!.click()
@@ -4533,7 +4554,7 @@ describe('the running block header Stop control', () => {
     )
     document.body.appendChild(el)
     const btn = el.querySelector<HTMLButtonElement>(
-      ':scope > .cmd-header .cmd-header-right > .ui-button',
+      ':scope > .cmd-header .cmd-header-right > [data-control="stop"]',
     )!
 
     // The same escape hatch the ⋮ button uses (blocks.ts wireBlockSelection,
@@ -4541,7 +4562,7 @@ describe('the running block header Stop control', () => {
     // duplicated — through the shared `data-block-control` attribute, never
     // `data-block-actions`, which is the ⋮'s own identity alone
     // (nocx-9bpeq.12 round 6).
-    expect(btn.getAttribute('data-block-control')).toBe('')
+    expect(btn.getAttribute('data-block-control')).toBe('stop')
     expect(btn.hasAttribute('data-block-actions')).toBe(false)
     btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
@@ -4569,14 +4590,16 @@ describe('the running block header Stop control', () => {
       { stop: vi.fn(), isActive: () => true },
     )
     const right = el.querySelector<HTMLElement>(':scope > .cmd-header .cmd-header-right')!
-    expect(right.querySelector('.ui-button')).not.toBeNull()
+    expect(right.querySelector('[data-control="stop"]')).not.toBeNull()
 
     settleBlockOutcome(el, 'command', 1200, { status: 'success', exitCode: 0 })
 
-    expect(right.querySelector('.ui-button')).toBeNull()
+    expect(right.querySelector('[data-control="stop"]')).toBeNull()
+    expect(right.querySelector('[data-control="interrupt"]')).toBeNull()
+    expect(el.querySelector('.cmd-header')?.hasAttribute('data-variant')).toBe(false)
   })
 
-  it('is the ONLY element carrying data-block-control besides the ⋮, and never carries data-block-actions (round 6, nocx-9bpeq.12)', () => {
+  it('keeps overflow identity unique and gives every running control the focus-bounce exclusion', () => {
     // Round 4 gave Stop the ⋮'s OWN identity (`data-block-actions`), which
     // made a bare `querySelector('[data-block-actions]')` — how the rest of
     // the repo (a dozen e2e specs, restored-block.test.ts,
@@ -4620,9 +4643,9 @@ describe('the running block header Stop control', () => {
     // as far as this file can assert that mechanism without terminal-
     // content.ts's own owner.
     const stopBtn = el.querySelector<HTMLButtonElement>(
-      ':scope > .cmd-header .cmd-header-right > .ui-button',
+      ':scope > .cmd-header .cmd-header-right > [data-control="stop"]',
     )!
-    expect(stopBtn.getAttribute('data-block-control')).toBe('')
+    expect(stopBtn.getAttribute('data-block-control')).toBe('stop')
     stopBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
     stopBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
     expect(el.classList.contains('cmd-block-selected')).toBe(false)
@@ -4899,5 +4922,114 @@ describe('accessible block structure (nocx-zg3k3.4.2)', () => {
     expect(block.getAttribute('role')).toBe('group')
     expect(block.tabIndex).toBe(0)
     expect(block.getAttribute('aria-label')).toContain('echo hello')
+  })
+})
+
+// ADR-3kqrem7v: one header owns running controls in either DOM seat.
+describe('running header keyboard ownership', () => {
+  function runningHeader() {
+    const grid = document.createElement('input')
+    const interrupt = vi.fn()
+    const stop = vi.fn()
+    let active = true
+    const returnToGrid = vi.fn(() => grid.focus())
+    const el = createRunningBlock(
+      1,
+      'sleep 30',
+      '~',
+      '',
+      () => document.body,
+      noopSelect,
+      freshStore(),
+      'shell',
+      {
+        interrupt,
+        stop,
+        returnToGrid,
+        isActive: () => active,
+      },
+    )
+    document.body.append(grid, el)
+    const header = el.querySelector<HTMLElement>('.cmd-header')!
+    const controls = [...header.querySelectorAll<HTMLButtonElement>('[data-block-control]')]
+    return {
+      el,
+      header,
+      grid,
+      controls,
+      interrupt,
+      stop,
+      returnToGrid,
+      deactivate: () => {
+        active = false
+      },
+      dispose: () => {
+        el.remove()
+        grid.remove()
+      },
+    }
+  }
+
+  it('exposes one running header with Interrupt, Stop and overflow in native order', () => {
+    const f = runningHeader()
+    expect(f.header.dataset.variant).toBe('running')
+    expect(f.controls.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Interrupt',
+      'Stop',
+      'Block actions',
+    ])
+    expect(
+      f.controls.every((button) => button.dataset.size === 'sm' && button.tabIndex === 0),
+    ).toBe(true)
+    expect(f.controls[0].getAttribute('aria-keyshortcuts')).toBe('Alt+F10')
+    expect(f.controls[0].title).toContain('Ctrl+C')
+    expect(f.header.querySelector('.cmd-header-text')?.getAttribute('title')).toBe('sleep 30')
+    f.dispose()
+  })
+
+  it('interrupts separately from Stop and returns focus only while still active', () => {
+    const f = runningHeader()
+    f.controls[0].click()
+    expect(f.interrupt).toHaveBeenCalledTimes(1)
+    expect(f.stop).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(f.grid)
+    f.controls[1].click()
+    expect(f.stop).toHaveBeenCalledTimes(1)
+    f.deactivate()
+    f.controls[0].click()
+    expect(f.interrupt).toHaveBeenCalledTimes(1)
+    f.dispose()
+  })
+
+  it('returns Escape and boundary Tab to grid but leaves inner Tab native, even when reseated', () => {
+    const f = runningHeader()
+    document.body.append(f.header)
+    const press = (index: number, key: string, shiftKey = false) => {
+      f.controls[index].focus()
+      const event = new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true })
+      f.controls[index].dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    expect(press(0, 'Tab')).toBe(false)
+    expect(press(1, 'Tab')).toBe(false)
+    expect(press(1, 'Tab', true)).toBe(false)
+    expect(press(2, 'Tab', true)).toBe(false)
+    expect(f.returnToGrid).not.toHaveBeenCalled()
+    expect(press(0, 'Tab', true)).toBe(true)
+    expect(document.activeElement).toBe(f.grid)
+    expect(press(2, 'Tab')).toBe(true)
+    expect(document.activeElement).toBe(f.grid)
+    expect(press(1, 'Escape')).toBe(true)
+    expect(document.activeElement).toBe(f.grid)
+    f.el.prepend(f.header)
+    settleBlockOutcome(f.el, 'command', 1200, { status: 'success', exitCode: 0 })
+    const calls = f.returnToGrid.mock.calls.length
+    f.header
+      .querySelector('[data-block-actions]')!
+      .dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+    expect(f.returnToGrid).toHaveBeenCalledTimes(calls)
+    f.dispose()
   })
 })

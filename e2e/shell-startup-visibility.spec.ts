@@ -117,7 +117,8 @@ test('a command submitted during shell startup has a visible running block', asy
     await page.keyboard.press('Enter')
     writeFileSync(startupRelease, '')
 
-    await expect(pane.locator('.ui-process-bar')).toContainText('Process running')
+    await expect(pane.locator('.cmd-header[data-variant="running"] .ui-spinner')).toBeVisible()
+    await expect(pane.locator('.ui-process-bar')).toHaveCount(0)
     const block = pane.locator('.cmd-block.cmd-block-running').filter({ hasText: COMMAND })
     await expect(block).toBeVisible()
   } finally {

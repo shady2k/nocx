@@ -165,3 +165,51 @@
   width: var(--icon-size-sm);
   height: var(--icon-size-sm);
 }
+
+/* ADR-3kqrem7v: one fixed-height running header, wherever the controller
+   seats it. Frozen command and ask layouts keep the two-line rules above. */
+.ui-command-block-frame[data-variant='running'] {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  height: var(--control-height-md);
+  min-height: var(--control-height-md);
+  max-height: var(--control-height-md);
+  margin: 0;
+  padding: 0 var(--pane-inline-padding);
+}
+
+.ui-command-block-frame[data-variant='running'] > .cmd-header-meta {
+  display: none;
+}
+
+.ui-command-block-frame[data-variant='running'] > .cmd-header-command {
+  flex: 1 1 0;
+  align-items: center;
+  overflow: hidden;
+}
+
+.ui-command-block-frame[data-variant='running'] .cmd-header-text {
+  flex: 1 1 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+
+.ui-command-block-frame[data-variant='running'] > .cmd-header-right {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  align-self: center;
+}
+
+.cmd-block > .ui-command-block-frame[data-variant='running'] .cmd-header-right > .ui-icon-button,
+.ui-command-block-frame[data-variant='running'] .cmd-header-right > .ui-icon-button {
+  position: static;
+  flex: none;
+  opacity: 1;
+}

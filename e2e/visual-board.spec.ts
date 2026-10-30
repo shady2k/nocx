@@ -20,9 +20,9 @@
 //                                    decision.md §1 items 1 and 3)
 //   <theme>-running.png            — the composer hidden, a live block with
 //                                    Stop
-//   <theme>-process-bar.png        — the SAME running moment, framed on the
-//                                    running-state footer (decision §1,
-//                                    "Running-state gap"): Send input,
+//   <theme>-running-header.png        — the SAME running moment, framed on the
+//                                    shared one-line header (ADR-3kqrem7v,
+//                                    shared chrome):
 //                                    Interrupt, Stop
 //   <theme>-composer.png           — the composer back, focused, with a
 //                                    draft typed
@@ -60,7 +60,7 @@ const SETTLED = '.pane.active .cmd-block:not(.cmd-block-running)'
 const RUNNING = '.pane.active .cmd-block.cmd-block-running'
 const COMPOSER_PROMPT = '.pane.active .nocx-editor-chrome .ui-prompt-context'
 const PANE_CONTEXT = '.pane.active .ui-pane-context'
-const PROCESS_BAR = '.pane.active .ui-process-bar'
+const RUNNING_HEADER = '.pane.active .cmd-header[data-variant="running"]'
 
 test.use({ viewport: { width: 1400, height: 900 } })
 
@@ -180,18 +180,18 @@ async function paintBoard(page: Page, prefix: string): Promise<void> {
   // this is the shot where it stays hidden.
   await page.screenshot({ path: `test-results/visual-board/${prefix}-running.png` })
 
-  // The running-state footer (decision §1, "Running-state gap"): shown for
+  // The shared one-line header (ADR-3kqrem7v, "Running-state gap"): shown for
   // ordinary running on the normal buffer, replacing the composer rather
   // than sitting beside it — never both surfaces visible at once. Stop here
   // is the SAME stop owner as the block header's own Stop; Interrupt is the
   // deliberately DIFFERENT `Ctrl+C` intent (`signalActiveCommand`
   // ('interrupt')), never claimed as Stop's own shortcut.
-  const processBar = page.locator(PROCESS_BAR)
-  await expect(processBar).toBeVisible()
-  await expect(processBar.getByRole('button', { name: 'Send input' })).toBeVisible()
-  await expect(processBar.getByRole('button', { name: 'Interrupt' })).toBeVisible()
-  await expect(processBar.getByRole('button', { name: 'Stop' })).toBeVisible()
-  await page.screenshot({ path: `test-results/visual-board/${prefix}-process-bar.png` })
+  const runningHeader = page.locator(RUNNING_HEADER)
+  await expect(runningHeader).toBeVisible()
+  await expect(runningHeader.getByRole('button', { name: 'Interrupt', exact: true })).toBeVisible()
+  await expect(runningHeader.getByRole('button', { name: 'Stop', exact: true })).toBeVisible()
+  await expect(page.locator('.pane.active .ui-process-bar')).toHaveCount(0)
+  await page.screenshot({ path: `test-results/visual-board/${prefix}-running-header.png` })
 
   // Stop it, bring the composer back and type a draft — the mockup's second
   // moment: "Run ▾ │ git checkout -b feat/fonts" in a focused field.

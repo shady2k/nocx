@@ -68,6 +68,10 @@
     {
       "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
       "bead": "nocx-atpw5.1.7"
+    },
+    {
+      "test": "e2e:e2e/composer-submit-flicker.spec.ts › the submit hand-off (nocx-1ebrs.40) › a quick command dips the panel and turns it around; the geometry never animates",
+      "bead": "nocx-atpw5.1.9"
     }
   ]
 }

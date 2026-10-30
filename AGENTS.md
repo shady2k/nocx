@@ -437,8 +437,12 @@ rules exist to prevent.
 File the flake, then add `{test, bead}` to `docs/testing/quarantine.json` with the key the
 suite printed (`go:<TestName>` or `e2e:<spec> › <title path>`, no line numbers). The
 promotion then accepts a red job whose every failed test is quarantined by a bead that is
-still open; closing the bead ends the protection by itself. The entry is not the fix — the
-bead still has to be worked, under every rule above. Measured 2026-10-29: 17 flakes fixed in
+still open, and so does the pull request's own CI
+([ADR-0bawnmfg](docs/decisions/0bawnmfg-a-pull-requests-ci-honours-the-test-quarantine.md)):
+each gated job's last step compares the failures it already printed with this file, passes
+while printing every quarantined one with its bead, and stays red on anything else. Closing
+the bead ends the protection by itself. The entry is not the fix — the bead still has to be
+worked, under every rule above. Measured 2026-10-29: 17 flakes fixed in
 one day and a fully green product run about one in five, which is what roughly 340 e2e tests
 at half a percent each predict.
 

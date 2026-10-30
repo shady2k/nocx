@@ -14,7 +14,7 @@ package session
 // One fixture is new here: rawReaderFakeProcess. When this file was first
 // written, EVERY fixture in this package (ownerFakeProcess, scriptedProcess,
 // blockingProcess) omitted the rawReader interface (WaitReadable/
-// RawReadUntilAgain) that owner.go's mode()/hasReadBarrier() use to decide
+// RawReadChunk) that owner.go's mode()/hasReadBarrier() use to decide
 // "local PTY versus SSH channel" (spec §5.2), so commitIntent (owner.go)
 // refused ErrNoReadBarrier for EVERY itemIntent — not only a token-bearing
 // one — before Admit was ever asked, contradicting nearly every assertion
@@ -52,11 +52,10 @@ import (
 // rawReaderFakeProcess: a Process with a REAL local-PTY-shaped read barrier.
 // ---------------------------------------------------------------------------
 
-// rawReaderFakeProcess implements [rawReader] (owner.go) properly: a
-// readiness signal a test raises with produce/endRead, and a
-// RawReadUntilAgain that hands the owner everything queued since the last
-// drain — the shape a real local PTY's non-blocking read(2) loop has,
-// without a real fd. Its write side mirrors ownerFakeProcess's own
+// rawReaderFakeProcess implements [rawReader] (owner.go): tests raise
+// readiness with produce/endRead, then bounded RawReadChunk calls retain
+// unread output until a subsequent call establishes the empty-queue barrier.
+// Its write side mirrors ownerFakeProcess's own
 // blockNextWrite/release, because that half of "a local PTY" is not what is
 // missing from the existing fixtures — a short-write override is not needed
 // here since TestEveryShortWritePrefixLengthReportsExactBytesWritten (below)
@@ -102,13 +101,8 @@ func (p *rawReaderFakeProcess) wake() {
 	}
 }
 
-// produce makes b available to the NEXT drain, delivered whole — never
-// truncated to a scratch buffer's size the way a fixture built only around
-// io.Reader (ownerFakeProcess, scriptedProcess) would be by a single Read
-// call, which is why the reply-storm test below needs this fixture rather
-// than either of those: a single produce of tens of thousands of bytes must
-// reach the emulator in one piece for the reply it provokes to be measured
-// honestly.
+// produce makes b available to subsequent bounded reads, preserving all bytes
+// even when a single produce exceeds the owner's scratch buffer.
 func (p *rawReaderFakeProcess) produce(b []byte) {
 	p.mu.Lock()
 	p.queue = append(p.queue, append([]byte(nil), b...))
@@ -137,23 +131,25 @@ func (p *rawReaderFakeProcess) WaitReadable(ctx context.Context) error {
 	}
 }
 
-func (p *rawReaderFakeProcess) RawReadUntilAgain(_ []byte, deliver func([]byte)) (eof bool, err error) {
+func (p *rawReaderFakeProcess) RawReadChunk(buf []byte) (int, bool, error) {
 	p.mu.Lock()
-	q := p.queue
-	p.queue = nil
-	eofSet := p.eofSet
-	eofErr := p.eofErr
-	p.mu.Unlock()
-	for _, chunk := range q {
-		deliver(chunk)
-	}
-	if eofSet {
-		if eofErr == nil {
-			eofErr = io.EOF
+	defer p.mu.Unlock()
+	if len(p.queue) > 0 {
+		n := copy(buf, p.queue[0])
+		p.queue[0] = p.queue[0][n:]
+		if len(p.queue[0]) == 0 {
+			p.queue = p.queue[1:]
 		}
-		return true, eofErr
+		return n, false, nil
 	}
-	return false, nil
+	if p.eofSet {
+		err := p.eofErr
+		if err == nil {
+			err = io.EOF
+		}
+		return 0, false, err
+	}
+	return 0, true, nil
 }
 
 var _ rawReader = (*rawReaderFakeProcess)(nil)
@@ -349,8 +345,8 @@ func TestReplyStormWithBlockedWriterOverflowsReserveAndDrainContinues(t *testing
 
 	// 12,000 cursor-position queries answered from a cursor that never
 	// moves (nothing here reads them) produce at least 12,000*7 = 84,000
-	// bytes of reply — comfortably past the 64 KiB reserve in one Ingest
-	// call.
+	// bytes of reply — comfortably past the 64 KiB reserve across bounded
+	// ingest quanta while the writer remains occupied.
 	storm := bytes.Repeat([]byte("\x1b[6n"), 12000)
 	proc.produce(storm)
 

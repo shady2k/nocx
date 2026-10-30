@@ -719,13 +719,11 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 	}
 }
 
-// handleClose closes a session: the resize lane's terminal gate first (a
-// close must never queue behind a dead resize), then the registry close
-// through the session operation, then the transport teardown (rings,
-// bindings, discovery — migration map, close finding). The git/files
-// binding teardown is shared transport lifecycle, not a handler capability:
-// it also runs on AD-9 disconnect via monitorExit, and the registries are
-// their own exclusion.
+// handleClose retires the registry identity, cancels the resize lane and marks
+// the expected exit, then completes process and transport teardown. The session
+// gate covers retirement only; slow helper I/O retains the execution lane, never
+// whole-domain exclusion. The git/files binding teardown also runs on AD-9
+// disconnect via monitorExit; those registries own their exclusion.
 func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, req jsonrpcRequest) {
 	var params closeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
@@ -741,57 +739,36 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		return
 	}
 
-	op, err := h.ops.ForSession(sid)
+	op, err := h.ops.ForSessionEnd(sid)
 	if err != nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
 		_ = respond(h.r, resp)
 		return
 	}
-	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
-		// Close is terminal for the session's resize lane: from here, queued
-		// and in-flight resizes are cancelled and nothing new may reach the
-		// session. Runs BEFORE the teardown below, and never waits for the
-		// lane's worker — the one operation that can unblock a dead resize
-		// must not queue behind it.
+	sess, err := op.Run(ctx, func(session.Session) {
+		// The ID is already retired, so another attach cannot claim it.
+		// Cancel resizes and mark the expected exit before process teardown
+		// wakes monitorExit. Neither step waits for a resize worker.
 		h.machine.closeLane(sid)
-
-		sess, gerr := svc.Get(sid)
-		if gerr != nil {
-			// The session is already gone from the registry; the transport
-			// teardown still runs (idempotent).
-			h.machine.closeSession(sid, nil)
-			state.remove(sid)
-			result, _ := json.Marshal(map[string]any{})
-			resp := newJSONRPCResult(req.ID, result)
-			_ = respond(h.r, resp)
-			return nil
-		}
-		// The end is the user's own doing, and the session layer cannot
-		// see that: a forced teardown records no shell report, so the exit
-		// it produces reads as ExitInterrupted like any dropped connection.
-		// Marked BEFORE the registry close, because the registry close is
-		// what wakes monitorExit — which takes the marker and files
-		// nothing. Not marked on the branch above: the session is already
-		// out of the registry there, so no exit of ours is coming and the
-		// entry would have nothing to clear it.
 		h.machine.markCloseRequested(sid)
-		// EndSession, not Close: a caller that asked this session to close by
-		// id knows nobody will ever attach to it again, so a helper-hosted
-		// session releases its reserved window budget here rather than only
-		// detaching (nocx-isjh4, closer 1's other door — the layout chain's
-		// own close runs through WSServer.closeSessionsForPanes).
-		_ = svc.EndSession(sid)
-		h.machine.closeSession(sid, sess)
-		state.remove(sid)
-
-		result, _ := json.Marshal(map[string]any{})
-		resp := newJSONRPCResult(req.ID, result)
-		_ = respond(h.r, resp)
-		return nil
 	})
-	if err != nil {
+	if capability.IsRefused(err) {
 		answerOperationRefusal(h.r, req, err)
+		return
 	}
+	if sess == nil {
+		// Another terminal path removed the session after ForSessionEnd.
+		// Transport teardown still completes idempotently, as before.
+		h.machine.closeLane(sid)
+	} else if err != nil {
+		log.From(ctx).Warn("session teardown failed after retirement", "session_id", sid, "err", err)
+	}
+	h.machine.closeSession(sid, sess)
+	state.remove(sid)
+
+	result, _ := json.Marshal(map[string]any{})
+	resp := newJSONRPCResult(req.ID, result)
+	_ = respond(h.r, resp)
 }
 
 // handleDetach drops this connection's attachment without ending the
@@ -1174,6 +1151,21 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
+// orderedBySession binds ordering to the protocol's authoritative sessionId,
+// never a tab/window/connection identity or a caller-selected queue name.
+// connMethods validates before admission so malformed requests cannot
+// allocate key state.
+// Ownership is still checked when the queued handler runs: a preceding detach
+// or a concurrent ownership transfer may have changed it since admission.
+func orderedBySession(spec methodSpec) methodSpec {
+	spec.key = func(raw json.RawMessage) string {
+		var target closeParams
+		_ = json.Unmarshal(raw, &target) // already validated by connMethods
+		return target.SessionID
+	}
+	return spec
+}
+
 // sessionSpecs declares the session-plane control methods. open and attach
 // need the connection as identity (subscriber registration); resize and close
 // need connState (session ownership); ack is ingress-critical and never
@@ -1217,14 +1209,15 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	immediate := control.ImmediateSubmission{}
 	openSub := s.operationQueue("open")
 	sessionSub := s.operationQueue("session")
-	// resize and close share an ORDERED submission (control package): the
-	// resize enqueue's arrival order is load-bearing for the coalescing
-	// lane, and a close admitted after a resize on the same socket must
-	// observe the resize's enqueue first — the same-socket ordering the
-	// read loop used to provide by running everything inline. The ordered
-	// worker preserves submission order; the bound refuses under a flood
-	// with the saturation contract like any admission-backed method.
-	ordered := control.NewOrderedSubmission("session-ops", 32)
+	// Completion ordering belongs to a session, not the whole server. All
+	// sockets share this scheduler: a blocked intent holds only its own
+	// session's FIFO. The 32 slots count running AND queued work, bounding
+	// active key workers as well as pending work. Inflight tracking makes
+	// Stop cancel and drain admitted tasks before session teardown.
+	ordered := &inflightSubmission{
+		inflight: &s.inflight,
+		inner:    control.NewKeyedOrderedSubmission("session-ops", 32),
+	}
 	// The instance identity is read ONCE, here, where the registry is: a
 	// handler judging a claim needs the value, never the registry.
 	instance := s.instanceIdentity()
@@ -1233,22 +1226,22 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := openHandlers{opener: s.opener, sess: s, log: s.log, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		orderedBySession(reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
-		}),
-		reg(ordered, "session.intent", params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		})),
+		orderedBySession(reg(ordered, "session.intent", params(validateSessionIntentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionIntentHandler{source: s.paneIntentSource, r: r, state: state}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
-		}),
-		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		})),
+		orderedBySession(reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
-		}),
-		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		})),
+		orderedBySession(reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
-		}),
+		})),
 		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s, intents: s.paneIntentSource}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }

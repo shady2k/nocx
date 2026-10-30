@@ -546,7 +546,7 @@ func TestSixteenConcurrentResolvesCompleteWhileOneRevokeBlocksOnItsHelperForever
 // path hands it — which is what "zero bytes" is read off, rather than a
 // returned field.
 //
-// It answers rawReader (WaitReadable/RawReadUntilAgain, owner.go) the way a
+// It answers rawReader (WaitReadable/RawReadChunk, owner.go) the way a
 // local PTY does, and that is load-bearing rather than incidental:
 // hasReadBarrier (owner_ssh.go) is what decides whether an intent may commit
 // at all, so a process without it would refuse EVERY intent in this section
@@ -609,15 +609,13 @@ func (p *heldIntentProcess) WaitReadable(ctx context.Context) error {
 	}
 }
 
-// RawReadUntilAgain delivers nothing and answers EOF exactly once the
-// process has ended — rawReaderFakeProcess's own contract, which is what
-// makes the owner's eofSeen true and lets it exit.
-func (p *heldIntentProcess) RawReadUntilAgain([]byte, func([]byte)) (bool, error) {
+// RawReadChunk reports EAGAIN while idle and EOF once the process ends.
+func (p *heldIntentProcess) RawReadChunk([]byte) (int, bool, error) {
 	select {
 	case <-p.ended:
-		return true, nil
+		return 0, false, io.EOF
 	default:
-		return false, nil
+		return 0, true, nil
 	}
 }
 

@@ -26,8 +26,9 @@ import (
 // (forced abandonment — see inflight.waitDrained).
 const defaultControlDrainTimeout = 5 * time.Second
 
-// inflightTask is the registration handle of one admitted task.
-type inflightTask struct{}
+// inflightTask is the registration handle of one admitted task. It must have
+// nonzero size: distinct live registrations need distinct pointer identities.
+type inflightTask struct{ _ byte }
 
 // inflight tracks admitted off-loop control tasks so Stop can cancel them
 // and wait, bounded, for them to drain.
@@ -131,7 +132,7 @@ func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *
 	if !ok {
 		return &control.Rejection{Reason: "server shutting down", Scope: "control"}
 	}
-	rej := s.inner.TrySubmit(tctx, control.Task{Run: func(pctx context.Context) {
+	rej := s.inner.TrySubmit(tctx, control.Task{Key: task.Key, Run: func(pctx context.Context) {
 		defer release()
 		task.Run(pctx)
 	}})
@@ -139,6 +140,14 @@ func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *
 		release()
 	}
 	return rej
+}
+
+// Shutdown fences an owned worker queue as well as its inflight registration.
+// The shared inflight tracker supplies cancellation and the bounded join in Stop.
+func (s *inflightSubmission) Shutdown() {
+	if inner, ok := s.inner.(control.Shutdownable); ok {
+		inner.Shutdown()
+	}
 }
 
 // saturatedNotifyLimiter rate-limits the control.saturated notification that

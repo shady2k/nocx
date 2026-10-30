@@ -11,8 +11,6 @@ import {
   verifyFiles,
   verifyCI,
   updateCask,
-  failedTests,
-  readQuarantine,
   runBelongsTo,
 } from './promotion.mjs'
 
@@ -478,59 +476,10 @@ test('a signed manifest with wrong platform metadata is refused before stable re
   }
 })
 
-// Real log lines (CI runs 40866954718 and 40893969284, 2026-10-29), with the
-// timestamp prefix the jobs/logs endpoint adds and Playwright's trailing rule.
-const goLog =
-  '2026-10-29T08:51:12.1Z === RUN   TestZshAgentWrapperCancelsTheLaunchOnCtrlC\n' +
-  '2026-10-29T08:51:23.8Z --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC (11.67s)\n' +
-  '2026-10-29T08:51:23.8Z     --- FAIL: TestZshAgentWrapperCancelsTheLaunchOnCtrlC/sub (0.1s)\n' +
-  '2026-10-29T08:51:24.0Z FAIL\tgithub.com/shady2k/nocx/internal/app\t300.1s\n'
-const e2eLog =
-  '2026-10-29T13:01:02.0Z   1) [webkit] › e2e/ask-attaches-the-frozen-screen.spec.ts:218:5 › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask ─────────\n' +
-  '2026-10-29T13:01:02.1Z     Error: fake-openai: timed out waiting for 2 request(s)\n'
-const askKey =
-  'e2e:e2e/ask-attaches-the-frozen-screen.spec.ts › the assistant is told the frozen screen came with the question (nocx-hp8p2.4) › summoning over a full-screen program on the alternate screen attaches its screen to the ask'
-
-test('a failed job log names its failed tests in the quarantine key form, and nothing else', () => {
-  assert.deepEqual(failedTests(goLog), ['go:TestZshAgentWrapperCancelsTheLaunchOnCtrlC'])
-  assert.deepEqual(failedTests(e2eLog), [askKey])
-  assert.deepEqual(failedTests('2026-10-29T00:00:00Z panic: test timed out after 10m0s\n'), [])
-})
-
-test('only an open bead quarantines; a closed one protects nothing; an unknown one refuses', () => {
-  const issues = [
-    { id: 'nocx-a', status: 'open' },
-    { id: 'nocx-b', status: 'submitted' },
-    { id: 'nocx-c', status: 'closed' },
-  ]
-    .map((row) => JSON.stringify(row))
-    .join('\n')
-  const doc = (tests) => JSON.stringify({ schema: 1, tests })
-  assert.deepEqual(readQuarantine(undefined, issues), {})
-  assert.deepEqual(
-    readQuarantine(
-      doc([
-        { test: 'go:TestA', bead: 'nocx-a' },
-        { test: askKey, bead: 'nocx-b' },
-        { test: 'go:TestC', bead: 'nocx-c' },
-      ]),
-      issues,
-    ),
-    { 'go:TestA': 'nocx-a', [askKey]: 'nocx-b' },
-  )
-  assert.throws(() => readQuarantine(doc([{ test: 'go:TestA', bead: 'nocx-z' }]), issues), /exist/)
-  assert.throws(() => readQuarantine(doc([{ test: 'TestA', bead: 'nocx-a' }]), issues), /entry/)
-  assert.deepEqual(readQuarantine(doc([{ test: 'job:ci-backlog#557', bead: 'nocx-a' }]), issues), {
-    'job:ci-backlog#557': 'nocx-a',
-  })
-  assert.throws(
-    () => readQuarantine(doc([{ test: 'job:ci-backlog', bead: 'nocx-a' }]), issues),
-    /entry/,
-  )
-  assert.throws(() => readQuarantine('{"schema":2,"tests":[]}', issues), /quarantine/)
-})
-
 test('a red required job passes only on quarantined tests or a retry that classified an infrastructure flake', (t) => {
+  // The quarantine's own file and log parse are scripts/quarantine.test.mjs's;
+  // this asks only what verifyCI does with a job that is red.
+  const askKey = 'go:TestQuarantinedFlake'
   const { input } = fixture(t)
   const base = structuredClone(input.ci[0])
   const red = (mutate) => {
@@ -544,7 +493,10 @@ test('a red required job passes only on quarantined tests or a retry that classi
       { attempt: 1, jobs: structuredClone(entry.jobs) },
       { attempt: 2, jobs: structuredClone(entry.jobs) },
     ]
-    for (const attempt of entry.attempts) attempt.jobs[failedIndex].failures = [askKey]
+    for (const attempt of entry.attempts) {
+      attempt.jobs[failedIndex].failures = [askKey]
+      attempt.jobs[failedIndex].complete = true
+    }
     mutate(entry, failedIndex)
     return [entry]
   }

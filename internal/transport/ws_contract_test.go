@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -57,63 +58,149 @@ import (
 // it belongs to neither party.
 const contractDir = "../../contracts"
 
+// contractSchemaSet owns a compiler for one immutable file set. Callers only
+// validate the returned schemas; they never modify them. The compiler caches
+// loaded documents and compiled schemas, but is not safe for concurrent use.
+// Serialize compilation; validation can use the completed schemas concurrently.
+// A separate set gets a separate compiler, so fixtures cannot share constraints.
+type contractSchemaSet struct {
+	mu       sync.Mutex
+	compiler *jsonschema.Compiler
+}
+
+type contractSchemaLoader struct {
+	files fs.FS
+}
+
+const contractSchemaURL = "https://nocx.local/contracts/"
+
+func (l contractSchemaLoader) Load(url string) (any, error) {
+	name, ok := strings.CutPrefix(url, contractSchemaURL)
+	if !ok || !fs.ValidPath(name) {
+		return nil, fmt.Errorf("contract reference outside the contract file set: %s", url)
+	}
+	raw, err := fs.ReadFile(l.files, name)
+	if err != nil {
+		return nil, err
+	}
+	return jsonschema.UnmarshalJSON(bytes.NewReader(raw))
+}
+
+func newContractSchemaSet(files fs.FS) *contractSchemaSet {
+	compiler := jsonschema.NewCompiler()
+	// Resolve canonical $id URLs locally, including cross-file references.
+	// Never fetch a contract from the network.
+	compiler.UseLoader(contractSchemaLoader{files: files})
+	return &contractSchemaSet{compiler: compiler}
+}
+
+func (s *contractSchemaSet) load(name string) (*jsonschema.Schema, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.compiler.Compile(contractSchemaURL + name)
+}
+
+var wireContractSchemas = newContractSchemaSet(os.DirFS(contractDir))
+
 func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 	t.Helper()
-	c := jsonschema.NewCompiler()
-	// Cross-file $refs (e.g. git.stage → git.status#/$defs/status) resolve
-	// against the referenced schema's $id, so every contract is registered
-	// under its canonical $id URL before anything is compiled — otherwise
-	// the compiler would try to fetch https://nocx.local/... from the
-	// network. The schema under test keeps the plain-name convention every
-	// existing call site uses. The single shared declaration this enables
-	// is the point: one concept, one owner (contracts/README.md, AD-8).
-	entries, err := os.ReadDir(contractDir)
+	s, err := wireContractSchemas.load(name)
 	if err != nil {
-		t.Fatalf("read contracts dir: %v", err)
-	}
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".schema.json") {
-			continue
-		}
-		f, openErr := os.Open(filepath.Join(contractDir, e.Name())) //nolint:gosec // test-only path under contracts/
-		if openErr != nil {
-			t.Fatalf("open %s: %v", e.Name(), openErr)
-		}
-		doc, parseErr := jsonschema.UnmarshalJSON(f)
-		_ = f.Close()
-		if parseErr != nil {
-			t.Fatalf("parse %s: %v", e.Name(), parseErr)
-		}
-		if addErr := c.AddResource("https://nocx.local/contracts/"+e.Name(), doc); addErr != nil {
-			t.Fatalf("add %s: %v", e.Name(), addErr)
-		}
-	}
-	schemaName, fragment, hasFragment := strings.Cut(name, "#")
-	path := filepath.Join(contractDir, filepath.Clean(schemaName))
-	f, openErr := os.Open(path) //nolint:gosec // a test-only path under contracts/
-	if openErr != nil {
-		t.Fatalf("open %s: %v", path, openErr)
-	}
-	defer func() { _ = f.Close() }()
-
-	doc, parseErr := jsonschema.UnmarshalJSON(f)
-	if parseErr != nil {
-		t.Fatalf("parse %s: %v", path, parseErr)
-	}
-	compileName := name
-	if hasFragment {
-		if addErr := c.AddResource(schemaName, doc); addErr != nil {
-			t.Fatalf("add %s: %v", schemaName, addErr)
-		}
-		compileName = schemaName + "#" + fragment
-	} else if addErr := c.AddResource(name, doc); addErr != nil {
-		t.Fatalf("add %s: %v", name, addErr)
-	}
-	s, err := c.Compile(compileName)
-	if err != nil {
-		t.Fatalf("compile %s: %v", compileName, err)
+		t.Fatalf("compile %s: %v", name, err)
 	}
 	return s
+}
+
+func TestLoadSchemaReusesCompiledContracts(t *testing.T) {
+	// Contract checks validate many payloads against the same immutable files.
+	// Recompiling them cannot add coverage; it only spends the package's race
+	// budget again. Reuse must include cross-file references and fragments.
+	for _, name := range []string{
+		"git.stage.schema.json",
+		"tools/session.read.schema.json#/$defs/result",
+	} {
+		t.Run(name, func(t *testing.T) {
+			first := loadSchema(t, name)
+			if again := loadSchema(t, name); again != first {
+				t.Fatal("the same contract was compiled twice")
+			}
+		})
+	}
+}
+
+func TestContractSchemaSetReusesAndIsolatesCompiledContracts(t *testing.T) {
+	files := func(minimum string) fstest.MapFS {
+		return fstest.MapFS{
+			"value.schema.json":  {Data: []byte(`{"$id":"https://nocx.local/contracts/value.schema.json","$defs":{"value":{"type":"integer","minimum":` + minimum + `}}}`)},
+			"result.schema.json": {Data: []byte(`{"$id":"https://nocx.local/contracts/result.schema.json","$ref":"value.schema.json#/$defs/value"}`)},
+		}
+	}
+	first := newContractSchemaSet(files("1"))
+	second := newContractSchemaSet(files("2"))
+	for _, name := range []string{"result.schema.json", "value.schema.json#/$defs/value"} {
+		t.Run(name, func(t *testing.T) {
+			schema, err := first.load(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := first.load(name)
+			if err != nil || again != schema {
+				t.Fatalf("the same contract was compiled twice: %v", err)
+			}
+			other, err := second.load(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if other == schema {
+				t.Fatal("different contract file sets shared a compiled value")
+			}
+			if err := validateJSONErr(schema, []byte(`1`)); err != nil {
+				t.Fatalf("the first file set must accept 1: %v", err)
+			}
+			if err := validateJSONErr(other, []byte(`1`)); err == nil {
+				t.Fatal("the second file set must reject 1")
+			}
+			if err := validateJSONErr(other, []byte(`2`)); err != nil {
+				t.Fatalf("the second file set must accept 2: %v", err)
+			}
+		})
+	}
+}
+
+func TestContractSchemaLoaderRefusesMissingMalformedAndRemoteResources(t *testing.T) {
+	files := fstest.MapFS{
+		"broken.schema.json": {Data: []byte(`{`)},
+		"remote.schema.json": {Data: []byte(`{"$ref":"https://example.com/untrusted.schema.json"}`)},
+	}
+	for _, name := range []string{"missing.schema.json", "broken.schema.json", "remote.schema.json"} {
+		t.Run(name, func(t *testing.T) {
+			set := newContractSchemaSet(files)
+			if _, err := set.load(name); err == nil {
+				t.Fatal("an unavailable contract must fail compilation")
+			}
+		})
+	}
+}
+
+func TestContractSchemaSetConcurrentLoadsAndValidation(t *testing.T) {
+	set := newContractSchemaSet(fstest.MapFS{
+		"value.schema.json": {Data: []byte(`{"type":"integer","minimum":1}`)},
+	})
+	for range 8 {
+		t.Run("reader", func(t *testing.T) {
+			t.Parallel()
+			schema, err := set.load("value.schema.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateJSONErr(schema, []byte(`1`)); err != nil {
+				t.Fatalf("valid payload rejected: %v", err)
+			}
+			if err := validateJSONErr(schema, []byte(`0`)); err == nil {
+				t.Fatal("invalid payload accepted")
+			}
+		})
+	}
 }
 
 // validateJSON checks raw against the schema. Takes bytes rather than a Go

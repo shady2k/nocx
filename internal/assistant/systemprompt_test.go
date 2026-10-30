@@ -630,3 +630,26 @@ func sectionOf(t *testing.T, prompt, heading string) string {
 	}
 	return rest
 }
+
+func TestSystemPrompt_MapsTrustedToolSlotsWithoutRewritingFacts(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd:                  "/repo/session.read",
+		PersonalInstructions: "Explain the literal session.read without changing it.",
+		AttachedContent: []AttachedContentItem{{
+			ItemID: "item-session.read", Command: "printf session.read", State: "closed", Automatic: true,
+		}},
+		Skills:   []SkillRef{{Name: "session.read", Description: "The user named this session.read."}},
+		ToolName: func(name string) string { return "encoded_" + strings.ReplaceAll(name, ".", "_") },
+	})
+	for _, want := range []string{
+		"with encoded_session_read and the id below", "What encoded_session_read returns",
+		"read it with encoded_skills_read", "with encoded_notes_create",
+		"/repo/session.read", "item-session.read", "printf session.read",
+		"Explain the literal session.read without changing it.",
+		"The user named this session.read.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lost %q", want)
+		}
+	}
+}

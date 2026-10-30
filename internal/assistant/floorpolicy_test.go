@@ -85,7 +85,7 @@ func TestNewClient_InjectsFloorBeforeToolExecution(t *testing.T) {
 		{Kind: content.ResourceSession, ID: "session-a"},
 		{Kind: content.ResourcePath, ID: "/"},
 	})
-	client, _, err := NewClientAndRegistry(nil, nil, content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx")), nil)
+	client, _, err := newTestClientAndRegistry(t, nil, content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx")), nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

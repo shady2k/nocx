@@ -962,10 +962,20 @@ type FrameRegion struct {
 // reinterprets what the run used. The credential is never part of this:
 // the key is resolved at stream time, never persisted.
 type RunFacts struct {
-	Mode       string `json:"mode"` // "explain" — the only mode this slice knows
-	EndpointID string `json:"endpointId,omitempty"`
-	BaseURL    string `json:"baseUrl,omitempty"`
-	Model      string `json:"model,omitempty"`
+	Mode           string `json:"mode"` // "explain" — the only mode this slice knows
+	EndpointID     string `json:"endpointId,omitempty"`
+	BaseURL        string `json:"baseUrl,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Engine         string `json:"engine,omitempty"`
+	RuntimeVersion string `json:"runtimeVersion,omitempty"`
+}
+
+// EngineID treats pre-selector runs as Eino without relabeling unknown engines.
+func (f RunFacts) EngineID() string {
+	if f.Engine == "" {
+		return "eino"
+	}
+	return f.Engine
 }
 
 // AgentAsk is one ask transaction (agent.ask, design §5, §7): the question
@@ -1035,6 +1045,8 @@ type AgentAskResult struct {
 	EntryID   string
 	IngestSeq int64
 	Replayed  bool
+	Facts     RunFacts
+	State     RunState
 }
 
 // ProseBlock is one run of assistant prose as the store holds it (ADR-0040):
@@ -1890,13 +1902,16 @@ type Artifact struct {
 	ID string
 	// EntryID is the block this body belongs to; ExecutionID is which
 	// attempt produced it, nil when there was none (ADR-0040).
-	EntryID        string
-	ExecutionID    *int64
-	MediaType      MediaType
-	DerivedFrom    *string
-	State          ArtifactState
-	ByteLen        int64
-	ChunkCount     int
+	EntryID     string
+	ExecutionID *int64
+	MediaType   MediaType
+	DerivedFrom *string
+	State       ArtifactState
+	ByteLen     int64
+	ChunkCount  int
+	// LastSeq is the highest chunk sequence included in Chunks, not their count.
+	// It is read in the same snapshot as the body so live replay cannot duplicate it.
+	LastSeq        int
 	Pinned         bool
 	Truncated      *Truncation
 	CaptureMethod  CaptureMethod
@@ -2129,6 +2144,8 @@ type LedgerRepository interface {
 	// Idempotent on (ID, Client, digest): a replay returns the original
 	// run id; the same ask id with different content is ErrIDConflict.
 	SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentAskResult, error)
+	// LookupAgentAsk reads an authenticated replay without admitting a new run.
+	LookupAgentAsk(ctx context.Context, in AgentAsk) (*AgentAskResult, error)
 	// OpenProse opens ONE run of assistant prose under a turn (ADR-0040): a
 	// `text` child at the turn's next free seat, with an artifact of its own
 	// for the deltas that follow. Both rows land in one transaction — a block

@@ -5,30 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 // recordingModel keeps the messages it was asked with, so a test can assert
 // what the auditing model is TOLD rather than what we hoped it inferred.
 type recordingModel struct {
-	got      []*schema.Message
-	response *schema.Message
+	got      []Message
+	response string
 	err      error
 }
 
-func (m *recordingModel) Generate(_ context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (m *recordingModel) Generate(_ context.Context, _ ModelTarget, msgs []Message) (string, error) {
 	m.got = msgs
 	return m.response, m.err
-}
-
-func (*recordingModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("stream is not used by a skill audit")
 }
 
 // auditOneFile is readOneFile with this file's fixture framing. The tests
@@ -36,8 +28,8 @@ func (*recordingModel) Stream(context.Context, []*schema.Message, ...model.Optio
 // the frame, the closed vocabulary, the bounds — and every one of them was
 // written against the single-pass reading this replaced. The subject changed
 // from "the bundle" to "one file of it"; the claims did not.
-func auditOneFile(ctx context.Context, m model.BaseChatModel, text string, opts ...model.Option) (SkillReading, error) {
-	return readOneFile(ctx, m, "weather", "", SkillAuditFile{Path: "SKILL.md", Text: text}, skillAuditCallTimeout, opts...)
+func auditOneFile(ctx context.Context, m TextGenerator, text string) (SkillReading, error) {
+	return readOneFile(ctx, m, ModelTarget{}, "weather", "", SkillAuditFile{Path: "SKILL.md", Text: text}, skillAuditCallTimeout)
 }
 
 // auditOK builds a model reply in the shape parseSkillReading demands: one
@@ -49,7 +41,7 @@ func auditOK(report string) *recordingModel {
 	if err != nil {
 		panic(err)
 	}
-	return &recordingModel{response: &schema.Message{Content: string(body)}}
+	return &recordingModel{response: string(body)}
 }
 
 // blockingModel answers nothing and waits for the context, which is what a
@@ -57,29 +49,15 @@ func auditOK(report string) *recordingModel {
 // in here. seen carries the context the call was made with, so a test can ask
 // what deadline the audit gave itself.
 type blockingModel struct {
-	mu   sync.Mutex
-	seen context.Context //nolint:containedctx // the assertion IS about the context the call carried
+	seen chan context.Context
 }
 
-func (m *blockingModel) Generate(ctx context.Context, _ []*schema.Message, _ ...model.Option) (*schema.Message, error) {
-	m.mu.Lock()
-	m.seen = ctx
-	m.mu.Unlock()
+func (m *blockingModel) Generate(ctx context.Context, _ ModelTarget, _ []Message) (string, error) {
+	if m.seen != nil {
+		m.seen <- ctx
+	}
 	<-ctx.Done()
-	return nil, ctx.Err()
-}
-
-// context is the call's context as the model saw it, read under the same lock
-// it is written under: the reading runs its files on goroutines of its own, so
-// this crosses one.
-func (m *blockingModel) context() context.Context {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.seen
-}
-
-func (*blockingModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("stream is not used by a skill audit")
+	return "", ctx.Err()
 }
 
 // A READING IS BOUNDED BY THE READING, not by whoever called it (nocx-w155y).
@@ -90,7 +68,7 @@ func (*blockingModel) Stream(context.Context, []*schema.Message, ...model.Option
 // measured on the dev stand as an ESTAB connection to the provider with the
 // request out and nothing coming back.
 func TestAuditSkillGivesTheReadingADeadlineOfItsOwn(t *testing.T) {
-	m := &blockingModel{}
+	m := &blockingModel{seen: make(chan context.Context, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -103,13 +81,11 @@ func TestAuditSkillGivesTheReadingADeadlineOfItsOwn(t *testing.T) {
 			Files:    []SkillAuditFile{{Path: "SKILL.md", Text: "body"}},
 		})
 	}()
-	// The model is called before anything is asserted about it.
-	deadline := time.Now().Add(2 * time.Second)
-	for m.context() == nil && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	seen := m.context()
-	if seen == nil {
+	// Wait for the model's actual call before inspecting its deadline.
+	var seen context.Context
+	select {
+	case seen = <-m.seen:
+	case <-time.After(2 * time.Second):
 		t.Fatal("the model was never called")
 	}
 	at, ok := seen.Deadline()
@@ -171,7 +147,7 @@ func TestAuditSkillFramesItsInputAsADocumentToExamine(t *testing.T) {
 	if _, err := auditOneFile(context.Background(), m, "---\nSKILL.md\n---\nbody"); err != nil {
 		t.Fatalf("auditSkill: %v", err)
 	}
-	if len(m.got) != 2 || m.got[0].Role != schema.System || m.got[1].Role != schema.User {
+	if len(m.got) != 2 || m.got[0].Role != "system" || m.got[1].Role != "user" {
 		t.Fatalf("messages = %+v, want one system frame and one user document", m.got)
 	}
 	system := strings.ToLower(m.got[0].Content)

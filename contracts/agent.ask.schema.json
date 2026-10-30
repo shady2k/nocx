@@ -4,8 +4,26 @@
   "title": "AgentAsk",
   "description": "Result of the agent.ask JSON-RPC method (nocx-f4s5, design §5, §7). The question text plus references to already-captured frames. The backend records the frame reference, the TURN and a PENDING run in ONE ledger transaction before the model would be called, and answers with the BACKEND-MINTED run id (what agent.cancel/approve/status will address) and the run's state, ON THE WIRE because the renderer draws it. The run is prepared at the response: recorded, and the backend then drives it to streaming and a terminal state asynchronously (agent.runDelta / agent.runState notifications). The same ask retried with the same askId answers the original run id — never a second run (a retry duplicates neither turn nor run).",
   "type": "object",
-  "required": ["runId", "entryId", "state", "ingestSeq", "replayed", "model"],
+  "required": [
+    "runId",
+    "entryId",
+    "state",
+    "ingestSeq",
+    "replayed",
+    "model",
+    "engine",
+    "runtimeVersion"
+  ],
   "properties": {
+    "engine": {
+      "description": "The engine pinned to the original run. Missing historical metadata is returned as eino; unknown nonempty stored identities remain unchanged.",
+      "type": "string",
+      "minLength": 1
+    },
+    "runtimeVersion": {
+      "description": "The original run's pinned runtime identity, or the empty string when historical metadata is absent.",
+      "type": "string"
+    },
     "runId": {
       "description": "The backend-minted run id — the execution row in the one ledger. Opaque to the renderer; a later agent.cancel/agent.approve/agent.status addresses the run by this id.",
       "type": "integer",

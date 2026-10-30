@@ -5,8 +5,12 @@
   "description": "Result of the ledger.artifact JSON-RPC method (nocx-m3fqk, design \u00a76) \u2014 ONE artifact's body, joined from its chunks in seq order. It is a separate method from ledger.get on purpose: the recall read must not haul bytes (ADR-0019 \u00a76), so the page and the detail carry metadata and whoever actually wants a body asks for it one at a time. This is what a restored block's output is drawn from.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "mediaType", "body", "truncated", "byteLen"],
+  "required": ["id", "mediaType", "body", "truncated", "byteLen", "lastSeq"],
   "properties": {
+    "lastSeq": {
+      "description": "Maximum actual chunk sequence included in this same body snapshot, not a chunk count. Null when the snapshot includes no chunks.",
+      "type": ["integer", "null"]
+    },
     "id": {
       "description": "The artifact asked for, echoed back.",
       "type": "string"

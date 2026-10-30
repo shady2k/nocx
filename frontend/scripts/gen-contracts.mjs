@@ -1,10 +1,9 @@
-// Generates the renderer's wire types from result contracts named by the
+// Generates the renderer's wire types enrolled in x-nocx-schemaRefs in the
 // OpenRPC surface manifest in contracts/openrpc.json.
 //
-// Params contracts use the `.params.schema.json` suffix and are consumed by the
-// Go transport agreement tests; they are intentionally not renderer result types.
+// Enrolled params retain their `.params` suffix, independently of each result.
 // The output is committed so a build never depends on a generator being installed,
-// and `--check` is what stops the committed result copy drifting from its schema.
+// and `--check` is what stops the committed types drifting from their schemas.
 //
 // Why generated rather than hand-written: `vault.status` shipped without
 // `defaultProvider` while the renderer's hand-written interface declared it and
@@ -47,10 +46,13 @@ async function main() {
   // satisfy both. One statement of the style, and the two gates cannot
   // disagree.
   const style = JSON.parse(await readFile(prettierConfig, 'utf8'))
-  const entries = (manifest['x-nocx-schemaRefs'] ?? [])
-    .map((schema) => basename(new URL(schema.$ref).pathname))
-    .filter((f) => f.endsWith('.schema.json') && !f.endsWith('.params.schema.json'))
-    .sort()
+  const entries = [
+    ...new Set(
+      (manifest['x-nocx-schemaRefs'] ?? []).map((schema) =>
+        basename(new URL(schema.$ref).pathname),
+      ),
+    ),
+  ].sort()
 
   if (entries.length === 0) {
     console.error('no *.schema.json under contracts/')

@@ -85,6 +85,13 @@ func wailsVersion() string {
 	if strings.TrimSpace(Wails) != "" {
 		return Wails
 	}
+	return ModuleVersion(wailsModule)
+}
+
+// ModuleVersion reports the dependency actually linked into this executable.
+// Local replacements without a version are reported as unknown, not as the
+// version of the module they replaced.
+func ModuleVersion(modulePath string) string {
 	bi, ok := debug.ReadBuildInfo()
 	if !ok {
 		return Unknown
@@ -93,12 +100,12 @@ func wailsVersion() string {
 		if dep == nil {
 			continue
 		}
-		if dep.Path == wailsModule {
+		if dep.Path == modulePath {
 			// A replaced module reports its replacement's version; that is the
 			// code actually linked in, which is what the reader is asking
 			// about.
-			if dep.Replace != nil && dep.Replace.Version != "" {
-				return dep.Replace.Version
+			if dep.Replace != nil {
+				return OrUnknown(dep.Replace.Version)
 			}
 			return OrUnknown(dep.Version)
 		}

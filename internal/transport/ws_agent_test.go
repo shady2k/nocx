@@ -54,12 +54,14 @@ func newAgentWSServer(t *testing.T) (*WSServer, content.ContentDB, func()) {
 }
 
 type askWireResult struct {
-	RunID     int64  `json:"runId"`
-	EntryID   string `json:"entryId"`
-	State     string `json:"state"`
-	IngestSeq int64  `json:"ingestSeq"`
-	Replayed  bool   `json:"replayed"`
-	Model     string `json:"model"`
+	RunID          int64  `json:"runId"`
+	EntryID        string `json:"entryId"`
+	State          string `json:"state"`
+	IngestSeq      int64  `json:"ingestSeq"`
+	Replayed       bool   `json:"replayed"`
+	Model          string `json:"model"`
+	Engine         string `json:"engine"`
+	RuntimeVersion string `json:"runtimeVersion"`
 }
 
 // askPaneID is the pane every ask in these tests is asked in — the harness

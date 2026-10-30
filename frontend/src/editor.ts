@@ -237,10 +237,10 @@ export class CommandEditor {
    *  listeners are permanent. Re-adding a listener per state change is how
    *  one click ends up firing three times. */
   private _modelChipTargets: {
-    endpoint: 'endpoints' | 'roles' | null
-    model: 'endpoints' | 'roles' | null
+    endpoint: 'endpoints' | 'roles' | 'assistant' | null
+    model: 'endpoints' | 'roles' | 'assistant' | null
   } = { endpoint: null, model: null }
-  private _onModelChipClick: ((page: 'endpoints' | 'roles') => void) | null = null
+  private _onModelChipClick: ((page: 'endpoints' | 'roles' | 'assistant') => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
@@ -675,7 +675,7 @@ export class CommandEditor {
   /** Where a model chip's click goes. Installed once by the host; the
    *  chips themselves carry no destination — they read the slot the last
    *  setModelChip wrote. */
-  onModelChipClick(handler: (page: 'endpoints' | 'roles') => void): void {
+  onModelChipClick(handler: (page: 'endpoints' | 'roles' | 'assistant') => void): void {
     this._onModelChipClick = handler
   }
 

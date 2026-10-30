@@ -362,7 +362,7 @@ func TestRunStillRunningSentence_NamesTheBoundTheCeilingAndTheContinuation(t *te
 		RunID:     "abc123",
 		Quiet:     10 * time.Minute,
 		Remaining: 4 * time.Minute,
-	})
+	}, nil)
 	for _, want := range []string{
 		"STILL RUNNING",
 		"printed nothing for 10 minutes",

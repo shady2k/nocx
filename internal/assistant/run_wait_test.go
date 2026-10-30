@@ -238,7 +238,7 @@ func TestRunStillRunningSentence_StatesTheClampAndTheRenewalCount(t *testing.T) 
 		Remaining:   90 * time.Second,
 		Renewals:    2,
 		ClampedFrom: 45 * time.Minute,
-	})
+	}, nil)
 	for _, want := range []string{
 		"deadbeef",
 		"10 minutes",

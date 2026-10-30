@@ -472,6 +472,11 @@ func (s *ledgerStub) SubmitAgentAsk(_ context.Context, in AgentAsk) (AgentAskRes
 	return AgentAskResult{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) LookupAgentAsk(ctx context.Context, in AgentAsk) (*AgentAskResult, error) {
+	log.From(ctx).Info("content stub: LedgerRepository.LookupAgentAsk", "id", in.ID)
+	return nil, ErrNotImplemented
+}
+
 func (s *ledgerStub) RunState(_ context.Context, executionID int64) (*RunState, error) {
 	s.log.Info("content stub: LedgerRepository.RunState", "execution", executionID)
 	return nil, ErrNotImplemented

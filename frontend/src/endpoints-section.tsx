@@ -51,12 +51,16 @@ const SCHEMA_LABEL: Record<Endpoint['schema'], string> = {
   'openai-compatible': 'OpenAI-compatible',
 }
 
+// A local transport refusal may precede engine admission. Its displayed
+// outcome is not a successful wire probe and must not invent provenance.
+type ProbeOutcome = Omit<EndpointsProbeResult, 'engine' | 'runtimeVersion'>
+
 /** The Test outcome sentence — the vocabulary nocx-q27y decided. Names
  *  WHICH check ran ("the endpoint is reachable" and "the model answered"
  *  are different facts) and what it found. ONE mapping, shared by the
  *  editor's Test and the row's Test, so the two surfaces cannot drift. */
 function probeOutcomeLine(
-  p: EndpointsProbeResult | null,
+  p: ProbeOutcome | null,
 ): { tone: 'danger' | 'success'; text: string } | null {
   if (!p) return null
   if (!p.ok) return { tone: 'danger', text: `Test failed: ${p.error}` }
@@ -265,7 +269,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   const [editing, setEditing] = createSignal<Endpoint | null>(null)
   const [draft, setDraft] = createSignal<EndpointDraft>(blankDraft())
   /** The Test button's state: idle, running, or the probe result. */
-  const [probeResult, setProbeResult] = createSignal<EndpointsProbeResult | null>(null)
+  const [probeResult, setProbeResult] = createSignal<ProbeOutcome | null>(null)
   const [probing, setProbing] = createSignal(false)
   /** Models the endpoint says it offers — filled by an explicit connection
    *  test OR by the silent discovery on focus. One owner, so the two paths
@@ -276,7 +280,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** One probe outcome per saved endpoint, rendered on its row
    *  (nocx-9bx0m). The editor's Test verdict stays in probeResult; the
    *  row's Test verdicts live here, keyed by endpoint id. */
-  const [rowProbes, setRowProbes] = createSignal<Record<string, EndpointsProbeResult>>({})
+  const [rowProbes, setRowProbes] = createSignal<Record<string, ProbeOutcome>>({})
   /** Rows whose probe is in flight — the row's Test is disabled while it
    *  runs, exactly like the editor's. */
   const [rowProbing, setRowProbing] = createSignal<Set<string>>(new Set())

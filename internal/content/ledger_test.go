@@ -1364,11 +1364,14 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 	if a.ByteLen != 0 {
 		t.Fatalf("fresh artifact byte_len = %d, want 0", a.ByteLen)
 	}
+	if a.LastSeq != 0 {
+		t.Fatalf("fresh artifact last sequence = %d, want 0", a.LastSeq)
+	}
 	if err = led.AppendChunk(ctx, artID, 1, []byte("0123456789")); err != nil {
 		t.Fatalf("AppendChunk 1: %v", err)
 	}
-	if err = led.AppendChunk(ctx, artID, 2, []byte("abcdef")); err != nil {
-		t.Fatalf("AppendChunk 2: %v", err)
+	if err = led.AppendChunk(ctx, artID, 7, []byte("abcdef")); err != nil {
+		t.Fatalf("AppendChunk 7: %v", err)
 	}
 	a, err = led.Artifact(ctx, artID)
 	if err != nil || a == nil {
@@ -1382,6 +1385,9 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 	}
 	if len(a.Chunks) != 2 || string(a.Chunks[0]) != "0123456789" || string(a.Chunks[1]) != "abcdef" {
 		t.Fatalf("chunks = %q, want [0123456789 abcdef] in seq order", a.Chunks)
+	}
+	if a.LastSeq != 7 {
+		t.Fatalf("body cursor = %d, want last included sequence 7, not chunk count 2", a.LastSeq)
 	}
 }
 

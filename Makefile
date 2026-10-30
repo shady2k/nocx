@@ -1,6 +1,6 @@
 .PHONY: all init build build-server dev dev-web lint format test clean connect ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-local-ssh-split ci-frontend ci-e2e \
-        helpers helper-local helpers-this-machine \
+        helpers helper-local helpers-this-machine agent-runtime print-agent-runtime-path ci-agent-runtime \
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
@@ -24,6 +24,9 @@ ZIG ?= zig
 # match the distribution. When 4.1 is absent (a GTK4-only host), the tag is
 # empty and v3's GTK4 default is used.
 HOST_GOOS ?= $(shell $(GO) env GOOS)
+HOST_GOARCH ?= $(shell $(GO) env GOARCH)
+AGENT_RUNTIME_TARGET := $(HOST_GOOS)-$(HOST_GOARCH)
+AGENT_RUNTIME_ROOT := $(abspath build/$(if $(filter darwin,$(HOST_GOOS)),Resources,lib/nocx)/agent-runtime/$(AGENT_RUNTIME_TARGET))
 WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf gtk3; fi)
 GOLANGCI_BUILD_TAGS := $(if $(WAILS_PLATFORM_TAGS),--build-tags=$(WAILS_PLATFORM_TAGS))
 
@@ -362,7 +365,25 @@ build: build-server
 # deployable artifact (nocx-50w7p.7) a coordinator built without the second one
 # serves no pane at all. The gate is what makes that a build failure here
 # rather than a refusal at the first window.
-build-server: helpers require-local-helper
+# Build-time only: the installed application never downloads Python or packages.
+agent-runtime:
+	python3 scripts/package-agent-runtime.py --target "$(AGENT_RUNTIME_TARGET)" --replace
+
+print-agent-runtime-path:
+	@printf '%s\n' "$(AGENT_RUNTIME_ROOT)"
+
+# Native packaged SDK/Go-kernel proof. CI executes this on every shipped
+# architecture; locally it proves only the host architecture.
+ci-agent-runtime: agent-runtime
+	python3 -m unittest discover -s scripts -p package_agent_runtime_test.py
+	python3 scripts/package-agent-runtime.py --target "$(AGENT_RUNTIME_TARGET)" --check-lock
+	"$(AGENT_RUNTIME_ROOT)/python/bin/python3.13" -I -B -c \
+		'import sys, unittest; sys.path.insert(0, sys.argv[1]); suite = unittest.defaultTestLoader.discover("agent-runtime/tests"); sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())' \
+		"$(AGENT_RUNTIME_ROOT)/app"
+	NOCX_TEST_AGENT_RUNTIME="$(AGENT_RUNTIME_ROOT)" NOCX_TEST_AGENT_RUNTIME_REQUIRED=1 \
+		$(GO) test -race -tags "$(WAILS_PLATFORM_TAGS)" -count=1 ./internal/assistant/pydantic ./internal/assistant/runtimebundle ./internal/update/serverbin
+
+build-server: helpers require-local-helper agent-runtime
 	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
@@ -383,7 +404,7 @@ build-server: helpers require-local-helper
 # different vault and a different settings document from the window attached
 # to it. It is NOT built through build-server, which is the development
 # build of the same binary.
-build-release: helpers require-local-helper
+build-release: helpers require-local-helper agent-runtime
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
@@ -398,9 +419,10 @@ build-release: helpers require-local-helper
 # install its own helper is a dev loop where no terminal opens. The deployable
 # one for the host platform only (nocx-cq0wa) — `make helpers` builds the
 # release's four when a remote host of another platform needs one.
-dev: helpers-this-machine
+dev: helpers-this-machine agent-runtime
 	$(FRONTEND_BUILD)
-	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
+	$(GO) build -tags "$(strip $(WAILS_PLATFORM_TAGS))" -o build/bin/nocx .
+	build/bin/nocx
 
 
 # The same app in an ordinary browser instead of the Wails webview: backend
@@ -528,7 +550,7 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 #
 # Order is cheapest-first: the drift check in seconds, the host gates next,
 # the Linux containers in minutes, e2e last because it is the longest.
-ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
+ci-full: ci-os-split ci-local-ssh-split ci ci-mac ci-backend ci-linux ci-frontend ci-agent-runtime ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
 
@@ -567,7 +589,7 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/helper/session internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
-               internal/storage internal/update internal/vault/system \
+               internal/storage internal/update internal/update/serverbin internal/vault/system \
                internal/peerpin internal/monoclock internal/emulator/ghostty/ghosttytest
 # One list owns both partitions; a second hand-kept regex can silently leave a
 # new OS package in the portable set even after OS_PKG_DIRS is corrected.

@@ -48,3 +48,45 @@ func main() {
 }`
   assert.equal(violationsInText('main.go', source).length, 1)
 })
+
+test('error values are not logger calls, including nested and multiline calls', () => {
+  const source = `func main() {
+  report(cause.Error())
+  report(other.Error(
+    /* no message argument */
+  ))
+  report(third.Error( // still no message argument
+  ))
+}`
+  assert.deepEqual(violationsInText('errors.go', source), [])
+})
+
+test('HTTP response errors use their actual unshadowed import alias', () => {
+  const source = `package main
+import nethttp "net/http"
+func main() {
+  nethttp.Error(w, cause.Error(), 500)
+}`
+  assert.deepEqual(violationsInText('http.go', source), [])
+  const shadowed = `package main
+import nethttp "net/http"
+func main() {
+  nethttp := newLogger()
+  nethttp.Error("lost context")
+}`
+  assert.deepEqual(
+    violationsInText('shadowed.go', shadowed).map((v) => v.text),
+    ['nethttp.Error("lost context")'],
+  )
+})
+
+test('real error logging remains reported beside error values and without HTTP imports', () => {
+  const source = `func main() {
+  logger.Error(cause.Error())
+  http.Error("lost context")
+}`
+  assert.deepEqual(
+    violationsInText('logging.go', source).map((v) => v.text),
+    ['logger.Error(cause.Error())', 'http.Error("lost context")'],
+  )
+})

@@ -282,6 +282,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	}
 
 	// Pass 2: the resume. The same messages, the same binding — the call runs.
+	p.Resume = true
 	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("the approved resume failed: %v", askErr)
 	}
@@ -428,6 +429,7 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 
 	// Pass 2: the resume. The tool does not re-run (the retained result is
 	// sent as approved), the finding does not re-suspend, the run completes.
+	p.Resume = true
 	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("the approved egress resume failed: %v", askErr)
 	}

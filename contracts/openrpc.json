@@ -10974,6 +10974,9 @@
       "$ref": "https://nocx.local/contracts/agent.approvalRequested.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/agent.approve.params.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/agent.approve.schema.json"
     },
     {

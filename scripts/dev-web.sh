@@ -136,6 +136,8 @@ trap cleanup EXIT INT TERM
 # another platform does.
 echo "=== building the helper artifacts ==="
 make -C "$repo_root" helpers-this-machine
+echo "=== building the pinned experimental agent runtime ==="
+make -C "$repo_root" agent-runtime
 
 # Built rather than `go run`: go run wraps the binary in a child process that
 # survives a kill of the parent, and an orphaned backend holds the WS port
@@ -147,7 +149,10 @@ make -C "$repo_root" helpers-this-machine
 # passphrase where the developer's OS key would have carried it.
 # `-tags nocx_dev_bind` alongside it, for the stable WS port: see the header.
 echo "=== building nocx-server ==="
-go build -tags "nocx_login_session nocx_dev_bind" -o "$work/nocx-server" ./cmd/nocx-server
+# Keep the executable beside the packaged layout. Standalone coordinator
+# startup stages and pins that artifact before any experimental operation.
+backend_binary="$repo_root/build/bin/nocx-server-dev-web"
+go build -tags "nocx_login_session nocx_dev_bind" -o "$backend_binary" ./cmd/nocx-server
 
 echo "=== backend on 127.0.0.1:$WS_PORT ==="
 backend_dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
@@ -163,10 +168,11 @@ fi
 # run's throwaway directory rather than anywhere that outlives it. The API key
 # is never written to it (internal/assistant/wiretap.go). Point NOCX_WIRE_LOG
 # somewhere else to keep one, or set it empty to turn the tap off.
-DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
+env -u NOCX_AGENT_RUNTIME_ROOT -u NOCX_AGENT_RUNTIME_DIGEST -u NOCX_AGENT_RUNTIME_LEASE_FD \
+	DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
 	NOCX_DEV_WS_PORT="$WS_PORT" \
 	NOCX_WIRE_LOG="${NOCX_WIRE_LOG-$work/wire.log}" \
-	"$work/nocx-server" >"$work/backend.log" 2>&1 &
+	"$backend_binary" >"$work/backend.log" 2>&1 &
 backend_pid=$!
 
 # The server names its discovery socket on its readiness line; the port and the

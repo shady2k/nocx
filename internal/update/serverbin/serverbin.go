@@ -33,6 +33,15 @@
 // about a number somebody stamped — two builds of one version differ in
 // their file names, and a truncated copy is not mistaken for the whole one.
 //
+// The experimental Python runtime uses TreeInstaller instead of Installer:
+// its entire manifest-hashed tree is validated, privately copied, read back,
+// fsynced and atomically promoted without replacement. A live interpreter can
+// import files later, so shared FD leases survive launcher/coordinator death
+// in their Python children. Pruning requires a nonblocking exclusive lease
+// over full validation and deletion; busy, corrupt and foreign trees stay.
+// Both Linux and macOS stage before mutable package resources disappear.
+// Missing experimental assets do not prevent default Eino startup.
+//
 // # Why this is not internal/helper/deploy
 //
 // That package owns the same shape and the resemblance is not accidental:

@@ -42,6 +42,7 @@ import type { CellModel, ScreenSnapshot } from './cell-model'
 import { applyTerminalFont } from './terminal-font'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
+import type { AgentAsk } from './generated/agent.ask'
 import { EditorView } from '@codemirror/view'
 import {
   makeClient,
@@ -4878,6 +4879,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       if (method === 'ledger.get') {
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
         })
@@ -4949,6 +4951,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       if (method === 'ledger.get') {
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
         })
@@ -5024,6 +5027,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       if (method === 'ledger.get') {
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
         })
@@ -5136,6 +5140,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
         entryReads += 1
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
         })
@@ -5521,6 +5526,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       if (method === 'ledger.get') {
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
         })
@@ -5819,6 +5825,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
         if (method === 'ledger.get') {
           return Promise.resolve({
             entry: {},
+            agentRuns: [],
             edges: [],
             artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
           })
@@ -9413,7 +9420,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       }
       if (method === 'agent.ask') {
         nextRun += 1
-        return Promise.resolve({ runId: nextRun, entryId: `entry-${nextRun}` })
+        return Promise.resolve(acceptedEngineAsk(nextRun, `entry-${nextRun}`, 'test-model'))
       }
       if (method === 'agent.status') {
         // `answering` is not optional on the wire (nocx-rikz5, Task 3):
@@ -9422,6 +9429,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         // predated that field and omitted it, which is a payload the
         // backend cannot send.
         return Promise.resolve({
+          engine: 'eino',
+          runtimeVersion: 'eino-test',
           endpointConfigured: status.endpointConfigured ?? true,
           credential: status.credential ?? 'resolvable',
           lastProbe: null,
@@ -11494,6 +11503,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       if (method === 'ledger.get') {
         return Promise.resolve({
           entry: {},
+          agentRuns: [],
           edges: [],
           artifacts: body === null ? [] : [{ id: 'art-1', mediaType: 'application/vt' }],
         })
@@ -12080,6 +12090,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         if (id === 'turn-1')
           return Promise.resolve({
             entry: { ...turn },
+            agentRuns: [],
             edges: [],
             artifacts: [{ id: 'art-t1', mediaType: 'text/plain' }],
             proseEvicted: false,
@@ -12199,6 +12210,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         if (id === 'turn-1')
           return Promise.resolve({
             entry: { ...turn },
+            agentRuns: [],
             edges: [],
             // The turn's OWN artifacts are the wiretap captures and nothing
             // else — which is the real shape of an ask entry.
@@ -12223,6 +12235,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
           })
         return Promise.resolve({
           entry: { kind: 'text' },
+          agentRuns: [],
           edges: [],
           artifacts: [{ id: 'art-prose', mediaType: 'text/plain', captureMethod: 'none' }],
           caused: [],
@@ -12475,6 +12488,8 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       if (method === 'agent.status') {
         state.asks += 1
         return Promise.resolve({
+          engine: 'eino',
+          runtimeVersion: 'eino-test',
           endpointConfigured: state.answering.ready,
           credential: state.answering.ready ? 'resolvable' : null,
           lastProbe: null,
@@ -13368,9 +13383,11 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16392,9 +16409,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16483,9 +16502,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16535,9 +16556,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
         const runId = ++nextRunId
-        return Promise.resolve({ runId, entryId: `entry-${runId}`, model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(runId, `entry-${runId}`, 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16656,9 +16679,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16832,6 +16857,8 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return asks === 1 ? firstAsk : secondAsk
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16849,7 +16876,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       const first = await submitQuestion(content, client, 'the request that will refuse')
       const second = await submitQuestion(content, client, 'the request that remains')
 
-      resolveSecond({ runId: 2, entryId: 'entry-2', model: 'test-model' })
+      resolveSecond(acceptedEngineAsk(2, 'entry-2', 'test-model'))
       await vi.waitFor(() => expect(second.dataset.entryId).toBe('entry-2'))
       expect(ed.isVisible).toBe(false)
 
@@ -16894,6 +16921,8 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         return asks === 1 ? firstAsk : secondAsk
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -16910,7 +16939,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       await summon(content)
       const first = await submitQuestion(content, client, 'older accepted turn')
       await submitQuestion(content, client, 'newer pre-ack turn')
-      resolveFirst({ runId: 1, entryId: 'entry-1', model: 'test-model' })
+      resolveFirst(acceptedEngineAsk(1, 'entry-1', 'test-model'))
       await vi.waitFor(() => expect(first.dataset.entryId).toBe('entry-1'))
 
       document.body.dispatchEvent(
@@ -16974,9 +17003,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17024,9 +17055,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17111,9 +17144,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17191,10 +17226,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17243,10 +17280,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17338,10 +17377,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17432,10 +17473,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17538,8 +17581,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17663,10 +17708,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17747,9 +17794,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       }
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17788,8 +17837,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17832,8 +17883,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(42, 'entry-42', 'test-model'))
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17875,10 +17928,12 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 43, entryId: 'entry-43', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(43, 'entry-43', 'test-model'))
       if (method === 'agent.cancel')
         return Promise.resolve({ runId: 43, state: 'cancelled', cancelled: true })
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -17941,8 +17996,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 44, entryId: 'entry-44', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(44, 'entry-44', 'test-model'))
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -18028,8 +18085,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
-        return Promise.resolve({ runId: 45, entryId: 'entry-45', model: 'test-model' })
+        return Promise.resolve(acceptedEngineAsk(45, 'entry-45', 'test-model'))
       return Promise.resolve({
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         endpointConfigured: true,
         credential: 'resolvable',
         answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
@@ -21189,3 +21248,16 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   })
 })
+
+function acceptedEngineAsk(runId: number, entryId: string, model: string): AgentAsk {
+  return {
+    runId,
+    entryId,
+    model,
+    state: 'prepared',
+    ingestSeq: 1,
+    replayed: false,
+    engine: 'eino',
+    runtimeVersion: 'eino-test',
+  }
+}

@@ -43,16 +43,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/openai"
-	einoModel "github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
-
-	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
 )
 
@@ -110,16 +103,6 @@ type CallClassifier interface {
 	Classify(ctx context.Context, in ClassifyInput) (Classification, error)
 }
 
-// ClassifierTarget is the resolved facts of one classification call: the
-// classifier role's assigned (endpoint, model) pair with its credential —
-// the same shape the answering role's pair resolves to, nothing less.
-type ClassifierTarget struct {
-	Key     credential.Secret
-	BaseURL string
-	Model   string
-	Headers []Header
-}
-
 // ClassifierResolver resolves the classifier role per classification call.
 // The transport adapts THE ONE role resolver (profile.ResolveRole through
 // its config service, bead e6kn2) and the vault's credential resolution to
@@ -127,7 +110,7 @@ type ClassifierTarget struct {
 // RETURNED as-is: the middleware escalates, so a classifier that cannot
 // resolve is a classifier that asks.
 type ClassifierResolver interface {
-	ResolveClassifier(ctx context.Context) (ClassifierTarget, error)
+	ResolveClassifier(ctx context.Context) (ModelTarget, error)
 }
 
 // classifierCallTimeout bounds one classification model call. A classifier
@@ -147,20 +130,17 @@ const classifierReasonMax = 512
 // The engine owns model calls (design §6 — usage has an owner); the
 // resolution is the transport's; the middleware sequences and enforces.
 type classifierEngine struct {
-	logger   log.Logger
-	http     *http.Client
-	resolver ClassifierResolver
-	timeout  time.Duration
+	generator TextGenerator
+	resolver  ClassifierResolver
+	timeout   time.Duration
 }
 
-// newClassifierEngine builds the concrete classifier over the guarded
-// client.
-func newClassifierEngine(logger log.Logger, httpClient *http.Client, resolver ClassifierResolver) *classifierEngine {
+// newClassifierEngine uses the selected engine's tool-free generation port.
+func newClassifierEngine(generator TextGenerator, resolver ClassifierResolver) *classifierEngine {
 	return &classifierEngine{
-		logger:   logger,
-		http:     httpClient,
-		resolver: resolver,
-		timeout:  classifierCallTimeout,
+		generator: generator,
+		resolver:  resolver,
+		timeout:   classifierCallTimeout,
 	}
 }
 
@@ -172,37 +152,27 @@ func (c *classifierEngine) Classify(ctx context.Context, in ClassifyInput) (Clas
 	if err != nil {
 		return Classification{}, err
 	}
-	cm, err := buildModel(c.http, target.Key, target.BaseURL, target.Model)
-	if err != nil {
-		return Classification{}, err
-	}
 	// The classification is a single bounded completion, unlike the
 	// answering stream: its output is machine-readable, nobody waits on
 	// deltas, and the run must not hand its lifespan to a classifier that
 	// never finishes.
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	msgs := []*schema.Message{
-		schema.SystemMessage(classifierSystemPrompt),
-		schema.UserMessage(fmt.Sprintf("tool: %s\ncallId: %s\narguments:\n%s", in.Tool, in.CallID, in.Arguments)),
+	msgs := []Message{
+		{Role: "system", Content: classifierSystemPrompt},
+		{Role: "user", Content: fmt.Sprintf("tool: %s\ncallId: %s\narguments:\n%s", in.Tool, in.CallID, in.Arguments)},
 	}
-	var opts []einoModel.Option
-	if m, names := headerMap(target.Headers); m != nil {
-		opts = append(opts, openai.WithExtraHeader(m))
-		// The endpoint's custom headers follow the guarded client's
-		// redirect rule like every other credential-bearing header
-		// (httpguard.go): their names must ride the request context so a
-		// redirect to another origin drops exactly them.
-		ctx = withCustomHeaderNames(ctx, names)
+	if c.generator == nil {
+		return Classification{}, errors.New("classifier: the model is unavailable")
 	}
-	resp, err := cm.Generate(ctx, msgs, opts...)
+	resp, err := c.generator.Generate(ctx, target, msgs)
 	if err != nil {
 		return Classification{}, err
 	}
-	if resp == nil {
+	if resp == "" {
 		return Classification{}, errors.New("classifier: the model returned no answer")
 	}
-	out, err := parseClassification(resp.Content)
+	out, err := parseClassification(resp)
 	if err != nil {
 		return Classification{}, err
 	}

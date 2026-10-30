@@ -14,6 +14,14 @@
  */
 export interface AgentAsk {
   /**
+   * The engine pinned to the original run. Missing historical metadata is returned as eino; unknown nonempty stored identities remain unchanged.
+   */
+  engine: string
+  /**
+   * The original run's pinned runtime identity, or the empty string when historical metadata is absent.
+   */
+  runtimeVersion: string
+  /**
    * The backend-minted run id — the execution row in the one ledger. Opaque to the renderer; a later agent.cancel/agent.approve/agent.status addresses the run by this id.
    */
   runId: number

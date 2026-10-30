@@ -86,12 +86,9 @@ func (s *runCheckpoints) suspend(id, interruptID string) {
 	s.target[id] = interruptID
 }
 
-// resumable answers the ONE question a drive of a run asks: is this run
-// suspended at a checkpoint, and if so which branch continues? A run with
-// both facts is resumed; a run with neither is started. There is no third
-// state — the two are written together and deleted together — and a
-// checkpoint whose interrupt we never saw is not resumable, because
-// ResumeWithParams would have nothing to target.
+// resumable reports which retained branch an explicit Resume may continue.
+// Both the checkpoint and its interrupt must exist; ResumeWithParams would
+// otherwise have nothing to target.
 func (s *runCheckpoints) resumable(id string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

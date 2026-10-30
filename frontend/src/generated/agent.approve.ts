@@ -10,35 +10,15 @@
  */
 
 /**
- * Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision and how far it reaches. The scope travels with the answer because the BACKEND applies it: a renderer that read the matrix, edited a row and wrote it back would be a second owner of the policy document, racing the settings page.
+ * Result of agent.approve: the state reached after recording the person's decision. The run's eventual outcome arrives through agent.runState.
  */
 export interface AgentApprove {
   /**
-   * The backend-minted run id — echoed from agent.approvalRequested.
+   * Streaming when a yes or policy decline resumes the run; failed when an egress decline or a refused resume terminalizes it.
    */
-  runId: string
+  state: 'streaming' | 'failed'
   /**
-   * The run's attempt — echoed from agent.approvalRequested.
+   * Consumer-visible sentence when the standing answer could not be recorded or its receipt could not be delivered. The decision on this proposal still stood. Omitted when there is no warning.
    */
-  attempt: number
-  /**
-   * The tool name — echoed from agent.approvalRequested.
-   */
-  tool: string
-  /**
-   * The model's call id — echoed from agent.approvalRequested.
-   */
-  callId: string
-  /**
-   * The canonical-argument hash — echoed from agent.approvalRequested. A changed argument hashes differently and does not resume under this approval.
-   */
-  argHash: string
-  /**
-   * The person's decision: yes resumes the run as a new attempt of the same entry; no terminalizes it with agent-declined.
-   */
-  approved: boolean
-  /**
-   * How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'expand' is not a fourth width but the distinct administrative answer to an out-of-scope question (design §5.3) — it widens the effect row's scopes to cover the resource that fell outside AND approves this call, as one act, and is accepted only where agent.approvalRequested's outOfScope.widening.available said it could be given. 'session', 'always' and 'expand' are refused for an egress question — 'always send secrets to the provider' is not a standing decision — and 'expand' is refused on a decline, because a widening is an approval.
-   */
-  scope: 'once' | 'session' | 'always' | 'expand'
+  warning?: string
 }

@@ -19,23 +19,10 @@
 import type { Dispatcher } from './dispatcher'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApproveParams } from './generated/agent.approve.params'
 
 /** How far the answer reaches — the wire's own vocabulary. */
-type ApprovalScope = AgentApprove['scope']
-
-/**
- * What agent.approve answers with. Declared here rather than imported from
- * `generated/`, because the method has no result contract to generate one
- * from: `contracts/agent.approve.schema.json` — the name the OpenRPC
- * generator treats as this method's RESULT — holds its PARAMS, which is also
- * what `generated/agent.approve.ts` therefore describes. That mix-up predates
- * this change and is not resolved by it; `state` is unread here on purpose,
- * since the outcome a person sees comes from agent.runState either way.
- */
-interface AgentApproveResult {
-  state: string
-  warning?: string
-}
+type ApprovalScope = AgentApproveParams['scope']
 
 export interface ApprovalDecisionSeams {
   dispatcher: Dispatcher
@@ -69,7 +56,7 @@ export async function recordApprovalDecision(
   seams: ApprovalDecisionSeams,
 ): Promise<boolean> {
   try {
-    const result = await seams.dispatcher.call<AgentApproveResult>('agent.approve', {
+    const result = await seams.dispatcher.call<AgentApprove>('agent.approve', {
       runId: ask.runId,
       attempt: ask.attempt,
       tool: ask.tool,
@@ -77,7 +64,7 @@ export async function recordApprovalDecision(
       argHash: ask.argHash,
       approved,
       scope,
-    } satisfies AgentApprove)
+    } satisfies AgentApproveParams)
     if (result?.warning) seams.onWarning(result.warning)
     return true
   } catch (err) {

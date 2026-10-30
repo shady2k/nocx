@@ -568,7 +568,7 @@ func TestAgentApprove_UnknownScopeIsRejected(t *testing.T) {
 // running server — the schema and the validator agreeing is the only thing
 // that makes the required field real.
 func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.approve.schema.json")
+	schema := loadSchema(t, "agent.approve.params.schema.json")
 	h := suspendedRun(t, askPolicyStore(t))
 
 	params, err := json.Marshal(h.answer(true, "session"))
@@ -577,9 +577,13 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, params, "agent.approve params (scope carried)")
 
-	got, errObj := approveOverWireRaw(t, h.conn, params, 2)
+	result, errObj := approveOverWireRaw(t, h.conn, params, 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve with the literal payload: %+v", errObj)
+	}
+	var got approvalWireResult
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("decode approval result: %v", err)
 	}
 	if got.State != string(content.RunStreaming) {
 		t.Fatalf("approve state = %q, want streaming", got.State)
@@ -600,7 +604,7 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) {
 	fake, srv := newToolCallingServer()
 	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -647,7 +651,7 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -740,7 +744,7 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	}))
 	defer srv.Close()
 
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

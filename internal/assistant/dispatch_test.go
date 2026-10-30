@@ -426,10 +426,8 @@ func TestAttemptRecordingDispatcherFinishTimeoutBoundsAWedgedLedger(t *testing.T
 // consume the same bound capability, so the catalogue offers exactly what
 // dispatch accepts" — checked for both the coordinator's tool-endpoint
 // dispatcher (NewToolDispatcher, allowed=orchestrationMethodNames) and the
-// kernel's own (no allowlist beyond ForGrant+Narrow, exactly as
-// callsCarrier.Declare/Invoke share one ForGrant projection by
-// construction — carrier.go: Declare offers ForGrant(grant), and nothing
-// past it can invoke a name Declare did not offer).
+// kernel's own (no allowlist beyond ForGrant+Narrow, exactly as the run host's
+// executable catalog and the kernel share the same admitted grant).
 //
 // Widened to set equality over the WHOLE registry (nocx-6q1uh.16), not just
 // the orchestration surface: registry.ForGrant already offered session.list,

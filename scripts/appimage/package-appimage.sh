@@ -29,6 +29,8 @@ test -x "$BIN" || { echo "no binary at $BIN — build it first"; exit 1; }
 # three tool downloads below, so a missing build fails in a second.
 SERVER_BIN="${SERVER_BIN:-build/bin/nocx-server}"
 test -x "$SERVER_BIN" || { echo "no coordinator at $SERVER_BIN — run: make build-server"; exit 1; }
+AGENT_RUNTIME="${AGENT_RUNTIME:-build/lib/nocx/agent-runtime/linux-amd64}"
+test -f "$AGENT_RUNTIME/manifest.json" || { echo "no pinned agent runtime at $AGENT_RUNTIME — run: make agent-runtime"; exit 1; }
 base="nocx-${VERSION}-linux-amd64"
 mkdir -p dist
 
@@ -228,6 +230,11 @@ python3 scripts/appimage/patch-webkit-path.py \
 # macOS bundle puts the same two files in one directory.
 cp "$SERVER_BIN" AppDir/usr/bin/nocx-server
 chmod +x AppDir/usr/bin/nocx-server
+# Native Python libraries are already pinned and sealed. Do not let linuxdeploy
+# rewrite them after the manifest was produced.
+rm -rf AppDir/usr/lib/nocx/agent-runtime
+mkdir -p AppDir/usr/lib/nocx/agent-runtime
+cp -a "$AGENT_RUNTIME" AppDir/usr/lib/nocx/agent-runtime/linux-amd64
 
 # ── Package ──────────────────────────────────────────────────
 ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run \
@@ -258,6 +265,11 @@ extracted="$(mktemp -d)"
 test -x "$extracted/squashfs-root/usr/bin/nocx-server" \
   || { echo "nocx-server is not in the AppImage"; exit 1; }
 file "$extracted/squashfs-root/usr/bin/nocx-server" | grep -q 'ELF 64-bit'
+runtime_in_image="$extracted/squashfs-root/usr/lib/nocx/agent-runtime/linux-amd64"
+cmp "$AGENT_RUNTIME/manifest.json" "$runtime_in_image/manifest.json"
+python3 scripts/package-agent-runtime.py --target linux-amd64 --output "$runtime_in_image" --verify
+test -x "$runtime_in_image/python/bin/python3.13"
+"$runtime_in_image/python/bin/python3.13" -I -B -c 'import pydantic_ai, pydantic_deep, httpx2, openai'
 
 # The notices are asserted from the IMAGE, for the reason above: an AppDir
 # check would pass on an image that dropped them, and the image is what a user

@@ -47,9 +47,6 @@ import (
 	"strings"
 	"time"
 
-	openai "github.com/cloudwego/eino-ext/components/model/openai"
-	einoModel "github.com/cloudwego/eino/components/model"
-
 	"github.com/shady2k/nocx/internal/credential"
 )
 
@@ -229,30 +226,16 @@ type SkillAuditParams struct {
 // slow. Every per-file call inherits this context, so the bound holds however
 // many there are.
 func (c *client) AuditSkill(ctx context.Context, p SkillAuditParams) (SkillAuditResult, error) {
-	if len(p.Files) == 0 {
-		return SkillAuditResult{}, errors.New("skill audit: there is nothing to read")
-	}
-	cm, err := buildModel(c.http, p.Key, p.BaseURL, p.Model)
-	if err != nil {
-		return SkillAuditResult{}, err
-	}
-	var opts []einoModel.Option
-	if len(p.Headers) > 0 {
-		// The endpoint's custom headers ride the call as per-request extra
-		// headers, and their names tag the context so the guarded client's
-		// redirect rule drops exactly them on an origin change (httpguard.go).
-		m, names := headerMap(p.Headers)
-		ctx = withCustomHeaderNames(ctx, names)
-		opts = append(opts, openai.WithExtraHeader(m))
-	}
-	return auditBundle(ctx, cm, p, opts...)
+	return AuditSkill(ctx, c.generator, p)
 }
 
-// auditBundle is the reading itself, over a model somebody already built. It
-// is separate from AuditSkill so the budget and the two stages can be
-// exercised against a fake model — buildModel needs an endpoint, and a test
-// about a provider that never answers must not need one to exist.
-func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditParams, opts ...einoModel.Option) (SkillAuditResult, error) {
+// AuditSkill runs the shared Go audit workflow with the selected generator.
+func AuditSkill(ctx context.Context, generator TextGenerator, p SkillAuditParams) (SkillAuditResult, error) {
+	return auditBundle(ctx, generator, p)
+}
+
+// auditBundle owns the whole-operation budget and bounded map/reduce passes.
+func auditBundle(ctx context.Context, cm TextGenerator, p SkillAuditParams) (SkillAuditResult, error) {
 	if cm == nil {
 		return SkillAuditResult{}, errors.New("skill audit: the auditing model is unavailable")
 	}
@@ -266,7 +249,8 @@ func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditPa
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	notes := readEachFile(ctx, cm, p.Name, p.Purpose, p.Files, budget, opts...)
+	target := ModelTarget{Key: p.Key, BaseURL: p.BaseURL, Model: p.Model, Headers: p.Headers}
+	notes := readEachFile(ctx, cm, target, p.Name, p.Purpose, p.Files, budget)
 	// EVERY file failing is the reading failing. One or two are notes that say
 	// so and a reduce that weighs them; all of them means there is nothing to
 	// weigh, and concluding from nothing would produce a verdict about a skill
@@ -285,7 +269,7 @@ func auditBundle(ctx context.Context, cm einoModel.BaseChatModel, p SkillAuditPa
 		return SkillAuditResult{Files: notes}, firstErr
 	}
 
-	reading, err := concludeFromNotes(ctx, cm, p.Name, p.Overview, notes, budget, opts...)
+	reading, err := concludeFromNotes(ctx, cm, target, p.Name, p.Overview, notes, budget)
 	if err != nil {
 		return SkillAuditResult{Files: notes}, err
 	}

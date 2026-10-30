@@ -14,6 +14,14 @@
  */
 export interface AgentStatusResult {
   /**
+   * The currently selected engine, or null when selection failed. Unknown nonempty identities are not relabeled.
+   */
+  engine: string | null
+  /**
+   * The selected runtime identity, or null when engine selection failed.
+   */
+  runtimeVersion: string | null
+  /**
    * At least one AI endpoint is stored. Endpoint EXISTENCE, and nothing more: it is not readiness and must not be read as readiness — that is `answering`. Kept because the Endpoints page's own empty state is a different question from the ask surface's.
    */
   endpointConfigured: boolean
@@ -30,7 +38,7 @@ export interface AgentStatusResult {
    */
   answering: {
     /**
-     * True when the answering role resolves to an (endpoint, model) pair. This — not endpointConfigured — is what the ask surface gates on.
+     * True when the answering role resolves and its selected runtime is available. This — not endpointConfigured — is what the ask surface gates on.
      */
     ready: boolean
     /**
@@ -44,6 +52,7 @@ export interface AgentStatusResult {
           | 'endpoint-gone'
           | 'model-gone'
           | 'unavailable'
+          | 'runtime-unavailable'
         )
       | null
     /**
@@ -60,6 +69,14 @@ export interface AgentStatusResult {
  * Result of the endpoints.probe JSON-RPC method — the Test button. TWO checks live behind that button (nocx-q27y) and `kind` names which one ran: with a model, a real streaming completion through the same engine the ask transaction uses; without one, a connection check that only establishes the endpoint is reachable and the credential accepted, which needs no model and is the only question askable of an endpoint nobody has typed a model into yet. The params are the form's DRAFT values (name, baseUrl, key, model, endpointId) — the endpoint may not be saved yet, the key is an input that never crosses back (ADR-0030), and when the key is blank the backend resolves the named endpoint's own credential. This schema is the SINGLE declaration of the probe result shape: agent.status's lastProbe references this whole file cross-file.
  */
 export interface EndpointsProbeResult {
+  /**
+   * The engine selected and pinned for this probe.
+   */
+  engine: string
+  /**
+   * The runtime identity pinned for this probe.
+   */
+  runtimeVersion: string
   /**
    * The probed draft's display name. Historical fact: agent.status reports the last probe whatever the endpoint list says now.
    */

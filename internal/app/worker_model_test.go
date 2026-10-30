@@ -37,7 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/lifecycle"
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workers"
@@ -265,7 +265,8 @@ func TestAModelSpawnsThreeWorkersReadsItsHoldingsAndClosesThem(t *testing.T) {
 	wg := launcherStandIn(t, w, stop)
 	defer func() { close(stop); wg.Wait() }()
 
-	client, _, err := assistant.NewClientAndRegistry(log.NewSlogAdapter(nil), nil, content.Floor{}, nil)
+	_, logger := logtest.New(t)
+	client, _, err := assistant.NewClientAndRegistry(logger, assistant.NewModelHTTPFactory(logger, nil), content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("assistant client: %v", err)
 	}

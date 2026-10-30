@@ -252,7 +252,7 @@ type RunStillRunningError struct {
 }
 
 func (e *RunStillRunningError) Error() string {
-	return "run still running: " + RunStillRunningSentence("", e)
+	return "run still running: " + RunStillRunningSentence("", e, nil)
 }
 
 // RunStillRunningSentence is what the model reads. It names the bound that
@@ -263,18 +263,18 @@ func (e *RunStillRunningError) Error() string {
 // is "the lease asks the model; the model may ask the person if it needs
 // to", and which of those the model does is its own judgement, taken through
 // the paths it already has.
-func RunStillRunningSentence(tool string, e *RunStillRunningError) string {
+func RunStillRunningSentence(tool string, e *RunStillRunningError, toolName func(string) string) string {
 	if e == nil {
 		return ""
 	}
 	call := "the command"
 	if tool != "" {
-		call = "your call to " + tool
+		call = "your call to " + renderModelToolName(tool, toolName)
 	}
 	s := "STILL RUNNING: " + call + " has printed nothing for " +
 		humanDuration(e.Quiet) + " and has NOT been stopped — it is still executing. " +
 		"Judge whether that silence is expected for this command: a stuck mount, a compile with no progress output and a wedged process all look like this. " +
-		"Answer with session.wait on run id " + e.RunID +
+		"Answer with " + renderModelToolName("session.wait", toolName) + " on run id " + e.RunID +
 		": \"continue\" keeps waiting on the SAME execution (it is not restarted), \"stop\" ends it. " +
 		"It will be stopped anyway in " + humanDuration(e.Remaining) + ", which is the limit the person set and which you cannot extend."
 	if e.Renewals > 0 {

@@ -47,7 +47,7 @@ func TestAsk_MixedResourceCommandAsksInTheRowItBelongsIn(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, err := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestAsk_MixedResourceCommandCarriesEveryDerivedEffect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, err := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestAsk_SingleResourceCommandCarriesItsOneDerivedEffect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, err := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestAsk_UnresolvedCommandCarriesNoDerivedEffect(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl, _, err := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, err := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

@@ -27,7 +27,7 @@ import { createVaultState, createVaultSecretSource, SetupDialog, UnlockDialog } 
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
 import { AgentApprovalPrompt } from './agent-approval-prompt'
-import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApproveParams } from './generated/agent.approve.params'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
@@ -400,7 +400,7 @@ function main(): void {
     const first = pendingApprovals.values().next().value
     setActiveApproval(first ?? null)
   }
-  const decideApproval = async (approved: boolean, scope: AgentApprove['scope']) => {
+  const decideApproval = async (approved: boolean, scope: AgentApproveParams['scope']) => {
     const ask = activeApproval()
     if (!ask || approvalBusy()) return
     setApprovalBusy(true)
@@ -700,6 +700,7 @@ function main(): void {
   // names the one page that repairs it — and it reuses that seam for the
   // endpoints destination rather than growing a second one.
   tm.onOpenRoles = () => openSettingsPane().openPage('roles')
+  tm.onOpenAssistant = () => openSettingsPane().openPage('assistant')
   // The approval receipt's Manage permissions: the page that governs the
   // standing answer the line is about (nocx-2019q). The same idea again — a
   // fact on screen names the one page that manages it.

@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -99,13 +98,14 @@ type SkillSource interface {
 // 4 — the dispatcher narrows, it does not check), while the session ledger is
 // wiring, exactly as the renderer requester is for InRenderer tools.
 type toolSeams struct {
+	modelToolName    func(string) string
 	sessions         SessionSource
 	screenCapture    ScreenCaptureSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
 	skills           SkillLibrary
 	skillDraft       *SkillDraftRequest
-	skillDraftHTTP   *http.Client
+	generator        TextGenerator
 	fetcher          apifetch.TextFetcher
 	snapshots        *runSnapshots
 	runID            string

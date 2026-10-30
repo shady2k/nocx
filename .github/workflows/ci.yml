@@ -167,6 +167,36 @@ jobs:
           tests=(scripts/release/*.test.*)
           if [ "${#tests[@]}" -gt 0 ]; then node --test "${tests[@]}"; fi
 
+  ci-agent-runtime:
+    needs: changes
+    if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: amd64
+          - runner: macos-15-intel
+            architecture: amd64
+          - runner: macos-15
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.16'
+      - name: Prove packaged native runtime and host authority
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: |
+          test "$(go env GOARCH)" = "$EXPECTED_ARCH"
+          make ci-agent-runtime
+
   ci-mac:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}

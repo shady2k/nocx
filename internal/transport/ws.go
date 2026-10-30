@@ -760,10 +760,9 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
-	// assistantClient is the eino-backed engine (nocx-edio) behind
-	// endpoints.probe and agent.status's last-probe fact. When nil, the
-	// endpoints.probe method answers -32601 "agent not available".
-	assistantClient assistant.Client
+	// assistantEngines selects new operations. Every admitted operation retains
+	// its own client, so settings changes never migrate active work.
+	assistantEngines assistant.EngineSelector
 	// skillLibrary is the single filesystem-backed owner for skills.read and
 	// the skills mutation tools.
 	skillLibrary assistant.SkillLibrary
@@ -1485,12 +1484,10 @@ func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 	return func(ws *WSServer) { ws.probeResultStore = s }
 }
 
-// WithAssistantClient attaches the assistant engine (nocx-edio): the one
-// eino-backed client behind the endpoints.probe probe and the future ask
-// transaction. When nil, endpoints.probe answers -32601 "agent not
-// available".
-func WithAssistantClient(ac assistant.Client) WSServerOption {
-	return func(ws *WSServer) { ws.assistantClient = ac }
+// WithAssistantEngines attaches operation admission to the selected engine.
+// Nil leaves endpoint probing and assistant operations unavailable.
+func WithAssistantEngines(engines assistant.EngineSelector) WSServerOption {
+	return func(ws *WSServer) { ws.assistantEngines = engines }
 }
 
 // WithSkillSource attaches the single skill library used by assistant asks.
@@ -2180,7 +2177,7 @@ func (s *WSServer) buildControlPlane() {
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
 	specs = append(specs, s.checkoutsStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantEngines, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

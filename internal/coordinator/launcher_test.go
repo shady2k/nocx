@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/assistant/runtimebundle"
 	"github.com/shady2k/nocx/internal/coordinator"
 )
 
@@ -51,11 +52,28 @@ func TestMain(m *testing.M) {
 // runChildDaemon is the spawned process: it records what reached its
 // environment, serves the discovery socket for the directory it was told,
 // and waits to be stopped.
-func runChildDaemon() int {
+func runChildDaemon() (exitCode int) {
+	if _, present := os.LookupEnv(coordinator.AgentRuntimeLeaseFDEnv); present {
+		executable, err := os.Executable()
+		if err != nil {
+			return 10
+		}
+		locator := runtimebundle.LocatorForExecutable(executable)
+		if err = locator.Pin(context.Background()); err != nil {
+			return 11
+		}
+		defer func() {
+			if closeErr := locator.Close(); closeErr != nil {
+				exitCode = 12
+			}
+		}()
+	}
 	if report := os.Getenv(childReportEnv); report != "" {
-		seen := fmt.Sprintf("NOCX_WS_ADDR=%q\nNOCX_NO_SYSTEM_KEYSTORE=%q\nARGS=%q\nPGID=%d\n",
+		root, rootPresent := os.LookupEnv(coordinator.AgentRuntimeRootEnv)
+		digest, digestPresent := os.LookupEnv(coordinator.AgentRuntimeDigestEnv)
+		seen := fmt.Sprintf("NOCX_WS_ADDR=%q\nNOCX_NO_SYSTEM_KEYSTORE=%q\nARGS=%q\nPGID=%d\nNOCX_AGENT_RUNTIME_ROOT=%q\nNOCX_AGENT_RUNTIME_ROOT_PRESENT=%t\nNOCX_AGENT_RUNTIME_DIGEST=%q\nNOCX_AGENT_RUNTIME_DIGEST_PRESENT=%t\n",
 			os.Getenv("NOCX_WS_ADDR"), os.Getenv("NOCX_NO_SYSTEM_KEYSTORE"),
-			strings.Join(os.Args[1:], " "), syscall.Getpgrp())
+			strings.Join(os.Args[1:], " "), syscall.Getpgrp(), root, rootPresent, digest, digestPresent)
 		if err := os.WriteFile(report, []byte(seen), 0o600); err != nil {
 			return 9
 		}

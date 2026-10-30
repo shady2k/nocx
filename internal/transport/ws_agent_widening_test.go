@@ -361,7 +361,7 @@ func TestAgentApprovalRequested_OutOfScopeOverTheWireConformsToContract(t *testi
 // agent.approve's widening answer, as the renderer's LITERAL bytes: the
 // schema accepts them and the real socket acts on them.
 func TestAgentApprove_ExpandParamsOverTheSocketConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.approve.schema.json")
+	schema := loadSchema(t, "agent.approve.params.schema.json")
 	store, doc := rowScopedPolicyStore(t)
 	h := suspendedOutOfScopeRun(t, store, content.OutOfScopeRowScope)
 
@@ -369,9 +369,13 @@ func TestAgentApprove_ExpandParamsOverTheSocketConformsToContract(t *testing.T) 
 		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true,"scope":"expand"}`
 	validateJSON(t, schema, []byte(params), "agent.approve params (renderer's literal widening payload)")
 
-	got, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
+	result, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve with the literal widening payload: %+v", errObj)
+	}
+	var got approvalWireResult
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("decode approval result: %v", err)
 	}
 	if got.State != string(content.RunStreaming) {
 		t.Fatalf("state = %q, want streaming", got.State)

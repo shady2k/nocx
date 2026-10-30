@@ -122,7 +122,18 @@ type agentAskResponse struct {
 	// announced on the wire because the renderer draws it: the answer
 	// block names which model answered (bead nocx-e6kn2 acceptance: "a
 	// person must be able to tell which model answered").
-	Model string `json:"model"`
+	Model          string `json:"model"`
+	Engine         string `json:"engine"`
+	RuntimeVersion string `json:"runtimeVersion"`
+}
+
+func askResponse(result content.AgentAskResult) agentAskResponse {
+	return agentAskResponse{
+		RunID: result.RunID, EntryID: result.EntryID, State: string(result.State),
+		IngestSeq: result.IngestSeq, Replayed: result.Replayed,
+		Model: result.Facts.Model, Engine: result.Facts.EngineID(),
+		RuntimeVersion: result.Facts.RuntimeVersion,
+	}
 }
 
 type agentRunControl struct {
@@ -567,7 +578,7 @@ const (
 // approveParams is the agent.approve request (design §7.2): the full binding
 // — run, attempt, tool, call id and the canonical-argument hash — plus the
 // person's decision and how far it reaches. The schema
-// (contracts/agent.approve.schema.json) pins it: additionalProperties false,
+// (contracts/agent.approve.params.schema.json) pins it: additionalProperties false,
 // every field required.
 type approveParams struct {
 	RunID    string `json:"runId"`
@@ -623,8 +634,9 @@ type agentHandlers struct {
 	// service, so the ask refuses before the call.
 	endpointWired bool
 	credentials   credential.Resolver
-	client        assistant.Client
+	engines       assistant.EngineSelector
 	askSub        control.Submission
+	inflight      *inflight
 	// fetcher is the guarded direct-network seam for fetch.url.
 	fetcher apifetch.TextFetcher
 	// attemptLedger is the ledger seam the tool-call pipeline records its
@@ -937,6 +949,21 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// comment. Nil when the session is attached to no recorded pane, which
 	// costs the restore hint and nothing else (nocx-4em1z).
 	in.PaneID = panePtr(sess.PaneID())
+	// Replay is authenticated against the original request before consulting
+	// today's role, engine, runtime or grant. It cannot replace a live owner.
+	var replay *content.AgentAskResult
+	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		var err error
+		replay, err = svc.LookupAsk(ctx, in)
+		return err
+	}); err != nil {
+		h.answerError(req, err)
+		return
+	}
+	if replay != nil {
+		_ = h.r.TryResult(req.ID, mustMarshal(askResponse(*replay)))
+		return
+	}
 	// The run's authority is minted here, with the question: the workspace
 	// policy preset the composition root named, scoped to the run's own
 	// session and the observe effect class (ADR-0020 decision 5 — the grant
@@ -989,6 +1016,12 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		}
 		return
 	}
+	engine, err := h.engines.Selected(ctx)
+	if err != nil {
+		h.answerError(req, err)
+		return
+	}
+	facts.Engine, facts.RuntimeVersion = engine.ID, engine.RuntimeVersion
 	in.Facts = facts
 
 	// Endpoint material (the credential and secret-valued headers) is NOT
@@ -1017,6 +1050,12 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		h.answerError(req, err)
 		return
 	}
+	// A concurrent same-key admission may have won after the read above.
+	// The transactional replay is the same read-only response, never a drive.
+	if askRes.Replayed {
+		_ = h.r.TryResult(req.ID, mustMarshal(askResponse(askRes)))
+		return
+	}
 
 	// The STREAM runs off the read loop on its own admission (the ask
 	// response is already sent). The task context derives from the
@@ -1043,6 +1082,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		question:   in.Question,
 		endpoint:   endpoint,
 		model:      facts.Model,
+		engine:     engine,
 		grant:      runGrant,
 		offerState: assistant.NewWireToolOfferState(),
 		// attempt is the run's attempt — the ledger inserted the run row at
@@ -1065,14 +1105,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
 	h.pendingRunsMu.Unlock()
-	_ = h.r.TryResult(req.ID, mustMarshal(agentAskResponse{
-		RunID:     askRes.RunID,
-		EntryID:   askRes.EntryID,
-		State:     string(content.RunPrepared),
-		IngestSeq: askRes.IngestSeq,
-		Replayed:  askRes.Replayed,
-		Model:     facts.Model,
-	}))
+	_ = h.r.TryResult(req.ID, mustMarshal(askResponse(askRes)))
 	if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
 		h.runAskStream(taskCtx, rc, h.r)
 	}}); rej != nil {
@@ -1169,9 +1202,9 @@ func resolveEndpointMaterial(
 // role deliberately spends the answering role's resolved endpoint; all other
 // role refusals remain visible rather than silently changing providers.
 func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
-	return assistant.SkillDraftResolverFunc(func(ctx context.Context) (assistant.SkillDraftTarget, error) {
+	return assistant.SkillDraftResolverFunc(func(ctx context.Context) (assistant.ModelTarget, error) {
 		if h.configOp == nil {
-			return assistant.SkillDraftTarget{}, errors.New("skill draft: config operation is not wired")
+			return assistant.ModelTarget{}, errors.New("skill draft: config operation is not wired")
 		}
 		var (
 			endpoint profile.Endpoint
@@ -1189,7 +1222,7 @@ func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
 			return nil
 		})
 		if err != nil {
-			return assistant.SkillDraftTarget{}, err
+			return assistant.ModelTarget{}, err
 		}
 		// Outside the operation, for the reason resolveAuditModel states in
 		// full (nocx-9fzkk): the config operation holds the vault gate, and
@@ -1197,9 +1230,9 @@ func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
 		// needs the same gate.
 		key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
 		if materialErr != nil {
-			return assistant.SkillDraftTarget{}, materialErr
+			return assistant.ModelTarget{}, materialErr
 		}
-		return assistant.SkillDraftTarget{
+		return assistant.ModelTarget{
 			Key:     key,
 			BaseURL: endpoint.BaseURL,
 			Model:   model,
@@ -1242,6 +1275,7 @@ type askRunContext struct {
 	draft    *assistant.SkillDraftRequest
 	endpoint profile.Endpoint
 	model    string
+	engine   assistant.Engine
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
@@ -1307,6 +1341,9 @@ type askRunContext struct {
 	// resumed is explicit because a fresh run can also have non-zero
 	// sequencing state after a later refactor; only the resume path sets it.
 	resumed bool
+	// runtimeLost belongs only to the terminal call made by OnRuntimeLost.
+	// The winning terminal owner stops this run's leases and active drive.
+	runtimeLost bool
 }
 
 func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reasoning, answer, requested, executed int, resumed bool, suspensionTool, suspensionEffect string, streamErr error) {
@@ -1406,6 +1443,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// is assembled from facts pinned when the ask arrived. It is never stored:
 	// a run resumed after approval rebuilds the same text from the same facts.
 	promptFacts := rc.promptFacts
+	promptFacts.ToolName = rc.engine.ToolName
 	msgs := make([]assistant.Message, 0, 8)
 	msgs = append(msgs, assistant.Message{
 		Role:    "system",
@@ -1488,7 +1526,12 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	prose := rc.prose
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
-	err := h.client.Ask(ctx, assistant.AskParams{
+	err := rc.engine.Client.Ask(ctx, assistant.AskParams{
+		ModelToolName: rc.engine.ToolName,
+		Resume:        rc.resumed,
+		OnRuntimeLost: func(err error) {
+			h.handleRuntimeLoss(ctx, rc, err, r)
+		},
 		Key:           secret,
 		BaseURL:       rc.endpoint.BaseURL,
 		Model:         rc.model,
@@ -1743,6 +1786,19 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}
 	emitStreamEnded()
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
+}
+
+func (h agentHandlers) handleRuntimeLoss(ctx context.Context, rc askRunContext, err error, r Responder) {
+	// The client calls outside the reaper joined by Discard. Settle inline,
+	// under the existing shutdown fence, rather than spawning unowned work.
+	tctx, _, release, ok := h.inflight.begin(context.WithoutCancel(ctx))
+	if !ok {
+		return
+	}
+	defer release()
+	reason, sentence := classifyAskFailure(err, rc.model)
+	rc.runtimeLost = true
+	h.terminalize(tctx, rc, content.RunFailed, reason, sentence, r)
 }
 
 // suspendForApproval moves the run to awaiting_approval and sends the
@@ -2411,7 +2467,7 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 	if strings.TrimSpace(p.Tool) == "" || utf8.RuneCountInString(p.Tool) > maxIDRunes {
 		return "tool is required and bounded"
 	}
-	if strings.TrimSpace(p.CallID) == "" || utf8.RuneCountInString(p.CallID) > maxIDRunes {
+	if assistant.ValidateToolCallID(p.CallID) != nil {
 		return "callId is required and bounded"
 	}
 
@@ -2502,7 +2558,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 			return
 		}
 		cancelled = c
-		defer releaseTerminal()
+		// beginTerminal drained the prior event and closed admission to every
+		// later event. Release before Discard or stopping a lease can wait on
+		// an active drive whose last event also needs this mutex.
+		releaseTerminal()
 		dropped = rc.control.droppedDeltaCount()
 	}
 	if cancelled {
@@ -2510,6 +2569,12 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 			<-rc.control.cancelDone
 		}
 		state, reason, sentence, wireError = rc.control.cancelOutcome()
+	}
+	if rc.runtimeLost && !cancelled && rc.control != nil {
+		if rc.control.cancelRunLeases() {
+			sentence += "; no local process group to signal — the execution keeps running"
+		}
+		rc.control.cancelContext()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -2522,8 +2587,8 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 	h.pendingRunsMu.Lock()
 	delete(h.pendingRuns, rc.runID)
 	h.pendingRunsMu.Unlock()
-	if h.client != nil {
-		h.client.Discard(strconv.FormatInt(rc.runID, 10))
+	if rc.engine.Client != nil {
+		rc.engine.Client.Discard(strconv.FormatInt(rc.runID, 10))
 	}
 	tctx := context.WithoutCancel(ctx)
 	err := h.op.Run(tctx, func(ctx context.Context, svc capability.AgentService) error {
@@ -2891,7 +2956,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillLibrary, agentTools agenttools.Registry, credentials credential.Resolver, engines assistant.EngineSelector, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2916,7 +2981,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp, skills: skills, agentTools: agentTools,
-			credentials: credentials, client: client, askSub: askSub,
+			credentials: credentials, engines: engines, askSub: askSub, inflight: &s.inflight,
 			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, screenCapture: s, sessions: s, expansions: s, scripts: s, knownMaterial: s.agentKnownMaterial,
 			workerStore: s.workerStore, paneAccessBinder: s.paneAccessBinder,

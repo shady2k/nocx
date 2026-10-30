@@ -844,6 +844,16 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 		)
 	}
 
+	// Stage before Linux's AppImage mount can disappear or a macOS app can
+	// be replaced. A shared lease survives the launcher through exec.
+	// Missing experimental assets must not prevent default Eino startup.
+	runtimeInstall := prepareAgentRuntime(ctx, execPath, paths.DataDir(), runtime.GOOS, runtime.GOARCH)
+	defer func() {
+		if closeErr := runtimeInstall.Close(); closeErr != nil {
+			log.From(ctx).Warn("closing launcher runtime lease", "error", closeErr)
+		}
+	}()
+
 	dir := coordinator.RuntimeDir(paths)
 	self := coordinator.ClientIdentity{
 		Version:  version.Version,
@@ -864,8 +874,11 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 		Self:   self,
 		Client: client,
 		Spawner: coordinator.NewExecSpawner(coordinator.ExecSpawnerConfig{
-			Path:   serverPath,
-			Logger: w.logger,
+			Path:               serverPath,
+			AgentRuntimeRoot:   runtimeInstall.Path,
+			AgentRuntimeDigest: runtimeInstall.Hash,
+			AgentRuntimeLease:  runtimeInstall.Lease.File(),
+			Logger:             w.logger,
 		}),
 		Stopper:   coordinator.NewSignalStopper(coordinator.SignalStopperConfig{Logger: w.logger}),
 		Announcer: &w.notices,

@@ -16,7 +16,7 @@ export interface AgentStatusLine {
   /** Where this rung is fixed. Absent when nothing is broken — and absent
    *  for 'unavailable' too, because no page repairs an unreadable store and
    *  a button that leads nowhere is worse than no button. */
-  fix?: { label: string; page: 'endpoints' | 'roles' }
+  fix?: { label: string; page: 'endpoints' | 'roles' | 'assistant' }
 }
 
 /** The credential fact → its sentence, one owner (AD-8). The endpoints
@@ -85,6 +85,12 @@ function unresolvedRoleLine(
         tone: 'danger',
         text: 'That model is no longer offered — choose another',
         fix: { label: 'Choose a model', page: 'roles' },
+      }
+    case 'runtime-unavailable':
+      return {
+        tone: 'warning',
+        text: 'The experimental agent runtime is unavailable. Turn off Pydantic agent (Experimental) in Settings → Assistant → Answers.',
+        fix: { label: 'Open Assistant settings', page: 'assistant' },
       }
     case 'unavailable':
       // No fix: a store that could not be read is not repaired on any page.

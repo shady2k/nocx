@@ -16,6 +16,8 @@ import type { AgentStatusResult } from './generated/agent.status'
 function status(over: Partial<AgentStatusResult> = {}): AgentStatusResult {
   return {
     endpointConfigured: true,
+    engine: 'eino',
+    runtimeVersion: 'eino-test',
     credential: 'resolvable',
     lastProbe: null,
     answering: { ready: true, reason: null, endpoint: 'openrouter', model: 'm-a' },

@@ -234,11 +234,8 @@ type modelResult struct {
 	kind modelResultKind
 }
 
-func (r modelResult) forModel(frame func(string) string) string {
-	if r.kind == modelNocxMessage {
-		return r.text
-	}
-	return frame(r.text)
+func (k *effectKernel) modelToolName(name string) string {
+	return renderModelToolName(name, k.runSeams.modelToolName)
 }
 
 // ApprovalRequestedError is what Ask returns when the run suspended for
@@ -768,7 +765,7 @@ func (m *effectKernel) boundWideningAsk(tool string, effect content.Effect, fact
 	default:
 		reason = RefusedWideningCapped
 	}
-	return &modelResult{text: refusalResult(tool, reason, ""), kind: modelNocxMessage}
+	return &modelResult{text: refusalResult(m.modelToolName(tool), reason, ""), kind: modelNocxMessage}
 }
 
 // verdict is the kernel's whole policy answer for one call, and it computes
@@ -1829,6 +1826,9 @@ func tripLatch(ctx context.Context, reason error) {
 // renders. The retained declared-call adapter translates those values into
 // eino interrupts; that framework detail is not the kernel's business.
 func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string) (string, error) {
+	if err := ValidateToolCallID(callID); err != nil {
+		return "", err
+	}
 	out, err := k.invokeClassified(ctx, name, callID, rawArgs)
 	if err != nil {
 		return "", err
@@ -1850,7 +1850,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if quoted, ok := k.runSeams.skillDraft.verbatim(rawArgs); ok {
 			rawArgs = quoted
 		} else {
-			generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
+			generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.generator)
 			var notCapturable *skillNotCapturableError
 			switch {
 			case errors.As(err, &notCapturable):
@@ -1887,29 +1887,29 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		resources := prepared.resources
 		invocation := prepared.invocation
 		if reason, denied := k.floorRefusal(invocation, resources); denied {
-			result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
+			result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedByFloor, "", reason), kind: modelNocxMessage}
 			return false, &result, nil
 		}
 		if decl.CommandArg != "" {
 			if command, ok := args[decl.CommandArg].(string); ok {
 				if reason, denied := k.grant.Policy.FloorRawCommandRefusal(command); denied {
-					result := modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}
+					result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedByFloor, "", reason), kind: modelNocxMessage}
 					return false, &result, nil
 				}
 			}
 		}
 		if k.approvals != nil {
 			if kind, declined := k.approvals.DeclinedKind(k.proposal(decl.Name, callID, rawArgs)); declined {
-				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+				result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedByPerson, kind), kind: modelNocxMessage}
 				return false, &result, nil
 			}
 			if decl.CommandArg == "" {
 				if kind, standing := k.approvals.DeclinedEffect(k.runID, decl.Effect); standing {
-					result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+					result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedByPerson, kind), kind: modelNocxMessage}
 					return false, &result, nil
 				}
 			} else if kind, standing := k.approvals.DeclinedInvocation(k.runID, invocation); standing {
-				result := modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}
+				result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedByPerson, kind), kind: modelNocxMessage}
 				return false, &result, nil
 			}
 		}
@@ -1920,7 +1920,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		outOfScope := outOfScopeFact(verdict)
 		switch outcome {
 		case policyRefuse:
-			result := modelResult{text: refusalResult(decl.Name, refusal, "", floorReason), kind: modelNocxMessage}
+			result := modelResult{text: refusalResult(k.modelToolName(decl.Name), refusal, "", floorReason), kind: modelNocxMessage}
 			return false, &result, nil
 		case policyAsk:
 			if !skillMutation {
@@ -2000,12 +2000,12 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			ap := k.proposal(decl.Name, callID, rawArgs)
 			if k.approvals.IsApproved(ap) {
 				if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
-					result := modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}
+					result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}
 					return false, &result, nil
 				}
 				if shown, ok := k.approvals.ApprovedExpansions(ap); ok && len(shown) > 0 {
 					if verifyErr := VerifyExpansions(ctx, k.runSeams.expansions, k.runCtx.Session, shown); verifyErr != nil {
-						result := modelResult{text: refusalResult(decl.Name, RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}
+						result := modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedExpansionChanged, "", verifyErr.Error()), kind: modelNocxMessage}
 						return false, &result, nil
 					}
 				}
@@ -2094,7 +2094,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// content owns that vocabulary.
 	if runErr != nil && capabilityRefusal(runErr) {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return modelResult{text: refusalResult(decl.Name, RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
+		return modelResult{text: refusalResult(k.modelToolName(decl.Name), RefusedOutOfScope, ""), kind: modelNocxMessage}, nil
 	}
 
 	// 7. Result ingest — the egress gate (design §7.1) FIRST, then the
@@ -2219,7 +2219,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if errors.As(runErr, &stillRunning) {
 			_ = k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess)
 			return modelResult{
-				text: RunStillRunningSentence(decl.Name, stillRunning),
+				text: RunStillRunningSentence(decl.Name, stillRunning, k.runSeams.modelToolName),
 				kind: modelNocxMessage,
 			}, nil
 		}
@@ -2229,7 +2229,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// result the model reads — never a failed run.
 		if errors.Is(runErr, ErrRunNotWaiting) {
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return modelResult{text: runNotWaitingResult(decl.Name), kind: modelNocxMessage}, nil
+			return modelResult{text: runNotWaitingResult(k.modelToolName(decl.Name)), kind: modelNocxMessage}, nil
 		}
 		var leaseErr *RunLeaseError
 		if errors.As(runErr, &leaseErr) {
@@ -2253,7 +2253,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// already screened them: the egress gate reads the error string as
 		// well as the result, for the reason stated there.
 		if failureChangedNothing(decl) {
-			return modelResult{text: toolFailedResult(decl.Name, runErr), kind: modelNocxMessage}, nil
+			return modelResult{text: toolFailedResult(k.modelToolName(decl.Name), runErr), kind: modelNocxMessage}, nil
 		}
 		// Named, so the transport can say WHICH tool failed without
 		// stringifying the framework's wrapper around it.
@@ -2363,11 +2363,8 @@ func (k *effectKernel) FrameForModel(tool, result string) string {
 	return decl.FrameToolResult(result)
 }
 
-// The two kernel methods below live HERE and not in classifier.go, where
-// they were written. That file talks to the classifier model and therefore
-// imports eino; a kernel method declared in it would put the framework back
-// inside the kernel's own boundary, which kernel_test.go's guard reads over
-// the RECEIVER precisely so that a move like this is what it catches.
+// Approval and classification enforcement stay with the kernel; the neutral
+// classifier generation adapter only supplies an advisory reading.
 // proposalApproved reports whether this exact proposal already carries a
 // human's approval. The approval covers the proposal INCLUDING its
 // classification — a person approved the call as proposed — so the resumed

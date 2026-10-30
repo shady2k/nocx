@@ -151,11 +151,27 @@ func isXMLToolCallEnvelope(inner string) bool {
 // coupling: if eino changes adapters this stops compiling, which is exactly the
 // failure we want, rather than silently classifying nothing.
 
+// EndpointHTTPError carries only the status and structured provider code needed
+// for safe failure classification. Provider bodies and SDK text stay private.
+type EndpointHTTPError struct {
+	StatusCode int
+	Code       string
+}
+
+func (e *EndpointHTTPError) Error() string { return endpointStatusSentence(e.StatusCode) }
+
 // EndpointErrorSentence turns a typed HTTP response from the model endpoint
 // into a sentence a person can act on. The adapter preserves the provider's
 // response type through its own APIError wrapper or the underlying
 // RequestError, so this owner can classify it without exposing framework text.
 func EndpointErrorSentence(err error, model string) (string, bool) {
+	var endpointErr *EndpointHTTPError
+	if errors.As(err, &endpointErr) {
+		if endpointErr.StatusCode == 0 {
+			return "", false
+		}
+		return endpointErrorSentence(endpointErr.StatusCode, endpointErr.Code, model), true
+	}
 	var requestErr *openai.RequestError
 	var adapterAPIError *einoopenai.APIError
 	var clientAPIError *openai.APIError
@@ -185,17 +201,20 @@ func EndpointErrorSentence(err error, model string) (string, bool) {
 	} else if clientAPIError != nil {
 		code = clientAPIError.Code
 	}
+	return endpointErrorSentence(status, code, model), true
+}
 
+func endpointErrorSentence(status int, code any, model string) string {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return "the model endpoint rejected the credential. Check the endpoint's API key or credential, then ask again.", true
+		return "the model endpoint rejected the credential. Check the endpoint's API key or credential, then ask again."
 	case http.StatusNotFound:
 		if isModelNotFound(code) {
-			return fmt.Sprintf("the model endpoint could not find model %q. Check the model id, then ask again.", model), true
+			return fmt.Sprintf("the model endpoint could not find model %q. Check the model id, then ask again.", model)
 		}
-		return "the model endpoint returned 404 Not Found. Check the endpoint's address — the path may be wrong; an OpenAI-compatible base URL usually ends in /v1 — then ask again.", true
+		return "the model endpoint returned 404 Not Found. Check the endpoint's address — the path may be wrong; an OpenAI-compatible base URL usually ends in /v1 — then ask again."
 	default:
-		return endpointStatusSentence(status), true
+		return endpointStatusSentence(status)
 	}
 }
 

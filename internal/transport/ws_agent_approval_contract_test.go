@@ -3,12 +3,14 @@ package transport
 // The approval wire shapes against their contracts (nocx-z9hj4, contracts/
 // README row 3 — the real payload off the real socket, not a test-built
 // one): the agent.approvalRequested notification's params satisfy
-// agent.approvalRequested.schema.json, and the agent.approve request the
-// renderer actually sends satisfies agent.approve.schema.json —
-// additionalProperties false, every field required.
+// agent.approvalRequested.schema.json; agent.approve's request and result
+// satisfy their separate contracts, including the warning a person sees.
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,7 +78,7 @@ func TestAgentApprovalRequested_OverTheWireConformsToContract(t *testing.T) {
 // schema — every binding field required, additionalProperties false — and
 // the same literal payload is what the over-the-socket flow accepts.
 func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.approve.schema.json")
+	schema := loadSchema(t, "agent.approve.params.schema.json")
 	const args = `{"path":"/repo/a.txt"}`
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
 		{suspend: policySuspension("files.read", "call_1", args, "hash-a")},
@@ -99,9 +101,13 @@ func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
 		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true,"scope":"once"}`
 	validateJSON(t, schema, []byte(params), "agent.approve params (renderer's literal payload)")
 
-	got, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
+	result, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve with the literal payload: %+v", errObj)
+	}
+	var got approvalWireResult
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("decode approval result: %v", err)
 	}
 	if got.State != "streaming" {
 		t.Fatalf("approve state = %q, want streaming", got.State)
@@ -114,9 +120,133 @@ func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
 	}
 }
 
+func TestAgentApprove_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.approve.schema.json")
+	for name, dto := range map[string]agentApproveResponse{
+		"resumed":                     {State: "streaming"},
+		"egress declined":             {State: "failed"},
+		"standing write failed":       {State: "streaming", Warning: "could not be saved: disk is full"},
+		"resume refused with warning": {State: "failed", Warning: "could not be saved: disk is full"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal approval result: %v", err)
+			}
+			validateJSON(t, schema, raw, "agent.approve result DTO")
+		})
+	}
+}
+
+// Resolve the advertised schemas, not a second spelling of which contract is
+// params and which is result. Filing params as the result fails on real socket
+// bytes, even when both schema files and the manifest are freshly generated.
+func TestAgentApprove_OverTheWireConformsToContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(contractDir, "openrpc.json"))
+	if err != nil {
+		t.Fatalf("read OpenRPC manifest: %v", err)
+	}
+	var manifest openRPCManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("decode OpenRPC manifest: %v", err)
+	}
+	var method openRPCMethod
+	for _, candidate := range manifest.Methods {
+		if candidate.Name == "agent.approve" {
+			method = candidate
+			break
+		}
+	}
+	if len(method.Params) != 1 || method.Result == nil {
+		t.Fatal("agent.approve must advertise independent params and result contracts")
+	}
+	paramsSchema := loadSchema(t, manifestRefFile(t, method.Params[0].Schema.Ref))
+	resultSchema := loadSchema(t, manifestRefFile(t, method.Result.Schema.Ref))
+	for _, tc := range []struct {
+		name     string
+		approved bool
+		scope    string
+		egress   bool
+		warning  bool
+		state    string
+	}{
+		{name: "approve once", approved: true, scope: "once", state: "streaming"},
+		{name: "policy decline", scope: "once", state: "streaming"},
+		{name: "approve with warning", approved: true, scope: "always", warning: true, state: "streaming"},
+		{name: "decline with warning", scope: "always", warning: true, state: "streaming"},
+		{name: "egress decline", scope: "once", egress: true, state: "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var policy assistant.GlobalPolicy = askPolicyStore(t)
+			if tc.warning {
+				policy = failingPolicyStore{err: errors.New("disk is full")}
+			}
+			var h *scopeHarness
+			if tc.egress {
+				h = suspendedEgressRun(t, policy)
+			} else {
+				h = suspendedRun(t, policy)
+			}
+			params, err := json.Marshal(h.answer(tc.approved, tc.scope))
+			if err != nil {
+				t.Fatalf("marshal approval params: %v", err)
+			}
+			validateJSON(t, paramsSchema, params, "advertised agent.approve params")
+			result, errObj := approveOverWireRaw(t, h.conn, params, 2)
+			if errObj != nil {
+				t.Fatalf("agent.approve: %+v", errObj)
+			}
+			validateJSON(t, resultSchema, result, "advertised agent.approve result (real socket)")
+			if err := validateJSONErr(resultSchema, params); err == nil {
+				t.Fatal("result contract accepts the request instead of its response")
+			}
+			if err := validateJSONErr(paramsSchema, result); err == nil {
+				t.Fatal("params contract accepts the response instead of its request")
+			}
+			var got approvalWireResult
+			if err := json.Unmarshal(result, &got); err != nil {
+				t.Fatalf("decode approval result: %v", err)
+			}
+			if got.State != tc.state {
+				t.Fatalf("state = %q, want %q", got.State, tc.state)
+			}
+			if tc.warning {
+				if !strings.Contains(got.Warning, "disk is full") {
+					t.Fatalf("consumer warning = %q, want the standing-write failure", got.Warning)
+				}
+			} else if got.Warning != "" {
+				t.Fatalf("unexpected warning: %q", got.Warning)
+			}
+		})
+	}
+}
+
+func TestAgentApprove_ContractsRejectIncompleteOrMixedMessages(t *testing.T) {
+	params := loadSchema(t, "agent.approve.params.schema.json")
+	result := loadSchema(t, "agent.approve.schema.json")
+	for _, raw := range []string{
+		`{"runId":"7","attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","scope":"once"}`,
+		`{"runId":"7","attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":null,"scope":"once"}`,
+	} {
+		if err := validateJSONErr(params, []byte(raw)); err == nil {
+			t.Fatalf("params contract accepted an absent decision: %s", raw)
+		}
+	}
+	for _, raw := range []string{
+		`{}`,
+		`{"state":"streaming","approved":true}`,
+		`{"state":"streaming","warning":false}`,
+		`{"state":"awaiting_approval"}`,
+	} {
+		if err := validateJSONErr(result, []byte(raw)); err == nil {
+			t.Fatalf("result contract accepted an invalid response: %s", raw)
+		}
+	}
+}
+
 // approveOverWireRaw drives agent.approve with a LITERAL raw params payload
 // — the renderer's bytes, never a helper-completed shape.
-func approveOverWireRaw(t *testing.T, conn *websocket.Conn, params json.RawMessage, id int) (approvalWireResult, *jsonrpcErrorObj) {
+func approveOverWireRaw(t *testing.T, conn *websocket.Conn, params json.RawMessage, id int) (json.RawMessage, *jsonrpcErrorObj) {
 	t.Helper()
 	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "agent.approve", "params": params})
 	if err != nil {
@@ -132,11 +262,13 @@ func approveOverWireRaw(t *testing.T, conn *websocket.Conn, params json.RawMessa
 			t.Fatalf("read approve: %v", rerr)
 		}
 		var env struct {
-			ID     *json.RawMessage   `json:"id"`
-			Error  *jsonrpcErrorObj   `json:"error"`
-			Result approvalWireResult `json:"result"`
+			ID     *json.RawMessage `json:"id"`
+			Error  *jsonrpcErrorObj `json:"error"`
+			Result json.RawMessage  `json:"result"`
 		}
-		_ = json.Unmarshal(resp, &env)
+		if err := json.Unmarshal(resp, &env); err != nil {
+			t.Fatalf("decode approval response: %v", err)
+		}
 		if env.ID == nil {
 			continue // a notification; keep looking for the response
 		}
@@ -173,7 +305,7 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 
 	fake, srv := newToolCallingServer()
 	defer srv.Close()
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

@@ -20,6 +20,8 @@ class FakeDispatcher {
         state: 'prepared',
         ingestSeq: 1,
         replayed: false,
+        engine: 'eino',
+        runtimeVersion: 'eino-test',
         model: 'qwen3',
       }
       this.next.run += 1
@@ -57,6 +59,10 @@ function makeTarget(grants: GrantBlock[] = []) {
     id: 1,
     el: document.createElement('div'),
     append: vi.fn(),
+    restoreProse: vi.fn(),
+    adoptChild: vi.fn(),
+    orderChildren: vi.fn(),
+    provenance: vi.fn(),
     toolCall: vi.fn(),
     reasoning: vi.fn(),
     notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -64,6 +70,8 @@ function makeTarget(grants: GrantBlock[] = []) {
   }
   const onRefusal = vi.fn()
   const target = new AgentInputTarget({
+    findAnswer: () => null,
+    drawCommand: () => Promise.resolve(null),
     dispatcher: dispatcher as never,
     cancel: vi.fn(() =>
       Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
@@ -306,6 +314,10 @@ describe('AgentInputTarget', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      restoreProse: vi.fn(),
+      adoptChild: vi.fn(),
+      orderChildren: vi.fn(),
+      provenance: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -323,6 +335,8 @@ describe('AgentInputTarget', () => {
     )
     const onTurnEnd = vi.fn()
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
@@ -365,6 +379,10 @@ describe('AgentInputTarget', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      restoreProse: vi.fn(),
+      adoptChild: vi.fn(),
+      orderChildren: vi.fn(),
+      provenance: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -387,6 +405,8 @@ describe('AgentInputTarget', () => {
     )
     const onTurnEnd = vi.fn()
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
       cwd: () => '/repo',
@@ -453,6 +473,10 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      restoreProse: vi.fn(),
+      adoptChild: vi.fn(),
+      orderChildren: vi.fn(),
+      provenance: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -460,6 +484,8 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
     }
     const openAnswer = vi.fn(() => handle)
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: dispatcher as never,
       cancel: vi.fn(() =>
         Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
@@ -495,6 +521,10 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       id: 1,
       el,
       append: vi.fn(),
+      restoreProse: vi.fn(),
+      adoptChild: vi.fn(),
+      orderChildren: vi.fn(),
+      provenance: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -503,6 +533,8 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
     const openAnswer = vi.fn(() => handle)
     const onRefusal = vi.fn()
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: failDispatcher as never,
       cancel: vi.fn(() =>
         Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
@@ -539,6 +571,10 @@ describe('AgentInputTarget refusal', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      restoreProse: vi.fn(),
+      adoptChild: vi.fn(),
+      orderChildren: vi.fn(),
+      provenance: vi.fn(),
       toolCall: vi.fn(),
       reasoning: vi.fn(),
       notice: vi.fn(() => new BlockNotice({ text: '' })),
@@ -546,6 +582,8 @@ describe('AgentInputTarget refusal', () => {
     }
     const onRefusal = vi.fn()
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: failDispatcher as never,
       cancel: vi.fn(() =>
         Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),

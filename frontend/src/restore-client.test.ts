@@ -41,11 +41,12 @@ function fakeLedger(
           entry: { kind },
           artifacts: artifacts.map((a) => ({ id: a.id, mediaType: a.mediaType })),
           caused: [],
+          agentRuns: [],
           proseEvicted,
         })
       }
       const found = artifacts.find((a) => a.id === (params as { id: string }).id)
-      return Promise.resolve({ body: found?.body ?? '' })
+      return Promise.resolve({ body: found?.body ?? '', lastSeq: found ? 0 : null })
     }),
   } as unknown as WSClient
   return { client, calls }
@@ -247,6 +248,13 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: false,
+      turn: {
+        entry: { kind: 'ask' },
+        agentRuns: [],
+        caused: [],
+        proseEvicted: false,
+        prose: new Map(),
+      },
     })
   })
 
@@ -285,6 +293,13 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: false,
+      turn: {
+        entry: { kind: 'ask' },
+        agentRuns: [],
+        caused: [],
+        proseEvicted: false,
+        prose: new Map(),
+      },
     })
   })
   it('a turn whose answer is gone is still an ask — the kind does not follow the loss', async () => {
@@ -297,6 +312,13 @@ describe('restore-client — a block says what it is by its kind, and a turn own
       body: null,
       caused: [],
       proseEvicted: true,
+      turn: {
+        entry: { kind: 'ask' },
+        agentRuns: [],
+        caused: [],
+        proseEvicted: true,
+        prose: new Map(),
+      },
     })
   })
 
@@ -453,6 +475,7 @@ describe('restore-client — the causal flow of a restored turn', () => {
           return Promise.resolve({
             entry: { kind: 'ask' },
             artifacts,
+            agentRuns: [],
             caused,
             proseEvicted: false,
           })

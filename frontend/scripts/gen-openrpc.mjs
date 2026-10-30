@@ -84,6 +84,14 @@ async function build() {
       name !== 'rpc.error.schema.json',
   )
   const resultFiles = new Set(results)
+  // Every request belongs to the protocol, but only requests with a renderer
+  // consumer need a generated module. Enroll those through the same manifest
+  // list as results and notifications, without a method-specific allowlist.
+  const rendererParams = []
+  for (const file of params) {
+    const schema = JSON.parse(await readFile(resolve(contractsDir, file), 'utf8'))
+    if (schema['x-nocx-rendererType'] === true) rendererParams.push(file)
+  }
   return {
     openrpc: '1.3.2',
     info: {
@@ -95,7 +103,7 @@ async function build() {
     methods: params.map((file) =>
       methodEntry(file.replace(/\.params\.schema\.json$/, ''), resultFiles),
     ),
-    'x-nocx-schemaRefs': results.map(ref),
+    'x-nocx-schemaRefs': [...results, ...rendererParams].sort().map(ref),
   }
 }
 

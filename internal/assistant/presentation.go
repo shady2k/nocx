@@ -7,14 +7,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
-	"github.com/eino-contrib/jsonschema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 const toolsSearchName = "tools.search"
+
+const toolsSearchDescription = "Find an eligible tool by name or capability words, then call it by its returned name."
 
 type presentationState struct {
 	mu     sync.RWMutex
@@ -53,7 +54,7 @@ func (s *presentationState) Names() []string {
 	return names
 }
 
-func (m *policyMiddleware) presentationProjection() agenttools.PresentationProjection {
+func (m *runHost) presentationProjection() agenttools.PresentationProjection {
 	grant := m.kernel.grant
 	if m.grantProvider != nil {
 		grant = m.grantProvider()
@@ -63,7 +64,7 @@ func (m *policyMiddleware) presentationProjection() agenttools.PresentationProje
 	return m.kernel.registry.Project(grant, cfg)
 }
 
-func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (string, error) {
+func (m *runHost) searchTools(ctx context.Context, rawArgs string) (string, error) {
 	var req struct {
 		Query string `json:"query"`
 	}
@@ -79,9 +80,7 @@ func (m *policyMiddleware) searchTools(ctx context.Context, rawArgs string) (str
 	}
 	matches := m.kernel.registry.Search(grant, req.Query, projection.Visible)
 	m.rememberLoaded(presentationToolNames(matches)...)
-	if m.kernel.log != nil {
-		m.kernel.log.Info("assistant tool catalog searched", "query", req.Query, "matches", len(matches))
-	}
+	log.From(ctx).Info("assistant tool catalog searched", "query", req.Query, "matches", len(matches))
 	result := struct {
 		Query string             `json:"query"`
 		Tools []searchToolResult `json:"tools"`
@@ -110,39 +109,6 @@ func marshalSearchResult(result any) (string, error) {
 	return string(out), nil
 }
 
-func searchToolInfo(raw []byte) (*schema.ToolInfo, error) {
-	var params jsonschema.Schema
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, fmt.Errorf("tools.search: params schema: %w", err)
-	}
-	return &schema.ToolInfo{
-		Name:        toolsSearchName,
-		Desc:        "Find an eligible tool by name or capability words, then call it by its returned name.",
-		ParamsOneOf: schema.NewParamsOneOfByJSONSchema(&params),
-	}, nil
-}
-
-func (m *policyMiddleware) searchTool() (tool.BaseTool, error) {
-	info, err := searchToolInfo(m.searchSchema)
-	if err != nil {
-		return nil, err
-	}
-	return &presentationSearchTool{middleware: m, info: info}, nil
-}
-
-type presentationSearchTool struct {
-	middleware *policyMiddleware
-	info       *schema.ToolInfo
-}
-
-func (t *presentationSearchTool) Info(context.Context) (*schema.ToolInfo, error) {
-	return t.info, nil
-}
-
-func (t *presentationSearchTool) InvokableRun(ctx context.Context, rawArgs string, _ ...tool.Option) (string, error) {
-	return t.middleware.searchTools(ctx, rawArgs)
-}
-
 func presentationToolNames(tools []agenttools.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
@@ -167,6 +133,6 @@ func declaredToolInfos(permitted []agenttools.Tool) ([]*schema.ToolInfo, error) 
 	return infos, nil
 }
 
-func (m *policyMiddleware) rememberLoaded(names ...string) {
+func (m *runHost) rememberLoaded(names ...string) {
 	m.presentationState.Load(names...)
 }

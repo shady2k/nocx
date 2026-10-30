@@ -4,8 +4,13 @@
   "title": "LedgerGet",
   "description": "Result of the ledger.get JSON-RPC method (nocx-rtg0.20, design §6.2) — one entry with its relations and the METADATA of what its runs captured. The bodies are deliberately absent: the recall read must not haul bytes (ADR-0019 §6), so an artifact's content is fetched one artifact at a time by whoever actually wants it. The entry is the same shape a ledger.query page row has, declared once there.",
   "additionalProperties": false,
-  "required": ["entry", "edges", "artifacts", "caused", "proseEvicted"],
+  "required": ["entry", "edges", "artifacts", "caused", "proseEvicted", "agentRuns"],
   "properties": {
+    "agentRuns": {
+      "description": "Persisted agent runs in attempt order. Empty for non-agent entries. Each run retains its original model and engine identity.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/agentRun" }
+    },
     "entry": {
       "$ref": "ledger.query.schema.json#/$defs/entry"
     },
@@ -36,6 +41,26 @@
     }
   },
   "$defs": {
+    "agentRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "attempt", "state", "model", "engine", "runtimeVersion"],
+      "properties": {
+        "runId": { "type": "integer", "minimum": 1 },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "state": { "$ref": "agent.ask.schema.json#/properties/state" },
+        "model": { "type": "string" },
+        "engine": {
+          "description": "Missing historical engine metadata is returned as eino. Unknown nonempty stored identities remain unchanged.",
+          "type": "string",
+          "minLength": 1
+        },
+        "runtimeVersion": {
+          "description": "The stored runtime identity, or the empty string when historical metadata is absent.",
+          "type": "string"
+        }
+      }
+    },
     "edge": {
       "type": "object",
       "additionalProperties": false,

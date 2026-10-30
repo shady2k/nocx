@@ -59,13 +59,6 @@ type skillAuditSource interface {
 	Audit(name string) (skill.AuditMaterial, error)
 }
 
-// skillAuditEngine is the model call. It is a narrow interface over
-// assistant.Client rather than the whole of it because this handler has no
-// business being able to start an ask.
-type skillAuditEngine interface {
-	AuditSkill(ctx context.Context, p assistant.SkillAuditParams) (assistant.SkillAuditResult, error)
-}
-
 // skillAuditResult is the wire shape (contracts/skills.audit.schema.json).
 //
 // IT CARRIES A VERDICT AND THE VERDICT DECIDES NOTHING — design §7's refusal
@@ -141,7 +134,7 @@ type skillAuditResult struct {
 
 type skillAuditHandlers struct {
 	source      skillAuditSource
-	engine      skillAuditEngine
+	engines     assistant.EngineSelector
 	configOp    capability.ConfigOperation
 	credentials credential.Resolver
 	// checks is where the reading is filed once the model has answered. Nil
@@ -190,6 +183,11 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
+	engine, err := h.engines.Selected(ctx)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
 	role, endpoint, model, key, headers, err := h.resolveAuditModel(ctx)
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
@@ -224,7 +222,7 @@ func (h skillAuditHandlers) handle(ctx context.Context, req jsonrpcRequest) {
 			"files", len(material.Read), "omitted", len(material.Omitted))
 	}
 
-	result, err := h.engine.AuditSkill(ctx, assistant.SkillAuditParams{
+	result, err := engine.Client.AuditSkill(ctx, assistant.SkillAuditParams{
 		Key: key, BaseURL: endpoint.BaseURL, Model: model, Headers: headers,
 		Name: material.Name, Purpose: purpose, Overview: overview,
 		Files: auditFiles(material.Files), Budget: h.readingBudget(),

@@ -49,7 +49,7 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 		// No model is not a missing parameter — it is the other question
 		// (nocx-q27y): "can I reach this API with this key", which needs
 		// none. See connection.go.
-		return c.probeConnection(ctx, p)
+		return CheckConnection(ctx, c.httpFactory, p)
 	}
 
 	start := time.Now()
@@ -62,8 +62,8 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	// therefore has nothing that can suspend and no run id to key a
 	// checkpoint by. It passes the client's store with an empty id: nothing
 	// is written, nothing is looked up.
-	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
-		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, nil, c.checkpoints, "",
+	streamErr := streamModelAnswer(probeCtx, c.log, c.httpFactory.NewModelHTTPClient(), p.Key, p.BaseURL, p.Model, p.Headers,
+		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, nil, c.checkpoints, "", "",
 		// The probe asks "does this model answer", so only the ANSWER
 		// counts: a reasoning model that thought and said nothing has not
 		// answered, and a probe that accepted its thinking would report a

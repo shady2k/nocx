@@ -1,0 +1,388 @@
+{
+  "schema_version": 1,
+  "python": {
+    "implementation": "CPython",
+    "version": "3.13.16",
+    "selection": "Newest non-prerelease CPython 3.13 patch in uv 0.13.0 catalog available for all three release targets at initial lock.",
+    "artifacts": [
+      {
+        "platform": "linux/amd64",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.13.16%2B20261009-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "sha256": "24801ea31c7d406d559a17e2226325c723d50c56900b9c0da7b62adaae2affc9",
+        "size": 35082735
+      },
+      {
+        "platform": "darwin/amd64",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.13.16%2B20261009-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "bd085c51e960f00ee33b630e2b13ac90fe90cdc3da25a0f0bc0719b1294920bf",
+        "size": 24975282
+      },
+      {
+        "platform": "darwin/arm64",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.13.16%2B20261009-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "11785155d0f70e634178219c20925d8f20be00a3da4684fc4f5019dd15602ef7",
+        "size": 25257849
+      }
+    ]
+  },
+  "build_tool": {
+    "name": "uv",
+    "version": "0.13.0",
+    "artifacts": [
+      {
+        "filename": "uv-0.13.0-py3-none-macosx_10_12_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/ff/27/2a2dde8a643337b6746a8e632b3ba8aef7c82b9bc28642bb94dd3a046ef5/uv-0.13.0-py3-none-macosx_10_12_x86_64.whl",
+        "sha256": "93265932cb2efd1486d4d182211281b3f0b31637e2fc160c4c8d7b15294188d1"
+      },
+      {
+        "filename": "uv-0.13.0-py3-none-macosx_11_0_arm64.whl",
+        "url": "https://files.pythonhosted.org/packages/9e/d4/d42eabbd9b61a965e0a262e06bf8452744593e7a3110a5c4273c4e917729/uv-0.13.0-py3-none-macosx_11_0_arm64.whl",
+        "sha256": "a5f93ae362b751737cecef0bbc0294624be68a843ff9b32d86e6862a26101630"
+      },
+      {
+        "filename": "uv-0.13.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/c3/75/1901383808ba0d421f32060ba0e9884169b685a722e1af5d87fdd4225ba6/uv-0.13.0-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "sha256": "52c7da0fd9056d9551124777ec77de53f0df7017daf8f98a19e947b7837416ed"
+      }
+    ]
+  },
+  "framework": {
+    "name": "pydantic-deep",
+    "version": "0.3.50",
+    "commit": "650b592b6accd7dc994226abbaa0cf717527e457",
+    "source_url": "https://codeload.github.com/vstorm-co/pydantic-deepagents/tar.gz/650b592b6accd7dc994226abbaa0cf717527e457",
+    "source_sha256": "dec2f2bd6d57a98f6163efbad969c731f12fe7b3bb1a0221b3b165097e1a5f09",
+    "wheel_url": "https://files.pythonhosted.org/packages/11/4d/60507926a1f0429450f9d0b1809bae260941a2244b863224cf7422376fe5/pydantic_deep-0.3.50-py3-none-any.whl",
+    "wheel_sha256": "4e91124385a7f0259337ae3ab219d26d22eb01fa8343149ece1c0cde5464725f",
+    "source_wheel_python_files_compared": 91,
+    "source_wheel_mismatches": []
+  },
+  "patched_sdk": {
+    "version": "2.52.0+nocx.1",
+    "source_sha256": "87819dbc35c5a0a75d59d0f2c3afe7dde16c0455e6716b816055e6770b417a83",
+    "patch_sha256": "05ff9c8bdd0003b031455747878ab2b2a08ce8b6f0098debeddc3a8b4c734a70",
+    "wheel_sha256": "622ff503c1331c1d372a7aeabf5e02a51ee3a5086edfbd1214350d1b8bcf4bda",
+    "provenance": "../third_party/pydantic-ai/PROVENANCE.json"
+  },
+  "lock": {
+    "path": "uv.lock",
+    "sha256": "3f12f4f86d2f5650d75a2a8c8f9eebf6bd0627e956aa4971378100c78a9f8ba4",
+    "package_count_including_project": 49
+  },
+  "native_dependencies": [
+    {
+      "name": "chardet",
+      "version": "7.7.0",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/4e/73/0c434bc65adc411e49b1bbebee24ebb36a3511c80a058f1fde17f43fb537/chardet-7.7.0-cp313-cp313-macosx_10_13_x86_64.whl",
+          "hash": "sha256:11263887c082c3d8c32026aeddbdef37ac8feccd1faece5a22b2ff00a29b115a",
+          "size": 1202232,
+          "upload-time": "2026-10-18T00:05:45.657Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/9d/be/222e5628af10d6b80750ccdda7f6d2610646dddb082c37947623d5e55bf7/chardet-7.7.0-cp313-cp313-macosx_11_0_arm64.whl",
+          "hash": "sha256:e8c718e6961981fe1685e1243742f326ac553f0fa0dfd0c6d3d17dd4f92cd3ff",
+          "size": 1173273,
+          "upload-time": "2026-10-18T00:05:46.984Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/ca/04/0b5fd38375ae182cec6446dd3121aaff5ae18fd12b98b10161a58b720db9/chardet-7.7.0-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "hash": "sha256:c519c10c315a675bcfd4b55c0e0de1859ca5a39881d8f69750500102c2fc5d2f",
+          "size": 1658830,
+          "upload-time": "2026-10-18T00:05:49.938Z"
+        }
+      ]
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.5.2",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/78/6e/60ce52a85a7fd631ae8482ae6d74521014ca2f255892679484dc04d7ef56/charset_normalizer-3.5.2-cp313-cp313-ios_13_0_arm64_iphoneos.whl",
+          "hash": "sha256:d2374b62878abb00cd8309b32af6c0b715cd02dec0ca74ef12e5069bdc64144a",
+          "size": 206701,
+          "upload-time": "2026-09-30T04:35:58.639Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/36/8c/71aafad23f971afc84c2b295bc0c560739ce1dac558aad9fec22e39f3639/charset_normalizer-3.5.2-cp313-cp313-ios_13_0_arm64_iphonesimulator.whl",
+          "hash": "sha256:d376bbd28b3a8999db1a103b3b388aee6f1ddeb3e51bc2172993efdcd86e064d",
+          "size": 210506,
+          "upload-time": "2026-09-30T04:36:00.147Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/91/da/3c5a7798c046df7d2d68ad653cf5b6c5a8bfee225055a843c6f2f42aac1a/charset_normalizer-3.5.2-cp313-cp313-macosx_10_13_universal2.whl",
+          "hash": "sha256:6045373d5a89a5ec71afde535db987ca28e76dfa276c2d4c818265b375d4b055",
+          "size": 366626,
+          "upload-time": "2026-09-30T04:36:01.77Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/4b/85/41d27f234b82e47c167a5f6c0f62501dc0c640585ff4aba79e08a390336a/charset_normalizer-3.5.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "hash": "sha256:7218e8f32b0956cfcd048fd42d9d5779809745ca1d86113ca56f66e7ae1549c4",
+          "size": 254660,
+          "upload-time": "2026-09-30T04:36:09.248Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/79/ba/57adc269824e8658f1a0f97a9e514c247445a9632b3419b97e0ba37f16dc/charset_normalizer-3.5.2-cp313-cp313-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:e243bd13217235fc7290c621941c3f5cc8b66e4872495be821d7436ba2fb838d",
+          "size": 257627,
+          "upload-time": "2026-09-30T04:36:19.938Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/9a/85/33abd4315c052d3d4f54c92b1ee49bfbc0dc7115a981e462a793b6d2ab87/charset_normalizer-3.5.2-cp313-cp313-pyemscripten_2025_0_wasm32.whl",
+          "hash": "sha256:a090bb2c68df85450502e3e20d665e3a5af9c65a84d6508ed477badd49166fd3",
+          "size": 143407,
+          "upload-time": "2026-09-30T04:36:21.376Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/8c/ab/176fbfd5b64939c55d652366aa5b9ef1d767af207a3aa6ebeb0d226c484d/charset_normalizer-3.5.2-cp37-abi3-macosx_10_9_universal2.whl",
+          "hash": "sha256:4275811936e2f06feff5e598fb42a1b7ae852da8e39605211892b56b81a34efd",
+          "size": 331815,
+          "upload-time": "2026-09-30T04:38:26.216Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/7e/84/371eac6b30bdbcbf2d632a1a01809103459216fcaae61b8b8d922c1bfb8a/charset_normalizer-3.5.2-cp37-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl",
+          "hash": "sha256:1c50fe28bbc2ced33386f298650d91218076c05420e6cbd790b913adc41659e7",
+          "size": 253276,
+          "upload-time": "2026-09-30T04:38:28.032Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/b4/f0/45b579df5cabc1d5d53ea1cc35e8437d3ca768c0acccc7041517cb6fbb32/charset_normalizer-3.5.2-cp37-abi3-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:9cae88599c7219005d879f98e5ed53341e9a122af585e1091200358a3003d2a0",
+          "size": 255100,
+          "upload-time": "2026-09-30T04:38:46.289Z"
+        }
+      ]
+    },
+    {
+      "name": "jiter",
+      "version": "0.18.0",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/50/94/aa275cdb099fd84e402977f8fc8628e2cee2f7c8eafe1d1d5c5e722f5ee5/jiter-0.18.0-cp313-cp313-macosx_10_12_x86_64.whl",
+          "hash": "sha256:1517648b5f6268513dea206241a99d9991d6ffcbdbc406848e77a7f02ed3ccf1",
+          "size": 289648,
+          "upload-time": "2026-10-23T13:49:33.059Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/8d/30/3eaf67279c6183393d3608b6713c93668ae82ea59f0589ea59d8176d8741/jiter-0.18.0-cp313-cp313-macosx_11_0_arm64.whl",
+          "hash": "sha256:7161217e2190b9b2c8c79b81699be29d67010f6f77e09a53a3b62261792d5489",
+          "size": 315919,
+          "upload-time": "2026-10-23T13:49:34.457Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/64/11/babc8d3c004bb2f11b7e3adfe27a5bc7c1e13cdfc6360d424c57355c55ff/jiter-0.18.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "hash": "sha256:6e3350b7431f7b8315b925d9ca0f29a44e8fb6ed45c1fe552392cb6297966bb9",
+          "size": 335978,
+          "upload-time": "2026-10-23T13:49:41.165Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/80/b8/081c0414379ee2564aa7808f78e963538a2c4aed2f8d31775e2423e1cdbf/jiter-0.18.0-cp313-cp313-musllinux_1_1_x86_64.whl",
+          "hash": "sha256:5cb43336244e063f9cc11e44730e4b92dea70c6eb9b649d268c5ebebc4bc7685",
+          "size": 514734,
+          "upload-time": "2026-10-23T13:49:46.236Z"
+        }
+      ]
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/52/05/3ef45db776baea068044c799bbba68f3ca00a440c0e930a17c572f3d9639/lxml-6.1.3-cp313-cp313-macosx_10_13_universal2.whl",
+          "hash": "sha256:3a48093cdb058a93af842ede9703520e810b05dcd0fc6d7190a06376c3bfb6bd",
+          "size": 8590357,
+          "upload-time": "2026-09-02T14:48:17.413Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/8c/a5/eee2fc77eee5ea68e4a4334b1def1781a3beaeefd3d98e81b4a38dc447b7/lxml-6.1.3-cp313-cp313-macosx_10_13_x86_64.whl",
+          "hash": "sha256:887c021d9a977cff89cb273047c1352997b772a8908a25c21836861f69b92be1",
+          "size": 4632616,
+          "upload-time": "2026-09-02T14:48:20.745Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/ab/8d/8a7b91df0b54d09d25f5f44885d6b3e0a6d6643a8c070191580318d20c42/lxml-6.1.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "hash": "sha256:b477912f42c5c33405a10c759d22f80cf5af043ae02d95b9d8e5e5bc555739ed",
+          "size": 5093324,
+          "upload-time": "2026-09-02T14:48:25.132Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/ac/7d/8bf1fd8bae8247743968bb76d027a1ac5bd2c4b44495fba6a71b30d10706/lxml-6.1.3-cp313-cp313-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl",
+          "hash": "sha256:d85dfab42dd672f87a7f76e9de7172962aee69fa12044f0d6e1a23cbd53fb80e",
+          "size": 5232385,
+          "upload-time": "2026-09-02T14:48:31.969Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/c3/3c/fe55b2bd5c6113c906511cd88f6a470195c5fbff1124f19970ab706c3477/lxml-6.1.3-cp313-cp313-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:d9b3e7d71bf6acff341233417abbdface29c647e3113892d9aaedc02eb4aa2bc",
+          "size": 5255814,
+          "upload-time": "2026-09-02T14:48:50.948Z"
+        }
+      ]
+    },
+    {
+      "name": "primp",
+      "version": "2.0.1",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/12/10/7de6810278d4578062449ebc14348c18da88b39fa027cabb13a7be19fe9f/primp-2.0.1-cp310-abi3-macosx_10_12_x86_64.whl",
+          "hash": "sha256:4296ae43a8660bcb1dfc1570ed07dc9f8ab64f11fdebf3272532411b7fe321ef",
+          "size": 6352835,
+          "upload-time": "2026-09-13T00:17:31.635Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/5d/ab/0a8af6dd09aa6875109aaf93fa0ceec4b6b8302d303690f1ce0922becece/primp-2.0.1-cp310-abi3-macosx_11_0_arm64.whl",
+          "hash": "sha256:ca21c764f17ba42dde38c29d6a1f01970d39fa5f4793b0fe702006bd71b7a16a",
+          "size": 6020705,
+          "upload-time": "2026-09-13T00:17:33.36Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/59/e9/24b5f9439aa4a0209602c7a997bf6dc537ed2aa0c8b6b7e5a40e694a5633/primp-2.0.1-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+          "hash": "sha256:9a7be373adfded677a9092ae2743873d5c8a9573148d617a189d26715f7d8ea5",
+          "size": 6585593,
+          "upload-time": "2026-09-13T00:17:41.793Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/d9/b8/885464388964abf3ed48cd852e45293eb1b96945a5c065180ca53db8b9f7/primp-2.0.1-cp310-abi3-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:7f494686da2991212f5607d125c32cb8da72a92e179d497c7d2ffeba21abff1e",
+          "size": 6846177,
+          "upload-time": "2026-09-13T00:17:49.323Z"
+        }
+      ]
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.50.2",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/c2/fc/ac3ae9d934932ce3c380e7fe53e01372b49ef5dcb49db56f1a1f005b4d8c/pydantic_core-2.50.2-cp313-cp313-macosx_10_12_x86_64.whl",
+          "hash": "sha256:93eb41d626d9a2749a678823c70bba8c25033cef474ae8001fd7621adbbd8437",
+          "size": 2222463,
+          "upload-time": "2026-10-29T16:32:32.125Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/f7/0b/7605223654ed4e777d05668e914d32b476b1fa2bb756bff9820fe270456b/pydantic_core-2.50.2-cp313-cp313-macosx_11_0_arm64.whl",
+          "hash": "sha256:7c539d452cba22f250103c7d1c00cbe9038eb705e657476e701c43374efd9f2e",
+          "size": 2093995,
+          "upload-time": "2026-10-29T16:32:33.496Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/79/be/b559a1ceaff8b1d4581733d47d2ffa785635ac05716eae4c964466aac6e8/pydantic_core-2.50.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+          "hash": "sha256:31a1fb3ffbd1195b24490f671d12623dd4c9bfa56d6af0a299fa43b516134f5b",
+          "size": 2241760,
+          "upload-time": "2026-10-29T16:32:46.382Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/3d/96/e96ff19527c73b9aaddce2a4424006dc15439fd89ef2d39641048c5ee85a/pydantic_core-2.50.2-cp313-cp313-musllinux_1_1_x86_64.whl",
+          "hash": "sha256:8772c2c0091e6fc2d0499151793d31bf811826986b0727052935a95104845544",
+          "size": 2478926,
+          "upload-time": "2026-10-29T16:32:52.856Z"
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "version": "2026.9.29",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/79/d5/6080f7d1a6e7e36aa720f806ac93c035ba39c209ae6cc510e8ef4c0279c6/regex-2026.9.29-cp313-cp313-macosx_10_13_universal2.whl",
+          "hash": "sha256:f1a0d5117230dd46b399a30a38afa44f79c99f3168988fdc4f425c3f928b39df",
+          "size": 497622,
+          "upload-time": "2026-09-29T00:47:08.251Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/00/71/c87fc7a2e21a42f9d57489db32951c37eef56d153840459a80d464f0321d/regex-2026.9.29-cp313-cp313-macosx_10_13_x86_64.whl",
+          "hash": "sha256:f0fe9834e5aeccaf19a0d8feb296d66a24be1a7c9922002f842a682cd5abb787",
+          "size": 296281,
+          "upload-time": "2026-09-29T00:47:09.764Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/11/9e/aa0f4cde3bc4688c1d58b0cd8415edd708339bc0bc401a195b0b1e8c8f0c/regex-2026.9.29-cp313-cp313-macosx_11_0_arm64.whl",
+          "hash": "sha256:c90fcf7804ea0a54b896ce0f2b9565350220b8d4890fd0db461a476a4c687963",
+          "size": 293472,
+          "upload-time": "2026-09-29T00:47:11.723Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/9a/8e/c1ed81f55f992f6aa0b699a592a50c1ce9e6d44ff1aee2c14c0537dcef9c/regex-2026.9.29-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+          "hash": "sha256:d49c18f1ea294cf4adde2e5ac256e98c82ea9d708462ce4bf799dffa7cfe8a2c",
+          "size": 807902,
+          "upload-time": "2026-09-29T00:47:18.268Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/12/62/d0314bcedfd3586197e4596931fa220260eb2385bf53184e5b9ae67db24b/regex-2026.9.29-cp313-cp313-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:ebb8912f565b8cdbbf27debfe00df04202c20e2f651b9e32767930c5eace3621",
+          "size": 796602,
+          "upload-time": "2026-09-29T00:47:29.233Z"
+        }
+      ]
+    },
+    {
+      "name": "tiktoken",
+      "version": "0.14.0",
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/50/53/ee1453623bf65f019328721ccb6587846d2c5b7b82f34e73ca09101f072e/tiktoken-0.14.0-cp313-cp313-macosx_10_13_x86_64.whl",
+          "hash": "sha256:e9c5fe393aab56469f04e432ff851216d3def3436cf5f07e442a240164bf500f",
+          "size": 1094198,
+          "upload-time": "2026-08-17T19:48:57.955Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/ad/5f/6448cfe278c3664ba9ec5b5ac08344341f7dc3d42888476e215a14eda2be/tiktoken-0.14.0-cp313-cp313-macosx_11_0_arm64.whl",
+          "hash": "sha256:cbe2cc3bba939bcdaf103e03df9d5039d33887080b315624be28ec69059e5f94",
+          "size": 1038820,
+          "upload-time": "2026-08-17T19:48:59.015Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/37/62/cae690d9783146b0f81f564ada0f8f611de68178c0c9c7e1e969f0516b48/tiktoken-0.14.0-cp313-cp313-manylinux_2_28_x86_64.whl",
+          "hash": "sha256:26e60f6a956ee171ab728b37b8439905d7ea1db435c30f9822f291e9861c861d",
+          "size": 1203884,
+          "upload-time": "2026-08-17T19:49:01.163Z"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/cb/56/4c12f07b812f84206f38d723eb1ebfdd34bad9309b5dbc0bee6bbcff4cbf/tiktoken-0.14.0-cp313-cp313-musllinux_1_2_x86_64.whl",
+          "hash": "sha256:3fd7c14b1cb45b486c39fc9b3443bb341f3e2fc7e6f31247f3435a5836651632",
+          "size": 1315434,
+          "upload-time": "2026-08-17T19:49:03.434Z"
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "Linux/amd64 has focused Python and real packaged Go-peer/native-SDK/kernel smoke evidence. Darwin artifacts are pinned; runtime execution acceptance belongs to native packaging checks.",
+    "Python owns only the SDK and private IPC adapter. Credentials, model HTTP, policy, tool validation/effects, approvals, egress screening and durable history remain Go-owned.",
+    "No optional CLI, sandbox, browser, MCP, Google, Logfire or all extras selected. Mandatory upstream infrastructure/dependencies remain."
+  ],
+  "bridge": {
+    "version": 1,
+    "entrypoint": "app/entrypoint.py",
+    "module_directory": "app/nocx_agent_runtime",
+    "interpreter": "python/bin/python3.13",
+    "arguments": [
+      "-I",
+      "-B",
+      "<absolute-entrypoint>",
+      "--operation-id",
+      "<id>",
+      "--epoch",
+      "<id>",
+      "--manifest-digest",
+      "<verified-bundle-digest>"
+    ],
+    "bounds": {
+      "frame_bytes": 1048576,
+      "object_bytes": 4194304,
+      "model_open_object_bytes": 5657944,
+      "decoded_model_body_bytes": 4194304,
+      "chunk_bytes": 32768,
+      "stream_credit_bytes": 262144,
+      "raw_arguments_bytes": 65536
+    },
+    "model_cycle_limit": 20,
+    "model_cycle_limit_basis": "Existing Eino v0.9.13 adk/react.go defaults maxIter to 20; nocx leaves MaxIterations unset."
+  },
+  "build_requirements": {
+    "path": "../third_party/pydantic-ai/build-requirements.txt",
+    "sha256": "b70f0bca1f4dcf0295ca3d75b080ae3a9b279836dc6205cb73c8c7fd1df1603d",
+    "description": "Hash-locked complete SDK wheel build environment; runtime project pins the same hatchling dependency versions through uv build constraints."
+  }
+}

@@ -21,6 +21,7 @@ import (
 func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.status.schema.json")
 	probe := &assistant.ProbeResult{
+		Engine: assistant.EngineEino, RuntimeVersion: "eino-test",
 		EndpointName: "Local",
 		Model:        "qwen3",
 		Kind:         assistant.ProbeModel,
@@ -47,6 +48,7 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 			EndpointConfigured: true,
 			Credential:         cred("sealed"),
 			LastProbe: &assistant.ProbeResult{
+				Engine: assistant.EngineEino, RuntimeVersion: "eino-test",
 				EndpointName: "Local",
 				Model:        "qwen3",
 				Kind:         assistant.ProbeModel,
@@ -62,7 +64,7 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 	// null: with no resolved endpoint there is no key the question is about.
 	for _, reason := range []string{
 		reasonNoEndpoints, reasonNoModels, reasonUnassigned,
-		reasonEndpointGone, reasonModelGone, reasonUnavailable,
+		reasonEndpointGone, reasonModelGone, reasonUnavailable, reasonRuntimeUnavailable,
 	} {
 		cases["refusal: "+reason] = agentStatusResult{
 			EndpointConfigured: reason != reasonNoEndpoints,
@@ -83,7 +85,7 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 // vault.status declare defaultProvider it never sent.
 func TestAgentStatus_ContractRefusesWhatItMustRefuse(t *testing.T) {
 	schema := loadSchema(t, "agent.status.schema.json")
-	const head = `{"endpointConfigured":true,"credential":null,"lastProbe":null`
+	const head = `{"endpointConfigured":true,"credential":null,"lastProbe":null,"engine":"eino","runtimeVersion":"eino-test"`
 	bad := map[string]string{
 		"answering missing":       head + `}`,
 		"answering null":          head + `,"answering":null}`,
@@ -106,6 +108,7 @@ func TestEndpointsProbe_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "endpoints.probe.schema.json")
 	cases := map[string]assistant.ProbeResult{
 		"ok": {
+			Engine: assistant.EngineEino, RuntimeVersion: "eino-test",
 			EndpointName: "Local",
 			Model:        "qwen3",
 			Kind:         assistant.ProbeModel,
@@ -114,6 +117,7 @@ func TestEndpointsProbe_DTOConformsToContract(t *testing.T) {
 			At:           time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
 		},
 		"failed": {
+			Engine: assistant.EngineEino, RuntimeVersion: "eino-test",
 			EndpointName: "Local",
 			Model:        "qwen3",
 			Kind:         assistant.ProbeModel,
@@ -122,6 +126,7 @@ func TestEndpointsProbe_DTOConformsToContract(t *testing.T) {
 			ElapsedMS:    5,
 		},
 		"connection": {
+			Engine: assistant.EngineEino, RuntimeVersion: "eino-test",
 			EndpointName: "Local",
 			Kind:         assistant.ProbeConnection,
 			OK:           true,

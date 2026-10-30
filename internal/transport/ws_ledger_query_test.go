@@ -20,6 +20,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -488,11 +489,11 @@ type gotEntry struct {
 // that names no such field could not see it.
 func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) {
 	db := newLedgerStore(t)
-	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	ctx, logger := logtest.New(t)
+	ws, stop := newLedgerWSServer(t, logger, db)
 	defer stop()
 	conn := connectWS(t, ws)
 	sid := openLocalSession(t, conn)
-	ctx := context.Background()
 
 	openEntry(t, conn, sid, "entry-1", "make test", 2)
 	openEntry(t, conn, sid, "entry-2", "make test again", 3)
@@ -516,6 +517,18 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("AppendArtifact: %v", err)
 	}
+	empty := vaultCall(t, conn, "ledger.artifact", map[string]any{"id": "artifact-1"}, 50)
+	if empty.Error != nil {
+		t.Fatalf("empty artifact: %+v", empty.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.artifact.schema.json"), empty.Result, "empty artifact cursor")
+	var emptyBody ledgerArtifactResponse
+	if err := json.Unmarshal(empty.Result, &emptyBody); err != nil {
+		t.Fatal(err)
+	}
+	if emptyBody.LastSeq != nil || emptyBody.Body != "" {
+		t.Fatalf("empty artifact invented a cursor: %+v", emptyBody)
+	}
 	if err := led.AppendChunk(ctx, "artifact-1", 1, []byte(body)); err != nil {
 		t.Fatalf("AppendChunk: %v", err)
 	}
@@ -523,6 +536,14 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	resp := vaultCall(t, conn, "ledger.get", map[string]any{"id": "entry-2"}, 5)
 	if resp.Error != nil {
 		t.Fatalf("ledger.get: %+v", resp.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.get.schema.json"), resp.Result, "non-agent metadata")
+	var detail ledgerGetResponse
+	if err := json.Unmarshal(resp.Result, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.AgentRuns == nil || len(detail.AgentRuns) != 0 {
+		t.Fatalf("non-agent runs must be an empty collection: %+v", detail.AgentRuns)
 	}
 	if strings.Contains(string(resp.Result), body) {
 		t.Fatalf("ledger.get hauled the chunk bodies:\n%s", resp.Result)
@@ -550,6 +571,21 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	}
 	if art.ByteLen != int64(len(body)) || art.ChunkCount != 1 {
 		t.Fatalf("artifact metadata = %+v, want byteLen %d and one chunk", art, len(body))
+	}
+	if err := led.AppendChunk(ctx, "artifact-1", 7, []byte("-later")); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := vaultCall(t, conn, "ledger.artifact", map[string]any{"id": "artifact-1"}, 51)
+	if snapshot.Error != nil {
+		t.Fatalf("artifact snapshot: %+v", snapshot.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.artifact.schema.json"), snapshot.Result, "noncontiguous chunk cursor")
+	var saved ledgerArtifactResponse
+	if err := json.Unmarshal(snapshot.Result, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.LastSeq == nil || *saved.LastSeq != 7 || saved.Body != body+"-later" {
+		t.Fatalf("body and actual maximum sequence diverged: %+v", saved)
 	}
 }
 

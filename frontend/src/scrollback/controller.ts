@@ -52,6 +52,7 @@ export interface ScrollbackControllerOpts {
    *  manager, which hands it to the copy menu of every answer block it
    *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
   answerText?: (entryId: string) => Promise<string | null>
+  proseText?: (entryId: string) => Promise<string | null>
   /** The recorded provider drives for one finished answer turn. */
   dump?: (entryId: string) => Promise<AgentDump>
   /** Reads back what a tool call returned, for the call's own expansion
@@ -223,6 +224,7 @@ export class ScrollbackController {
       paintStoredRows: opts.paintStoredRows,
       sessionName: opts.sessionName,
       answerText: opts.answerText,
+      proseText: opts.proseText,
       dump: opts.dump,
       toolResult: opts.toolResult,
       runningActions: opts.runningActions,

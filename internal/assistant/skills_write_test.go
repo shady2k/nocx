@@ -140,8 +140,8 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	params.Skills = store
 	params.SkillDraft = NewSkillDraftRequest(
 		[]content.PriorTurn{{EntryID: "e1", Question: "remember how to release", Prose: content.TurnProse{Text: "Run make release."}}},
-		SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-			return SkillDraftTarget{
+		SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+			return ModelTarget{
 				Key:     credential.NewSecret("sk-draft-test"),
 				BaseURL: server.URL,
 				Model:   "draft-model",
@@ -162,6 +162,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	}) {
 		t.Fatal("the exact skill proposal was not pending")
 	}
+	params.Resume = true
 	if askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("approved resume Ask: %v", askErr)
 	}
@@ -336,6 +337,7 @@ func TestSkillsWriteResultsConformOnTheProviderSocket(t *testing.T) {
 			}) {
 				t.Fatal("the exact skill proposal was not pending")
 			}
+			params.Resume = true
 			askErr = client.Ask(context.Background(), params, func(AskEvent) error { return nil })
 			if askErr != nil {
 				t.Fatalf("Ask: %v", askErr)

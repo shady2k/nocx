@@ -28,44 +28,14 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-
-	"github.com/shady2k/nocx/internal/agenttools"
-	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/log"
 )
 
-// policyMiddleware is the retained declared-call carrier wearing eino's
-// middleware interface. It holds no state of its own: the run's facts belong
-// to the kernel, and two owners of them is the thing this split exists to
-// prevent.
-//
-// It is the carrier rather than the kernel because the framework's seam is
-// "the model reached for a tool"; the kernel is still underneath it.
+// policyMiddleware adapts the shared run host to Eino. Authority, invocation
+// classification and presentation belong to the host; only the framework's
+// batch latch and suspension vocabulary live here.
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
-	carrier
-	kernel            *effectKernel
-	grantProvider     func() content.Grant
-	presentation      agenttools.PresentationConfig
-	presentationState *presentationState
-	searchSchema      []byte
-}
-
-// newPolicyMiddleware builds the kernel for one run, wraps the declared-call
-// carrier in eino's middleware interface, and dresses the pair as eino's
-// middleware. Every argument is the kernel's; see newEffectKernel for what
-// each one is and which may be nil.
-func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, attached Attachments, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*policyMiddleware, error) {
-	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, sessionID, attempt, turnEntryID, requester, attached, classifier, onCall, seams...)
-	if err != nil {
-		return nil, err
-	}
-	return &policyMiddleware{
-		carrier:           &callsCarrier{effectKernel: k},
-		kernel:            k,
-		grantProvider:     func() content.Grant { return grant },
-		presentationState: newPresentationState(nil),
-	}, nil
+	*runHost
 }
 
 // WrapInvokableToolCall installs the pipeline on one tool call.
@@ -100,7 +70,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			}
 		}
 
-		out, err := m.Invoke(ctx, tCtx.Name, tCtx.CallID, rawArgs)
+		out, err := m.InvokeClassified(ctx, tCtx.Name, tCtx.CallID, rawArgs)
 
 		// A suspension is not a failure: the kernel has already recorded the
 		// proposal and asked, and what remains is to stop THIS carrier in the
@@ -121,9 +91,10 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			return "", err
 		}
 		// The model-facing frame belongs to a carrier that faces a model.
-		return out.forModel(func(result string) string {
-			return m.FrameForModel(tCtx.Name, result)
-		}), nil
+		if out.Kind == InvocationNocxMessage {
+			return out.Text, nil
+		}
+		return m.FrameForModel(tCtx.Name, out.Text), nil
 	}, nil
 }
 
@@ -143,19 +114,30 @@ func (m *policyMiddleware) BeforeModelRewriteState(ctx context.Context, state *a
 	if state == nil {
 		return ctx, state, nil
 	}
-	projection := m.presentationProjection()
-	infos, err := declaredToolInfos(projection.Visible)
+	infos, err := declaredToolInfos(m.ModelTools())
 	if err != nil {
 		return ctx, state, err
 	}
-	if projection.Lazy {
-		searchInfo, err := searchToolInfo(m.searchSchema)
-		if err != nil {
+	state.ToolInfos = infos
+	return ctx, state, nil
+}
+
+// Validate the complete response before the tool node can execute its first
+// sibling. A later invalid identity must not leave earlier effects committed
+// or create an approval the wire cannot answer.
+func (m *policyMiddleware) AfterModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	if state == nil || len(state.Messages) == 0 {
+		return ctx, state, nil
+	}
+	last := state.Messages[len(state.Messages)-1]
+	if last == nil {
+		return ctx, state, nil
+	}
+	for _, call := range last.ToolCalls {
+		if err := ValidateToolCallID(call.ID); err != nil {
 			return ctx, state, err
 		}
-		infos = append(infos, searchInfo)
 	}
-	state.ToolInfos = infos
 	return ctx, state, nil
 }
 

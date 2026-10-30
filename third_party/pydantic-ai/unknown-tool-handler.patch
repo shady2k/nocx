@@ -1,0 +1,187 @@
+--- a/pydantic_ai/agent/__init__.py
++++ b/pydantic_ai/agent/__init__.py
+@@ -522,6 +522,9 @@
+     _max_tool_retries: int = dataclasses.field(repr=False)
+     _tool_timeout: float | None = dataclasses.field(repr=False)
+     _validation_context: Any | Callable[[RunContext[AgentDepsT]], Any] = dataclasses.field(repr=False)
++    _unknown_tool_handler: Callable[[RunContext[Any], _messages.ToolCallPart], Awaitable[Any]] | None = dataclasses.field(
++        repr=False
++    )
+ 
+     _event_stream_handler: EventStreamHandler[AgentDepsT] | None = dataclasses.field(repr=False)
+ 
+@@ -564,6 +567,7 @@
+         tool_timeout: float | None = None,
+         max_concurrency: _concurrency.AnyConcurrencyLimit = None,
+         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
++        unknown_tool_handler: Callable[[RunContext[Any], _messages.ToolCallPart], Awaitable[Any]] | None = None,
+     ) -> None: ...
+ 
+     @overload
+@@ -588,6 +592,7 @@
+         tool_timeout: float | None = None,
+         max_concurrency: _concurrency.AnyConcurrencyLimit = None,
+         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
++        unknown_tool_handler: Callable[[RunContext[Any], _messages.ToolCallPart], Awaitable[Any]] | None = None,
+     ) -> None: ...
+ 
+     def __init__(
+@@ -611,6 +616,7 @@
+         tool_timeout: float | None = None,
+         max_concurrency: _concurrency.AnyConcurrencyLimit = None,
+         capabilities: Sequence[AgentCapability[AgentDepsT]] | None = None,
++        unknown_tool_handler: Callable[[RunContext[Any], _messages.ToolCallPart], Awaitable[Any]] | None = None,
+     ) -> None:
+         """Create an agent.
+ 
+@@ -679,10 +685,14 @@
+                 See [`CapabilityFunc`][pydantic_ai.capabilities.CapabilityFunc] for more information.
+                 Custom capabilities can be created by subclassing
+                 [`AbstractCapability`][pydantic_ai.capabilities.AbstractCapability].
++            unknown_tool_handler: Optional handler for names absent from the prepared tool map.
++                Runs in the normal executor, preserving call identity and scheduling. Failures
++                abort the run, including SDK control-flow exceptions; no model retry is charged.
+         """
+         self._name = name
+         self._description = description
+         self.end_strategy = end_strategy
++        self._unknown_tool_handler = unknown_tool_handler
+ 
+         capabilities = wrap_capability_funcs(capabilities)
+ 
+@@ -1873,7 +1883,8 @@
+         )
+         toolset = await toolset.for_run(initial_ctx)
+         tool_manager = ToolManager[AgentDepsT](
+-            toolset, root_capability=run_capability, default_max_retries=effective_tool_retries_resolved
++            toolset, root_capability=run_capability, default_max_retries=effective_tool_retries_resolved,
++            unknown_tool_handler=self._unknown_tool_handler,
+         )
+ 
+         # Build instructions with per-run capability contributions
+@@ -3770,7 +3781,7 @@
+                         yield _RealtimeSessionResolution(
+                             model=model,
+                             run_context=run_context,
+-                            tool_manager=ToolManager(FunctionToolset()),
++                            tool_manager=ToolManager(FunctionToolset(), unknown_tool_handler=self._unknown_tool_handler),
+                             model_request_parameters=models.ModelRequestParameters(),
+                             model_settings=effective_model_settings,
+                             instructions=None,
+@@ -3787,7 +3798,8 @@
+                     return
+             await session_stack.enter_async_context(toolset)
+             tool_manager = await ToolManager[AgentDepsT](
+-                toolset, root_capability=run_capability, default_max_retries=max_tool_retries
++                toolset, root_capability=run_capability, default_max_retries=max_tool_retries,
++                unknown_tool_handler=self._unknown_tool_handler,
+             ).for_run_step(run_context)
+             tool_defs = tool_manager.tool_defs
+ 
+@@ -3902,7 +3914,7 @@
+         yield _RealtimeSessionResolution(
+             model=model,
+             run_context=run_context,
+-            tool_manager=ToolManager(FunctionToolset()),
++            tool_manager=ToolManager(FunctionToolset(), unknown_tool_handler=self._unknown_tool_handler),
+             model_request_parameters=models.ModelRequestParameters(),
+             model_settings=effective_model_settings,
+             instructions=None,
+--- a/pydantic_ai/tool_manager.py
++++ b/pydantic_ai/tool_manager.py
+@@ -55,6 +55,10 @@
+ ToolValidationHandler = Callable[[bool], Awaitable[None]]
+ """Internal callback for observing a tool call's argument-validation result."""
+ 
++class UnknownToolHandlerError(RuntimeError):
++    """An unknown-tool handler failed; never convert it into SDK control flow."""
++
++
+ 
+ @dataclass
+ class ValidatedToolCall(Generic[AgentDepsT]):
+@@ -151,6 +155,8 @@
+     """The toolset that provides the tools for this run step."""
+     root_capability: AbstractCapability[AgentDepsT] | None = None
+     """The root capability for hook invocation."""
++    unknown_tool_handler: Callable[[RunContext[Any], ToolCallPart], Awaitable[Any]] | None = None
++    """Optional unresolved-call handler, invoked only by the ordinary executor."""
+     ctx: RunContext[AgentDepsT] | None = None
+     """The agent run context for a specific run step."""
+     tools: dict[str, ToolsetTool[AgentDepsT]] | None = None
+@@ -249,6 +255,7 @@
+         new_tm = self.__class__(
+             toolset=toolset,
+             root_capability=self.root_capability,
++            unknown_tool_handler=self.unknown_tool_handler,
+             ctx=ctx,
+             tools=await toolset.get_tools(ctx),
+             default_max_retries=self.default_max_retries,
+@@ -703,6 +710,19 @@
+         assert self.ctx is not None
+         ctx = self.ctx
+         tool: ToolsetTool[AgentDepsT] | None = None
++        if self.unknown_tool_handler is not None and self.tools is not None and call.tool_name not in self.tools:
++            # Preserve the original identity and raw arguments; no handler, parsing,
++            # hooks, or retry accounting may run during upfront validation.
++            ctx = replace(
++                ctx,
++                tool_manager=self,
++                tool_name=call.tool_name,
++                tool_call_id=call.tool_call_id,
++                tool_call_approved=approved,
++                tool_call_metadata=metadata,
++            )
++            return ValidatedToolCall(call=call, tool=None, ctx=ctx, args_valid=True)
++
+ 
+         try:
+             _name, tool = self._resolve_tool(call)
+@@ -1020,6 +1040,17 @@
+         if not validated.args_valid:
+             assert validated.validation_error is not None
+             raise validated.validation_error
++
++        if validated.tool is None and self.unknown_tool_handler is not None:
++            try:
++                tool_result = await self.unknown_tool_handler(validated.ctx, validated.call)
++            except Exception as exc:
++                # This includes SDK retry, deferral, failure, skip and RunCancelled
++                # signals. None is a valid result of this refusal-only callback.
++                # BaseException cancellation/system-exit retain their normal semantics.
++                raise UnknownToolHandlerError('Unknown tool handler failed') from exc
++            _usage_attribution.record_tool_call(usage)
++            return tool_result
+ 
+         assert validated.tool is not None
+         assert validated.validated_args is not None
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -62,7 +62,7 @@
+     "griffelib>=2.0",
+     "httpx2>=2.7",
+     "pydantic>=2.12",
+-    "pydantic-graph=={{ version }}",
++    "pydantic-graph==2.52.0",
+     "exceptiongroup>=1.2.2; python_version < '3.11'",
+     "opentelemetry-api>=1.28.0",
+     "typing-inspection>=0.4.0",
+@@ -140,7 +140,7 @@
+ # `fastmcp-tasks`'s transitive pin alone does not.
+ mcp-tasks = ["fastmcp-tasks>=4.0.0b1,<5", "fastmcp-slim[client]>=4.0.0b1,<5"]
+ # Evals
+-evals = ["pydantic-evals=={{ version }}"]
++evals = ["pydantic-evals==2.52.0"]
+ # UI
+ ui = ["starlette>=0.46.2"]
+ # AG-UI
+--- a/PKG-INFO
++++ b/PKG-INFO
+@@ -1,6 +1,6 @@
+ Metadata-Version: 2.4
+ Name: pydantic-ai-slim
+-Version: 2.52.0
++Version: 2.52.0+nocx.1
+ Summary: AI Agent Framework, the Pydantic way, slim package
+ Project-URL: Homepage, https://github.com/pydantic/pydantic-ai/tree/main/pydantic_ai_slim
+ Project-URL: Source, https://github.com/pydantic/pydantic-ai/tree/main/pydantic_ai_slim

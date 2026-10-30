@@ -35,7 +35,6 @@ import (
 	"github.com/eino-contrib/jsonschema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
-	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -79,7 +78,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID, resumeTarget string, onEvent func(AskEvent) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -107,8 +106,8 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// before any middleware of ours runs, so a model reaching for a tool
 		// that does not exist ended the run with a framework error nothing
 		// could name — over the most ordinary mistake a model makes. The
-		// carrier answers it, because what to say depends on which one is
-		// driving (carrier.go's UnknownTool).
+		// shared run host supplies the same pure policy-aware answer to
+		// every engine.
 		cfg.ToolsConfig = adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools:               tools,
@@ -159,7 +158,7 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		CheckPointStore: checkpoints,
 	})
 	var it *adk.AsyncIterator[*adk.AgentEvent]
-	if target, ok := checkpoints.resumable(checkpointID); ok {
+	if resumeTarget != "" {
 		// A resume, and it takes NO messages: the continuation is the
 		// checkpoint, and the target names WHICH suspended branch goes on.
 		// The decision itself is not passed here — it lives in the
@@ -168,7 +167,7 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// second place for one answer to live.
 		var err error
 		it, err = runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
-			Targets: map[string]any{target: nil},
+			Targets: map[string]any{resumeTarget: nil},
 		}, runOpts...)
 		if err != nil {
 			return fmt.Errorf("resume the suspended run: %w", err)
@@ -306,20 +305,24 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 // StreamError — the endpoint answered; it did not answer. Reasoning alone
 // does not count: a model that only thought did not reply.
 func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
-	// The chain the transport put in the context becomes the chain
-	// everything under this ask logs with — the kernel and the declared-call
-	// carrier are both handed THIS logger. Binding it once here is what makes
-	// an effect three layers down say which run and which wire frame it belongs
-	// to without being told either.
-	askLog := c.log
-	if askLog != nil {
-		askLog = askLog.WithContext(ctx)
+	// Bind the configured logger once; the shared host derives its logger
+	// from this operation's context rather than owning a second logger.
+	if c.log != nil {
+		ctx = log.WithLogger(ctx, c.log)
 	}
+	askLog := log.From(ctx)
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("ask: base URL is required")
 	}
 	if strings.TrimSpace(p.Model) == "" {
 		return fmt.Errorf("ask: model is required")
+	}
+	resumeTarget, suspended := c.checkpoints.resumable(p.RunID)
+	if p.Resume && !suspended {
+		return &StreamError{Message: "this assistant continuation is no longer available. Ask again"}
+	}
+	if !p.Resume && suspended {
+		return &StreamError{Message: "this answer is already paused. Resume or stop the existing answer"}
 	}
 	if p.RunID != "" && p.TurnEntryID != "" {
 		// The HTTP recorder is below eino and can only learn which turn owns
@@ -327,17 +330,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		// Keep the unbound probe/test shape untouched.
 		ctx = WithWireIdentity(ctx, p.RunID, p.TurnEntryID)
 	}
-	msgs := make([]*schema.Message, 0, len(p.Messages))
-	for _, m := range p.Messages {
-		switch m.Role {
-		case "user":
-			msgs = append(msgs, schema.UserMessage(m.Content))
-		case "assistant":
-			msgs = append(msgs, schema.AssistantMessage(m.Content, nil))
-		default:
-			msgs = append(msgs, schema.SystemMessage(m.Content))
-		}
-	}
+	msgs := einoMessages(p.Messages)
 	// ONE ordered stream, and the mutex is what makes it one. The events
 	// have two producers on two goroutines: this function's loop over the
 	// agent's iterator, and the policy middleware, which runs inside eino's
@@ -387,57 +380,18 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	var unknownTool func(ctx context.Context, name, rawArgs string) (string, error)
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
-		grant := *p.Grant
-		grant.Policy = grant.Policy.WithFloor(c.floor)
-		permitted := c.tools.ForGrant(grant)
-		// The approval store is the client's own (process-lifetime, one
-		// per client, keyed by run id — ADR-0028: checkpoints are
-		// process-lifetime state); a caller may pass one explicitly.
-		approvals := p.Approvals
-		if approvals == nil {
-			approvals = c.approvals
-		}
-		// The classifier (bead nocx-kpy23): the middleware consults a
-		// SECOND model for every permitted proposal. The engine builds
-		// the classifier over ITS guarded client and the caller's role
-		// resolver — the model call is the engine's (design §6: usage
-		// has an owner); nil without a resolver is the feature off.
-		var classifier CallClassifier
-		if p.Classifier != nil {
-			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
-		}
-		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, Attachments{AutomaticItems: p.AutomaticSessionItems, MarkedWindows: p.MarkedSessionWindows}, classifier, func(call ToolCall) error {
+		host, err := c.hosts.NewRunHost(ctx, p, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
-		}, toolSeams{
-			sessions:          p.SessionSource,
-			screenCapture:     p.ScreenCapture,
-			noteOperation:     p.NoteOperation,
-			snippetOperation:  p.SnippetOperation,
-			skills:            p.Skills,
-			skillDraft:        p.SkillDraft,
-			skillDraftHTTP:    c.http,
-			fetcher:           p.Fetcher,
-			snapshots:         c.snapshots,
-			runID:             p.RunID,
-			expansions:        p.Expansions,
-			workerStore:       p.Workers,
-			workerEnvironment: p.WorkerEnvironment,
-			scripts:           p.Scripts,
-			cwd:               p.Cwd,
-			paneAccessBinder:  p.PaneAccessBinder,
 		})
 		if err != nil {
 			return err
 		}
-		if p.Presentation != nil {
-			mw.presentation = *p.Presentation
-			mw.presentationState = newPresentationState(p.Presentation.Loaded)
-			mw.grantProvider = func() content.Grant {
-				return grant
-			}
-			mw.searchSchema = append([]byte(nil), c.searchSchema...)
+		concreteHost, ok := host.(*runHost)
+		if !ok {
+			return fmt.Errorf("eino: unsupported run host %T", host)
 		}
-		declared, err = mw.Declare(permitted)
+		mw := &policyMiddleware{runHost: concreteHost}
+		declared, err = declaredTools(host.Tools())
 		if err != nil {
 			return err
 		}
@@ -445,13 +399,6 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		// refused. The policy middleware removes this internal anchor from
 		// ToolInfos before every model call, so it is never declared.
 		runTools = append(append([]tool.BaseTool(nil), declared...), &unknownToolAnchor{})
-		if p.Presentation != nil && p.Presentation.Lazy && len(c.searchSchema) > 0 {
-			search, err := mw.searchTool()
-			if err != nil {
-				return err
-			}
-			runTools = append(runTools, search)
-		}
 		unknownTool = func(_ context.Context, name, rawArgs string) (string, error) {
 			return mw.UnknownTool(name, rawArgs)
 		}
@@ -465,12 +412,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		handlers = append(handlers, newOrderedAnswerMiddleware(sink), mw)
 	}
 
-	// The checkpoint is keyed by the run id, because that is what a drive
-	// of this run already is: one run, one suspension, one continuation.
-	// So an Ask whose run has a live checkpoint IS the resume of it —
-	// there is no second flag to keep in step with the store, and no way
-	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, runTools, unknownTool, handlers, c.checkpoints, p.RunID, sink)
+	// The caller explicitly distinguishes admission from continuation. Only a
+	// retained checkpoint admitted above can select the runner's resume path.
+	err := streamModelAnswer(ctx, askLog, c.httpFactory.NewModelHTTPClient(), p.Key, p.BaseURL, p.Model, p.Headers, msgs, runTools, unknownTool, handlers, c.checkpoints, p.RunID, resumeTarget, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can
@@ -512,9 +456,7 @@ func (c *client) Discard(runID string) {
 	if runID == "" {
 		return
 	}
-	if c.snapshots != nil {
-		c.snapshots.Discard(runID)
-	}
+	c.hosts.Discard(runID)
 	_ = c.checkpoints.Delete(context.Background(), runID)
 }
 

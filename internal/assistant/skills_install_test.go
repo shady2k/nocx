@@ -203,6 +203,7 @@ func (s *installStand) resume(t *testing.T, params AskParams) error {
 	if s.client == nil {
 		t.Fatal("resume before any ask")
 	}
+	params.Resume = true
 	return s.client.Ask(context.Background(), params, func(AskEvent) error { return nil })
 }
 

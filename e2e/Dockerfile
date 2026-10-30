@@ -77,7 +77,7 @@ ENV GOTOOLCHAIN=local
 # server in this image and none is wanted.
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends \
-       bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 xz-utils \
+       bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 xz-utils python3 binutils \
     && rm -rf /var/lib/apt/lists/*
 
 # THE PINNED ZIG, because the stand builds the helper artifacts with

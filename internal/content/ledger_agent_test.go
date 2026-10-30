@@ -515,12 +515,27 @@ func TestSubmitAgentAsk_ReplayReturnsOriginalRun(t *testing.T) {
 		Cwd:        "/repo",
 		Question:   "what does this screen mean?",
 		References: []content.AgentReference{{FrameID: frameID, Region: fullRegion()}},
+		Facts: content.RunFacts{
+			Mode: "explain", Model: "original-model",
+			Engine: "pydantic-deepagents", RuntimeVersion: "manifest-original",
+		},
+	}
+	if original, err := led.LookupAgentAsk(ctx, ask); err != nil || original != nil {
+		t.Fatalf("unadmitted lookup = %+v, %v; want absent", original, err)
 	}
 
 	res1, err := led.SubmitAgentAsk(ctx, ask)
 	if err != nil {
 		t.Fatalf("first ask: %v", err)
 	}
+	if res1.Facts != ask.Facts || res1.State != content.RunPrepared {
+		t.Fatalf("admission facts/state = %+v/%s, want %+v/prepared", res1.Facts, res1.State, ask.Facts)
+	}
+	if transitionErr := led.TransitionRun(ctx, res1.RunID, content.RunStreaming); transitionErr != nil {
+		t.Fatal(transitionErr)
+	}
+	originalFacts := ask.Facts
+	ask.Facts = content.RunFacts{Mode: "explain", Model: "changed-model", Engine: "eino"}
 	res2, err := led.SubmitAgentAsk(ctx, ask)
 	if err != nil {
 		t.Fatalf("replay ask: %v", err)
@@ -533,6 +548,13 @@ func TestSubmitAgentAsk_ReplayReturnsOriginalRun(t *testing.T) {
 	}
 	if !res2.Replayed {
 		t.Error("replay did not report Replayed")
+	}
+	if res2.Facts != originalFacts || res2.State != content.RunStreaming {
+		t.Fatalf("replay facts/state = %+v/%s, want original %+v/streaming", res2.Facts, res2.State, originalFacts)
+	}
+	original, err := led.LookupAgentAsk(ctx, ask)
+	if err != nil || original == nil || *original != res2 {
+		t.Fatalf("read-only replay = %+v, %v; want %+v", original, err, res2)
 	}
 
 	// Exactly one question entry and one run.
@@ -555,6 +577,24 @@ func TestSubmitAgentAsk_ReplayReturnsOriginalRun(t *testing.T) {
 	other.Question = "a different question"
 	if _, err := led.SubmitAgentAsk(ctx, other); !errors.Is(err, content.ErrIDConflict) {
 		t.Errorf("conflicting replay error = %v, want ErrIDConflict", err)
+	}
+	for _, field := range []string{"client", "session", "environment", "question", "cwd"} {
+		other := ask
+		switch field {
+		case "client":
+			other.Client = "another-client"
+		case "session":
+			other.SessionID = new("another-session")
+		case "environment":
+			other.Env.ID = "another-environment"
+		case "question":
+			other.Question = "another question"
+		case "cwd":
+			other.Cwd = "/elsewhere"
+		}
+		if _, err := led.LookupAgentAsk(ctx, other); !errors.Is(err, content.ErrIDConflict) {
+			t.Errorf("lookup with changed %s = %v; want ErrIDConflict", field, err)
+		}
 	}
 }
 

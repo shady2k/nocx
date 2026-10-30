@@ -23,8 +23,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 )
 
 // fakeBlocks is the session source with a call log and scripted answers.
@@ -154,7 +156,31 @@ func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, recorder WireRec
 		return nil, err
 	}
 	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
+	return newClientWithRegistry(logger, reg, NewModelHTTPFactory(logger, recorder), floor, searchSchema), nil
+}
+
+func newTestClientAndRegistry(t *testing.T, recorder WireRecorder, floor content.Floor, roots []string) (Client, agenttools.Registry, error) {
+	t.Helper()
+	_, logger := logtest.New(t)
+	return NewClientAndRegistry(logger, NewModelHTTPFactory(logger, recorder), floor, roots)
+}
+
+func newTestClientWithRegistry(t *testing.T, registry agenttools.Registry, floor content.Floor) Client {
+	t.Helper()
+	_, logger := logtest.New(t)
+	return newClientWithRegistry(logger, registry, NewModelHTTPFactory(logger, nil), floor)
+}
+
+// newPolicyMiddleware builds the kernel for one run, wraps the declared-call
+// carrier in eino's middleware interface, and dresses the pair as eino's
+// middleware. Every argument is the kernel's; see newEffectKernel for what
+// each one is and which may be nil.
+func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, attached Attachments, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*policyMiddleware, error) {
+	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, sessionID, attempt, turnEntryID, requester, attached, classifier, onCall, seams...)
+	if err != nil {
+		return nil, err
+	}
+	return &policyMiddleware{runHost: newRunHost(k)}, nil
 }
 
 // ── the middleware ───────────────────────────────────────────────────────

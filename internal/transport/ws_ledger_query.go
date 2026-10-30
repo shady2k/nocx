@@ -163,6 +163,7 @@ type ledgerGetResponse struct {
 	Entry     ledgerEntryWire      `json:"entry"`
 	Edges     []ledgerEdgeWire     `json:"edges"`
 	Artifacts []ledgerArtifactWire `json:"artifacts"`
+	AgentRuns []ledgerAgentRunWire `json:"agentRuns"`
 	// Caused is the entry's causal flow (nocx-h1l4o): the `caused-by` edges
 	// above, resolved and ordered by the position the turn assigned. It is
 	// beside `edges` rather than instead of them because they answer
@@ -178,6 +179,17 @@ type ledgerGetResponse struct {
 	// command whose own terminal body was evicted says its own sentence and
 	// does not set this.
 	ProseEvicted bool `json:"proseEvicted"`
+}
+
+// Provenance is projected from the execution's pinned payload, not another
+// metadata store. Missing historical engine identity means Eino only.
+type ledgerAgentRunWire struct {
+	RunID          int64            `json:"runId"`
+	Attempt        int              `json:"attempt"`
+	State          content.RunState `json:"state"`
+	Model          string           `json:"model"`
+	Engine         string           `json:"engine"`
+	RuntimeVersion string           `json:"runtimeVersion"`
 }
 
 // ledgerCausedWire is one entry a turn caused: where it sits in the turn,
@@ -402,7 +414,18 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 		// An execution's artifacts attach to the run, and the run's id rides
 		// each one, so a caller that cares which attempt produced what still
 		// can tell.
+		agentRuns := make([]ledgerAgentRunWire, 0)
 		for _, ex := range row.Executions {
+			if ex.State != nil {
+				var facts content.RunFacts
+				if err := json.Unmarshal([]byte(ex.Payload), &facts); err != nil {
+					return fmt.Errorf("read agent run facts: %w", err)
+				}
+				agentRuns = append(agentRuns, ledgerAgentRunWire{
+					RunID: ex.ID, Attempt: ex.Attempt, State: *ex.State,
+					Model: facts.Model, Engine: facts.EngineID(), RuntimeVersion: facts.RuntimeVersion,
+				})
+			}
 			for _, a := range ex.Artifacts {
 				wire, err := ledgerArtifactWireOf(a)
 				if err != nil {
@@ -428,6 +451,7 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 		}
 		out = ledgerGetResponse{
 			Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused,
+			AgentRuns:    agentRuns,
 			ProseEvicted: row.ProseEvicted,
 		}
 		return nil
@@ -457,6 +481,7 @@ type ledgerArtifactResponse struct {
 	Body      string  `json:"body"`
 	Truncated *string `json:"truncated"`
 	ByteLen   int64   `json:"byteLen"`
+	LastSeq   *int    `json:"lastSeq"`
 }
 
 func validateLedgerArtifactRaw(raw json.RawMessage) string {
@@ -511,9 +536,13 @@ func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcReque
 			v := string(*art.Truncated)
 			truncated = &v
 		}
+		var lastSeq *int
+		if len(art.Chunks) > 0 {
+			lastSeq = &art.LastSeq
+		}
 		out = ledgerArtifactResponse{
 			ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
-			Truncated: truncated, ByteLen: art.ByteLen,
+			Truncated: truncated, ByteLen: art.ByteLen, LastSeq: lastSeq,
 		}
 		return nil
 	})

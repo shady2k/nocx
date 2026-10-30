@@ -5,8 +5,17 @@
   "description": "Result of the endpoints.probe JSON-RPC method — the Test button. TWO checks live behind that button (nocx-q27y) and `kind` names which one ran: with a model, a real streaming completion through the same engine the ask transaction uses; without one, a connection check that only establishes the endpoint is reachable and the credential accepted, which needs no model and is the only question askable of an endpoint nobody has typed a model into yet. The params are the form's DRAFT values (name, baseUrl, key, model, endpointId) — the endpoint may not be saved yet, the key is an input that never crosses back (ADR-0030), and when the key is blank the backend resolves the named endpoint's own credential. This schema is the SINGLE declaration of the probe result shape: agent.status's lastProbe references this whole file cross-file.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "model", "kind", "ok", "elapsedMs", "at"],
+  "required": ["name", "model", "kind", "ok", "elapsedMs", "at", "engine", "runtimeVersion"],
   "properties": {
+    "engine": {
+      "description": "The engine selected and pinned for this probe.",
+      "type": "string",
+      "minLength": 1
+    },
+    "runtimeVersion": {
+      "description": "The runtime identity pinned for this probe.",
+      "type": "string"
+    },
     "name": {
       "description": "The probed draft's display name. Historical fact: agent.status reports the last probe whatever the endpoint list says now.",
       "type": "string"

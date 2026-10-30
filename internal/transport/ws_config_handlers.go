@@ -2402,13 +2402,13 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			// credential it owns — the same seams agent.status holds.
 			h := assistantProbeHandlers{
 				op: configOp, secrets: s.credentialResolver(),
-				client: s.assistantClient, probes: s.assistantProbes,
-				wired: s.assistantClient != nil, admit: s.agentProbeAdmit, r: r,
+				engines: s.assistantEngines, probes: s.assistantProbes,
+				wired: s.assistantEngines != nil, admit: s.agentProbeAdmit, r: r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
 		regResponder(configSub, "agent.status", noParams(), func(r Responder) handlerFunc {
-			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, wired: endpointWired, r: r}
+			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, engines: s.assistantEngines, wired: endpointWired && s.assistantEngines != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
 		}),
 		regResponder(configSub, "groups.list", noParams(), func(r Responder) handlerFunc {
@@ -2481,10 +2481,10 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			// the bytes, the config operation and the vault for the role
 			// and its credential, and the engine for the call.
 			h := skillAuditHandlers{
-				source: skillSource, engine: s.assistantClient,
+				source: skillSource, engines: s.assistantEngines,
 				configOp: configOp, credentials: s.credentialResolver(),
 				checks: s.skillChecks, settings: s.settings,
-				log: s.log, wired: skillWired && s.assistantClient != nil, r: r,
+				log: s.log, wired: skillWired && s.assistantEngines != nil, r: r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),

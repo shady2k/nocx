@@ -151,14 +151,16 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 ## Prerequisites
 
-| Tool            | Version           | Install                                                                                                            |
-| --------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------ |
-| Go              | 1.26              | [go.dev](https://go.dev/dl/)                                                                                       |
-| Node            | 24                | [nodejs.org](https://nodejs.org/)                                                                                  |
-| Wails CLI       | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`                                                 |
-| gofumpt         | latest            | `go install mvdan.cc/gofumpt@latest`                                                                               |
-| golangci-lint   | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8`                                           |
-| br (beads_rust) | latest            | `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh \| bash -s -- --verify` |
+| Tool                            | Version              | Install                                                                                                            |
+| ------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Go                              | 1.26                 | [go.dev](https://go.dev/dl/)                                                                                       |
+| Node                            | 24                   | [nodejs.org](https://nodejs.org/)                                                                                  |
+| Python (build only)             | 3.12+                | [python.org](https://www.python.org/downloads/); the packaged interpreter is pinned separately                     |
+| GNU binutils (Linux build only) | distribution package | Provides `readelf` for the runtime's glibc-floor check                                                             |
+| Wails CLI                       | **^3.0.0-beta.9**    | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`                                                 |
+| gofumpt                         | latest               | `go install mvdan.cc/gofumpt@latest`                                                                               |
+| golangci-lint                   | **v1.64.8**          | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8`                                           |
+| br (beads_rust)                 | latest               | `curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh \| bash -s -- --verify` |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
@@ -239,6 +241,33 @@ command. `make connect` just does that eagerly. What a clone can lack is `br` it
 where to get it, because the commit-message hook resolves tasks through `br`.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
+
+**Experimental assistant engine.** Development builds offer **Settings → Assistant
+→ Answers → Pydantic agent (Experimental)**, off by default. Eino remains the
+default. The switch affects new Ask, model Test, skill-audit and skill-draft
+operations; an active or approval-paused operation keeps its original engine
+until completion or Stop. Experimental answers retain their identity after
+restart. An unavailable experimental runtime is an error, never an automatic
+fallback; turn the switch off to use Eino again.
+
+The application bundles CPython and the locked SDK dependencies for Linux amd64
+and macOS amd64/arm64. Users do not install Python, and the first Ask downloads
+nothing. The bundle is included even when the switch is off. Both launchers stage
+it into a verified, content-addressed private directory so AppImage unmounts and
+application replacement cannot invalidate a running operation. Go still owns
+tools, approval, credentials, network policy and durable history; there is no
+second Python-owned permission or filesystem path.
+
+`make dev`, `make dev-web` and the build targets prepare the runtime at build time.
+`make agent-runtime` prepares only the host bundle; `make ci-agent-runtime` checks
+its lock, packaged Python tests and native Go/SDK lifecycle on the **host target**.
+macOS signing and execution require their native CI jobs, not a Linux cross-build.
+See the [integration plan and measured costs](PYDANTIC_DEEP_AGENTS_PLAN.md#verification).
+
+Automated browser smoke must use the no-login-session `cmd/nocx-server` build
+with `e2e/home-isolation.ts` and the existing discovery/binding helpers.
+`make dev-web` is an interactive developer stand: a disposable HOME alone does
+not isolate an OS keychain.
 
 **Terminal font.** In **Settings → Terminal → Font family**, choose **Nordwand
 Mono** to use the bundled [Nordwand Mono 1.3.4](https://github.com/tywr/Nordwand-Mono/releases/tag/1.3.4)

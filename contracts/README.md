@@ -47,8 +47,12 @@ that.
 params and result schemas by `$ref`; schema bodies are never copied into the
 manifest. Methods without a result schema are marked explicitly with
 `x-nocx-noResultSchema` rather than receiving an invented response shape. The
-`x-nocx-schemaRefs` list also names standalone notification result schemas so the
-renderer generator does not need a directory glob.
+`x-nocx-schemaRefs` list enrolls renderer types: all result and standalone
+notification schemas, plus request schemas explicitly annotated with
+`"x-nocx-rendererType": true`. Every method's params remain in the protocol
+manifest whether or not the renderer consumes a generated request type. The
+renderer generator reads only this enrollment list, not a directory glob or
+every method's params reference.
 
 `internal/transport/TestOpenRPCManifestMatchesRegisteredMethods` compares the
 manifest's method set with the actual `buildControlPlane` registration output in
@@ -73,11 +77,17 @@ schema where one exists.
    schema accepts anything and the gate is theatre. Use `enum` where the set is
    genuinely closed, `["string", "null"]` for a field that is nullable rather than
    optional.
-2. `cd frontend && npm run contracts` — commit generated files with the schemas.
-3. Import generated result types in the client; do not re-declare them. Params schemas
-   are consumed by the Go registration agreement test rather than emitted as renderer
-   result types.
-4. Add the method's result contract to the Go table in
+2. For request params consumed as a generated renderer type, add the top-level
+   annotation `"x-nocx-rendererType": true` to the params schema. This enrolls it
+   in `x-nocx-schemaRefs`; do not enroll requests without a renderer consumer.
+3. `cd frontend && npm run contracts` — commit generated files with the schemas.
+4. Import generated result and enrolled params types in the client; do not
+   re-declare them. Params types retain the `.params.ts` suffix, separately from
+   result and notification types.
+   `agent.approve.params.schema.json`, for example, requires the explicit decision
+   and proposal binding; `agent.approve.schema.json` describes only the returned
+   state and optional consumer-visible warning.
+5. Add the method's result contract to the Go table in
    `internal/transport/ws_contract_test.go`: one DTO case per interesting shape
    (populated, empty, error-adjacent), and one over-the-socket case.
 

@@ -123,7 +123,6 @@ import {
   blockOutputText,
   createRunningHeaderProbe,
   renderRecordedCommand,
-  toolCallExpansion,
   setBlockWhere,
   blockScreenAnchor,
   type BlockScreenAnchor,
@@ -138,6 +137,7 @@ import { ScrollbackController } from './scrollback/controller'
 import { LiveHistorySurface } from './scrollback/live-history'
 import type {
   AnswerToolCall,
+  AnswerBlockHandle,
   BlockRecord,
   DumpSource,
   RunningBlockActions,
@@ -157,11 +157,16 @@ import {
   blocksForPane,
   restoredBody,
   toolResultForEntry,
+  reconcileTurn,
+  restorableBlock,
+  type RestorableBlock,
+  type RestoredBody,
+  type RestoredCause,
 } from './restore-client'
-import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { restoredBlock } from './scrollback/restored-block'
 import { blockColumnsOf, paintStoredRows, repaintStoredRows } from './scrollback/block-rows'
 import { recordStoredBlock } from './scrollback/cell-drift'
-import { toolCallTitle } from './scrollback/tool-call-title'
+import type { LedgerGet } from './generated/ledger.get'
 import { TailFollow } from './scrollback/tail-follow'
 import { fromITheme, type TerminalSnapshot } from './scrollback/serializer'
 import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapter'
@@ -779,6 +784,7 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
+  onOpenAssistant?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
    *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
@@ -2846,6 +2852,7 @@ export class TerminalContent extends BasePaneContent {
         // `text` children joined — never an artifact of its own, which since
         // ADR-0040 it does not have (nocx-3dteo).
         answerText: (entryId) => answerTextForTurn(this.client, entryId),
+        proseText: (entryId) => answerTextForEntry(this.client, entryId),
         dump: (entryId) => agentClient.dump(entryId),
         // What a tool call returned, read back from the action entry it was
         // recorded under — the handle agent.runToolCall sends instead of the
@@ -3223,6 +3230,17 @@ export class TerminalContent extends BasePaneContent {
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
+        findAnswer: (entryId, running) => {
+          const handle = this.scrollback?.blockManager.answerForEntry(entryId, running)
+          return handle ? this.followAnswer(handle) : null
+        },
+        onAnswerReused: (existing, speculative) => {
+          if (this._liveAnswer?.el === speculative.el) this._liveAnswer.el = existing.el
+          this._summonedAnswers = this._summonedAnswers.filter(
+            (answer) => answer.el !== speculative.el,
+          )
+        },
+        drawCommand: (cause) => this.restoreTurnCommand(cause),
         cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
@@ -3290,57 +3308,7 @@ export class TerminalContent extends BasePaneContent {
           // The streamed answer grows the block, and growth is the same
           // situation as arrival: stay at the bottom unless the reader has
           // gone elsewhere.
-          return {
-            ...handle,
-            append: (text: string, blockId?: string) => {
-              this._mutateSummonAnswers(() => handle.append(text, blockId))
-              this.scrollback?.scrollToBottom()
-            },
-            // A tool call and a chunk of thinking grow the block exactly as
-            // a delta does, so they follow for the same reason (nocx-shxv0,
-            // nocx-s92so). Forwarded EXPLICITLY rather than left to the
-            // spread above: the spread would carry the method and lose the
-            // follow, which is the kind of gap nobody notices until an
-            // answer stops scrolling for one of its three event kinds.
-            toolCall: (call: AnswerToolCall) => {
-              this._mutateSummonAnswers(() => handle.toolCall(call))
-              this.scrollback?.scrollToBottom()
-            },
-            reasoning: (text: string) => {
-              this._mutateSummonAnswers(() => handle.reasoning(text))
-              this.scrollback?.scrollToBottom()
-            },
-            // A line the turn states about itself grows the block exactly as
-            // a delta does, so it follows for the same reason — and it is
-            // forwarded EXPLICITLY, like the two above: the spread would
-            // carry the method and lose the follow, which is the gap nobody
-            // notices until one of the four event kinds stops scrolling.
-            notice: (state: BlockNoticeState) => {
-              let drawn!: BlockNotice
-              this._mutateSummonAnswers(() => {
-                drawn = handle.notice(state)
-              })
-              this.scrollback?.scrollToBottom()
-              return drawn
-            },
-            // `model` is forwarded, and it was not: this wrapper took two
-            // parameters where the handle takes three, so the "answered by
-            // <model>" provenance nocx-e6kn2 added could never be painted —
-            // the value reached here and stopped. TypeScript cannot see it;
-            // a function of lower arity is assignable.
-            close: (
-              status: 'success' | 'failure' | 'cancelled',
-              error?: string,
-              model?: string,
-            ) => {
-              if (this._liveAnswer?.el === handle.el) this._liveAnswer = null
-              this._mutateSummonAnswers(() => {
-                handle.close(status, error, model)
-                this._terminalizeSummonedAnswer(handle.el)
-              })
-              this.scrollback?.scrollToBottom()
-            },
-          }
+          return this.followAnswer(handle)
         },
         // The no-endpoint refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
@@ -3628,7 +3596,8 @@ export class TerminalContent extends BasePaneContent {
       // endpoint is fixed", reused rather than duplicated.
       this.editor.onModelChipClick((page) => {
         if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
-        else this.hooks.onOpenRoles?.()
+        else if (page === 'roles') this.hooks.onOpenRoles?.()
+        else this.hooks.onOpenAssistant?.()
       })
       // Shell is active at start, so this paints the chip's absence — the
       // state a Run pane is in, and the one the row was built for.
@@ -6381,6 +6350,119 @@ export class TerminalContent extends BasePaneContent {
    *  reconnect that may never come. */
   private _pastRetryPending = false
 
+  private followAnswer(handle: AnswerBlockHandle): AnswerBlockHandle {
+    return {
+      ...handle,
+      append: (text: string, blockId?: string) => {
+        this._mutateSummonAnswers(() => handle.append(text, blockId))
+        this.scrollback?.scrollToBottom()
+      },
+      restoreProse: (text: string, blockId: string) => {
+        this._mutateSummonAnswers(() => handle.restoreProse(text, blockId))
+        this.scrollback?.scrollToBottom()
+      },
+      adoptChild: (entryId: string, child: HTMLElement) => {
+        this._mutateSummonAnswers(() => handle.adoptChild(entryId, child))
+        this.scrollback?.scrollToBottom()
+      },
+      orderChildren: (entryIds: readonly string[]) => {
+        this._mutateSummonAnswers(() => handle.orderChildren(entryIds))
+        this.scrollback?.scrollToBottom()
+      },
+      provenance: (engine: string, runtimeVersion: string) => {
+        this._mutateSummonAnswers(() => handle.provenance(engine, runtimeVersion))
+        this.scrollback?.scrollToBottom()
+      },
+      // A tool call and a chunk of thinking grow the block exactly as
+      // a delta does, so they follow for the same reason (nocx-shxv0,
+      // nocx-s92so). Forwarded EXPLICITLY rather than left to the
+      // spread above: the spread would carry the method and lose the
+      // follow, which is the kind of gap nobody notices until an
+      // answer stops scrolling for one of its three event kinds.
+      toolCall: (call: AnswerToolCall) => {
+        this._mutateSummonAnswers(() => handle.toolCall(call))
+        this.scrollback?.scrollToBottom()
+      },
+      reasoning: (text: string) => {
+        this._mutateSummonAnswers(() => handle.reasoning(text))
+        this.scrollback?.scrollToBottom()
+      },
+      // A line the turn states about itself grows the block exactly as
+      // a delta does, so it follows for the same reason — and it is
+      // forwarded EXPLICITLY, like the two above: the spread would
+      // carry the method and lose the follow, which is the gap nobody
+      // notices until one of the four event kinds stops scrolling.
+      notice: (state: BlockNoticeState) => {
+        let drawn!: BlockNotice
+        this._mutateSummonAnswers(() => {
+          drawn = handle.notice(state)
+        })
+        this.scrollback?.scrollToBottom()
+        return drawn
+      },
+      // `model` is forwarded, and it was not: this wrapper took two
+      // parameters where the handle takes three, so the "answered by
+      // <model>" provenance nocx-e6kn2 added could never be painted —
+      // the value reached here and stopped. TypeScript cannot see it;
+      // a function of lower arity is assignable.
+      close: (
+        status: 'success' | 'failure' | 'cancelled',
+        error?: string,
+        model?: string,
+        durationMs?: number | null,
+      ) => {
+        if (this._liveAnswer?.el === handle.el) this._liveAnswer = null
+        this._mutateSummonAnswers(() => {
+          handle.close(status, error, model, durationMs)
+          this._terminalizeSummonedAnswer(handle.el)
+        })
+        this.scrollback?.scrollToBottom()
+      },
+    }
+  }
+
+  private drawStoredCommand(block: RestorableBlock, body: RestoredBody): HTMLElement {
+    const scrollback = this.scrollback!
+    const snapshot = fromITheme(getCurrentTheme())
+    const el = restoredBlock(
+      {
+        id: scrollback.blockManager.nextRestoredId(),
+        entryId: block.entryId,
+        command: block.command,
+        cwd: block.cwd,
+        location: block.host,
+        durationMs: block.durationMs,
+        exitCode: block.exitCode,
+        status: block.status,
+        body: body.body,
+        kind: 'command',
+        author: block.author,
+      },
+      snapshot,
+      () => scrollback.scrollbackInner,
+      () => {},
+      scrollback.snapshotStore,
+      this.runningActions,
+      this.dumpSource ?? undefined,
+    )
+    if (body.rows) {
+      const fit = this._cellFit
+      const metric = fit !== null && fit.begin() ? metricOf(fit) : null
+      paintStoredRows(el, body.rows, { metric, palette: snapshot })
+    }
+    return el
+  }
+
+  private async restoreTurnCommand(cause: RestoredCause): Promise<HTMLElement | null> {
+    if (!this.scrollback) return null
+    const existing = this.scrollback.blockManager.elementForEntry(cause.entryId)
+    if (existing) return existing
+    const detail = await this.client.call<LedgerGet>('ledger.get', { id: cause.entryId })
+    const body = await restoredBody(this.client, cause.entryId, detail)
+    if (!this.scrollback) return null
+    return this.drawStoredCommand(restorableBlock(detail.entry), body)
+  }
+
   /**
    * Draw the blocks this pane's ledger holds.
    *
@@ -6443,215 +6525,53 @@ export class TerminalContent extends BasePaneContent {
       this._pastRestoring = false
       return
     }
-    const snapshot = fromITheme(getCurrentTheme())
-    // Every block's body AND its causal flow, in the one round trip pair the
-    // body already cost (restore-client restoredBody). Both are needed
-    // before anything is drawn, because the relation decides WHERE a block
-    // goes and a block cannot be placed while the page is still arriving.
-    const bodies = new Map<string, Awaited<ReturnType<typeof restoredBody>>>()
-    for (const b of blocks) {
-      // What the entry HAS decides what it is: a terminal body is a
-      // command, a text-only body is an assistant turn (nocx-4em1z). One
-      // read answers both — the fetch already had to ask for the artifact
-      // list.
-      bodies.set(b.entryId, await restoredBody(this.client, b.entryId))
+    const bodies = new Map<string, RestoredBody>()
+    for (const block of blocks) {
+      bodies.set(block.entryId, await restoredBody(this.client, block.entryId))
     }
-    // The arrangement is the LEDGER's (nocx-h1l4o): a turn is followed by
-    // the blocks it caused, in the causal order it assigned. A missing,
-    // unreadable or dangling relation lands on plain ledger order with the
-    // command drawn as an independent agent block — arrangedByCause is the
-    // one place that decides it, and it never guesses a parent.
     const arranged = arrangedByCause(blocks, (id) => bodies.get(id)?.caused ?? [])
-    const els: HTMLElement[] = []
-    const page = new Map(blocks.map((b) => [b.entryId, b]))
-    const container = (): HTMLElement =>
-      this.scrollback?.scrollbackInner ?? document.createElement('div')
-    const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
-    const snapshotStore = this.scrollback.snapshotStore
-    const fit = this._cellFit
-    const metric = fit !== null && fit.begin() ? metricOf(fit) : null
-    const paintRows = (el: HTMLElement, entryId: string): HTMLElement => {
-      const rows = bodies.get(entryId)?.rows
-      if (rows) paintStoredRows(el, rows, { metric, palette: snapshot })
-      return el
-    }
-    /** One page row as the facts a restored block is built from. */
-    const factsOf = (b: (typeof blocks)[number]) => ({
-      command: b.command,
-      cwd: b.cwd,
-      // The host the command ran on, not the one the pane is on now: a
-      // block keeps saying where it ran (design §7).
-      location: b.host,
-      durationMs: b.durationMs,
-      exitCode: b.exitCode,
-      status: b.status,
-      body: bodies.get(b.entryId)?.body ?? null,
-      rows: bodies.get(b.entryId)?.rows,
-      kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
-      entryId: b.entryId,
-      // Who ran it, carried from the entry's OWN source column
-      // (nocx-dc2fr; restore-client maps entries.source to the display
-      // author). The block's badge is painted from this, so a command the
-      // assistant ran still says so after a restart.
-      author: b.author,
-    })
-    // A block a TURN placed is not also drawn at its own row: the turn
-    // consumed it, and drawing it twice would be the relation costing the
-    // page a duplicate instead of a placement.
+    const page = new Map(blocks.map((block) => [block.entryId, block]))
     const placed = new Set<string>()
-    for (const b of arranged) {
-      if (placed.has(b.entryId)) continue
-      placed.add(b.entryId)
-      const restored = bodies.get(b.entryId)
-      if ((restored?.kind ?? 'command') !== 'ask') {
-        els.push(
-          paintRows(
-            restoredBlock(
-              { ...factsOf(b), id: nextId() },
-              snapshot,
-              container,
-              () => {},
-              snapshotStore,
-              this.runningActions,
-              this.dumpSource ?? undefined,
-            ),
-            b.entryId,
-          ),
-        )
+    const els: HTMLElement[] = []
+    const manager = this.scrollback.blockManager
+    for (const block of arranged) {
+      if (placed.has(block.entryId) || manager.elementForEntry(block.entryId)) continue
+      placed.add(block.entryId)
+      const body = bodies.get(block.entryId)!
+      if (body.kind !== 'ask' || !body.turn) {
+        els.push(this.drawStoredCommand(block, body))
         continue
       }
-      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0040), and the restore
-      // draws exactly that: one turn block whose `.cmd-children` hold the
-      // causal sequence — prose, tool calls, commands — in the seats the
-      // ledger stored, through the SAME builders the live path ends at.
-      //
-      // THE PROSE IS THE CHILDREN'S. `restoredBody` returns no body for a
-      // turn — it has none since ADR-0040 — and the children ride the same
-      // `ledger.get` call as `caused`. A `text` child's body is its own
-      // artifact, read here per child exactly as a top-level block's is.
-      const childBody = new Map<string, string | null>()
-      for (const c of restored?.caused ?? []) {
-        if (c.kind !== 'text') continue
-        const art = await answerTextForEntry(this.client, c.entryId)
-        childBody.set(c.entryId, art)
+      const handle = manager.addAnswerBlock(block.command, block.cwd)
+      handle.el.dataset.entryId = block.entryId
+      handle.el.dataset.restored = 'true'
+      if (body.readError) handle.notice({ text: body.readError, tone: 'warning' })
+      await reconcileTurn(handle, body.turn, (cause) => {
+        // The pane's query already enforces ThroughEntryID. A causal edge
+        // cannot fetch an older command back across that clear boundary.
+        const child = page.get(cause.entryId)
+        if (!child || placed.has(cause.entryId)) return null
+        placed.add(cause.entryId)
+        return (
+          manager.elementForEntry(cause.entryId) ??
+          this.drawStoredCommand(child, bodies.get(cause.entryId)!)
+        )
+      })
+      const run = body.turn.agentRuns[body.turn.agentRuns.length - 1]
+      const model = run?.model
+      if (model) handle.el.dataset.answeredBy = model
+      if (run?.state === 'completed' || (!run && block.status === 'success')) {
+        handle.close('success', undefined, model, block.durationMs)
+      } else if (run?.state === 'cancelled' || (!run && block.status === 'cancelled')) {
+        handle.close('cancelled', undefined, model, block.durationMs)
+      } else if (
+        run?.state === 'failed' ||
+        run?.state === 'interrupted' ||
+        (!run && (block.status === 'failure' || block.status === 'unknown'))
+      ) {
+        handle.close('failure', run?.state, model, block.durationMs)
       }
-      els.push(
-        ...restoredTurn(
-          {
-            ...factsOf(b),
-            proseEvicted: restored?.proseEvicted ?? false,
-            causes: restored?.caused ?? [],
-          },
-          snapshot,
-          nextId,
-          container,
-          () => {},
-          snapshotStore,
-          (cause) => {
-            // A TEXT child is drawn as the prose block it was, with its own
-            // body — or, when retention took it, as an empty block: the
-            // run's notice is the turn's, said once (proseEvicted above).
-            if (cause.kind === 'text') {
-              return restoredBlock(
-                {
-                  ...factsOf(b),
-                  id: nextId(),
-                  command: '',
-                  cwd: '',
-                  location: '',
-                  kind: 'text',
-                  body: childBody.get(cause.entryId) ?? null,
-                  entryId: cause.entryId,
-                  // A run of the assistant's prose is the assistant's —
-                  // the child's own source says so (nocx-dc2fr).
-                  author: cause.source === 'assistant' ? 'agent' : 'shell',
-                  status: 'success',
-                  durationMs: null,
-                  exitCode: null,
-                },
-                snapshot,
-                container,
-                () => {},
-                snapshotStore,
-                this.runningActions,
-                this.dumpSource ?? undefined,
-                // A text child owns its single text/plain artifact; it must
-                // never borrow the enclosing turn's assembled answer.
-                (entryId) => answerTextForEntry(this.client, entryId),
-              )
-            }
-            // An ACTION child is a tool line — a header naming what was
-            // called and with what, never a top-level block — EXCEPT one
-            // that opened a block: the command block it opened IS the
-            // account of that call (ADR-0040), exactly as the live flow
-            // draws it, so a restored turn must not restate it.
-            if (cause.kind === 'action') {
-              if (cause.opensBlock) return null
-              const toolEl = restoredBlock(
-                {
-                  ...factsOf(b),
-                  id: nextId(),
-                  command: toolCallTitle(
-                    {
-                      tool: cause.intent ?? '',
-                      args: cause.args ?? {},
-                      resource: cause.resource ?? undefined,
-                    },
-                    { sessionName: this.hooks.sessionName },
-                  ),
-                  cwd: '',
-                  kind: 'tool',
-                  body: null,
-                  // The assistant's call is the assistant's — the child's
-                  // own source says so (nocx-dc2fr).
-                  author: cause.source === 'assistant' ? 'agent' : 'shell',
-                  status: 'success',
-                  durationMs: null,
-                  exitCode: null,
-                },
-                snapshot,
-                container,
-                () => {},
-                snapshotStore,
-                this.runningActions,
-                this.dumpSource ?? undefined,
-              )
-              // A RESTORED CALL EXPANDS THE SAME WAY A LIVE ONE DOES
-              // (nocx-hp8p2.13). The result is on the action entry, which is
-              // this child's own row, so the restore reaches it through the
-              // same reader — a turn read back from the ledger says exactly
-              // what the turn said while it was being written.
-              toolEl.appendChild(
-                toolCallExpansion(cause.entryId, cause.args ?? {}, (actionEntryId) =>
-                  toolResultForEntry(this.client, actionEntryId),
-                ),
-              )
-              return toolEl
-            }
-            // A block the turn RAN (or a person's, if the ledger
-            // mis-seated): it is already a page row, drawn where the turn
-            // holds it.
-            const caused = page.get(cause.entryId)
-            if (!caused || placed.has(cause.entryId)) return null
-            placed.add(cause.entryId)
-            return paintRows(
-              restoredBlock(
-                { ...factsOf(caused), id: nextId() },
-                snapshot,
-                container,
-                () => {},
-                snapshotStore,
-                this.runningActions,
-                this.dumpSource ?? undefined,
-              ),
-              caused.entryId,
-            )
-          },
-          this.runningActions,
-          this.dumpSource ?? undefined,
-          (entryId) => answerTextForTurn(this.client, entryId),
-        ),
-      )
+      els.push(handle.el)
     }
     this.scrollback.restorePast(els, {
       // A reclaimed handle proves the shell that produced these blocks is

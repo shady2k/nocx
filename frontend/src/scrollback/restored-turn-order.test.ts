@@ -27,8 +27,13 @@
 // this file asserts.
 import { describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
-import { restoredBlock, restoredTurn } from './restored-block'
-import { arrangedByCause, blocksForPane, type RestorableBlock } from '../restore-client'
+import { restoredBlock } from './restored-block'
+import {
+  arrangedByCause,
+  blocksForPane,
+  reconcileTurn,
+  type RestorableBlock,
+} from '../restore-client'
 import type { Caused } from '../generated/ledger.get'
 import { DEFAULT_SNAPSHOT } from './serializer'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -69,7 +74,7 @@ function flowOf(el: HTMLElement): string[] {
     const kind = c.dataset.blockKind ?? 'command'
     const header = c.querySelector(':scope > .cmd-header .cmd-header-text')?.textContent ?? ''
     if (kind === 'tool') {
-      out.push(`call:${header}`)
+      out.push(`call:${c.dataset.tool ?? header}`)
       continue
     }
     if (kind !== 'text') {
@@ -120,6 +125,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
       callId: 'c0',
       tool: 'files.read',
       effect: 'observe',
+      args: { path: '/repo/a.txt' },
       resource: { kind: 'path', id: '/repo/a.txt' },
       opensBlock: false,
     })
@@ -131,7 +137,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     return inner
   }
 
-  it('draws the same blocks in the same order — children included (ADR-0040)', () => {
+  it('draws the same blocks in the same order — children included (ADR-0040)', async () => {
     const live = liveTurn()
     const turnEl = live.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')!
 
@@ -203,7 +209,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
         opensBlock: false,
       },
     ]
-    const restored = draw(
+    const restored = await draw(
       page,
       causes,
       new Map([
@@ -229,13 +235,13 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     expect(topLevel(live)).toEqual([`ask:${QUESTION}`])
   })
 
-  it('CRITERION 1 — a command the assistant ran restores as a command with a terminal grid, not as prose (the defect)', () => {
+  it('CRITERION 1 — a command the assistant ran restores as a command with a terminal grid, not as prose (the defect)', async () => {
     // The whole point of the task: a command the assistant ran is
     // kind='shell' WITH source='assistant', and the restore must draw the
     // GRAMMAR from the kind (a terminal grid, never re-wrapped) and the
     // BADGE from the source. The old code derived both from kind, so an
     // agent-run command came back as prose.
-    const restored = draw(
+    const restored = await draw(
       [
         block('turn-1', QUESTION, 'shell'),
         // The block's display author is what blocksForPane maps from
@@ -323,7 +329,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
       ]),
       'pane-1',
     )
-    const restored = draw(
+    const restored = await draw(
       page,
       [cause('cmd-mine', 0, MINE, 'user'), cause('cmd-theirs', 1, THEIRS, 'assistant')],
       new Map([
@@ -371,11 +377,11 @@ describe('a restored turn reads the same as the live turn it came from', () => {
  *  relation places the blocks, a turn becomes one block carrying its
  *  children in seat order, and a block the turn caused is not drawn twice.
  *  Text children are drawn from their own stored bodies. */
-function draw(
+async function draw(
   page: RestorableBlock[],
   causes: Caused[],
   childBodies: Map<string, string>,
-): HTMLElement {
+): Promise<HTMLElement> {
   const root = document.createElement('div')
   const store = new CommandSnapshotStore()
   const container = () => document.createElement('div')
@@ -389,83 +395,26 @@ function draw(
       root.appendChild(restoredBlock(blockFacts(b, 'out'), S, container, () => {}, store))
       continue
     }
-    let id = 100
-    for (const el of restoredTurn(
+    const { manager } = newManager()
+    const handle = manager.addAnswerBlock(QUESTION, '/repo')
+    handle.el.dataset.entryId = 'turn-1'
+    await reconcileTurn(
+      handle,
       {
-        command: QUESTION,
-        cwd: '/repo',
-        location: '',
-        durationMs: 0,
-        exitCode: null,
-        status: 'success',
-        body: null,
-        author: 'agent',
-        kind: 'ask',
-        entryId: 'turn-1',
-        causes,
+        agentRuns: [],
+        caused: causes,
         proseEvicted: false,
+        prose: new Map([...childBodies].map(([id, body]) => [id, { body, lastSeq: 0 }])),
       },
-      S,
-      () => id++,
-      container,
-      () => {},
-      store,
       (cause) => {
-        if (cause.kind === 'text') {
-          const body = childBodies.get(cause.entryId)
-          return restoredBlock(
-            {
-              id: id++,
-              command: '',
-              cwd: '',
-              location: '',
-              kind: 'text',
-              body: body ?? '',
-              author: cause.source === 'assistant' ? ('agent' as const) : ('shell' as const),
-              status: 'success',
-              durationMs: null,
-              exitCode: null,
-              entryId: cause.entryId,
-            },
-            S,
-            container,
-            () => {},
-            store,
-          )
-        }
-        if (cause.kind === 'action') {
-          // A call that OPENED A BLOCK draws no child line of its own: the
-          // command block it opened IS the account of that call, exactly as
-          // the live flow places it (ADR-0040).
-          if (cause.opensBlock) return null
-          return restoredBlock(
-            {
-              id: id++,
-              command: cause.intent ?? '',
-              cwd: '',
-              location: '',
-              kind: 'tool',
-              body: null,
-              author: cause.source === 'assistant' ? ('agent' as const) : ('shell' as const),
-              status: 'success',
-              durationMs: null,
-              exitCode: null,
-              entryId: cause.entryId,
-            },
-            S,
-            container,
-            () => {},
-            store,
-          )
-        }
         const row = byID.get(cause.entryId)
-        if (!row || placed.has(cause.entryId)) return null
+        if (!row || placed.has(cause.entryId)) return Promise.resolve(null)
         placed.add(cause.entryId)
-        return restoredBlock(blockFacts(row, 'out'), S, container, () => {}, store)
+        return Promise.resolve(restoredBlock(blockFacts(row, 'out'), S, container, () => {}, store))
       },
-    )) {
-      root.appendChild(el)
-    }
+    )
+    handle.close('success')
+    root.appendChild(handle.el)
   }
   return root
 }

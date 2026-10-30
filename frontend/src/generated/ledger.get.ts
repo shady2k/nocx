@@ -13,6 +13,10 @@
  * Result of the ledger.get JSON-RPC method (nocx-rtg0.20, design §6.2) — one entry with its relations and the METADATA of what its runs captured. The bodies are deliberately absent: the recall read must not haul bytes (ADR-0019 §6), so an artifact's content is fetched one artifact at a time by whoever actually wants it. The entry is the same shape a ledger.query page row has, declared once there.
  */
 export interface LedgerGet {
+  /**
+   * Persisted agent runs in attempt order. Empty for non-agent entries. Each run retains its original model and engine identity.
+   */
+  agentRuns: AgentRun[]
   entry: Entry
   /**
    * Every edge touching this entry, in either direction — the difference between a log and a memory (design §3.4). Never null: no relation is [].
@@ -30,6 +34,30 @@ export interface LedgerGet {
    * Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.
    */
   caused: Caused[]
+}
+export interface AgentRun {
+  runId: number
+  attempt: number
+  /**
+   * The run's state, exactly as the renderer draws it (design §7). prepared → streaming → awaiting_approval → one of the terminal states; interrupted is what a run becomes when the backend restarts and finds it non-terminal (design §4.2). A reconnecting renderer reads the state; it never infers liveness from notifications having stopped.
+   */
+  state:
+    | 'prepared'
+    | 'streaming'
+    | 'awaiting_approval'
+    | 'completed'
+    | 'cancelled'
+    | 'failed'
+    | 'interrupted'
+  model: string
+  /**
+   * Missing historical engine metadata is returned as eino. Unknown nonempty stored identities remain unchanged.
+   */
+  engine: string
+  /**
+   * The stored runtime identity, or the empty string when historical metadata is absent.
+   */
+  runtimeVersion: string
 }
 /**
  * One row of recall: the ledger's identity for the entry plus every fact a block or a history row is rendered from.

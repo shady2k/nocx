@@ -395,7 +395,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	t.Helper()
 	fake, srv := newRunToolCallingServer("")
 	t.Cleanup(srv.Close)
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -435,12 +435,13 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig, extra ...WSServer
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
 	_, transportLogger := logtest.New(t)
-	ws := NewWSServer(transportLogger, newRegWithReal(log.NewSlogAdapter(nil)),
+	ptySessions := newRegWithReal(transportLogger)
+	ws := NewWSServer(transportLogger, ptySessions,
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultLifecycle(v),
 		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
-		WithAssistantClient(client),
+		WithAssistantEngines(fixedEinoSelector(client)),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 		WithAgentPolicy(autonomousPolicyStore(t)),
 		WithLifecyclePublisher(pub),

@@ -47,6 +47,8 @@ type agentStatusResult struct {
 	EndpointConfigured bool                   `json:"endpointConfigured"`
 	Credential         *string                `json:"credential"`
 	LastProbe          *assistant.ProbeResult `json:"lastProbe"`
+	Engine             *string                `json:"engine"`
+	RuntimeVersion     *string                `json:"runtimeVersion"`
 	// Answering is the resolution of the role the ask will use. Ready, or
 	// one of the refusal reasons; never absent, because readiness is the
 	// question the ask surface asks and a status with no answer to it is
@@ -74,12 +76,13 @@ type answeringWire struct {
 // model" from an empty picker, and a store that could not answer would have
 // been an error toast with no repair path.
 const (
-	reasonNoEndpoints  = "no-endpoints"
-	reasonNoModels     = "no-models"
-	reasonUnassigned   = "unassigned"
-	reasonEndpointGone = "endpoint-gone"
-	reasonModelGone    = "model-gone"
-	reasonUnavailable  = "unavailable"
+	reasonNoEndpoints        = "no-endpoints"
+	reasonNoModels           = "no-models"
+	reasonUnassigned         = "unassigned"
+	reasonEndpointGone       = "endpoint-gone"
+	reasonModelGone          = "model-gone"
+	reasonUnavailable        = "unavailable"
+	reasonRuntimeUnavailable = "runtime-unavailable"
 )
 
 // reasonPtr is the wire's "present and non-null" for a reason constant.
@@ -137,6 +140,7 @@ type assistantStatusHandlers struct {
 	op      capability.ConfigOperation
 	secrets credential.Resolver
 	probes  *assistant.ProbeStore
+	engines assistant.EngineSelector
 	wired   bool
 	r       Responder
 }
@@ -147,8 +151,18 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 		return
 	}
 	res := agentStatusResult{LastProbe: nil}
+	engine, engineErr := h.engines.Selected(ctx)
+	if engine.ID != "" {
+		res.Engine = &engine.ID
+		if engineErr == nil {
+			res.RuntimeVersion = &engine.RuntimeVersion
+		}
+	}
 	if h.probes != nil {
 		res.LastProbe = h.probes.Last()
+		if res.LastProbe != nil && (engineErr != nil || res.LastProbe.Engine != engine.ID || res.LastProbe.RuntimeVersion != engine.RuntimeVersion) {
+			res.LastProbe = nil
+		}
 	}
 	// The order is the whole change (nocx-rikz5): resolve the ROLE first,
 	// then ask about THAT endpoint's key. The handler used to decide the
@@ -181,7 +195,7 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 			// A probe describes ONE endpoint and one model. Reported only
 			// when it describes this one; otherwise "Last test ok" is about
 			// something the person is not asking.
-			if res.LastProbe != nil && !probeDescribes(res.LastProbe, ep, model) {
+			if res.LastProbe != nil && (engineErr != nil || !probeDescribes(res.LastProbe, ep, model, engine)) {
 				res.LastProbe = nil
 			}
 		case len(eps) == 0:
@@ -223,6 +237,17 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
+	}
+	// Configuration and credential repairs keep their existing precedence.
+	// A missing packaged runtime is actionable only after those are usable.
+	if engineErr != nil && res.Answering.Ready && res.Credential != nil &&
+		(*res.Credential == credResolvable || *res.Credential == credNotRequired) {
+		res.Answering.Ready = false
+		reason := reasonUnavailable
+		if errors.Is(engineErr, assistant.ErrRuntimeUnavailable) {
+			reason = reasonRuntimeUnavailable
+		}
+		res.Answering.Reason = reasonPtr(reason)
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(res))
 }
@@ -288,8 +313,8 @@ func anyEndpointOffersAModel(eps []profile.Endpoint) bool {
 // no model at all (Model is empty by definition), so it describes the
 // endpoint but never this model, and reporting its verdict as this model's
 // would be the same lie in a quieter voice.
-func probeDescribes(p *assistant.ProbeResult, ep profile.Endpoint, model string) bool {
-	return p.EndpointName == ep.Name && p.Model == model
+func probeDescribes(p *assistant.ProbeResult, ep profile.Endpoint, model string, engine assistant.Engine) bool {
+	return p.EndpointName == ep.Name && p.Model == model && p.Engine == engine.ID && p.RuntimeVersion == engine.RuntimeVersion
 }
 
 // assistantProbeHandlers answers endpoints.probe: probe the form's draft
@@ -303,7 +328,7 @@ func probeDescribes(p *assistant.ProbeResult, ep profile.Endpoint, model string)
 type assistantProbeHandlers struct {
 	op      capability.ConfigOperation
 	secrets credential.Resolver
-	client  assistant.Client
+	engines assistant.EngineSelector
 	probes  *assistant.ProbeStore
 	wired   bool
 	// admit is the one-probe-at-a-time gate, acquired HERE on the task
@@ -338,6 +363,11 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
+	engine, err := h.engines.Selected(ctx)
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
 	key, refused, resolveErr := h.resolveProbeCredential(ctx, params)
 	if resolveErr != nil {
 		// The renderer named a record that does not exist (deleted
@@ -347,6 +377,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		return
 	}
 	if refused != nil {
+		refused.Engine, refused.RuntimeVersion = engine.ID, engine.RuntimeVersion
 		// A sealed or unavailable vault is a probe RESULT naming that —
 		// the Test button that hangs or lies is the thing being fixed, and
 		// a Go error here would be a second kind of lie. Recorded like any
@@ -366,6 +397,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		return
 	}
 	if refusedHeaders != nil {
+		refusedHeaders.Engine, refusedHeaders.RuntimeVersion = engine.ID, engine.RuntimeVersion
 		if h.probes != nil {
 			h.probes.Record(*refusedHeaders)
 		}
@@ -373,7 +405,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		return
 	}
 
-	res, err := h.client.Probe(ctx, assistant.ProbeParams{
+	res, err := engine.Client.Probe(ctx, assistant.ProbeParams{
 		Name:    params.Name,
 		BaseURL: params.BaseURL,
 		Key:     key,
@@ -384,6 +416,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
+	res.Engine, res.RuntimeVersion = engine.ID, engine.RuntimeVersion
 	if h.probes != nil {
 		h.probes.Record(res)
 	}

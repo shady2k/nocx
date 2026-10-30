@@ -466,7 +466,7 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
 	defer srv.Close()
 
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

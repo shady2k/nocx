@@ -20,6 +20,7 @@ import { standingAnswerReceipt } from './agent-approval-prompt'
 import { EFFECT_LABEL } from './effect-labels'
 import { PolicyClient } from './policy-client'
 import type { BlockNotice, BlockNoticeAction } from './ui/block-notice'
+import { readTurnSnapshot, reconcileTurn, type RestoredCause } from './restore-client'
 
 export interface AgentAskSeams {
   dispatcher: Dispatcher
@@ -28,6 +29,9 @@ export interface AgentAskSeams {
   grants: () => ReadonlyArray<GrantBlock>
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
+  findAnswer: (entryId: string, running: RunningBlockActions) => AnswerBlockHandle | null
+  onAnswerReused?: (existing: AnswerBlockHandle, speculative: AnswerBlockHandle) => void
+  drawCommand: (cause: RestoredCause) => Promise<HTMLElement | null>
   onRefusal: (message: string) => void
   /** Called only after the backend accepts the turn, so a speculative
    *  overlay can change presentation without hiding itself on refusal. */
@@ -58,15 +62,41 @@ interface AskParams {
   }[]
 }
 
+type RunPresentation = {
+  state: AgentRunState['state']
+  error?: string
+  droppedDeltas?: number
+  notices?: string[]
+  unarmedBounds?: string[]
+  durationMs?: number | null
+}
+
+type RunEvent =
+  | { kind: 'delta'; value: AgentRunDelta }
+  | { kind: 'tool'; value: AgentRunToolCall }
+  | { kind: 'reasoning'; value: AgentRunReasoning }
+  | { kind: 'standing'; value: AgentStandingAnswerSaved }
+  | { kind: 'state'; value: AgentRunState }
+
+interface RunView {
+  handle: AnswerBlockHandle
+  settle: () => void
+  onTurnEnd: () => void
+  hydrating: boolean
+  queued: RunEvent[]
+  hydration?: Promise<void>
+  watermarks: Map<string, number>
+  terminal?: RunPresentation
+}
+
 export class AgentInputTarget implements InputTarget {
   readonly id = 'agent'
   readonly label = 'Agent'
   readonly author = 'agent'
   readonly routesToShell = false
-  private readonly runs = new Map<
-    number,
-    { handle: AnswerBlockHandle; settle: () => void; askId: string }
-  >()
+  private readonly runs = new Map<number, RunView>()
+  private pendingAsks = 0
+  private earlyEvents: RunEvent[] = []
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -128,34 +158,80 @@ export class AgentInputTarget implements InputTarget {
       },
       isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
     }
-    const handle = this.seams.openAnswer(doc, cwd, running)
+    let handle = this.seams.openAnswer(doc, cwd, running)
+    this.pendingAsks++
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)
       .catch((err: unknown) => {
         this.seams.onTurnEnd?.(askId)
+        this.pendingAsks--
+        if (this.pendingAsks === 0) this.earlyEvents = []
         handle.el.remove()
         const message = err instanceof Error ? err.message : String(err)
         this.seams.onRefusal(message)
         void this.offerEndpointRepair()
         throw err
       })
+    this.pendingAsks--
     this.seams.onTurnAccepted?.(askId)
     runId = ask.runId
+    const active = this.runs.get(ask.runId)
+    const existing = active?.handle ?? this.seams.findAnswer(ask.entryId, running)
+    if (existing && existing !== handle) {
+      this.seams.onAnswerReused?.(existing, handle)
+      handle.el.remove()
+      handle = existing
+    }
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
-    this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
+    handle.provenance(ask.engine, ask.runtimeVersion)
+    const finishSubmission = (): void => {
+      settled = true
+    }
+    const endSubmission = (): void => {
+      this.seams.onTurnEnd?.(askId)
+    }
+    const run: RunView = active ?? {
+      handle,
+      settle: finishSubmission,
+      onTurnEnd: endSubmission,
+      hydrating: false,
+      queued: [],
+      watermarks: new Map(),
+    }
+    if (active) {
+      const previousSettle = active.settle
+      const previousEnd = active.onTurnEnd
+      active.settle = () => {
+        previousSettle()
+        finishSubmission()
+      }
+      active.onTurnEnd = () => {
+        previousEnd()
+        endSubmission()
+      }
+    }
+    this.runs.set(ask.runId, run)
+    run.hydrating ||= ask.replayed
+    const early = this.earlyEvents.filter(
+      (event) =>
+        Number(event.value.runId) === ask.runId &&
+        (event.kind === 'state' || event.value.entryId === ask.entryId),
+    )
+    this.earlyEvents =
+      this.pendingAsks === 0
+        ? []
+        : this.earlyEvents.filter((event) => Number(event.value.runId) !== ask.runId)
+    for (const event of early) this.receive(event)
+    if (ask.replayed) {
+      run.hydration ??= this.hydrate(ask, run).finally(() => {
+        run.hydration = undefined
+      })
+      await run.hydration
+    } else this.settleRun(ask.runId, ask)
   }
 
-  private settleRun(
-    runId: number,
-    presentation: {
-      state: AgentRunState['state']
-      error?: string
-      droppedDeltas?: number
-      notices?: string[]
-      unarmedBounds?: string[]
-    },
-  ): void {
+  private settleRun(runId: number, presentation: RunPresentation): void {
     const run = this.runs.get(runId)
     if (!run) return
     if (
@@ -165,6 +241,10 @@ export class AgentInputTarget implements InputTarget {
       presentation.state !== 'interrupted'
     )
       return
+    if (run.hydrating) {
+      run.terminal = presentation
+      return
+    }
 
     // Delete first: runState and the reserved cancel response may race, and
     // either may synchronously trigger presentation callbacks. The first
@@ -195,14 +275,24 @@ export class AgentInputTarget implements InputTarget {
     if (unarmed.length > 0) {
       run.handle.append(`— ${unarmed.join('; ')}; only the wall-clock deadline remains active —`)
     }
-    if (presentation.state === 'completed') {
-      run.handle.close('success', undefined, run.handle.el.dataset.answeredBy)
-    } else if (presentation.state === 'cancelled') {
-      run.handle.close('cancelled', presentation.error)
-    } else {
-      run.handle.close('failure', presentation.error ?? presentation.state)
-    }
-    this.seams.onTurnEnd?.(run.askId)
+    const outcome =
+      presentation.state === 'completed'
+        ? 'success'
+        : presentation.state === 'cancelled'
+          ? 'cancelled'
+          : 'failure'
+    const error =
+      outcome === 'success'
+        ? undefined
+        : outcome === 'cancelled'
+          ? presentation.error
+          : (presentation.error ?? presentation.state)
+    if (presentation.durationMs !== undefined) {
+      run.handle.close(outcome, error, run.handle.el.dataset.answeredBy, presentation.durationMs)
+    } else if (outcome === 'success') {
+      run.handle.close(outcome, error, run.handle.el.dataset.answeredBy)
+    } else run.handle.close(outcome, error)
+    run.onTurnEnd()
   }
 
   /**
@@ -272,109 +362,108 @@ export class AgentInputTarget implements InputTarget {
     })
   }
 
-  /** Subscribe once: deltas append to the run's block; the terminal state
-   *  closes it. A runState with no prior delta (a failure before any text)
-   *  still has a block — the ask result's entryId opened it. */
+  private async hydrate(ask: AgentAsk, run: RunView): Promise<void> {
+    let presentation: RunPresentation = ask
+    try {
+      let finalRead = false
+      for (;;) {
+        const snapshot = await readTurnSnapshot(this.seams.dispatcher, ask.entryId)
+        const savedWatermarks = await reconcileTurn(run.handle, snapshot, this.seams.drawCommand)
+        // Children absent from this snapshot were not redrawn. Keep their live
+        // watermark, while redrawn children use the store's actual maximum seq.
+        for (const [blockId, seq] of savedWatermarks) run.watermarks.set(blockId, seq)
+        const saved = snapshot.agentRuns.find((candidate) => candidate.runId === ask.runId)
+        if (saved) presentation = { state: saved.state, durationMs: snapshot.entry.durationMs }
+        // A terminal notification proves its commit preceded this next read.
+        // Reread metadata too, not only the children the first snapshot saw.
+        if (run.terminal && !finalRead) {
+          finalRead = true
+          continue
+        }
+        break
+      }
+    } catch (err) {
+      run.handle.notice({
+        text: `The saved answer could not be read: ${err instanceof Error ? err.message : String(err)}`,
+        tone: 'warning',
+      })
+    }
+    run.hydrating = false
+    const queued = run.queued
+    run.queued = []
+    for (const event of queued) {
+      if (event.kind !== 'state') this.apply(run, event)
+    }
+    this.settleRun(ask.runId, run.terminal ? { ...presentation, ...run.terminal } : presentation)
+  }
+
+  private receive(event: RunEvent): void {
+    const run = this.runs.get(Number(event.value.runId))
+    if (!run) {
+      if (this.pendingAsks > 0) this.earlyEvents.push(event)
+      return
+    }
+    if (event.kind !== 'state' && run.handle.el.dataset.entryId !== event.value.entryId) return
+    if (run.hydrating) {
+      if (event.kind === 'state') this.settleRun(Number(event.value.runId), event.value)
+      else run.queued.push(event)
+      return
+    }
+    this.apply(run, event)
+  }
+
+  private apply(run: RunView, event: RunEvent): void {
+    switch (event.kind) {
+      case 'delta': {
+        const delta = event.value
+        if (delta.seq <= (run.watermarks.get(delta.blockId) ?? -1)) return
+        run.watermarks.set(delta.blockId, delta.seq)
+        run.handle.append(delta.text, delta.blockId)
+        break
+      }
+      case 'tool': {
+        const call = event.value
+        run.handle.toolCall({
+          callId: call.callId,
+          actionEntryId: call.actionEntryId,
+          tool: call.tool,
+          effect: call.effect,
+          args: call.args,
+          resource: call.resource ?? undefined,
+          opensBlock: call.opensBlock,
+        })
+        break
+      }
+      case 'reasoning':
+        run.handle.reasoning(event.value.text)
+        break
+      case 'standing':
+        this.drawStandingAnswer(run.handle, event.value)
+        break
+      case 'state':
+        this.settleRun(event.value.runId, event.value)
+        break
+    }
+  }
+
+  /** Subscribe before sending asks, so no accepted event can outrun its handle. */
   private ensureSubscribed(): void {
     if (this.subscribed) return
     this.subscribed = true
-    this.seams.dispatcher.subscribe('agent.runDelta', (params: unknown) => {
-      const d = params as AgentRunDelta
-      const run = this.runs.get(d.runId)
-      if (!run) return
-      const handle = run.handle
-      // Both ids are on every delta on purpose (design §7): the run id
-      // finds the ask, the entry id confirms the deltas land on the right
-      // block — a mismatch is a stale or misrouted notification and must
-      // not append to the wrong one.
-      if (handle.el.dataset.entryId !== d.entryId) return
-      // …and the block id says WHERE in the turn: the `text` child this run
-      // of prose is, opened by the backend on the first delta after a call
-      // and sealed when the next one arrives (ADR-0040). The renderer never
-      // works the boundary out — that is what the anchor did, and the live
-      // path and the restore each computed it and could drift.
-      handle.append(d.text, d.blockId)
-    })
-    // A tool call is a CHILD of this turn (ADR-0040), so it is routed
-    // exactly as a delta is — same two ids, same mismatch rule — and handed
-    // to the same handle. That is the whole ordering fix: the call takes its
-    // seat when it arrives, which is before the deltas the model writes from
-    // its result, so it can no longer read as "answered first, ran the
-    // command afterwards".
-    //
-    // For a call that OPENS A BLOCK the handle draws no child of its own:
-    // the block the command opened is the account of that call, and it takes
-    // the seat. The routing is identical either way — the turn decides what
-    // the call becomes, from a fact the backend sent.
-    this.seams.dispatcher.subscribe('agent.runToolCall', (params: unknown) => {
-      const c = params as AgentRunToolCall
-      const run = this.runs.get(c.runId)
-      if (!run) return
-      const handle = run.handle
-      if (handle.el.dataset.entryId !== c.entryId) return
-      handle.toolCall({
-        callId: c.callId,
-        tool: c.tool,
-        effect: c.effect,
-        // What the model asked for, as the tool's schema validated it: the
-        // half that tells two calls of one tool apart, which the tool name
-        // and the derived resource cannot (ADR-0040).
-        args: c.args,
-        // The wire says `null` for a tool that names no resource; the flow
-        // wants "absent", and the two must not be confused into a resource
-        // with an empty half.
-        resource: c.resource ?? undefined,
-        // Whether the call's work becomes a block of its own — the tool
-        // table's fact, off the wire and never derived from the name here.
-        // It is what tells the turn to let that block take the next seat
-        // instead of drawing a child that restates it.
-        opensBlock: c.opensBlock,
-        // The LEDGER action entry the attempt was recorded under — the
-        // handle the call's expansion reaches its result through, rather
-        // than a second copy of the bytes on this wire (nocx-hp8p2.13).
-        actionEntryId: c.actionEntryId,
-      })
-    })
-    // The model's thinking, into its own note and never into the answer
-    // text (nocx-s92so).
-    this.seams.dispatcher.subscribe('agent.runReasoning', (params: unknown) => {
-      const r = params as AgentRunReasoning
-      const run = this.runs.get(r.runId)
-      if (!run) return
-      const handle = run.handle
-      if (handle.el.dataset.entryId !== r.entryId) return
-      handle.reasoning(r.text)
-    })
-    // A STANDING ANSWER WAS WRITTEN (nocx-2019q). It is routed exactly as a
-    // delta is — the run id finds the turn, the entry id confirms the block —
-    // because it IS a fact about that run: the person answered the question
-    // this turn raised, and the place that answer belongs is the turn that
-    // raised it. Before this the rule went into the store and the terminal
-    // said nothing, so the only way to find out you had configured something
-    // was to stop being asked a question you had forgotten answering.
-    this.seams.dispatcher.subscribe('agent.standingAnswerSaved', (params: unknown) => {
-      const saved = params as AgentStandingAnswerSaved
-      // The wire says the run id as a STRING here, as agent.approvalRequested
-      // and agent.approve do — the whole approval exchange is in that
-      // vocabulary — while the ask that opened this turn minted a number.
-      // One conversion, at the one seam where the two meet.
-      const run = this.runs.get(Number(saved.runId))
-      if (!run) return
-      const handle = run.handle
-      // Routed EXACTLY as a delta is, with no escape hatch. The empty
-      // entryId this used to wave through was the schema's invention: it
-      // promised "empty when the proposal was never bound to an entry", and
-      // nothing on the backend can produce that (contracts/, and the trace
-      // at agentStandingAnswerSaved.EntryID). A wildcard for a value nobody
-      // sends is a second reading of routing that disagrees with every
-      // sibling here, and it would draw a receipt on whatever block the run
-      // id happened to find.
-      if (handle.el.dataset.entryId !== saved.entryId) return
-      this.drawStandingAnswer(handle, saved)
-    })
-    this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
-      const state = params as AgentRunState
-      this.settleRun(state.runId, state)
-    })
+    this.seams.dispatcher.subscribe('agent.runDelta', (value: unknown) =>
+      this.receive({ kind: 'delta', value: value as AgentRunDelta }),
+    )
+    this.seams.dispatcher.subscribe('agent.runToolCall', (value: unknown) =>
+      this.receive({ kind: 'tool', value: value as AgentRunToolCall }),
+    )
+    this.seams.dispatcher.subscribe('agent.runReasoning', (value: unknown) =>
+      this.receive({ kind: 'reasoning', value: value as AgentRunReasoning }),
+    )
+    this.seams.dispatcher.subscribe('agent.standingAnswerSaved', (value: unknown) =>
+      this.receive({ kind: 'standing', value: value as AgentStandingAnswerSaved }),
+    )
+    this.seams.dispatcher.subscribe('agent.runState', (value: unknown) =>
+      this.receive({ kind: 'state', value: value as AgentRunState }),
+    )
   }
 }

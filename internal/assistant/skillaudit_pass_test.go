@@ -7,9 +7,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 // scriptedFiles answers per call and records what each one was asked, so a
@@ -17,14 +14,14 @@ import (
 // one.
 type scriptedFiles struct {
 	mu    sync.Mutex
-	asked [][]*schema.Message
+	asked [][]Message
 	// reply is chosen by the file's path so an out-of-order fan-out cannot
 	// make a test pass by accident.
 	reply  func(user string) (string, error)
 	failed int
 }
 
-func (m *scriptedFiles) Generate(_ context.Context, msgs []*schema.Message, _ ...model.Option) (*schema.Message, error) {
+func (m *scriptedFiles) Generate(_ context.Context, _ ModelTarget, msgs []Message) (string, error) {
 	m.mu.Lock()
 	m.asked = append(m.asked, msgs)
 	m.mu.Unlock()
@@ -33,13 +30,9 @@ func (m *scriptedFiles) Generate(_ context.Context, msgs []*schema.Message, _ ..
 		m.mu.Lock()
 		m.failed++
 		m.mu.Unlock()
-		return nil, err
+		return "", err
 	}
-	return &schema.Message{Content: body}, nil
-}
-
-func (*scriptedFiles) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("stream is not used by a skill audit")
+	return body, nil
 }
 
 func envelope(verdict, report string) string {

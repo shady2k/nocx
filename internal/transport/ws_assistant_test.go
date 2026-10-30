@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
@@ -99,7 +100,7 @@ func newAssistantHarness(t *testing.T, stub *stubAssistantClient) *assistantHarn
 	return newAssistantHarnessWith(t, stub, nil)
 }
 
-func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *scriptedEndpoints) *assistantHarness {
+func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *scriptedEndpoints, extra ...WSServerOption) *assistantHarness {
 	t.Helper()
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
@@ -126,13 +127,14 @@ func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *sc
 		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
 	}
 	if stub != nil {
-		opts = append(opts, WithAssistantClient(stub))
+		opts = append(opts, WithAssistantEngines(fixedEinoSelector(stub)))
 	}
 	probes := assistant.NewProbeStore()
 	opts = append(opts, WithAssistantProbeStore(probes))
+	opts = append(opts, extra...)
 
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
-	ctx := t.Context()
+	ctx, transportLogger := logtest.New(t)
+	ws := NewWSServer(transportLogger, newRegWithStub(transportLogger), opts...)
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

@@ -14,6 +14,14 @@
  */
 export interface EndpointsProbeResult {
   /**
+   * The engine selected and pinned for this probe.
+   */
+  engine: string
+  /**
+   * The runtime identity pinned for this probe.
+   */
+  runtimeVersion: string
+  /**
    * The probed draft's display name. Historical fact: agent.status reports the last probe whatever the endpoint list says now.
    */
   name: string

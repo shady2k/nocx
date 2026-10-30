@@ -5921,7 +5921,7 @@ func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	raw, err := json.Marshal(agentAskResponse{
 		RunID: 7, EntryID: "ask-1",
 		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
-		Model: "qwen3",
+		Model: "qwen3", Engine: "eino", RuntimeVersion: "eino-test",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -6843,14 +6843,14 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
 		`"redactions":[],"unreconciled":null,"terminationReason":null}`
 	body := func(caused string) string {
-		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
+		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"agentRuns":[],"proseEvicted":false,"caused":` + caused + `}`
 	}
 	// And the shape itself: the schema refuses a ledger.get result that
 	// will not say whether the prose of the run is gone — absent and false
 	// must not be the same wire state for the one fact a turn's reader
 	// cannot re-derive.
 	if err := validateJSONErr(schema, []byte(
-		`{"entry":`+entry+`,"edges":[],"artifacts":[],"caused":[]}`,
+		`{"entry":`+entry+`,"edges":[],"artifacts":[],"agentRuns":[],"caused":[]}`,
 	)); err == nil {
 		t.Fatal("the schema accepted a ledger.get result that omits proseEvicted")
 	}

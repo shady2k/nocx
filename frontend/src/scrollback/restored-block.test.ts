@@ -1,14 +1,9 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, vi } from 'vitest'
-import {
-  restoredBlock,
-  restoredTurn,
-  bodyToHTML,
-  type RestoredCause,
-  type RestoredTurnFacts,
-} from './restored-block'
-import type { RunningBlockActions } from './blocks'
+import { restoredBlock, bodyToHTML } from './restored-block'
+import { BlockManager, type RunningBlockActions } from './blocks'
+import { reconcileTurn, type RestoredCause } from '../restore-client'
 import { DEFAULT_SNAPSHOT } from './serializer'
 import { CommandSnapshotStore } from '../command-snapshot'
 
@@ -163,25 +158,8 @@ describe('a block built from the store', () => {
     expect(el.dataset.restored).toBe('true')
   })
 
-  it("draws the answer as prose, through the answer body's own renderer", () => {
-    // Through restoredTurn, which is the ONE builder of a turn's prose: the
-    // block builder draws the pieces it is handed, and the projection that
-    // produces them is the turn's (nocx-9sqii).
-    const [el] = restoredTurn(
-      facts({
-        kind: 'ask',
-        author: 'agent',
-        command: 'summarise',
-        body: '## Findings\n- run `ls`\n',
-        id: undefined,
-      }),
-      S,
-      () => 1,
-      container,
-      () => {},
-      store(),
-      () => null,
-    )
+  it("draws the answer as prose, through the answer body's own renderer", async () => {
+    const [el] = await turn([], { body: '## Findings\n- run `ls`\n' })
     // The ask kind's body class — the wrap policy lives there, and a restored
     // answer must wrap exactly as a live one does.
     const body = el.querySelector('.cmd-output-ask')
@@ -192,22 +170,8 @@ describe('a block built from the store', () => {
     expect(body?.querySelector('.ui-md-code')?.textContent).toBe('ls')
   })
 
-  it('keeps a fenced block in the command grammar, as the live answer does', () => {
-    const [el] = restoredTurn(
-      facts({
-        kind: 'ask',
-        author: 'agent',
-        command: 'show me',
-        body: '```\nls -la\n```\n',
-        id: undefined,
-      }),
-      S,
-      () => 1,
-      container,
-      () => {},
-      store(),
-      () => null,
-    )
+  it('keeps a fenced block in the command grammar, as the live answer does', async () => {
+    const [el] = await turn([], { body: '```\nls -la\n```\n' })
     expect(el.querySelector('.cmd-output-code')).not.toBeNull()
   })
 
@@ -292,56 +256,82 @@ describe('a block built from the store', () => {
     expect(el.querySelector('[data-prose-evicted="true"]')).toBeNull()
     expect(el.textContent).not.toContain('Output is no longer kept')
   })
-  const turn = (causes: RestoredCause[], over: Partial<RestoredTurnFacts> = {}) => {
-    let n = 100
-    return restoredTurn(
+  const turn = async (
+    causes: Array<Pick<RestoredCause, 'entryId' | 'kind' | 'source'>>,
+    over: {
+      body?: string | null
+      proseEvicted?: boolean
+      status?: 'success' | 'failure' | 'cancelled'
+    } = {},
+  ): Promise<[HTMLElement]> => {
+    const inner = container()
+    const live = container()
+    inner.appendChild(live)
+    const manager = new BlockManager(inner, live, { snapshotStore: store() })
+    const handle = manager.addAnswerBlock('what went wrong?', '/repo')
+    handle.el.dataset.entryId = 'turn-1'
+    const body = over.body === undefined ? 'line 3 is wrong' : over.body
+    const rows: RestoredCause[] = causes.map((cause, position) => ({
+      intent: '',
+      args: null,
+      effect: null,
+      resource: null,
+      opensBlock: false,
+      ...cause,
+      position,
+    }))
+    if (body !== null)
+      rows.unshift({
+        entryId: 'prose-1',
+        kind: 'text',
+        source: 'assistant',
+        position: 0,
+        intent: '',
+        args: null,
+        effect: null,
+        resource: null,
+        opensBlock: false,
+      })
+    await reconcileTurn(
+      handle,
       {
-        command: 'what went wrong?',
-        cwd: '/repo',
-        location: '',
-        durationMs: 1200,
-        exitCode: null,
-        status: 'success',
-        body: 'line 3 is wrong',
-        author: 'agent',
-        kind: 'ask',
-        entryId: 'turn-1',
-        causes,
-        ...over,
+        agentRuns: [],
+        caused: rows,
+        proseEvicted: over.proseEvicted ?? false,
+        prose: new Map(body === null ? [] : [['prose-1', { body, lastSeq: 0 }]]),
       },
-      S,
-      () => n++,
-      container,
-      () => {},
-      store(),
       (cause) =>
-        cause.entryId === 'gone'
-          ? null
-          : restoredBlock(
-              facts({
-                id: n++,
-                command: `cmd ${cause.entryId}`,
-                author: 'agent',
-                entryId: cause.entryId,
-              }),
-              S,
-              container,
-              () => {},
-              store(),
-            ),
+        Promise.resolve(
+          cause.entryId === 'gone'
+            ? null
+            : restoredBlock(
+                facts({
+                  id: manager.nextRestoredId(),
+                  command: `cmd ${cause.entryId}`,
+                  author: 'agent',
+                  entryId: cause.entryId,
+                }),
+                S,
+                container,
+                () => {},
+                store(),
+              ),
+        ),
     )
+    handle.close(over.status ?? 'success', undefined, undefined, 1200)
+    return [handle.el]
   }
 
-  it('a turn with no causes is ONE block with its prose', () => {
-    const [el] = turn([])
+  it('a turn with only prose is one block', async () => {
+    const [el] = await turn([])
     expect(el.querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
   })
 
-  it('the question appears exactly once, however many blocks the turn caused', () => {
+  it('the question appears exactly once, however many blocks the turn caused', async () => {
     // The `continued` badge and the repeated header are gone with the
     // fragments (ADR-0040): a restored turn says its question once, like a
     // live one.
-    const [el] = turn([
+    const [el] = await turn([
       { entryId: 'cmd-1', kind: 'shell', source: 'user' },
       { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
@@ -352,11 +342,11 @@ describe('a block built from the store', () => {
     expect(el.querySelector('[data-turn-continuation]')).toBeNull()
   })
 
-  it('the blocks it caused are drawn inside the turn, in the seat order the ledger gave', () => {
+  it('the blocks it caused are drawn inside the turn, in the seat order the ledger gave', async () => {
     // ADR-0040: the turn CARRIES its children. A restored turn is ONE
     // block whose `.cmd-children` hold the same seats the store recorded,
     // exactly as the live path draws them.
-    const [el] = turn([
+    const [el] = await turn([
       { entryId: 'cmd-1', kind: 'shell', source: 'user' },
       { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
@@ -367,10 +357,10 @@ describe('a block built from the store', () => {
     )
   })
 
-  it('a DANGLING cause costs the turn that block and nothing else', () => {
+  it('a DANGLING cause costs the turn that block and nothing else', async () => {
     // The command is older than the page limit, or retention took it.
     // Nothing is invented to stand in for it.
-    const [el] = turn([
+    const [el] = await turn([
       { entryId: 'gone', kind: 'shell', source: 'user' },
       { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
@@ -380,11 +370,11 @@ describe('a block built from the store', () => {
     ])
   })
 
-  it('a turn whose prose is gone says so once and keeps every child block', () => {
+  it('a turn whose prose is gone says so once and keeps every child block', async () => {
     // Retention takes bodies and leaves entries (ADR-0019 §7). The blocks a
     // turn caused are entries of their own and survive the loss of the
     // prose; the run's loss is the turn's sentence, said ONCE.
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
+    const [el] = await turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
       body: null,
       proseEvicted: true,
     })
@@ -398,10 +388,10 @@ describe('a block built from the store', () => {
     ])
   })
 
-  it('a turn whose prose is intact says nothing of the sort', () => {
+  it('a turn whose prose is intact says nothing of the sort', async () => {
     // The paired positive: without it, the sentence above could be one that
     // is always shown. A whole turn carries its prose and no notice.
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
+    const [el] = await turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
       proseEvicted: false,
     })
     expect(el.querySelector('[data-prose-evicted="true"]')).toBeNull()
@@ -433,8 +423,8 @@ describe('a block built from the store', () => {
       ':scope > .cmd-header .cmd-header-right > .ui-meta[data-column="duration"]',
     )
 
-  it('a restored turn says it completed, from its status and never from an exit code', () => {
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }])
+  it('a restored turn says it completed, from its status and never from an exit code', async () => {
+    const [el] = await turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }])
     // Success is silent (spec 2026-09-14 \u00a73.1): the outcome is the
     // observable, and no status word reaches the DOM.
     expect(el.dataset.outcome).toBe('success')
@@ -442,8 +432,8 @@ describe('a block built from the store', () => {
     expect(duration(el)?.textContent).toBe('1.2s')
   })
 
-  it('a turn that failed says so in its own word, not in the shell\u2019s', () => {
-    const [el] = turn([], { status: 'failure' })
+  it('a turn that failed says so in its own word, not in the shell’s', async () => {
+    const [el] = await turn([], { status: 'failure' })
     expect(el.dataset.outcome).toBe('failure')
     expect(status(el)?.textContent).toBe('failed')
     expect(status(el)?.dataset.tone).toBe('danger')
@@ -453,7 +443,7 @@ describe('a block built from the store', () => {
     // The store cannot send one today, and the point is that the header does
     // not depend on that staying true: an answer is not a command's output
     // (nocx-ex636), so the ask kind's outcome never reads the shell's code.
-    const [el] = turn([], { exitCode: 0 })
+    const el = restoredBlock(facts({ kind: 'ask', exitCode: 0 }), S, container, () => {}, store())
     expect(el.dataset.outcome).toBe('success')
     expect(status(el)).toBeNull()
   })

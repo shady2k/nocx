@@ -27,7 +27,7 @@ import { agentStatusLine } from './agent-status-line'
  *  words; `page` is null for a rung no page repairs. */
 export type ModelChipState =
   | { kind: 'ready'; endpoint: string; model: string }
-  | { kind: 'action'; text: string; page: 'endpoints' | 'roles' | null }
+  | { kind: 'action'; text: string; page: 'endpoints' | 'roles' | 'assistant' | null }
 
 /** The one call this store makes. An interface rather than the concrete
  *  AgentClient so a surface test can hand it a source without a socket —

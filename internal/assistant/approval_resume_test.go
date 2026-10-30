@@ -79,7 +79,9 @@ func TestAsk_ApprovedProposalResumesWhenTheModelReRolls(t *testing.T) {
 	// 3. The resume: the same run, re-driven. The person answered; the call
 	//    must run, and the person must NOT be asked the same question again.
 	var got strings.Builder
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+	resumed := askParams(srv.URL, &grant, ledger, approvals)
+	resumed.Resume = true
+	err = cl.Ask(context.Background(), resumed, func(e AskEvent) error {
 		if e.Kind == AskAnswer {
 			got.WriteString(e.Text)
 		}
@@ -171,6 +173,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 	// The resume, under the re-minted grant: the restored call runs, the
 	// model proposes a SECOND read, and nobody is asked about it.
 	resumed := askParams(srv.URL, &answered, ledger, approvals)
+	resumed.Resume = true
 	if askErr := cl.Ask(context.Background(), resumed, func(AskEvent) error { return nil }); askErr != nil {
 		var again *ApprovalRequestedError
 		if errors.As(askErr, &again) && again.Request != nil {
@@ -230,7 +233,9 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 	if !approvals.Approve(asked) {
 		t.Fatal("the proposal was not pending")
 	}
-	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil }); err != nil {
+	resumed := askParams(srv.URL, &grant, ledger, approvals)
+	resumed.Resume = true
+	if err := cl.Ask(context.Background(), resumed, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("the approved resume failed: %v", err)
 	}
 	if held() {
@@ -287,6 +292,7 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 		}) {
 			t.Fatalf("%s: the proposal the middleware asked about was not pending", which)
 		}
+		p.Resume = true
 		return asked.Request
 	}
 
@@ -302,5 +308,64 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 	// Both answered: the run finishes, and nobody is asked a third time.
 	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("after both answers the run still did not finish: %v", err)
+	}
+}
+
+func TestAsk_ExplicitResumeCannotColdStartOrStealParkedRun(t *testing.T) {
+	for _, finish := range []string{"complete", "discard"} {
+		t.Run(finish, func(t *testing.T) {
+			grant, dir := testDirGrant(t, askEveryTimeMatrix())
+			path := filepath.Join(dir, "a.txt")
+			writeFile(t, path, "approved bytes")
+			f, srv := newFakeOpenAI(reProposingModel("files.read", fmt.Sprintf(`{"path":%q}`, path)))
+			t.Cleanup(srv.Close)
+			cl, _, err := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			approvals := NewApprovalStore()
+			p := askParams(srv.URL, &grant, &fakeLedger{}, approvals)
+			p.Resume = true
+			if askErr := cl.Ask(t.Context(), p, func(AskEvent) error { return nil }); askErr == nil {
+				t.Fatal("a missing continuation started a fresh drive")
+			}
+			if f.requests.Load() != 0 {
+				t.Fatal("missing continuation reached the provider")
+			}
+			p.Resume = false
+			err = cl.Ask(t.Context(), p, func(AskEvent) error { return nil })
+			var asked *ApprovalRequestedError
+			if !errors.As(err, &asked) || asked.Request == nil {
+				t.Fatalf("initial suspension: %v", err)
+			}
+			if err := cl.Ask(t.Context(), p, func(AskEvent) error { return nil }); err == nil {
+				t.Fatal("a fresh admission implicitly resumed a parked operation")
+			}
+			if f.requests.Load() != 1 {
+				t.Fatal("duplicate admission reached the provider")
+			}
+			if finish == "discard" {
+				cl.Discard(p.RunID)
+			} else {
+				if !approvals.Approve(Approval{
+					RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
+					CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
+				}) {
+					t.Fatal("duplicate admission destroyed the original parked proposal")
+				}
+				p.Resume = true
+				if err := cl.Ask(t.Context(), p, func(AskEvent) error { return nil }); err != nil {
+					t.Fatalf("explicit resume: %v", err)
+				}
+			}
+			p.Resume = true
+			before := f.requests.Load()
+			if err := cl.Ask(t.Context(), p, func(AskEvent) error { return nil }); err == nil {
+				t.Fatal("a retired continuation cold-started")
+			}
+			if f.requests.Load() != before {
+				t.Fatal("retired continuation reached the provider")
+			}
+		})
 	}
 }

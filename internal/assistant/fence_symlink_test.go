@@ -172,7 +172,7 @@ func TestAsk_AFenceRefusalAfterApprovalContinuesTheRun(t *testing.T) {
 	f, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, _, clErr := NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	cl, _, clErr := newTestClientAndRegistry(t, nil, content.Floor{}, nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -195,7 +195,9 @@ func TestAsk_AFenceRefusalAfterApprovalContinuesTheRun(t *testing.T) {
 	// 3. The resume: the fence refuses the approved call, and the run must
 	//    reach a terminal state of its own accord — an ANSWER.
 	var answer strings.Builder
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+	resumed := askParams(srv.URL, &grant, ledger, approvals)
+	resumed.Resume = true
+	err = cl.Ask(context.Background(), resumed, func(e AskEvent) error {
 		if e.Kind == AskAnswer {
 			answer.WriteString(e.Text)
 		}

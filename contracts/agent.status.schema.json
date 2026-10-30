@@ -5,8 +5,24 @@
   "description": "Result of the agent.status JSON-RPC method (design §7): whether the ANSWERING ROLE resolves to an (endpoint, model) pair, the credential fact of the endpoint that resolution named, and the last probe result. Readiness is a fact about the ROLE, never about endpoint existence (nocx-rikz5): an endpoint with a valid key and no model chosen is not ready, and said so here rather than at the person's first question. The ask surface reads it before offering an ask; a soft degrade — no endpoint, no model chosen, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["endpointConfigured", "credential", "lastProbe", "answering"],
+  "required": [
+    "endpointConfigured",
+    "credential",
+    "lastProbe",
+    "answering",
+    "engine",
+    "runtimeVersion"
+  ],
   "properties": {
+    "engine": {
+      "description": "The currently selected engine, or null when selection failed. Unknown nonempty identities are not relabeled.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "runtimeVersion": {
+      "description": "The selected runtime identity, or null when engine selection failed.",
+      "type": ["string", "null"]
+    },
     "endpointConfigured": {
       "description": "At least one AI endpoint is stored. Endpoint EXISTENCE, and nothing more: it is not readiness and must not be read as readiness — that is `answering`. Kept because the Endpoints page's own empty state is a different question from the ask surface's.",
       "type": "boolean"
@@ -41,7 +57,7 @@
       "required": ["ready", "reason", "endpoint", "model"],
       "properties": {
         "ready": {
-          "description": "True when the answering role resolves to an (endpoint, model) pair. This — not endpointConfigured — is what the ask surface gates on.",
+          "description": "True when the answering role resolves and its selected runtime is available. This — not endpointConfigured — is what the ask surface gates on.",
           "type": "boolean"
         },
         "reason": {
@@ -54,7 +70,8 @@
                 "unassigned",
                 "endpoint-gone",
                 "model-gone",
-                "unavailable"
+                "unavailable",
+                "runtime-unavailable"
               ],
               "type": "string"
             },

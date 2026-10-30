@@ -5,16 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 
-	openai "github.com/cloudwego/eino-ext/components/model/openai"
-	einoModel "github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
-
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/credential"
 )
 
 // ComposeDraftInput builds the only transcript the summarizing model may see.
@@ -97,22 +91,18 @@ const maxNotCapturableReason = 300
 // three fields a skills.create proposal needs. The caller remains responsible
 // for presenting those fields for approval and for validating the eventual
 // write through the skills capability.
-func DraftSkill(ctx context.Context, client einoModel.BaseChatModel, input string) (name, description, body string, err error) {
-	return draftSkillGenerate(ctx, client, input)
-}
-
-func draftSkillGenerate(ctx context.Context, client einoModel.BaseChatModel, input string, opts ...einoModel.Option) (name, description, body string, err error) {
-	if client == nil {
+func DraftSkill(ctx context.Context, generator TextGenerator, target ModelTarget, input string) (name, description, body string, err error) {
+	if generator == nil {
 		return "", "", "", errors.New("skill draft: summarizing model is unavailable")
 	}
-	resp, err := client.Generate(ctx, []*schema.Message{
-		schema.SystemMessage(skillDraftSystemPrompt),
-		schema.UserMessage(input),
-	}, opts...)
+	resp, err := generator.Generate(ctx, target, []Message{
+		{Role: "system", Content: skillDraftSystemPrompt},
+		{Role: "user", Content: input},
+	})
 	if err != nil {
 		return "", "", "", fmt.Errorf("skill draft: %w", err)
 	}
-	if resp == nil {
+	if resp == "" {
 		return "", "", "", errors.New("skill draft: summarizing model returned no answer")
 	}
 
@@ -122,7 +112,7 @@ func draftSkillGenerate(ctx context.Context, client einoModel.BaseChatModel, inp
 		Body             string `json:"body"`
 		NothingToCapture string `json:"nothing_to_capture"`
 	}
-	if err := json.Unmarshal([]byte(resp.Content), &draft); err != nil {
+	if err := json.Unmarshal([]byte(resp), &draft); err != nil {
 		return "", "", "", fmt.Errorf("skill draft: answer is not JSON: %w", err)
 	}
 	// The refusal is read before the three fields, and it wins if both
@@ -137,26 +127,16 @@ func draftSkillGenerate(ctx context.Context, client einoModel.BaseChatModel, inp
 	return strings.TrimSpace(draft.Name), strings.TrimSpace(draft.Description), strings.TrimSpace(draft.Body), nil
 }
 
-// SkillDraftTarget is the resolved endpoint and credential for the
-// summarizing model. The transport resolves it through the one role resolver
-// and the vault; the assistant only sends the already-resolved facts.
-type SkillDraftTarget struct {
-	Key     credential.Secret
-	BaseURL string
-	Model   string
-	Headers []Header
-}
-
 // SkillDraftResolver resolves the summarizing role, falling back to the
 // answering role when the summarizing role has no assignment.
 type SkillDraftResolver interface {
-	ResolveSkillDraft(ctx context.Context) (SkillDraftTarget, error)
+	ResolveSkillDraft(ctx context.Context) (ModelTarget, error)
 }
 
 // SkillDraftResolverFunc adapts a function to SkillDraftResolver.
-type SkillDraftResolverFunc func(context.Context) (SkillDraftTarget, error)
+type SkillDraftResolverFunc func(context.Context) (ModelTarget, error)
 
-func (f SkillDraftResolverFunc) ResolveSkillDraft(ctx context.Context) (SkillDraftTarget, error) {
+func (f SkillDraftResolverFunc) ResolveSkillDraft(ctx context.Context) (ModelTarget, error) {
 	return f(ctx)
 }
 
@@ -244,7 +224,7 @@ func (r *SkillDraftRequest) verbatim(rawArgs string) (string, bool) {
 	return "", false
 }
 
-func (r *SkillDraftRequest) arguments(ctx context.Context, httpClient *http.Client) (string, error) {
+func (r *SkillDraftRequest) arguments(ctx context.Context, generator TextGenerator) (string, error) {
 	if r == nil {
 		return "", errors.New("skill draft: request is unavailable")
 	}
@@ -254,12 +234,7 @@ func (r *SkillDraftRequest) arguments(ctx context.Context, httpClient *http.Clie
 			r.err = err
 			return
 		}
-		cm, err := buildModel(httpClient, target.Key, target.BaseURL, target.Model)
-		if err != nil {
-			r.err = err
-			return
-		}
-		name, description, body, err := draftSkillWithHeaders(ctx, cm, r.input, target.Headers)
+		name, description, body, err := DraftSkill(ctx, generator, target, r.input)
 		if err != nil {
 			r.err = err
 			return
@@ -272,15 +247,6 @@ func (r *SkillDraftRequest) arguments(ctx context.Context, httpClient *http.Clie
 		r.args, r.err = string(args), marshalErr
 	})
 	return r.args, r.err
-}
-
-func draftSkillWithHeaders(ctx context.Context, client einoModel.BaseChatModel, input string, headers []Header) (name, description, body string, err error) {
-	if len(headers) == 0 {
-		return DraftSkill(ctx, client, input)
-	}
-	m, names := headerMap(headers)
-	ctx = withCustomHeaderNames(ctx, names)
-	return draftSkillGenerate(ctx, client, input, openai.WithExtraHeader(m))
 }
 
 // collapseSpace folds every run of whitespace to one space so a multi-line

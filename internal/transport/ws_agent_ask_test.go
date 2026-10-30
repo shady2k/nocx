@@ -170,7 +170,7 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 		// override this one entry in extra without standing up a second
 		// content db.
 		WithSkillChecks(db.SkillChecks()),
-		WithAssistantClient(client),
+		WithAssistantEngines(fixedEinoSelector(client)),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 	}
 	opts = append(opts, extra...)

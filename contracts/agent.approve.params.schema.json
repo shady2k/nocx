@@ -2,16 +2,49 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.approve.params.schema.json",
   "title": "AgentApproveParams",
-  "description": "Params for agent.approve.",
+  "x-nocx-rendererType": true,
+  "description": "Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision and how far it reaches. The scope travels with the answer because the BACKEND applies it: a renderer that read the matrix, edited a row and wrote it back would be a second owner of the policy document, racing the settings page.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["runId", "attempt", "tool", "callId", "argHash", "scope"],
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "approved", "scope"],
   "properties": {
-    "runId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "attempt": { "type": "integer", "exclusiveMinimum": 0 },
-    "tool": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "callId": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "argHash": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "scope": { "type": "string", "enum": ["once", "session", "always", "expand"] }
+    "runId": {
+      "description": "The backend-minted run id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "attempt": {
+      "description": "The run's attempt — echoed from agent.approvalRequested.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "The tool name — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "callId": {
+      "description": "The model's call id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "argHash": {
+      "description": "The canonical-argument hash — echoed from agent.approvalRequested. A changed argument hashes differently and does not resume under this approval.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "approved": {
+      "description": "The person's decision: yes resumes the run; a policy no resumes with the refusal as the call's result, while an egress no terminalizes it with agent-declined.",
+      "type": "boolean"
+    },
+    "scope": {
+      "description": "How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'expand' is not a fourth width but the distinct administrative answer to an out-of-scope question (design §5.3) — it widens the effect row's scopes to cover the resource that fell outside AND approves this call, as one act, and is accepted only where agent.approvalRequested's outOfScope.widening.available said it could be given. 'session', 'always' and 'expand' are refused for an egress question — 'always send secrets to the provider' is not a standing decision — and 'expand' is refused on a decline, because a widening is an approval.",
+      "type": "string",
+      "enum": ["once", "session", "always", "expand"]
+    }
   }
 }

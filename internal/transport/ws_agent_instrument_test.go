@@ -64,13 +64,13 @@ func TestLogAgentStreamEnded_DistinguishesRequestedExecutedAndResume(t *testing.
 func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
 	svc := &fakeAgentService{sealErr: errors.New("seal failed")}
 	logger := &instrumentLogger{}
-	h := newGapHandlers(svc, &toolCallScript{events: []assistant.AskEvent{
+	h := newGapHandlers(t, svc, &toolCallScript{events: []assistant.AskEvent{
 		answerEvent("before"),
 		callEvent("call-1", "files.read", "action-1"),
 	}}, assistant.NewApprovalStore())
 	h.log = logger
 
-	h.runAskStream(context.Background(), gapRunContext(), &gapResponder{})
+	h.runAskStream(context.Background(), gapRunContext(t, h), &gapResponder{})
 
 	if logger.record.message != "agent ask: the stream ended" {
 		t.Fatalf("message = %q, want stream-ended record", logger.record.message)

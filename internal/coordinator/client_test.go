@@ -302,11 +302,15 @@ func TestTheSpawnEnvironmentDropsTheOverridesAndKeepsTheRest(t *testing.T) {
 		"PATH=/usr/bin",
 		"NOCX_WS_ADDR=0.0.0.0:1",
 		"NOCX_NO_SYSTEM_KEYSTORE=1",
+		"NOCX_AGENT_RUNTIME_ROOT=/untrusted/inherited",
+		"NOCX_AGENT_RUNTIME_DIGEST=untrusted",
+		"NOCX_AGENT_RUNTIME_ROOT=/duplicate/inherited",
+		"NOCX_AGENT_RUNTIME_LEASE_FD=777",
 		"NOCX_TEST_APPDIR=/tmp/profile",
 		"NOCX_LOG_LEVEL=debug",
 	})
 	joined := strings.Join(got, "\n")
-	for _, gone := range []string{"NOCX_WS_ADDR", "NOCX_NO_SYSTEM_KEYSTORE"} {
+	for _, gone := range []string{"NOCX_WS_ADDR", "NOCX_NO_SYSTEM_KEYSTORE", coordinator.AgentRuntimeRootEnv, coordinator.AgentRuntimeDigestEnv, coordinator.AgentRuntimeLeaseFDEnv} {
 		if strings.Contains(joined, gone) {
 			t.Errorf("%s survived the clean: %v", gone, got)
 		}

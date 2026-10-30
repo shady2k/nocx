@@ -14,6 +14,10 @@
  */
 export interface LedgerArtifact {
   /**
+   * Maximum actual chunk sequence included in this same body snapshot, not a chunk count. Null when the snapshot includes no chunks.
+   */
+  lastSeq: number | null
+  /**
    * The artifact asked for, echoed back.
    */
   id: string

@@ -451,6 +451,11 @@ export interface AnswerBlockHandle {
    *  -deltas notice is the only one — which continues whatever run is open
    *  rather than declaring a boundary of its own. */
   append(this: void, text: string, blockId?: string): void
+  /** Replace one durable prose snapshot before applying newer live deltas. */
+  restoreProse(this: void, text: string, blockId: string): void
+  adoptChild(this: void, entryId: string, child: HTMLElement): void
+  orderChildren(this: void, entryIds: readonly string[]): void
+  provenance(this: void, engine: string, runtimeVersion: string): void
   /** Draw one tool call (agent.runToolCall) as a CHILD of the turn, in the
    *  seat it arrived at (ADR-0040). Never a top-level block: the call
    *  belongs to the turn that made it, and its position among the turn's
@@ -485,6 +490,7 @@ export interface AnswerBlockHandle {
     status: 'success' | 'failure' | 'cancelled',
     error?: string,
     model?: string,
+    durationMs?: number | null,
   ): void
 }
 
@@ -502,7 +508,7 @@ type ToolCallEffect = AgentRunToolCall['effect']
 export interface AnswerToolCall {
   callId: string
   tool: string
-  effect: ToolCallEffect
+  effect: ToolCallEffect | null
   /** What the model asked for, as the tool's schema validated it. This is
    *  what NAMES the call: the tool and the derived resource are the same for
    *  two calls of one session-scoped tool, and the arguments are what tell
@@ -554,7 +560,7 @@ const TOOL_RESULT_ABSENT = 'The result is not in the record.'
  *  It is NOT height-capped here. The body scrolls inside its own box (the
  *  component's tool-result variant), so a long result is bounded on screen
  *  without being cut — the store already bounds what is KEPT. */
-export function toolCallExpansion(
+function toolCallExpansion(
   actionEntryId: string,
   args: Record<string, unknown>,
   read: ToolResultSource,
@@ -597,6 +603,8 @@ interface AnswerBlockRecord {
   id: number
   question: string
   el: HTMLElement
+  handle: AnswerBlockHandle
+  bindRunning(actions: RunningBlockActions): void
 }
 
 export type BlockScreenAnchor = NonNullable<BlockClosed['screenAnchor']>
@@ -2033,12 +2041,10 @@ export interface BlockManagerOpts {
    *  scrollback/tool-call-title.ts. Absent in a bare-bones embedding, and
    *  then a session simply cannot be named — never rendered as its id. */
   sessionName?: (sessionId: string) => string | null
-  /** The durable text of one ANSWER entry, for the copy path (nocx-v13pd).
-   *  The manager holds no socket, so the caller that does supplies the
-   *  reader (restore-client.answerTextForEntry). Absent in a bare-bones
-   *  embedding, and then copying an answer refuses rather than falling back
-   *  to the painted text. */
+  /** The durable text of one whole answer turn, for its copy path. */
   answerText?: AnswerTextSource
+  /** The durable text of one prose child, kept separate from whole-turn copy. */
+  proseText?: AnswerTextSource
   /** Fetches the recorded provider drives for a finished answer turn. */
   dump?: DumpSource
   /** Reads back what a tool call returned (nocx-hp8p2.13). The manager holds
@@ -2115,6 +2121,7 @@ export class BlockManager {
   /** Reader for an answer's durable text — handed to the copy menu of every
    *  answer block this manager frames (nocx-v13pd). */
   private _answerText?: AnswerTextSource
+  private _proseText?: AnswerTextSource
   private _dump?: DumpSource
   /** Reads back what a tool call returned — see BlockManagerOpts. */
   private _toolResult?: ToolResultSource
@@ -2182,6 +2189,7 @@ export class BlockManager {
     this._paintStoredRows = opts.paintStoredRows
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
+    this._proseText = opts.proseText
     this._dump = opts.dump
     this._toolResult = opts.toolResult
     this._runningActions = opts.runningActions
@@ -3298,7 +3306,31 @@ export class BlockManager {
    * Returns the handle the ask surface writes the turn through; nothing else
    * touches the turn's DOM.
    */
+  answerForEntry(entryId: string, running: RunningBlockActions): AnswerBlockHandle | null {
+    const record = this._answerBlocks.find((answer) => answer.el.dataset.entryId === entryId)
+    if (!record) return null
+    record.bindRunning(running)
+    return record.handle
+  }
+
+  elementForEntry(entryId: string): HTMLElement | null {
+    for (const el of this._owned) if (el.dataset.entryId === entryId) return el
+    return null
+  }
+
   addAnswerBlock(question: string, cwd: string, running?: RunningBlockActions): AnswerBlockHandle {
+    let closed = false
+    let currentRunning = running
+    // The durable card outlives the request that first drew it. Keep its one
+    // menu attached to the operation that currently owns a replayed turn.
+    const menuActions: RunningBlockActions = {
+      stop: () => currentRunning?.stop(),
+      isActive: (block) => !closed && (currentRunning?.isActive(block) ?? false),
+      isGranted: (block) => currentRunning?.isGranted?.(block) ?? false,
+      grantsAvailable: () =>
+        currentRunning?.toggleGrant !== undefined && (currentRunning.grantsAvailable?.() ?? true),
+      toggleGrant: (block) => currentRunning?.toggleGrant?.(block),
+    }
     const id = this._nextId++
     const el = createCommandBlock(
       'ask',
@@ -3323,7 +3355,7 @@ export class BlockManager {
       // that matters here: an answer block's copy reads the ledger.
       'shell',
       this._answerText,
-      running,
+      menuActions,
       undefined,
       this._dump,
     )
@@ -3336,7 +3368,6 @@ export class BlockManager {
     // At the TAIL: below the running command's live output, which is where
     // an answer about that command belongs (nocx-hp8p2.8).
     this._own(el, null)
-    this._answerBlocks.push({ id, question, el })
 
     // The answer says it is being written, WHERE it will be written. The
     // header chip is in the corner a person checks; this is where they are
@@ -3366,6 +3397,7 @@ export class BlockManager {
     const sessionName = this._sessionName
     const toolResult = this._toolResult
     const getContainer = this._getContainer
+    const proseText = this._proseText
     const onSelect = (bid: number, sel: boolean): void => {
       if (sel) this._onBlockSelected(bid)
       else this._onBlockDeselected(bid)
@@ -3384,6 +3416,7 @@ export class BlockManager {
      *  it, so repeated calls both keep one marker and keep it at the tail.
      *  Shown for the whole turn while work is in flight. */
     const showTyping = (): void => {
+      if (closed) return
       const indicator = children.querySelector(':scope > .cmd-answer-typing')
       if (indicator) {
         children.appendChild(indicator)
@@ -3405,6 +3438,10 @@ export class BlockManager {
     let prose: { body: AnswerBody; blockId: string | null } | null = null
     let reasoningNote: Disclosure | null = null
     const seenCalls = new Set<string>()
+    const childElements = new Map<string, HTMLElement>()
+    const proseBodies = new Map<string, { body: AnswerBody; output: HTMLElement }>()
+    const seenActions = new Set<string>()
+    let engineNotice: BlockNotice | null = null
 
     /** Finish the run of prose being written. The next chunk opens a new one,
      *  which is what a `text` child is: one run, its own seat. */
@@ -3425,6 +3462,13 @@ export class BlockManager {
     const proseBody = (blockId: string | undefined): AnswerBody => {
       if (prose && (blockId === undefined || prose.blockId === blockId)) return prose.body
       endProse()
+      if (blockId) {
+        const existing = proseBodies.get(blockId)
+        if (existing) {
+          prose = { body: existing.body, blockId }
+          return existing.body
+        }
+      }
       const pid = mintId()
       const pel = createCommandBlock(
         'text',
@@ -3443,6 +3487,7 @@ export class BlockManager {
         onSelect,
         store,
         'shell',
+        proseText,
       )
       if (blockId) pel.dataset.entryId = blockId
       const outputEl = document.createElement('div')
@@ -3463,12 +3508,68 @@ export class BlockManager {
         copy: copyToClipboard,
       })
       prose = { body, blockId: blockId ?? null }
+      if (blockId) {
+        childElements.set(blockId, pel)
+        proseBodies.set(blockId, { body, output: outputEl })
+      }
       return body
     }
 
-    return {
+    const handle: AnswerBlockHandle = {
       id,
       el,
+      restoreProse(text: string, blockId: string): void {
+        proseBody(blockId)
+        const existing = proseBodies.get(blockId)!
+        const liveReasoning =
+          reasoningNote?.el && existing.output.contains(reasoningNote.el) ? reasoningNote.el : null
+        liveReasoning?.remove()
+        existing.output.replaceChildren()
+        existing.body = createAnswerBody(existing.output, { store, copy: copyToClipboard })
+        if (liveReasoning) existing.body.insert(liveReasoning)
+        prose = { body: existing.body, blockId }
+        existing.body.append(text)
+        if (closed) existing.body.finish()
+      },
+      adoptChild(entryId: string, child: HTMLElement): void {
+        if (childElements.has(entryId)) return
+        child.dataset.entryId = entryId
+        childElements.set(entryId, child)
+        children.appendChild(child)
+        own(child)
+      },
+      orderChildren(entryIds: readonly string[]): void {
+        const ordered = new Set(entryIds)
+        const remaining = Array.from(children.children).filter(
+          (child) => !ordered.has((child as HTMLElement).dataset.entryId ?? ''),
+        )
+        for (const entryId of entryIds) {
+          const child = childElements.get(entryId)
+          if (child) children.appendChild(child)
+        }
+        for (const child of remaining) children.appendChild(child)
+      },
+      provenance(engine: string, runtimeVersion: string): void {
+        el.dataset.engine = engine
+        el.dataset.runtimeVersion = runtimeVersion
+        const text =
+          engine === 'pydantic-deepagents'
+            ? 'Pydantic agent · Experimental'
+            : engine !== 'eino'
+              ? `Unknown engine: ${engine}`
+              : ''
+        if (!text) {
+          engineNotice?.root.remove()
+          engineNotice = null
+          return
+        }
+        if (engineNotice) engineNotice.say({ text })
+        else {
+          engineNotice = new BlockNotice({ text })
+          children.prepend(engineNotice.root)
+          own(engineNotice.root)
+        }
+      },
       toolCall(call: AnswerToolCall): void {
         // The dedupe exists for ONE case: an approved egress resume puts the
         // same call through the pipeline a second time, and the backend
@@ -3478,6 +3579,8 @@ export class BlockManager {
         // collide (w-call-id-order). So the key is only consulted when there
         // is one.
         if (call.callId !== '' && seenCalls.has(call.callId)) return
+        if (call.actionEntryId && seenActions.has(call.actionEntryId)) return
+        if (call.actionEntryId) seenActions.add(call.actionEntryId)
         if (call.callId !== '') seenCalls.add(call.callId)
         // The run of prose above ends here whatever the call turns out to be:
         // the backend sealed its `text` block when this call arrived, and the
@@ -3527,8 +3630,12 @@ export class BlockManager {
         // The effect the BACKEND decided, as a typed attribute: a destructive
         // call must not look like a read, and the renderer may never derive
         // an effect from a tool name (ADR-0028 decision 4).
-        cel.dataset.effect = call.effect
+        if (call.effect !== null) cel.dataset.effect = call.effect
         cel.dataset.tool = call.tool
+        if (call.actionEntryId) {
+          cel.dataset.entryId = call.actionEntryId
+          childElements.set(call.actionEntryId, cel)
+        }
         // WHAT CAME BACK, ON DEMAND (nocx-hp8p2.13). The header names the
         // call; this is the rest of the account of it. It is drawn only
         // where something can actually read the record, and it reads
@@ -3585,7 +3692,14 @@ export class BlockManager {
         proseBody(blockId).append(text)
         showTyping()
       },
-      close(status: 'success' | 'failure' | 'cancelled', error?: string, model?: string): void {
+      close(
+        status: 'success' | 'failure' | 'cancelled',
+        error?: string,
+        model?: string,
+        durationMs?: number | null,
+      ): void {
+        if (closed) return
+        closed = true
         el.dataset.turnState = status
         el.dispatchEvent(new Event('nocx:block-settled'))
         stopWaiting()
@@ -3598,7 +3712,10 @@ export class BlockManager {
         // ONE owner (nocx-hoeq3, nocx-9bpeq.6): how long the turn took and
         // how it ended, as the ask kind's rules say them. One header now, so
         // the outcome lands where the question is and nowhere else.
-        settleBlockOutcome(el, 'ask', now() - startedAt, { status, exitCode: null })
+        settleBlockOutcome(el, 'ask', durationMs === undefined ? now() - startedAt : durationMs, {
+          status,
+          exitCode: null,
+        })
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going to
         // look it up. The value is the ask result's pinned model — this run's
@@ -3618,6 +3735,16 @@ export class BlockManager {
         }
       },
     }
+    this._answerBlocks.push({
+      id,
+      question,
+      el,
+      handle,
+      bindRunning: (actions) => {
+        currentRunning = actions
+      },
+    })
+    return handle
   }
 
   /** Close every body-level menu this manager owns before its pane hides. */

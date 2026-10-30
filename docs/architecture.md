@@ -83,6 +83,7 @@ Raw terminal bytes and raw marker sequences never cross the WebSocket as text. T
 | `transport`        | Serve one WebSocket per client; multiplex sessions; carry the binary data plane (PTY I/O) and the JSON-RPC control plane; enforce reconnect replay (AD-9) and backpressure (AD-10).                             |
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
 | `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
+| `assistant`        | Own shared run authority, tool execution, model HTTP policy and the engine-selection interface; register Eino and the default-off experimental Pydantic loop at the composition root.                           |
 
 The pure `toolendpoint/panebind` contract owns the tool bearer's wire format and
 private MCP environment name. Shell staging renders that name into the private
@@ -236,6 +237,22 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 ## Cross-Cutting Concerns
 
 **DI / replaceability.** Modules depend only on abstractions; the composition root is the one place concrete implementations are chosen and wired. Swapping SSH backends, transports, or loggers is a one-line change at the root, and every module is independently testable via injected fakes.
+
+**Assistant engine boundary.** [ADR-zkvkzrzc](decisions/zkvkzrzc-an-experimental-loop-shares-the-go-owned-run-authority.md)
+keeps one Go-owned run host behind both engines. The experimental native Python
+SDK owns model parsing and the loop, not credentials, network access, filesystem
+effects, approval or durable history. Its private framed stdio protocol does not
+replace the WebSocket or PTY data plane. A tool result crosses into Python only
+after the existing Go screening and release decision.
+
+The selected engine and verified runtime digest are pinned to each admitted
+operation. Changing the setting affects new operations only; continuation and
+read-only replay retain original provenance and never fall back to Eino.
+Launchers stage the complete runtime on both platforms before mutable package
+resources can disappear. Shared leases span launcher, coordinator and worker;
+startup pruning acquires an exclusive lease through validation and deletion and
+keeps live or uncertain trees. Runtime staging failure leaves Eino available and
+makes experimental selection fail explicitly.
 
 **Shutdown ownership.** The composition root closes the encrypted content store
 after transport shutdown has joined every admitted session-output recorder,

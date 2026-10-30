@@ -1,16 +1,15 @@
 package backup
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"hash"
-	"io"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/shady2k/nocx/internal/jsoncheck"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
@@ -886,8 +885,8 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 
 	// Detect duplicate keys before the main decode so the token-level walk
 	// sees the raw JSON before encoding/json's "last value wins" consumes it.
-	if err := detectDuplicateKeys([]byte(contents)); err != nil {
-		return Document{}, RestoreOmissions{}, err
+	if err := jsoncheck.UniqueKeys([]byte(contents)); err != nil {
+		return Document{}, RestoreOmissions{}, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
 	}
 
 	var doc Document
@@ -1050,77 +1049,6 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 		omissions.GroupDefaultKeysOmitted += len(g.OmittedDefaultKeys)
 	}
 	return doc, omissions, nil
-}
-
-// detectDuplicateKeys walks the JSON tokens of raw and returns an error if
-// any object contains duplicate keys (decoded-equivalent after Unicode escape
-// resolution). This is stricter than the encoding/json behavior of "last
-// value wins" and catches tampered files.
-func detectDuplicateKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	if err := checkObjectDuplicates(dec); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidDocument, err)
-	}
-	if _, err := dec.Token(); err == io.EOF {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidDocument, err)
-	}
-	return fmt.Errorf("%w: trailing content after JSON", ErrInvalidDocument)
-}
-
-func checkObjectDuplicates(dec *json.Decoder) error {
-	t, err := dec.Token()
-	if err != nil {
-		return err
-	}
-	delim, ok := t.(json.Delim)
-	if !ok {
-		return nil
-	}
-
-	switch delim {
-	case '{':
-		seen := make(map[string]struct{})
-		for dec.More() {
-			keyTok, err := dec.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyTok.(string)
-			if !ok {
-				return fmt.Errorf("expected string key, got %T", keyTok)
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return fmt.Errorf("duplicate key %q", key)
-			}
-			seen[key] = struct{}{}
-			if err := checkObjectDuplicates(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim('}') {
-			return fmt.Errorf("expected object end, got %v", end)
-		}
-	case '[':
-		for dec.More() {
-			if err := checkObjectDuplicates(dec); err != nil {
-				return err
-			}
-		}
-		end, err := dec.Token()
-		if err != nil {
-			return err
-		}
-		if end != json.Delim(']') {
-			return fmt.Errorf("expected array end, got %v", end)
-		}
-	}
-	return nil
 }
 
 // valuesEqual reports whether a and b are semantically equal.

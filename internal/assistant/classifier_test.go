@@ -82,10 +82,10 @@ func (f failIfCalledClassifier) Classify(context.Context, ClassifyInput) (Classi
 // fixedResolver serves one (endpoint, model, key) — the classifier role's
 // class, as the transport would resolve them.
 type fixedResolver struct {
-	target ClassifierTarget
+	target ModelTarget
 }
 
-func (f fixedResolver) ResolveClassifier(context.Context) (ClassifierTarget, error) {
+func (f fixedResolver) ResolveClassifier(context.Context) (ModelTarget, error) {
 	return f.target, nil
 }
 
@@ -95,8 +95,8 @@ type failingResolver struct {
 	err error
 }
 
-func (f failingResolver) ResolveClassifier(context.Context) (ClassifierTarget, error) {
-	return ClassifierTarget{}, f.err
+func (f failingResolver) ResolveClassifier(context.Context) (ModelTarget, error) {
+	return ModelTarget{}, f.err
 }
 
 // failCountingServer is the classifier provider criterion 4 asserts on: it
@@ -147,8 +147,8 @@ func classifyCompletion(content string) string {
 // classifierTargetAt builds the resolved classifier target for a test
 // server, the shape the transport would produce when the classifier role
 // resolves.
-func classifierTargetAt(url string) ClassifierTarget {
-	return ClassifierTarget{Key: credential.NewSecret("sk-clf-test"), BaseURL: url, Model: "clf-model"}
+func classifierTargetAt(url string) ModelTarget {
+	return ModelTarget{Key: credential.NewSecret("sk-clf-test"), BaseURL: url, Model: "clf-model"}
 }
 
 // askParamsWithClassifier is askParams plus the classifier resolver — the

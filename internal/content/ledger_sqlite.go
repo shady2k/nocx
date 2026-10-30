@@ -530,7 +530,7 @@ func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]
 	// connection store deadlocks against itself.
 	out := make([]Artifact, 0, len(ids))
 	for _, id := range ids {
-		a, err := s.artifactByID(ctx, id)
+		a, err := artifactByID(ctx, s.conn(ctx), id)
 		if err != nil {
 			return nil, err
 		}
@@ -1403,28 +1403,42 @@ func (s *sqliteContent) AppendChunk(ctx context.Context, artifactID string, seq 
 // Artifact returns one artifact with its chunk bodies, or nil when no
 // artifact carries id.
 func (s *sqliteContent) Artifact(ctx context.Context, id string) (*Artifact, error) {
-	a, err := s.artifactByID(ctx, id)
+	tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer txEnd.rollback()
+	a, err := artifactByID(ctx, tx, id)
 	if err != nil || a == nil {
 		return a, err
 	}
-	rows, err := s.conn(ctx).QueryContext(ctx,
-		`SELECT body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, id)
+	rows, err := tx.QueryContext(ctx,
+		`SELECT seq, body FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var body []byte
-		if err := rows.Scan(&body); err != nil {
+		if err := rows.Scan(&a.LastSeq, &body); err != nil {
 			return nil, err
 		}
 		a.Chunks = append(a.Chunks, body)
 	}
-	return a, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := txEnd.commit(); err != nil {
+		return nil, err
+	}
+	return a, nil
 }
 
 // artifactByID reads one artifact row plus its chunk count, without bodies.
-func (s *sqliteContent) artifactByID(ctx context.Context, id string) (*Artifact, error) {
+func artifactByID(ctx context.Context, q rowQuerier, id string) (*Artifact, error) {
 	var a Artifact
 	var gapsJSON string
 	var stream, truncated sql.NullString
@@ -1432,7 +1446,7 @@ func (s *sqliteContent) artifactByID(ctx context.Context, id string) (*Artifact,
 	// are only meaningful together: zero bytes is what a body retention took
 	// and a capture that held nothing BOTH look like, and this is the column
 	// that tells them apart.
-	err := s.conn(ctx).QueryRowContext(ctx, `SELECT a.id, a.entry_id, a.execution_id, a.media_type,
+	err := q.QueryRowContext(ctx, `SELECT a.id, a.entry_id, a.execution_id, a.media_type,
 		a.derived_from,
 		a.state, a.byte_len, (SELECT count(*) FROM artifact_chunks c WHERE c.artifact_id = a.id),
 		a.pinned, a.truncated, a.capture_method, a.capture_version, a.terminal_cols,
@@ -1799,7 +1813,7 @@ func (s *sqliteContent) artifactsFor(ctx context.Context, executionID int64) ([]
 	}
 	out := make([]Artifact, 0, len(ids))
 	for _, id := range ids {
-		a, err := s.artifactByID(ctx, id)
+		a, err := artifactByID(ctx, s.conn(ctx), id)
 		if err != nil {
 			return nil, err
 		}

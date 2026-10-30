@@ -479,6 +479,10 @@ jobs:
       - name: The built binary embeds this machine's helper for every platform this app runs on
         run: go test -v ./internal/helper/deploy/artifacts -count=1
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.16'
+
       - name: Build universal bundle
         run: |
           set -euo pipefail
@@ -541,6 +545,12 @@ jobs:
             build/bin/darwin-amd64/nocx-server build/bin/darwin-arm64/nocx-server
           cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
           cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
+          for target in darwin-amd64 darwin-arm64; do
+            runtime="build/bin/nocx.app/Contents/Resources/agent-runtime/$target"
+            python3 scripts/package-agent-runtime.py --target "$target" --output "$runtime"
+            python3 scripts/package-agent-runtime.py --target "$target" --output "$runtime" --sign "$SIGN_IDENTITY"
+            python3 scripts/package-agent-runtime.py --target "$target" --output "$runtime" --verify
+          done
           # THE PINNED THIRD-PARTY NOTICES, AND BEFORE THE SIGNATURE BELOW.
           # The bundle is how our distribution reaches a user: it carries the
           # app, the coordinator, and the helper artifacts the app embeds —
@@ -1114,6 +1124,13 @@ jobs:
       # can be run against a real build outside a tag push. Packaging that only
       # exists inside a workflow cannot be tested before it ships, and this step
       # is exactly where nocx-azxe.7 shipped from.
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13.16'
+
+      - name: Build the frozen Linux agent runtime
+        run: python3 scripts/package-agent-runtime.py --target linux-amd64
+
       - name: Package AppImage
         run: scripts/appimage/package-appimage.sh
 

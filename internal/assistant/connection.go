@@ -54,10 +54,10 @@ type modelListResponse struct {
 	} `json:"data"`
 }
 
-// probeConnection performs the no-model check. Like Probe, a dial failure or
-// a refused credential is a RESULT with OK=false, never a Go error; a Go
-// error means the check could not run at all.
-func (c *client) probeConnection(ctx context.Context, p ProbeParams) (ProbeResult, error) {
+// CheckConnection performs the shared no-model check. Like Probe, a dial
+// failure or refused credential is a result with OK=false; a Go error means
+// the check could not run at all. It uses the same guarded model transport.
+func CheckConnection(ctx context.Context, httpFactory ModelHTTPFactory, p ProbeParams) (ProbeResult, error) {
 	base := strings.TrimSpace(p.BaseURL)
 	if base == "" {
 		return ProbeResult{}, errProbeInvalid("base URL is required")
@@ -106,7 +106,7 @@ func (c *client) probeConnection(ctx context.Context, p ProbeParams) (ProbeResul
 		req = req.WithContext(withCustomHeaderNames(req.Context(), names))
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := httpFactory.NewModelHTTPClient().Do(req)
 	if err != nil {
 		// Never reached the endpoint: the dial, the address rule, TLS, the
 		// timeout. This is the failure the button exists to report.

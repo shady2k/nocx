@@ -1,59 +1,37 @@
 package assistant
 
-// THE DECLARED-CALL CARRIER: the model names one effect at a time, the host
-// runs it through the effect kernel, and the result returns to the model
-// before it names the next.
-//
-// The effect kernel remains the single owner of validation, policy, attempt
-// recording, narrowed capability, execution and egress screening. This
-// interface keeps the framework adapter independent from that owner.
-
 import (
-	"context"
 	"fmt"
 	"strings"
 
-	"github.com/cloudwego/eino/components/tool"
-
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/content"
 )
 
-type carrier interface {
-	Declare(permitted []agenttools.Tool) ([]tool.BaseTool, error)
-	Invoke(ctx context.Context, name, callID, rawArgs string) (modelResult, error)
-	FrameForModel(tool, result string) string
-	UnknownTool(name, rawArgs string) (string, error)
-}
-
-// ── The declared-call carrier ──────────────────────────────────────────
-
-// callsCarrier is the kernel offered directly: every declared tool is a tool
-// the model may name, and one invocation is one effect.
-type callsCarrier struct{ *effectKernel }
-
-func (c *callsCarrier) Invoke(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
-	return c.effectKernel.invokeClassified(ctx, name, callID, rawArgs)
-}
-
-func (c *callsCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, error) {
-	return declaredTools(permitted)
-}
-
-func (c *callsCarrier) UnknownTool(name, _ string) (string, error) {
-	if refused := c.effectKernel.registry.RefusedEffects(c.effectKernel.grant, name); len(refused) > 0 {
+// unknownToolResult is policy-aware but effect-free. Both engine adapters use
+// this response; an undeclared name can never dispatch through this path.
+func unknownToolResult(registry agenttools.Registry, grant content.Grant, name string, toolName func(string) string) string {
+	if refused := registry.RefusedEffects(grant, name); len(refused) > 0 {
 		if len(refused) == 1 {
-			return refusalResult(name, RefusedByDecision, ""), nil
+			return refusalResult(renderModelToolName(name, toolName), RefusedByDecision, "")
 		}
-		return withheldToolResult(name, refused), nil
+		return withheldToolResult(renderModelToolName(name, toolName), refused)
+	}
+	names := presentationToolNames(registry.ForGrant(grant))
+	for i, name := range names {
+		names[i] = renderModelToolName(name, toolName)
+	}
+	displayName := name
+	if _, known := registry.Lookup(name); known {
+		displayName = renderModelToolName(name, toolName)
 	}
 	return fmt.Sprintf("There is no such tool %q. The tools you may call are the ones you were given and no others: %s.",
-		name, strings.Join(permittedNames(c.effectKernel), ", ")), nil
+		displayName, strings.Join(names, ", "))
 }
 
-func permittedNames(k *effectKernel) []string {
-	var out []string
-	for _, t := range k.registry.ForGrant(k.grant) {
-		out = append(out, t.Name)
+func renderModelToolName(name string, mapper func(string) string) string {
+	if mapper != nil {
+		return mapper(name)
 	}
-	return out
+	return name
 }

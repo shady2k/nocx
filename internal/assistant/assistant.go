@@ -1,20 +1,11 @@
-// Package assistant is the AI assistant's model access, behind one
-// interface (ADR-0028, design §4). eino runs the loop; this package is the
-// one owner of the eino wiring, the guarded HTTP client and the probe — the
-// rest of the app depends on Client, never on eino types, and nothing in
-// the product reads eino's state to answer a question the ledger answers
-// (ADR-0019).
+// Package assistant owns the shared Go run host and model-access contracts.
+// The host wraps the existing effect kernel: grants, approvals, history,
+// narrowed capabilities, result disclosure and tool framing keep one owner.
 //
-// The engine is adk.ChatModelAgent with the OpenAI-compatible adapter
-// (ADR-0028 decision 1; design §4.1). Explain mode is the ONLY mode this
-// slice knows: zero tools declared, terminate after the first completed
-// response, context is question + referenced frames (design §4.2). The
-// tools, the policy middleware, the grant and the narrowed capability are
-// nocx-lndv and deliberately do not live here.
-//
-// The HTTP client every model call goes through enforces design §4.5
-// decision 3 at dial time — see httpguard.go for the rule and the four
-// reasons it cannot live in the form.
+// Eino remains a live Client implementation. Its framework adapter drives the
+// loop through RunHost, while auxiliary drafting, auditing and classification
+// use TextGenerator without depending on framework messages or model options.
+// Every model transport shares the guarded HTTP client and wire recorder.
 package assistant
 
 import (
@@ -22,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
 	"time"
 
 	tools "github.com/shady2k/nocx/contracts/tools"
@@ -233,6 +223,9 @@ type SkillLibrary interface {
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {
+	// ModelToolName renders only host-owned tool references for this engine.
+	// Canonical identities still bind approvals, events and ledger records.
+	ModelToolName func(string) string
 	// Key is the endpoint's resolved credential. Never persisted, never
 	// echoed; it lives only in the model config for the call's duration.
 	Key credential.Secret
@@ -369,6 +362,14 @@ type AskParams struct {
 	RunID     string
 	SessionID string
 	Attempt   int
+	// Resume continues a retained, parked operation. A missing continuation is
+	// an error, never permission to start a fresh model drive or repeat effects.
+	Resume bool
+	// OnRuntimeLost reports an unexpected subprocess or protocol loss once,
+	// including while a run is parked for approval. The transport owns its
+	// terminal transition and may synchronously Discard the run, so the callback
+	// must run outside a reaper that Discard joins. Eino never calls it.
+	OnRuntimeLost func(error)
 	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
 	// since ADR-0039, and what everything this run causes is joined to by a
 	// `caused-by` edge (nocx-h1l4o).
@@ -460,6 +461,8 @@ const (
 // agent.status's lastProbe — the Go DTO lives here so the transport maps
 // to it directly.
 type ProbeResult struct {
+	Engine         string `json:"engine"`
+	RuntimeVersion string `json:"runtimeVersion"`
 	// EndpointName is the probed draft's display name. Historical fact:
 	// agent.status reports the last probe whatever the endpoint list says
 	// now.
@@ -498,13 +501,16 @@ type ProbeResult struct {
 // NewClientAndRegistry builds the assistant and returns the exact registry
 // used by its engine. The composition root passes that same registry to
 // transport so prompt offers and execution use one declaration table.
-func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
+func NewClientAndRegistry(logger log.Logger, httpFactory ModelHTTPFactory, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
+	if httpFactory == nil {
+		return nil, agenttools.Registry{}, errors.New("assistant: guarded model HTTP factory is not configured")
+	}
 	reg, err := assembleToolRegistry(tools.Schemas, skillRoots)
 	if err != nil {
 		return nil, agenttools.Registry{}, err
 	}
 	searchSchema, _ := fs.ReadFile(tools.Schemas, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
+	return newClientWithRegistry(logger, reg, httpFactory, floor, searchSchema), reg, nil
 }
 
 func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {
@@ -526,31 +532,25 @@ func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Regist
 	return reg, nil
 }
 
-func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, floor content.Floor, searchSchema ...[]byte) Client {
+func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, httpFactory ModelHTTPFactory, floor content.Floor, searchSchema ...[]byte) Client {
+	generator := NewEinoTextGenerator(httpFactory)
 	var schema []byte
 	if len(searchSchema) > 0 {
-		schema = append([]byte(nil), searchSchema[0]...)
+		schema = searchSchema[0]
 	}
 	return &client{
-		log:          logger,
-		http:         newGuardedHTTPClient(logger, nil, recorder),
-		tools:        reg,
-		searchSchema: schema,
-		floor:        floor,
-		approvals:    NewApprovalStore(),
-		checkpoints:  newRunCheckpoints(),
-		snapshots:    newRunSnapshots(),
+		log:         logger,
+		httpFactory: httpFactory,
+		generator:   generator,
+		hosts:       newRunHostFactory(reg, floor, generator, schema),
+		checkpoints: newRunCheckpoints(),
 	}
 }
 
 type client struct {
-	log          log.Logger
-	http         *http.Client
-	tools        agenttools.Registry
-	searchSchema []byte
-	floor        content.Floor
-
-	approvals   *ApprovalStore
+	log         log.Logger
+	httpFactory ModelHTTPFactory
+	generator   TextGenerator
+	hosts       *runHostFactory
 	checkpoints *runCheckpoints
-	snapshots   *runSnapshots
 }

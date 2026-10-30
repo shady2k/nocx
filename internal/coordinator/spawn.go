@@ -43,6 +43,12 @@ type Spawner interface {
 	Spawn(ctx context.Context) (Spawned, error)
 }
 
+const (
+	AgentRuntimeRootEnv    = "NOCX_AGENT_RUNTIME_ROOT"
+	AgentRuntimeDigestEnv  = "NOCX_AGENT_RUNTIME_DIGEST"
+	AgentRuntimeLeaseFDEnv = "NOCX_AGENT_RUNTIME_LEASE_FD"
+)
+
 // ExecSpawnerConfig is what the composition root knows and this package
 // must not guess: where the binary is.
 type ExecSpawnerConfig struct {
@@ -51,6 +57,13 @@ type ExecSpawnerConfig struct {
 	// copy under ~/.local/share on Linux (design §4) — and that is the
 	// caller's knowledge, not this package's.
 	Path string
+	// AgentRuntimeRoot/Digest pin the launcher's selected immutable bundle.
+	// Empty root is explicit unavailability, not a request to discover Python.
+	AgentRuntimeRoot   string
+	AgentRuntimeDigest string
+	// AgentRuntimeLease remains owned by the launcher; exec gives the child
+	// its own descriptor of the same shared lock before the launcher closes.
+	AgentRuntimeLease *os.File
 	// Environ supplies the launcher's environment. nil means os.Environ,
 	// which is what production wants; a test supplies its own.
 	Environ func() []string
@@ -104,7 +117,13 @@ func (s *ExecSpawner) Spawn(ctx context.Context) (Spawned, error) {
 	// The context bounds the launcher's WAIT, not the daemon's life.
 	//nolint:gosec // the path comes from the composition root, never from a caller or the wire
 	cmd := exec.Command(s.cfg.Path)
-	cmd.Env = SpawnEnvironment(s.environ())
+	cmd.Env = append(SpawnEnvironment(s.environ()),
+		AgentRuntimeRootEnv+"="+s.cfg.AgentRuntimeRoot,
+		AgentRuntimeDigestEnv+"="+s.cfg.AgentRuntimeDigest)
+	if s.cfg.AgentRuntimeLease != nil {
+		cmd.ExtraFiles = []*os.File{s.cfg.AgentRuntimeLease}
+		cmd.Env = append(cmd.Env, AgentRuntimeLeaseFDEnv+"=3")
+	}
 	// A nil Stdin/Stdout/Stderr is /dev/null for os/exec, which is exactly
 	// what is wanted and is stated here because "nil" does not say it.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
@@ -222,6 +241,9 @@ func SpawnDirectory(environ []string) string {
 //     would change nothing. The rule it serves is the one that matters: the
 //     stance is never something any process of the user can supply, and the
 //     cheapest way to keep that true is for the daemon never to see it.
+//   - NOCX_AGENT_RUNTIME_ROOT and NOCX_AGENT_RUNTIME_DIGEST are replaced by
+//     explicit launcher configuration. Empty values pin unavailability;
+//     inherited shell values can never select another runtime tree.
 //
 // Deliberately NOT on the list, because the reasoning runs the other way:
 //
@@ -238,6 +260,9 @@ func SpawnDirectory(environ []string) string {
 var inheritedOverrides = []string{
 	"NOCX_WS_ADDR",
 	"NOCX_NO_SYSTEM_KEYSTORE",
+	AgentRuntimeRootEnv,
+	AgentRuntimeDigestEnv,
+	AgentRuntimeLeaseFDEnv,
 }
 
 // SpawnEnvironment returns environ with the overrides above removed.
@@ -246,7 +271,8 @@ var inheritedOverrides = []string{
 // process: the list is the point, and a test that had to spawn something to
 // read it would be testing exec.
 func SpawnEnvironment(environ []string) []string {
-	cleaned := make([]string, 0, len(environ))
+	// Spawn appends root/digest and, when supplied, the leased descriptor.
+	cleaned := make([]string, 0, len(environ)+3)
 	for _, entry := range environ {
 		name, _, _ := strings.Cut(entry, "=")
 		if slices.Contains(inheritedOverrides, name) {

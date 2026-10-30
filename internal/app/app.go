@@ -30,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/app/clienthost"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/assistant/pydantic"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
@@ -130,6 +131,9 @@ type App struct {
 	noteCloser interface{ Close() error }
 	// contentCloser owns the encrypted store after New opens it.
 	contentCloser interface{ Close() error }
+	// agentRuntimeCloser releases this coordinator's immutable-runtime lease
+	// after transport shutdown. A surviving child retains its inherited lease.
+	agentRuntimeCloser interface{ Close() error }
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
@@ -2115,12 +2119,43 @@ func New(opts ...Option) (*App, error) {
 	// vault, ledger, and shell-integration documents; no policy layer can
 	// widen it.
 	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
-	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor, skill.FilesystemRoots(skillRoots))
+	modelHTTP := assistant.NewModelHTTPFactory(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()})
+	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, modelHTTP, floor, skill.FilesystemRoots(skillRoots))
 	if err != nil {
 		return nil, err
 	}
+	executable, executableErr := os.Executable()
+	if executableErr != nil {
+		log.From(ctx).Warn("experimental agent executable path unavailable", "error", executableErr)
+	}
+	agentRuntime := newAgentRuntimeLocator(ctx, executable, paths.DataDir())
+	runtimeOwnedByApp := false
+	defer func() {
+		if !runtimeOwnedByApp {
+			_ = agentRuntime.Close()
+		}
+	}()
+	experimentalClient, err := pydantic.NewClient(pydantic.Config{
+		NewHosts: func(generator assistant.TextGenerator) assistant.RunHostFactory {
+			return assistant.NewRunHostFactory(agentToolRegistry, floor, generator)
+		},
+		HTTP:     modelHTTP,
+		Registry: agentToolRegistry,
+		Runtime:  agentRuntime,
+	})
+	if err != nil {
+		return nil, err
+	}
+	assistantEngines := assistant.NewEngineSelector(
+		assistant.Engine{ID: assistant.EngineEino, RuntimeVersion: version.ModuleVersion("github.com/cloudwego/eino"), Client: assistantClient},
+		assistant.Engine{ID: assistant.EnginePydantic, Client: experimentalClient, ToolName: experimentalClient.ModelToolName},
+		func(context.Context) (bool, error) {
+			return settingsRegistry.GetBool(settings.AssistantExperimentalAgent)
+		},
+		experimentalClient.RuntimeVersion,
+	)
 	tpOpts = append(tpOpts,
-		transport.WithAssistantClient(assistantClient),
+		transport.WithAssistantEngines(assistantEngines),
 		transport.WithAssistantProbeStore(assistantProbes),
 		transport.WithSkillSource(skills),
 		transport.WithAgentToolRegistry(agentToolRegistry),
@@ -2787,6 +2822,7 @@ func New(opts ...Option) (*App, error) {
 		vaultCloser:             v,
 		noteCloser:              noteCloser,
 		contentCloser:           contentDB,
+		agentRuntimeCloser:      agentRuntime,
 		discoverySched:          discoverySched,
 		gitFactory:              gitFactory,
 		workerCheckouts:         checkouts,
@@ -2835,6 +2871,7 @@ func New(opts ...Option) (*App, error) {
 	tp.SetAttentionActivation(attention)
 
 	logger.Info("application initialized")
+	runtimeOwnedByApp = true
 	return app, nil
 }
 
@@ -3444,6 +3481,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	}
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	if a.agentRuntimeCloser != nil {
+		if err := a.agentRuntimeCloser.Close(); err != nil {
+			log.From(ctx).Error("experimental agent runtime lease shutdown error", "error", err)
+		}
 	}
 	// After the transport, so no pane can still be opening. The daemon and
 	// every session on it survive this — closing the connection is this

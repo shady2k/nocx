@@ -15,8 +15,9 @@ import { RpcError } from './dispatcher'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { UnreconciledCause } from './unreconciled-notice'
 import type { LedgerArtifact } from './generated/ledger.artifact'
-import type { Caused, LedgerGet } from './generated/ledger.get'
+import type { AgentRun, Caused, LedgerGet } from './generated/ledger.get'
 import { parseStoredBlockRows, type StoredBlockRows } from './scrollback/block-rows'
+import type { AnswerBlockHandle } from './scrollback/blocks'
 
 /** How many blocks a pane comes back with.
  *
@@ -127,17 +128,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
   })
   return page.entries
     .filter((e) => e.kind !== 'action')
-    .map((e) => ({
-      entryId: e.id,
-      command: e.intent,
-      cwd: e.cwd,
-      host: e.host ?? '',
-      status: frozenStatus(e.status, e.unreconciled ?? null, e.terminationReason ?? null),
-      unreconciled: e.unreconciled ?? null,
-      durationMs: e.durationMs,
-      exitCode: e.exitCode,
-      author: authorFromSource(e.source),
-    }))
+    .map(restorableBlock)
     .reverse()
 }
 
@@ -161,6 +152,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
 interface FetchedArtifact {
   readonly metadata: LedgerGet['artifacts'][number]
   readonly body: string
+  readonly lastSeq: number | null
 }
 
 async function readArtifact(
@@ -173,7 +165,7 @@ async function readArtifact(
     const metadata = entry.artifacts.find((a) => a.mediaType === mediaType)
     if (!metadata) return null
     const artifact = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
-    return { metadata, body: artifact.body }
+    return { metadata, body: artifact.body, lastSeq: artifact.lastSeq }
   } catch {
     return null
   }
@@ -259,7 +251,7 @@ async function readBlockRowsForEntry(client: WSClient, entryId: string): Promise
     const metadata = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
     if (!metadata) return { kind: 'absent' }
     const read = await client.call<LedgerArtifact>('ledger.artifact', { id: metadata.id })
-    artifact = { metadata, body: read.body }
+    artifact = { metadata, body: read.body, lastSeq: read.lastSeq }
   } catch (err) {
     return { kind: 'unreadable', reason: `the stored rows could not be read: ${reasonOf(err)}` }
   }
@@ -378,6 +370,83 @@ export async function answerTextForTurn(client: WSClient, entryId: string): Prom
  *  would be a second owner of a relation the ledger already owns (AD-8). */
 export type RestoredCause = Caused
 
+export interface TurnSnapshot {
+  entry: LedgerGet['entry']
+  agentRuns: AgentRun[]
+  caused: RestoredCause[]
+  proseEvicted: boolean
+  prose: Map<string, { body: string; lastSeq: number | null }>
+}
+
+/** One durable snapshot per prose artifact: its bytes and maximum included
+ * sequence come from the same transaction, never from a chunk count. */
+export async function readTurnSnapshot(
+  client: Pick<WSClient, 'call'>,
+  entryId: string,
+  metadata?: LedgerGet,
+): Promise<TurnSnapshot> {
+  const entry = metadata ?? (await client.call<LedgerGet>('ledger.get', { id: entryId }))
+  if (entry.entry.kind !== 'ask') throw new Error('The saved entry is not an assistant turn')
+  const prose = new Map<string, { body: string; lastSeq: number | null }>()
+  for (const cause of entry.caused) {
+    if (cause.kind !== 'text') continue
+    const child = await client.call<LedgerGet>('ledger.get', { id: cause.entryId })
+    const artifact = child.artifacts.find((a) => a.mediaType === 'text/plain')
+    if (!artifact) continue
+    const saved = await client.call<LedgerArtifact>('ledger.artifact', { id: artifact.id })
+    prose.set(cause.entryId, { body: saved.body, lastSeq: saved.lastSeq })
+  }
+  return {
+    entry: entry.entry,
+    agentRuns: entry.agentRuns,
+    caused: entry.caused,
+    proseEvicted: entry.proseEvicted,
+    prose,
+  }
+}
+
+/** The same identity-based child reconciliation serves pane restore and ask
+ * replay. Command construction remains with the pane's existing row renderer. */
+export async function reconcileTurn(
+  handle: AnswerBlockHandle,
+  snapshot: Pick<TurnSnapshot, 'agentRuns' | 'caused' | 'proseEvicted' | 'prose'>,
+  drawCommand: (cause: RestoredCause) => Promise<HTMLElement | null> | HTMLElement | null,
+): Promise<Map<string, number>> {
+  const watermarks = new Map<string, number>()
+  for (const cause of snapshot.caused) {
+    if (cause.kind === 'text') {
+      const saved = snapshot.prose.get(cause.entryId)
+      if (saved) {
+        handle.restoreProse(saved.body, cause.entryId)
+        watermarks.set(cause.entryId, saved.lastSeq ?? -1)
+      }
+    } else if (cause.kind === 'action') {
+      if (cause.opensBlock) continue
+      handle.toolCall({
+        callId: '',
+        actionEntryId: cause.entryId,
+        tool: cause.intent ?? '',
+        args: cause.args ?? {},
+        effect: cause.effect,
+        resource: cause.resource ?? undefined,
+        opensBlock: false,
+      })
+    } else {
+      const child = await drawCommand(cause)
+      if (child) handle.adoptChild(cause.entryId, child)
+    }
+  }
+  handle.orderChildren(snapshot.caused.map((cause) => cause.entryId))
+  if (snapshot.proseEvicted && handle.el.dataset.proseEvicted !== 'true') {
+    handle.el.dataset.proseEvicted = 'true'
+    handle.notice({ text: 'Output is no longer kept', tone: 'warning' }).root.dataset.proseEvicted =
+      'true'
+  }
+  const run = snapshot.agentRuns[snapshot.agentRuns.length - 1]
+  if (run) handle.provenance(run.engine, run.runtimeVersion)
+  return watermarks
+}
+
 /** What a restored entry turns out to be, and the body to draw it with.
  *
  *  `kind` is the block's GRAMMAR (blocks.ts BlockKind): a terminal grid must
@@ -413,6 +482,8 @@ export interface RestoredBody {
    * once (ADR-0019 §2).
    */
   caused: RestoredCause[]
+  turn?: TurnSnapshot
+  readError?: string
 }
 
 /**
@@ -437,12 +508,42 @@ export interface RestoredBody {
  * artifact. The kind and the causal flow fall out of the first call — which
  * is why the relation cost this path no round trip at all.
  */
-export async function restoredBody(client: WSClient, entryId: string): Promise<RestoredBody> {
+export async function restoredBody(
+  client: WSClient,
+  entryId: string,
+  metadata?: LedgerGet,
+): Promise<RestoredBody> {
   try {
-    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const entry = metadata ?? (await client.call<LedgerGet>('ledger.get', { id: entryId }))
     const caused = entry.caused ?? []
+    if (entry.entry.kind === 'ask') {
+      try {
+        return {
+          kind: 'ask',
+          body: null,
+          caused,
+          proseEvicted: entry.proseEvicted,
+          turn: await readTurnSnapshot(client, entryId, entry),
+        }
+      } catch (err) {
+        return {
+          kind: 'ask',
+          body: null,
+          caused,
+          proseEvicted: entry.proseEvicted,
+          turn: {
+            entry: entry.entry,
+            agentRuns: entry.agentRuns,
+            caused,
+            proseEvicted: entry.proseEvicted,
+            prose: new Map(),
+          },
+          readError: `The saved answer could not be read: ${reasonOf(err)}`,
+        }
+      }
+    }
     const rows = entry.artifacts.find((a) => a.mediaType === 'application/x-nocx-rows')
-    if (entry.entry.kind !== 'ask' && rows) {
+    if (rows) {
       // Restoration shares the in-flight row read used by notifications.
       // Reading the large artifact through the coalescing reader avoids a
       // second response when restoration races a block notification.
@@ -457,10 +558,10 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     }
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    const chosen = entry.entry.kind === 'ask' ? undefined : (vt ?? text)
+    const chosen = vt ?? text
     if (!chosen) {
       return {
-        kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
+        kind: 'command',
         body: null,
         caused,
         proseEvicted: !!entry.proseEvicted,
@@ -468,7 +569,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
     return {
-      kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
+      kind: 'command',
       body: body.body,
       caused,
       proseEvicted: !!entry.proseEvicted,
@@ -545,4 +646,18 @@ export function arrangedByCause<T extends { entryId: string }>(
   // block its placement, never its existence.
   for (const b of blocks) emit(b)
   return out
+}
+
+export function restorableBlock(entry: LedgerQuery['entries'][number]): RestorableBlock {
+  return {
+    entryId: entry.id,
+    command: entry.intent,
+    cwd: entry.cwd,
+    host: entry.host ?? '',
+    status: frozenStatus(entry.status, entry.unreconciled ?? null, entry.terminationReason ?? null),
+    unreconciled: entry.unreconciled ?? null,
+    durationMs: entry.durationMs,
+    exitCode: entry.exitCode,
+    author: authorFromSource(entry.source),
+  }
 }

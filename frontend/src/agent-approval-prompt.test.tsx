@@ -39,7 +39,7 @@ import { BlockManager } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import { EFFECT_LABEL } from './effect-labels'
-import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApproveParams } from './generated/agent.approve.params'
 
 const POLICY_ASK: AgentApprovalRequested = {
   runId: '7',
@@ -88,10 +88,10 @@ function renderPrompt(overrides?: Partial<Parameters<typeof AgentApprovalPrompt>
 
 /** A recorder for the seam the surface actually owns: direction and width. */
 function recordDecisions() {
-  const decisions: Array<[boolean, AgentApprove['scope']]> = []
+  const decisions: Array<[boolean, AgentApproveParams['scope']]> = []
   return {
     decisions,
-    onDecide: (approved: boolean, scope: AgentApprove['scope']) =>
+    onDecide: (approved: boolean, scope: AgentApproveParams['scope']) =>
       decisions.push([approved, scope]),
   }
 }
@@ -1621,6 +1621,8 @@ describe('AgentApprovalPrompt — the receipt a standing answer earns', () => {
           state: 'prepared',
           ingestSeq: 1,
           replayed: false,
+          engine: 'eino',
+          runtimeVersion: 'eino-test',
           model: 'qwen3',
         }) as Promise<T>
       }
@@ -1657,6 +1659,8 @@ describe('AgentApprovalPrompt — the receipt a standing answer earns', () => {
       snapshotStore: new CommandSnapshotStore(),
     })
     const target = new AgentInputTarget({
+      findAnswer: () => null,
+      drawCommand: () => Promise.resolve(null),
       dispatcher: wire as never,
       cancel: vi.fn(() =>
         Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),

@@ -9,9 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
-
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -44,22 +41,18 @@ func TestDraftInputCarriesNoToolOutputAndNoAttachedBody(t *testing.T) {
 }
 
 type draftModel struct {
-	response *schema.Message
+	response string
 	err      error
 }
 
-func (m draftModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+func (m draftModel) Generate(context.Context, ModelTarget, []Message) (string, error) {
 	return m.response, m.err
-}
-
-func (draftModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("stream is not used by skill drafting")
 }
 
 func TestDraftSkillParsesTheSummarizingModelResult(t *testing.T) {
 	name, description, body, err := DraftSkill(context.Background(), draftModel{
-		response: schema.AssistantMessage(`{"name":"deploy","description":"How we ship","body":"Run make release."}`, nil),
-	}, "Person: how do we deploy\nAssistant: You run make release.\n")
+		response: `{"name":"deploy","description":"How we ship","body":"Run make release."}`,
+	}, ModelTarget{}, "Person: how do we deploy\nAssistant: You run make release.\n")
 	if err != nil {
 		t.Fatalf("DraftSkill: %v", err)
 	}
@@ -70,7 +63,7 @@ func TestDraftSkillParsesTheSummarizingModelResult(t *testing.T) {
 
 func TestDraftSkillReportsSummarizingFailure(t *testing.T) {
 	want := errors.New("endpoint unavailable")
-	_, _, _, err := DraftSkill(context.Background(), draftModel{err: want}, "conversation")
+	_, _, _, err := DraftSkill(context.Background(), draftModel{err: want}, ModelTarget{}, "conversation")
 	if !errors.Is(err, want) {
 		t.Fatalf("DraftSkill error = %v, want the model failure", err)
 	}
@@ -83,8 +76,8 @@ func TestSkillCreateProposalUsesTheSummarizingDraft(t *testing.T) {
 		Kind: content.ResourceContent,
 		ID:   "skill/deploy",
 	}})
-	resolver := SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-		return SkillDraftTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
+	resolver := SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+		return ModelTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
 	})
 	request := NewSkillDraftRequest([]content.PriorTurn{{EntryID: "e1", Question: "how do we deploy", Prose: content.TurnProse{Text: "Run make release."}}}, resolver)
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
@@ -92,8 +85,8 @@ func TestSkillCreateProposalUsesTheSummarizingDraft(t *testing.T) {
 		t.Fatalf("Assemble: %v", err)
 	}
 	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
-		skillDraft:     request,
-		skillDraftHTTP: http.DefaultClient,
+		skillDraft: request,
+		generator:  &einoTextGenerator{http: http.DefaultClient},
 	})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
@@ -121,20 +114,20 @@ func TestSkillCreateDraftFailuresReturnSafeToolResultsWithoutApproval(t *testing
 	}{
 		{
 			name: "unassigned role",
-			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-				return SkillDraftTarget{}, profile.ErrRoleUnassigned
+			resolver: SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+				return ModelTarget{}, profile.ErrRoleUnassigned
 			}),
 		},
 		{
 			name: "endpoint gone",
-			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-				return SkillDraftTarget{}, profile.ErrRoleEndpointGone
+			resolver: SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+				return ModelTarget{}, profile.ErrRoleEndpointGone
 			}),
 		},
 		{
 			name: "summarizing call error",
-			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-				return SkillDraftTarget{
+			resolver: SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+				return ModelTarget{
 					Key:     credential.NewSecret("sk-draft-test"),
 					BaseURL: callErrServer.URL,
 					Model:   "draft-model",
@@ -155,8 +148,8 @@ func TestSkillCreateDraftFailuresReturnSafeToolResultsWithoutApproval(t *testing
 			}
 			ledger := &fakeLedger{}
 			k, err := newEffectKernel(nil, grant, reg, ledger, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft-failure", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
-				skillDraft:     request,
-				skillDraftHTTP: http.DefaultClient,
+				skillDraft: request,
+				generator:  &einoTextGenerator{http: http.DefaultClient},
 			})
 			if err != nil {
 				t.Fatalf("newEffectKernel: %v", err)
@@ -215,8 +208,8 @@ func TestDraftSkillRefusesWhatMustNotBeCaptured(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.rule, func(t *testing.T) {
 			name, description, body, err := DraftSkill(context.Background(), draftModel{
-				response: schema.AssistantMessage(`{"nothing_to_capture":`+strconv.Quote(test.reason)+`}`, nil),
-			}, test.transcript)
+				response: `{"nothing_to_capture":` + strconv.Quote(test.reason) + `}`,
+			}, ModelTarget{}, test.transcript)
 
 			var refusal *skillNotCapturableError
 			if !errors.As(err, &refusal) {
@@ -237,8 +230,8 @@ func TestDraftSkillRefusesWhatMustNotBeCaptured(t *testing.T) {
 
 func TestDraftSkillDraftsTheMethodThatWorked(t *testing.T) {
 	name, description, body, err := DraftSkill(context.Background(), draftModel{
-		response: schema.AssistantMessage(`{"name":"reset-the-vpn","description":"Bring the tunnel back up","body":"Run wg-quick down wg0 then wg-quick up wg0."}`, nil),
-	}, "Person: get the vpn up\nAssistant: wg-quick down wg0 then wg-quick up wg0 brought it back.\n")
+		response: `{"name":"reset-the-vpn","description":"Bring the tunnel back up","body":"Run wg-quick down wg0 then wg-quick up wg0."}`,
+	}, ModelTarget{}, "Person: get the vpn up\nAssistant: wg-quick down wg0 then wg-quick up wg0 brought it back.\n")
 	if err != nil {
 		t.Fatalf("DraftSkill: %v", err)
 	}
@@ -277,8 +270,8 @@ func TestSkillCreateRefusalReachesThePersonAsAnAnswer(t *testing.T) {
 		Kind: content.ResourceContent,
 		ID:   "skill/vpn",
 	}})
-	resolver := SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-		return SkillDraftTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
+	resolver := SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+		return ModelTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
 	})
 	request := NewSkillDraftRequest([]content.PriorTurn{{EntryID: "e1", Question: "get the vpn up", Prose: content.TurnProse{Text: "I tried three configs and none connected."}}}, resolver)
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
@@ -287,8 +280,8 @@ func TestSkillCreateRefusalReachesThePersonAsAnAnswer(t *testing.T) {
 	}
 	ledger := &fakeLedger{}
 	k, err := newEffectKernel(nil, grant, reg, ledger, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft-refusal", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
-		skillDraft:     request,
-		skillDraftHTTP: http.DefaultClient,
+		skillDraft: request,
+		generator:  &einoTextGenerator{http: http.DefaultClient},
 	})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
@@ -317,9 +310,9 @@ func TestSkillCreateRefusalReachesThePersonAsAnAnswer(t *testing.T) {
 // quoting.
 func TestSkillCreateKeepsBytesThePersonTyped(t *testing.T) {
 	procedure := "1. ssh into the bastion\n2. run `systemctl restart api`\n3. tail the journal until it settles"
-	resolver := SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+	resolver := SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
 		t.Fatal("the summarizing model was consulted about bytes the person typed")
-		return SkillDraftTarget{}, nil
+		return ModelTarget{}, nil
 	})
 	request := NewSkillDraftRequest([]content.PriorTurn{{
 		EntryID:  "e1",
@@ -354,8 +347,8 @@ func TestSkillCreateSummarizesWhatThePersonDidNotType(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, srv := newClassifierServer(classifyCompletion(`{"name":"restart-api","description":"How we restart","body":"Run systemctl restart api."}`))
 			defer srv.Close()
-			resolver := SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
-				return SkillDraftTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
+			resolver := SkillDraftResolverFunc(func(context.Context) (ModelTarget, error) {
+				return ModelTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
 			})
 			request := NewSkillDraftRequest([]content.PriorTurn{{
 				EntryID:  "e1",
@@ -390,8 +383,8 @@ func draftKernel(t *testing.T, request *SkillDraftRequest) *effectKernel {
 		t.Fatalf("Assemble: %v", err)
 	}
 	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
-		skillDraft:     request,
-		skillDraftHTTP: http.DefaultClient,
+		skillDraft: request,
+		generator:  &einoTextGenerator{http: http.DefaultClient},
 	})
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)

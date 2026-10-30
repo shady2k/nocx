@@ -346,7 +346,7 @@ func TestSessionRead_BackendCaptureOverTheRealSocket(t *testing.T) {
 	fake, srv := newToolCallingServer()
 	defer srv.Close()
 
-	client, _, err := assistant.NewClientAndRegistry(nil, nil, content.Floor{}, nil)
+	client, _, err := newEinoTestClient(t)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

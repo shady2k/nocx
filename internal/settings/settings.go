@@ -1084,6 +1084,16 @@ var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
 	Default:     false,
 })
 
+// AssistantExperimentalAgent selects only newly admitted model operations.
+var AssistantExperimentalAgent = MustRegisterBool(BoolSpec{
+	Key:         "assistant.experimentalAgent",
+	Section:     "Answers",
+	Label:       "Pydantic agent (Experimental)",
+	Description: "Use the experimental Pydantic engine for new assistant operations. Active operations keep their engine; use Stop to end them. Turn this off to use Eino again.",
+	DataClass:   PublicConfig,
+	Default:     false,
+})
+
 // ── The two ceilings a command the assistant runs is bound by ──────────
 //
 // ADR-0020 decision 2 gives every agent execution a wall-clock deadline

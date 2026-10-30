@@ -296,6 +296,28 @@ func TestBoolGetSet(t *testing.T) {
 	}
 }
 
+func TestExperimentalAgentDefaultsOffAndPersistsExplicitChoice(t *testing.T) {
+	doc := &fakeDoc{}
+	reg := settings.New(doc, &fakeSecretStore{})
+	if enabled, err := reg.GetBool(settings.AssistantExperimentalAgent); err != nil || enabled {
+		t.Fatalf("new profile experimental engine = %v, %v; want false", enabled, err)
+	}
+	if err := reg.SetBool(settings.AssistantExperimentalAgent, true); err != nil {
+		t.Fatal(err)
+	}
+	reopened := settings.New(doc, &fakeSecretStore{})
+	if enabled, err := reopened.GetBool(settings.AssistantExperimentalAgent); err != nil || !enabled {
+		t.Fatalf("reopened explicit choice = %v, %v; want true", enabled, err)
+	}
+	if err := reopened.Reset(settings.AssistantExperimentalAgent); err != nil {
+		t.Fatal(err)
+	}
+	reset := settings.New(doc, &fakeSecretStore{})
+	if enabled, err := reset.GetBool(settings.AssistantExperimentalAgent); err != nil || enabled {
+		t.Fatalf("reopened reset choice = %v, %v; want false", enabled, err)
+	}
+}
+
 // ── getSnapshot ─────────────────────────────────────────────────────────
 
 func TestGetSnapshot_ExcludesSecrets(t *testing.T) {

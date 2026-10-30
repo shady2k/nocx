@@ -25,7 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -62,6 +62,10 @@ func (f *fakeAgentService) CaptureFrame(context.Context, content.CaptureFrame) (
 
 func (f *fakeAgentService) SubmitAsk(context.Context, content.AgentAsk) (content.AgentAskResult, error) {
 	return content.AgentAskResult{}, nil
+}
+
+func (f *fakeAgentService) LookupAsk(context.Context, content.AgentAsk) (*content.AgentAskResult, error) {
+	return nil, nil
 }
 
 func (f *fakeAgentService) TransitionRun(_ context.Context, _ int64, to content.RunState) error {
@@ -206,22 +210,30 @@ func (r *gapResponder) TryNotify(method string, params json.RawMessage) error {
 
 // newGapHandlers builds the agentHandlers the unit tests drive directly,
 // with the real stream logic and a recording store.
-func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *assistant.ApprovalStore) agentHandlers {
+func newGapHandlers(t *testing.T, svc *fakeAgentService, client assistant.Client, approvals *assistant.ApprovalStore) agentHandlers {
+	t.Helper()
+	_, logger := logtest.New(t)
 	return agentHandlers{
 		op:            &directAgentOp{svc: svc},
-		log:           log.NewSlogAdapter(nil),
-		client:        client,
+		log:           logger,
+		engines:       fixedEinoSelector(client),
 		approvals:     approvals,
 		pendingRuns:   make(map[int64]askRunContext),
 		pendingRunsMu: &sync.Mutex{},
 	}
 }
 
-func gapRunContext() askRunContext {
+func gapRunContext(t *testing.T, h agentHandlers) askRunContext {
+	t.Helper()
+	engine, err := h.engines.Selected(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	return askRunContext{
 		runID:    7,
 		entryID:  "turn-1",
 		question: "q",
+		engine:   engine,
 		control:  &agentRunControl{cancelDone: make(chan struct{})},
 		// The stream resolves endpoint material up front; a keyless endpoint
 		// resolves to nothing, keeping these unit tests on the delta path.
@@ -238,10 +250,10 @@ func gapRunContext() askRunContext {
 func TestAgentAsk_DroppedDeltaIsVisibleOnTheTerminalState(t *testing.T) {
 	svc := &fakeAgentService{}
 	client := &scriptedAssistantClient{deltas: []string{"hello", " ", "world"}}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	h := newGapHandlers(t, svc, client, assistant.NewApprovalStore())
 	r := &gapResponder{failDeltaTimes: 3} // the wire refuses EVERY delta
 
-	h.runAskStream(context.Background(), gapRunContext(), r)
+	h.runAskStream(context.Background(), gapRunContext(t, h), r)
 
 	if r.runState == nil {
 		t.Fatal("no agent.runState notification — the drop count never reached the renderer")
@@ -268,10 +280,10 @@ func TestAgentAsk_DroppedDeltaIsVisibleOnTheTerminalState(t *testing.T) {
 func TestAgentAsk_SeqAdvancesPastDroppedDeltas(t *testing.T) {
 	svc := &fakeAgentService{}
 	client := &scriptedAssistantClient{deltas: []string{"a", "b", "c"}}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	h := newGapHandlers(t, svc, client, assistant.NewApprovalStore())
 	r := &gapResponder{failDeltaTimes: 1} // only the FIRST delta is refused
 
-	h.runAskStream(context.Background(), gapRunContext(), r)
+	h.runAskStream(context.Background(), gapRunContext(t, h), r)
 
 	if len(r.deltas) != 3 {
 		t.Fatalf("received %d deltas, want 3 — a refused delta must not abort the stream", len(r.deltas))
@@ -298,14 +310,14 @@ func TestAgentAsk_SeqAdvancesPastDroppedDeltas(t *testing.T) {
 func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 	svc := &fakeAgentService{}
 	approvals := assistant.NewApprovalStore()
-	h := newGapHandlers(svc, &scriptedAssistantClient{
+	h := newGapHandlers(t, svc, &scriptedAssistantClient{
 		deltas: []string{"first"},
 		err: &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
 			RunID: "7", Attempt: 1, Tool: "session.read", CallID: "c1", ArgHash: "h",
 			Effect: content.EffectObserve,
 		}},
 	}, approvals)
-	rc := gapRunContext()
+	rc := gapRunContext(t, h)
 	rc.attempt = 1
 	h.pendingRuns[rc.runID] = rc // handleAsk stores the context before the stream
 	first := &gapResponder{failDeltaTimes: 1}
@@ -328,7 +340,11 @@ func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 	// The person approves; the resume re-streams with the SAME run. Its
 	// terminal close must name BOTH drops — the gap describes the whole
 	// answer, not just the last Ask invocation.
-	h.client = &scriptedAssistantClient{deltas: []string{"second"}}
+	client, ok := stored.engine.Client.(*scriptedAssistantClient)
+	if !ok {
+		t.Fatalf("pending client = %T, want *scriptedAssistantClient", stored.engine.Client)
+	}
+	client.deltas, client.err = []string{"second"}, nil
 	second := &gapResponder{failDeltaTimes: 1}
 	h.resumeRun(context.Background(), stored, second)
 
@@ -492,7 +508,7 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 		release:     make(chan struct{}),
 		pumpStarted: sock.writeStarted,
 	}
-	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	h := newGapHandlers(t, svc, client, assistant.NewApprovalStore())
 	t.Cleanup(func() {
 		select {
 		case <-client.release:
@@ -503,7 +519,7 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 
 	streamDone := make(chan struct{})
 	go func() {
-		h.runAskStream(context.Background(), gapRunContext(), outboundNotifyResponder{c: conn})
+		h.runAskStream(context.Background(), gapRunContext(t, h), outboundNotifyResponder{c: conn})
 		close(streamDone)
 	}()
 	select {

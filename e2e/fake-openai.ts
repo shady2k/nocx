@@ -133,25 +133,12 @@ function chunkFrame(model: string, content: string, finish: string): string {
 /** One chat.completion.chunk frame carrying TOOL CALLS — the whole proposal
  *  in a single frame, finishing the response with `tool_calls`.
  *
- *  MATCHED AGAINST, not invented from the OpenAI docs: this is field for
- *  field `internal/assistant/policy_test.go`'s streamToolCalls and
- *  `internal/transport/ws_readscreen_test.go`'s streamToolCallChunk — the
- *  two Go fakes whose frames our own client already parses. Every member is
- *  there for a reason on the client side: eino's openai adapter decodes the
- *  delta into `[]openai.ToolCall` and maps it to `schema.ToolCall`
- *  (eino-ext/libs/acl/openai chat_model.go, toMessageToolCalls), so `id`
- *  becomes the call id the approval binding names, `type` must be
- *  "function", and `function.arguments` is a STRING the middleware
- *  validates against the tool's params schema. `index` is deliberately
- *  ABSENT: eino concatenates a stream's tool calls by index and a call
- *  delivered whole in one frame needs no merging (eino schema/message.go,
- *  concatToolCalls appends an index-less chunk as it stands) — which is
- *  exactly what both Go fakes do.
- *
- *  A REAL provider may split one call's arguments across several frames.
- *  This fake does not, because nothing in this suite tests eino's
- *  concatenation; if a spec ever needs that, it is a second frame shape and
- *  it gets its own matching exercise. */
+ *  Each streamed tool call carries its provider index and original call id.
+ *  The index identifies fragments of the same call across frames; the id
+ *  binds the completed call to its tool result and approval. Arguments are
+ *  JSON encoded inside the function.arguments string, as on the OpenAI wire.
+ *  These scripts deliver complete calls in one frame; both engines consume
+ *  the same valid provider response. */
 function toolCallFrame(model: string, calls: readonly ScriptedToolCall[]): string {
   return JSON.stringify({
     id: CHUNK_ID,
@@ -164,6 +151,7 @@ function toolCallFrame(model: string, calls: readonly ScriptedToolCall[]): strin
         delta: {
           role: 'assistant',
           tool_calls: calls.map((c, i) => ({
+            index: i,
             id: c.id ?? `call_${i + 1}`,
             type: 'function',
             function: { name: c.name, arguments: JSON.stringify(c.arguments) },

@@ -5,15 +5,35 @@ package serverbin
 // the fake and this file is what the round-trip test runs against.
 
 import (
+	"context"
 	"io"
 	iofs "io/fs"
 	"os"
+
+	"github.com/shady2k/nocx/internal/assistant/runtimebundle"
 )
 
 type osFS struct{}
 
 // NewOSFS returns the [FS] backed by the local filesystem.
 func NewOSFS() FS { return osFS{} }
+
+// NewOSTreeFS adds the private-tree operations to the same OS adapter.
+func NewOSTreeFS() TreeFS { return osFS{} }
+
+func (osFS) Lstat(path string) (iofs.FileInfo, error)  { return os.Lstat(path) }
+func (osFS) Readlink(path string) (string, error)      { return os.Readlink(path) }
+func (osFS) Symlink(target, path string) error         { return os.Symlink(target, path) }
+func (osFS) Mkdir(path string, mode os.FileMode) error { return os.Mkdir(path, mode) }
+func (osFS) RemoveAll(path string) error               { return os.RemoveAll(path) }
+
+func (osFS) LockShared(ctx context.Context, parent, digest string) (*runtimebundle.Lease, error) {
+	return runtimebundle.AcquireShared(ctx, parent, digest)
+}
+
+func (osFS) TryLockExclusive(parent, digest string) (*runtimebundle.Lease, error) {
+	return runtimebundle.TryExclusive(parent, digest)
+}
 
 func (osFS) Stat(path string) (iofs.FileInfo, error) { return os.Stat(path) }
 

@@ -26,6 +26,8 @@ type AgentService interface {
 	// opens no body: a turn's body is its `text` children now (ADR-0040), and
 	// the first one is opened by the stream, not by the ask.
 	SubmitAsk(ctx context.Context, in content.AgentAsk) (content.AgentAskResult, error)
+	// LookupAsk reads the original run before current model or engine resolution.
+	LookupAsk(ctx context.Context, in content.AgentAsk) (*content.AgentAskResult, error)
 	// TransitionRun moves the run to a non-terminal state (prepared →
 	// streaming) — the gate deltas may not pass before.
 	TransitionRun(ctx context.Context, runID int64, to content.RunState) error
@@ -93,6 +95,13 @@ func (s *agentService) SubmitAsk(ctx context.Context, in content.AgentAsk) (cont
 		return content.AgentAskResult{}, err
 	}
 	return s.ledger.SubmitAgentAsk(ctx, in)
+}
+
+func (s *agentService) LookupAsk(ctx context.Context, in content.AgentAsk) (*content.AgentAskResult, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.LookupAgentAsk(ctx, in)
 }
 
 func (s *agentService) TransitionRun(ctx context.Context, runID int64, to content.RunState) error {

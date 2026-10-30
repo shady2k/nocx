@@ -1,0 +1,24 @@
+{
+  "upstream": {
+    "project": "https://github.com/pydantic/pydantic-ai",
+    "version": "2.52.0",
+    "sdist": "pydantic_ai_slim-2.52.0.tar.gz",
+    "url": "https://files.pythonhosted.org/packages/26/2b/b70b807abcfe81f9b11f1c67e9ee72fc36140c2af1d6569c085fcb1c8167/pydantic_ai_slim-2.52.0.tar.gz",
+    "sha256": "87819dbc35c5a0a75d59d0f2c3afe7dde16c0455e6716b816055e6770b417a83"
+  },
+  "local_version": "2.52.0+nocx.1",
+  "patch_sha256": "05ff9c8bdd0003b031455747878ab2b2a08ce8b6f0098debeddc3a8b4c734a70",
+  "source_date_epoch": 315532800,
+  "version_environment": {
+    "UV_DYNAMIC_VERSIONING_BYPASS": "2.52.0+nocx.1"
+  },
+  "scope": [
+    "Optional Agent unknown_tool_handler forwarded through every Agent ToolManager construction and for_run_step.",
+    "Unresolved raw ToolCallPart scheduled by the unchanged SDK executor.",
+    "Callback exceptions become fatal UnknownToolHandlerError, including SDK control flow; BaseException cancellation is unchanged.",
+    "Pin sibling graph/evals metadata to upstream 2.52.0 rather than nonexistent local sibling builds.",
+    "Update sdist PKG-INFO version, which Hatch consumes before its dynamic version hook."
+  ],
+  "build_requirements": "build-requirements.txt",
+  "wheel_sha256": "622ff503c1331c1d372a7aeabf5e02a51ee3a5086edfbd1214350d1b8bcf4bda"
+}

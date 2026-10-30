@@ -14,6 +14,8 @@ import type { AgentStatusResult } from './generated/agent.status'
 
 const ready: AgentStatusResult = {
   endpointConfigured: true,
+  engine: 'eino',
+  runtimeVersion: 'eino-test',
   credential: 'resolvable',
   lastProbe: null,
   answering: { ready: true, reason: null, endpoint: 'Local', model: 'qwen3' },
@@ -26,12 +28,16 @@ const unready = (
   reason: NonNullable<AgentStatusResult['answering']['reason']>,
 ): AgentStatusResult => ({
   endpointConfigured: true,
+  engine: 'eino',
+  runtimeVersion: 'eino-test',
   credential: 'resolvable',
   lastProbe: null,
   answering: { ready: false, reason, endpoint: null, model: null },
 })
 
 const okProbe = {
+  engine: 'eino',
+  runtimeVersion: 'eino-test',
   name: 'local',
   model: 'qwen',
   kind: 'model' as const,
@@ -169,6 +175,8 @@ describe('agentStatusLine', () => {
         agentStatusLine({
           ...ready,
           lastProbe: {
+            engine: 'eino',
+            runtimeVersion: 'eino-test',
             name: 'local',
             model: 'qwen',
             kind: 'model' as const,
@@ -191,5 +199,20 @@ describe('agentStatusLine', () => {
     it('keeps Ready for a role that resolves', () => {
       expect(agentStatusLine(ready)).toEqual({ tone: 'success', text: 'Ready' })
     })
+  })
+})
+
+it('repairs an unavailable experimental runtime at the Assistant setting, not at model or endpoint selection', () => {
+  expect(
+    agentStatusLine({
+      ...ready,
+      engine: 'pydantic-deepagents',
+      runtimeVersion: null,
+      answering: { ready: false, reason: 'runtime-unavailable', endpoint: 'Local', model: 'qwen3' },
+    }),
+  ).toEqual({
+    tone: 'warning',
+    text: 'The experimental agent runtime is unavailable. Turn off Pydantic agent (Experimental) in Settings → Assistant → Answers.',
+    fix: { label: 'Open Assistant settings', page: 'assistant' },
   })
 })

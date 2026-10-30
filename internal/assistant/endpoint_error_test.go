@@ -18,6 +18,27 @@ func TestEndpointErrorSentence(t *testing.T) {
 		not  []string
 	}{
 		{
+			name: "neutral unauthorized names credential",
+			err:  &EndpointHTTPError{StatusCode: http.StatusUnauthorized},
+			want: []string{"credential"},
+		},
+		{
+			name: "neutral model not found names model id",
+			err:  wrapEndpointError(&EndpointHTTPError{StatusCode: http.StatusNotFound, Code: "model_not_found"}),
+			want: []string{model, "model id"},
+		},
+		{
+			name: "neutral code is never rendered",
+			err:  &EndpointHTTPError{StatusCode: http.StatusNotFound, Code: "[NodeRunError] ToolNode node path"},
+			want: []string{"404", "address", "/v1"},
+			not:  frameworkWords,
+		},
+		{
+			name: "neutral rate limit names status",
+			err:  &EndpointHTTPError{StatusCode: http.StatusTooManyRequests},
+			want: []string{"429", "Too Many Requests"},
+		},
+		{
 			name: "unauthorized names credential",
 			err:  &openai.APIError{HTTPStatusCode: http.StatusUnauthorized, Message: "invalid api key"},
 			want: []string{"credential"},

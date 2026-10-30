@@ -421,6 +421,63 @@ func chunkBytes(b []byte) [][]byte {
 
 // ── agent.ask ─────────────────────────────────────────────────────────────
 
+// LookupAgentAsk returns the original admission without consulting current
+// configuration. It uses the same authenticated content binding as submission.
+func (s *sqliteContent) LookupAgentAsk(ctx context.Context, in AgentAsk) (*AgentAskResult, error) {
+	if err := validateAgentAsk(in); err != nil {
+		return nil, err
+	}
+	var out *AgentAskResult
+	err := s.run(ctx, func(ctx context.Context) error {
+		var err error
+		out, err = lookupAgentAsk(ctx, s.conn(ctx), in, askDigest(in))
+		return err
+	})
+	return out, err
+}
+
+func validateAgentAsk(in AgentAsk) error {
+	if in.ID == "" {
+		return errors.New("content: submit agent ask: ask id is required")
+	}
+	if in.Client == "" {
+		return errors.New("content: submit agent ask: client is required — it binds the idempotency key")
+	}
+	if strings.TrimSpace(in.Question) == "" {
+		return errors.New("content: submit agent ask: question is required")
+	}
+	return nil
+}
+
+func lookupAgentAsk(ctx context.Context, q rowQuerier, in AgentAsk, digest string) (*AgentAskResult, error) {
+	var out AgentAskResult
+	var client, storedDigest string
+	var runID sql.NullInt64
+	var state, payload sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT e.ingest_seq, e.client, e.digest, x.id, x.state, x.payload
+		FROM entries e LEFT JOIN executions x ON x.id = (
+			SELECT id FROM executions WHERE entry_id = e.id AND lane = 'agent' ORDER BY attempt LIMIT 1
+		) WHERE e.id = ?`, in.ID).Scan(
+		&out.IngestSeq, &client, &storedDigest, &runID, &state, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if client != in.Client || storedDigest != digest {
+		return nil, ErrIDConflict
+	}
+	if !runID.Valid {
+		return nil, fmt.Errorf("content: submit agent ask: replayed ask %q has no run", in.ID)
+	}
+	if err := json.Unmarshal([]byte(payload.String), &out.Facts); err != nil {
+		return nil, fmt.Errorf("content: read original ask facts: %w", err)
+	}
+	out.RunID, out.EntryID, out.State, out.Replayed = runID.Int64, in.ID, RunState(state.String), true
+	return &out, nil
+}
+
 // SubmitAgentAsk records ONE ask transaction atomically: the TURN
 // (kind=agent, open/pending — the question is its intent, anchored to the
 // pane it was asked in), its pending run (the backend-minted execution row,
@@ -432,14 +489,8 @@ func chunkBytes(b []byte) [][]byte {
 // run record exists from before the ask returns until the run terminalizes"
 // has no one-sided states.
 func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentAskResult, error) {
-	if in.ID == "" {
-		return AgentAskResult{}, errors.New("content: submit agent ask: ask id is required")
-	}
-	if in.Client == "" {
-		return AgentAskResult{}, errors.New("content: submit agent ask: client is required — it binds the idempotency key")
-	}
-	if strings.TrimSpace(in.Question) == "" {
-		return AgentAskResult{}, errors.New("content: submit agent ask: question is required")
+	if err := validateAgentAsk(in); err != nil {
+		return AgentAskResult{}, err
 	}
 	digest := askDigest(in)
 	var out AgentAskResult
@@ -450,41 +501,15 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		}
 		defer txEnd.rollback()
 
-		// Replay: the same (ask id, client, content) returns the ORIGINAL
-		// run id — the bead's "a retry duplicates both" is the defect this
-		// exists to prevent. Same id, different content: ErrIDConflict.
-		var haveSeq int64
-		var haveClient, haveDigest string
-		err = tx.QueryRowContext(ctx,
-			`SELECT ingest_seq, client, digest FROM entries WHERE id = ?`, in.ID,
-		).Scan(&haveSeq, &haveClient, &haveDigest)
-		switch {
-		case err == nil:
-			if haveClient != in.Client || haveDigest != digest {
-				return ErrIDConflict
-			}
-			var runID int64
-			if runErr := tx.QueryRowContext(ctx,
-				`SELECT id FROM executions WHERE entry_id = ? AND lane = 'agent' ORDER BY attempt LIMIT 1`,
-				in.ID).Scan(&runID); runErr != nil {
-				if errors.Is(runErr, sql.ErrNoRows) {
-					return fmt.Errorf("content: submit agent ask: replayed ask %q has no run", in.ID)
-				}
-				return runErr
-			}
-			// A replay returns the ORIGINAL run and turn, and nothing else
-			// to return: the answer's body is not one artifact any more, it
-			// is whatever `text` children the run has opened so far
-			// (ADR-0040). A replay that re-drove the stream would open its
-			// prose blocks after the ones already there, which is the same
-			// answer twice and is a defect of the driver, not of this
-			// result shape.
-			out = AgentAskResult{
-				RunID: runID, EntryID: in.ID, IngestSeq: haveSeq, Replayed: true,
-			}
-			return txEnd.commit()
-		case !errors.Is(err, sql.ErrNoRows):
+		// Repeat the read under the creation transaction: a concurrent
+		// admission may have won since the caller's read-only lookup.
+		original, err := lookupAgentAsk(ctx, tx, in, digest)
+		if err != nil {
 			return err
+		}
+		if original != nil {
+			out = *original
+			return txEnd.commit()
 		}
 
 		obsID, err := ensureLedgerContext(ctx, tx, in.Env, in.SessionID)
@@ -572,7 +597,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		if err := txEnd.commit(); err != nil {
 			return err
 		}
-		out = AgentAskResult{RunID: runID, EntryID: in.ID, IngestSeq: seq}
+		out = AgentAskResult{RunID: runID, EntryID: in.ID, IngestSeq: seq, Facts: in.Facts, State: RunPrepared}
 		return nil
 	})
 	return out, err

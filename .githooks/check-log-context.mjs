@@ -12,6 +12,10 @@
  * because there is nothing to forget. This ratchet is what stops a new call
  * site opting back into forgetting them.
  *
+ * Zero-argument Error calls describe error values. The Error function from
+ * net/http writes a response. Neither is a logger call; actual logger.Error
+ * calls still require context provenance.
+ *
  * WHAT IT CANNOT SEE, the same admission the sibling ratchets make about
  * their own blind spots:
  *
@@ -67,17 +71,19 @@ const CALL_RE = /(?:^|[^.\w])([A-Za-z_]\w*)\.(Debug|Info|Warn|Error)\(/g
 const IMPORT_RE =
   /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"github\.com\/shady2k\/nocx\/internal\/log"\s*$/
 
-// version.Info is build metadata, not a log method. Resolve this exact
-// package import rather than exempting every receiver called "version". If
-// that name is also declared locally anywhere in the file, keep the stricter
-// scan: this lexical ratchet cannot prove which scope a receiver belongs to.
+// version.Info is build metadata and net/http.Error writes a response.
+// Resolve the actual package import rather than exempting a receiver name.
+// If that name is declared locally, keep the stricter scan: this lexical
+// ratchet cannot prove which scope a receiver belongs to.
 const VERSION_IMPORT_RE =
   /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"github\.com\/shady2k\/nocx\/internal\/version"\s*$/
+const HTTP_IMPORT_RE = /^\s*(?:import\s+)?(?:([A-Za-z_]\w*)\s+)?"net\/http"\s*$/
+const NO_ARGUMENTS_RE = /^(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*(?:\n|$))*\)/
 
-function metadataAlias(lines, text) {
-  const imported = lines.map((line) => VERSION_IMPORT_RE.exec(line)).find(Boolean)
+function unshadowedAlias(lines, text, importRe, packageName) {
+  const imported = lines.map((line) => importRe.exec(line)).find(Boolean)
   if (!imported) return null
-  const alias = imported[1] || 'version'
+  const alias = imported[1] || packageName
   const declaration = new RegExp(
     `\\b${alias}\\s*(?::=|=(?!=))|\\bvar\\s+${alias}\\b|[,(]\\s*${alias}\\s+(?:\\*?[A-Za-z_]|\\[)`,
   )
@@ -119,7 +125,8 @@ function resolveAlias(lines) {
 export function violationsInText(file, text) {
   const lines = text.split('\n')
   const alias = resolveAlias(lines)
-  const buildMetadataAlias = metadataAlias(lines, text)
+  const buildMetadataAlias = unshadowedAlias(lines, text, VERSION_IMPORT_RE, 'version')
+  const httpAlias = unshadowedAlias(lines, text, HTTP_IMPORT_RE, 'http')
 
   const fromRe = new RegExp(`\\b(\\w+)\\s*(?::=|=)[^\\n]*\\b${alias}\\.From\\(`)
   const startRe = new RegExp(
@@ -140,6 +147,7 @@ export function violationsInText(file, text) {
   }
 
   const violations = []
+  let lineOffset = 0
   lines.forEach((line, idx) => {
     const fm = fromRe.exec(line)
     if (fm) compliant.add(fm[1])
@@ -152,10 +160,17 @@ export function violationsInText(file, text) {
     let m
     while ((m = CALL_RE.exec(line))) {
       const [, receiver, method] = m
+      if (
+        method === 'Error' &&
+        (receiver === httpAlias || NO_ARGUMENTS_RE.test(text.slice(lineOffset + CALL_RE.lastIndex)))
+      ) {
+        continue
+      }
       if (receiver === buildMetadataAlias && method === 'Info') continue
       if (compliant.has(receiver)) continue
       violations.push({ file, line: idx + 1, text: line.trim() })
     }
+    lineOffset += line.length + 1
   })
   return violations
 }

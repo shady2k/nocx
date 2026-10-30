@@ -882,6 +882,7 @@ export class PaneManager {
    *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
    *  beside onCreateEndpoint, which the chip's other destination reuses. */
   onOpenRoles?: () => void
+  onOpenAssistant?: () => void
   /** The approval receipt's second action: open Settings → Assistant
    *  permissions,
    *  where standing answers are managed (nocx-2019q). Beside onOpenRoles for
@@ -1589,6 +1590,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onOpenAssistant: this.onOpenAssistant,
         onManagePermissions: this.onManagePermissions,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state, children) =>
@@ -1702,6 +1704,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
+        onOpenAssistant: this.onOpenAssistant,
         onManagePermissions: this.onManagePermissions,
       },
     )

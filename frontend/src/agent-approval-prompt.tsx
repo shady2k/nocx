@@ -182,10 +182,10 @@ import {
 import { EFFECT_LABEL } from './effect-labels'
 import { scanPatternWords } from './scan-pattern-words'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
-import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApproveParams } from './generated/agent.approve.params'
 
 /** How far an answer reaches — the wire's own vocabulary, not a second one. */
-type ApprovalScope = AgentApprove['scope']
+type ApprovalScope = AgentApproveParams['scope']
 
 /**
  * The two tools this window says something EXTRA about, named once each

@@ -456,7 +456,7 @@ test('the actual producer seals ordinary test failures and preserves both comman
   assert.notEqual(bad.status, 0)
 })
 
-test('a gate CLI refuses a failed current-main fetch instead of using a cached snapshot', (t) => {
+test('a gate CLI refuses a failed tracker-store fetch instead of using a cached snapshot', (t) => {
   const { logs } = evidence(t, [{ name: 'go-backend', status: 0, log: 'ok\n' }])
   const bin = join(logs, 'bin')
   mkdirSync(bin)
@@ -476,7 +476,10 @@ test('a gate CLI refuses a failed current-main fetch instead of using a cached s
   })
   assert.equal(result.status, 1, result.stderr)
   assert.match(result.stderr, /FAILED/)
-  assert.equal(readFileSync(trace, 'utf8'), 'fetch --no-tags origin refs/heads/main\n')
+  assert.equal(
+    readFileSync(trace, 'utf8'),
+    'fetch --no-tags origin refs/tracker/state:refs/tracker/state\n',
+  )
 })
 
 test('the real helper and gate leave rejudgeable evidence even when a quarantine makes the job green', (t) => {

@@ -143,5 +143,18 @@
     "idPattern": "nocx-[a-z0-9]+(?:\\.\\d+)*",
     "maskPatterns": []
   },
-  "notifyPushes": false
+  "notifyPushes": true,
+  "openQuestions": "one-at-a-time",
+  "codePaths": [
+    "*.go",
+    "**/*.go",
+    "frontend/src/**",
+    "frontend/e2e/**",
+    "scripts/**",
+    "e2e/**",
+    "cmd/**",
+    "internal/**",
+    "contracts/**"
+  ],
+  "requireDesignMatch": true
 }

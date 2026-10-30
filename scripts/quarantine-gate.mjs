@@ -19,9 +19,9 @@
  * on success. Promotion reads successful job logs too and rejudges this record
  * against its own quarantine state. No expiring workflow artifact is needed.
  *
- * Every invocation fetches current main's tracker export. A bead must exist
- * in both the checkout and current main and be nonterminal in both. Failure to
- * obtain main refuses; new branch-local beads protect nothing until exported.
+ * Every invocation fetches refs/tracker/state. A bead must exist in both the
+ * active state and the published store and be nonterminal in both. Failure to
+ * obtain either refuses; a branch-local bead protects nothing until published.
  *
  *   NOCX_EXPECTED_STEPS   required space-separated positive step manifest
  *   NOCX_TEST_LOG_DIR     the directory the gated steps wrote (required)
@@ -33,7 +33,7 @@
  *   NOCX_QUARANTINE_FILE  default docs/testing/quarantine.json
  *   NOCX_ISSUES_FILE      default .beads/issues.jsonl
  */
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
@@ -196,14 +196,14 @@ export function gate({
   return 0
 }
 
-// Fetch the remote's current main on EVERY invocation, including reruns of an
-// old merge ref. No cached origin/main or checkout fallback can renew a closed
-// bead. New branch-local beads must be exported on main before they protect CI.
-function currentMainIssues() {
-  execFileSync('git', ['fetch', '--no-tags', 'origin', 'refs/heads/main'], {
+// The tracker lives on refs/tracker/state, outside every code branch. Fetch it
+// on EVERY invocation, including reruns of an old merge ref, so a closed bead
+// cannot be renewed from a cached checkout.
+function trackerStoreIssues() {
+  execFileSync('git', ['fetch', '--no-tags', 'origin', 'refs/tracker/state:refs/tracker/state'], {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  return execFileSync('git', ['show', 'FETCH_HEAD:.beads/issues.jsonl'], {
+  return execFileSync('git', ['show', 'refs/tracker/state:.beads/issues.jsonl'], {
     encoding: 'utf8',
     maxBuffer: 256 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -228,8 +228,11 @@ export function main(env = process.env) {
         env.NOCX_QUARANTINE_FILE || 'docs/testing/quarantine.json',
         'utf8',
       ),
-      issuesJsonl: readFileSync(env.NOCX_ISSUES_FILE || '.beads/issues.jsonl', 'utf8'),
-      mainIssuesJsonl: currentMainIssues(),
+      issuesJsonl:
+        env.NOCX_ISSUES_FILE && existsSync(env.NOCX_ISSUES_FILE)
+          ? readFileSync(env.NOCX_ISSUES_FILE, 'utf8')
+          : trackerStoreIssues(),
+      mainIssuesJsonl: trackerStoreIssues(),
     })
   } catch (error) {
     // Fail closed: a check that cannot read its own evidence must never report

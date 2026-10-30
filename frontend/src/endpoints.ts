@@ -11,6 +11,7 @@
  * minted or rotated by the backend, and never survives a result (ADR-0030
  * §3). Nothing here reads a key back.
  */
+import { notifyAiConfigChanged } from './ai-config'
 import { Dispatcher } from './dispatcher'
 import type { EndpointsListResult, Endpoint as ListEndpoint } from './generated/endpoints.list'
 import type {
@@ -84,6 +85,20 @@ export interface RoleAssignInput {
   model: string | null
 }
 
+/** Every write to the assistant's configuration announces itself once the
+ *  backend has taken it (bead nocx-1ebrs.66.1.28). The pane that names the
+ *  pair that will answer has no other way to learn that a write made on the
+ *  Settings pane landed — see ai-config.ts — and a chip left naming the
+ *  model from before it is a false claim about which model answers.
+ *
+ *  Only a reply announces: a refused write changed nothing. */
+function written<T>(reply: Promise<T>): Promise<T> {
+  return reply.then((value) => {
+    notifyAiConfigChanged()
+    return value
+  })
+}
+
 export class EndpointClient {
   constructor(private readonly dispatcher: Dispatcher) {}
 
@@ -111,7 +126,7 @@ export class EndpointClient {
    *  the roles surface renders, default included, so load and write adopt
    *  both fields from the same moment. */
   assignRole(input: RoleAssignInput): Promise<RolesAssignResult> {
-    return this.dispatcher.call<RolesAssignResult>('roles.assign', input)
+    return written(this.dispatcher.call<RolesAssignResult>('roles.assign', input))
   }
 
   /** Names the ONE (endpoint, model) pair every role without an assignment
@@ -121,26 +136,26 @@ export class EndpointClient {
    *  invents a default, so the only way to have one is to have chosen it.
    *  Returns the same table roles.list does, default included. */
   setDefault(input: { endpointId: string; model: string }): Promise<RolesListResult> {
-    return this.dispatcher.call<RolesListResult>('roles.setDefault', input)
+    return written(this.dispatcher.call<RolesListResult>('roles.setDefault', input))
   }
 
   createEndpoint(input: EndpointWrite): Promise<EndpointsCreateResult['endpoint']> {
-    return this.dispatcher
-      .call<EndpointsCreateResult>('endpoints.create', input)
-      .then((r) => r.endpoint)
+    return written(this.dispatcher.call<EndpointsCreateResult>('endpoints.create', input)).then(
+      (r) => r.endpoint,
+    )
   }
 
   /** Full-replace update. An empty key keeps the existing material
    *  (design §4.5.4) — a blank key cannot erase a saved key. */
   updateEndpoint(id: string, input: EndpointWrite): Promise<EndpointsUpdateResult['endpoint']> {
-    return this.dispatcher
-      .call<EndpointsUpdateResult>('endpoints.update', { id, ...input })
-      .then((r) => r.endpoint)
+    return written(
+      this.dispatcher.call<EndpointsUpdateResult>('endpoints.update', { id, ...input }),
+    ).then((r) => r.endpoint)
   }
 
   /** Nothing to return; the list is the state (like vault.deleteSecret). */
   deleteEndpoint(id: string): Promise<EndpointsDeleteResult> {
-    return this.dispatcher.call<EndpointsDeleteResult>('endpoints.delete', { id })
+    return written(this.dispatcher.call<EndpointsDeleteResult>('endpoints.delete', { id }))
   }
 
   /**

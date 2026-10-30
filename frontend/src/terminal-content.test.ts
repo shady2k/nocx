@@ -34,6 +34,7 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
@@ -12696,6 +12697,80 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     } finally {
       teardown()
     }
+  })
+
+  it('catches up when a configuration write lands after the pane is back in front', async () => {
+    // The show was the ONLY seam (nocx-1ebrs.66.1.28), and a write still in
+    // flight when the person came back answered the read made there: the
+    // chip then named the model from before the write and no later read was
+    // ever issued. The write announces its own landing now, and this is that
+    // announcement, made while the chip is on screen and nobody is
+    // navigating anywhere.
+    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      const before = state.asks
+
+      state.answering = READY_ANSWERING
+      notifyAiConfigChanged()
+
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      expect(state.asks).toBe(before + 1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('pays no readiness call for a configuration write while Enter goes to the shell', async () => {
+    // The same rule the show follows: a Run pane has no chip, so nothing can
+    // have gone stale in front of anybody, and it asks nobody anything.
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      notifyAiConfigChanged()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(state.asks).toBe(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('pays no readiness call for a configuration write while the pane is behind', async () => {
+    // Settings is in front while the write is made. This pane is hidden, and
+    // its show will read the facts when the person comes back.
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      content.setVisible(false)
+      const before = state.asks
+      notifyAiConfigChanged()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(state.asks).toBe(before)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('stops listening for configuration writes once the pane is gone', async () => {
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    switchToAsk(content)
+    await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    const before = state.asks
+    teardown()
+    notifyAiConfigChanged()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(state.asks).toBe(before)
   })
 
   it('does not ask while Enter goes to the shell — a Run pane pays no readiness call', async () => {

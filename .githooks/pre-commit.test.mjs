@@ -53,6 +53,12 @@ run_step() {
 }
 
 case "$prog" in
+    go)
+        if [ "$*" = "env GOPATH" ]; then
+            printf '%s\\n' "\${NOCX_HOOK_TEST_TOOLCHAIN:?NOCX_HOOK_TEST_TOOLCHAIN}"
+        else
+            run_step go
+        fi ;;
     npx)
         case "\${1:-}" in
             eslint)
@@ -142,6 +148,9 @@ function stand(t) {
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
+        // The hook prepends GOPATH/bin; keep that lookup inside this stand,
+        // rather than letting an empty stub answer put the host's /bin first.
+        NOCX_HOOK_TEST_TOOLCHAIN: root,
         NOCX_HOOK_TEST_LOG: log,
         NOCX_HOOK_TEST_WHO: who,
         NOCX_GATE_LOCK_DIR: lock,

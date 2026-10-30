@@ -171,7 +171,9 @@ func writeZshPluginFixtureHome(t *testing.T, wrapperDir string) string {
 }
 
 func TestLiveSshd_ZshParentBlockClosesWhenTheSshChildExits(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	// Keep the plugin-bearing parent Zsh, but declare the helper-less remote
+	// Bash endpoint instead of inheriting the test account's login shell.
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	logger := fx.log()
 	zsh, err := exec.LookPath("zsh")
 	if err != nil {

@@ -159,11 +159,36 @@ test('the quiet ⋮ is still reachable from the keyboard', async ({ page }) => {
   await page.goto('/')
   await promptReady(page)
   await run(page, 'true')
-  const block = page.locator('.pane.active .scrollback-inner > .cmd-block').last()
-  const dots = block.locator(':scope > .cmd-header .cmd-header-right > .ui-icon-button')
+  const block = page.locator(COMMAND_BLOCKS).last()
+  // run() can observe an intermediate prompt before the command finishes.
+  // The visual freeze replaces the running block, including its ⋮. Wait for
+  // this command's settled element before sending the keyboard there.
+  await expect(block).toHaveAttribute('data-outcome', 'success')
+  const entryId = await block.getAttribute('data-entry-id')
+  expect(entryId, 'the settled command carries no entry identity').not.toBeNull()
+  const settled = page.locator(`${COMMAND_BLOCKS}[data-entry-id="${entryId}"]`)
+  const dots = settled.locator(':scope > .cmd-header .cmd-header-right > .ui-icon-button')
   await page.mouse.move(0, 0)
   await expect(dots).toHaveCSS('opacity', '0')
-  await dots.focus()
-  await expect(dots).toBeFocused()
-  await expect(dots).toHaveCSS('opacity', '1')
+  const focusedElement = await dots.elementHandle()
+  expect(focusedElement, 'the settled block has no actions button').not.toBeNull()
+  try {
+    await focusedElement!.focus()
+    await expect
+      .poll(
+        () => focusedElement!.evaluate((el) => el.isConnected && document.activeElement === el),
+        { message: 'the original settled block actions element must keep focus' },
+      )
+      .toBe(true)
+    await expect(dots).toBeFocused()
+    await expect(dots).toHaveCSS('opacity', '1')
+  } finally {
+    // A locator re-resolves after replacement. It must still name the node
+    // that received focus, even if a replacement itself happens to be focused.
+    expect(
+      await dots.evaluate((current, original) => current === original, focusedElement),
+      'the settled block actions element was replaced after focus',
+    ).toBe(true)
+    await focusedElement?.dispose()
+  }
 })

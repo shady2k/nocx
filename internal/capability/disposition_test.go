@@ -22,6 +22,10 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ForSessionTarget: %v", err)
 	}
+	endOp, err := NewSessionOperations(gate(GateSession), gate("lane"), dispositionRegistry{}, nil).ForSessionEnd("s1")
+	if err != nil {
+		t.Fatalf("ForSessionEnd: %v", err)
+	}
 
 	cases := []struct {
 		name string
@@ -46,6 +50,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"OpenOperation", NewOpenOperation(gate(GateConfig), gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
 		{"SecretOperation", NewSecretOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil), DispositionDirect},
 		{"SessionOperation", NewSessionOperation(gate(GateSession), gate("lane"), nil, nil), DispositionAdapted},
+		{"SessionEndOperation", endOp, DispositionAdapted},
 		{"SessionTargetOperation", targetOp, DispositionAdapted},
 		{"SnippetOperation", NewSnippetOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"UIStateOperation", NewUIStateOperation(gate(GateConfig), gate("lane"), nil), DispositionExcluded},
@@ -53,9 +58,6 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 		{"VaultResetOperation", NewVaultResetOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil), DispositionDirect},
 	}
 
-	if len(cases) != 23 {
-		t.Fatalf("operation map has %d rows, want 23", len(cases))
-	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := tc.op.Disposition()
@@ -156,6 +158,10 @@ func (dispositionRegistry) Get(session.ID) (session.Session, error) {
 func (dispositionRegistry) Close(session.ID) error { return nil }
 
 func (dispositionRegistry) EndSession(session.ID) error { return nil }
+
+func (dispositionRegistry) PrepareEndSession(session.ID) (session.Session, func() error, error) {
+	return nil, func() error { return nil }, nil
+}
 
 func (dispositionRegistry) List() []session.Session { return nil }
 

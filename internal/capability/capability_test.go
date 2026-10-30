@@ -458,10 +458,22 @@ func (f *fakeSessionRegistry) Close(id session.ID) error {
 }
 
 func (f *fakeSessionRegistry) EndSession(id session.ID) error {
+	_, complete, err := f.PrepareEndSession(id)
+	if err != nil {
+		return err
+	}
+	return complete()
+}
+
+func (f *fakeSessionRegistry) PrepareEndSession(id session.ID) (session.Session, func() error, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	s, ok := f.sessions[id]
+	if !ok {
+		return nil, nil, errors.New("session not found")
+	}
 	delete(f.sessions, id)
-	return nil
+	return s, func() error { return nil }, nil
 }
 
 func (f *fakeSessionRegistry) List() []session.Session {

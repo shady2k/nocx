@@ -728,7 +728,10 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 		}
 		return string(raw)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !consumeProviderRequestBeforeResponse(w, r) {
+			return
+		}
 		switch requests.Add(1) {
 		case 1:
 			streamToolCallChunk(w, "session.run", argsFor("df -h"))

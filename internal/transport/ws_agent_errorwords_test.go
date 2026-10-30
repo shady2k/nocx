@@ -123,7 +123,10 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 // malformedReadScreen names a declared tool — so the call reaches OUR
 // middleware rather than the framework's own index lookup — with an argument
 // object the schema the model was shown does not allow.
-func malformedReadScreen(w http.ResponseWriter, _ *http.Request) {
+func malformedReadScreen(w http.ResponseWriter, r *http.Request) {
+	if !consumeProviderRequestBeforeResponse(w, r) {
+		return
+	}
 	streamToolCallChunk(w, "session.read", `{"notADeclaredProperty":1}`)
 }
 
@@ -140,7 +143,10 @@ func (f failingKnownMaterial) FindKnown(context.Context, string) ([]assistant.Kn
 // reads the resulting sentence from the real runState notification.
 func TestAskFailure_EgressScreeningNamesSealedVault(t *testing.T) {
 	var sessionID string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !consumeProviderRequestBeforeResponse(w, r) {
+			return
+		}
 		streamToolCallChunk(w, "session.list", `{}`)
 	}))
 	defer srv.Close()
@@ -532,7 +538,13 @@ func TestAskFailure_CausesKeepTheirOwnSentences(t *testing.T) {
 	}
 	seen := map[string]string{}
 	for _, tc := range cases {
-		_, sentence, _ := failingRun(t, tc.baseURL, tc.handler)
+		state, sentence, engineErr := failingRun(t, tc.baseURL, tc.handler)
+		if state != "failed" {
+			t.Errorf("%s produced state %q, want failed; engine error: %v", tc.cause, state, engineErr)
+		}
+		if tc.handler != nil && !errors.Is(engineErr, assistant.ErrMalformedModelOutput) {
+			t.Errorf("%s did not reach schema validation; engine error: %v", tc.cause, engineErr)
+		}
 		if sentence == "" {
 			t.Fatalf("%s produced no sentence at all", tc.cause)
 		}

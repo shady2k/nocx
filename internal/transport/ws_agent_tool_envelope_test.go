@@ -29,7 +29,10 @@ func TestAskFailure_UnexecutedToolCallEnvelopeDialectsFailAtTransportPayload(t *
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !consumeProviderRequestBeforeResponse(w, r) {
+					return
+				}
 				streamAnswerChunk(w, tt.payload)
 			}))
 			if state != "failed" {
@@ -50,7 +53,10 @@ func TestAskFailure_UnexecutedToolCallEnvelopeDialectsFailAtTransportPayload(t *
 }
 
 func TestAskFailure_OrdinaryProseThatMentionsToolCallCompletes(t *testing.T) {
-	state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	state, sentence, engineErr := failingRun(t, "", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !consumeProviderRequestBeforeResponse(w, r) {
+			return
+		}
 		streamAnswerChunk(w, "The answer quotes <tool_call> but gives a real explanation.")
 	}))
 	if state != "completed" {

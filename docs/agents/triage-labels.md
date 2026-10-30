@@ -29,5 +29,5 @@ it computes blockers and holds, which a hand-applied label cannot. Two answers t
 takeable" is the failure AGENTS.md's "look for the existing answer" rule is against, so
 apply these two at triage and let `br ready` govern in-flight work.
 
-Every label write is a backlog write: `br sync --flush-only` and commit
-`.beads/issues.jsonl` immediately after.
+Every label write is a backlog write: publish the tracker ref immediately after, with
+the `tracker-sync publish` command in [`issue-tracker.md`](issue-tracker.md).

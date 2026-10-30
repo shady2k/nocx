@@ -35,9 +35,6 @@ for f in adapter.mjs check.mjs check-present.mjs check-docs.mjs check-product.mj
     check-commits.mjs time-format.mjs document-format.mjs regular-file.mjs argv.mjs merge-gate.mjs commit-links.mjs config.json; do
     [ -r "$gate/$f" ] || need "$gate/$f is missing or unreadable"
 done
-[ -r .beads/issues.jsonl ] || need ".beads/issues.jsonl is missing or unreadable"
-[ -r .beads/config.yaml ] || need ".beads/config.yaml is missing or unreadable"
-[ -r .beads/policy.yaml ] || need ".beads/policy.yaml is missing or unreadable"
 [ -r scripts/check-site.sh ] || need "scripts/check-site.sh is missing or unreadable"
 for f in package.json package-lock.json eslint.config.mjs .prettierrc.json .prettierignore \
     .githooks/check-control-goroutines.mjs .githooks/control-goroutines-baseline.json \
@@ -45,6 +42,7 @@ for f in package.json package-lock.json eslint.config.mjs .prettierrc.json .pret
     scripts/site-forbidden-phrases.txt; do
     [ -r "$f" ] || need "$f is missing or unreadable"
 done
+[ -r scripts/connect-tracker-store.sh ] || need "scripts/connect-tracker-store.sh is missing or unreadable"
 
 if [ "$missing" = 1 ]; then
     printf 'connect: nothing was connected; supply the above and run make connect again\n' >&2
@@ -62,6 +60,17 @@ if [ ! -x node_modules/.bin/prettier ] || [ ! -x node_modules/.bin/eslint ]; the
         printf 'connect: root tools could not be installed; hooks were not connected\n' >&2
         exit 1
     }
+fi
+bash scripts/connect-tracker-store.sh || {
+    printf 'connect: the external tracker store could not be connected\n' >&2
+    exit 1
+}
+for f in .beads/issues.jsonl .beads/config.yaml .beads/policy.yaml; do
+    [ -r "$f" ] || need "$f is missing or unreadable"
+done
+if [ "$missing" = 1 ]; then
+    printf 'connect: nothing was connected; supply the above and run make connect again\n' >&2
+    exit 1
 fi
 br where >/dev/null 2>&1 || {
     printf 'connect: br has no usable tracker in this checkout\n' >&2
@@ -89,28 +98,25 @@ br sync --import-only || {
     exit 1
 }
 
-old_hooks=$(git config --local --get core.hooksPath 2>/dev/null || :)
-old_driver=$(git config --local --get merge.beads-export.driver 2>/dev/null || :)
-old_name=$(git config --local --get merge.beads-export.name 2>/dev/null || :)
-restore() {
-    git config --local --unset-all core.hooksPath 2>/dev/null || :
-    [ -n "$old_hooks" ] && git config --local core.hooksPath "$old_hooks"
-    git config --local --unset-all merge.beads-export.driver 2>/dev/null || :
-    [ -n "$old_driver" ] && git config --local merge.beads-export.driver "$old_driver"
-    git config --local --unset-all merge.beads-export.name 2>/dev/null || :
-    [ -n "$old_name" ] && git config --local merge.beads-export.name "$old_name"
-}
+hooks_path=$(git config --get core.hooksPath 2>/dev/null || :)
+case "$hooks_path" in
+    ''|.githooks)
+        printf 'connect: core.hooksPath is %s; the tracker connector must point it outside the checkout\n' "${hooks_path:-unset}" >&2
+        exit 1
+        ;;
+esac
 unset_local() {
     if git config --local --get-all "$1" >/dev/null 2>&1; then
         git config --local --unset-all "$1"
     fi
 }
-if ! git config --local core.hooksPath .githooks ||
-    ! unset_local merge.beads-export.driver ||
-    ! unset_local merge.beads-export.name; then
-    restore
-    printf 'connect: git configuration failed; previous settings restored\n' >&2
+unset_local merge.beads-export.driver || {
+    printf 'connect: the retired beads merge driver could not be removed\n' >&2
     exit 1
-fi
+}
+unset_local merge.beads-export.name || {
+    printf 'connect: the retired beads merge driver could not be removed\n' >&2
+    exit 1
+}
 
 printf 'connect: hooks from .githooks, backlog imported, every hook input present\n'

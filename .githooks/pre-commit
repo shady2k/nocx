@@ -548,15 +548,11 @@ fi
 # Staged against HEAD, never the working tree: `br` rewrites the export on
 # almost every command, so a working-tree read would judge backlog writes the
 # commit is not making.
-RUN_BACKLOG=1
-if [ "${#CHANGED[@]}" -gt 0 ]; then
-    RUN_BACKLOG=0
-    for f in "${CHANGED[@]}"; do
-        case "$f" in
-            .beads/issues.jsonl|.githooks/backlog-gate/*|.githooks/check-tracker-import.sh) RUN_BACKLOG=1 ;;
-        esac
-    done
-fi
+# The tracker store is outside the code branches, so a code commit stages no
+# tracker change. The backlog gate runs when the store is published and in CI,
+# against recorded revisions; running it here would judge other agents' live
+# tracker writes against this branch's parent.
+RUN_BACKLOG=0
 
 # The other parent of the merge being committed, or failure when this is not a
 # merge or it cannot be named. A merge committed after a stop (conflicts,
@@ -638,12 +634,9 @@ backlog_gate() {
 }
 
 if [ "$RUN_BACKLOG" = 1 ]; then
-    # The gate's adapter reads the export leniently; br does not, and br is
-    # what every pull and every `make init` feeds it to (nocx-8t2lo).
-    host_gate "tracker export imports into br" .githooks/check-tracker-import.sh
     host_gate "backlog gate" backlog_gate
 else
-    ok "backlog gate — skipped (the backlog export is not staged)"
+    ok "backlog gate — skipped (the tracker store is not committed with code)"
 fi
 
 printf "\nAll static checks passed.\n"

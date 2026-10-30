@@ -68,9 +68,10 @@
  *   no --at     the working tree
  */
 
-import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { linkedIds } from './commit-links.mjs'
 
@@ -158,10 +159,74 @@ export function normalize(rows) {
   return issues
 }
 
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+function trackerExport(at) {
+  const repo = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+  let body
+  if (at && at !== ':0') {
+    // CI and local historical checks read the immutable store recording by the
+    // code revision's name. A missing record is an error, never a later-state fallback.
+    const revision = execFileSync('git', ['rev-parse', '--verify', `${at}^{commit}`], {
+      cwd: repo,
+      encoding: 'utf8',
+    }).trim()
+    const recording = execFileSync(
+      'git',
+      ['show', `refs/tracker/state:.tracker-sync/recordings/${revision}.jsonl`],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+      },
+    )
+    const entry = JSON.parse(recording)
+    if (typeof entry.store !== 'string' || !/^[0-9a-f]{40,64}$/.test(entry.store))
+      throw new Error(`tracker recording for ${revision} has no valid store commit`)
+    body = execFileSync('git', ['show', `${entry.store}:.beads/issues.jsonl`], {
+      cwd: repo,
+      encoding: 'utf8',
+      maxBuffer: 1 << 28,
+    })
+  } else {
+    const mechanism = join(HERE, 'tracker-sync.mjs')
+    const recipe = join(HERE, 'br-tracker.mjs')
+    if (!existsSync(mechanism) || !existsSync(recipe))
+      throw new Error('tracker-sync integration is missing; run make connect')
+    // :0 has no code revision recording. The staged gate compares the active
+    // store; a normal working read refreshes it from the shared ref first.
+    const args = [mechanism, 'export', '--repo', repo, '--recipe', recipe]
+    if (at !== ':0') args.push('--now')
+    const result = spawnSync('node', args, { cwd: repo, encoding: 'utf8', maxBuffer: 1 << 28 })
+    if (result.error || result.status !== 0)
+      throw new Error(
+        `tracker-sync could not read ${at || 'the active store'}: ${(result.stderr || result.error?.message || `exit ${result.status}`).trim()}`,
+      )
+    const marker = '=== .beads/issues.jsonl\n'
+    const start = result.stdout.indexOf(marker)
+    if (start < 0)
+      throw new Error(
+        `tracker-sync returned no .beads/issues.jsonl for ${at || 'the active store'}`,
+      )
+    const from = start + marker.length
+    const next = result.stdout.indexOf('\n=== ', from)
+    body = result.stdout.slice(from, next < 0 ? undefined : next)
+  }
+  return body
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+}
+
 export function readExport(at, exportPath = '.beads/issues.jsonl') {
-  // `git show :0:<path>` is the staged copy and `git show HEAD:<path>` the last
-  // committed one; both take the same spelling, so one flag serves the hook and
-  // the ages snapshots alike.
+  // A worktree after the store move has no tracker file in its Git tree. Read
+  // current state from the store and a historical baseline only from the exact
+  // tracker-sync recording. Keep the file path for isolated adapter fixtures.
+  if (
+    exportPath === '.beads/issues.jsonl' &&
+    existsSync(join(process.cwd(), '.githooks/backlog-gate/tracker-sync.mjs'))
+  )
+    return trackerExport(at)
   const text = at
     ? execFileSync('git', ['show', `${at}:${exportPath}`], {
         encoding: 'utf8',

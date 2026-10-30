@@ -645,6 +645,15 @@ func (s *Session) Snapshot() Snapshot {
 // holds s.mu when it runs the caller's check, and Snapshot would deadlock
 // taken from inside it.
 func (s *Session) snapshotLocked() Snapshot {
+	snap := s.frameSnapshotLocked()
+	snap.Screen = s.screenTextLocked()
+	return snap
+}
+
+// frameSnapshotLocked constructs the revision's facts under s.mu. Publication
+// needs styled rows, not the text projection; snapshotLocked adds that projection
+// only for full snapshot readers, including Commit's check.
+func (s *Session) frameSnapshotLocked() Snapshot {
 	rows, cur, identity, modes := s.screenStateLocked()
 	baseRow, err := s.activeBaseRowLocked(identity.AltScreen)
 	if err != nil {
@@ -669,7 +678,6 @@ func (s *Session) snapshotLocked() Snapshot {
 		Availability:      s.avail,
 		Control:           s.control,
 		Geometry:          s.geom,
-		Screen:            s.screenTextLocked(),
 		PendingRendezvous: s.pendingRendezvousLocked(),
 		Completeness:      s.completeness,
 		Rows:              rows,
@@ -2444,7 +2452,7 @@ func (s *Session) publishFrameLocked() error {
 // that asked for state, and the bound's own fail-open owes a person whose
 // program never released.
 func (s *Session) publishNowLocked() error {
-	snap := s.snapshotLocked()
+	snap := s.frameSnapshotLocked()
 	encoded, err := EncodeFrame(snap)
 	if errors.Is(err, ErrNoScreen) {
 		return nil

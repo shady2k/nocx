@@ -63,7 +63,13 @@ export function prepare({ sha, previous, files, version, date, runId }) {
 }
 export function attest(input) {
   const { dir, sha, version, tag, runId, runAttempt } = input
-  const artifacts = readdirSync(dir)
+  const artifacts = readdirSync(dir, { withFileTypes: true })
+    .map((entry) => {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) fail(`${path} is a directory, not an artifact`)
+      if (!entry.isFile()) fail(`${path} is not a regular file artifact`)
+      return entry.name
+    })
     .filter((name) => !['nightly.json', 'nightly.json.sig'].includes(name))
     .sort()
     .map((name) => {

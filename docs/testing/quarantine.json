@@ -58,16 +58,32 @@
       "bead": "nocx-kylyl"
     },
     {
-      "test": "e2e:e2e/composer-submit-flicker.spec.ts › the submit hand-off (nocx-1ebrs.40) › a real command departs through a fade, and the tail never detaches",
-      "bead": "nocx-atpw5.1.4"
-    },
-    {
       "test": "e2e:e2e/block-outcome.spec.ts › the quiet ⋮ is still reachable from the keyboard",
       "bead": "nocx-atpw5.1.2"
     },
     {
       "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
       "bead": "nocx-atpw5.1.7"
+    },
+    {
+      "test": "e2e:e2e/alt-screen-switch.spec.ts › an alternate-screen switch during the resize › fits the pane, sends the resize first, and holds early input until it applies",
+      "bead": "nocx-1ebrs.66.1.25"
+    },
+    {
+      "test": "e2e:e2e/vault-settings.spec.ts › Vault settings — reissue recovery code › reissue recovery code then unseal with new code and connect",
+      "bead": "nocx-1ebrs.47"
+    },
+    {
+      "test": "e2e:e2e/backend-clear-boundary.spec.ts › clear hides the earlier block, and the record still holds it",
+      "bead": "nocx-atpw5.1.12"
+    },
+    {
+      "test": "e2e:e2e/composer-submit-flicker.spec.ts › the submit hand-off (nocx-1ebrs.40) › a real command departs through a fade, and the tail never detaches",
+      "bead": "nocx-atpw5.1.4"
+    },
+    {
+      "test": "e2e:e2e/agent-ask.spec.ts › agent ask about a frozen block (nocx-x8s2.2) › a second ask while the first streams lands its deltas on the right entry",
+      "bead": "nocx-1ebrs.73.7"
     }
   ]
 }

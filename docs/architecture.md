@@ -71,6 +71,12 @@ graph LR
 
 Raw terminal bytes and raw marker sequences never cross the WebSocket as text. The backend emulator emits only explicitly supported, schema-checked `session.effect` values, including cwd, recovery sighting and promptBoundary; they may drive UI actions or the next `open{cwd}`. The renderer does not parse the stream, and a marker never grants lifecycle authority (AD-1, AD-6, ADR-0081).
 
+Frame publication reads styled screen rows once through the runtime's locked snapshot
+construction, keeping geometry, cursor, buffer identity, modes, title and cwd at the same
+revision. It does not extract the unused text `Screen`; public `Snapshot` and commit
+checks add that text through the existing reader, preserving spacer and blank trimming.
+An unreadable screen still produces no new frame, never a partial one.
+
 ## Module Map
 
 **Backend (Go core)** — one interface, one responsibility each:

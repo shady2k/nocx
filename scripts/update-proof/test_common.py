@@ -47,6 +47,8 @@ class CommonTests(unittest.TestCase):
                  platform="linux", arch="amd64"):
         return {
             "version": "0.8.0",
+            "build": {"commit": hashlib.sha1(payload).hexdigest(),
+                      "builtAt": released},
             "released": released,
             "notesUrl": f"https://github.com/shady2k/nocx/releases/tag/{tag}",
             "artifacts": [self.item(payload, platform=platform, arch=arch, tag=tag)],
@@ -103,6 +105,22 @@ class CommonTests(unittest.TestCase):
             common.verify_manifest(manifest, signature, verifier)
         self.assertIn("verifier diagnostic", str(refused.exception))
         self.assertTrue(arguments.exists(), "the external verifier must actually run")
+
+    def test_verified_manifest_read_or_json_failure_names_path_and_cause(self):
+        manifest = self.directory / "verified-manifest.json"
+        signature = self.directory / "manifest.sig"
+        verifier, _ = self.verifier()
+        for content in (None, "not JSON"):
+            if content is None:
+                manifest.unlink(missing_ok=True)
+            else:
+                manifest.write_text(content)
+            with self.subTest(content=content), \
+                    self.assertRaisesRegex(common.ProofError, "cannot read verified manifest") as refused:
+                common.verify_manifest(manifest, signature, verifier)
+            self.assertIn(str(manifest), str(refused.exception))
+            self.assertIn("No such file" if content is None else "Expecting value",
+                          str(refused.exception))
 
     def test_verified_json_must_be_an_object(self):
         manifest = self.directory / "manifest.json"
@@ -234,6 +252,19 @@ class CommonTests(unittest.TestCase):
                 with self.assertRaises(common.ProofError):
                     common.read_pending(journal, install, expected)
 
+    def test_pair_matches_the_go_updater_ordering_contract(self):
+        fixture = Path(__file__).resolve().parents[2] / "internal/update/testdata/nightly-ordering.json"
+        for case in json.loads(fixture.read_text()):
+            previous, candidate = self.pair()
+            previous.update(case["previous"])
+            candidate.update(case["candidate"])
+            with self.subTest(case=case["name"]):
+                if case["accepted"]:
+                    common.nightly_pair(previous, candidate, "linux", "amd64")
+                else:
+                    with self.assertRaises(common.ProofError):
+                        common.nightly_pair(previous, candidate, "linux", "amd64")
+
     def test_pair_proves_two_same_version_different_byte_published_nightlies(self):
         previous, candidate = self.pair()
         self.assertEqual(common.nightly_pair(previous, candidate, "linux", "amd64"),
@@ -247,8 +278,99 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(common.nightly_pair(previous, candidate, "darwin", "arm64"),
                          (previous["artifacts"][0], candidate["artifacts"][0]))
 
-    def test_pair_refuses_different_semvers_or_non_plain_semver(self):
-        for version in ("0.9.0", "0.8.0-nightly.1", "0.8.0+build", "v0.8.0"):
+    def test_pair_accepts_a_higher_version_successor(self):
+        for previous_version, candidate_version in (("0.8.0", "0.8.1"),
+                                                     ("0.8.9", "0.8.10"),
+                                                     ("0.9.9", "0.10.0"),
+                                                     ("0.9.9", "1.0.0")):
+            previous, candidate = self.pair()
+            previous["version"], candidate["version"] = previous_version, candidate_version
+            with self.subTest(previous=previous_version, candidate=candidate_version):
+                self.assertEqual(common.nightly_pair(previous, candidate, "linux", "amd64"),
+                                 (previous["artifacts"][0], candidate["artifacts"][0]))
+
+    def test_pair_refuses_a_lower_version_even_with_a_newer_build(self):
+        for previous_version, candidate_version in (("0.8.0", "0.7.9"),
+                                                     ("0.8.10", "0.8.9"),
+                                                     ("1.0.0", "0.9.9")):
+            previous, candidate = self.pair()
+            previous["version"], candidate["version"] = previous_version, candidate_version
+            with self.subTest(previous=previous_version, candidate=candidate_version), \
+                    self.assertRaisesRegex(common.ProofError, "must not be lower"):
+                common.nightly_pair(previous, candidate, "linux", "amd64")
+
+    def test_pair_refuses_equal_version_older_or_identical_builds(self):
+        # A later publication cannot make an older build a newer nightly.
+        previous, candidate = self.pair()
+        for changes in ({"builtAt": "2026-10-24T04:00:00Z"},
+                        {"builtAt": previous["build"]["builtAt"]},
+                        {"commit": previous["build"]["commit"]}):
+            previous, candidate = self.pair()
+            candidate["build"].update(changes)
+            with self.subTest(changes=changes), \
+                    self.assertRaisesRegex(common.ProofError, "newer stamped build"):
+                common.nightly_pair(previous, candidate, "linux", "amd64")
+
+    def test_pair_refuses_equal_version_unstamped_or_invalid_builds(self):
+        for changes in ({"commit": "dev"}, {"commit": "A" * 40},
+                        {"commit": None}, {"commit": 123},
+                        {"builtAt": None}, {"builtAt": 123},
+                        {"builtAt": "unknown"}, {"builtAt": "2026-10-26T04:00:00+00:00"},
+                        {"builtAt": "2026-02-30T04:00:00Z"}):
+            for side in (0, 1):
+                pair = self.pair()
+                pair[side]["build"].update(changes)
+                with self.subTest(changes=changes, side=side), \
+                        self.assertRaisesRegex(common.ProofError, "stamped build"):
+                    common.nightly_pair(*pair, "linux", "amd64")
+        for side in (0, 1):
+            pair = self.pair()
+            del pair[side]["build"]
+            with self.subTest(missing_build=side), \
+                    self.assertRaisesRegex(common.ProofError, "stamped build"):
+                common.nightly_pair(*pair, "linux", "amd64")
+
+    def test_pair_refuses_missing_or_wrongly_typed_version_and_build_fields(self):
+        for side in (0, 1):
+            for value in (None, 123, ["0.8.0"]):
+                pair = self.pair()
+                pair[side]["version"] = value
+                with self.subTest(side=side, version=value), \
+                        self.assertRaisesRegex(common.ProofError, "plain next-stable semver"):
+                    common.nightly_pair(*pair, "linux", "amd64")
+            pair = self.pair()
+            del pair[side]["version"]
+            with self.subTest(missing_version=side), \
+                    self.assertRaisesRegex(common.ProofError, "plain next-stable semver"):
+                common.nightly_pair(*pair, "linux", "amd64")
+            for value in (None, 123, []):
+                pair = self.pair()
+                pair[side]["build"] = value
+                with self.subTest(side=side, build=value), \
+                        self.assertRaisesRegex(common.ProofError, "stamped build"):
+                    common.nightly_pair(*pair, "linux", "amd64")
+
+    def test_pair_invalid_fields_name_the_side_and_field(self):
+        for index, side in enumerate(("previous", "candidate")):
+            cases = ({"version": None}, {"build": None},
+                     {"build": {"builtAt": "2026-10-26T04:00:00Z"}},
+                     {"build": {"commit": "a" * 40}},
+                     {"build": {"commit": None}}, {"build": {"builtAt": 123}})
+            for changes in cases:
+                pair = self.pair()
+                pair[index].update(changes)
+                field = ("version" if "version" in changes else
+                         "build" if changes["build"] is None else
+                         "build.commit" if not isinstance(changes["build"].get("commit"), str)
+                         else "build.builtAt")
+                with self.subTest(side=side, changes=changes), \
+                        self.assertRaises(common.ProofError) as refused:
+                    common.nightly_pair(*pair, "linux", "amd64")
+                self.assertIn(side, str(refused.exception))
+                self.assertIn(field, str(refused.exception))
+
+    def test_pair_refuses_non_plain_semver(self):
+        for version in ("0.8.0-nightly.1", "0.8.0+build", "v0.8.0", "01.8.0"):
             previous, candidate = self.pair()
             candidate["version"] = version
             with self.subTest(version=version), self.assertRaises(common.ProofError):

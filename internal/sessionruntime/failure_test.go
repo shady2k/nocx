@@ -299,6 +299,72 @@ func TestAClosedEmulatorIsReportedRatherThanCrashed(t *testing.T) {
 	}
 }
 
+type unreadableLastRow struct {
+	emulator.Terminal
+	fail bool
+}
+
+func (r *unreadableLastRow) Row(y int) (emulator.Row, error) {
+	geometry, err := r.Terminal.Geometry()
+	if err != nil {
+		return emulator.Row{}, err
+	}
+	if r.fail && y == geometry.Rows-1 {
+		return emulator.Row{}, errors.New("last screen row is unreadable")
+	}
+	return r.Terminal.Row(y)
+}
+
+func TestPublicationRefusesAPartiallyReadableScreen(t *testing.T) {
+	var screen *unreadableLastRow
+	s, _, _ := realRuntime(t, func(cfg *Config) {
+		screen = &unreadableLastRow{Terminal: cfg.Emulator}
+		cfg.Emulator = screen
+	})
+	c := s.Consumers().Attach()
+	if err := s.Ingest([]byte("before")); err != nil {
+		t.Fatal(err)
+	}
+	if frames := c.Take(); len(frames) != 1 {
+		t.Fatalf("readable screen published %d frames, want one", len(frames))
+	}
+
+	screen.fail = true
+	if err := s.Ingest([]byte(" during")); err != nil {
+		t.Fatal(err)
+	}
+	if frames := c.Take(); len(frames) != 0 {
+		t.Fatalf("partially readable screen published %d frames, want none", len(frames))
+	}
+	snap := s.Snapshot()
+	if snap.Rows != nil || snap.Screen != nil || snap.Identity.Cols != 0 || snap.Identity.Rows != 0 {
+		t.Fatalf("partial screen was presented as readable: %+v", snap)
+	}
+	if _, err := EncodeFrame(snap); !errors.Is(err, ErrNoScreen) {
+		t.Fatalf("encode unreadable snapshot: %v, want ErrNoScreen", err)
+	}
+
+	screen.fail = false
+	if err := s.Ingest([]byte(" after")); err != nil {
+		t.Fatal(err)
+	}
+	snap = s.Snapshot()
+	if got := string(snap.Screen); got != "before during after" {
+		t.Fatalf("recovered screen = %q, want every ingested byte", got)
+	}
+	frames := c.Take()
+	if len(frames) != 1 || frames[0].Revision != snap.Revision {
+		t.Fatalf("recovered publication = %+v, want revision %d", frames, snap.Revision)
+	}
+	want, err := EncodeFrame(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(frames[0].Bytes, want) {
+		t.Fatalf("recovered frame = %s, want %s", frames[0].Bytes, want)
+	}
+}
+
 // TestClosingTheEmulatorDuringIngestDoesNotCrash is the same path under
 // concurrency, which is how it happens in a product: a teardown closes the
 // terminal while the reader goroutine is still feeding it. Every ingest either

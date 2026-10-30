@@ -331,7 +331,12 @@ var (
 // sequence, and agents still run when the channel is unavailable (nocx-5qa8h).
 // 67: injected startup reserves the legacy load latch; remote publication
 // neutralises installer targets atomically rather than leaving a stale loader.
-const version = "67"
+// 68: the Bash and zsh grant readers MATCH the bootstrap field before slicing
+// it out — a refused grant omits the field on the wire (`bootstrap,omitempty`),
+// and the unconditional slice handed the ssh branch the whole frame to eval
+// (nocx-40rlu). Every installed copy must be rewritten: a shell still sourcing
+// 67 parses the frame's JSON as shell source and never runs the typed ssh.
+const version = "68"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

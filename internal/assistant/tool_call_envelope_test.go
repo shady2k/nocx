@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/providertest"
 )
 
 func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T) {
@@ -88,7 +89,10 @@ func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T)
 }
 
 func TestAsk_OfferedToolsAndWholeEnvelopeReturnTypedFailure(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
+			return
+		}
 		streamAnswer(w, `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`)
 	}))
 	defer srv.Close()
@@ -108,7 +112,10 @@ func TestAsk_OfferedToolsAndWholeEnvelopeReturnTypedFailure(t *testing.T) {
 }
 
 func TestAsk_OrdinaryAnswerWithToolMarkupQuotedStillCompletes(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
+			return
+		}
 		streamAnswer(w, "The answer mentions <tool_call> as an example, but it is ordinary prose.")
 	}))
 	defer srv.Close()

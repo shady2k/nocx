@@ -10,18 +10,6 @@ import (
 	"testing"
 )
 
-// consumeProviderRequestBeforeResponse keeps fake completions behind the same boundary as
-// real providers: the complete POST arrives before its answer. net/http does
-// not drain it for the handler when Connection: close is set; answering first
-// can otherwise close the socket while the client is still writing.
-func consumeProviderRequestBeforeResponse(w http.ResponseWriter, r *http.Request) bool {
-	if _, err := io.Copy(io.Discard, r.Body); err != nil {
-		http.Error(w, "could not read provider request", http.StatusBadRequest)
-		return false
-	}
-	return true
-}
-
 // delayedProviderBody lets the test send the body only after the handler
 // starts reading it. A response before that read is an early-close race,
 // independent of how fast a loopback socket happens to deliver the POST.

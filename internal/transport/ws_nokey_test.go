@@ -10,6 +10,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/providertest"
 )
 
 func TestEndpointsProbe_RequiredCredentialMissingIsRefused(t *testing.T) {
@@ -59,7 +60,7 @@ func TestEndpointsProbe_RequiredCredentialMissingIsRefused(t *testing.T) {
 func TestAgentAsk_NoKeyEndpointAnswersWithoutAuthorization(t *testing.T) {
 	auth := make(chan string, 1)
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !consumeProviderRequestBeforeResponse(w, r) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
 			return
 		}
 		auth <- r.Header.Get("Authorization")

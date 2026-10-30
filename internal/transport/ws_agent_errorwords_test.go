@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/providertest"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -124,7 +125,7 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 // middleware rather than the framework's own index lookup — with an argument
 // object the schema the model was shown does not allow.
 func malformedReadScreen(w http.ResponseWriter, r *http.Request) {
-	if !consumeProviderRequestBeforeResponse(w, r) {
+	if !providertest.ConsumeRequestBeforeResponse(w, r) {
 		return
 	}
 	streamToolCallChunk(w, "session.read", `{"notADeclaredProperty":1}`)
@@ -144,7 +145,7 @@ func (f failingKnownMaterial) FindKnown(context.Context, string) ([]assistant.Kn
 func TestAskFailure_EgressScreeningNamesSealedVault(t *testing.T) {
 	var sessionID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !consumeProviderRequestBeforeResponse(w, r) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
 			return
 		}
 		streamToolCallChunk(w, "session.list", `{}`)

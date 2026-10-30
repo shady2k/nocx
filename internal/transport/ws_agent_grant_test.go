@@ -18,6 +18,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/providertest"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -418,7 +419,7 @@ type missingGrantProvider struct {
 }
 
 func (p *missingGrantProvider) serve(w http.ResponseWriter, r *http.Request) {
-	if !consumeProviderRequestBeforeResponse(w, r) {
+	if !providertest.ConsumeRequestBeforeResponse(w, r) {
 		return
 	}
 	streamToolCallChunk(w, "session.read", fmt.Sprintf(

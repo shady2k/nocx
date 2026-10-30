@@ -274,6 +274,7 @@ type wireRequestBody struct {
 	buf      []byte
 	overflow bool
 	done     bool
+	finished chan struct{}
 	mu       sync.Mutex
 }
 
@@ -306,13 +307,22 @@ func (b *wireRequestBody) Close() error {
 func (b *wireRequestBody) finish(closedEarly bool) {
 	b.mu.Lock()
 	if b.done {
+		finished := b.finished
 		b.mu.Unlock()
+		<-finished
 		return
 	}
 	b.done = true
+	b.finished = make(chan struct{})
 	body := append([]byte(nil), b.buf...)
 	truncated := closedEarly || b.overflow
 	b.mu.Unlock()
+	// EOF and RoundTrip may finish concurrently. A completed exchange must
+	// already have its diagnostics, including the tool offer. Keep callbacks
+	// outside mu, but make every finisher wait for the whole emission. A
+	// channel also makes that wait observable to the synctest regression;
+	// sync.Once's mutex wait is not durably blocked there.
+	defer close(b.finished)
 	b.parent.write(b.label + "\n" + string(body))
 	b.parent.record(b.ctx, "request", body, truncated)
 	b.parent.logToolOffer(b.ctx, body)

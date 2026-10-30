@@ -68,6 +68,10 @@
     {
       "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
       "bead": "nocx-atpw5.1.7"
+    },
+    {
+      "test": "e2e:e2e/agent-ask.spec.ts › agent ask about a frozen block (nocx-x8s2.2) › a second ask while the first streams lands its deltas on the right entry",
+      "bead": "nocx-1ebrs.73.7"
     }
   ]
 }

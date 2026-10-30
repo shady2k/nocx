@@ -14,11 +14,11 @@ The owner authorized implementation on 2026-10-29 in
 `origin/main` at `6062102f0`. Feature `nocx-g9giy` owns this work;
 `nocx-g9giy.1` owns admission and reconciliation.
 
-Before final integrated verification, the feature checkout advanced to
-`origin/main` at `ceb6bcc87` and the feature changes were reapplied. The newer
-busy-terminal lifecycle, keyed session control and ledger-row changes remain
-in the integration; they are not replaced with the original investigation's
-versions.
+Before final integrated verification, the feature checkout advanced first to
+`origin/main` at `ceb6bcc87`, then integrated `3a67b18ec`. The newer
+busy-terminal lifecycle, keyed session control, ledger-row changes and
+matched FreeType AppImage packaging remain in the integration; they are not
+replaced with the original investigation's versions.
 
 The owner initially selected an independent workstream outside the
 single-current-milestone rule. On 2026-10-30 the owner authorized `v0-9`

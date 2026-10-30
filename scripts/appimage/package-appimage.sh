@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build the Linux AppImage from an already-compiled binary.
+# ADR-8c9vy815 owns the prebuilt WebKit/FreeType experimental ABI pairing.
 #
 # Lives here rather than inline in .github/workflows/release.yml so it can be
 # run on a developer machine against a real build — packaging that only exists
@@ -180,6 +181,23 @@ convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
   --deploy-deps-only="AppDir$webkit_libexec" \
   --plugin gtk
 
+# linuxdeploy excludes FreeType, but its prebuilt WebKit uses the 2.11
+# experimental COLRv1 structs. The host's >=2.13 SONAME is not ABI-compatible.
+# Stage security-current jammy after deployment so it cannot be overwritten.
+webkit_package='2.50.4-0ubuntu0.22.04.1'
+webkit_build_id='5453dc26598bc698bee8376a0266f979a653dac7'
+[ "$(dpkg-query -W -f='${Version}' libwebkit2gtk-4.1-0)" = "$webkit_package" ] \
+  || { echo "unknown WebKit build: bump the package/build-ID pins, record its buildinfo URL and FreeType headers, then rerun the COLRv1 artifact gate"; exit 1; }
+readelf -n AppDir/usr/lib/libwebkit2gtk-4.1.so.0 | grep -q "Build ID: $webkit_build_id" \
+  || { echo "deployed WebKit build-ID changed: bump both pins, record the new buildinfo URL and FreeType headers, then rerun the COLRv1 artifact gate"; exit 1; }
+scripts/appimage/stage-freetype.sh AppDir
+{
+  echo "webkit_package=$webkit_package"
+  echo "webkit_build_id=$webkit_build_id"
+  echo 'webkit_freetype_headers=2.11.1+dfsg-1ubuntu0.3'
+  echo 'webkit_buildinfo=https://launchpad.net/~ubuntu-security-proposed/+archive/ubuntu/ppa/+build/32114182/+files/webkit2gtk_2.50.4-0ubuntu0.22.04.1_amd64.buildinfo'
+} | tee -a AppDir/usr/share/doc/libfreetype6/nocx-provenance.txt
+
 # ── Point the bundled WebKitGTK back inside the AppDir ───────
 # The AppRun sources its hooks BY NAME, so a file dropped into
 # apprun-hooks/ is not picked up on its own; the source line is
@@ -266,6 +284,15 @@ test -f "$shipped" || { echo "the AppImage carries no third-party notices"; exit
 got="$(sha256sum "$shipped" | awk '{print $1}')"
 [ "$got" = "$pinned" ] || { echo "the AppImage's notices are not the pinned document: $got != $pinned"; exit 1; }
 echo "AppImage notices: $got is the pinned document"
+
+echo "=== matched FreeType and its notices are in the image ==="
+ftdoc="$extracted/squashfs-root/usr/share/doc/libfreetype6"
+test -s "$ftdoc/copyright"
+test -s "$ftdoc/nocx-provenance.txt"
+cat "$ftdoc/nocx-provenance.txt"
+cmp AppDir/usr/lib/libfreetype.so.6 "$extracted/squashfs-root/usr/lib/libfreetype.so.6"
+cmp AppDir/usr/share/doc/libfreetype6/copyright "$ftdoc/copyright"
+cmp AppDir/usr/share/doc/libfreetype6/nocx-provenance.txt "$ftdoc/nocx-provenance.txt"
 
 rm -rf "$extracted"
 

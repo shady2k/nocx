@@ -76,6 +76,14 @@
     {
       "test": "e2e:e2e/backend-clear-boundary.spec.ts › clear hides the earlier block, and the record still holds it",
       "bead": "nocx-atpw5.1.12"
+    },
+    {
+      "test": "e2e:e2e/composer-submit-flicker.spec.ts › the submit hand-off (nocx-1ebrs.40) › a real command departs through a fade, and the tail never detaches",
+      "bead": "nocx-atpw5.1.4"
+    },
+    {
+      "test": "e2e:e2e/agent-ask.spec.ts › agent ask about a frozen block (nocx-x8s2.2) › a second ask while the first streams lands its deltas on the right entry",
+      "bead": "nocx-1ebrs.73.7"
     }
   ]
 }

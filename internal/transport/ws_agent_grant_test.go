@@ -417,7 +417,10 @@ type missingGrantProvider struct {
 	missingID string
 }
 
-func (p *missingGrantProvider) serve(w http.ResponseWriter, _ *http.Request) {
+func (p *missingGrantProvider) serve(w http.ResponseWriter, r *http.Request) {
+	if !consumeProviderRequestBeforeResponse(w, r) {
+		return
+	}
 	streamToolCallChunk(w, "session.read", fmt.Sprintf(
 		`{"id":%q,"start":0,"count":20}`, p.missingID))
 }

@@ -382,6 +382,7 @@ These are verification entry points, not claims that every platform gate has pas
 - Provision local Zsh plugin fixtures with `scripts/install-zsh-zle-plugins.sh <dir>` and pass `NOCX_ZSH_PLUGINS=<dir>` to the host gate. The Zsh-parent SSH closure scenario uses the shared declared Bash endpoint, like the SSH assembly scenarios: it must not accidentally test unsupported helper-less remote Fish merely because the developer's account uses Fish. This does not change the account shell, product shell selection or the plugin-bearing Zsh parent.
 - The live SSH fixture isolates native account-shell XDG state outside the launcher-installation home. OpenSSH invokes that account shell even before a forced Bash command, and Fish creates its own config/cache/data directories there. Both capability and bearer-canary checks scan the isolated XDG tree; the strict assertion that nocx installs only its launcher bundle is unchanged.
 - `node --test .githooks/pre-commit.test.mjs` exercises the real hook's cross-process lock, failure and interruption paths with a fixture-owned toolchain. Its `go env GOPATH` answer points back to that toolchain, so the hook cannot accidentally select system Node/npm from `/bin` and run downloads or real lint inside the test.
+- The real DNS failure fixture uses the absolute reserved name `nocx-no-such-host.invalid.`. The trailing root prevents a container's search suffix from turning it into a resolvable public host; the real resolver and the paired localhost success check remain in use.
 
 ## Assumptions and contingencies
 

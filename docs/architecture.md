@@ -111,6 +111,12 @@ use the same visibility gate; visible unfocused splits still paint.
 | `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it.                                                                                                                                                                                                                                                                                        |
 | `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                                                                                                                                                                                                                                                                                                                   |
 
+On `session.frame` intake, the client cell model decodes each row's Unicode
+positions and marks once, validates the whole frame, and reuses those positions
+to build its immutable cell snapshot. That intermediate data belongs to one
+`apply` call, not a cross-revision cache. A refused frame leaves the installed
+snapshot unchanged.
+
 ## Architectural Decisions
 
 All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litigate.

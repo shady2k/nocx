@@ -57,6 +57,23 @@
 // keep, because Go's own darwin runtime loads libSystem and libresolv whatever
 // the helper does.
 //
+// # Departed-row capture
+//
+// Ordinary departures and synchronous pre-erasure callbacks share the bulk
+// history reader. It resolves a row once and traverses its cells on that
+// reference, preserving styles (including erased backgrounds), full graphemes,
+// width classes and soft-wrap flags. Text uses row-wide UTF-8 scratch storage,
+// not a Go grapheme buffer per cell; each returned string owns its bytes.
+// Active-screen and tracked-row reads retain their existing per-cell path.
+//
+// An unusually long cluster can overflow the initial UTF-8 budget: the reader
+// retries the whole row with a larger buffer, paying another resolution, and
+// reports exhaustion rather than returning truncated or partially read cells.
+// Capture stops at the first unreadable row and reports that hole with the
+// successfully copied prefix. The pre-erasure span is borrowed only until its
+// callback returns, so copying stays synchronous under the terminal lock and
+// never re-enters vt_write or mutates the terminal while reading the reference.
+//
 // # What answers a program, and what does not
 //
 // The port carries the program's own replies; which queries produce one is

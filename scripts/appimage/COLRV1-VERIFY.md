@@ -63,9 +63,13 @@ semantic screenshot recognition of the actual app's tab and grid: inspect the
 two AppImage PNGs to confirm those glyphs visibly appear. The standalone
 shipped-engine DOM/canvas snapshots do have automated colour-pixel checks.
 
-Evidence stays in `<artifact directory>/appimage-verification/<mutation>/`.
-Set `NOCX_APPIMAGE_VERIFY_EVIDENCE` to choose another directory. Logs print
-in the gate output. The font itself is not copied to retained evidence;
+Evidence stays in `$RUNNER_TEMP/appimage-verification.XXXXXX/<mutation>/`
+when `RUNNER_TEMP` is set. Otherwise a fresh `appimage-verification.XXXXXX`
+directory is created beside the artifact directory, not inside it. This keeps
+screenshots and logs out of `dist/*`, which release jobs upload as artifacts.
+Set `NOCX_APPIMAGE_VERIFY_EVIDENCE` to choose another directory. The gate log
+prints `AppImage verification evidence: <path>` before running any container;
+find the screenshots and full logs at that path on the runner or local host. The font itself is not copied to retained evidence;
 `fixture.json` identifies the exact bytes and selected glyph.
 
 ## Optional host comparison

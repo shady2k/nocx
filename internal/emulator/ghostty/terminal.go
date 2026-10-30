@@ -988,7 +988,7 @@ func (t *terminal) noteDepartedLocked() {
 // the rest as though the hole were not there.
 func (t *terminal) captureDepartedLocked(from, to int) {
 	for y := from; y < to; y++ {
-		row, err := t.rowAt(pointHistory, y)
+		row, err := t.historyRow(y)
 		if err != nil {
 			t.failDeparted(fmt.Errorf("ghostty: departed row %d of %d..%d: %w", y, from, to, err))
 			return
@@ -1029,6 +1029,9 @@ func (t *terminal) beginHistoryCaptureLocked() {
 // The original coordinate is first_row + prunedRows; rows before baseRows were
 // already present at the mutation boundary. The departed frontier then skips
 // any fresh prefix already copied by an earlier callback in this mutation.
+// The callback runs synchronously before these pages are erased, with mu held.
+// historyRow only reads that borrowed span; no terminal mutation or reentrant
+// vt_write may occur until the row has been copied.
 func (t *terminal) captureHistoryErasedLocked(firstRow, count int) {
 	prunedBefore := t.historyCapture.prunedRows
 	t.historyCapture.erased = true
@@ -1054,7 +1057,7 @@ func (t *terminal) captureHistoryErasedLocked(firstRow, count int) {
 	to := endOriginal - prunedBefore
 	if t.departedErr == nil {
 		for y := from; y < to; y++ {
-			row, err := t.rowAt(pointHistory, y)
+			row, err := t.historyRow(y)
 			if err != nil {
 				t.failDeparted(fmt.Errorf("ghostty: history-erased row %d of %d..%d: %w", y, firstRow, firstRow+count, err))
 				break
@@ -1074,11 +1077,9 @@ func (t *terminal) failDeparted(err error) {
 	}
 }
 
-// rowAt is the one row read: the line's soft-wrap flags and its cells,
-// copied, from the coordinate space tag names — the active area for the
-// port's Row, the scrollback history for a departed row. Bounds belong to
-// the caller, because the two spaces are bounded differently: the active
-// area by the geometry, history by what has not been evicted.
+// rowAt reads a line's soft-wrap flags and cells from the coordinate space tag
+// names. Bounds belong to the caller. Departed capture uses historyRow instead,
+// sharing one resolved reference across all columns of each history row.
 func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 	wrapped, continuation, err := t.rowFlags(tag, y)
 	if err != nil {
@@ -1527,14 +1528,9 @@ func (t *terminal) rowFlags(tag C.GhosttyPointTag, y int) (wrapped, continuation
 // takes is only valid until the next mutating call, so it is used here and
 // never returned.
 //
-// Each position costs its own grid reference and the four calls behind it — the
-// reference itself, the cell, two cell fields and the style, with a grapheme
-// read on top when the cell holds text. That is the CAPTURE path and not the
-// frame path: the library's incremental render-state API (render.h) is the one
-// built for per-frame work, a Row here is O(columns) references, and this port
-// does not carry the render state at all (see the port's package doc).
-// Tag names the coordinate space the position is read in: the active area
-// for the port's own reads, the scrollback history for a departed row.
+// Each position costs its own grid reference, cell fields, style and (for text)
+// grapheme read. Active and tracked-row reads use this path; departed capture
+// uses historyRow's bulk traversal instead. Tag names the coordinate space.
 func (t *terminal) readCell(tag C.GhosttyPointTag, x, y int) (emulator.Cell, error) {
 	var ref C.GhosttyGridRef
 	if r := C.nocxGridRefAt(t.t, tag, C.uint32_t(x), C.uint32_t(y), &ref); r != C.GHOSTTY_SUCCESS {
@@ -1624,16 +1620,16 @@ func (t *terminal) historyRow(y int) (emulator.Row, error) {
 	// even that re-runs the whole traversal on a fourfold budget rather than
 	// truncating — the bridge holds no state between attempts, and each
 	// attempt pays its own one resolution.
-	graphemes := make([]C.uint8_t, cols*maxGraphemeCodepoints*4)
+	graphemes := make([]byte, cols*maxGraphemeCodepoints*4)
 	for {
 		r := C.nocxHistoryRow(t.t, C.uint32_t(y), C.uint16_t(cols), &cells[0],
-			&graphemes[0], C.size_t(len(graphemes)), &wrap, &cont)
+			(*C.uint8_t)(unsafe.Pointer(&graphemes[0])), C.size_t(len(graphemes)), &wrap, &cont)
 		if r == C.GHOSTTY_OUT_OF_SPACE {
 			if len(graphemes) >= cols*maxGraphemeCodepoints*64 {
 				return emulator.Row{}, fmt.Errorf("ghostty: history row %d utf8 budget %d: %w",
 					y, len(graphemes), emulator.ErrExhausted)
 			}
-			graphemes = make([]C.uint8_t, len(graphemes)*4)
+			graphemes = make([]byte, len(graphemes)*4)
 			continue
 		}
 		if r != C.GHOSTTY_SUCCESS {
@@ -1660,7 +1656,7 @@ func (t *terminal) historyRow(y int) (emulator.Row, error) {
 		}
 		if cell.HasText {
 			off, n := int(f.grapheme_off), int(f.grapheme_len)
-			cell.Grapheme = string(C.GoBytes(unsafe.Pointer(&graphemes[off]), C.int(n)))
+			cell.Grapheme = string(graphemes[off : off+n])
 		}
 		out[x] = cell
 	}

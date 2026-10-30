@@ -12,8 +12,8 @@ package app
 // So these tests open a real pane through the SHIPPED composition root — the
 // same App a person launches, the same installer, the same endpoint, the same
 // handshake — and then ask the OPERATING SYSTEM who the shell's parent is. Not
-// a record nocx wrote about itself, not a code path: `ps`, about a pid the
-// shell reported for itself.
+// a record nocx wrote about itself, not a code path: `ps`, about the parent pid
+// reported by a foreground probe the native shell launched.
 //
 // Everything a local pane had is asserted through the new owner in the same
 // way: the shell-integration activation environment by asking the shell what
@@ -201,20 +201,29 @@ func TestAUserOpenedHelperPaneReachesPromptReady(t *testing.T) {
 // reaches the screen the pane is painted from), and none of it waited for the
 // person to quit.
 func TestAHelperHostedPaneWhoseHelloNeverArrivesIsAWorkingTerminal(t *testing.T) {
+	// HOME alone does not redirect an explicitly configured Fish startup path.
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
 	a := newLocalPaneApp(t)
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatalf("this stand's home: %v", err)
 	}
-	// EVERY STARTUP FILE the three tiers source, because which shell this
-	// machine's account runs is not this test's to choose: the helper resolves
-	// the login shell itself (internal/loginshell), and a hold in the wrong
-	// file would leave the hello arriving and the test proving nothing.
+	// Hold each supported shell in its own startup language. The helper still
+	// resolves the real account shell; POSIX rc files do not hold native Fish.
 	const hold = "while [ ! -e \"$HOME/.hello-release\" ]; do sleep 0.05; done\n"
 	for _, name := range []string{".bashrc", ".bash_profile", ".zshenv", ".zprofile", ".zshrc", ".zlogin"} {
 		if werr := os.WriteFile(filepath.Join(home, name), []byte(hold), 0o600); werr != nil {
 			t.Fatalf("writing %s: %v", name, werr)
 		}
+	}
+	fishConfig := filepath.Join(config, "fish")
+	if mkdirErr := os.MkdirAll(fishConfig, 0o700); mkdirErr != nil {
+		t.Fatalf("creating Fish's startup directory: %v", mkdirErr)
+	}
+	const fishHold = "while not test -e \"$HOME/.hello-release\"\n    sleep 0.05\nend\n"
+	if writeErr := os.WriteFile(filepath.Join(fishConfig, "config.fish"), []byte(fishHold), 0o600); writeErr != nil {
+		t.Fatalf("writing Fish's startup hold: %v", writeErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*lifecycle.HelloTimeout)
@@ -566,6 +575,7 @@ func openLocalPane(t *testing.T, a *App) *pane {
 	if err != nil {
 		t.Fatalf("opening a local pane through the shipped opener: %v", err)
 	}
+	awaitLocalPaneIntegration(t, a, opened.Session.ID())
 	p := &pane{sess: opened.Session}
 	// The ring already holds everything the pump has written since offset
 	// zero — nothing acks here, so nothing trims it — so this goroutine
@@ -614,6 +624,47 @@ func say(marker, rest string) string {
 	return `echo "` + marker[:4] + `""` + marker[4:] + rest + `"`
 }
 
+// posixPaneCommand declares the fixture program's language without replacing
+// the account shell under test. That shell still launches and records one
+// foreground command, including when it is native Fish.
+func posixPaneCommand(script string) string {
+	return "/bin/sh -c " + shellQuoteForSh(script)
+}
+
+// awaitLocalPaneIntegration waits for authentication and the reader boundary,
+// not just the hello that can precede native shell startup finishing.
+func awaitLocalPaneIntegration(t *testing.T, a *App, sid session.ID) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), lifecycle.HelloTimeout)
+	defer cancel()
+	outcome, err := a.Transport.AwaitIntegration(ctx, sid)
+	if err != nil {
+		t.Fatalf("waiting for the fixture shell's integration: %v", err)
+	}
+	if outcome.Status != transport.IntegrationIntegrated {
+		t.Fatalf("fixture shell integration = %+v, want integrated", outcome)
+	}
+	// Fish's integration emits B with BEL while rendering the prompt. Its
+	// native reader emits B with ST after keyboard-protocol setup; only that
+	// later boundary says it is ready for input.
+	boundary := "\x1b]133;B\a"
+	if shellintegration.LocalShellKind(loginShellPath()) == shellintegration.ShellFish {
+		boundary = "\x1b]133;B\x1b\\"
+	}
+	var output strings.Builder
+	ready := false
+	err = a.Transport.WatchSessionOutput(ctx, sid, func(data []byte) {
+		output.Write(data)
+		if strings.Contains(output.String(), boundary) {
+			ready = true
+			cancel()
+		}
+	})
+	if !ready || (err != nil && !errors.Is(err, context.Canceled)) {
+		t.Fatalf("waiting for the fixture shell's reader boundary: ready=%v, err=%v, output=%q", ready, err, output.String())
+	}
+}
+
 // run types a line into the pane and waits for the answer it asked for.
 //
 // The wait is on an OBSERVABLE — the marker the shell itself prints — and
@@ -646,11 +697,11 @@ func (p *pane) await(t *testing.T, want *regexp.Regexp) []string {
 var shellPID = regexp.MustCompile(`NOCXPID=(\d+)\b`)
 
 // THE SHELL IS THE DAEMON'S CHILD, NOT THE BACKEND'S — read from the operating
-// system, about a pid the shell reported for itself.
+// system, about the parent pid reported by the shell's foreground probe.
 //
 // This is the whole of nocx-ie23r.3 in one assertion, and it is deliberately
-// made without asking nocx anything. The shell says its own pid; `ps` says who
-// that pid's parent is; `ps` says what that parent is running. If the local
+// made without asking nocx anything. The probe says its parent's pid; `ps`
+// says who that pid's parent is and what that parent is running. If the local
 // pane were still forked in the coordinator — which is what it did until this
 // bead — the parent would be this test binary, and every other test in this
 // file would pass exactly as it does now.
@@ -658,7 +709,9 @@ func TestALocalPaneIsTheDaemonsChild(t *testing.T) {
 	a := newLocalPaneApp(t)
 	p := openLocalPane(t, a)
 
-	pid, err := strconv.Atoi(p.run(t, say("NOCXPID", "=$$"), shellPID)[1])
+	// The POSIX probe is a child of the native interactive shell. Its PPID is
+	// that shell's PID; $$ would name the probe (and is invalid Fish syntax).
+	pid, err := strconv.Atoi(p.run(t, posixPaneCommand(say("NOCXPID", "=$PPID")), shellPID)[1])
 	if err != nil || pid <= 0 {
 		t.Fatalf("the shell reported an unusable pid: %v", err)
 	}

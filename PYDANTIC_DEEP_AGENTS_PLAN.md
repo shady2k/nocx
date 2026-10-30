@@ -353,6 +353,20 @@ The runtime-only gzip archive was 60,423,726 bytes (SHA-256 `0fbfb7fb34cab40142b
 
 These are not production latency, continuous peak memory, PSS, model-quality or final installer-compression measurements. Sampling intervals reached approximately 11 ms; aggregate RSS double-counts shared pages and includes the coordinator, helper and three shells. Go heap baselines varied, Eino preceded Pydantic, and the shared host had background load without CPU pinning. Reproduction and raw measurements are recorded with `nocx-g9giy.4.3`; no benchmark framework or performance threshold is added.
 
+### Packaged Linux acceptance
+
+An unsigned `VERSION=dev` AppImage built from `2dc52b04302924c33be9648cfdbcc9eadc2cfbfd` is 210,577,912 bytes, SHA-256 `c5d82d72fedfeebc52f282ccf5ab2f32835fa8c325e82ee7df6f32dd49502952`. The isolated builder used Ubuntu 22, Go 1.26.10, Node 24.22.1 and WebKitGTK 2.50.4. Dependency installation used the frozen lock and a private offline npm download cache; no host `node_modules` or mutable build outputs were mounted.
+
+The repository's `verify-appimage.sh` passed its complete default Arch matrix: the happy path and the `no-freetype`, `no-network-process`, `no-web-process` and `unpatched` refusal mutations. Arch had neither GTK3 nor WebKitGTK installed. The happy path observed the renderer connection, a terminal, both bundled WebKit helpers, a shell in disposable HOME and the COLRv1 output/title acknowledgement.
+
+A separate run extracted that same AppImage and exercised its no-login coordinator under Docker `--network none`, with disposable HOME and a PATH without Python. Against a local scripted provider, flag-off Eino completed without a Python child; flag-on Pydantic completed through the profile-staged interpreter with `-I -B` and manifest digest `b57910d6bb462f8ac45bccded63e6afcbc57a748b8e122658ef2f60b05265183`. Full offline manifest verification and imports of the SDK and native dependencies passed. The extracted coordinator matched the built binary, SHA-256 `73f8139f432ee18645850356fd592a408bd5c8222cf3fb0b67ccf77a7ca27b74`.
+
+Reproduction drivers and receipts are recorded with `nocx-g9giy.4.2`. This proves the Linux experimental payload is present and executable in the packaged artifact; it is not release publication, signing, model-quality evidence or native macOS acceptance.
+
+### Native runtime acceptance
+
+[CI run 40994079153](https://github.com/shady2k/nocx/actions/runs/40994079153), at `2dc52b04302924c33be9648cfdbcc9eadc2cfbfd`, passed the packaged-runtime and host-authority checks natively on Linux/amd64, macOS/amd64 and macOS/arm64. The `ci-mac` job, both variants of the OS-specific `ci-linux` job, and all four Chromium/WebKit e2e shards also passed. These are component results, not a claim that the whole run was green. They prove native execution rather than only cross-built bundles; release signing and notarization remain separate release checks.
+
 ### Commands and execution ownership
 
 These are verification entry points, not claims that every platform gate has passed. Stage acceptance records hold the executed commands and results. Work from the repository root unless a directory is named.

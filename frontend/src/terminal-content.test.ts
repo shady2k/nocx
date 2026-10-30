@@ -12092,7 +12092,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
             entry: { ...turn },
             agentRuns: [],
             edges: [],
-            artifacts: [{ id: 'art-t1', mediaType: 'text/plain' }],
+            artifacts: [],
             proseEvicted: false,
             caused: [
               {
@@ -12118,6 +12118,15 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
                 opensBlock: false,
               },
             ],
+          })
+        if (id === 'txt-1')
+          return Promise.resolve({
+            entry: { kind: 'text' },
+            agentRuns: [],
+            edges: [],
+            artifacts: [{ id: 'art-t1', mediaType: 'text/plain', captureMethod: 'none' }],
+            caused: [],
+            proseEvicted: false,
           })
         // A top-level block's entry: no body data and no causes.
         return Promise.resolve({

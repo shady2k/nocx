@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	helperlocal "github.com/shady2k/nocx/internal/helper/local"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/transport"
 )
@@ -84,6 +85,7 @@ func TestAVersionTakeoverKeepsTheLiveShellAndRoutesNewPanesToTheInstalledGenerat
 		t.Fatalf("open the pane before the update: %v", err)
 	}
 	sid := opened.Session.ID()
+	awaitLocalPaneIntegration(t, first, sid)
 	if opened.Hosted == nil || opened.Hosted.Generation != oldSource.hash() {
 		t.Fatal("the first pane was not opened on the old installed generation")
 	}
@@ -98,7 +100,13 @@ func TestAVersionTakeoverKeepsTheLiveShellAndRoutesNewPanesToTheInstalledGenerat
 	// The value exists only in the live shell, not in the pane's cwd,
 	// ledger or startup files. The expected output is absent from the
 	// command's echoed input: a marker wait cannot pass on tty echo alone.
-	if _, writeErr := opened.Session.Write([]byte("NOCX_TAKEOVER_STATE=held; printf 'BEFORE-%s\\n' \"$NOCX_TAKEOVER_STATE\"\n")); writeErr != nil {
+	// Keep the state in the actual native shell, rather than in a disposable
+	// POSIX child, so the post-takeover read still proves that shell survived.
+	setState := "NOCX_TAKEOVER_STATE=held"
+	if shellintegration.LocalShellKind(loginShellPath()) == shellintegration.ShellFish {
+		setState = "set -g NOCX_TAKEOVER_STATE held"
+	}
+	if _, writeErr := opened.Session.Write([]byte(setState + "; printf 'BEFORE-%s\\n' \"$NOCX_TAKEOVER_STATE\"\n")); writeErr != nil {
 		t.Fatalf("use the original shell: %v", writeErr)
 	}
 	waitForMarkerAnywhere(t, first, sid, "BEFORE-held")
@@ -177,6 +185,7 @@ func TestAVersionTakeoverKeepsTheLiveShellAndRoutesNewPanesToTheInstalledGenerat
 	if err != nil {
 		t.Fatalf("open a fresh pane after the takeover: %v", err)
 	}
+	awaitLocalPaneIntegration(t, second, fresh.Session.ID())
 	if fresh.Hosted == nil || fresh.Hosted.Generation != newSource.hash() || fresh.Session.ID() == sid {
 		t.Fatal("the fresh pane did not name the new installed generation and a new session")
 	}

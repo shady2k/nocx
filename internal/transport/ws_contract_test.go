@@ -6695,11 +6695,13 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				Gaps:    []ledgerGapWire{{Start: 10, End: 20, Reason: "dropped"}},
 				Payload: json.RawMessage(`{}`),
 			}},
+			AgentRuns:    []ledgerAgentRunWire{},
 			ProseEvicted: true,
 		},
 		"an entry with no relations and no captures": {
 			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
-			Caused: []ledgerCausedWire{}, ProseEvicted: false,
+			AgentRuns: []ledgerAgentRunWire{},
+			Caused:    []ledgerCausedWire{}, ProseEvicted: false,
 		},
 	}
 	getSchema := loadSchema(t, "ledger.get.schema.json")

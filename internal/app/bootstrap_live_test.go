@@ -38,7 +38,7 @@ import (
 // TestLiveSshd_CarrierBootstrapReachesAcceptedDomain is the happy path of the
 // whole epic, watched end to end.
 func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	installer := liveBundleCarrier(t, fx)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
@@ -89,7 +89,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	// Nothing installed beyond the bundle, and no file on the far host
 	// holds the capability — including the temp root, which the bootstrap
 	// wrote to and unlinked before writing a byte.
-	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, cap)
+	assertSessionLeftOnlyTheLauncherBundle(t, fx, cap)
 }
 
 // TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt is the same
@@ -99,7 +99,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 // case that used to HANG before the writer existed — the loader waited for a
 // frame that never came.
 func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 

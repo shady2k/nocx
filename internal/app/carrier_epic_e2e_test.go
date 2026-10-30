@@ -481,7 +481,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 
 func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	logs, logger := captureProductLogs(t)
-	fx := startLiveSshd(t, true, withFarSideRecording())
+	fx := startLiveSshd(t, true, withFarSideRecording(), withAssemblyBashEndpoint(t))
 	fx.logger = logger
 	fx.rand = canaryRand{}
 
@@ -643,6 +643,7 @@ func assertEverySurface(t *testing.T, fx *liveSshd, probe canaryProbe, path, ter
 	// 3. Every remote root written to, including the temp root.
 	probe.scanTree(t, path+": the remote home", fx.home)
 	probe.scanTree(t, path+": the remote temp root", fx.tmpRoot)
+	probe.scanTree(t, path+": the remote account shell's XDG state", fx.xdgRoot)
 
 	// 4. Product logs.
 	probe.scan(t, path+": the product's logs", logs.String())

@@ -249,7 +249,7 @@ func terminalTail(out *outputBuffer, limit int) string {
 // produce authenticated start/complete with the right exit status and the
 // render fence on the terminal.
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
-	fx := startLiveSshd(t, true)
+	fx := startLiveSshd(t, true, withAssemblyBashEndpoint(t))
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, liveBundleCarrier(t, fx))
 
@@ -322,7 +322,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 
 	// Nothing installed: the session home holds only the fixture .bashrc and
 	// the launcher's own ~/.nocx bundle, and no file carries the capability.
-	assertSessionLeftOnlyTheLauncherBundle(t, fx.home, kernel.capabilityHex())
+	assertSessionLeftOnlyTheLauncherBundle(t, fx, kernel.capabilityHex())
 }
 
 // TestLiveSshd_RemoteBundleRepublishReplacesManifest proves nocx-340t
@@ -668,25 +668,27 @@ func homeEntries(root string) []string {
 // (nocx-k47n), and no file anywhere contains the per-epoch capability — the
 // channel installs nothing and persists nothing beyond the rcfile text
 // (ADR-0024 decision 2).
-func assertSessionLeftOnlyTheLauncherBundle(t *testing.T, home, capability string) {
+func assertSessionLeftOnlyTheLauncherBundle(t *testing.T, fx *liveSshd, capability string) {
 	t.Helper()
-	for _, e := range homeEntries(home) {
+	for _, e := range homeEntries(fx.home) {
 		if e == ".bashrc" || e == ".nocx" || strings.HasPrefix(e, ".nocx/") {
 			continue
 		}
-		t.Fatalf("session left an artifact in the remote home: %s", e)
+		t.Fatalf("session left an artifact in the remote home: %s; entries=%v", e, homeEntries(fx.home))
 	}
 	found := ""
-	_ = filepath.WalkDir(home, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || found != "" {
+	for _, root := range []string{fx.home, fx.xdgRoot} {
+		_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || found != "" {
+				return nil
+			}
+			b, err := os.ReadFile(p) // #nosec G304 — p comes from WalkDir over fixture-owned remote state.
+			if err == nil && strings.Contains(string(b), capability) {
+				found = p
+			}
 			return nil
-		}
-		b, err := os.ReadFile(p) // #nosec G304 — p comes from WalkDir over the fixture-owned session home.
-		if err == nil && strings.Contains(string(b), capability) {
-			found = p
-		}
-		return nil
-	})
+		})
+	}
 	if found != "" {
 		t.Fatalf("the per-epoch capability persisted on the remote host at %s — "+
 			"the channel must install nothing and persist nothing", found)

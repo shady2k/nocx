@@ -71,6 +71,7 @@ type liveSshd struct {
 	addr      string       // "127.0.0.1:<port>"
 	user      string       // passwd name of the current uid
 	home      string       // the session HOME (SetEnv override, fixture-owned)
+	xdgRoot   string       // native account-shell state, separate from launcher installation
 	signer    gossh.Signer // client key installed in authorized_keys
 	hostKey   gossh.PublicKey
 	clientRaw ed25519.PrivateKey // the raw client key, for the child-line ssh-agent fixture
@@ -329,7 +330,16 @@ func startLiveSshd(t *testing.T, allowForward bool, opts ...liveSshdOption) *liv
 	// behind. With recording on it is redirected to a fixture-owned file
 	// INSTEAD, because "the shell's history" is one of the surfaces the
 	// canary must not appear on and /dev/null cannot be searched.
-	sessionEnv := []string{"HOME=" + home}
+	// sshd still invokes the account shell before ForceCommand. Fish creates
+	// native XDG state even for that non-interactive invocation; keep it
+	// separate from the launcher-installation assertion and scan it for leaks.
+	xdgRoot := filepath.Join(dir, "xdg")
+	sessionEnv := []string{
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(xdgRoot, "config"),
+		"XDG_CACHE_HOME=" + filepath.Join(xdgRoot, "cache"),
+		"XDG_DATA_HOME=" + filepath.Join(xdgRoot, "data"),
+	}
 	rcHist := "HISTFILE=/dev/null\n"
 	rcRecorder := ""
 	var recDir, tmpRoot, histFile string
@@ -441,6 +451,7 @@ LogLevel VERBOSE
 		addr:         addr,
 		user:         userName,
 		home:         home,
+		xdgRoot:      xdgRoot,
 		clientKey:    clientKeyPath,
 		signer:       clientSigner,
 		clientRaw:    clientRaw,

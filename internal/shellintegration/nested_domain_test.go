@@ -1012,15 +1012,15 @@ func TestZshNestedSudoWithoutPreserveFDSRunsConventionally(t *testing.T) {
 	assertUnsupportedSudoRunsConventionally(t, s, k)
 }
 
-// TestZshNestedChildStillborn covers the §9 failure interval on the zsh
+// TestZshNestedChildStillborn covers the §9 refusal interval on the zsh
 // tier: the kernel REFUSES the request (an empty bootstrap — forwarding
-// refused, sudo policy), the parent sends domain_suspended and runs the
-// command conventionally, and still re-activates at its next prompt. The
-// child never establishes — no child hello — and the parent's activation
-// is accepted against the stillborn child (a Pending child is not on the
-// stack). A late frame from that never-established child is rejected
-// against the restored parent by the real kernel; the fake kernel here
-// proves the shell half: the parent neither hangs nor stays suspended.
+// refused, sudo policy), and the documented contract for that echo is the
+// honest fallback: the parent runs the user's line conventionally,
+// suspends nothing and claims no domain (nocx-tyyo; nocx-40rlu pinned the
+// wire shape — a refused grant OMITS the bootstrap field, which this
+// kernel's real-codec grant already sends). The child never establishes —
+// no child hello — and the parent reaches its own next prompt, never a
+// hang and never left suspended.
 func TestZshNestedChildStillborn(t *testing.T) {
 	k := newNestedKernel(t)
 	k.refuseChild = true
@@ -1033,40 +1033,46 @@ func TestZshNestedChildStillborn(t *testing.T) {
 	s := startNestedZshParent(t, k, "sudo", fakeSudo)
 
 	// The user enters sudo -i. The parent requests the child, receives the
-	// REFUSAL (an empty bootstrap), sends domain_suspended, and runs the
-	// command conventionally — the fake sudo reports and exits.
+	// REFUSAL (no bootstrap field on the wire), and runs the command
+	// conventionally — the fake sudo reports and exits.
 	_, _ = s.ptmx.Write([]byte("sudo -i\n"))
 
-	// The parent still re-activates at its next prompt — the §9 stillborn
-	// interval is the expected path, not an error, and never a hang.
-	waittest.WaitForTimeoutDetail(t, "parent activation after refused child", 15*time.Second,
-		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
-		func() bool {
-			k.mu.Lock()
-			defer k.mu.Unlock()
-			return k.parentActivated
-		})
-
-	// The sentinel is written to the PTY; the activation above was observed
+	// The sentinel is written to the PTY; the kernel's events are observed
 	// on the CHANNEL. One transport cannot speak for the other, so wait for
 	// the sentinel itself (channelShell.run carries the long note) — and do
 	// it before taking the kernel mutex, so nothing waits while holding it.
 	waittest.WaitForTimeoutDetail(t, "the STILLBORN-SUDO-RAN sentinel", 15*time.Second,
-		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "STILLBORN-SUDO-RAN")
 		})
 
+	// The parent's own lifecycle resumes — a complete and prompt_ready for
+	// the parent domain — which is the never-a-hang half of the contract:
+	// no suspend was owed, so no activation is owed either.
+	waittest.WaitForTimeoutDetail(t, "the parent's next prompt after the refused launch", 15*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			for _, e := range k.accepted {
+				if e.Body["dom"] == testDom && e.Evt == "complete" {
+					return true
+				}
+			}
+			return false
+		})
+
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if !k.parentSuspended {
-		t.Fatalf("parent never suspended before the refused launch; order=%v output=%q", k.order, s.output())
+	if k.parentSuspended {
+		t.Fatalf("parent suspended for a refused child; no child exists and no domain may be claimed (nocx-tyyo); order=%v output=%q", k.order, s.output())
 	}
 	if k.childHeard {
 		t.Fatalf("a refused child still established (hello accepted); order=%v", k.order)
 	}
-	if !k.parentActivated {
-		t.Fatalf("parent never re-activated after the stillborn child; order=%v output=%q", k.order, s.output())
+	if k.parentActivated {
+		t.Fatalf("parent claimed an activation for a launch that never happened; order=%v output=%q", k.order, s.output())
 	}
 }
 

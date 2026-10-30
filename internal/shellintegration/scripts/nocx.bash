@@ -629,8 +629,9 @@ __nocx_lc_read_grant() {
         __env="${__nocx_lc_frame#*\"env\":\"}"
         __env="${__env%%\"*}"
         # The bootstrap is the grant's LAST field (the wire order is pinned
-        # by the codec): everything after its opening quote, minus the
-        # closing quote and brace. Its own escaped quotes are untouched.
+        # by the codec): when present, everything after its opening quote,
+        # minus the closing quote and brace. Its own escaped quotes are
+        # untouched.
         # The strips are %? (one char) — a pattern of } would be read by
         # bash as an empty pattern plus a literal brace, stripping nothing.
         # SHORTEST match, deliberately: ## scans the whole frame for the
@@ -641,9 +642,22 @@ __nocx_lc_read_grant() {
         # It is also the more correct match: the field precedes its own
         # value, so the FIRST occurrence is the real one, while ## would
         # prefer a lookalike inside the bootstrap text.
-        __bootstrap="${__nocx_lc_frame#*\"bootstrap\":\"}"
-        __bootstrap="${__bootstrap%?}"
-        __bootstrap="${__bootstrap%\"}"
+        # The extraction is a MATCH, not an assumption: the codec omits an
+        # empty bootstrap (`bootstrap,omitempty`), so a refused grant carries
+        # no "bootstrap":" at all, and a bare # strip would hand back the
+        # WHOLE FRAME — which the ssh branch evals in this parent, parsing
+        # the frame's JSON as shell source and losing the person's line to
+        # the eval's own exit status (nocx-40rlu). A frame with no
+        # bootstrap field is the refusal, exactly like an empty one; the
+        # guard below reads it as that.
+        case "$__nocx_lc_frame" in
+            *'"bootstrap":"'*)
+                __bootstrap="${__nocx_lc_frame#*\"bootstrap\":\"}"
+                __bootstrap="${__bootstrap%?}"
+                __bootstrap="${__bootstrap%\"}"
+                ;;
+            *) __bootstrap= ;;
+        esac
         __nocx_lc_json_unescape "$__bootstrap"
         __nocx_grant_bootstrap="$__nocx_lc_json_unescaped"
         __nocx_grant_env="$__env"

@@ -3567,6 +3567,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		_ = respond(wconn, resp)
 		return
 	}
+	key := ""
+	if m.key != nil {
+		var refusal *RPCError
+		key, refusal = m.key(req.Params)
+		if refusal != nil {
+			_ = wconn.TryError(req.ID, *refusal)
+			return
+		}
+	}
 	// THE CHAIN STARTS HERE (nocx-d6gn4.8.1): the frame names itself in the
 	// context, so every log line the handler and everything it calls
 	// produces says which request it came from — without a single one of
@@ -3599,7 +3608,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			return
 		}
 	}
-	rej := m.submission.TrySubmit(requestCtx, control.Task{Run: func(pctx context.Context) {
+	rej := m.submission.TrySubmit(requestCtx, control.Task{Key: key, Run: func(pctx context.Context) {
 		defer cancelRequest()
 		defer func() {
 			if cancelEntry != nil {

@@ -825,7 +825,7 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.56.0';
+const RULES_VERSION = '0.58.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 

@@ -273,20 +273,24 @@ export function rowColumnsOf(wireRow: SessionFrame['rows'][number]): number {
   return 'malformed' in positions ? 0 : explicitColumnsOf(positions)
 }
 
-/** Intake validation, one pass, before anything is built: the wire names
- *  the malformed shapes (a rows array that is not geometry.rows long, a
+/** Validate intake before building cells, retaining each row's positions.
+ *  Reject malformed shapes (a rows array that is not geometry.rows long, a
  *  row whose explicit content spans more columns than geometry.cols, a
  *  mark that claims more codepoints than the text has left or names a
  *  position twice, a width outside {1, 2, 4}, present runs whose lengths
- *  do not partition the row's own explicit width) and refuses them. A
- *  refusal installs nothing. */
-function refusalFor(frame: SessionFrame, currentRevision: number | null): FrameRefusal | null {
+ *  do not partition the row's own explicit width). A refusal installs nothing;
+ *  successful positions live only for this apply. */
+function validateFrame(
+  frame: SessionFrame,
+  currentRevision: number | null,
+): RowPositions[] | FrameRefusal {
   if (currentRevision !== null && frame.revision <= currentRevision) {
     return { reason: 'stale-revision', revision: frame.revision, current: currentRevision }
   }
   if (frame.rows.length !== frame.geometry.rows) {
     return { reason: 'malformed-geometry', detail: 'row-count' }
   }
+  const rows: RowPositions[] = []
   for (let r = 0; r < frame.rows.length; r++) {
     const wireRow = frame.rows[r]
     const positions = positionsOf(wireRow)
@@ -309,6 +313,7 @@ function refusalFor(frame: SessionFrame, currentRevision: number | null): FrameR
         return { reason: 'malformed-row', row: r, detail: 'run-partition' }
       }
     }
+    rows.push(positions)
   }
   const state = frame.state
   if (
@@ -335,7 +340,7 @@ function refusalFor(frame: SessionFrame, currentRevision: number | null): FrameR
   ) {
     return { reason: 'malformed-state' }
   }
-  return null
+  return rows
 }
 
 /** Build one row of the next snapshot: walk positions in order, splitting
@@ -345,11 +350,12 @@ function refusalFor(frame: SessionFrame, currentRevision: number | null): FrameR
  *  the encoder produced them from two independent per-column reads. A
  *  shorter row (a trailing run of default columns implied rather than
  *  sent) is padded out to geometry.cols in the default style. */
-function buildRow(index: number, wireRow: SessionFrame['rows'][number], cols: number): ModelRow {
-  const positions = positionsOf(wireRow)
-  if ('malformed' in positions) {
-    throw new Error('cell-model: buildRow called on a row refusalFor already rejected')
-  }
+function buildRow(
+  index: number,
+  wireRow: SessionFrame['rows'][number],
+  cols: number,
+  positions: RowPositions,
+): ModelRow {
   const cells: ModelCell[] = []
   let runIndex = 0
   let runRemaining = wireRow.runs?.[0]?.[1] ?? Number.POSITIVE_INFINITY
@@ -403,9 +409,9 @@ export function createCellModel(): CellModel {
     },
 
     apply(frame: SessionFrame): ApplyResult {
-      const refusal = refusalFor(frame, installed?.revision ?? null)
-      if (refusal !== null) {
-        return { ok: false, refusal }
+      const positions = validateFrame(frame, installed?.revision ?? null)
+      if (!Array.isArray(positions)) {
+        return { ok: false, refusal: positions }
       }
       // Decode builds every fact fresh from the frame's strings and
       // numbers — there is nothing left to alias, so freezing the result
@@ -416,7 +422,7 @@ export function createCellModel(): CellModel {
       const state: FrameState = Object.freeze({ ...frame.state })
       const rows: ModelRow[] = []
       for (let r = 0; r < frame.rows.length; r++) {
-        rows.push(buildRow(r, frame.rows[r], geometry.cols))
+        rows.push(buildRow(r, frame.rows[r], geometry.cols, positions[r]))
       }
       Object.freeze(rows)
       const snapshot: ScreenSnapshot = Object.freeze({

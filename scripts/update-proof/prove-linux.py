@@ -18,17 +18,37 @@ from urllib.request import Request, urlopen
 
 from common import (ProofError, artifact, command, download_artifact, nightly_pair,
                     read_pending, require, sha256, verify_manifest)
+from controls import (ACTIVATE, FOCUS, REFUSE, Channel, Option, Rail, Reveal,
+                      channel_settled)
 from transport import BASE, Relay
 
 
-def wait_for(description, probe, timeout=120):
+def wait_for(description, probe, timeout=120, describe=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = probe()
         if value:
             return value
         threading.Event().wait(0.1)
+    if describe:
+        # A timeout that says what the window looked like, not only what was
+        # wanted; a window that died must not replace the timeout with its own
+        # read error.
+        try:
+            description += " (last reading: " + describe() + ")"
+        except Exception as error:
+            description += " (last reading failed: " + str(error) + ")"
     raise ProofError("not observed: " + description)
+
+
+def descendants(node):
+    """Every accessible at or below `node`; objects that went away are skipped."""
+    try:
+        yield node
+        for index in range(node.childCount):
+            yield from descendants(node.getChildAtIndex(index))
+    except (RuntimeError, AttributeError):
+        return
 
 
 class Desktop:
@@ -41,30 +61,107 @@ class Desktop:
     def nodes(self):
         # Query the real GTK/WebKit accessibility tree on every observation:
         # old accessible objects become defunct after a window restart.
-        def walk(node):
-            try:
-                yield node
-                for index in range(node.childCount):
-                    yield from walk(node.getChildAtIndex(index))
-            except (RuntimeError, AttributeError):
-                return
         desktop = self.atspi.Registry.getDesktop(0)
         pids = profile_pids(self.home)
         result = []
         for application in desktop:
             if application.get_process_id() in pids:
-                result.extend(walk(application))
+                result.extend(descendants(application))
         return result
 
-    def named(self, name, role=None):
+    def named(self, name, role=None, showing=True):
         for node in self.nodes():
             try:
                 if node.name == name and (role is None or node.getRoleName() == role):
-                    if node.getState().contains(self.atspi.STATE_SHOWING):
+                    if not showing or node.getState().contains(self.atspi.STATE_SHOWING):
                         return node
             except RuntimeError:
                 continue
         return None
+
+    def rail(self):
+        """One reading of the settings rail: every row, and the ones on screen."""
+        nav = self.named("Settings sections")
+        if nav is None:
+            return None
+        rows, showing = [], []
+        for node in descendants(nav):
+            try:
+                if node.getRoleName() != "push button":
+                    continue
+                rows.append(node.name or "")
+                if node.getState().contains(self.atspi.STATE_SHOWING):
+                    showing.append(node.name or "")
+            except RuntimeError:
+                continue
+        return Rail(tuple(rows), tuple(showing))
+
+    def rail_click(self, name):
+        """Activate a settings-rail row, scrolling the rail to it first.
+
+        The rail is taller than the window: at the default 1024x768 the last
+        rows are in the tree, FOCUSABLE, and not SHOWING (the About row sits
+        about 270px below the rail's bottom edge), so waiting for a shown
+        control never returned. A person scrolls the rail; asking the engine to
+        focus the row is how this does it, and WebKitGTK then scrolls the rail
+        until the row is on screen (measured on 2.52). Only then is the row
+        activated, and a row that focusing cannot reveal is reported with the
+        reading that refused it.
+        """
+        reveal = Reveal(name)
+        deadline = time.monotonic() + 120
+        reading = None
+        while time.monotonic() < deadline:
+            reading = self.rail()
+            if reading is not None:
+                step = reveal.step(reading)
+                if step == ACTIVATE:
+                    row = self.named(name, "push button")
+                    require(row is not None, "rail row announced but not addressable: " + name)
+                    actions = row.queryAction()
+                    require(actions.nActions > 0 and actions.doAction(0),
+                            "rail row refused activation: " + name)
+                    return
+                if step == FOCUS:
+                    row = self.named(name, "push button", showing=False)
+                    if row is not None:
+                        row.queryComponent().grabFocus()
+                elif step == REFUSE:
+                    raise ProofError(reveal.refusal(reading))
+            threading.Event().wait(0.1)
+        raise ProofError("not observed: settings row " + name
+                         + ("; " + reading.describe() if reading else "; no settings rail"))
+
+    def wait_for_channel(self, wanted):
+        """Wait until the combo's own value is `wanted`.
+
+        The press counts only once the value changed, and the value is the row
+        the combo marks SELECTED — never a row that merely carries the name.
+        """
+        def settled():
+            reading = self.channel()
+            return reading if reading is not None and channel_settled(reading, wanted) else None
+        wait_for("the channel to read " + wanted, settled,
+                 describe=lambda: (self.channel() or Channel()).describe())
+
+    def channel(self):
+        """One reading of the update-channel combo, or None before it is announced."""
+        combo = self.named("Update channel", "combo box")
+        if combo is None:
+            return None
+        options = []
+        expanded = combo.getState().contains(self.atspi.STATE_EXPANDED)
+        for node in descendants(combo):
+            try:
+                if node.getRoleName() != "menu item":
+                    continue
+                state = node.getState()
+                options.append(Option(node.name or "",
+                                      state.contains(self.atspi.STATE_SELECTED),
+                                      state.contains(self.atspi.STATE_SHOWING)))
+            except RuntimeError:
+                continue
+        return Channel(tuple(options), expanded)
 
     def text(self):
         result = []
@@ -89,11 +186,18 @@ class Desktop:
     def nightly(self):
         self.click("Settings")
         self.click("Updates")
-        node = wait_for("Update channel", lambda: self.named("Update channel", "combo box"))
-        require(node.queryAction().doAction(0), "channel select refused opening")
-        option = wait_for("Nightly option", lambda: self.named("Nightly"))
+        combo = wait_for("Update channel", lambda: self.named("Update channel", "combo box"))
+        require(combo.queryAction().nActions > 0 and combo.queryAction().doAction(0),
+                "channel select did not accept its press")
+        # Every option is a menu item in the tree whether or not it is the
+        # value, so the row is addressed without requiring it to be on screen.
+        option = wait_for("the Nightly option",
+                          lambda: self.named("Nightly", "menu item", showing=False))
         require(option.queryAction().doAction(0), "Nightly option refused selection")
-        self.click("About")
+        self.wait_for_channel("nightly")
+        # About is the last row of the rail and starts below the fold.
+        self.rail_click("About")
+        wait_for("the About page", lambda: self.named("Check for updates", "push button"))
 
     def check(self, refused=False):
         start = len(self.relay.requests)
@@ -180,6 +284,51 @@ def extract_identities(appimage, destination):
     appdir = destination / "squashfs-root"
     return {"window": sha256(appdir / "usr/bin/nocx"),
             "coordinator": sha256(appdir / "usr/bin/nocx-server")}
+
+
+def permitted_coordinators(previous, candidate, initial, identities):
+    # ADR-0104 allows reuse only within one Version. A version change must
+    # replace the serving coordinator, even when its protocol is compatible.
+    permitted = {identities["coordinator"]}
+    if previous["version"] == candidate["version"]:
+        permitted.update(p["sha256"] for p in initial if "nocx-server" in p["executable"])
+    return permitted
+
+
+class RestartObservation:
+    """One restart observation, shared by the wait predicate and its diagnostic."""
+
+    def __init__(self, previous, candidate, initial, identities, install, old_windows,
+                 home, journal, backup):
+        self.permitted = permitted_coordinators(previous, candidate, initial, identities)
+        self.policy = ("same-Version coordinator reuse permitted"
+                       if previous["version"] == candidate["version"] else
+                       "version change requires candidate-only coordinator")
+        self.identities, self.install, self.old_windows = identities, install, old_windows
+        self.home, self.journal, self.backup = home, journal, backup
+        self.processes = []
+        self.windows = []
+        self.servers = []
+        self.old_still_running = False
+
+    def observe(self):
+        self.processes = profile_processes(self.home)
+        self.windows = [p for p in self.processes
+                        if p["sha256"] == self.identities["window"]
+                        and p["pid"] not in self.old_windows
+                        and p["appimage"] == str(self.install)]
+        self.servers = [p for p in self.processes if "nocx-server" in p["executable"]
+                        and p["sha256"] in self.permitted]
+        self.old_still_running = any(p["pid"] in self.old_windows for p in self.processes)
+        return self.processes if (self.windows and self.servers and not self.old_still_running
+                                  and not self.journal.exists() and self.backup.exists()) else None
+
+    def describe(self):
+        observed = [p["sha256"] for p in self.processes if "nocx-server" in p["executable"]]
+        return (f"{self.policy}; expected coordinator SHA-256={sorted(self.permitted)}; "
+                f"observed coordinator SHA-256={observed}; candidate windows="
+                f"{[p['pid'] for p in self.windows]}; old window running={self.old_still_running}; "
+                f"journal exists={self.journal.exists()}; backup exists={self.backup.exists()}")
 
 
 def run(args, evidence):
@@ -278,7 +427,7 @@ def run(args, evidence):
         relay.verify_live()
         relay.mode = "live"
         desktop.check()
-        wait_for("same-semver different-byte nightly offer (.66.1.8)",
+        wait_for("newer published nightly offer",
                  lambda: desktop.named("Install now", "push button")
                  or desktop.named("Install", "push button"))
         desktop.click("Install now" if desktop.named("Install now", "push button") else "Install")
@@ -292,23 +441,17 @@ def run(args, evidence):
         # ADR-0104 deliberately permits a protocol-compatible same-Version
         # coordinator to survive a different-Commit nightly. Require a REAL
         # serving executable, but do not invent a coordinator takeover policy.
-        permitted_servers = {identities["coordinator"]} | {
-            p["sha256"] for p in initial if "nocx-server" in p["executable"]}
+        restarted = RestartObservation(previous, candidate, initial, identities, install,
+                                       old_windows, home, journal, backup)
         desktop.click("Restart now")
-        def restarted_pair():
-            processes = profile_processes(home)
-            windows = [p for p in processes if p["sha256"] == identities["window"]
-                       and p["pid"] not in old_windows and p["appimage"] == str(install)]
-            servers = [p for p in processes if "nocx-server" in p["executable"]
-                       and p["sha256"] in permitted_servers]
-            old_still_running = any(item["pid"] in old_windows for item in processes)
-            return processes if (windows and servers and not old_still_running
-                                 and not journal.exists() and backup.exists()) else None
-        evidence["restartedProcesses"] = wait_for("new window and serving coordinator, ReportHealthy finalization",
-                                                   restarted_pair)
+        evidence["restartedProcesses"] = wait_for(
+            "new window and serving coordinator, ReportHealthy finalization",
+            restarted.observe, describe=restarted.describe)
         evidence["coordinatorPolicy"] = (
             "ADR-0104 acceptance #3: same-Version/different-Commit nightlies may run "
-            "the new window against the previous coordinator by design")
+            "the new window against the previous coordinator by design"
+            if previous["version"] == candidate["version"] else
+            "ADR-0104 acceptance #1: a version change requires the candidate coordinator")
         # The decisive assertion happens AFTER the new window has run, not merely
         # after Apply or after an app-reported version string.
         require(sha256(install) == after["sha256"], "post-restart installed digest is not candidate")
@@ -321,7 +464,8 @@ def run(args, evidence):
         evidence["installedVersionAfterRestart"] = metadata.stdout.strip()
         evidence["reportHealthyFinalized"] = True
         desktop.click("Settings")
-        desktop.click("About")
+        desktop.rail_click("About")
+        wait_for("the About page", lambda: desktop.named("Check for updates", "push button"))
         desktop.check()
         require("You're up to date" in desktop.text(), "already-current artifact offered itself again")
         evidence["alreadyCurrentRefused"] = True
@@ -338,6 +482,8 @@ def run(args, evidence):
         evidence["transportRequests"] = relay.requests
         try:
             evidence["accessibilitySnapshot"] = desktop.text() if desktop else "driver unavailable"
+            reading = desktop.rail() if desktop else None
+            evidence["settingsRail"] = reading.describe() if reading else "settings rail not open"
         except Exception as error:
             evidence["snapshotError"] = str(error)
         owned_pids = profile_pids(home)

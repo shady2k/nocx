@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -574,16 +575,18 @@ func waitChildAlive(t *testing.T, pid int) {
 	}
 }
 
-// readPidFile reads one integer from the command's own pid file, polling
-// until it exists — the command writes it a moment after the data frame
-// reaches the shell, and the file's appearance is the observable that the
-// execution actually started (there is something for the lease to cancel).
+// readPidFile waits for the command to publish a non-empty PID record.
+// Shell redirection creates the file before echo writes it, so existence alone
+// cannot establish that the execution has published its process identity.
 func readPidFile(t *testing.T, path string) int {
 	t.Helper()
 	var pid int
 	waittest.WaitForTimeout(t, "the command to write its pid file", 10*time.Second, func() bool {
 		b, err := os.ReadFile(path) //nolint:gosec // the pid file is the test's own temp file, written by the command under test
 		if err != nil {
+			return false
+		}
+		if len(b) == 0 {
 			return false
 		}
 		parsed, perr := strconv.Atoi(strings.TrimSpace(string(b)))
@@ -594,6 +597,32 @@ func readPidFile(t *testing.T, path string) int {
 		return true
 	})
 	return pid
+}
+
+func TestReadPidFileWaitsForThePIDWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "child.pid")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		result := make(chan int, 1)
+		go func() {
+			defer close(result)
+			result <- readPidFile(t, path)
+		}()
+		synctest.Wait()
+		select {
+		case pid := <-result:
+			t.Fatalf("accepted an empty PID record as %d", pid)
+		default:
+		}
+		if err := os.WriteFile(path, []byte("123"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if pid := <-result; pid != 123 {
+			t.Fatalf("complete PID = %d, want 123", pid)
+		}
+	})
 }
 
 // waitForRunState scans the tap until the run terminalizes with the wanted

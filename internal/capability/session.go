@@ -18,9 +18,6 @@ type SessionService interface {
 	Get(id session.ID) (session.Session, error)
 	// Close tears down one session.
 	Close(id session.ID) error
-	// EndSession is Close's sibling for a caller that knows nobody will ever
-	// want this session again (nocx-isjh4) — see session.Reg.EndSession.
-	EndSession(id session.ID) error
 	// List returns every live session (sessions.status, attach addressing).
 	List() []session.Session
 	// LastUsedForProfiles answers persisted last-used timestamps
@@ -33,6 +30,23 @@ type SessionService interface {
 type SessionOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, SessionService) error) error
+}
+
+// SessionEndOperation retires one authoritative ID under the session gate,
+// then ends its process under the execution lane alone. Before runs after
+// retirement and before teardown, so transport can mark the expected exit and
+// cancel the session's resize lane without exposing the ID to another attach.
+// A non-nil returned session means retirement committed even if teardown failed.
+type SessionEndOperation interface {
+	AssistantOperation
+	Run(context.Context, func(session.Session)) (session.Session, error)
+}
+
+type sessionEndOperation struct {
+	sessionGate control.Admission
+	lane        control.Admission
+	registry    session.Registry
+	id          session.ID
 }
 
 // SessionTarget is the immutable routing snapshot a long-lived auxiliary
@@ -89,6 +103,70 @@ func (f *SessionOperations) ForSession(id session.ID) (SessionOperation, error) 
 	}
 	g := &guard{}
 	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
+}
+
+// ForSessionEnd builds the terminal operation for one live session. Ordinary
+// SessionOperation cannot perform this work: its gate spans the entire callback,
+// whereas a helper's close round trip must not exclude unrelated sessions.
+func (f *SessionOperations) ForSessionEnd(id session.ID) (SessionEndOperation, error) {
+	if _, err := f.registry.Get(id); err != nil {
+		return nil, fmt.Errorf("capability: unknown session %q", id)
+	}
+	return &sessionEndOperation{
+		sessionGate: f.sessionGate,
+		lane:        f.lane,
+		registry:    f.registry,
+		id:          id,
+	}, nil
+}
+
+func (op *sessionEndOperation) Disposition() Disposition {
+	return Adapted("terminal.close", "session closure retires its authoritative identity before ending the process")
+}
+
+func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Session)) (sess session.Session, err error) {
+	// Queued tasks still run during shutdown to settle their callers, but an
+	// uncommitted close has no authority after cancellation. Admissions may
+	// take their free fast path without consulting ctx, so check each handoff.
+	refuseCancelled := func() error {
+		if ctx.Err() != nil {
+			return &RefusedError{Rejection: control.Rejection{Scope: GateSession, Reason: ctx.Err().Error()}}
+		}
+		return nil
+	}
+	if cancelled := refuseCancelled(); cancelled != nil {
+		return nil, cancelled
+	}
+	sessionPermit, rej := op.sessionGate.TryAcquire(ctx)
+	if rej != nil {
+		return nil, &RefusedError{Rejection: *rej}
+	}
+	defer sessionPermit.Release()
+	if cancelled := refuseCancelled(); cancelled != nil {
+		return nil, cancelled
+	}
+
+	// Both permits precede retirement: a refused lane must leave the session
+	// live. Acquisition order remains domain gate before execution lane.
+	lanePermit, rej := op.lane.TryAcquire(ctx)
+	if rej != nil {
+		return nil, &RefusedError{Rejection: *rej}
+	}
+	defer lanePermit.Release()
+	if cancelled := refuseCancelled(); cancelled != nil {
+		return nil, cancelled
+	}
+
+	sess, finish, err := op.registry.PrepareEndSession(op.id)
+	if err != nil {
+		return nil, err
+	}
+	// Retirement is the commit point. Cancellation or a failing callback may
+	// not strand the removed process; completion precedes releasing the lane.
+	defer func() { err = finish() }()
+	sessionPermit.Release()
+	before(sess)
+	return sess, nil
 }
 
 // ForSessionTarget returns a staged read operation for immutable connection
@@ -172,13 +250,6 @@ func (s *sessionService) Close(id session.ID) error {
 		return err
 	}
 	return s.registry.Close(id)
-}
-
-func (s *sessionService) EndSession(id session.ID) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	return s.registry.EndSession(id)
 }
 
 func (s *sessionService) List() []session.Session {

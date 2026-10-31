@@ -3,12 +3,17 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { failedTests, readQuarantine } from '../quarantine.mjs'
 import {
   authorize,
   ciJobNames,
+  ciStepManifests,
+  cleanCICover,
+  readQuarantineEvidence,
   isNewerVersion,
   prepareStable,
   readKeyring,
+  runBelongsTo,
   signedRunNumber,
   signingKey,
   updateCask,
@@ -22,7 +27,14 @@ const fail = (condition, message) => {
   if (!condition) throw new Error(message)
 }
 export function githubClient(run = execFileSync) {
-  const gh = (args) => run('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  // Successful product logs can be large; the final gate record is at their
+  // end. Bound the read, but do not use execFileSync's 1 MiB default.
+  const gh = (args) =>
+    run('gh', args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 256 * 1024 * 1024,
+    })
   const api = (path) => JSON.parse(gh(['api', path]))
   // Explicit pagination on every list. A missing page/API error throws, never means green.
   const pages = (path, field) => {
@@ -38,7 +50,16 @@ export function githubClient(run = execFileSync) {
   return { gh, api, pages }
 }
 
-export async function collectCI({ repo, commits, github, loadWorkflow, touchesProduct }) {
+export async function collectCI({
+  repo,
+  commits,
+  github,
+  loadWorkflow,
+  touchesProduct,
+  quarantine = {},
+  commitFiles,
+  isAncestor,
+}) {
   fail(commits.length > 0, 'CI: promoted range is empty')
   const evidence = []
   const seen = new Set()
@@ -51,6 +72,13 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
         pr.base?.ref === 'main' &&
         pr.base.repo?.full_name === repo,
     )
+    // The owner may push to main directly (AGENTS.md). Such a commit has no PR
+    // and no CI run of its own; it is recorded here and judged after the loop,
+    // against the later PRs whose CI ran over it.
+    if (merged.length === 0 && commitFiles) {
+      evidence.push({ direct: true, commit, product: touchesProduct(commitFiles(commit)) })
+      continue
+    }
     fail(merged.length === 1, `CI: commit ${commit} must map to exactly one merged main PR`)
     const pr = merged[0]
     fail(!seen.has(pr.number), `CI: duplicate PR #${pr.number} in promoted range`)
@@ -67,7 +95,7 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
         run.head_sha === pr.head.sha &&
         run.event === 'pull_request' &&
         run.path === '.github/workflows/ci.yml' &&
-        run.pull_requests?.some((p) => p.number === pr.number),
+        runBelongsTo(run, pr, repo),
     )
     // A failed newer attempt must not be hidden by an older successful run.
     matching.sort((a, b) => b.id - a.id)
@@ -77,22 +105,114 @@ export async function collectCI({ repo, commits, github, loadWorkflow, touchesPr
       `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
       'jobs',
     )
+    const workflow = loadWorkflow(pr.head.sha)
+    const manifests = ciStepManifests(workflow)
+    const gatedJobs = Object.keys(manifests)
+    fail(
+      !workflow.includes('quarantine-gate.mjs') || gatedJobs.length > 0,
+      'CI: cannot locate workflow quarantine gates',
+    )
+    const jobLog = (job) =>
+      github.gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${job.id}/logs`])
+    const readGatedJob = (job, attempt) =>
+      gatedJobs.includes(job.name) && job.conclusion === 'success'
+        ? {
+            ...job,
+            quarantineEvidence: readQuarantineEvidence(jobLog(job), job.name, pr.number, {
+              runId: run.id,
+              attempt,
+              expectedSteps: manifests[job.name],
+            }),
+          }
+        : job
+    const recordedJobs = jobs.map((job) => readGatedJob(job, run.run_attempt))
     const entry = {
       number: pr.number,
       head: pr.head.sha,
+      headRef: pr.head.ref,
+      headRepo: pr.head.repo?.full_name,
       product: touchesProduct(files.map((f) => f.filename)),
       run,
-      jobs,
-      requiredJobs: ciJobNames(loadWorkflow(pr.head.sha)),
+      jobs: recordedJobs,
+      requiredJobs: ciJobNames(workflow),
+      ...(gatedJobs.length ? { gatedJobs, quarantine, workflow } : {}),
+    }
+    // Gated reruns also need their earlier records: an API-green attempt can
+    // contain accepted failures even when the newest attempt is truly clean.
+    // Legacy green runs keep their original collection policy.
+    if (
+      run.conclusion !== 'success' ||
+      jobs.some((job) => job.conclusion === 'failure') ||
+      (gatedJobs.length > 0 && run.run_attempt > 1)
+    ) {
+      entry.quarantine = quarantine
+      entry.attempts = []
+      for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
+        const attemptJobs =
+          attempt === run.run_attempt
+            ? recordedJobs
+            : github
+                .pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
+                .map((job) => readGatedJob(job, attempt))
+        entry.attempts.push({
+          attempt,
+          jobs: attemptJobs.map((job) => ({
+            name: job.name,
+            status: job.status,
+            conclusion: job.conclusion,
+            ...(job.quarantineEvidence ? { quarantineEvidence: job.quarantineEvidence } : {}),
+            ...(job.conclusion === 'failure'
+              ? {
+                  failures: failedTests(jobLog(job)),
+                  // Legacy text names cannot prove a whole command completed.
+                  complete: false,
+                }
+              : {}),
+          })),
+        })
+      }
     }
     verifyCI([entry])
     evidence.push(entry)
   }
+  // A direct product commit is accepted only when a later PR in the range ran
+  // the full product suites green, with nothing quarantined, on a head that
+  // contains it. A direct supporting commit (tracker rows, documents) owes no
+  // product run, as the classifier already says of a PR.
+  evidence.forEach((entry, index) => {
+    if (!entry.direct || !entry.product) return
+    const cover = evidence
+      .slice(index + 1)
+      .find(
+        (later) =>
+          !later.direct &&
+          later.product &&
+          cleanCICover(later) &&
+          isAncestor(entry.commit, later.head),
+      )
+    fail(cover, `CI: direct commit ${entry.commit} touches product and no later green PR covers it`)
+    entry.coveredBy = cover.number
+  })
   return evidence
 }
 
+// The tracker export the quarantine is checked against is ~14 MB (2026-10-29),
+// far past execFileSync's 1 MiB default, which throws ENOBUFS rather than
+// truncating. 256 MiB leaves room for growth and still fails loudly beyond it.
 const git = (...args) =>
-  execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  execFileSync('git', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 256 * 1024 * 1024,
+  }).trim()
+// The quarantine is optional: a commit with no file quarantines nothing.
+const showIfPresent = (sha, path) => {
+  try {
+    return git('show', `${sha}:${path}`)
+  } catch {
+    return undefined
+  }
+}
 const readJSON = (path) => JSON.parse(readFileSync(path, 'utf8'))
 const saveJSON = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n')
 
@@ -176,14 +296,48 @@ async function collect(directory, github) {
     .filter(Boolean)
   // This is CI's own classifier, shared with nightly (not copied into promotion).
   const { touchesProduct } = await import('../product-change.mjs')
+  // The tracker is not in the code tree. Read the store's recording of this
+  // revision; a repository whose merge commits were never recorded on a machine
+  // falls back to the published store and says so in the release log.
+  const trackerIssues = (() => {
+    git('fetch', '--no-tags', 'origin', 'refs/tracker/state:refs/tracker/state')
+    try {
+      const recording = JSON.parse(
+        git('show', `refs/tracker/state:.tracker-sync/recordings/${sha}.jsonl`),
+      )
+      return git('show', `${recording.store}:.beads/issues.jsonl`)
+    } catch {
+      process.stderr.write(
+        `promotion: no tracker recording for ${sha}; reading the published store state instead\n`,
+      )
+      return git('show', 'refs/tracker/state:.beads/issues.jsonl')
+    }
+  })()
+  const quarantine = readQuarantine(
+    showIfPresent(sha, 'docs/testing/quarantine.json'),
+    trackerIssues,
+  )
   const ci = await collectCI({
     repo,
     commits,
     github,
+    quarantine,
     touchesProduct,
     loadWorkflow: (head) => {
       git('fetch', '--no-tags', 'origin', head)
       return git('show', `${head}:.github/workflows/ci.yml`)
+    },
+    commitFiles: (commit) =>
+      git('diff-tree', '--no-commit-id', '--name-only', '-r', `${commit}^`, commit)
+        .split('\n')
+        .filter(Boolean),
+    isAncestor: (ancestor, head) => {
+      try {
+        git('merge-base', '--is-ancestor', ancestor, head)
+        return true
+      } catch {
+        return false
+      }
     },
   })
   const readme = git('show', `${sha}:README.md`)
@@ -213,7 +367,13 @@ export function verifyUploaded(github, repo, plan, directory) {
   mkdirSync(directory)
   github.gh(['release', 'download', plan.tag, '--repo', repo, '--dir', directory])
   verifyFiles(directory, plan.assets)
-  const release = github.api(`repos/${repo}/releases/tags/${plan.tag}`)
+  // releases/tags/<tag> answers 404 for a DRAFT, and this runs first on the
+  // draft (Release run 40924528670 refused there after uploading it). The
+  // authenticated release list includes drafts, so the release is found there,
+  // by tag, and exactly once.
+  const matches = github.pages(`repos/${repo}/releases`).filter((r) => r.tag_name === plan.tag)
+  fail(matches.length === 1, `expected exactly one release ${plan.tag}, found ${matches.length}`)
+  const release = matches[0]
   fail(
     release.assets.length === plan.assets.length &&
       release.assets.every((a) => plan.assets.some((p) => p.name === a.name && p.size === a.size)),

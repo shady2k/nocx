@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -36,11 +37,11 @@ type LocalPty struct {
 	waitSet bool
 
 	// readyFd, wakeR and wakeW are WaitReadable's own machinery (nocx-6q1uh.18),
-	// never touched by RawReadUntilAgain: readyFd is a unix.Dup of the
+	// never touched by RawReadChunk: readyFd is a unix.Dup of the
 	// master's fd, held open ONLY so WaitReadable can unix.Poll it without
 	// ever going through (*os.File).SyscallConn().Read — the call that used
 	// to hold the master file's own read lock for the whole wait, which is
-	// the lock RawReadUntilAgain (via the SAME call, on the SAME file) needed
+	// the lock RawReadChunk (via the SAME call, on the SAME file) needed
 	// next and could never get while a readiness wait was parked on an idle
 	// program. wakeR/wakeW are a self-pipe: WakeReadiness writes one byte to
 	// wakeW to unpark a WaitReadable blocked in the kernel's poll(2), which
@@ -234,7 +235,7 @@ func NewLocal(logger log.Logger, cfg Config) (*LocalPty, error) {
 
 	// The readiness dup and the wake pipe (nocx-6q1uh.18): see the LocalPty
 	// field doc for why WaitReadable needs a fd of its own rather than going
-	// through f's SyscallConn like RawReadUntilAgain does. f.Fd() is safe to
+	// through f's SyscallConn like RawReadChunk does. f.Fd() is safe to
 	// call here — it never reverts the master to blocking, exactly as
 	// Resize's own pty.Setsize(lp.file, ...) already relies on (see that
 	// method's doc and master_nonblock_{linux,darwin}.go's longer note on
@@ -355,73 +356,54 @@ func reapAfterFailedSetup(cmd *exec.Cmd) {
 	_ = cmd.Wait()
 }
 
-// RawReadUntilAgain reads everything currently available off the master,
-// through the runtime poller rather than a blocking Read: it issues raw,
-// non-blocking read(2) calls over SyscallConn().Read, handing each one's
-// bytes to deliver as they arrive, until read(2) answers EAGAIN — never
-// until a deadline expires, because an expired deadline is a timeout
-// answered before read(2) is ever issued and would report "nothing more to
-// read right now" when the true answer is "the poller never got to ask".
+// RawReadChunk issues one nonblocking read(2), delivering at most len(buf)
+// bytes. barrier is true ONLY when that syscall actually answered EAGAIN.
+// A successful data read (even a short one), or EINTR, exhausts this work
+// quantum without establishing a barrier. Callers must not validate a screen
+// target until a later call reaches EAGAIN. EOF is reported as io.EOF.
 //
-// It is this method that makes the owner's drain step (spec §5.3) a single,
-// bounded call: everything readable at the moment of the call is delivered
-// before it returns, and a second call on an idle fd returns (false, nil)
-// at once, having issued exactly one read(2) that answered EAGAIN.
-//
-// deliver is called with a slice into buf and must not retain it past the
-// call: buf is reused for the next chunk read within the same call.
-//
-// It always starts by clearing any read deadline left on the file, whether
-// or not one is set — belt and braces against a deadline some other caller
-// left behind; ordinary operation never sets one on lp.file's read side any
-// more (nocx-6q1uh.18: WaitReadable polls a SEPARATE dup fd, below, and
-// never touches this file's own deadline or its SyscallConn at all, which is
-// exactly what stops it sharing internal/poll's read lock with this call in
-// the first place).
-func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof bool, err error) {
+// SyscallConn.Read always receives true from its callback: it must never park
+// in the runtime poller. WaitReadable owns readiness on a separate descriptor.
+func (lp *LocalPty) RawReadChunk(buf []byte) (n int, barrier bool, err error) {
+	if len(buf) == 0 {
+		return 0, false, io.ErrShortBuffer
+	}
 	if err := lp.file.SetReadDeadline(time.Time{}); err != nil {
-		return false, err
+		return 0, false, err
 	}
 	rc, scErr := lp.file.SyscallConn()
 	if scErr != nil {
-		return false, scErr
+		return 0, false, scErr
 	}
 	var readErr error
 	ctlErr := rc.Read(func(fd uintptr) bool {
-		for {
-			n, e := unix.Read(int(fd), buf)
-			switch {
-			case e == nil && n > 0:
-				deliver(buf[:n])
-				continue
-			case e == nil && n == 0:
-				// The master's read side reached EOF: the slave has no more
-				// writers. Report it and stop — there is nothing further to
-				// drain and nothing further to wait for.
-				eof = true
-				return true
-			case errors.Is(e, unix.EINTR):
-				continue
-			case errors.Is(e, unix.EAGAIN):
-				// Everything currently available has been delivered. This is
-				// the ordinary, successful end of a drain — not an error.
-				return true
-			default:
-				readErr = e
-				return true
-			}
+		var e error
+		n, e = unix.Read(int(fd), buf)
+		switch {
+		case e == nil && n > 0:
+		case e == nil && n == 0:
+			readErr = io.EOF
+		case errors.Is(e, unix.EINTR):
+			n = 0
+		case errors.Is(e, unix.EAGAIN):
+			n = 0
+			barrier = true
+		default:
+			n = 0
+			readErr = e
 		}
+		return true
 	})
 	if ctlErr != nil {
-		return eof, ctlErr
+		return n, barrier, ctlErr
 	}
-	return eof, readErr
+	return n, barrier, readErr
 }
 
 // WaitReadable blocks until the master is readable, cancellable by ctx, and
 // reads NOTHING itself: it is the readiness half spec §5.2 splits from the
 // reading half, so that only the owner's own goroutine ever issues a
-// read(2) against this fd (RawReadUntilAgain, above) and no byte is ever
+// read(2) against this fd (RawReadChunk, above) and no byte is ever
 // consumed by the goroutine that merely noticed readiness.
 //
 // # Why this does not go through the master file's own SyscallConn (nocx-6q1uh.18)
@@ -430,7 +412,7 @@ func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof boo
 // caller in the runtime poller until the fd is readable — and it deadlocked
 // the merged-tree gate for 8+ minutes: internal/poll's SyscallConn().Read
 // holds the file's OWN read lock (fdMutex) for the whole call, a parked wait
-// included, not only while a read(2) is actually in flight. RawReadUntilAgain
+// included, not only while a read(2) is actually in flight. RawReadChunk
 // goes through that same call on the SAME *os.File, so a goroutine idling in
 // this method on an idle program held exactly the lock the owner's own drain
 // needed next, and nothing was ever going to make the fd readable to release
@@ -438,7 +420,7 @@ func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof boo
 // that might have prompted it to answer. A prior fix (fd99a9d1) tried
 // forcing the parked wait to give the lock back with a deadline-in-the-past
 // handshake; it did not hold up — the handshake itself still serialised the
-// two goroutines through the same lock, RawReadUntilAgain during the
+// two goroutines through the same lock, RawReadChunk during the
 // interrupt-then-wait window included, and the merged-tree gate hung again.
 //
 // So this method never touches lp.file at all. readyFd is a unix.Dup of the
@@ -463,7 +445,7 @@ func (lp *LocalPty) RawReadUntilAgain(buf []byte, deliver func([]byte)) (eof boo
 // way. Readable on wakeR is drained and, only if ctx is already done,
 // reported as ctx's own error; otherwise it is a spurious wake (WakeReadiness
 // called with no real cancellation behind it) and this returns nil —
-// harmless, because the owner's next RawReadUntilAgain simply finds nothing
+// harmless, because the owner's next RawReadChunk simply finds nothing
 // and answers EAGAIN at once.
 //
 // # After Close, os.ErrClosed — never a nil (nocx-mrfe5)
@@ -518,7 +500,7 @@ func (lp *LocalPty) WaitReadable(ctx context.Context) error {
 		}
 		if fds[0].Revents != 0 {
 			// Readable, POLLHUP and POLLERR alike: any of the three means
-			// RawReadUntilAgain has something to say about this fd next —
+			// RawReadChunk has something to say about this fd next —
 			// bytes, EOF or the read error itself — and none of them is this
 			// method's to interpret.
 			return nil
@@ -633,7 +615,7 @@ func (lp *LocalPty) writeWakeLocked() {
 
 // InterruptWrite unblocks a Write in flight on this master, the way spec
 // §5.7 asks: a write deadline set in the past on the pollable file. It never
-// touches the read side, so a drain already in progress (RawReadUntilAgain)
+// touches the read side, so a drain already in progress (RawReadChunk)
 // is unaffected, and it is always safe to call more than once — the second
 // call finds nothing blocked and simply re-arms an already-expired
 // deadline.

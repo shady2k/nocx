@@ -6,12 +6,14 @@ tracked `.beads/issues.jsonl`. Not GitHub Issues, not markdown files.
 wins over any skill; this file only records the command surface the engineering skills
 need.
 
-**`br` never runs git.** Every backlog write is published by hand, immediately — a create,
-an edit, an edge, a close — not at session close:
+**`br` never runs git.** The tracker store is outside the code branches, on
+`refs/tracker/state`. The sync watcher publishes a write within seconds; when it is not
+running, publish by hand:
 
 ```bash
-br sync --flush-only          # db -> .beads/issues.jsonl
-git add .beads/issues.jsonl   # commit it with the code it describes
+node .githooks/backlog-gate/tracker-sync.mjs publish \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --recipe .githooks/backlog-gate/br-tracker.mjs
 ```
 
 ## Conventions
@@ -49,7 +51,8 @@ in it.
 
 ## When a skill says "publish to the issue tracker"
 
-`br create …`, then `br sync --flush-only` and commit `.beads/issues.jsonl`.
+`br create …`, then run the `tracker-sync publish` command above. No code commit carries
+the tracker state.
 
 ## When a skill says "fetch the relevant ticket"
 

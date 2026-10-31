@@ -11,6 +11,7 @@ import {
   verifyFiles,
   verifyCI,
   updateCask,
+  runBelongsTo,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
@@ -328,6 +329,27 @@ test('stable cask pins the promoted zip and preserves unrelated cask text; malfo
   )
 })
 
+test('a release key whose base64 holds "//" is read whole, beside a real comment', async () => {
+  const { readKeyring } = await import('./promotion.mjs')
+  // Base64 uses "/", so roughly one key in a hundred contains "//". Draw keys
+  // until one does: the outcome is fixed even though the key is not.
+  let raw
+  do {
+    raw = generateKeyPairSync('ed25519')
+      .publicKey.export({ format: 'der', type: 'spki' })
+      .subarray(-32)
+      .toString('base64')
+  } while (!raw.includes('//'))
+  const keys = readKeyring(
+    `package update\nvar releaseKeys = []string{\n\t// a comment // with slashes\n\t"${raw}", // trailing\n}\n`,
+  )
+  assert.equal(keys.length, 1)
+  assert.equal(
+    keys[0].export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
+    raw,
+  )
+})
+
 test('candidate keyring and seed interoperate with the raw detached Ed25519 contract', async () => {
   const { readKeyring, signingKey, verifySignature } = await import('./promotion.mjs')
   const rawPublic = publicKey
@@ -452,4 +474,118 @@ test('a signed manifest with wrong platform metadata is refused before stable re
     resign(input, nightly)
     assert.throws(() => verifyCandidate(input), /tuples/)
   }
+})
+
+test('a red required job passes only on quarantined tests or a retry that classified an infrastructure flake', (t) => {
+  // The quarantine's own file and log parse are scripts/quarantine.test.mjs's;
+  // this asks only what verifyCI does with a job that is red.
+  const askKey = 'go:TestQuarantinedFlake'
+  const { input } = fixture(t)
+  const base = structuredClone(input.ci[0])
+  const red = (mutate) => {
+    const entry = structuredClone(base)
+    entry.run.conclusion = 'failure'
+    entry.run.run_attempt = 2
+    const failedIndex = entry.jobs.findIndex((job) => job.name === 'ci-e2e (webkit, 2)')
+    entry.jobs[failedIndex] = { ...entry.jobs[failedIndex], conclusion: 'failure' }
+    entry.quarantine = { [askKey]: 'nocx-b' }
+    entry.attempts = [
+      { attempt: 1, jobs: structuredClone(entry.jobs) },
+      { attempt: 2, jobs: structuredClone(entry.jobs) },
+    ]
+    for (const attempt of entry.attempts) {
+      attempt.jobs[failedIndex].failures = [askKey]
+      attempt.jobs[failedIndex].complete = true
+    }
+    mutate(entry, failedIndex)
+    return [entry]
+  }
+  // Every failure is a quarantined test: green.
+  verifyCI(red(() => {}))
+  // A test no open bead owns: red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          e.attempts[1].jobs[i].failures = [askKey, 'go:TestOther']
+        }),
+      ),
+    /quarantines/,
+  )
+  // A failure that names no test and never passed: red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          for (const a of e.attempts) a.jobs[i].failures = []
+        }),
+      ),
+    /never passed/,
+  )
+  // The same unnamed failure, but the job passed in another attempt: green.
+  verifyCI(
+    red((e, i) => {
+      e.attempts[0].jobs[i] = { ...e.attempts[0].jobs[i], conclusion: 'success' }
+      delete e.attempts[0].jobs[i].failures
+      e.attempts[1].jobs[i].failures = []
+    }),
+  )
+  // The same nameless failure in every attempt, quarantined for exactly this
+  // job of exactly this PR: green; for another PR's number: red.
+  const nameless = (e, i) => {
+    for (const a of e.attempts) a.jobs[i].failures = []
+  }
+  verifyCI(
+    red((e, i) => {
+      nameless(e, i)
+      e.quarantine['job:ci-e2e (webkit, 2)#12'] = 'nocx-b'
+    }),
+  )
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          nameless(e, i)
+          e.quarantine['job:ci-e2e (webkit, 2)#13'] = 'nocx-b'
+        }),
+      ),
+    /never passed/,
+  )
+  // A cancelled job is never a flake.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e, i) => {
+          e.attempts[1].jobs[i].conclusion = 'cancelled'
+        }),
+      ),
+    /not green/,
+  )
+  // Without the attempts the collector reads, a red job stays red.
+  assert.throws(
+    () =>
+      verifyCI(
+        red((e) => {
+          delete e.attempts
+        }),
+      ),
+    /not green/,
+  )
+})
+
+test('a run is its PR by number, or after the branch is deleted by branch, repository and head', () => {
+  const repo = 'shady2k/nocx'
+  const pr = { number: 529, head: { ref: 'chore/setup-skills-056', repo: { full_name: repo } } }
+  const run = (over) => ({
+    pull_requests: [],
+    head_branch: 'chore/setup-skills-056',
+    head_repository: { full_name: repo },
+    ...over,
+  })
+  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 529 }] }), pr, repo), true)
+  assert.equal(runBelongsTo(run({}), pr, repo), true)
+  assert.equal(runBelongsTo(run({ pull_requests: [{ number: 530 }] }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ head_branch: 'other' }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ head_repository: { full_name: 'fork/nocx' } }), pr, repo), false)
+  assert.equal(runBelongsTo(run({ pull_requests: undefined }), pr, repo), false)
 })

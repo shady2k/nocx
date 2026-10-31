@@ -684,13 +684,23 @@
    leaves the painter on natural font advances instead of the committed grid.
 
    A single :not() keeps this less specific than the unstructured history
-   rule above, so preserving the probe does not hide the shell's past.
+   rule above, so preserving the probe does not hide the shell's past. The
+   running header ADR-3kqrem7v keeps above the grid needs the same care: its
+   selector is a class plus an attribute, so written plainly it would raise
+   this rule to that history rule's own specificity and source order would
+   then hide the history surface in a markerless session (measured in
+   e2e/terminal-scrollback-surface.spec.ts). :where() keeps the argument at
+   zero specificity, which is what every other argument here already costs.
 
    The live container is excluded rather than the whole stack being hidden from
    an ancestor: `display: none` on `.scrollback-inner` would take fixed
    descendants with it (P0-2). */
 .scrollback-inner.inner-fullscreen-mode
-  > :not(.terminal-live-container, .cell-metric-probe, .cmd-header[data-variant='running']) {
+  > :not(
+    .terminal-live-container,
+    .cell-metric-probe,
+    :where(.cmd-header[data-variant='running'])
+  ) {
   display: none;
 }
 

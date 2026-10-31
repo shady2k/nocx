@@ -263,14 +263,15 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     await page.keyboard.press('Control+C')
   })
 
-  test('still pays the body top padding once when the block has no rows of its own yet', async ({
+  test('starts the body right under the one header, with no pad band above its first row', async ({
     page,
   }) => {
     // The paired half, so the fix cannot be "the live region never pads": a
     // command that has printed nothing past its own screen has its whole body
-    // in the live region, and that body's first row sits below the header by
-    // the body's own top padding — the same offset the frozen body it becomes
-    // has (`.cmd-output`'s own pad, which is where the number lives).
+    // in the live region, and ADR-3kqrem7v makes that body edge-to-edge in
+    // both presentations. What a person sees is the 32px header and then the
+    // command's first row — no blank band from the frozen transcript's 2px
+    // body pad, which returns when the block freezes.
     await run(page, "printf 'FIRST\\n'; sleep 60")
     await expect(page.locator('.pane.active .terminal-live-grid')).toContainText('FIRST', {
       timeout: 20_000,
@@ -280,6 +281,8 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     const top = await page.evaluate(async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
       const pane = document.querySelector<HTMLElement>('.pane.active')!
+      const block = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')!
+      const header = block.querySelector<HTMLElement>('.cmd-header[data-variant="running"]')!
       const live = pane.querySelector<HTMLElement>('.terminal-live-container')!
       const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')!
       // The first VISIBLE row: the echo row above the body's start is
@@ -295,16 +298,20 @@ test.describe('the body of a running block that has outgrown its screen', () => 
         (row) => row.getBoundingClientRect().top >= clipTop - 0.5,
       )
       return {
+        headerBottom: +header.getBoundingClientRect().bottom.toFixed(2),
+        headerHeight: +header.getBoundingClientRect().height.toFixed(2),
         padTop: parseFloat(getComputedStyle(live).paddingTop),
-        token: parseFloat(
-          getComputedStyle(document.documentElement).getPropertyValue('--cmd-output-pad-top'),
-        ),
         offset: +(first!.getBoundingClientRect().top - live.getBoundingClientRect().top).toFixed(2),
+        bodyTop: +live.getBoundingClientRect().top.toFixed(2),
       }
     })
     const said = `live body top: ${JSON.stringify(top)}`
-    expect(top.padTop, said).toBe(top.token)
-    expect(Math.abs(top.offset - top.padTop), said).toBeLessThan(0.5)
+    expect(top.headerHeight, said).toBe(32)
+    expect(top.padTop, said).toBe(0)
+    // The body begins where the header ends, and its first row begins with
+    // the body: one seam, no band and no gap.
+    expect(Math.abs(top.bodyTop - top.headerBottom), said).toBeLessThan(0.5)
+    expect(Math.abs(top.offset), said).toBeLessThan(0.5)
     await page.keyboard.press('Control+C')
   })
 

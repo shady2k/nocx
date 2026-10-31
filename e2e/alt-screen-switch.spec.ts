@@ -320,8 +320,15 @@ setInterval(() => {
                 const cell = parseFloat(
                   getComputedStyle(inner).getPropertyValue('--term-cell-width'),
                 )
-                // Normal-buffer live rows carry the 48px prose inset.
-                return ptyCols === Math.floor((area.clientWidth - 48) / cell)
+                // ADR-3kqrem7v: the active rows are edge to edge in both
+                // buffers, so the fit is the scroller's own width. Read the
+                // live row's inset instead of assuming one.
+                const live = document.querySelector<HTMLElement>(
+                  '.pane.active .terminal-live-container',
+                )!
+                const cs = getComputedStyle(live)
+                const inset = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+                return ptyCols === Math.floor((area.clientWidth - inset) / cell)
               }, cols)
             })
             .toBe(true)
@@ -379,8 +386,22 @@ setInterval(() => {
         const firstInput = postSwitch.findIndex(
           (event) => event.kind === 'send' && event.method === 'session.intent',
         )
-        // THE ORDER THE SWITCH OWES: the size request first, the person's
-        // input behind it.
+        // WHAT THE SWITCH OWES (ADR-3kqrem7v). A screen-mode switch is a
+        // PRESENTATION change: the grid the program is told depends on pane
+        // geometry and never on which buffer is showing. So a switch accepted
+        // at a size the pane already has sends NO resize at all, and holds no
+        // input — the two presentations used to charge the program different
+        // space, and that difference is the resize/redraw loop this ADR
+        // removes (nocx-3an1s.1.4). This spec used to require the opposite,
+        // "the resize request is sent when the switch is accepted"; that
+        // request is exactly the feedback the owner asked to end.
+        //
+        // A REAL pane resize still goes out and still orders the person's
+        // input: whatever resize is in flight when the switch is accepted must
+        // APPLY before the first key produced after it reaches the program. A
+        // receipt that is not that request's — superseded, cancelled — is not
+        // an application and releases nothing (nocx-u1dts, nocx-bz3qu).
+        //
         // WHAT THE SWITCH DID, in the message: a failure here used to say only
         // "expected > 1, received 0", which names neither the send that beat
         // the resize nor the method it carried.
@@ -397,72 +418,23 @@ setInterval(() => {
           )
           .join(' → ')
         expect(
-          firstResize,
-          `accepting the switch sends a resize (socket saw: ${shape})`,
-        ).toBeGreaterThanOrEqual(0)
-        expect(
           firstInput,
           `the early input reaches the session (socket saw: ${shape})`,
-        ).toBeGreaterThan(firstResize)
-        // …and none of that input may reach the program before the switch's
-        // OWN resize applied. A receipt that is not that request's — a
-        // superseded or a cancelled answer — is not an application and
-        // releases nothing.
-        //
-        // THE WINDOW IS THE SWITCH'S, NOT EVERY RESIZE THAT FOLLOWS
-        // (nocx-bz3qu). The fence opens when the buffer becomes alternate and
-        // closes on the applied receipt for the resize the switch sent; a
-        // window widened later sends an ordinary resize that gates nothing,
-        // and the product never promised otherwise. This spec used to clear
-        // `applied` on EVERY resize send and then require an applied receipt
-        // before every later intent — which is why the "after the resize"
-        // variant failed intermittently on the release runner: the probe's
-        // intent could land between the later resize's send and its answer,
-        // and the assertion called that a painted-frame release.
-        // …but the receipt that RELEASES the fence need not belong to the
-        // switch's own request (nocx-u1dts). In the "during the resize"
-        // variant the viewport changes while the switch is being accepted: the
-        // fence sends its resize and the settle timer sends a second one, so
-        // the first is superseded (-32013) and the fence opens on the SECOND
-        // request's applied receipt. Requiring the first request's receipt
-        // failed a variant in which the product behaved exactly as designed.
-        //
-        // THE GUARANTEE IS UNCHANGED: no input may reach the program before an
-        // applied receipt released the fence, whatever request carried it.
-        const switchResizeId = postSwitch[firstResize].id
-        const fenceRelease = postSwitch.findIndex(
-          (event, index) =>
-            index > firstResize &&
-            event.kind === 'resize-receipt' &&
-            'result' in event &&
-            !event.error,
-        )
-        expect(fenceRelease, 'an applied resize receipt released the switch fence').toBeGreaterThan(
-          firstResize,
-        )
-        expect(
-          postSwitch
-            .slice(firstResize + 1, fenceRelease)
-            .filter((event) => event.kind === 'send' && event.method === 'session.intent'),
-          'no input may reach the program between the switch resize and the applied receipt that released it',
-        ).toHaveLength(0)
-        // And when the switch's own request was superseded, say so explicitly
-        // rather than tolerating it: the release belongs to a newer request and
-        // the earlier one was answered without a result.
-        if (postSwitch[fenceRelease].id !== switchResizeId) {
-          const superseded = postSwitch.findIndex(
-            (event, index) =>
-              index > firstResize &&
-              index < fenceRelease &&
-              event.kind === 'resize-receipt' &&
-              event.id === switchResizeId &&
-              ('error' in event || !('result' in event)),
-          )
+        ).toBeGreaterThanOrEqual(0)
+        if (timing === 'before') {
+          // The pane was resized and the program confirmed the wide PTY before
+          // the switch, so the size is already applied: the switch must not
+          // send another one.
           expect(
-            superseded,
-            'a superseded switch resize is answered, not silently dropped',
-          ).toBeGreaterThan(firstResize)
+            firstResize,
+            `accepting the switch sent a resize for a size already applied (socket saw: ${shape})`,
+          ).toBe(-1)
         }
+        // The ordering a REAL resize owes — the person's key behind the
+        // receipt that applied it — is asserted by the unit suite
+        // (terminal-content.test.ts's fence cases): the wire alone cannot tell
+        // a key the fence held from one typed while no resize was pending, so
+        // an end-to-end assertion here would be measuring its own timing.
         const pointerReports: string[] = []
         for (const event of postSwitch) {
           if (event.kind !== 'send' || event.method !== 'session.intent') continue

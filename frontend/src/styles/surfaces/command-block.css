@@ -43,16 +43,8 @@
   padding-bottom: var(--terminal-block-trailing-space);
 }
 
-/* Running/frozen trailing-space seam (spec 2026-09-15 §1.5): the trailing
-   space must be paid ONCE, after the block's output, or it lands between two
-   rows that belong together — the gap the mockup pass measured. While a
-   command runs its body is the live region, and since ADR-0091 that region is
-   a CHILD of this block (`BlockManager.holdLiveInRunningBlock`), so it is the
-   region's own trailing edge that carries the amount (style.css
-   `.terminal-live-container.live-running`, `--cmd-output-pad-bottom` +
-   `--terminal-block-trailing-space`). This rule stops the space being paid at
-   both ends: the block's own bottom stays nothing while the command runs, and
-   comes back at the freeze, when the block's output really is its end. */
+/* ADR-3kqrem7v: running rows have no trailing air. Freeze restores the
+   transcript's normal trailing rhythm and insets without changing cells. */
 .cmd-block.cmd-block-running {
   padding-bottom: 0;
 }

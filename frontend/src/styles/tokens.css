@@ -128,9 +128,6 @@ html {
      split/remote identity alongside the local one. */
   --terminal-context-height: 40px;
   --terminal-split-context-height: 44px;
-  /* ProcessBar (spec's running-state gap): the row-cost the owner accepted
-     for a truthful, always-visible running footer. */
-  --terminal-process-bar-height: 56px;
   /* ComposerFrame's outer card (spec §1.2): 12px on every side that matters
      — inline/bottom margin from the pane, and the padding inside the card. */
   --terminal-card-margin: var(--space-3);

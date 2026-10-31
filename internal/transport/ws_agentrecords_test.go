@@ -144,3 +144,65 @@ func containsAgentRecordName(values []string, wanted string) bool {
 	}
 	return false
 }
+
+// THE RECORD'S NON-LAUNCH WORDS SURVIVE A SETTINGS SAVE (nocx-3an1s.1.3).
+//
+// The document is replaced wholesale on save, so a field the form does not
+// carry is a field an edit of another field deletes. `claude update` depends on
+// this list, and the wrapper reads it from the record: losing it silently would
+// put the tool-surface argument back on a maintenance command.
+func TestAgentRecordsSaveKeepsTheNonLaunchSubcommands(t *testing.T) {
+	store, err := agentrecord.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, cleanup := agentRecordsConnection(t, store)
+	defer cleanup()
+
+	params := map[string]any{
+		"id": "custom", "displayName": "Custom", "command": "custom",
+		"args": []string{}, "icon": "", "colour": "", "disabled": false,
+		"env":                  []string{},
+		"nonLaunchSubcommands": []string{"update", "update-config"},
+		"resume":               map[string]any{"sessionIdArgs": []string{}, "resumeIdArgs": []string{}, "resumeCwdArgs": []string{}},
+	}
+	resp := jsonrpcCall(t, conn, "agentRecords.save", params)
+	var env rpcEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error != nil {
+		t.Fatalf("save: %+v", env.Error)
+	}
+	validateJSON(t, loadSchema(t, "agentRecords.save.schema.json"), env.Result, "agentRecords.save wire")
+
+	entry, ok := store.Entry("custom")
+	if !ok {
+		t.Fatal("saved record is absent from the store")
+	}
+	if got := entry.Record.NonLaunchSubcommands; len(got) != 2 || got[0] != "update" || got[1] != "update-config" {
+		t.Fatalf("saved non-launch subcommands = %v", got)
+	}
+
+	// And the list answers with them, so the next Settings edit starts from
+	// what is on disk rather than from nothing.
+	listed := jsonrpcCall(t, conn, "agentRecords.list", map[string]any{})
+	var listEnv rpcEnvelope
+	if err := json.Unmarshal(listed, &listEnv); err != nil {
+		t.Fatal(err)
+	}
+	validateJSON(t, loadSchema(t, "agentRecords.list.schema.json"), listEnv.Result, "agentRecords.list wire")
+	var result agentRecordsListResult
+	if err := json.Unmarshal(listEnv.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range result.Agents {
+		if row.ID == "custom" {
+			if len(row.NonLaunchSubcommands) != 2 || row.NonLaunchSubcommands[0] != "update" {
+				t.Fatalf("listed non-launch subcommands = %v", row.NonLaunchSubcommands)
+			}
+			return
+		}
+	}
+	t.Fatal("the saved record is absent from the listing")
+}

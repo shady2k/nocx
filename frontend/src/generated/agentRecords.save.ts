@@ -24,6 +24,7 @@ export interface Agent {
   colour: string
   disabled: boolean
   env: string[]
+  nonLaunchSubcommands?: string[]
   resume: Resume
 }
 export interface Resume {

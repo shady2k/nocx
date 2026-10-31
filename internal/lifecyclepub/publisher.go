@@ -369,9 +369,14 @@ type AgentLaunchResolution struct {
 	// (nocx-xn63t.6.49) — one field answering both questions is what left a
 	// spawned worker with no tools.
 	ToolSurface bool
-	Ticket      string
-	Payload     string
-	Reason      string
+	// NonLaunchSubcommands is the record's list of first-argument words that
+	// are not a launch, space-joined (nocx-3an1s.1.3). It travels with the
+	// local record only: a worker's literal command and a remote host have no
+	// record whose words could apply.
+	NonLaunchSubcommands string
+	Ticket               string
+	Payload              string
+	Reason               string
 }
 
 // AgentLaunchContext is resolution input, not part of the ticket's authority
@@ -708,6 +713,7 @@ func (p *Publisher) answerAgentLaunchResolve(ctx context.Context, transport life
 		} else {
 			ans.Local = resolved.Local
 			ans.ToolSurface = resolved.ToolSurface
+			ans.NonLaunchSubcommands = resolved.NonLaunchSubcommands
 			ans.Ticket = resolved.Ticket
 			ans.Payload = resolved.Payload
 			ans.Reason = resolved.Reason
@@ -716,9 +722,13 @@ func (p *Publisher) answerAgentLaunchResolve(ctx context.Context, transport life
 				// names only, regardless of what an implementation returned.
 				// ToolSurface is NOT part of that rule: it is the answer to a
 				// different question, and a worker-literal launch on this
-				// machine needs it (nocx-xn63t.6.49).
+				// machine needs it (nocx-xn63t.6.49). The record's non-launch
+				// words ARE part of it: with no record there is nothing to
+				// exempt, and a shell must not be told a word that no record of
+				// this machine declared.
 				ans.Ticket = ""
 				ans.Payload = ""
+				ans.NonLaunchSubcommands = ""
 			}
 		}
 	}
@@ -728,6 +738,7 @@ func (p *Publisher) answerAgentLaunchResolve(ctx context.Context, transport life
 		}
 		ans.Ticket = ""
 		ans.Payload = ""
+		ans.NonLaunchSubcommands = ""
 		ans.Local = true
 		// The answer is a refusal and nothing may be staged for it, so the
 		// surface goes with the ticket and the payload: a shell handed a

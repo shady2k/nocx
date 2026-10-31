@@ -75,6 +75,12 @@ func TestSaveRejectsInvalidLaunchData(t *testing.T) {
 		{name: "invalid UTF-8 command", doc: Document{Command: string([]byte{0xff})}},
 		{name: "invalid UTF-8 argument", doc: Document{Command: "agent", Args: []string{string([]byte{0xff})}}},
 		{name: "invalid UTF-8 environment", doc: Document{Command: "agent", Env: []string{"TOKEN=" + string([]byte{0xff})}}},
+		{name: "empty non-launch subcommand", doc: Document{Command: "agent", NonLaunchSubcommands: []string{""}}},
+		{name: "non-launch subcommand with a space", doc: Document{Command: "agent", NonLaunchSubcommands: []string{"update now"}}},
+		{name: "non-launch subcommand that reads as an option", doc: Document{Command: "agent", NonLaunchSubcommands: []string{"--version"}}},
+		{name: "non-launch subcommand with a glob", doc: Document{Command: "agent", NonLaunchSubcommands: []string{"up*"}}},
+		{name: "non-launch subcommand with a newline", doc: Document{Command: "agent", NonLaunchSubcommands: []string{"update\nsecond"}}},
+		{name: "non-launch subcommand with NUL", doc: Document{Command: "agent", NonLaunchSubcommands: []string{"update\x00"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -99,6 +105,9 @@ func TestSaveRoundTripsValidLaunchData(t *testing.T) {
 		Command: "/tmp/agent with spaces",
 		Args:    []string{"--label", "value with spaces", "✓"},
 		Env:     []string{"EMPTY=", "MESSAGE=hello world ✓", "INLINE=left=right", "_PRIVATE=value"},
+		// One word and one that only starts with it: the wrapper compares
+		// whole words, so both must survive a person's document unchanged.
+		NonLaunchSubcommands: []string{"update", "update-config"},
 	}
 	if err := s.Save("custom", want); err != nil {
 		t.Fatalf("Save valid launch data: %v", err)

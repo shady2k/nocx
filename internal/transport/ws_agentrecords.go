@@ -29,33 +29,42 @@ type agentRecordResumeDTO struct {
 }
 
 type agentRecordRow struct {
-	ID          string               `json:"id"`
-	Builtin     bool                 `json:"builtin"`
-	State       agentrecord.State    `json:"state"`
-	Problem     string               `json:"problem"`
-	DisplayName string               `json:"displayName"`
-	Command     string               `json:"command"`
-	Args        []string             `json:"args"`
-	Icon        string               `json:"icon"`
-	Colour      string               `json:"colour"`
-	Disabled    bool                 `json:"disabled"`
-	Env         []string             `json:"env"`
-	Resume      agentRecordResumeDTO `json:"resume"`
+	ID          string            `json:"id"`
+	Builtin     bool              `json:"builtin"`
+	State       agentrecord.State `json:"state"`
+	Problem     string            `json:"problem"`
+	DisplayName string            `json:"displayName"`
+	Command     string            `json:"command"`
+	Args        []string          `json:"args"`
+	Icon        string            `json:"icon"`
+	Colour      string            `json:"colour"`
+	Disabled    bool              `json:"disabled"`
+	Env         []string          `json:"env"`
+	// NonLaunchSubcommands is the record's list of first-argument words that
+	// are not a launch (nocx-3an1s.1.3). It is optional on the wire because
+	// every field before it is required and an older client must not start
+	// failing to save an agent; the list row always carries an array.
+	NonLaunchSubcommands []string             `json:"nonLaunchSubcommands,omitempty"`
+	Resume               agentRecordResumeDTO `json:"resume"`
 }
 
 type agentRecordsListResult struct {
 	Agents []agentRecordRow `json:"agents"`
 }
 type agentRecordsSaveParams struct {
-	ID          string             `json:"id"`
-	DisplayName string             `json:"displayName"`
-	Command     string             `json:"command"`
-	Args        []string           `json:"args"`
-	Icon        string             `json:"icon"`
-	Colour      string             `json:"colour"`
-	Disabled    bool               `json:"disabled"`
-	Env         []string           `json:"env"`
-	Resume      agentrecord.Resume `json:"resume"`
+	ID          string   `json:"id"`
+	DisplayName string   `json:"displayName"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args"`
+	Icon        string   `json:"icon"`
+	Colour      string   `json:"colour"`
+	Disabled    bool     `json:"disabled"`
+	Env         []string `json:"env"`
+	// Optional: see agentRecordRow. A save that does not name the list keeps
+	// the document's own (a person's hand-written words survive a Settings
+	// edit of another field).
+	NonLaunchSubcommands []string           `json:"nonLaunchSubcommands,omitempty"`
+	Resume               agentrecord.Resume `json:"resume"`
 }
 type agentRecordsRemoveParams struct {
 	ID string `json:"id"`
@@ -69,7 +78,7 @@ type agentRecordsRemovedResult struct {
 
 func validateAgentRecordsSave(raw json.RawMessage) string {
 	var p agentRecordsSaveParams
-	if msg := decodeObject(raw, &p, "id", "displayName", "command", "args", "icon", "colour", "disabled", "env", "resume"); msg != "" {
+	if msg := decodeObject(raw, &p, "id", "displayName", "command", "args", "icon", "colour", "disabled", "env", "nonLaunchSubcommands", "resume"); msg != "" {
 		return msg
 	}
 	if msg := requireAgentRecordFields(raw, "id", "displayName", "command", "args", "icon", "colour", "disabled", "env", "resume"); msg != "" {
@@ -184,7 +193,8 @@ func (h agentRecordsHandlers) handleSave(_ context.Context, req jsonrpcRequest) 
 	}
 	doc := agentrecord.Document{
 		DisplayName: p.DisplayName, Command: p.Command, Args: nonNilStrings(p.Args),
-		Icon: p.Icon, Colour: p.Colour, Disabled: p.Disabled, Env: nonNilStrings(p.Env), Resume: p.Resume,
+		Icon: p.Icon, Colour: p.Colour, Disabled: p.Disabled, Env: nonNilStrings(p.Env),
+		NonLaunchSubcommands: p.NonLaunchSubcommands, Resume: p.Resume,
 	}
 	if err := h.store.Save(p.ID, doc); err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("agent record was not saved: %s", err)})
@@ -221,7 +231,8 @@ func rowFromEntry(entry agentrecord.Entry) agentRecordRow {
 		ID: entry.ID, Builtin: entry.Builtin, State: entry.State, Problem: entry.Problem,
 		DisplayName: r.DisplayName, Command: r.Command, Args: nonNilStrings(r.Args), Icon: r.Icon,
 		Colour: r.Colour, Disabled: r.Disabled, Env: nonNilStrings(r.Env),
-		Resume: agentRecordResumeDTO{SessionIDArgs: nonNilStrings(r.Resume.SessionIDArgs), ResumeIDArgs: nonNilStrings(r.Resume.ResumeIDArgs), ResumeCwdArgs: nonNilStrings(r.Resume.ResumeCwdArgs)},
+		NonLaunchSubcommands: nonNilStrings(r.NonLaunchSubcommands),
+		Resume:               agentRecordResumeDTO{SessionIDArgs: nonNilStrings(r.Resume.SessionIDArgs), ResumeIDArgs: nonNilStrings(r.Resume.ResumeIDArgs), ResumeCwdArgs: nonNilStrings(r.Resume.ResumeCwdArgs)},
 	}
 }
 

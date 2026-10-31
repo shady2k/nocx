@@ -2,6 +2,7 @@
   "version": 1,
   "displayName": "Claude Code",
   "command": "claude",
+  "nonLaunchSubcommands": ["update"],
   "resume": {
     "sessionIdArgs": ["--session-id", "{UUID}"],
     "resumeIdArgs": ["--resume", "{UUID}"],

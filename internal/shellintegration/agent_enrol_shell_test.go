@@ -1127,3 +1127,78 @@ func TestBashAgentWrapperKeepsServerClassifiedWorkerCommandLiteral(t *testing.T)
 	// rule every other test in this file already follows.
 	waitForEvent(t, k, "agent_withdraw")
 }
+
+// A SUBCOMMAND THE RECORD MARKS AS NOT A LAUNCH REACHES THE CLI UNCHANGED
+// (nocx-3an1s.1.3, GitHub #541).
+//
+// The owner ran `claude update` in a pane and Claude answered "unknown option
+// '--mcp-config'": the wrapper appended its tool-surface argument to every
+// invocation of the agent, maintenance subcommands included. A subcommand is
+// not a launch, so its argv is the program's own — no surface, no staged
+// config, and no enrolment, because a maintenance command is not an agent
+// session. The record owns the list of such words; the resolve answer carries
+// it; the wrapper reads it.
+//
+// BOTH HALVES ARE ASSERTED, because either alone is satisfiable by doing
+// nothing: "update carries no --mcp-config" passes if the wrapper never adds
+// one, and "a plain launch carries it" passes if it always does.
+func TestBashAgentWrapperRunsANonLaunchSubcommandUnchanged(t *testing.T) {
+	agentWrapperRunsANonLaunchSubcommandUnchanged(t, startNestedBashParent)
+}
+
+// The zsh twin: the two scripts are separate implementations of one protocol,
+// and the generated wrapper is one block per shell.
+func TestZshAgentWrapperRunsANonLaunchSubcommandUnchanged(t *testing.T) {
+	agentWrapperRunsANonLaunchSubcommandUnchanged(t, startNestedZshParent)
+}
+
+func agentWrapperRunsANonLaunchSubcommandUnchanged(t *testing.T, start nestedParentStarter) {
+	t.Helper()
+	k := newNestedKernel(t)
+	// What the shipped Claude record now says, and what the backend's answer
+	// carries as non_launch_subcommands.
+	k.launchNonLaunch = []string{"update"}
+	s := start(t, k, "claude", inspectingAgentBody)
+
+	if _, err := s.ptmx.Write([]byte("export NOCX_TOOL_SOCKET=/tmp/nocx-tool.sock NOCX_AGENT_HELPER_PATH=/opt/nocx-helper; claude update\n")); err != nil {
+		t.Fatalf("type the maintenance subcommand: %v", err)
+	}
+	waitForEvent(t, k, "agent_launch_resolve")
+	waitUntil(t, "the maintenance subcommand to run", func() bool {
+		return strings.Contains(s.output(), "AGENT-RAN")
+	})
+	s.waitForPromptAfterComplete()
+	s.waitForRenderedThroughPrompt()
+	out := strings.ReplaceAll(s.output(), "\r", "")
+	if !strings.Contains(out, "ARG_0=update") {
+		t.Fatalf("the person's argv did not reach the program: %q", out)
+	}
+	if strings.Contains(out, "--mcp-config") || strings.Contains(out, "MCP_PATH=") {
+		t.Fatalf("a maintenance subcommand was given the tool surface: %q", out)
+	}
+	if strings.Contains(out, "ARG_1=") {
+		t.Fatalf("a maintenance subcommand received arguments it was not typed with: %q", out)
+	}
+	if hasEvent(k, "agent_enrol") {
+		t.Fatalf("a maintenance subcommand was enrolled as an agent launch: %v", k.events())
+	}
+	if !hasEvent(k, "agent_launch_cancel") {
+		t.Fatalf("the maintenance invocation left its launch ticket live: %v", k.events())
+	}
+
+	// …and the same wrapper still points a real launch at the surface.
+	if _, err := s.ptmx.Write([]byte("claude\n")); err != nil {
+		t.Fatalf("type the agent: %v", err)
+	}
+	waitForEvent(t, k, "agent_enrol")
+	waitUntil(t, "the plain launch to receive the tool surface", func() bool {
+		return strings.Contains(strings.ReplaceAll(s.output(), "\r", ""), "ARG_0=--mcp-config")
+	})
+	s.waitForPromptAfterComplete()
+	out = strings.ReplaceAll(s.output(), "\r", "")
+	if !strings.Contains(out, "MCP_PATH=") {
+		t.Fatalf("a plain launch lost its tool surface: %q", out)
+	}
+	// The interval's other end: the program exits and the wrapper withdraws.
+	waitForEvent(t, k, "agent_withdraw")
+}

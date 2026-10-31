@@ -402,8 +402,24 @@ export class ScrollbackController {
 
   get runningLiveCap(): number | null {
     if (this._mode !== 'running') return null
-    const max = this.scrollbackArea.clientHeight - this.runningHeaderHeightPx
+    const max = this._areaHeightPx() - this.runningHeaderHeightPx
     return max > 0 ? max : null
+  }
+
+  /** The scroller's laid-out height in the FRACTIONAL CSS pixels the browser
+   *  lays out in.
+   *
+   *  `clientHeight` rounds to a whole pixel, and the grid the pane fits and
+   *  this cap are two halves of one geometry: rounding the scroller here while
+   *  the fit added the composer's fractional box rounded nowhere made the two
+   *  differ by a fraction, the pty was fitted a row into space the running box
+   *  did not have, and the last row was clipped at the bottom
+   *  (nocx-3an1s.1.4). jsdom computes no layout and answers a zero rect, so
+   *  the named `clientHeight` stands there — the same seam every unit test
+   *  below mocks. */
+  private _areaHeightPx(): number {
+    const rect = this.scrollbackArea.getBoundingClientRect().height
+    return rect > 0 ? rect : this.scrollbackArea.clientHeight
   }
 
   /**
@@ -691,8 +707,7 @@ export class ScrollbackController {
    *  by its overflow — `top` drawing 34 of the 40 rows it had been given.
    *  A window resize is the same defect with no card in it. */
   private _fillPane(): void {
-    const max =
-      this.scrollbackArea.clientHeight - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
+    const max = this._areaHeightPx() - (this._fullscreenHeader ? this.runningHeaderHeightPx : 0)
     if (max > 0) this.terminalLiveContainer.style.height = `${max}px`
   }
 

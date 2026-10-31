@@ -5947,20 +5947,42 @@ export class TerminalContent extends BasePaneContent {
     }
     const composer = this.editor?.root
     const inFlow = composer && composer.dataset.placement !== 'overlay' ? composer : null
-    return area.clientHeight + outer(inFlow)
+    return this._areaHeightPx(area) + outer(inFlow)
+  }
+
+  /** The scroller's laid-out height in the FRACTIONAL CSS pixels the browser
+   *  lays out in. `clientHeight` rounds to a whole pixel, and the composer's
+   *  box is fractional: adding a rounded scroller to a fractional composer
+   *  gives a number a fraction different from the same sum taken before the
+   *  composer hid, so the prompt's fit could be a row taller than the running
+   *  box that has to display it, and the last row was clipped
+   *  (nocx-3an1s.1.4). jsdom computes no layout and answers a zero rect, so
+   *  the named `clientHeight` stands there — the seam every unit test mocks. */
+  private _areaHeightPx(area: HTMLElement): number {
+    const rect = area.getBoundingClientRect().height
+    return rect > 0 ? rect : area.clientHeight
   }
 
   /** ADR-3kqrem7v: the desired grid depends on the pane, not its current
    * presentation or DOM seat. Prompt prediction reserves the same header,
    * so submitting cannot resize a program after its bytes are delivered. */
   private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
-    const scroller = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
+    const scroller =
+      area && this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
     const sb = this.scrollback
     if (!sb) return scroller
     const structured =
       sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
     if (!structured) return scroller
-    const total = area && area.clientHeight > 0 ? this._terminalAreaPx(area) : scroller
+    // ONE OWNER of the running box. While a command runs, the live region's
+    // cap IS the desired grid height — the box that will display the rows
+    // states how many of them fit, and the fit takes that number rather than
+    // computing a second one from the same pane. The two agree when the pane
+    // is measured in its own fractional pixels (nocx-3an1s.1.4); a second
+    // expression is what let them drift by a fraction and clip the last row.
+    const cap = sb.runningLiveCap
+    if (cap !== null) return Math.max(0, cap)
+    const total = area && this._areaHeightPx(area) > 0 ? this._terminalAreaPx(area) : scroller
     return Math.max(0, total - sb.runningHeaderHeightPx)
   }
 

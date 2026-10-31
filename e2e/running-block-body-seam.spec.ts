@@ -242,24 +242,21 @@ test.describe('the body of a running block that has outgrown its screen', () => 
     const said = `running block body: ${JSON.stringify(g)}`
     // The rows either side of the joint are consecutive rows of ONE body in ONE
     // box: the same pitch as every other pair, no padding at the joint itself,
-    // and both of them inside the block's own box (ADR-0091).
+    // and both of them inside the block's own box (ADR-0091's one-block rule,
+    // whose joint padding ADR-3kqrem7v zeroes).
     expect(Math.abs(g.jointGap), said).toBeLessThan(0.5)
     expect(g.jointStep, said).not.toBeNull()
     expect(Math.abs(g.jointStep! - g.blockPitch), said).toBeLessThan(0.5)
     expect(g.rowsSharePitch, said).toBe(true)
     expect(g.jointInBlock, said).toBe(true)
-    // And the body's trailing space is paid ONCE, at the body's end — the same
-    // total a frozen block pays, so the pane does not move at the freeze.
-    const trailing = await page.evaluate(() => {
-      const cs = getComputedStyle(document.documentElement)
-      const px = (name: string): number => parseFloat(cs.getPropertyValue(name))
-      return px('--cmd-output-pad-bottom') + px('--terminal-block-trailing-space')
-    })
-    // Once, and at the end: at least the body's own trailing space and never a
-    // second pad stacked onto it (a row's worth of slack is the cap rounding the
-    // region mid-row, which is the region's own business).
-    expect(g.bodyTrailing, `${said} trailing: ${trailing}`).toBeGreaterThanOrEqual(trailing - 0.5)
-    expect(g.bodyTrailing, `${said} trailing: ${trailing}`).toBeLessThan(trailing + g.blockPitch)
+    // And the ACTIVE body pays no trailing air: ADR-3kqrem7v's table gives the
+    // running block 0px of trailing space in either presentation, where
+    // ADR-0091 paid the frozen block's `--terminal-block-trailing-space` at the
+    // body's end. The transcript's rhythm returns when the block freezes (the
+    // frozen pads are pinned in running-body-seam.test.ts); while the command
+    // runs, the block ends at its last live row — a person sees no blank strip
+    // between the newest output and the pane's bottom.
+    expect(g.bodyTrailing, `${said}`).toBeLessThan(0.5)
     await page.keyboard.press('Control+C')
   })
 

@@ -79,7 +79,15 @@ test('a drag from a historical card to live output copies the pinned text and ke
   const liveRow = grid.locator('[role="row"]', { hasText: live }).last()
   await expect(liveRow).toBeVisible()
   const terminalInput = page.locator('.pane.active .ui-terminal-input')
-  await grid.click()
+  // THE ROW A PERSON CLICKS, NOT THE ELEMENT'S CENTRE. The grid element is the
+  // whole SCREEN grid (every row the pty was sized to), while the running
+  // region clips it to the output tail; the element's own centre is therefore
+  // outside the clip and a synthetic click there is intercepted by the header
+  // or the scroller above it. A person clicks the visible row — the same grid,
+  // through the same gesture, which is what ADR-0092 promises — and that is
+  // what this line does. The assertion after it is unchanged: the click must
+  // reach the existing terminal input.
+  await liveRow.click()
   await expect(terminalInput).toBeFocused()
 
   const typed = marker('TYPE')

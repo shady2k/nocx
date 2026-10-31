@@ -19809,7 +19809,10 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
   // less the fixed running header, before submit and in either buffer.
   const COMPOSER = 130
   const HEADER = 32
-  async function paneWithLayout() {
+  /** `scroller` and `composer` are the laid-out boxes the fit must add up; the
+   *  default keeps the integers every other test in this describe was written
+   *  against. A fractional pair is the pane the browser really lays out. */
+  async function paneWithLayout(layout: { scroller?: number; composer?: number } = {}) {
     const client = makeClient()
     const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
     const { content } = mounted
@@ -19824,12 +19827,16 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       editor: CommandEditor
     }
     const sb = inner.scrollback
-    let pane = 676
+    const composerPx = layout.composer ?? COMPOSER
+    let pane = layout.scroller !== undefined ? layout.scroller + composerPx : 676
     const composerShown = (): boolean =>
       inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
     Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
       configurable: true,
-      get: () => pane - (composerShown() ? COMPOSER : 0),
+      // `clientHeight` is a whole number: it ROUNDS the box the browser laid
+      // out. The rect below is the same box in the fractional pixels the fit
+      // adds up (nocx-3an1s.1.4).
+      get: () => Math.round(pane - (composerShown() ? composerPx : 0)),
     })
     Object.defineProperty(sb.scrollbackArea, 'clientWidth', { configurable: true, value: 926 })
     const rect = (height: number): DOMRect =>
@@ -19844,7 +19851,8 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     let headerHeight = HEADER
     const measuredProbes: Element[] = []
     Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
+      if (this === sb.scrollbackArea) return rect(pane - (composerShown() ? composerPx : 0))
+      if (this === inner.editor.root) return rect(composerShown() ? composerPx : 0)
       if (this.classList.contains('cmd-block')) {
         if ((this as HTMLElement).style.position === 'absolute') measuredProbes.push(this)
         return rect(headerHeight)
@@ -19988,6 +19996,38 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       restore,
     }
   }
+
+  it('the prompt’s area and the running cap are one fractional height (nocx-3an1s.1.4)', async () => {
+    // A pane the browser lays out at 677.0px: a 546.6px scroller and a 130.4px
+    // composer. `clientHeight` rounds each half separately (547 + 130.4), which
+    // is 0.4px MORE than the same pane measured once the composer hides and the
+    // scroller takes its box. The pty was fitted into that difference — a row
+    // the running box has no room for — and the last row ended below the clip
+    // (e2e/running-grid-fits-its-clip.spec.ts). ADR-3kqrem7v's one geometry
+    // means one measurement in the pane's own fractional pixels, so the two
+    // numbers are equal before any row is fitted.
+    const { content, sb, fits, openCommand, restore } = await paneWithLayout({
+      scroller: 546.6,
+      composer: 130.4,
+    })
+    try {
+      const area = sb.scrollbackArea
+      const inner = content as unknown as { _terminalAreaPx(a: HTMLElement): number }
+      const promptHeight = inner._terminalAreaPx(area) - sb.runningHeaderHeightPx
+      const prompt = fits()[fits().length - 1]
+      expect(prompt).toBeDefined()
+
+      openCommand()
+      const cap = sb.runningLiveCap
+      expect(cap).not.toBeNull()
+      expect(promptHeight).toBeCloseTo(cap!, 6)
+      // And the rows the prompt fitted occupy no more than the box that will
+      // show them.
+      expect(prompt.rows * 16).toBeLessThanOrEqual(cap!)
+    } finally {
+      restore()
+    }
+  })
 
   it('commits no geometry across twenty commands in a pane whose size did not change', async () => {
     const { sb, fits, runCommand, restore } = await paneWithLayout()

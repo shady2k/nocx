@@ -320,9 +320,13 @@ connect` runs this connector before it checks the backlog inputs.
 
 - **JSON report:** add `--json` to the `check.mjs` line.
 - **Recorded tracker states import into br:** every code revision the gate judges
-  must have a recording under `.tracker-sync/recordings/` on `refs/tracker/state`, and
-  the recorded store commit's `.beads/issues.jsonl` must import into br. `adapter.mjs`
-  refuses a missing or malformed recording instead of falling back to a later state.
+  must have a recording under `.tracker-sync/recordings/`, and the recorded store
+  commit's `.beads/issues.jsonl` must import into br. A connected checkout reads it
+  through the mechanism (`tracker-sync.mjs export --at <rev>`), which owns the store
+  layout and verifies the recording's digest; a clone with no store — CI, which fetches
+  `refs/tracker/state` in `scripts/connect-tracker-ci.sh` — reads the same recording
+  from that ref. `adapter.mjs` refuses a missing or malformed recording instead of
+  falling back to a later state.
 - **Commit-link check:** [`commit-links.mjs`](../../.githooks/backlog-gate/commit-links.mjs)
   parses messages and calls `check-commits.mjs`. `--message <file>` checks a pending
   message; tasks come from the export `br where` names, which is the database's own view,

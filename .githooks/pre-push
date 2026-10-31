@@ -20,16 +20,32 @@ for command in node br git; do
     }
 done
 
-# Preserve the tracker warning, but never let it replace the mandatory gates.
-if br --no-auto-import --no-auto-flush where >/dev/null 2>&1; then
-    if ! br --no-auto-import --no-auto-flush sync --status 2>/dev/null </dev/null | grep -q "Dirty issues: 0"; then
-        printf '\nWARN: br has changes that never reached .beads/issues.jsonl.\n' >&2
-        printf '      Publish only changes owned by your tracked work; read docs/agents/backlog.md before writing the shared export.\n' >&2
-    fi
-fi
-if ! git diff --quiet -- .beads/issues.jsonl 2>/dev/null; then
-    printf '\nWARN: .beads/issues.jsonl is modified and uncommitted — the backlog stays here.\n' >&2
-    printf '      Keep unrelated tracker changes out of this commit; follow docs/agents/backlog.md to publish your own delta.\n' >&2
+# Publish and sync the external tracker ref, not a code-tree JSONL file.
+# status --json can return zero while reporting an unreachable remote, a
+# checkout that does not reach the store, unpublished work, or a stopped
+# supervisor. Read what it says instead of treating the exit code as the answer.
+status_json=$(node "$gate/tracker-sync.mjs" status --json --repo "$(git rev-parse --show-toplevel)" --recipe "$gate/br-tracker.mjs" </dev/null) || {
+    printf 'pre-push: tracker-sync status failed; run make connect\n' >&2
+    exit 2
+}
+if ! printf '%s' "$status_json" | node -e '
+let s = "";
+process.stdin.on("data", (d) => (s += d));
+process.stdin.on("end", () => {
+  const x = JSON.parse(s);
+  const bad = [];
+  if (x.unreachable) bad.push(`remote unreachable${x.said ? `: ${x.said}` : ""}`);
+  if (x.errorClass) bad.push(`status error class ${x.errorClass}`);
+  for (const c of x.checks || []) if (!c.ok) bad.push(`${c.checkout} does not reach the store`);
+  if (bad.length) {
+    console.error(`pre-push: tracker status: ${bad.join("; ")}`);
+    process.exit(1);
+  }
+  if (x.queued && x.queued.unpublished) console.error(`pre-push: WARN ${x.queued.unpublished} tracker change(s) unpublished`);
+  if (!x.supervisor || !x.supervisor.alive) console.error("pre-push: WARN tracker sync supervisor is not running");
+});
+'; then
+    exit 2
 fi
 
 remote=${1:-}
@@ -60,43 +76,10 @@ while IFS="$(printf '\t')" read -r local_ref local_sha remote_ref remote_sha; do
     esac
     node "$gate/commit-links.mjs" "$@" || { status=$?; exit "$status"; }
 
-    introduced=$(node "$gate/commit-links.mjs" --list-introduced "$@") || exit 2
-    [ -n "$introduced" ] || continue
-    first=$(printf '%s\n' "$introduced" | while IFS= read -r row; do printf '%s\n' "$row"; break; done)
-    baseline=$remote_sha
-    case "$baseline" in
-        *[!0]*)
-            if ! git merge-base --is-ancestor "$baseline" "$tip"; then
-                baseline=$(printf '%s\n' "$first" | awk '{print $2}')
-            fi
-            ;;
-        *) baseline=$(printf '%s\n' "$first" | awk '{print $2}') ;;
-    esac
-    if [ -z "$baseline" ] || ! git rev-parse -q --verify "$baseline^{commit}" >/dev/null 2>&1; then
-        printf 'pre-push: no valid preceding backlog revision for %s\n' "$remote_ref" >&2
-        exit 2
-    fi
-    baseline_file=$(mktemp)
-    staged_file=$(mktemp)
-    baseline_config=$(mktemp)
-    tip_config=$(mktemp)
-    if ! node "$gate/adapter.mjs" --at "$baseline" >"$baseline_file" ||
-        ! node "$gate/adapter.mjs" --at "$tip" >"$staged_file" ||
-        ! git show "$tip:$gate/config.json" >"$tip_config"; then
-        rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
-        printf 'pre-push: backlog export or configuration cannot be read at the pushed revisions\n' >&2
-        exit 2
-    fi
-    set --
-    if git show "$baseline:$gate/config.json" >"$baseline_config" 2>/dev/null; then
-        set -- --baseline-config "$baseline_config"
-    fi
-    node "$gate/check.mjs" --config "$tip_config" --baseline "$baseline_file" "$@" "$staged_file" || {
-        status=$?
-        rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
-        exit "$status"
-    }
-    rm -f "$baseline_file" "$staged_file" "$baseline_config" "$tip_config"
+    # A code push carries no tracker state: the store lives on
+    # refs/tracker/state and is published separately. Comparing this branch's
+    # parent with the live store would gate the push on other agents' writes.
+    printf 'pre-push: backlog comparison skipped (tracker state is not part of a code push)\n' >&2
 done <<EOF_REFS
 $refs
 EOF_REFS

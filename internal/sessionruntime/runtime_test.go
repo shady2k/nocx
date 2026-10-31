@@ -509,6 +509,63 @@ func TestTheRuntimePublishesTheWireFrame(t *testing.T) {
 	validateFrameContract(t, schema, frames[0].Bytes, "frame the runtime published")
 }
 
+func TestPublishedFramesMatchFullSnapshotsAcrossScreenChanges(t *testing.T) {
+	s, _, _ := realRuntime(t)
+	c := s.Consumers().Attach()
+	var previous Snapshot
+	for _, step := range []struct {
+		name, output, text string
+	}{
+		{"text", "  hello  \r\n\r\n\x1b[3;3Hworld  ", "  hello\n\n  world"},
+		{"style", "\x1b[1;3H\x1b[31mhello\x1b[0m", "  hello\n\n  world"},
+		{"cursor", "\x1b[4;5H", "  hello\n\n  world"},
+		{"unicode", "\x1b[2;2H漢a\u0301z  ", "  hello\n 漢a\u0301z\n  world"},
+		{"metadata", "\x1b]2;runtime title\x07\x1b]7;file://localhost/tmp\x07\x1b[?2004h", "  hello\n 漢a\u0301z\n  world"},
+		{"alternate", "\x1b[?1049h\x1b[Halt 漢", "alt 漢"},
+		{"primary", "\x1b[?1049l", "  hello\n 漢a\u0301z\n  world"},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if err := s.Ingest([]byte(step.output)); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			snap := s.Snapshot()
+			if got := string(snap.Screen); got != step.text {
+				t.Fatalf("snapshot text = %q, want %q", got, step.text)
+			}
+			frames := c.Take()
+			if len(frames) != 1 || frames[0].Revision != snap.Revision {
+				t.Fatalf("published frames = %+v, want one at revision %d", frames, snap.Revision)
+			}
+			want, err := EncodeFrame(snap)
+			if err != nil {
+				t.Fatalf("encode full snapshot: %v", err)
+			}
+			if !bytes.Equal(frames[0].Bytes, want) {
+				t.Fatalf("published frame differs from the full snapshot:\ngot %s\nwant %s", frames[0].Bytes, want)
+			}
+			switch step.name {
+			case "style":
+				if reflect.DeepEqual(snap.Rows, previous.Rows) {
+					t.Fatal("style-only change left the styled rows unchanged")
+				}
+			case "cursor":
+				if snap.Cursor.X != 4 || snap.Cursor.Y != 3 || !reflect.DeepEqual(snap.Rows, previous.Rows) {
+					t.Fatalf("cursor-only change altered rows or missed the caret: %+v", snap.Cursor)
+				}
+			case "metadata":
+				if snap.Title == nil || *snap.Title != "runtime title" || snap.Cwd == nil || !snap.Modes.BracketedPaste {
+					t.Fatalf("metadata or modes missing from snapshot: %+v", snap)
+				}
+			case "alternate", "primary":
+				if snap.Identity.AltScreen != (step.name == "alternate") || snap.Identity.BufferInstance == previous.Identity.BufferInstance {
+					t.Fatalf("buffer switch did not change identity: %+v", snap.Identity)
+				}
+			}
+			previous = snap
+		})
+	}
+}
+
 // The memory a wedged consumer costs is the count bound times what a frame
 // WEIGHS on this runtime: at most MaxPendingFrames payloads, each whatever
 // the session.frame encoding of this geometry costs. The gauge takes the

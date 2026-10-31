@@ -100,7 +100,9 @@ v0-8 took 17 findings against its budget of 10.
 
 ## Finding budget
 
-**5**, set in `.githooks/backlog-gate/config.json`. The work is small and already
+**10**, raised from 5 by the owner on 2026-10-30 when the fifth finding (the agent TUI
+pane flipping between views) arrived; the milestone had absorbed unplanned pipeline repairs (the nightly's
+sign and proof steps, the tracker move) beside its five findings. It was **5**, set in `.githooks/backlog-gate/config.json`. The work is small and already
 written; v0-8 took 17 findings against 10, mostly flakes, so a larger budget would let
 flakes widen the milestone unnoticed. Reaching five means deferring or trading, decided
 by the owner.

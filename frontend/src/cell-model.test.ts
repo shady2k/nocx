@@ -691,6 +691,36 @@ describe('atomic per-revision replacement', () => {
     }
   })
 
+  it('a malformed final row cannot partially replace earlier rows or advance the revision', () => {
+    const model = createCellModel()
+    const previous = applied(model, frame(1, [[['old', 1, true]], [['tail', 1, true]]], 4))
+    const next = frame(
+      2,
+      [
+        [['new', 1, true]],
+        [
+          ['界', 2, true],
+          ['', 3, false],
+          ['é', 1, true],
+        ],
+      ],
+      4,
+    )
+    const marks = next.rows[1].marks
+    next.rows[1].marks = [[99, 1, 1]]
+    expect(refused(model, next)).toEqual({ reason: 'malformed-row', row: 1, detail: 'marks' })
+    expect(model.current()).toBe(previous)
+    expect(model.current()?.cellAt(0, 0)?.grapheme).toBe('old')
+    expect(model.current()?.cellAt(1, 0)?.grapheme).toBe('tail')
+
+    next.rows[1].marks = marks
+    const accepted = applied(model, next)
+    expect(accepted.revision).toBe(2)
+    expect(accepted.cellAt(0, 0)?.grapheme).toBe('new')
+    expect(accepted.cellAt(1, 0)?.grapheme).toBe('界')
+    expect(accepted.cellAt(1, 2)?.grapheme).toBe('é')
+  })
+
   it('refuses a stale revision and keeps the newer one', () => {
     const model = createCellModel()
     applied(model, blankFrame(10, 1))
@@ -714,7 +744,17 @@ describe('atomic per-revision replacement', () => {
 
   it('never aliases the frame it decoded: mutating the caller’s objects after apply does not move the snapshot', () => {
     const red = style(1)
-    const f = frame(1, [[['a', 1, true, red]]], 1)
+    const f = frame(
+      1,
+      [
+        [
+          ['界', 2, true, red],
+          ['', 3, false, red],
+          ['é', 1, true, red],
+        ],
+      ],
+      3,
+    )
     const model = createCellModel()
     const snapshot = applied(model, f)
 
@@ -724,10 +764,17 @@ describe('atomic per-revision replacement', () => {
     // freeze against — simply does not reach the installed snapshot.
     f.geometry.cols = 80
     f.cursor.x = 7
+    f.rows[0].text = 'changed'
+    f.rows[0].marks![0][2] = 1
+    f.rows[0].runs![0][0] = 0
 
     expect(snapshot.cellAt(0, 0)?.style.foreground.palette).toBe(1)
-    expect(snapshot.geometry.cols).toBe(1)
+    expect(snapshot.geometry.cols).toBe(3)
     expect(snapshot.cursor.x).toBe(0)
+    expect(snapshot.cellAt(0, 0)?.grapheme).toBe('界')
+    expect(snapshot.cellAt(0, 0)?.width).toBe(2)
+    expect(snapshot.cellAt(0, 1)?.width).toBe(3)
+    expect(snapshot.cellAt(0, 2)?.grapheme).toBe('é')
   })
 
   it('freezes what it installs: a caller cannot rewrite an installed snapshot', () => {

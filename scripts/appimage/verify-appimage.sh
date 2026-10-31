@@ -31,11 +31,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MUTATIONS=("none" "no-freetype" "no-network-process" "no-web-process" "unpatched")
 [ $# -gt 1 ] && MUTATIONS=("${@:2}")
 
-# Keep screenshots and full logs outside the disposable container. CI receives
-# the evidence in its workspace; a caller can choose another output directory.
-EVIDENCE="${NOCX_APPIMAGE_VERIFY_EVIDENCE:-$(dirname "$APPIMAGE")/appimage-verification}"
+# Keep diagnostics outside the artifact directory: release jobs upload dist/*.
+# CI uses RUNNER_TEMP; local runs use a fresh sibling of the artifact directory.
+# Retain evidence after the container exits and print its path for inspection.
+EVIDENCE="${NOCX_APPIMAGE_VERIFY_EVIDENCE:-}"
+if [ -z "$EVIDENCE" ]; then
+  evidence_parent="${RUNNER_TEMP:-$(dirname "$(dirname "$APPIMAGE")")}"
+  EVIDENCE="$(mktemp -d "$evidence_parent/appimage-verification.XXXXXX")"
+fi
 mkdir -p "$EVIDENCE"
 EVIDENCE="$(cd "$EVIDENCE" && pwd)"
+echo "AppImage verification evidence: $EVIDENCE"
 IMAGE="${NOCX_APPIMAGE_VERIFY_IMAGE:-archlinux:latest}"
 status=0
 for mutation in "${MUTATIONS[@]}"; do

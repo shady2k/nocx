@@ -71,6 +71,12 @@ graph LR
 
 Raw terminal bytes and raw marker sequences never cross the WebSocket as text. The backend emulator emits only explicitly supported, schema-checked `session.effect` values, including cwd, recovery sighting and promptBoundary; they may drive UI actions or the next `open{cwd}`. The renderer does not parse the stream, and a marker never grants lifecycle authority (AD-1, AD-6, ADR-0081).
 
+Frame publication reads styled screen rows once through the runtime's locked snapshot
+construction, keeping geometry, cursor, buffer identity, modes, title and cwd at the same
+revision. It does not extract the unused text `Screen`; public `Snapshot` and commit
+checks add that text through the existing reader, preserving spacer and blank trimming.
+An unreadable screen still produces no new frame, never a partial one.
+
 ## Module Map
 
 **Backend (Go core)** — one interface, one responsibility each:
@@ -104,6 +110,12 @@ use the same visibility gate; visible unfocused splits still paint.
 | `terminal` | Paint the screen the session runtime sends: a passive cell model of its frames and the painter that draws the live grid from it ([ADR-0072](decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md), `nocx-zg3k3.2`). xterm.js stays only as the invisible input layer — it parses the bytes for input encoding and surfaces OSC events via `parser.registerOscHandler`, and paints nothing — until `nocx-zg3k3.8` removes it ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |
 | `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it.                                                                                                                                                                                                                                                                                        |
 | `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                                                                                                                                                                                                                                                                                                                   |
+
+On `session.frame` intake, the client cell model decodes each row's Unicode
+positions and marks once, validates the whole frame, and reuses those positions
+to build its immutable cell snapshot. That intermediate data belongs to one
+`apply` call, not a cross-revision cache. A refused frame leaves the installed
+snapshot unchanged.
 
 ## Architectural Decisions
 

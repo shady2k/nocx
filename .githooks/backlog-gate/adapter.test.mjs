@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
-import { contextualReady, landed, normalize } from './adapter.mjs'
+import { contextualReady, landed, normalize, readExport } from './adapter.mjs'
 
 const row = (comments, status = 'in_progress') => ({
   id: 'nocx-a',
@@ -407,4 +408,136 @@ test('the gate reports an open leaf a landed commit names, and clears once it cl
     [['nocx-a', 'still open, and the commit abc1234 on the main line names it']],
   )
   assert.deepEqual(gate('closed'), [])
+})
+
+// A checkout in the shape the mechanism leaves it: a store worktree parked at
+// the machine's state directory, a recording written there and committed, and
+// refs/tracker/state at the commit the store was created from. That ref is the
+// one the mechanism never advances, and it is what this fixture's `published`
+// variant moves instead, for the clone that fetched it (CI).
+function trackerCheckout(t, { published = false } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'adapter-tracker-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const code = join(root, 'code')
+  mkdirSync(code)
+  const git = (...args) => execFileSync('git', ['-C', code, ...args], { encoding: 'utf8' }).trim()
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'adapter-test@example.invalid')
+  git('config', 'user.name', 'Adapter Test')
+  writeFileSync(join(code, 'proof'), 'proof\n')
+  git('add', 'proof')
+  git('commit', '-qm', 'chore: proof (nocx-a)')
+  const revision = git('rev-parse', 'HEAD')
+  // The gate's own files are in the checkout, as in the real one: readExport
+  // takes that as "the tracker store, not a JSONL file in the tree".
+  mkdirSync(join(code, '.githooks'))
+  symlinkSync(fileURLToPath(new URL('.', import.meta.url)), join(code, '.githooks/backlog-gate'))
+
+  const stateDir = join(root, 'state')
+  mkdirSync(stateDir)
+  const store = join(stateDir, basename(code), 'tracker')
+  const issues = `${JSON.stringify({
+    id: 'nocx-a',
+    title: 'A',
+    status: 'closed',
+    issue_type: 'task',
+    created_at: '2026-10-31T00:00:00Z',
+    updated_at: '2026-10-31T00:00:00Z',
+  })}\n`
+  let recorded
+  const storeGit = (...args) =>
+    execFileSync('git', ['-C', store, ...args], { encoding: 'utf8' }).trim()
+  git('worktree', 'add', '-q', '--detach', store, revision)
+  mkdirSync(join(store, '.beads'), { recursive: true })
+  writeFileSync(join(store, '.beads/issues.jsonl'), issues)
+  storeGit('add', '.beads/issues.jsonl')
+  storeGit('commit', '-qm', 'tracker store: the state at the revision')
+  const stateCommit = storeGit('rev-parse', 'HEAD')
+  // The recording names the store commit and the digest of the state it
+  // exports; the mechanism verifies the digest on every read.
+  const digest = `sha256:${createHash('sha256')
+    .update(`=== .beads/issues.jsonl\n${issues}`)
+    .digest('hex')}`
+  mkdirSync(join(store, '.tracker-sync/recordings'), { recursive: true })
+  writeFileSync(
+    join(store, '.tracker-sync/recordings', `${revision}.jsonl`),
+    `${JSON.stringify({ format: 'tracker-sync-recording/1', store: stateCommit, digest }, null, 2)}\n`,
+  )
+  storeGit('add', '.tracker-sync/recordings')
+  storeGit('commit', '-qm', 'tracker store: record the revision')
+  recorded = storeGit('rev-parse', 'HEAD')
+  // The mechanism leaves refs/tracker/state where it created the store, and a
+  // clone that fetched the ref has it at the published commit instead.
+  git('update-ref', 'refs/tracker/state', published ? recorded : stateCommit)
+  // A clone that never connected has no store at all, which is CI.
+  if (published) execFileSync('git', ['-C', code, 'worktree', 'remove', '--force', store])
+  return { code, revision, stateDir }
+}
+
+function inCheckout(fixture, stateDir, run) {
+  const cwd = process.cwd()
+  const before = process.env.XDG_STATE_HOME
+  try {
+    process.chdir(fixture.code)
+    process.env.XDG_STATE_HOME = stateDir
+    return run()
+  } finally {
+    process.chdir(cwd)
+    if (before === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = before
+  }
+}
+
+test('a recorded revision is read from the store when refs/tracker/state is stale', (t) => {
+  const fixture = trackerCheckout(t)
+  // The defect: the mechanism writes refs/tracker/state once, then commits the
+  // recording on the store worktree's HEAD and only ever publishes it. A push
+  // of a freshly recorded commit met "path ... does not exist in refs/tracker/state".
+  assert.notEqual(
+    spawnSync('git', [
+      '-C',
+      fixture.code,
+      'cat-file',
+      '-e',
+      `refs/tracker/state:.tracker-sync/recordings/${fixture.revision}.jsonl`,
+    ]).status,
+    0,
+  )
+  const issues = inCheckout(fixture, fixture.stateDir, () => readExport(fixture.revision))
+  assert.deepEqual(
+    issues.map((issue) => issue.id),
+    ['nocx-a'],
+  )
+})
+
+test('a clone with no store reads the recording from the published ref it fetched', (t) => {
+  // CI: connect-tracker-ci.sh fetches refs/tracker/state and never connects a
+  // store, so the published ref is the only state there.
+  const fixture = trackerCheckout(t, { published: true })
+  const empty = join(fixture.stateDir)
+  rmSync(empty, { recursive: true, force: true })
+  const issues = inCheckout(fixture, empty, () => readExport(fixture.revision))
+  assert.deepEqual(
+    issues.map((issue) => issue.id),
+    ['nocx-a'],
+  )
+})
+
+test('a revision with no recording is refused, never read from a later state', (t) => {
+  const fixture = trackerCheckout(t)
+  const later = execFileSync(
+    'git',
+    ['-C', fixture.code, 'commit', '--allow-empty', '-qm', 'chore: later (nocx-a)'],
+    {
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(later, '')
+  const unrecorded = execFileSync('git', ['-C', fixture.code, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim()
+  assert.throws(
+    () => inCheckout(fixture, fixture.stateDir, () => readExport(unrecorded)),
+    /no recording for .*: the store never recorded that revision/,
+  )
 })

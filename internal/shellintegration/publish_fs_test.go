@@ -87,13 +87,17 @@ func TestOSFSReadDirLstatSemantics(t *testing.T) {
 	}
 }
 
-// TestReadDirSkipsAnEntryRemovedWhileListing: two publishers share the root,
-// and one finishing its publish removes its lock and staging entries while
-// the other is still reading the directory. The listing is taken first and
-// each name is lstat'ed after; a name that is gone by then is not a failed
+// TestOSFSReadDirSkipsAnEntryRemovedWhileListing: two publishers share the
+// root, and one finishing its publish removes its lock and staging entries
+// while the other is still reading the directory. The listing is taken first
+// and each name is lstat'ed after; a name that is gone by then is not a failed
 // read — the directory was read, and that entry no longer exists
 // (nocx-1ebrs.66.1.34: `first publisher: readdir …: lstat …`).
-func TestReadDirSkipsAnEntryRemovedWhileListing(t *testing.T) {
+//
+// The listing is handed to ReadDir through osFS's own seam, so the
+// interleaving is DRIVEN: the method lists, then the entry disappears, then
+// the method stats exactly the listing it holds.
+func TestOSFSReadDirSkipsAnEntryRemovedWhileListing(t *testing.T) {
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, "kept"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write kept: %v", err)
@@ -109,7 +113,8 @@ func TestReadDirSkipsAnEntryRemovedWhileListing(t *testing.T) {
 	if rmErr := os.Remove(filepath.Join(home, "staged")); rmErr != nil {
 		t.Fatalf("remove staged: %v", rmErr)
 	}
-	infos, err := dirInfos(entries)
+	fsys := osFS{readDir: func(string) ([]fs.DirEntry, error) { return entries, nil }}
+	infos, err := fsys.ReadDir(home)
 	if err != nil {
 		t.Fatalf("a removed entry failed the read: %v", err)
 	}
@@ -125,7 +130,7 @@ func TestReadDirSkipsAnEntryRemovedWhileListing(t *testing.T) {
 // A failure that is not a disappearance is still a failed read: permission,
 // I/O and everything else must surface, or a directory this process cannot
 // read would look empty.
-func TestReadDirKeepsAnEntryItCannotStat(t *testing.T) {
+func TestOSFSReadDirKeepsAnEntryItCannotStat(t *testing.T) {
 	home := t.TempDir()
 	// #nosec G306 — test fixture, intentionally created with restricted permissions.
 	if err := os.WriteFile(filepath.Join(home, "f"), []byte("x"), 0o600); err != nil {
@@ -138,7 +143,8 @@ func TestReadDirKeepsAnEntryItCannotStat(t *testing.T) {
 	denied := dirEntryFunc{name: "f", info: func() (fs.FileInfo, error) {
 		return nil, &fs.PathError{Op: "lstat", Path: "f", Err: fs.ErrPermission}
 	}}
-	if _, err := dirInfos(append(entries, denied)); !errors.Is(err, fs.ErrPermission) {
+	fsys := osFS{readDir: func(string) ([]fs.DirEntry, error) { return append(entries, denied), nil }}
+	if _, err := fsys.ReadDir(home); !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("a permission failure read as: %v, want it returned", err)
 	}
 }

@@ -65,7 +65,13 @@ type File interface {
 // osFS is the production FS over the local filesystem. The self-installing
 // launcher runs on the remote host with this implementation; the SFTP
 // carrier provides its own.
-type osFS struct{}
+// osFS is the production FS over os.*. readDir is its one seam: nil means
+// os.ReadDir, and a test may hand ReadDir a listing taken before an entry was
+// removed, so the race between a listing and that entry's lstat is DRIVEN
+// rather than waited for (nocx-1ebrs.66.1.34).
+type osFS struct {
+	readDir func(string) ([]fs.DirEntry, error)
+}
 
 // NewOSFS returns the production FS implementation over os.*.
 func NewOSFS() FS { return osFS{} }
@@ -119,22 +125,23 @@ func (osFS) Rename(src, dst string) error { return os.Rename(src, dst) }
 
 func (osFS) Remove(path string) error { return os.Remove(path) }
 
-func (osFS) ReadDir(path string) ([]fs.FileInfo, error) {
-	entries, err := os.ReadDir(path)
+// ReadDir resolves the listed entries to lstat results. A name that another
+// publisher removed between the listing and its lstat is skipped, not an
+// error: two invocations share the root, and one finishing its publish removes
+// its lock and staging entries while the other is still reading the directory
+// (nocx-1ebrs.66.1.34). An entry that no longer exists is not foreign data and
+// not an unreadable directory, so the read of the directory succeeded. Every
+// other failure is real and returned: a directory this process cannot stat
+// must not look empty.
+func (o osFS) ReadDir(path string) ([]fs.FileInfo, error) {
+	readDir := o.readDir
+	if readDir == nil {
+		readDir = os.ReadDir
+	}
+	entries, err := readDir(path)
 	if err != nil {
 		return nil, err
 	}
-	return dirInfos(entries)
-}
-
-// dirInfos resolves the listed entries to lstat results. A name that another
-// publisher removed between the listing and its lstat is skipped, not an
-// error: two invocations share this root, and one finishing its publish
-// removes its lock and staging entries while the other is still reading the
-// directory (nocx-1ebrs.66.1.34). An entry that no longer exists is not
-// foreign data and not an unreadable directory, so the read of the directory
-// succeeded. Every other failure is real and returned.
-func dirInfos(entries []fs.DirEntry) ([]fs.FileInfo, error) {
 	infos := make([]fs.FileInfo, 0, len(entries))
 	for _, e := range entries {
 		info, err := e.Info() // lstat semantics: a symlink entry reports the link

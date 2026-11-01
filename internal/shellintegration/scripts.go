@@ -334,8 +334,11 @@ var (
 // 68: the Bash and zsh grant readers MATCH the bootstrap field before slicing
 // it out — a refused grant omits the field on the wire (`bootstrap,omitempty`),
 // and the unconditional slice handed the ssh branch the whole frame to eval
-// (nocx-40rlu). Every installed copy must be rewritten: a shell still sourcing
-// 67 parses the frame's JSON as shell source and never runs the typed ssh.
+// (nocx-atpw5.1.15, the colleague's nocx-40rlu). Every installed copy must be
+// rewritten: a shell still sourcing 67 parses the frame's JSON as shell source
+// and never runs the typed ssh. 68 is also the bump that carries the agent-
+// launch helper changes that reached these scripts on main without one, so an
+// install holding 67 is rewritten once, for both.
 const version = "68"
 
 // ScriptVersion is the integration script version other packages may read.

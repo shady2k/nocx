@@ -32,6 +32,13 @@ test.describe('enhanced input raw routing', () => {
     // `read x` never received `hello`). The observable a keystroke needs is
     // focus, not visibility, so the premise is established rather than
     // assumed. Same gate as e2e/snippets.spec.ts.
+    //
+    // AND THE GATE IS A SAMPLE, NOT A PROMISE THE FOCUS STAYS (nocx-atpw5.1.20).
+    // The same focus-losing DOM operations can drop it again after this check,
+    // and a person types before any repair exists. From the submit's write
+    // until its running fact the pane therefore adopts keys typed at an
+    // unclaimed keyboard (terminal-content.ts, _submittedAwaitingStart): the
+    // letters must reach `read` wherever the keyboard was at the keystroke.
     await expect(page.locator(GRID_INPUT)).toBeFocused({ timeout: 5000 })
 
     // The `read` builtin is now waiting for stdin. Typing must reach the running

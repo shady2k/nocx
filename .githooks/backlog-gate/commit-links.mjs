@@ -26,6 +26,15 @@
  * they are listed as such and fail nothing. The committer date is the
  * author's to set, so this is honesty, not enforcement.
  *
+ * A QUARANTINE COMMIT NAMES THE BOOKKEEPING, NOT THE FLAKE (nocx-atpw5.1.8).
+ * Adding an entry to docs/testing/quarantine.json is not delivering the bead
+ * that entry names; the gate's merged-but-open rule reads any main-line commit
+ * whose HEADER names a leaf as its delivery, and the flake's bead must stay
+ * open for the quarantine to protect anything. So a commit whose diff only
+ * adds quarantine entries may not name one of those entries' beads in its
+ * header: it names the bookkeeping task publishing them, and the flake ids
+ * stay in the entry (and the body, where they are references, not links).
+ *
  * WHICH TASKS: every issue of the tracker, closed ones included. Locally that
  * is the export `br` writes after every mutation (`br where`), which is the
  * database's own view — a bead created a minute ago resolves. In CI it is the
@@ -123,6 +132,57 @@ function recordsOnly(base, tip = null) {
     if (!isDeepStrictEqual(issue.comments, next.comments)) changed = true
   }
   return changed
+}
+
+const QUARANTINE = 'docs/testing/quarantine.json'
+
+function quarantineEntries(text, where) {
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(`${where}: docs/testing/quarantine.json is not readable JSON`)
+  }
+  if (!data || data.schema !== 1 || !Array.isArray(data.tests))
+    throw new Error(`${where}: the quarantine needs schema 1 and a tests array`)
+  const entries = new Map()
+  for (const entry of data.tests) {
+    if (!entry || typeof entry.test !== 'string' || typeof entry.bead !== 'string')
+      throw new Error(`${where}: every quarantine entry needs a string test and bead`)
+    if (entries.has(entry.test))
+      throw new Error(`${where}: duplicate quarantine test ${entry.test}`)
+    entries.set(entry.test, entry)
+  }
+  return entries
+}
+
+// The beads of the entries a change set ONLY adds. Empty when the diff touches
+// another path, when an existing entry was removed or changed, or when nothing
+// new arrived: anything else might be the fix, and this rule is about the
+// commit that cannot be one (nocx-atpw5.1.8). `tip` null means the index, the
+// pending commit the commit-msg hook is asked about.
+export function addedQuarantineBeads(base, tip = null) {
+  if (!base) return []
+  const paths = git('diff', '--name-only', '-z', ...(tip ? [base, tip] : ['--cached', base]))
+    .split('\0')
+    .filter(Boolean)
+  if (paths.length !== 1 || paths[0] !== QUARANTINE) return []
+  const at = tip ? `${tip}:${QUARANTINE}` : `:${QUARANTINE}`
+  const show = (rev) => {
+    const result = spawnSync('git', ['show', rev], { encoding: 'utf8', maxBuffer: 1 << 28 })
+    return result.status === 0 ? result.stdout : null
+  }
+  const beforeText = show(`${base}:${QUARANTINE}`)
+  const afterText = show(at)
+  if (afterText === null) return []
+  const before = beforeText === null ? new Map() : quarantineEntries(beforeText, base)
+  const after = quarantineEntries(afterText, tip ?? 'the index')
+  for (const [test, entry] of before) {
+    const next = after.get(test)
+    if (!next || !isDeepStrictEqual(next, entry)) return []
+  }
+  if (after.size <= before.size) return []
+  return [...after.entries()].filter(([test]) => !before.has(test)).map(([, entry]) => entry.bead)
 }
 
 // A merge without its own link borrows links from incoming work under the rule.
@@ -344,11 +404,12 @@ function main() {
       taskIds = incoming('HEAD', head, from, null)
     }
     const head = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' })
+    const headSha = head.status === 0 ? head.stdout.trim() : null
     commits.push({
       id: 'pending message',
       taskIds,
-      recordsOnly:
-        !existsSync(mergeHead) && recordsOnly(head.status === 0 ? head.stdout.trim() : null),
+      recordsOnly: !existsSync(mergeHead) && recordsOnly(headSha),
+      quarantineBeads: !existsSync(mergeHead) ? addedQuarantineBeads(headSha) : [],
     })
   } else {
     let listed
@@ -421,6 +482,7 @@ function main() {
         id: sha,
         taskIds,
         recordsOnly: parents.length === 1 && recordsOnly(parents[0], sha),
+        quarantineBeads: parents.length === 1 ? addedQuarantineBeads(parents[0], sha) : [],
       })
     }
     if (!opt['export-at']) opt['export-at'] = opt.introduced || range.split('..')[1]
@@ -443,39 +505,56 @@ function main() {
     console.error(`commit-links.mjs: the tracker could not be read: ${e.message}`)
     return 2
   }
+  // A quarantine-only commit that names an entry's bead in its header is a
+  // link problem of its own kind: the vendored check sees a valid leaf and
+  // passes it, while the gate's merged-but-open reads that header as delivery
+  // (nocx-atpw5.1.8). Said here, where the diff and the message are both in
+  // hand, because commit-links.mjs is the project's half and check-commits.mjs
+  // is the plugin's.
+  const quarantineViolations = []
+  for (const c of commits)
+    for (const bead of c.quarantineBeads ?? [])
+      if (c.taskIds.includes(bead))
+        quarantineViolations.push({
+          id: c.id,
+          task: bead,
+          reason:
+            'only adds its quarantine entry, which is not delivery: name the bookkeeping task publishing it in the header and keep this id in the entry — merged-but-open reads a header id as the leaf landing',
+        })
+
   const args = [join(HERE, 'check-commits.mjs'), '-']
   const run = spawnSync(process.execPath, args, {
     input: JSON.stringify({ issues, commits }),
     encoding: 'utf8',
   })
   const out = run.stdout || ''
-  if (opt.json) process.stdout.write(out)
-  else {
-    let report
-    try {
-      report = JSON.parse(out)
-    } catch {
-      process.stdout.write(out)
-    }
-    if (report?.violations) {
-      for (const v of report.violations) {
-        const subject =
-          v.id === 'pending message'
-            ? v.id
-            : `${v.id.slice(0, 10)} ${git('log', '-1', '--format=%s', v.id).trim()}`
-        console.log(`  ${subject}: ${v.task ? `${v.task} — ` : ''}${v.reason}`)
-      }
-      console.log(
-        `${report.checked} commit(s) checked, ${report.violations.length} link problem(s)`,
-      )
-      if (report.violations.length) {
-        console.log(
-          'Name a leaf task, "(nocx-…)" at the end of the subject. No task for it? File one through /shady2k-skills:to-backlog — a stage or an epic is not a task.',
-        )
-      }
-    } else if (report?.error) console.log(report.error)
+  let report
+  try {
+    report = JSON.parse(out)
+  } catch {
+    report = null
   }
+  if (report?.violations) report.violations.push(...quarantineViolations)
+  if (opt.json) {
+    process.stdout.write(quarantineViolations.length && report ? JSON.stringify(report) : out)
+  } else if (report?.violations) {
+    for (const v of report.violations) {
+      const subject =
+        v.id === 'pending message'
+          ? v.id
+          : `${v.id.slice(0, 10)} ${git('log', '-1', '--format=%s', v.id).trim()}`
+      console.log(`  ${subject}: ${v.task ? `${v.task} — ` : ''}${v.reason}`)
+    }
+    console.log(`${report.checked} commit(s) checked, ${report.violations.length} link problem(s)`)
+    if (report.violations.length) {
+      console.log(
+        'Name a leaf task, "(nocx-…)" at the end of the subject. No task for it? File one through /shady2k-skills:to-backlog — a stage or an epic is not a task.',
+      )
+    }
+  } else if (report?.error) console.log(report.error)
+  else process.stdout.write(out)
   process.stderr.write(run.stderr || '')
+  if ((run.status ?? 2) === 0 && quarantineViolations.length) return 1
   return run.status ?? 2
 }
 

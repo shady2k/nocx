@@ -43,9 +43,17 @@ The cask here is the **stable** one (`Casks/nocx.rb`). `nocx-1ebrs.35.4`'s night
 install-time channel preset are cancelled by [ADR-2syp2fpx](../decisions/2syp2fpx-one-cask-and-the-channel-setting-not-two-casks.md):
 one app, one cask, and `update.channel` decides which line an install follows.
 
-`VERSION` on main contains the next stable version (`0.8.0` initially). A nightly
-stamps that version into both executables and both plist version fields.
-Nightly identity is the channel/tag, not a prerelease version suffix.
+The version is **not** stored in a file on main. A nightly reads the stable
+tags its commit can reach (`git tag --list --merged HEAD`) and embeds the next
+patch after the highest one: after `v0.8.0` it stamps `0.8.1`, and after
+`v0.8.1` exists it stamps `0.8.2`. Nightly tags are excluded, `git describe` is
+not used, and a history with no readable stable tag fails the nightly instead of
+guessing. One function owns the rule (`nextVersion` in
+`scripts/publish-nightly.mjs`); the workflows pass it the tag list and never
+derive a version themselves. The stable tag a promotion creates is therefore
+the next nightly's input, with no version PR between them. A nightly stamps that
+version into both executables and both plist version fields. Nightly identity
+is the channel/tag, not a prerelease version suffix.
 
 `manifest.json` retains the updater's existing strict schema:
 

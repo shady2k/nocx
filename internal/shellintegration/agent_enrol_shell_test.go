@@ -830,9 +830,16 @@ func agentWrapperUsesResolvedRecordAfterRefusalWithoutTools(t *testing.T, start 
 	}
 	want := "REFUSED:record env|4|record-one|record two|user-one|user two"
 	waitUntil(t, "recorded launch without tools", func() bool { return strings.Contains(s.output(), want) })
-	if !hasEvent(k, "agent_launch_cancel") {
-		t.Fatal("the refused invocation left its local launch ticket live")
-	}
+	// THE CANCEL IS THE REFUSAL'S OUTPUT, and the pane's text is not its
+	// receipt. The shell writes the cancel frame BEFORE it runs the fallback
+	// (the refusal block in agentEnrolRefusalLocal, agents.go:244), but the
+	// kernel accepts frames on its own goroutine, so the command's output can
+	// be read here first; sampling the log at that instant called a
+	// retirement that was in flight "live" (nocx-atpw5.1.10). The ticket is
+	// created when the resolution's local answer is read
+	// (scripts/nocx.zsh:917) and retired by __nocx_agent_launch_cancel
+	// (scripts/nocx.zsh:980-983), which that block calls.
+	waitForEvent(t, k, "agent_launch_cancel")
 	if hasEvent(k, "agent_withdraw") {
 		t.Fatal("a refused enrolment withdrew an interval it never opened")
 	}

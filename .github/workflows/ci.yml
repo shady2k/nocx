@@ -1001,6 +1001,15 @@ jobs:
           echo "base: $base"
           node "$gate/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
 
+      # The gate's own tests: commit-links, the adapter and the merge gate are
+      # tooling, and a change to them was guarded only by whoever remembered the
+      # by-hand command in docs/agents/backlog.md (nocx-fg79x.5). This job runs
+      # on every pull request and push, so a change to .githooks/backlog-gate/
+      # owes these whether or not it owes the product suites. The glob is the
+      # point: a new *.test.mjs beside them is run without another edit here.
+      - name: The backlog gate's own tests
+        run: node --test .githooks/backlog-gate/*.test.mjs
+
   # e2e — the suite, in the same container a developer runs it in.
   #
   # ONE command: `e2e/run-in-container.sh`. Inside it, `npx playwright test`; the

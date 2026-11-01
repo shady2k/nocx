@@ -34,6 +34,7 @@ const COMMAND_BLOCK_FRAME_STYLE_ENTRY = resolve(srcDir, 'styles/components/comma
 const COMPOSER_STYLE = resolve(srcDir, 'styles/surfaces/composer.css')
 
 import type { PaneIdentity, PaneScreenReading } from './terminal-content'
+import { notifyAiConfigChanged } from './ai-config'
 import type { SessionEffect } from './generated/session.effect'
 import type { Row, SessionFrame } from './generated/session.frame'
 import { frameOf, styleOf, wireRowOf, type CellSpec } from './painter/fixtures'
@@ -7619,24 +7620,8 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         value: 400,
         configurable: true,
       })
-      // THE RUNNING CAP TAKES THE HEADER OFF THE SCROLLER, not the block: the
-      // block holds the live region itself since ADR-0091, so its own height is
-      // the box this cap bounds. jsdom lays nothing out, so the header is
-      // stubbed the way a browser would answer for it.
-      const runningHeader =
-        scrollback.blockManager.runningBlock!.el.querySelector<HTMLElement>(':scope > .cmd-header')!
-      runningHeader.getBoundingClientRect = () => ({
-        height: 20,
-        width: 800,
-        top: 0,
-        left: 0,
-        right: 800,
-        bottom: 20,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      })
-
+      // The live cap reserves the same fixed 32px running header, regardless
+      // of command text or the number of populated output rows.
       // The accepted screen has four populated rows, but the cursor remains
       // in the final row of a taller viewport. A short block stays seated by
       // its output rather than reserving the blank tail as running content.
@@ -7658,7 +7643,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       fullScreen.cursor.y = viewportRows - 1
       client._sessions[0].fireScreenFrame(fullScreen)
       await vi.waitFor(() => {
-        expect(scrollback.terminalLiveViewport.style.height).toBe('380px')
+        expect(scrollback.terminalLiveViewport.style.height).toBe('368px')
       })
     } finally {
       teardown()
@@ -7811,7 +7796,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
-    const protoRect = Element.prototype.getBoundingClientRect
     const raf = globalThis.requestAnimationFrame
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
@@ -7824,47 +7808,14 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       content.setVisible(true)
       // An accepted frame establishes the cell metrics; the delivered
       // viewport is then measured against those committed metrics.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       session.fireScreenFrame(screenFrame(1, ['prompt']))
-      content.viewportChanged({ width: 800, height: 400 })
-      await vi.waitFor(() => expect(reports().length).toBeGreaterThan(0))
-
-      // A real scroller height, and a running block header that occupies
-      // part of it: grid and live box share the scroller, so the grid must
-      // be fitted to scroller MINUS header — the same cap setLiveHeight
-      // clamps the box to. A taller grid's last rows sit outside the box
-      // (overflow: hidden) and are unreachable: the omp report, where the
-      // composer at the bottom of the program could not be scrolled to.
       Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
         value: 300,
         configurable: true,
       })
-      // A real browser gives the header its final, wrapped height the
-      // instant it exists (the command text is already in the DOM) — the
-      // prompt's geometry prediction measures it there, on an off-flow
-      // probe, before the command exists (nocx-2v80t.3.50), so the mock
-      // has to answer that early too. A class check rather than the
-      // instance: the block does not exist yet.
-      Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-        // The running block's HEADER is what the live cap takes off the
-        // scroller (ADR-0091; the block itself now holds the live region), and
-        // the off-flow probe is a `.cmd-block-running` wrapper whose height a
-        // browser gives as its header's. Both answer the same 24.
-        if (this.classList.contains('cmd-block') || this.classList.contains('cmd-header')) {
-          return {
-            height: 24,
-            width: 800,
-            top: 0,
-            left: 0,
-            right: 800,
-            bottom: 24,
-            x: 0,
-            y: 0,
-            toJSON: () => ({}),
-          }
-        }
-        return protoRect.call(this)
-      }
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      content.viewportChanged({ width: 800, height: 300 })
+      await vi.waitFor(() => expect(reports().length).toBeGreaterThan(0))
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -7876,10 +7827,8 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
 
-      // Output taller than the pane: the box is capped at scroller minus
-      // header (276) and the grid must be fitted to the SAME 276 — not the
-      // bare scroller, which would leave the last rows clipped and
-      // unscrollable inside the box.
+      // Output taller than the pane: the box and grid share the same 268px
+      // budget (300 minus one 32px header). Output cannot change that budget.
       const before = reports().length
       session.fireScreenFrame(
         screenFrame(
@@ -7888,14 +7837,13 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
-      await vi.waitFor(() => expect(reports().length).toBeGreaterThan(before))
-      expect(reports()[reports().length - 1]).toMatchObject({ rows: 17, ypixel: 272 })
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
+      expect(reports()).toHaveLength(before)
+      expect(reports()[reports().length - 1]).toMatchObject({ rows: 16, ypixel: 256 })
     } finally {
       globalThis.requestAnimationFrame = raf
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
-      Element.prototype.getBoundingClientRect = protoRect
       teardown()
     }
   })
@@ -8059,7 +8007,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         { rows: 20 },
       )
       session.fireScreenFrame(topFrame)
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
       expect(scrollTo).toHaveBeenCalled()
       scrollTo.mockClear()
 
@@ -8072,7 +8020,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
           { rows: 20 },
         ),
       )
-      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('276px')
+      expect(withScrollback.scrollback.terminalLiveContainer.style.height).toBe('268px')
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {
       globalThis.requestAnimationFrame = raf
@@ -8615,10 +8563,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // the keyboard reaches it (Tab lands on it: it carries
       // `data-block-control`, the pane's own exemption from its focus
       // bounce).
-      const stop = Array.from(
-        document.querySelectorAll<HTMLElement>('.cmd-block [data-block-control]'),
-      ).find((el) => (el.textContent ?? '').trim() === 'Stop')
-      expect(stop).toBeDefined()
+      const stop = document.querySelector<HTMLButtonElement>(
+        '.cmd-block [data-block-control][aria-label="Stop"]',
+      )
+      expect(stop).not.toBeNull()
       stop?.focus()
       expect(document.activeElement).toBe(stop)
 
@@ -12698,6 +12646,80 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     }
   })
 
+  it('catches up when a configuration write lands after the pane is back in front', async () => {
+    // The show was the ONLY seam (nocx-1ebrs.66.1.28), and a write still in
+    // flight when the person came back answered the read made there: the
+    // chip then named the model from before the write and no later read was
+    // ever issued. The write announces its own landing now, and this is that
+    // announcement, made while the chip is on screen and nobody is
+    // navigating anywhere.
+    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      const before = state.asks
+
+      state.answering = READY_ANSWERING
+      notifyAiConfigChanged()
+
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      expect(state.asks).toBe(before + 1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('pays no readiness call for a configuration write while Enter goes to the shell', async () => {
+    // The same rule the show follows: a Run pane has no chip, so nothing can
+    // have gone stale in front of anybody, and it asks nobody anything.
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      notifyAiConfigChanged()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(state.asks).toBe(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('pays no readiness call for a configuration write while the pane is behind', async () => {
+    // Settings is in front while the write is made. This pane is hidden, and
+    // its show will read the facts when the person comes back.
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      content.setVisible(false)
+      const before = state.asks
+      notifyAiConfigChanged()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(state.asks).toBe(before)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('stops listening for configuration writes once the pane is gone', async () => {
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    content.setVisible(true)
+    switchToAsk(content)
+    await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    const before = state.asks
+    teardown()
+    notifyAiConfigChanged()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(state.asks).toBe(before)
+  })
+
   it('does not ask while Enter goes to the shell — a Run pane pays no readiness call', async () => {
     const { client, state } = statusClient(READY_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -15171,7 +15193,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // without consulting the kernel first — the rule the 2026-09-16 window
       // bought, which outlives the window itself.
       const stop = paneOf(content).querySelector<HTMLElement>(
-        '.cmd-block-running [data-block-control]',
+        '.cmd-block-running [data-block-control][aria-label="Stop"]',
       )
       expect(stop, 'the running block has no Stop control').not.toBeNull()
       stop!.click()
@@ -19857,23 +19879,15 @@ describe('the live region is the painter picture (nocx-zg3k3.2.5)', () => {
 })
 
 describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', () => {
-  // The pane's lifecycle chrome trades places at every command: the composer
-  // at the prompt, nothing in the frame after it leaves, the ProcessBar and
-  // the running block's header while the command runs. The scroller absorbs
-  // each swap, and fitting the grid to the scroller resized the pty twice a
-  // command — 221 geometry commits in 500 commands, the grid stepping between
-  // 27, 28 and 33 rows. A resize that lands at a submit makes bash redraw its
-  // line with no newline, and the command's output then begins on that row.
-  //
-  // The layout below is the one measured in the e2e container (546 px of
-  // scroller at the prompt under a 130 px composer, 620 px while running
-  // above a 56 px ProcessBar, 676 px in between, a 60 px running header),
-  // played by the test because jsdom lays nothing out.
+  // The composer changes the scroller's height, but not the common terminal
+  // area. The program always receives that area's full width and its height
+  // less the fixed running header, before submit and in either buffer.
   const COMPOSER = 130
-  const BAR = 56
-  const HEADER = 60
-
-  async function paneWithLayout() {
+  const HEADER = 32
+  /** `scroller` and `composer` are the laid-out boxes the fit must add up; the
+   *  default keeps the integers every other test in this describe was written
+   *  against. A fractional pair is the pane the browser really lays out. */
+  async function paneWithLayout(layout: { scroller?: number; composer?: number } = {}) {
     const client = makeClient()
     const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
     const { content } = mounted
@@ -19886,16 +19900,18 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     const inner = content as unknown as {
       scrollback: ScrollbackController
       editor: CommandEditor
-      processBar: HTMLElement
     }
     const sb = inner.scrollback
-    let pane = 676
+    const composerPx = layout.composer ?? COMPOSER
+    let pane = layout.scroller !== undefined ? layout.scroller + composerPx : 676
     const composerShown = (): boolean =>
       inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
-    const barShown = (): boolean => !inner.processBar.hidden
     Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
       configurable: true,
-      get: () => pane - (composerShown() ? COMPOSER : 0) - (barShown() ? BAR : 0),
+      // `clientHeight` is a whole number: it ROUNDS the box the browser laid
+      // out. The rect below is the same box in the fractional pixels the fit
+      // adds up (nocx-3an1s.1.4).
+      get: () => Math.round(pane - (composerShown() ? composerPx : 0)),
     })
     Object.defineProperty(sb.scrollbackArea, 'clientWidth', { configurable: true, value: 926 })
     const rect = (height: number): DOMRect =>
@@ -19906,17 +19922,16 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     const protoScrollIntoView = Element.prototype.scrollIntoView
     const raf = globalThis.requestAnimationFrame
     /* eslint-enable @typescript-eslint/unbound-method */
-    // Mutable, not the HEADER constant: a command whose title wraps to a
-    // second line opens a taller header than the last one's (nocx-2v80t.3.50).
+    // A hostile DOM measurement cannot change the fixed header budget.
     let headerHeight = HEADER
+    const measuredProbes: Element[] = []
     Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
-      if (this === inner.processBar) return rect(barShown() ? BAR : 0)
-      // The prediction measures the ProcessBar off-flow, on a clone —
-      // unhidden, so it lands here: the bar takes BAR shown or measured
-      // (nocx-2v80t.3.50).
-      if (this.classList.contains('ui-process-bar')) return rect(BAR)
-      if (this.classList.contains('cmd-block')) return rect(headerHeight)
+      if (this === sb.scrollbackArea) return rect(pane - (composerShown() ? composerPx : 0))
+      if (this === inner.editor.root) return rect(composerShown() ? composerPx : 0)
+      if (this.classList.contains('cmd-block')) {
+        if ((this as HTMLElement).style.position === 'absolute') measuredProbes.push(this)
+        return rect(headerHeight)
+      }
       return rect(0)
     }
     Element.prototype.scrollTo = () => {}
@@ -20022,8 +20037,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       pane = height
       content.viewportChanged({ width: 936, height })
     }
-    /** A taller (or shorter) header for the NEXT command opened — a
-     *  wrapping title takes more than one line (nocx-2v80t.3.50). */
+    /** Simulate a header whose DOM rectangle changes independently of the pane. */
     const setHeaderHeight = (px: number): void => {
       headerHeight = px
     }
@@ -20040,6 +20054,9 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       session.sendResize.mock.calls.map((call) => call[0])
     await vi.waitFor(() => expect(fits().length).toBeGreaterThan(0))
     return {
+      content,
+      session,
+      tab: mounted.tab,
       sb,
       fits,
       runCommand,
@@ -20048,11 +20065,44 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       openCommand,
       openShellCommand,
       finishCommand,
+      measuredProbes,
       setHeaderHeight,
       resize,
       restore,
     }
   }
+
+  it('the prompt’s area and the running cap are one fractional height (nocx-3an1s.1.4)', async () => {
+    // A pane the browser lays out at 677.0px: a 546.6px scroller and a 130.4px
+    // composer. `clientHeight` rounds each half separately (547 + 130.4), which
+    // is 0.4px MORE than the same pane measured once the composer hides and the
+    // scroller takes its box. The pty was fitted into that difference — a row
+    // the running box has no room for — and the last row ended below the clip
+    // (e2e/running-grid-fits-its-clip.spec.ts). ADR-3kqrem7v's one geometry
+    // means one measurement in the pane's own fractional pixels, so the two
+    // numbers are equal before any row is fitted.
+    const { content, sb, fits, openCommand, restore } = await paneWithLayout({
+      scroller: 546.6,
+      composer: 130.4,
+    })
+    try {
+      const area = sb.scrollbackArea
+      const inner = content as unknown as { _terminalAreaPx(a: HTMLElement): number }
+      const promptHeight = inner._terminalAreaPx(area) - sb.runningHeaderHeightPx
+      const prompt = fits()[fits().length - 1]
+      expect(prompt).toBeDefined()
+
+      openCommand()
+      const cap = sb.runningLiveCap
+      expect(cap).not.toBeNull()
+      expect(promptHeight).toBeCloseTo(cap!, 6)
+      // And the rows the prompt fitted occupy no more than the box that will
+      // show them.
+      expect(prompt.rows * 16).toBeLessThanOrEqual(cap!)
+    } finally {
+      restore()
+    }
+  })
 
   it('commits no geometry across twenty commands in a pane whose size did not change', async () => {
     const { sb, fits, runCommand, restore } = await paneWithLayout()
@@ -20069,9 +20119,8 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
   })
 
   it('a pane’s FIRST command commits no geometry from Enter to close (nocx-2v80t.3.50)', async () => {
-    // No calibration command before this one — the pane has run nothing,
-    // so no learned chrome stands behind the prediction; it is the typed
-    // text's own measured header or nothing. The snapshot sits between
+    // No calibration command before this one. The fixed running-header budget
+    // must be reserved before Enter. The snapshot sits between
     // typing and Enter, where a person's submit begins: a fit committed at
     // the submit, the running fact, the first parsed write or the close is
     // a pty resize the command's own echo or output is already inside.
@@ -20092,12 +20141,9 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('a command whose header wraps to a second line commits no geometry from Enter to close (nocx-2v80t.3.50)', async () => {
-    // A short title fits one line; a long one wraps to two, taking more of
-    // the pane than the LAST command's header did — no prediction made from
-    // the last command can be this command's answer. The snapshot sits
-    // between typing and Enter: settling this command's geometry later than
-    // that is a resize inside its own echo or output.
+  it('long command text and a changed header measurement cannot resize a command (nocx-3an1s.1.4)', async () => {
+    // Text truncates on one line. Even a hostile DOM height must not become
+    // a second owner of the running program's geometry.
     const {
       fits,
       runCommand,
@@ -20111,9 +20157,12 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     try {
       runCommand()
       setHeaderHeight(2 * HEADER)
-      typeCommand('printf 2')
+      const longCommand = 'printf staging && deploy && tell everyone '.repeat(12)
+      const settled = fits()[fits().length - 1]
+      typeCommand(longCommand)
+      expect(fits()[fits().length - 1]).toEqual(settled)
       const before = fits().length
-      const id = submitCommand('printf 2')
+      const id = submitCommand(longCommand)
       finishCommand(id)
       expect(fits().length).toBe(before)
       resize(776)
@@ -20143,6 +20192,86 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
+  it('reserves exactly one fixed header at the prompt and does not measure command-text probes', async () => {
+    const { fits, typeCommand, submitCommand, finishCommand, measuredProbes, restore } =
+      await paneWithLayout()
+    try {
+      const initial = fits()[fits().length - 1]
+      expect(initial).toEqual({ cols: 115, rows: 40, xpixel: 920, ypixel: 640 })
+      const before = fits().length
+      for (const text of ['git', 'git status', 'deploy staging && tell everyone '.repeat(20)]) {
+        typeCommand(text)
+      }
+      const id = submitCommand('deploy staging && tell everyone '.repeat(20))
+      finishCommand(id)
+      expect(measuredProbes).toEqual([])
+      expect(fits()).toHaveLength(before)
+      expect(fits()[fits().length - 1]).toEqual(initial)
+    } finally {
+      restore()
+    }
+  })
+
+  it('fits the full pane width independently of the live node’s ancestor insets', async () => {
+    const { content, sb, fits, openCommand, restore } = await paneWithLayout()
+    try {
+      openCommand()
+      const initial = fits()[fits().length - 1]
+      const before = fits().length
+      sb.scrollbackInner.style.paddingInline = '24px'
+      sb.terminalLiveContainer.style.paddingLeft = '24px'
+      sb.terminalLiveContainer.style.paddingRight = '24px'
+      content.viewportChanged({ width: 936, height: 676 })
+      expect(fits()).toHaveLength(before)
+      expect(fits()[fits().length - 1]).toEqual(initial)
+      expect(initial.cols).toBe(115)
+      expect(initial.xpixel).toBe(920)
+    } finally {
+      restore()
+    }
+  })
+
+  it('keeps the same desired grid across alternate entry, output, and return with no bottom panel', async () => {
+    const { content, session, tab, sb, fits, openCommand, resize, restore } = await paneWithLayout()
+    try {
+      openCommand()
+      const initial = fits()[fits().length - 1]
+      const before = fits().length
+      expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
+      const alternate = screenFrame(10, ['ALT'], { cols: 40, rows: 20 })
+      alternate.state.bufferKind = 'alternate'
+      session.fireScreenFrame(alternate)
+      expect(sb.mode).toBe('fullscreen')
+      expect(session.resizeApplied).toHaveBeenLastCalledWith(initial)
+      expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
+      expect(fits()).toHaveLength(before)
+
+      // Output and the header's new DOM seat are not a real pane resize.
+      const repaint = screenFrame(11, ['ALT redraw'], { cols: 40, rows: 20 })
+      repaint.state.bufferKind = 'alternate'
+      session.fireScreenFrame(repaint)
+      content.viewportChanged({ width: 936, height: 676 })
+      expect(fits()).toHaveLength(before)
+
+      // The equal applied receipt opens the switch fence. A later genuine
+      // resize follows the normal report path, rather than replacing an
+      // outstanding receipt (whose mock does not call sendResize).
+      typeIntoPane(content, 'x')
+      await vi.waitFor(() => expect(session.intent).toHaveBeenCalledWith('text', 'x'))
+      resize(776)
+      await vi.waitFor(() => expect(fits()).toHaveLength(before + 1))
+      const resized = fits()[fits().length - 1]
+      expect(resized).toEqual({ cols: 115, rows: 46, xpixel: 920, ypixel: 736 })
+      session.fireScreenFrame(screenFrame(12, ['PRIMARY'], { cols: 40, rows: 20 }))
+      expect(sb.mode).toBe('running')
+      expect(fits()).toHaveLength(before + 1)
+      expect(fits()[fits().length - 1]).toEqual(resized)
+      expect(tab.pane.querySelector('.ui-process-bar')).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
   it('and a real resize commits once, at the resize, and not again at the next command', async () => {
     const { fits, runCommand, resize, restore } = await paneWithLayout()
     try {
@@ -20163,310 +20292,10 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 })
-// ═══════════════════════════════════════════════════════════════════════════
-// The prompt's geometry prediction measures at the real block's width, once
-// per animation frame (nocx-2v80t.3.55)
-// ═══════════════════════════════════════════════════════════════════════════
-// Two review majors against the 3.50 prediction. The off-flow probe was
-// appended with no width, so an absolutely positioned clone rendered
-// shrink-to-fit while the real running block is a stretched flex child of
-// `.scrollback-inner` — a long title wrapped in the pane and not in the
-// probe, and the grid was fitted to the wrong height. And every keystroke
-// paid the measurement synchronously: a header built and highlighted, two
-// clones appended, two layouts forced. The mock below answers BY WIDTH —
-// one line holds floor(width / 23) characters — where the 3.46 mock answers
-// every .cmd-block with one fixed height and so hides width errors.
-describe('the prompt prediction measures at the real block width, once per frame (nocx-2v80t.3.55)', () => {
-  const COMPOSER = 130
-  const BAR = 56
-  const LINE = 20
-  const PANE = 676
-  /** The mock's wrap arithmetic: one header line holds floor(width / 23)
-   *  characters — 40 at the pane's 926. */
-  const CHAR_PX = 23
-  const linesFor = (text: string, width: number): number =>
-    width > 0 ? Math.max(1, Math.ceil(text.length / Math.floor(width / CHAR_PX))) : 1
-
-  async function paneWithWidthLayout() {
-    const client = makeClient()
-    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-    const { content, view, teardown } = mounted
-    const handler = lifecycleHandler(client)
-    const session = sessionOf(content)
-    let frameRevision = 0
-    const paint = (line: string): void => {
-      session.fireScreenFrame(screenFrame(++frameRevision, [line]))
-    }
-    const inner = content as unknown as {
-      scrollback: ScrollbackController
-      editor: CommandEditor
-      processBar: HTMLElement
-    }
-    const sb = inner.scrollback
-    const pane = PANE
-    let innerWidth = 926
-    const composerShown = (): boolean =>
-      inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
-    const barShown = (): boolean => !inner.processBar.hidden
-    Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
-      configurable: true,
-      get: () => pane - (composerShown() ? COMPOSER : 0) - (barShown() ? BAR : 0),
-    })
-    Object.defineProperty(sb.scrollbackArea, 'clientWidth', { configurable: true, value: 926 })
-    // The real block is a stretched child of scrollback-inner: its width IS
-    // this number, and the prediction must measure the probe at it.
-    Object.defineProperty(sb.scrollbackInner, 'clientWidth', {
-      configurable: true,
-      get: () => innerWidth,
-    })
-    const rect = (height: number): DOMRect =>
-      ({ height, width: 926, top: 0, left: 0, right: 926, bottom: height, x: 0, y: 0 }) as DOMRect
-    /** Every .cmd-block rectangle the mock answered, split by whether the
-     *  element is the prediction's off-flow clone (inline absolute) or a
-     *  real block in the flow. */
-    const measured: Array<{ probe: boolean; width: number; height: number }> = []
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoRect = Element.prototype.getBoundingClientRect
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    const protoRaf = globalThis.requestAnimationFrame
-    const protoCaf = globalThis.cancelAnimationFrame
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
-      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
-      if (this === inner.processBar) return rect(barShown() ? BAR : 0)
-      if (this.classList.contains('ui-process-bar')) return rect(BAR)
-      if (this.classList.contains('cmd-block') || this.classList.contains('cmd-header')) {
-        const el = this as HTMLElement
-        // A clone the prediction pinned a width on measures at it. An
-        // in-flow block is a stretched child of scrollback-inner and takes
-        // the container's width. An absolute clone with NO width is the
-        // browser's shrink-to-fit — unconstrained, one line however long
-        // the title: exactly the rendering the fix removes.
-        const probe = el.style.position === 'absolute'
-        const inline = parseFloat(el.style.width)
-        const width = probe ? (Number.isFinite(inline) && inline > 0 ? inline : 0) : innerWidth
-        // The header text alone: a real block carries Stop and the ⋮ menu
-        // beside the title, and neither wraps it.
-        const title = el.querySelector('.cmd-header-text')?.textContent ?? ''
-        const height = LINE * linesFor(title, width)
-        // A `.cmd-header` is the REAL header, and since ADR-0091 it is what the
-        // live cap measures — the block around it also holds the live region, so
-        // its own height is the box, not the chrome above the rows.
-        measured.push({ probe: probe && !el.classList.contains('cmd-header'), width, height })
-        return rect(height)
-      }
-      return rect(0)
-    }
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-
-    let n = 0
-    /** Put a command in the composer — typing, and nothing else. */
-    const typeCommand = (text: string): void => {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: text },
-      })
-    }
-    /** Enter: the submit, then the running fact it publishes. */
-    const submitCommand = (text: string): string => {
-      n += 1
-      const id = `att-${n}`
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id,
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: text,
-        },
-      })
-      return id
-    }
-    /** Output, completion, the block's close, the return to a ready prompt. */
-    const finishCommand = (id: string): void => {
-      paint(`out ${id}`)
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id,
-          state: 'completed',
-          exitCode: 0,
-          fence: 'f'.repeat(64),
-          completedAt: '2026-09-26T00:00:00Z',
-        },
-      })
-      blockClosedHandler(client)(id)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      paint('$ ')
-    }
-    /** Every accepted-size report sent to the backend. */
-    const fits = (): { cols: number; rows: number; xpixel: number; ypixel: number }[] =>
-      session.sendResize.mock.calls.map((call) => call[0])
-    const probeMeasures = (): Array<{ width: number; height: number }> =>
-      measured.filter((m) => m.probe)
-    const realMeasures = (): Array<{ width: number; height: number }> =>
-      measured.filter((m) => !m.probe)
-    const setPaneWidth = (px: number): void => {
-      innerWidth = px
-    }
-    /** Hold every animation frame until `runFrame` — the browser the
-     *  coalescing tests need: a frame happens exactly when they say so. */
-    const holdFrames = (): { runFrame: () => void; restore: () => void } => {
-      const frames = new Map<number, { cb: FrameRequestCallback; cancelled: boolean }>()
-      let next = 1
-      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-        const id = next++
-        frames.set(id, { cb, cancelled: false })
-        return id
-      }
-      globalThis.cancelAnimationFrame = (id: number): void => {
-        const frame = frames.get(id)
-        if (frame) frame.cancelled = true
-      }
-      const runFrame = (): void => {
-        const due = [...frames.values()].filter((f) => !f.cancelled)
-        frames.clear()
-        for (const f of due) f.cb(0)
-      }
-      return {
-        runFrame,
-        restore: (): void => {
-          globalThis.requestAnimationFrame = protoRaf
-          globalThis.cancelAnimationFrame = protoCaf
-        },
-      }
-    }
-    /** Frames the moment they are asked for — what a browser does to a
-     *  frame that is already due, and what the 3.46 harness above plays. */
-    const runFramesAsap = (): void => {
-      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-        cb(0)
-        return 0
-      }
-    }
-
-    content.setVisible(true)
-    runFramesAsap()
-    content.viewportChanged({ width: 936, height: pane })
-    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-    // The opening prompt's own output settles the grid before anyone types.
-    paint('$ ')
-    await vi.waitFor(() => expect(fits().length).toBeGreaterThan(0))
-
-    return {
-      typeCommand,
-      submitCommand,
-      finishCommand,
-      fits,
-      probeMeasures,
-      realMeasures,
-      setPaneWidth,
-      holdFrames,
-      restore: (): void => {
-        Element.prototype.getBoundingClientRect = protoRect
-        Element.prototype.scrollTo = protoScrollTo
-        Element.prototype.scrollIntoView = protoScrollIntoView
-        globalThis.requestAnimationFrame = protoRaf
-        globalThis.cancelAnimationFrame = protoCaf
-        teardown()
-      },
-    }
-  }
-
-  it('the probe and the real header it predicted report the same height at the pane’s width', async () => {
-    const h = await paneWithWidthLayout()
-    try {
-      const LONG = 'deploy staging && ship it && tell everyone '.repeat(6)
-      const settled = h.probeMeasures().length
-      h.typeCommand(LONG)
-      const probes = h.probeMeasures()
-      expect(probes.length).toBe(settled + 1)
-      const probe = probes[probes.length - 1]
-      // Measured at the container the real block will stretch in.
-      expect(probe.width).toBe(926)
-      expect(probe.height).toBe(LINE * linesFor(LONG, 926))
-      const id = h.submitCommand(LONG)
-      h.finishCommand(id)
-      const reals = h.realMeasures()
-      expect(reals.length).toBeGreaterThan(0)
-      // What the block opened at is what the probe said it would.
-      expect(reals[reals.length - 1].height).toBe(probe.height)
-    } finally {
-      h.restore()
-    }
-  })
-
-  it('typing N characters in one frame performs one measurement, and skips when neither the text nor the width changed', async () => {
-    const h = await paneWithWidthLayout()
-    const frames = h.holdFrames()
-    try {
-      const settled = h.probeMeasures().length
-      h.typeCommand('git')
-      h.typeCommand('git st')
-      h.typeCommand('git status')
-      // Pending: the three keystrokes share the frame that has not come.
-      expect(h.probeMeasures().length).toBe(settled)
-      frames.runFrame()
-      expect(h.probeMeasures().length).toBe(settled + 1)
-      // The text came back to what the last measurement answered: skipped.
-      h.typeCommand('git status --short')
-      h.typeCommand('git status')
-      frames.runFrame()
-      expect(h.probeMeasures().length).toBe(settled + 1)
-      // A width the last measurement never saw is a new question.
-      h.setPaneWidth(700)
-      h.typeCommand('git status -s')
-      frames.runFrame()
-      expect(h.probeMeasures().length).toBe(settled + 2)
-      expect(h.probeMeasures()[settled + 1].width).toBe(700)
-    } finally {
-      frames.restore()
-      h.restore()
-    }
-  })
-
-  it('a submit right after a keystroke flushes the pending measure, and nothing fits after start', async () => {
-    const h = await paneWithWidthLayout()
-    const frames = h.holdFrames()
-    try {
-      const LONG = 'deploy staging && ship it && tell everyone '.repeat(6)
-      const settled = h.probeMeasures().length
-      h.typeCommand(LONG)
-      // Pending, not synchronous: no measurement at the keystroke.
-      expect(h.probeMeasures().length).toBe(settled)
-      const before = h.fits().length
-      const id = h.submitCommand(LONG)
-      // The submit flushes the pending measurement before command output.
-      expect(h.probeMeasures().length).toBe(settled + 1)
-      await vi.waitFor(() => expect(h.fits().length).toBe(before + 1))
-      const wrapped = LINE * linesFor(LONG, 926)
-      const committed = h.fits()[h.fits().length - 1]
-      expect(committed.rows).toBe(Math.floor((PANE - BAR - wrapped) / 16))
-      expect(committed.ypixel).toBe(committed.rows * 16)
-      // The frame the keystroke scheduled is gone: firing it mid-command
-      // measures nothing and emits no new backend size report.
-      frames.runFrame()
-      expect(h.probeMeasures().length).toBe(settled + 1)
-      expect(h.fits().length).toBe(before + 1)
-      h.finishCommand(id)
-    } finally {
-      frames.restore()
-      h.restore()
-    }
-  })
-})
-
+// ADR-3kqrem7v replaces text-dependent off-flow header probes with one fixed
+// running-header budget. These checks cover the old probe failure cases through
+// the desired report: long text, a burst of typing, immediate submit, ancestor
+// insets and alternate-screen seating must not change the pane's grid.
 describe('runtime command snapshots update the per-pane store', () => {
   it('applies only a valid backend snapshot', async () => {
     const client = makeClient()
@@ -20636,8 +20465,9 @@ describe('the copy chord does not claim plain Ctrl+C (nocx-1ebrs.19.1)', () => {
 describe('an alternate-screen switch holds input for its applied grid (nocx-1ebrs.10)', () => {
   const PANE = { width: 800, height: 400 }
   const CELL = { cellWidthPx: 8, cellHeightPx: 16 }
-  /** 800 / 8 by 400 / 16 — the grid this pane measures for itself. */
-  const FITTED = { cols: 100, rows: 25 }
+  /** One full-width pane less the same 32px header in both buffers. */
+  const FITTED = { cols: 100, rows: 23 }
+  const GRID_HEIGHT = FITTED.rows * CELL.cellHeightPx
 
   /** Mount a pane, give it a measured box and a live normal-buffer frame, then
    * fire the frame that switches to the alternate screen.
@@ -20662,7 +20492,8 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     flushFrames: () => void
     teardown: () => void
   }> {
-    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
+    const client = makeClient()
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
     const { content, tab } = mounted
     // The painter's only ordering boundary is an animation frame. The frames
     // are COLLECTED and run on demand (flushFrames) rather than run inline:
@@ -20706,6 +20537,15 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     })
     // The pane's own box, delivered the way the presentation host delivers it.
     content.viewportChanged({ width: PANE.width, height: PANE.height })
+    const lifecycle = lifecycleHandler(client)
+    lifecycle({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    lifecycle({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'alt-command', state: 'open', origin: 'shell', command: 'top' },
+    })
     // A first frame in the normal buffer gives the pane a committed cell
     // metric, which is what its fit measures with.
     session.fireScreenFrame(screenFrame(1, ['$ prompt'], CELL))
@@ -20715,10 +20555,13 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
         cols: FITTED.cols,
         rows: FITTED.rows,
         xpixel: PANE.width,
-        ypixel: PANE.height,
+        ypixel: GRID_HEIGHT,
       }),
     )
     session.sendResize.mockClear()
+    // Setup may seat and focus the program input. Only intents produced
+    // after this boundary belong to the alternate-screen fence under test.
+    session.intent.mockClear()
     const grid = () => tab.pane.querySelector<HTMLElement>('.term-grid')!
     const receipts: Array<(outcome: 'applied' | 'superseded' | 'closed') => void> = []
     const failures: Array<(error: Error) => void> = []
@@ -20772,7 +20615,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
         cols: FITTED.cols,
         rows: FITTED.rows,
         xpixel: PANE.width,
-        ypixel: PANE.height,
+        ypixel: GRID_HEIGHT,
       })
     } finally {
       teardown()
@@ -20815,88 +20658,33 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
     }
   })
 
-  it('presents the pane’s FULLSCREEN fit, not the fit the previous mode had', async () => {
-    // THE CASE THE REAL STACK MEASURED, and the one the jsdom-default fixture
-    // cannot see: in the normal buffer the live region wears the prose gutter,
-    // and entering fullscreen zeroes it. So the pane's own grid is a WIDER
-    // rectangle the instant the mode changes — 94 columns before, 100 after,
-    // for an 800 px pane with an 8 px cell — and on the real page the frame
-    // that switches carries the 94 the pty still has. Presenting the fit the
-    // pane had BEFORE the switch (94) is what the e2e caught: 192 columns
-    // where the pane admitted 199.
-    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true })
-    const { content, tab } = mounted
-    const raf = globalThis.requestAnimationFrame
-    let queued: FrameRequestCallback[] = []
-    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
-      queued.push(cb)
-      return queued.length
-    }
-    // Frames run AFTER the handler that scheduled them, as the browser runs
-    // them — the order in which the mode change and its refit precede the
-    // paint.
-    const flushFrames = (): void => {
-      for (let pass = 0; queued.length > 0 && pass < 50; pass++) {
-        const frame = queued
-        queued = []
-        for (const cb of frame) cb(0)
-      }
-    }
+  it('keeps the primary grid across alternate entry instead of deriving a new fit from its DOM seat', async () => {
+    const { content, session, tab, grid, switchFrame, flushFrames, teardown } =
+      await switchingPane()
     try {
-      tab.setActive(true)
-      const session = sessionOf(content)
       const scrollback = scrollbackFor(content)
-      // The stylesheet's own rule, stated where jsdom cannot read it: the
-      // inset is the mode class's (`.live-fullscreen { padding-inline: 0 }`).
-      Object.defineProperty(scrollback, 'liveInlineInsetPx', {
-        configurable: true,
-        get: () =>
-          scrollback.terminalLiveContainer.classList.contains('live-fullscreen') ? 0 : 48,
-      })
-      Object.defineProperty(scrollback.scrollbackArea, 'clientWidth', {
-        configurable: true,
-        value: PANE.width,
-      })
-      Object.defineProperty(scrollback.scrollbackArea, 'clientHeight', {
-        configurable: true,
-        value: PANE.height,
-      })
-      content.viewportChanged({ width: PANE.width, height: PANE.height })
-      session.fireScreenFrame(screenFrame(1, ['$ prompt'], { ...CELL, cols: 94, rows: 25 }))
+      const block = scrollback.blockManager.runningBlock!
+      const header = block.el.querySelector('.cmd-header')!
+      // Transcript ancestors can retain prose insets. They do not own the
+      // desired grid, and seating the active live node elsewhere changes none
+      // of its columns or rows.
+      scrollback.scrollbackInner.style.paddingLeft = '24px'
+      scrollback.scrollbackInner.style.paddingRight = '24px'
+      switchFrame()
       flushFrames()
-      await vi.waitFor(() =>
-        expect(session.sendResize).toHaveBeenCalledWith({
-          cols: 94,
-          rows: FITTED.rows,
-          xpixel: 94 * CELL.cellWidthPx,
-          ypixel: PANE.height,
-        }),
-      )
-      session.sendResize.mockClear()
-      session.resizeApplied.mockImplementation(() => Promise.resolve('applied'))
-
-      // The switch frame says 94 — the width the program still has.
-      const switched = screenFrame(2, ['ALT-READY'], { ...CELL, cols: 94, rows: 20 })
-      switched.state.bufferKind = 'alternate'
-      session.fireScreenFrame(switched)
-      flushFrames()
-
-      // The request is the PANE's grid, not the previous mode's…
-      expect(session.resizeApplied).toHaveBeenCalledWith({
+      expect(session.resizeApplied).toHaveBeenLastCalledWith({
         cols: FITTED.cols,
         rows: FITTED.rows,
         xpixel: PANE.width,
-        ypixel: PANE.height,
+        ypixel: GRID_HEIGHT,
       })
-      // …and so is the grid the frame is presented on.
-      const painted = tab.pane.querySelector<HTMLElement>('.term-grid')!
-      expect(painted.textContent).toContain('ALT-READY')
-      expect(painted.getAttribute('aria-colcount')).toBe(String(FITTED.cols))
-      expect(painted.querySelectorAll('.term-grid-row')).toHaveLength(20)
+      expect(session.sendResize).not.toHaveBeenCalled()
+      expect(tab.pane.contains(header)).toBe(true)
+      expect(grid().textContent).toContain('ALT-READY')
+      expect(grid().getAttribute('aria-colcount')).toBe(String(FITTED.cols))
+      expect(grid().querySelectorAll('.term-grid-row')).toHaveLength(20)
     } finally {
-      queued = []
-      globalThis.requestAnimationFrame = raf
-      mounted.teardown()
+      teardown()
     }
   })
 
@@ -20997,7 +20785,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
           cols: 120,
           rows: FITTED.rows,
           xpixel: 960,
-          ypixel: PANE.height,
+          ypixel: GRID_HEIGHT,
         }),
       )
       expect(session.intent).not.toHaveBeenCalledWith('text', 'q')
@@ -21009,7 +20797,7 @@ describe('an alternate-screen switch holds input for its applied grid (nocx-1ebr
         cols: 120,
         rows: FITTED.rows,
         xpixel: 960,
-        ypixel: PANE.height,
+        ypixel: GRID_HEIGHT,
       })
       expect(tab.pane.querySelector('.term-grid')?.textContent).toContain('ALT-READY')
     } finally {

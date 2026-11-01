@@ -405,3 +405,32 @@ func sameStrings(got, want []string) bool {
 	}
 	return true
 }
+
+// THE SHIPPED CLAUDE RECORD MARKS ITS MAINTENANCE SUBCOMMAND
+// (nocx-3an1s.1.3, GitHub #541). `claude update` is not a launch, so the
+// wrapper must pass the person's argv through; the list lives in the RECORD
+// because that is the one place the three shells' generated wrappers read it
+// from — hard-coding it in each script would be three owners of one fact.
+func TestTheShippedClaudeRecordMarksUpdateAsNotALaunch(t *testing.T) {
+	s, _ := newStore(t)
+	e := entry(t, s, "claude")
+	if e.State != StateShipped {
+		t.Fatalf("claude = %+v, want the build's own record", e)
+	}
+	got := e.Record.NonLaunchSubcommands
+	if len(got) != 1 || got[0] != "update" {
+		t.Fatalf("shipped claude nonLaunchSubcommands = %v, want [update]", got)
+	}
+	// The other agents' records say nothing, which is a legitimate absence and
+	// not an error: a record that marks nothing is a record every one of whose
+	// invocations is a launch.
+	for _, id := range []string{"codex", "omp", "prime-agent"} {
+		other, ok := s.entry(id)
+		if !ok {
+			continue
+		}
+		if len(other.Record.NonLaunchSubcommands) != 0 {
+			t.Fatalf("%s marks %v as non-launch, and this test names only claude's", id, other.Record.NonLaunchSubcommands)
+		}
+	}
+}

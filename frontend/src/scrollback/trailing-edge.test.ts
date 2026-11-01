@@ -24,13 +24,14 @@
 //   3. every child of `.scrollback-inner` (a block, the separator, the
 //      restore boundary, the live region) states the same
 //      `padding-inline: var(--pane-inline-padding)` as a border-box, so the
-//      frozen column and the live column share one content box; a block
-//      nested in a turn is not a child of the stack and gets none;
-//   4. `usableViewport` (terminal-content.ts) fits the grid to that content
-//      box — the scroller's `clientWidth` minus the live row's own computed
-//      inline padding — which is what keeps the grid from being `2 ×
-//      gutter` wider than the box it is drawn in (the nocx-vydj defect,
-//      returned if this drifts).
+//      frozen rows share one content box; a block nested in a turn is not a
+//      child of the stack and gets none. The ACTIVE body opts out of that
+//      gutter on purpose (ADR-3kqrem7v): an edge-to-edge grid is what makes a
+//      buffer switch cost no columns;
+//   4. `usableViewport` (terminal-content.ts) fits the grid to the scroller's
+//      `clientWidth`, which is the active row's content box now that an
+//      active row inset is zero — the nocx-vydj defect returns if the two
+//      drift apart.
 //
 // jsdom computes no cascade, so this reads the shipped stylesheets the way
 // `cmd-output-wrap.test.ts` does.
@@ -164,22 +165,19 @@ describe('rows are full width, and the gutter lives in them (nocx-9bpeq.8)', () 
     expect(shipped('.scrollback-restore-boundary', 'padding-block')).toBe('var(--space-2)')
   })
 
-  it('the running region states only its block padding, never resetting the inset', () => {
-    // A `padding` shorthand here (0,2,0) would override the row inset (0,1,0)
-    // with 0 and put the running grid on a different edge from the block it
-    // freezes into. `padding-block` only ever touches top/bottom, whatever
-    // its own value — the inline inset stays whatever `.scrollback-inner > *`
-    // (fact 3 above) already gave it.
-    expect(shipped('.terminal-live-container.live-running', 'padding')).toBeNull()
-    // The bottom half grew by --terminal-block-trailing-space (nocx-9bpeq.23,
-    // round 2): a frozen block pays that space OUTSIDE `.cmd-output`, on
-    // `.cmd-block` itself; the running region has no such outer box — it IS
-    // the body — so its own bottom padding is where the same total is paid,
-    // or the freeze reads as a 16px shrink. Only the bottom changed: the top
-    // pad is untouched, so the first output row's baseline does not move.
-    expect(shipped('.terminal-live-container.live-running', 'padding-block')).toBe(
-      'var(--cmd-output-pad-top)\n    calc(var(--cmd-output-pad-bottom) + var(--terminal-block-trailing-space))',
-    )
+  it('the active body pays no padding at all, in either presentation', () => {
+    // ADR-3kqrem7v: while a command runs, the pane's row inset and the body
+    // padding are both zero — the running block, its committed rows and the
+    // live region are one edge-to-edge box, so switching the program's screen
+    // mode cannot move the grid. The frozen transcript keeps its gutter and
+    // its own body pads; those are asserted where they live
+    // (running-body-seam.test.ts, command-block.css).
+    expect(shipped('.terminal-live-container.live-running', 'padding')).toBe('0')
+    expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding')).toBe('0')
+    // The row inset the frozen rows wear is not paid by the active block: a
+    // placeholder there would run the grid against the transcript's gutter.
+    expect(shipped('.cmd-block.cmd-block-running', 'padding-inline')).toBe('0')
+    expect(shipped('.cmd-block.cmd-block-running > .cmd-output', 'padding-inline')).toBe('0')
   })
 
   it('the summon stack is full width and its answers wear the row inset', () => {

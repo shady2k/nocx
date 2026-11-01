@@ -18,6 +18,30 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 type Rule = { selectors: string[]; body: string }
+
+/** A selector list, split on the commas that separate its selectors. A comma
+ *  inside `:is()`/`:not()` belongs to that argument list: splitting on it
+ *  invents selectors out of the arguments, and `.cell-metric-probe` was once
+ *  read as its own `display: none` rule because a `:not(a, b, c)` in
+ *  inner-fullscreen-mode listed it third (nocx-3an1s.1.4). */
+function selectorList(selector: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let current = ''
+  for (const ch of selector) {
+    if (ch === '(' || ch === '[') depth++
+    else if (ch === ')' || ch === ']') depth--
+    if (ch === ',' && depth === 0) {
+      out.push(current.trim())
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  out.push(current.trim())
+  return out
+}
+
 const STYLE_ENTRY = resolve(import.meta.dirname ?? '.', '..', 'style.css')
 /** Top-level rules only, comments stripped. An at-rule block is skipped whole:
  *  a declaration that only holds at some viewport width does not hold. */
@@ -39,7 +63,7 @@ function topLevelRules(css: string): Rule[] {
       if (depth === 0) {
         const selector = head.trim()
         if (!selector.startsWith('@')) {
-          rules.push({ selectors: selector.split(',').map((s) => s.trim()), body })
+          rules.push({ selectors: selectorList(selector), body })
         }
         head = ''
         continue

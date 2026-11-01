@@ -150,6 +150,7 @@ function __nocx_agent_clear
     set -gu __nocx_agent_decoded ''
     set -gu __nocx_agent_launch_local 0
     set -gu __nocx_agent_launch_surface 0
+    set -gu __nocx_agent_non_launch ''
     set -gu __nocx_agent_launch_valid 0
     set -gu __nocx_agent_waiting 0
 end
@@ -167,6 +168,13 @@ function __nocx_agent_resolve_answer --argument-names request
         if test "$__nocx_lc_value" = true
             set -gu __nocx_agent_launch_surface 1
         end
+    end
+    # THE RECORD'S NON-LAUNCH WORDS (nocx-3an1s.1.3): claude update is the
+    # agent's own maintenance command, not an agent launch. One space-joined
+    # field rather than an array because the answer is read as flat fields;
+    # agentrecord refuses a word that is not a plain spelling.
+    if __nocx_lc_field /non_launch_subcommands
+        set -gu __nocx_agent_non_launch "$__nocx_lc_value"
     end
     __nocx_lc_field /local bool; or return 1
     if test "$__nocx_lc_value" = false
@@ -402,6 +410,20 @@ function __nocx_agent_exec_input
     __nocx_agent_exec_data $argv | command "$NOCX_AGENT_HELPER_PATH" agent-exec --data-fd 0 --stdin-fd 6
 end
 
+# A subcommand the agent record marks as NOT a launch runs the record's
+# program with the person's argv and nothing else (nocx-3an1s.1.3, GitHub
+# #541): no tool surface — Claude rejects its own --mcp-config on update —
+# and no enrolment, because a maintenance command is not an agent session. The
+# record owns the list; the resolve answer carries it; the first typed word is
+# compared whole, so 'update-config' is still a launch.
+function __nocx_agent_launch_maintenance
+    set -l fish_trace
+    test "$__nocx_agent_launch_local" = 1; or return 1
+    test -n "$__nocx_agent_non_launch"; or return 1
+    test (builtin count $argv) -gt 0; or return 1
+    builtin contains -- "$argv[1]" (builtin string split ' ' -- "$__nocx_agent_non_launch")
+end
+
 function __nocx_agent_exec --argument-names agent surface
     set -l fish_trace
     set -e argv[1..2]
@@ -505,6 +527,13 @@ function __nocx_agent_run --argument-names agent
             builtin printf 'nocx: not started — %s\n' "$reason" >&2
             __nocx_finish_launch
             return 1
+        end
+        if __nocx_agent_launch_maintenance $argv
+            __nocx_agent_cancel_ticket
+            __nocx_agent_exec "$agent" 0 $argv
+            set -l rc $status
+            __nocx_finish_launch
+            return "$rc"
         end
     end
     __nocx_agent_enrol "$agent"

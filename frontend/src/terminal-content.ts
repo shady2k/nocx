@@ -31,6 +31,7 @@ import { AgentInputTarget } from './agent-ask'
 import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
 import { AgentReadiness, modelChipState } from './agent-readiness'
+import { onAiConfigChanged } from './ai-config'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
@@ -121,7 +122,6 @@ import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
 import type { Capture, HistoryRecorded, Redaction } from './generated/history.recorded'
 import {
   blockOutputText,
-  createRunningHeaderProbe,
   renderRecordedCommand,
   toolCallExpansion,
   setBlockWhere,
@@ -195,7 +195,6 @@ import { ResizeHandle } from './ui/resize-handle'
 import { IconButton } from './ui/icon-button'
 import { CloseIcon } from './ui/icons'
 import { createPaneContext, updatePaneContext, type PaneContextFacts } from './ui/pane-context'
-import { createProcessBar, updateProcessBar } from './ui/process-bar'
 import { cwdLabel, homeRelation } from './cwd-label'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
@@ -1123,7 +1122,6 @@ export class TerminalContent extends BasePaneContent {
   /** The running-state footer (decision §1, "Running-state gap"), mounted
    *  once beside the composer and shown/hidden by `_syncLifecycleOwnership`
    *  — never both surfaces visible at once. */
-  private processBar: HTMLElement | null = null
   private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -1232,6 +1230,8 @@ export class TerminalContent extends BasePaneContent {
     grantsAvailable: () => this.grantsAvailable(),
     toggleGrant: (blockEl) => this.toggleGrant(blockEl),
     stop: () => this.signalActiveCommand('stop'),
+    interrupt: () => this.signalActiveCommand('interrupt'),
+    returnToGrid: () => this.takeKeyboardToGrid(),
   }
   /** True from pointerdown until pointerup: the person is still choosing
    *  what to select. */
@@ -1478,6 +1478,11 @@ export class TerminalContent extends BasePaneContent {
    *  itself. */
   private readiness: AgentReadiness | null = null
   private _readinessUnsub: (() => void) | null = null
+  /** Unsubscribe from the renderer's own configuration writes
+   *  (nocx-1ebrs.66.1.28): a default model set on the Settings pane while
+   *  this pane is already in front has no show to catch up on, and the chip
+   *  would go on naming the model from before it. */
+  private _aiConfigUnsub: (() => void) | null = null
   /** Unsubscribe from the reconnect report for the readiness refresh — its
    *  own registration rather than a second statement inside the restore's,
    *  so removing either leaves the other alone. */
@@ -2574,26 +2579,15 @@ export class TerminalContent extends BasePaneContent {
     this._syncPaneContext()
   }
 
-  /** Push the pane's current identity into its PaneContext strip (decision
-   *  2026-09-15-terminal-screen-mockup-decision.md §1 item 3) — the exact
-   *  facts already pushed to the composer's PromptContext
-   *  (`_applyEnvironmentView`, `_onHomeKnown`, `_onBranchChanged`), read
-   *  fresh rather than cached a second time. `program` is chosen from the
-   *  accepted backend frame's buffer state, reflected in `this.scrollback.mode`,
-   *  never a heuristic over the byte stream (AD-6): an alt-screen program
-   *  takes the pane and this strip switches with it, in both directions.
-   *
-   *  Session actions (the mockup's `02` trailing control) is deliberately
-   *  NOT wired here yet: the decision record asks this strip to "expose
-   *  clearly" the existing native-input escape, and no such menu exists
-   *  in this tree to point it at — inventing one would be exactly the
-   *  "invented activity" AGENTS.md forbids. `createPaneContext`'s
-   *  `onSessionActions` slot is ready for whichever pane-management
-   *  surface owns that escape once it exists. */
+  /** Keep identity facts current without allocating alternate-only chrome.
+   * ADR-3kqrem7v replaces the mockup's separate fullscreen context strip with
+   * the shared running header so both presentations fit the same pane. */
   private _syncPaneContext(): void {
     const el = this.paneContext
     if (!el) return
-    el.hidden = this.scrollback?.mode !== 'fullscreen'
+    // ADR-3kqrem7v: the common command header is the only running chrome.
+    // A separate fullscreen-only context strip would change the pane area.
+    el.hidden = true
     if (this.scrollback?.mode === 'fullscreen') {
       const target = this.inputOwner() === 'pty' ? this.programTitle || undefined : undefined
       const facts: PaneContextFacts = {
@@ -3056,6 +3050,21 @@ export class TerminalContent extends BasePaneContent {
         // boundary answers through (design §10.1, AD-8) — the same
         // handler the editor arbiter calls.
         consume: (e) => {
+          // ADR-3kqrem7v: an explicit focus gesture, never steal Tab from
+          // the running program. Once a native header button has focus,
+          // browser Tab/Enter/Space belong to that control instead.
+          if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key === 'F10') {
+            const interrupt =
+              this.scrollback?.blockManager.runningBlock?.el.querySelector<HTMLButtonElement>(
+                '[data-block-control="interrupt"]',
+              ) ??
+              this.scrollback?.scrollbackInner.querySelector<HTMLButtonElement>(
+                ':scope > .cmd-header [data-block-control="interrupt"]',
+              )
+            if (!interrupt || hasOpenOverlays()) return false
+            interrupt.focus({ preventScroll: true })
+            return true
+          }
           if (!isSnippetChord(e)) return false
           this.handleSnippetChord()
           return true
@@ -3157,6 +3166,11 @@ export class TerminalContent extends BasePaneContent {
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
+      // And a write to the configuration behind that chip, whenever it lands
+      // (nocx-1ebrs.66.1.28). The show seam below covers the writes this pane
+      // cannot see; this covers the ones that are still in flight when it
+      // arrives, which the show cannot.
+      this._aiConfigUnsub = onAiConfigChanged(() => this.refreshReadinessIfShown())
 
       this.inputTargets = createRegistry((target) => {
         // The per-target draft swap (nocx-4ff.7): snapshot the editor
@@ -3634,20 +3648,7 @@ export class TerminalContent extends BasePaneContent {
       // state a Run pane is in, and the one the row was built for.
       this.renderTargetChips()
       this.editor.mount(target)
-      // The running-state footer (decision §1, "Running-state gap"):
-      // mounted once, right after the composer it replaces, and hidden
-      // until `_syncLifecycleOwnership` decides an ordinary running
-      // command owns the pane. `onStop` is the SAME stop owner the
-      // running block's own Stop uses; `onInterrupt` is the deliberately
-      // DIFFERENT intent the decision record's semantic-mismatch note
-      // requires.
-      this.processBar = createProcessBar({
-        onSendInput: () => this.takeKeyboardToGrid(),
-        onStop: () => this.runningActions.stop(),
-        onInterrupt: () => this.signalActiveCommand('interrupt'),
-      })
-      this.processBar.hidden = true
-      target.appendChild(this.processBar)
+      // ADR-3kqrem7v: running controls live in the shared one-line header.
       // Whatever this pane's where-sources already know — a reconnect can
       // land here with the session's home already resolved by another
       // pane on the same session (nocx-9bpeq.16). `_syncWhereSources`
@@ -3778,8 +3779,6 @@ export class TerminalContent extends BasePaneContent {
         this.scrollback.dispose()
         this.paneContext?.remove()
         this.paneContext = null
-        this.processBar?.remove()
-        this.processBar = null
         this._readyResolve(false)
         return
       }
@@ -5671,11 +5670,8 @@ export class TerminalContent extends BasePaneContent {
     // makes equal usable geometry a no-op, so this presentation driver and
     // the live-region output driver never re-fit the same rectangle.
     if (this._mounted) {
-      // The pane's own size changed, so the running region's ceiling really
-      // did move — release the cap the running command is holding before
-      // anything reads it. This is the ONLY caller: a cap released from the
-      // output path is the resize-mid-repaint nocx-oikdu was.
-      this.scrollback?.invalidateRunningCap()
+      // ADR-3kqrem7v: the pane changed, so recompute its one desired
+      // rectangle. Output and buffer changes never own another rectangle.
       this.fitUsableViewport(this.usableViewport(viewport))
       // And the live BOX, not only the grid inside it. The pane changing size
       // is the one resize the live-region path never heard about: it runs off
@@ -5879,18 +5875,6 @@ export class TerminalContent extends BasePaneContent {
   private refitIfResized(): void {
     const v = this._latestViewport
     if (!v) return
-    const sb = this.scrollback
-    if (sb && sb.mode === 'running') {
-      // While a command runs, the output-driven refit may only SHRINK the
-      // grid to the running cap — the zn4d rescue for a header taller than
-      // the prompt predicted. Growing here is the pty resize the command's
-      // own bytes are inside (nocx-2v80t.3.50): the height a command runs
-      // at was settled at the prompt, and a real pane resize takes
-      // viewportChanged, which never runs through here.
-      const cap = sb.runningLiveCap
-      const last = this.lastFitGeometry
-      if (cap !== null && last && last.height <= cap - sb.runningBodyPaddingPx) return
-    }
     this.fitUsableViewport(this.usableViewport(v))
   }
 
@@ -5952,15 +5936,6 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  /**
-   * The chrome — ProcessBar plus running header — the LAST command took off
-   * the pane: the terminal area less its running cap. The prompt height's
-   * FALLBACK for when nothing measures (nocx-2v80t.3.46); the primary is
-   * the typed text's own measured prediction (`_promptRunningHeightPx`,
-   * nocx-2v80t.3.50). Null until a command has run.
-   */
-  private _runningChromePx: number | null = null
-
   /** The prediction's pending animation frame, if a keystroke scheduled
    *  one and no frame has run since (nocx-2v80t.3.55). */
   private _promptMeasureFrame: number | null = null
@@ -5969,15 +5944,9 @@ export class TerminalContent extends BasePaneContent {
    *  (nocx-2v80t.3.55). */
   private _promptMeasuredKey: { text: string; width: number } | null = null
 
-  /**
-   * The pane's TERMINAL AREA: the scroller plus whichever lifecycle chrome is
-   * in the flow beside it right now — the inline composer at a prompt, the
-   * ProcessBar while a command runs, neither in the frame between. Those two
-   * trade places at every command and the scroller absorbs the difference,
-   * so the scroller alone is a different number at the prompt, while running
-   * and in between; this sum is the same number in all three, and changes
-   * only when the pane (or chrome that is not the lifecycle's) does.
-   */
+  /** The pane content area is stable across prompt and running ownership:
+   * add the in-flow composer back before reserving the common running header
+   * (ADR-3kqrem7v). Overlay Ask does not change this rectangle. */
   private _terminalAreaPx(area: HTMLElement): number {
     const outer = (el: HTMLElement | null | undefined): number => {
       if (!el || !el.isConnected || el.hidden) return 0
@@ -5989,66 +5958,43 @@ export class TerminalContent extends BasePaneContent {
     }
     const composer = this.editor?.root
     const inFlow = composer && composer.dataset.placement !== 'overlay' ? composer : null
-    return area.clientHeight + outer(inFlow) + outer(this.processBar)
+    return this._areaHeightPx(area) + outer(inFlow)
   }
 
-  /**
-   * The height the grid is fitted to (nocx-2v80t.3.46).
-   *
-   * While a command runs it is the live region's CAP, not the bare scroller:
-   * setLiveHeight clamps the live box to scroller minus the running block's
-   * header, and a grid fitted to the full scroller is taller than the box
-   * that displays it — its last rows are clipped by the box's overflow and
-   * nothing scrolls them, so the bottom of a tall inline TUI (its composer)
-   * is unreachable (nocx-zn4d).
-   *
-   * AT THE PROMPT IT IS THE HEIGHT A COMMAND TYPED NOW WILL RUN AT. The
-   * grid is not on screen there (the live region is `height: 0`), and
-   * fitting it to the scroller made it breathe with the lifecycle: 546, 676
-   * and 560 px in one pane, 27, 33 and 28 rows, 221 resizes in 500
-   * commands. A resize that lands once a command's bytes are out makes
-   * bash redraw its line into the block's first output row. So the prompt
-   * holds the running height MEASURED off-flow from the typed text's own
-   * header (nocx-2v80t.3.50), falling back to the chrome the last command
-   * took when nothing measures (nocx-2v80t.3.46). A pane that did not
-   * change size fits the same rectangle, which the guard in
-   * fitUsableViewport turns into no resize at all; a pane that did change
-   * moves the terminal area, and the grid with it, at once.
-   *
-   * The terminal owning the pane (fullscreen, unstructured) is sized from
-   * the scroller, as before.
-   */
-  private _gridHeight(
-    area: HTMLElement | undefined,
-    viewport: ContentViewport,
-    promptText: string = this.editor?.getDoc() ?? '',
-  ): number {
-    const scroller = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
+  /** The scroller's laid-out height in the FRACTIONAL CSS pixels the browser
+   *  lays out in. `clientHeight` rounds to a whole pixel, and the composer's
+   *  box is fractional: adding a rounded scroller to a fractional composer
+   *  gives a number a fraction different from the same sum taken before the
+   *  composer hid, so the prompt's fit could be a row taller than the running
+   *  box that has to display it, and the last row was clipped
+   *  (nocx-3an1s.1.4). jsdom computes no layout and answers a zero rect, so
+   *  the named `clientHeight` stands there — the seam every unit test mocks. */
+  private _areaHeightPx(area: HTMLElement): number {
+    const rect = area.getBoundingClientRect().height
+    return rect > 0 ? rect : area.clientHeight
+  }
+
+  /** ADR-3kqrem7v: the desired grid depends on the pane, not its current
+   * presentation or DOM seat. Prompt prediction reserves the same header,
+   * so submitting cannot resize a program after its bytes are delivered. */
+  private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
+    const scroller =
+      area && this._areaHeightPx(area) > 0 ? this._areaHeightPx(area) : viewport.height
     const sb = this.scrollback
-    if (!sb || !area || area.clientHeight <= 0) {
-      const cap = sb?.runningLiveCap ?? null
-      return cap === null ? scroller : cap - sb!.runningBodyPaddingPx
-    }
-    const mode = sb.mode
-    if (mode !== 'running' && mode !== 'idle') return scroller
+    if (!sb) return scroller
+    const structured =
+      sb.mode === 'idle' || sb.mode === 'running' || sb.blockManager.runningBlock !== null
+    if (!structured) return scroller
+    // ONE OWNER of the running box. While a command runs, the live region's
+    // cap IS the desired grid height — the box that will display the rows
+    // states how many of them fit, and the fit takes that number rather than
+    // computing a second one from the same pane. The two agree when the pane
+    // is measured in its own fractional pixels (nocx-3an1s.1.4); a second
+    // expression is what let them drift by a fraction and clip the last row.
     const cap = sb.runningLiveCap
-    if (cap !== null) {
-      // The grid lives INSIDE the running body's padding (nocx-g6hnk): the
-      // cap is a ceiling on the whole box, rows and padding together.
-      const grid = cap - sb.runningBodyPaddingPx
-      this._runningChromePx = this._terminalAreaPx(area) - grid
-      return grid
-    }
-    if (mode === 'idle') {
-      // The prediction is the owner of the prompt height; the learned
-      // chrome is its fallback for when measurement cannot answer.
-      const predicted = this._promptRunningHeightPx(area, promptText)
-      if (predicted !== null) return predicted
-      if (this._runningChromePx !== null) {
-        return this._terminalAreaPx(area) - this._runningChromePx
-      }
-    }
-    return scroller
+    if (cap !== null) return Math.max(0, cap)
+    const total = area && this._areaHeightPx(area) > 0 ? this._terminalAreaPx(area) : scroller
+    return Math.max(0, total - sb.runningHeaderHeightPx)
   }
 
   /**
@@ -6081,14 +6027,8 @@ export class TerminalContent extends BasePaneContent {
     this._measurePromptPrediction(doc)
   }
 
-  /**
-   * Measure and commit — skipped when neither the text nor the width
-   * changed since the last measurement answered that pair: the
-   * prediction it produced is already fitted, and building and wrapping
-   * the header again would buy the same rectangle. The width is the
-   * probe container's own clientWidth, the same number
-   * `_offFlowHeightPx` pins the clone to.
-   */
+  /** Refit the pane rectangle once per delivered prompt measurement. Text
+   * changes do not change chrome height (ADR-3kqrem7v). */
   private _measurePromptPrediction(text: string): void {
     const sb = this.scrollback
     if (!sb || sb.mode !== 'idle') return
@@ -6098,91 +6038,20 @@ export class TerminalContent extends BasePaneContent {
     this._promptMeasuredKey = { text, width }
     const v = this._latestViewport
     if (!v) return
-    this.fitUsableViewport(this.usableViewport(v, text))
+    this.fitUsableViewport(this.usableViewport(v))
   }
 
-  /**
-   * The height a command typed into the composer RIGHT NOW will run at:
-   * the terminal area less the chrome a running command takes — the
-   * ProcessBar and the header this text will open — both measured
-   * off-flow, because neither is in the flow at the prompt. Null when
-   * either refuses to measure (jsdom without layout, no editor); the
-   * caller falls back to the learned chrome (nocx-2v80t.3.50). The text
-   * is passed because the submit flush calls this after the handoff
-   * emptied the editor (nocx-2v80t.3.55).
-   */
-  private _promptRunningHeightPx(area: HTMLElement, text: string): number | null {
-    const editor = this.editor
-    const bar = this.processBar
-    const sb = this.scrollback
-    if (!editor || !sb) return null
-    const barPx = bar ? this._offFlowHeightPx(bar, bar.parentElement ?? area) : null
-    if (barPx === null) return null
-    const probe = createRunningHeaderProbe(
-      text || '(empty)',
-      this._cwd,
-      this._host ?? '',
-      sb.snapshotStore,
-    )
-    const headerPx = this._offFlowHeightPx(probe, sb.scrollbackInner)
-    if (headerPx === null) return null
-    return this._terminalAreaPx(area) - barPx - headerPx - sb.runningBodyPaddingPx
-  }
-
-  /**
-   * Measure an element that is not in the flow — the ProcessBar at the
-   * prompt, a header whose block does not exist — on a clone of it placed
-   * beside the real one: same classes, same container width, taken out of
-   * flow and hidden so nothing visible moves. Null when the clone measures
-   * nothing at all — never 0, which would read as "takes no space" and
-   * over-fit the grid.
-   */
-  private _offFlowHeightPx(el: HTMLElement, parent: HTMLElement): number | null {
-    const clone = el.cloneNode(true) as HTMLElement
-    clone.hidden = false
-    clone.style.position = 'absolute'
-    clone.style.visibility = 'hidden'
-    clone.style.left = '-9999px'
-    // The real element is a stretched flex child of this container: its
-    // width IS the container's clientWidth, and its text wraps at it. An
-    // absolute clone defaults to shrink-to-fit — wide enough to hold the
-    // whole title on one line — so a long command's wrapped height was
-    // mispredicted exactly when wrapping mattered (nocx-2v80t.3.55). The
-    // clone takes the same width, border-box, which is the box a
-    // stretched child occupies. Without a laid-out container there is no
-    // honest width, and jsdom's 0 leaves the clone as it was, so the
-    // layout mocks that answer by class keep answering.
-    const width = parent.clientWidth
-    if (width > 0) {
-      clone.style.width = `${width}px`
-      clone.style.boxSizing = 'border-box'
-    }
-    parent.appendChild(clone)
-    try {
-      const height = clone.getBoundingClientRect().height
-      return height > 0 ? height : null
-    } finally {
-      clone.remove()
-    }
-  }
-
-  private usableViewport(
-    viewport: ContentViewport,
-    promptText: string = this.editor?.getDoc() ?? '',
-  ): ContentViewport {
+  private usableViewport(viewport: ContentViewport): ContentViewport {
     const area = this.scrollback?.scrollbackArea
     // Zero before first layout — the delivered box is the better guess then,
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
-    const height = this._gridHeight(area, viewport, promptText)
-    // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8). Rows carry
-    // the pane gutter, the live region included, so the scroller's clientWidth
-    // is the grid width PLUS that inset — fitting to clientWidth would put the
-    // last columns under `.terminal-live-inner`'s overflow, which is nocx-vydj again.
-    // Subtracted on the fallback path too: the delivered box is the pane's.
+    const height = this._gridHeight(area, viewport)
+    // ADR-3kqrem7v: active rows occupy the pane width in either buffer.
+    // Frozen transcript insets never take columns from the live PTY grid.
     const outer = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
-    const width = Math.max(0, outer - (this.scrollback?.liveInlineInsetPx ?? 0))
+    const width = Math.max(0, outer)
     return { ...viewport, width, height }
   }
 
@@ -6234,15 +6103,18 @@ export class TerminalContent extends BasePaneContent {
     // chip can have changed: an endpoint is created, a role assigned and a
     // default set on the SETTINGS pane, which is a different pane — so the
     // person cannot see this chip while they do it, and this is the moment
-    // it must catch up. Named triggers per write (endpoints.create,
-    // roles.assign, roles.setDefault) would each have to be installed in a
-    // surface this task does not own, and there is no backend notification
-    // for them; the show is the one seam that covers all of them at once
-    // and is not a poll. Only while Enter goes to the assistant — a Run
-    // pane has no chip to refresh, and pays no call for one.
-    if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
-      this.refreshReadiness()
-    }
+    // it must catch up. Only while Enter goes to the assistant — a Run pane
+    // has no chip to refresh, and pays no call for one.
+    //
+    // The show alone is not enough, and a flake proved it
+    // (nocx-1ebrs.66.1.28): a write can still be IN FLIGHT when the person
+    // is back, the read issued here then answers with the pair from before
+    // it, and nothing asks again — so the chip goes on naming a model that
+    // will not answer. A write made by this renderer therefore announces its
+    // own landing (ai-config.ts), which closes that window without a poll;
+    // the show stays for the writes this renderer does not make — another
+    // client, a restored profile.
+    if (visible) this.refreshReadinessIfShown()
     // The mark affordance is portaled to body, so pane CSS cannot hide it.
     // Reconcile on return from the current selection; hide immediately when
     // this pane leaves the front.
@@ -6261,6 +6133,19 @@ export class TerminalContent extends BasePaneContent {
     // blocks is four hundred blocks of DOM before the first frame, and a pane
     // nobody has opened has not been read.
     if (visible) void this.restorePast()
+  }
+
+  /**
+   * Ask again about the chip's facts, but only where there is a chip: the
+   * pane is in front and Enter goes to the assistant. The two seams that
+   * call it — the pane coming to the front, and a configuration write
+   * landing while it already is (nocx-1ebrs.66.1.28) — share this one rule,
+   * so a Run pane pays no readiness call at either.
+   */
+  private refreshReadinessIfShown(): void {
+    if (!this._active) return
+    if (this.inputTargets?.active().id !== this.agentTarget?.id) return
+    this.refreshReadiness()
   }
 
   /**
@@ -7379,18 +7264,9 @@ export class TerminalContent extends BasePaneContent {
     // ownership. The runtime's frame supplies this state independently.
     this.lifecycle.setBuffer(type)
     if (type === 'alternate') {
-      // HOLD FIRST, THEN CHANGE, THEN ASK (nocx-1ebrs.10). The mode change
-      // below can produce intents of its own, and they belong behind the
-      // resize like everything else the switch produces; the request has to
-      // wait for the mode change, because entering fullscreen zeroes the prose
-      // inset the fit subtracts — 199 columns where the normal-buffer fit had
-      // 192, measured on the e2e's page. A request sent before that refit asks
-      // the pty for the previous layout's width, which is the stale size this
-      // bead is about, and the presentation would then pad the switch frame to
-      // the same stale width: the fix reproducing the defect it was written
-      // for. This is the one synchronous refit in a mode change, and it exists
-      // so the fence's first request — and the fit the paint reads — are both
-      // the pane's own grid.
+      // ADR-3kqrem7v: switching the presentation does not change desired
+      // geometry. Keep the receipt fence for a REAL pane resize in flight;
+      // an equal applied size reuses its receipt and sends no resize RPC.
       this._openAlternateScreenFence()
       this.scrollback?.enterFullscreen()
       this.refitIfResized()
@@ -9251,31 +9127,6 @@ export class TerminalContent extends BasePaneContent {
     // projection has shown or hidden the editor so recovery actions cannot
     // describe the state from before this reconciliation.
     this._updateCapability()
-    this._syncProcessBar(summoned)
-  }
-
-  /** ProcessBar's own visibility policy (decision §1, "Running-state gap"):
-   *  shown for ORDINARY running — `hasRunningCommand()`, never a heuristic
-   *  over recognized output text — and omitted whenever the composer would
-   *  instead be an overlay (`summoned`), the buffer is alternate (an
-   *  alt-screen program takes the pane, and `02` carries no such footer),
-   *  or the person's own native-input latch is on. Never both the
-   *  composer and this bar visible at once: `show` above and this policy
-   *  are complementary by construction — a summoned/native/alt-screen
-   *  pane that is NOT showing the editor still does not get the bar,
-   *  because none of those are "ordinary running". */
-  private _syncProcessBar(summoned: boolean): void {
-    const bar = this.processBar
-    if (!bar) return
-    const visible =
-      this.hasRunningCommand() &&
-      !summoned &&
-      !this.nativeMode &&
-      this.lifecycle.buffer === 'normal'
-    bar.hidden = !visible
-    if (visible) {
-      updateProcessBar(bar, { inputAvailable: this.session !== null })
-    }
   }
 
   /** A selection is a quote and a grant whose window follows the selected
@@ -9434,6 +9285,8 @@ export class TerminalContent extends BasePaneContent {
     this._readinessRetryUnsub = null
     this._readinessUnsub?.()
     this._readinessUnsub = null
+    this._aiConfigUnsub?.()
+    this._aiConfigUnsub = null
     this.readiness = null
     this._projections = null
     this.env?.detach()
@@ -9489,8 +9342,6 @@ export class TerminalContent extends BasePaneContent {
     this.scrollback?.dispose()
     this.paneContext?.remove()
     this.paneContext = null
-    this.processBar?.remove()
-    this.processBar = null
     this.destroyReceipt()
     this.clearGrants()
     this.grantController?.destroy()

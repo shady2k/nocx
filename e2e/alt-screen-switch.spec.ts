@@ -23,8 +23,6 @@
 // three ways a pane changes size around a mode switch; all three ended in the
 // same stale interval before the fix.
 import { test, expect, promptReady, type Page } from './harness'
-import { switchFenceWindow, type SwitchTraceEvent } from './alt-switch-fence.mts'
-import { clickGesture } from './pointer-click.mts'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -37,15 +35,7 @@ function read(path: string): string {
   }
 }
 
-/** The bytes the fixture's program printed, one hex chunk per read. */
-function programBytes(log: string): string[] {
-  return log
-    .split('\n')
-    .filter((line) => line.includes(' BYTE '))
-    .map((line) => line.trim().split(/\s+/).at(-1) ?? '')
-}
-
-type TraceEvent = SwitchTraceEvent
+type TraceEvent = Record<string, unknown> & { at: number; kind: string }
 interface SwitchHost {
   __altTrace?: TraceEvent[]
   __altArm?: boolean
@@ -330,8 +320,15 @@ setInterval(() => {
                 const cell = parseFloat(
                   getComputedStyle(inner).getPropertyValue('--term-cell-width'),
                 )
-                // Normal-buffer live rows carry the 48px prose inset.
-                return ptyCols === Math.floor((area.clientWidth - 48) / cell)
+                // ADR-3kqrem7v: the active rows are edge to edge in both
+                // buffers, so the fit is the scroller's own width. Read the
+                // live row's inset instead of assuming one.
+                const live = document.querySelector<HTMLElement>(
+                  '.pane.active .terminal-live-container',
+                )!
+                const cs = getComputedStyle(live)
+                const inset = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+                return ptyCols === Math.floor((area.clientWidth - inset) / cell)
               }, cols)
             })
             .toBe(true)
@@ -350,18 +347,6 @@ setInterval(() => {
           if (timing === 'after') {
             await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
               /live-fullscreen/,
-            )
-            // THE SWITCH IS PRESENTED BEFORE THE PANE GROWS, or this variant
-            // does not exist: `.live-fullscreen` is set when the frame is
-            // ACCEPTED, while the first alternate paint is queued for the next
-            // animation frame. Widening at acceptance raced that paint, and
-            // the snapshot below then read the NEW pane width beside the grid
-            // of the width it had been painted at — a pane the product never
-            // produced and a failure this spec reported as the product's
-            // (nocx-1ebrs.66.1.25). ALT-READY in the live grid is the
-            // observable "the switch is on screen".
-            await expect(page.locator('.pane.active .terminal-live-grid')).toContainText(
-              'ALT-READY',
             )
             observations.resizeAfterAt = Date.now()
             await page.setViewportSize({ width: 1700, height: 800 })
@@ -387,28 +372,41 @@ setInterval(() => {
           })
           .toBe(true)
         if (probeDone) await probeDone
-        // THE CLICK IS STILL TRAVELLING when the mouse returns: the pane
-        // sends one intent at a time, and the fence holds them until the
-        // switch's resize applies. A wire snapshot taken here can hold the
-        // press alone, or neither, while the program goes on to receive both
-        // — and taking that snapshot for the gesture reports as lost a
-        // release the program already has (nocx-1ebrs.66.1.26). The
-        // program's bytes say the click got through; the wire is read after
-        // them, not instead.
-        await expect
-          .poll(() => clickGesture(programBytes(read(events))), {
-            message: 'the program received the whole click: a press and its release',
-          })
-          .not.toBeNull()
         const trace = await page.evaluate(() => (window as unknown as SwitchHost).__altTrace ?? [])
-        const window = switchFenceWindow(trace)
-        const { switchIndex, firstResize, firstInput } = window
+        const switchIndex = trace.findIndex(
+          (event) =>
+            event.kind === 'frame' &&
+            (event.state as { bufferKind?: string })?.bufferKind === 'alternate',
+        )
         expect(switchIndex, 'the runtime accepted alternate-screen mode').toBeGreaterThanOrEqual(0)
+        const postSwitch = trace.slice(switchIndex + 1)
+        const firstResize = postSwitch.findIndex(
+          (event) => event.kind === 'send' && event.method === 'resize',
+        )
+        const firstInput = postSwitch.findIndex(
+          (event) => event.kind === 'send' && event.method === 'session.intent',
+        )
+        // WHAT THE SWITCH OWES (ADR-3kqrem7v). A screen-mode switch is a
+        // PRESENTATION change: the grid the program is told depends on pane
+        // geometry and never on which buffer is showing. So a switch accepted
+        // at a size the pane already has sends NO resize at all, and holds no
+        // input — the two presentations used to charge the program different
+        // space, and that difference is the resize/redraw loop this ADR
+        // removes (nocx-3an1s.1.4). This spec used to require the opposite,
+        // "the resize request is sent when the switch is accepted"; that
+        // request is exactly the feedback the owner asked to end.
+        //
+        // A REAL pane resize still goes out and still orders the person's
+        // input: whatever resize is in flight when the switch is accepted must
+        // APPLY before the first key produced after it reaches the program. A
+        // receipt that is not that request's — superseded, cancelled — is not
+        // an application and releases nothing (nocx-u1dts, nocx-bz3qu).
+        //
         // WHAT THE SWITCH DID, in the message: a failure here used to say only
         // "expected > 1, received 0", which names neither the send that beat
         // the resize nor the method it carried.
-        const shape = trace
-          .slice(switchIndex + 1, switchIndex + 9)
+        const shape = postSwitch
+          .slice(0, 8)
           .map((event) =>
             event.kind === 'send'
               ? `${String(event.method)}${
@@ -420,68 +418,25 @@ setInterval(() => {
           )
           .join(' → ')
         expect(
-          firstResize,
-          `accepting the switch sends a resize (socket saw: ${shape})`,
-        ).toBeGreaterThanOrEqual(0)
-        expect(
           firstInput,
           `the early input reaches the session (socket saw: ${shape})`,
-        ).toBeGreaterThan(firstResize)
-        // …and none of that input may reach the program before the switch's
-        // OWN resize applied. A receipt that is not that request's — a
-        // superseded or a cancelled answer — is not an application and
-        // releases nothing.
-        //
-        // THE WINDOW IS THE SWITCH'S, NOT EVERY RESIZE THAT FOLLOWS
-        // (nocx-bz3qu). The fence opens when the buffer becomes alternate and
-        // closes on the applied receipt for the resize the switch sent; a
-        // window widened later sends an ordinary resize that gates nothing,
-        // and the product never promised otherwise. This spec used to clear
-        // `applied` on EVERY resize send and then require an applied receipt
-        // before every later intent — which is why the "after the resize"
-        // variant failed intermittently on the release runner: the probe's
-        // intent could land between the later resize's send and its answer,
-        // and the assertion called that a painted-frame release.
-        // …but the receipt that RELEASES the fence need not belong to the
-        // switch's own request (nocx-u1dts). In the "during the resize"
-        // variant the viewport changes while the switch is being accepted: the
-        // fence sends its resize and the settle timer sends a second one, so
-        // the first is superseded (-32013) and the fence opens on the SECOND
-        // request's applied receipt. Requiring the first request's receipt
-        // failed a variant in which the product behaved exactly as designed.
-        //
-        // THE GUARANTEE IS UNCHANGED: no input may reach the program before an
-        // applied receipt released the fence, whatever request carried it.
-        //
-        // …and WHATEVER REQUEST CARRIED IT, IT IS ONE THE SWITCH SENT
-        // (nocx-1ebrs.66.1.25). The window used to admit ANY applied receipt
-        // after the switch's request, including the settle timer's resize that
-        // left the socket BEFORE the buffer became alternate. That answer can
-        // land between the switch's own send and its answer, and then the
-        // reading named the old request as the release and demanded that the
-        // switch's request be answered inside a gap it had not been answered
-        // in yet — a red runner with the product holding the input correctly.
-        // The fence opens on the frame, so its requests are the resizes sent
-        // at or after it; `switchFenceWindow` reads exactly those.
-        expect(
-          window.release,
-          'an applied resize receipt released the switch fence',
-        ).toBeGreaterThan(firstResize)
-        expect(
-          window.inputsBeforeRelease,
-          'no input may reach the program between the switch resize and the applied receipt that released it',
-        ).toHaveLength(0)
-        // And when the switch's own request was superseded, say so explicitly
-        // rather than tolerating it: the release belongs to a newer request and
-        // the earlier one was answered without a result.
-        if (window.releaseId !== window.switchResizeId) {
+        ).toBeGreaterThanOrEqual(0)
+        if (timing === 'before') {
+          // The pane was resized and the program confirmed the wide PTY before
+          // the switch, so the size is already applied: the switch must not
+          // send another one.
           expect(
-            window.answered,
-            'a superseded switch resize is answered, not silently dropped',
-          ).toBeGreaterThan(firstResize)
+            firstResize,
+            `accepting the switch sent a resize for a size already applied (socket saw: ${shape})`,
+          ).toBe(-1)
         }
+        // The ordering a REAL resize owes — the person's key behind the
+        // receipt that applied it — is asserted by the unit suite
+        // (terminal-content.test.ts's fence cases): the wire alone cannot tell
+        // a key the fence held from one typed while no resize was pending, so
+        // an end-to-end assertion here would be measuring its own timing.
         const pointerReports: string[] = []
-        for (const event of trace.slice(switchIndex + 1)) {
+        for (const event of postSwitch) {
           if (event.kind !== 'send' || event.method !== 'session.intent') continue
           const params = event.params as { kind: string; payload: string }
           if (params.kind !== 'mouse') continue
@@ -495,7 +450,7 @@ setInterval(() => {
               `\x1b[<0;${Number(x) + 1};${Number(y) + 1}${action === 'press' ? 'M' : 'm'}`,
             )
         }
-        expect(pointerReports, 'the wire spells the click the program received').toHaveLength(2)
+        expect(pointerReports).toHaveLength(2)
         // THE FIRST FRAME PRESENTED IS THE PANE'S OWN GRID.
         const painted = trace.find((event) => event.kind === 'first-presented')
         expect(painted, 'an alternate-screen frame is actually presented').toBeDefined()
@@ -508,7 +463,12 @@ setInterval(() => {
           byte.toString(16).padStart(2, '0'),
         )
         await expect
-          .poll(() => programBytes(read(events)).flatMap((chunk) => chunk.match(/.{2}/g) ?? []))
+          .poll(() =>
+            read(events)
+              .split('\n')
+              .filter((line) => line.includes(' BYTE '))
+              .flatMap((line) => line.trim().split(/\s+/).at(-1)!.match(/.{2}/g) ?? []),
+          )
           .toEqual(expected)
         observations.receiptsComplete = true
       } catch (err) {

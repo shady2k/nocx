@@ -25,6 +25,10 @@ function draftFromAgent(agent: Agent): AgentRecordDraft {
     colour: agent.colour,
     disabled: agent.disabled,
     env: agent.env,
+    // Not editable here, but the document is replaced wholesale on save:
+    // dropping the list would silently un-mark an agent's maintenance
+    // subcommands (nocx-3an1s.1.3).
+    nonLaunchSubcommands: agent.nonLaunchSubcommands,
     resume: agent.resume,
   }
 }

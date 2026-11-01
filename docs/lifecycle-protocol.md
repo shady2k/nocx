@@ -649,6 +649,19 @@ and one field answering both is what left a spawned worker running with no nocx 
 all (nocx-xn63t.6.49). `local` alone still decides whether a record's command, arguments
 and environment are what runs; `tool_surface` alone decides whether the shell stages the
 private `mcp.json` and appends `--mcp-config` to the literal command.
+
+`non_launch_subcommands` is the record's own list — `update` for the shipped Claude
+record — of first argument words that are not a launch (nocx-3an1s.1.3, GitHub #541).
+`claude update` is the agent's maintenance command and rejects `--mcp-config` as an
+unknown option, so the shell compares the person's first word against this list and, on a
+match, runs the record's program with the typed argv only: no staged config, no
+`--mcp-config`, and no enrolment, because a maintenance command is not an agent session.
+It is a **space-joined string** rather than a JSON array because the shell consumers read
+the frame without a JSON parser; the record validates every word to a spelling that cannot
+contain a space. Only a local record answers it — a remote generation and a
+`workers.spawn` literal have no record whose words could apply — and an older backend
+leaves it absent, which is the empty list and therefore every invocation a launch.
+
 Fields are hex data, not shell text. The publisher measures the fully JSON-encoded
 `agent_launch_resolved` frame against `MaxFrameBytes`; an oversized response is refused and
 its ticket is discarded.

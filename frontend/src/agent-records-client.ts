@@ -14,7 +14,15 @@ import type {
 /** The editable fields of one existing agent record. Identity and build facts are not editable. */
 export type AgentRecordDraft = Pick<
   ListedAgent,
-  'id' | 'displayName' | 'command' | 'args' | 'icon' | 'colour' | 'disabled' | 'env'
+  | 'id'
+  | 'displayName'
+  | 'command'
+  | 'args'
+  | 'icon'
+  | 'colour'
+  | 'disabled'
+  | 'env'
+  | 'nonLaunchSubcommands'
 > & { resume: ListedResume }
 
 /** The Settings surface's view of the live agent-record owner. */

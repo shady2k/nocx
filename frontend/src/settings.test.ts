@@ -553,6 +553,70 @@ describe('SettingsContent', () => {
     expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
   })
 
+  /**
+   * A SETTINGS CHANGE MUST NOT BLANK THE SECTION IT FOUND (nocx-atpw5.1.7).
+   *
+   * `loading` is page-wide: the rail and every generated section render only
+   * while it says ready. A refresh that starts after the page has loaded —
+   * the one every settings.changed and every reconnect asks for — therefore
+   * took the whole body off screen until its answer came back, and the
+   * generated section a person had just navigated to was gone for the length
+   * of the wire. The tab-placement select tabs.spec.ts had reached by clicking
+   * Interface was on screen at one frame and absent for five seconds at the
+   * next.
+   *
+   * The refresh here does not answer until the test says so, which is the only
+   * way to assert in the middle of one.
+   */
+  it('a settings refresh leaves the loaded section on screen (nocx-atpw5.1.7)', async () => {
+    let invalidate: ((params: unknown) => void) | null = null
+    const dispatcher = {
+      subscribe: (method: string, cb: (params: unknown) => void) => {
+        if (method === 'settings.changed') invalidate = cb
+        return () => {}
+      },
+      onConnect: () => () => {},
+    }
+    const observer = new SettingsObserver(dispatcher as unknown as Dispatcher)
+    content = new SettingsContent(client, observer)
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Terminal')
+    const row = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLElement>('.ui-settings-row[data-key="terminal.fontSize"]')
+      expect(el).toBeTruthy()
+      return el!
+    })
+
+    let answer:
+      | ((snap: {
+          values: Record<string, unknown>
+          overridden: string[]
+          revision: number
+        }) => void)
+      | undefined
+    vi.spyOn(client, 'getSnapshot').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve
+        }),
+    )
+
+    expect(invalidate).toBeTruthy()
+    invalidate!({ revision: 1, keys: ['terminal.fontSize'] })
+
+    // Mid-refresh: the page it had is still the page on screen, and it is the
+    // same row rather than a rebuilt one.
+    expect(target.querySelector('.ui-settings-loading')).toBeNull()
+    expect(target.querySelector('.ui-settings-row[data-key="terminal.fontSize"]')).toBe(row)
+
+    answer!({ values: {}, overridden: [], revision: 1 })
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-settings-row[data-key="terminal.fontSize"]')).toBe(row)
+    })
+  })
+
   it('rail has exactly one search input', async () => {
     mockReady(client)
     await content.mount(target, host, signal)

@@ -1,4 +1,4 @@
-import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, settingsReady, type Page } from './harness'
 
 // ── Placement helpers (shared with tabs.spec.ts conventions) ─────────────
 
@@ -7,11 +7,14 @@ const PLACEMENT_SELECT = `${PLACEMENT_ROW} select`
 
 async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Promise<void> {
   await page.keyboard.press('Meta+,')
-  // Settings opens on its FIRST section, so a row in any other section is in the
-  // DOM and hidden. Navigate before waiting, or this times out on a control that
-  // is right there and reads like a broken selector.
+  // Settings mounts on "Loading settings…" and draws its rail only once the
+  // describe and the snapshot have arrived; settingsReady is that signal. Then
+  // Settings opens on its FIRST section, so a row in any other section is in
+  // the DOM and hidden, and navigating is what makes it visible
+  // (nocx-atpw5.1.7).
+  await settingsReady(page)
   await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-  await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({ timeout: 5000 })
+  await expect(page.locator(PLACEMENT_SELECT)).toBeVisible()
   await page.selectOption(PLACEMENT_SELECT, value)
   await page.keyboard.press('Meta+w')
   if (value === 'vertical') {

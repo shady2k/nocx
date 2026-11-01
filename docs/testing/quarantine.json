@@ -30,10 +30,6 @@
       "bead": "nocx-atpw5.1.3"
     },
     {
-      "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
-      "bead": "nocx-atpw5.1.7"
-    },
-    {
       "test": "e2e:e2e/alt-screen-switch.spec.ts › an alternate-screen switch during the resize › fits the pane, sends the resize first, and holds early input until it applies",
       "bead": "nocx-1ebrs.66.1.25"
     },

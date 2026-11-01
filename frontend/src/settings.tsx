@@ -383,7 +383,17 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // ── Data loading ───────────────────────────────────────────────────
 
   async function refresh(accept: RevisionPolicy = monotonicRevisionPolicy): Promise<void> {
-    setLoadState('loading')
+    // A PAGE THAT HAS ALREADY LOADED KEEPS WHAT IT HAS while a refresh is in
+    // flight. `loading` is page-wide: the rail and every generated section are
+    // rendered only while it says ready, so a refresh that started after the
+    // page had loaded took the whole body off screen until its answer came
+    // back. A settings.changed from another window or a reconnect does exactly
+    // that, and on a slow wire the settings a person was using vanished and
+    // came back — the tab-placement select a spec had just navigated to was
+    // simply not there for the length of the refresh (nocx-atpw5.1.7). Only a
+    // page that has nothing yet, or a retry after a failure, shows the status.
+    const settled = loadState() === 'ready' || loadState() === 'empty'
+    if (!settled) setLoadState('loading')
     try {
       const [desc, snap] = await Promise.all([
         props.profileClient.describeSettings(),
@@ -424,7 +434,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
       setLoadState(decls.length === 0 ? 'empty' : 'ready')
     } catch {
-      setLoadState('failed')
+      // A refresh that fails keeps the page it already had: the failure is of
+      // the update, and blanking loaded settings for a transient wire error is
+      // the same defect from the other side. The next change or reconnect asks
+      // again; a page with nothing yet still says so and offers Retry.
+      if (!settled) setLoadState('failed')
     }
   }
 

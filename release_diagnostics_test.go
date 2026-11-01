@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -150,5 +151,40 @@ func TestWindowUpdaterOffersLaterNightlyThroughProductionWrapper(t *testing.T) {
 	fetch.SetChannel(update.ChannelStable)
 	if info, err := updater.Check(ctx); err != nil || info != nil {
 		t.Fatalf("stable comparison changed: %v, %v", info, err)
+	}
+}
+
+// The packaged diagnostic that drives the macOS proof must refuse before it
+// touches a profile, a network or an install: a development build has no
+// updater, and a misspelt argument must not silently become the default
+// channel (nocx-1ebrs.35.5).
+func TestApplyReleaseUpdateRefusesWhatItCannotHonour(t *testing.T) {
+	old := version.Version
+	defer func() { version.Version = old }()
+
+	version.Version = "dev"
+	handled, err := releaseDiagnostic(context.Background(),
+		[]string{"--apply-release-update", "--channel", "nightly"}, io.Discard)
+	if !handled || err == nil || !strings.Contains(err.Error(), "development build") {
+		t.Fatalf("development build: handled=%v err=%v", handled, err)
+	}
+
+	version.Version = "0.8.0"
+	handled, err = releaseDiagnostic(context.Background(),
+		[]string{"--apply-release-update", "--force"}, io.Discard)
+	if !handled || err == nil || !strings.Contains(err.Error(), "unknown argument") {
+		t.Fatalf("unknown argument: handled=%v err=%v", handled, err)
+	}
+
+	handled, err = releaseDiagnostic(context.Background(),
+		[]string{"--apply-release-update", "--channel", "beta"}, io.Discard)
+	if !handled || err == nil || !strings.Contains(err.Error(), "unknown update channel") {
+		t.Fatalf("unknown channel: handled=%v err=%v", handled, err)
+	}
+
+	// An argument list the flag does not own is somebody else's business.
+	if handled, _ := releaseDiagnostic(context.Background(),
+		[]string{"--apply-release-update", "--channel"}, io.Discard); !handled {
+		t.Fatal("the flag must handle its own argument list")
 	}
 }

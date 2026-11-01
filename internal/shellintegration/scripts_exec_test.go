@@ -1175,7 +1175,7 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		// ordering (nocx-0ije).
 		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
-	capture := newPTYCapture(t, cmd)
+	capture := newPTYCaptureSize(t, cmd, promptPTYSize)
 
 	// The first prompt and the command completion are observable PTY fences.
 	waittest.WaitForTimeout(t, "bash snapshot test first prompt", 15*time.Second, func() bool {

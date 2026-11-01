@@ -7,8 +7,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -418,6 +421,53 @@ func agentWrapperCancelsTheLaunchOnCtrlC(t *testing.T, start nestedParentStarter
 	}
 	if hasEvent(k, "agent_withdraw") {
 		t.Error("a cancelled launch sent a withdrawal for an interval that never opened")
+	}
+}
+
+// A CTRL+C DURING THE WAIT MUST REACH THE SHELL, NOT A CHILD'S GROUP
+// (nocx-6o5xe). The terminal delivers an interrupt to its FOREGROUND process
+// group, and with zsh's job control on that group is the `sleep` the bounded
+// read runs, not the shell. zsh synthesises the interrupt when its foreground
+// child dies of SIGINT, which is why the ordinary tests pass; the window that
+// remains is the gap after that child exits and before zsh takes the terminal
+// back — a signal written then names a group with no member and is lost, and
+// the open-question wait, which has no deadline, never ends. That is the
+// captured pane: ^C echoed, the typed line echoed, then nothing.
+//
+// This holds the enrolment's answer, so the wrapper is provably spending the
+// wait in that child, and samples the terminal's foreground group for the
+// whole window: every sample must be the shell's own. Then it presses Ctrl+C
+// at the same seam and asserts what a person sees.
+func TestZshAgentWrapperKeepsTheShellInTheTerminalsForegroundGroup(t *testing.T) {
+	k, s, flag := raiseQuestion(t, startNestedZshParent, func(k *nestedKernel) {
+		k.holdEnrolAnswer = true
+	})
+	shellPgid, err := syscall.Getpgid(s.cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("read the shell's process group: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	samples := 0
+	for time.Now().Before(deadline) {
+		foreground, err := unix.IoctlGetInt(int(s.ptmx.Fd()), unix.TIOCGPGRP)
+		if err != nil {
+			t.Fatalf("read the terminal's foreground group: %v", err)
+		}
+		if foreground != shellPgid {
+			t.Fatalf("the terminal's foreground group is %d, not the shell's %d: a Ctrl+C written now reaches that child, and one written after it exits is lost (nocx-6o5xe)", foreground, shellPgid)
+		}
+		samples++
+		time.Sleep(10 * time.Millisecond)
+	}
+	if samples == 0 {
+		t.Fatal("sampled the terminal's foreground group no times")
+	}
+
+	// And the same action a person takes, with the answer still held.
+	pressCtrlCBeforeTheAnswer(t, k, s)
+	closeQuestionWith(t, k, flag, "")
+	if out := s.output(); strings.Contains(out, "AGENT-RAN") {
+		t.Fatalf("a cancelled launch started the agent; output=%q", out)
 	}
 }
 

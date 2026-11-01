@@ -313,6 +313,24 @@ class UTF8StreamDecoder {
   }
 }
 
+type ResizeOutcome = 'applied' | 'superseded' | 'closed'
+
+interface ResizeReport {
+  size: SessionSize
+  socket: WebSocket
+  receipt: Promise<ResizeOutcome>
+}
+
+function sameSize(left: SessionSize | null, right: SessionSize): boolean {
+  return (
+    left !== null &&
+    left.cols === right.cols &&
+    left.rows === right.rows &&
+    left.xpixel === right.xpixel &&
+    left.ypixel === right.ypixel
+  )
+}
+
 interface SessionState {
   decoder: UTF8StreamDecoder
 
@@ -343,6 +361,9 @@ interface SessionState {
   // of nothing: the attach then carries no geometry at all and the backend
   // leaves the session at the size it is running at.
   reported: SessionSize | null
+  // Only the latest report on this socket can prove application. The open
+  // geometry is a reconnect report, not a resize application receipt.
+  resizeReport: ResizeReport | null
 
   // dataCallback receives decoded PTY output for the caller (Tab → renderer).
   // May be null briefly between session creation (open response) and the
@@ -1574,6 +1595,7 @@ export class WSClient {
       decoder: new UTF8StreamDecoder(),
       offset,
       reported,
+      resizeReport: null,
       dataCallback: null,
       screenFrameCallback: null,
       effectCallback: null,
@@ -1899,50 +1921,48 @@ export class WSClient {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return false
     const state = this.sessions.get(sessionId)
-    if (!state) return false
-    const last = state.reported
-    if (
-      last !== null &&
-      last.cols === size.cols &&
-      last.rows === size.rows &&
-      last.xpixel === size.xpixel &&
-      last.ypixel === size.ypixel
-    ) {
-      return false
-    }
-    state.reported = { ...size }
-    // Fire-and-forget — response is silently dropped.
-    void this.dispatcher.call('resize', { sessionId, ...size }).catch(() => {})
+    if (!state || sameSize(state.reported, size)) return false
+    // Keep the application receipt even for a fire-and-forget report: an
+    // input fence at this same geometry must await it, not submit it again.
+    void this.resizeApplied(sessionId, size).catch(() => {})
     return true
   }
 
-  /** The receipt-bearing resize path for the renderer's input fence.
-   *  Always submit, even at the last reported size: a report is not evidence
-   *  of application. Keep the same reconnect report as sendResize, and let
-   *  the dispatcher own response correlation and disconnect rejection. */
-  async resizeApplied(
-    sessionId: string,
-    size: SessionSize,
-  ): Promise<'applied' | 'superseded' | 'closed'> {
+  /** Share the latest geometry's pending or applied receipt. A reconnect
+   *  report alone is not application, and an older success cannot release
+   *  input after a newer geometry has taken ownership. */
+  resizeApplied(sessionId: string, size: SessionSize): Promise<ResizeOutcome> {
     const ws = this.dispatcher.socket
     const state = this.sessions.get(sessionId)
-    if (!ws || ws.readyState !== WebSocket.OPEN || !state) return 'closed'
+    if (!ws || ws.readyState !== WebSocket.OPEN || !state) return Promise.resolve('closed')
+    const previous = state.resizeReport
+    if (previous?.socket === ws && sameSize(previous.size, size)) return previous.receipt
     const closed = (): boolean =>
       this.dispatcher.socket !== ws ||
       ws.readyState !== WebSocket.OPEN ||
       this.sessions.get(sessionId) !== state
     state.reported = { ...size }
-    try {
-      await this.dispatcher.call('resize', { sessionId, ...size })
-      return closed() ? 'closed' : 'applied'
-    } catch (err) {
-      // Superseded and cancelled resizes share this wire code. Neither is
-      // an application receipt, and their JSON-RPC error is not the fence's
-      // vocabulary. Other failures remain errors unless this binding closed.
-      if (err instanceof RpcError && err.code === -32013) return 'superseded'
-      if (closed()) return 'closed'
-      throw err
+    const report: ResizeReport = {
+      socket: ws,
+      size: state.reported,
+      receipt: this.dispatcher.call('resize', { sessionId, ...size }).then(
+        (): ResizeOutcome => {
+          if (closed()) return 'closed'
+          return state.resizeReport === report ? 'applied' : 'superseded'
+        },
+        (err: unknown): ResizeOutcome => {
+          // Failed reports remain the reconnect geometry, but cannot be
+          // reused as application receipts. Never clear a newer report.
+          if (state.resizeReport === report) state.resizeReport = null
+          // Keep the existing wire-code vocabulary even after local close.
+          if (err instanceof RpcError && err.code === -32013) return 'superseded'
+          if (closed()) return 'closed'
+          throw err
+        },
+      ),
     }
+    state.resizeReport = report
+    return report.receipt
   }
 
   /**

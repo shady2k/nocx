@@ -2,9 +2,9 @@ import { iconElement, CheckIcon } from './icons'
 
 // CommandBlockFrame — the passive kit shell around a command block's header
 // (decision record 2026-09-15 §1.5/§1.7, §4 task B). It owns DOM structure
-// for the header's grid — a meta line, the command/question line beside it,
-// and a status region that reads even with the path line once the block
-// has settled and spans both lines, centered, while work is in progress —
+// for the frozen header's two-line grid and the one-line running variance
+// (ADR-3kqrem7v). The ask kind keeps its in-progress two-line layout; a
+// running command uses one fixed-height row in either screen mode —
 // and the `ui-command-block-frame` identity that carries that layout in
 // styles/components/command-block-frame.css.
 //
@@ -15,9 +15,8 @@ import { iconElement, CheckIcon } from './icons'
 // `.cmd-header-meta` and `.cmd-header-right` hooks every caller and e2e spec
 // already assumes keep their class names and their descendant-selector
 // reachability (`:scope > .cmd-header .cmd-header-right`, …) — only the
-// status region's DOM PARENT changed, from living inside the meta row to
-// standing beside it as the header's own grid child, which is what lets it
-// span both text lines while running without also widening row one alone.
+// status region is a sibling of the text rows: frozen/ask use the grid,
+// while the running variance uses one flex row (ADR-3kqrem7v).
 //
 // Vanilla-emitted, like Meta and PromptContext (ui/README): the terminal
 // screen that uses it is imperative DOM (ADR-0012), built once per block.
@@ -35,6 +34,20 @@ export interface CommandBlockFrameSlots {
   readonly status: HTMLElement
 }
 
+export interface CommandBlockFrameOptions {
+  /** ADR-3kqrem7v: the same one-line header in primary and alternate seats. */
+  variant?: 'running'
+}
+
+/** Remove the running variance on settle to restore the frozen two-line layout. */
+export function setCommandBlockFrameVariant(
+  header: HTMLElement,
+  variant: CommandBlockFrameOptions['variant'],
+): void {
+  if (variant) header.dataset.variant = variant
+  else delete header.dataset.variant
+}
+
 /**
  * Build the header's three grid children — `metaRow`, the caller's own
  * command/question row (appended directly to `header`, since the kind's
@@ -43,9 +56,12 @@ export interface CommandBlockFrameSlots {
  * `status`. CSS places all three (command-block-frame.css); nothing here
  * decides a pixel.
  */
-export function createCommandBlockFrame(): CommandBlockFrameSlots {
+export function createCommandBlockFrame(
+  options: CommandBlockFrameOptions = {},
+): CommandBlockFrameSlots {
   const header = document.createElement('div')
   header.className = 'cmd-header ui-command-block-frame'
+  setCommandBlockFrameVariant(header, options.variant)
 
   const metaRow = document.createElement('div')
   metaRow.className = 'cmd-header-meta'
@@ -57,13 +73,11 @@ export function createCommandBlockFrame(): CommandBlockFrameSlots {
 }
 
 /**
- * Mark the header's status region as spanning BOTH text lines, centered,
- * rather than sitting even with the path line alone (spec §1.7): a
- * running command's spinner + `Running · 12.4s` + Stop, or the ask kind's
- * own "thinking" word share this one shape (AD-8 — one owner for "this
- * block is in progress"). Set once, structurally, by whoever builds or
- * settles the header — never derived from which chips happen to be inside
- * the region, so an empty status group and a full one behave alike.
+ * Declare in-progress status independently of its contents. The default
+ * two-line layout centers this region across both rows (the ask kind's
+ * "thinking" state). Running command variance keeps it on its single row
+ * instead (ADR-3kqrem7v). Builders and settlers own this fact, never the
+ * presence of incidental chips.
  */
 export function setHeaderInProgress(header: HTMLElement, inProgress: boolean): void {
   if (inProgress) header.dataset.headerProgress = 'true'

@@ -647,8 +647,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.setLiveHeight(24 * 16)
     expect(controller.terminalLiveInner.style.transform).toBe('')
     // Both the content clip and flow box clamp to the live-region cap.
-    expect(controller.terminalLiveViewport.style.height).toBe('360px')
-    expect(controller.terminalLiveContainer.style.height).toBe('360px')
+    expect(controller.terminalLiveViewport.style.height).toBe('328px')
+    expect(controller.terminalLiveContainer.style.height).toBe('328px')
 
     // A later matching accepted frame may place the anchor back in view.
     record.outputAnchorOffset = 1
@@ -670,13 +670,7 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.blockManager.clearAll()
   })
 
-  it('reserves the block body padding around the rows, and caps the WHOLE box', () => {
-    // THE RUNNING REGION IS THE BLOCK'S BODY. The frozen body has padding
-    // (`--cmd-output-pad-*`); until the live region wore the same, it was
-    // that much shorter than the body that replaces it, and the scrollback —
-    // which hangs from its bottom edge — moved at every freeze. The number
-    // is never repeated in TypeScript: the controller reads it off the
-    // element, which is what this test writes to it.
+  it('keeps active rows edge-to-edge with no extra body space, while excluding the echoed row', () => {
     const renderer = rendererWithGeometry()
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
@@ -686,8 +680,6 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
       snapshotStore: new CommandSnapshotStore(),
     })
     document.body.appendChild(pane)
-    controller.terminalLiveContainer.style.paddingTop = '2px'
-    controller.terminalLiveContainer.style.paddingBottom = '6px'
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 360,
       configurable: true,
@@ -698,41 +690,183 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     controller.blockManager.runningBlock!.outputAnchorOffset = 1
     controller.blockManager.runningBlock!.outputAnchorText = 'prompt ls'
     controller.outputAnchorChanged()
-    // Two shown rows (the third is the translated echo): the clip holds the
-    // rows, the flow box holds the rows plus the body's 8px.
     controller.setLiveHeight(3 * 16)
     expect(controller.terminalLiveViewport.style.height).toBe('32px')
-    expect(controller.terminalLiveContainer.style.height).toBe('40px')
+    expect(controller.terminalLiveContainer.style.height).toBe('32px')
 
-    // The cap is a ceiling on the BOX, not on the rows inside it: a grid
-    // taller than the pane must not push the region past the space it shares
-    // with the running block's header (nocx-zn4d), padding included.
+    // Full capacity is the pane less the one header. The live box and clip
+    // have the same size; neither reserves frozen-output padding or air.
     controller.setLiveHeight(100 * 16)
-    expect(controller.terminalLiveContainer.style.height).toBe('360px')
-    expect(controller.terminalLiveViewport.style.height).toBe('352px')
+    expect(controller.runningLiveCap).toBe(328)
+    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.terminalLiveViewport.style.height).toBe('328px')
     controller.blockManager.clearAll()
     pane.remove()
   })
 
-  it('reports the inline inset the grid must not be fitted into (nocx-9bpeq.8)', () => {
-    // Rows carry the pane gutter now, the live region included, so the grid's
-    // box is the scroller MINUS that inset. Read off the element, like the body
-    // padding above: the stylesheet stays the one place the number lives.
-    const renderer = rendererWithGeometry()
-    const pane = document.createElement('div')
-    const controller = new ScrollbackController({
-      pane,
-      liveContentHeight: () => renderer.liveContentHeight(),
-      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
-      snapshotStore: new CommandSnapshotStore(),
-    })
-    document.body.appendChild(pane)
-    expect(controller.liveInlineInsetPx).toBe(0)
-    controller.terminalLiveContainer.style.paddingLeft = '16px'
-    controller.terminalLiveContainer.style.paddingRight = '16px'
-    expect(controller.liveInlineInsetPx).toBe(32)
+  it('uses the kit header token with a 32px fallback, independent of header text or DOM seat', () => {
+    const { controller } = makeController()
+    document.body.appendChild(controller.scrollbackArea)
+    try {
+      expect(controller.runningHeaderHeightPx).toBe(32)
+      controller.beginBlock('a very long command '.repeat(30), '~', 0)
+      expect(controller.runningLiveCap).toBe(328)
+      const header =
+        controller.blockManager.runningBlock!.el.querySelector<HTMLElement>('.cmd-header')!
+      header.getBoundingClientRect = () => ({ height: 120 }) as DOMRect
+      expect(controller.runningLiveCap).toBe(328)
+      controller.scrollbackArea.style.setProperty('--control-height-md', '40px')
+      expect(controller.runningHeaderHeightPx).toBe(40)
+      expect(controller.runningLiveCap).toBe(320)
+      controller.scrollbackArea.style.setProperty('--control-height-md', 'invalid')
+      expect(controller.runningHeaderHeightPx).toBe(32)
+      expect(controller.runningLiveCap).toBe(328)
+      Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+        value: 460,
+        configurable: true,
+      })
+      expect(controller.runningLiveCap).toBe(428)
+    } finally {
+      controller.blockManager.clearAll()
+      controller.scrollbackArea.remove()
+    }
+  })
+
+  it('reserves the same header and full live capacity before and after an alternate round trip', () => {
+    const { controller } = makeController()
+    controller.beginBlock('top', '~', 0)
+    controller.setLiveHeight(100 * 16)
+    const block = controller.blockManager.runningBlock!
+    const header = block.el.querySelector('.cmd-header')!
+    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    controller.enterFullscreen()
+    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.scrollbackArea.contains(header)).toBe(true)
+    controller.exitFullscreen()
+    controller.setRunning()
+    controller.setLiveHeight(100 * 16)
+    expect(controller.terminalLiveContainer.style.height).toBe('328px')
+    expect(controller.blockManager.runningBlock).toBe(block)
+    expect(block.el.contains(header)).toBe(true)
     controller.blockManager.clearAll()
-    pane.remove()
+  })
+})
+
+describe('a nested running command borrows the full pane without changing its transcript slot', () => {
+  it('cancels ancestor insets only for the active block and freezes one replacement in the same order', () => {
+    const { pane, controller } = makeController()
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const scrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollIntoView = () => {}
+    document.body.appendChild(pane)
+    controller.scrollbackArea.scrollTo = vi.fn()
+    Object.defineProperty(controller.scrollbackArea, 'clientWidth', {
+      value: 500,
+      configurable: true,
+    })
+    const manager = controller.blockManager
+    const turn = manager.addAnswerBlock('inspect disk space', '/repo')
+    turn.el.style.paddingLeft = '24px'
+    turn.append('before command', 'nested-before')
+    turn.toolCall({
+      callId: 'nested-run',
+      tool: 'run',
+      effect: 'mutate-destructive',
+      opensBlock: true,
+    })
+    controller.beginBlock('df -h', '/repo', 0, 'agent')
+    manager.bindAttempt('nested-command')
+    const record = manager.runningBlock!
+    const running = record.el
+    const header = running.querySelector<HTMLElement>(':scope > .cmd-header')!
+    const children = turn.el.querySelector<HTMLElement>(':scope > .cmd-children')!
+    children.style.paddingLeft = '12px'
+    children.style.borderLeft = '1px solid transparent'
+    turn.append('after command', 'nested-after')
+    const before = children.querySelector<HTMLElement>('[data-entry-id="nested-before"]')!
+    const after = children.querySelector<HTMLElement>('[data-entry-id="nested-after"]')!
+    before.style.paddingLeft = '7px'
+    after.style.paddingLeft = '9px'
+    const originalStyles = [turn.el, children, before, after].map((el) => el.style.cssText)
+    const originalOrder = Array.from(children.children)
+    const slot = originalOrder.indexOf(running)
+    expect(slot).toBeGreaterThan(0)
+    expect(originalOrder[slot - 1]).toBe(before)
+    expect(originalOrder[slot + 1]).toBe(after)
+
+    try {
+      controller.setLiveHeight(160)
+      expect(running.parentElement).toBe(children)
+      expect(running.style.width).toBe('500px')
+      expect(running.style.marginLeft).toBe('-37px')
+      expect(Array.from(children.children)).toEqual(originalOrder)
+
+      // A buffer switch keeps the actual header DOM node and record alive.
+      controller.enterFullscreen()
+      expect(record.el).toBe(running)
+      expect(running.parentElement).toBe(children)
+      expect(controller.scrollbackInner.querySelector(':scope > .cmd-header')).toBe(header)
+      expect(
+        controller.scrollbackArea.querySelectorAll('[data-entry-id="nested-command"]'),
+      ).toHaveLength(1)
+      expect([turn.el, children, before, after].map((el) => el.style.cssText)).toEqual(
+        originalStyles,
+      )
+
+      controller.exitFullscreen()
+      controller.setRunning()
+      controller.setLiveHeight(160)
+      expect(running.querySelector(':scope > .cmd-header')).toBe(header)
+      expect(running.parentElement).toBe(children)
+      expect(running.style.width).toBe('500px')
+      expect(running.style.marginLeft).toBe('-37px')
+      expect(Array.from(children.children)).toEqual(originalOrder)
+
+      manager.blockClosed('nested-command')
+      expect(
+        controller.freezeFromAttempt(
+          {
+            id: 'nested-command',
+            domain: mintDomain({
+              lane: 'nested-lane',
+              lifecycle: 'prompt_ready',
+              domain: 'nested-domain',
+              epoch: 1,
+            }) as IntegrationDomain,
+            state: 'completed',
+            exitCode: 0,
+            fence: 'f'.repeat(64),
+          },
+          10,
+        ),
+      ).toBe(true)
+      // Freeze keeps record/backend identity, but replaces the running DOM
+      // element with the ordinary indented frozen presentation in its slot.
+      const frozen = manager.blockForAttempt('nested-command')!
+      expect(frozen).toBe(record)
+      expect(frozen.el).not.toBe(running)
+      expect(frozen.el.parentElement).toBe(children)
+      expect(frozen.el.dataset.entryId).toBe('nested-command')
+      expect(frozen.el.style.width).toBe('')
+      expect(frozen.el.style.marginLeft).toBe('')
+      expect(
+        controller.scrollbackArea.querySelectorAll('[data-entry-id="nested-command"]'),
+      ).toHaveLength(1)
+      expect(Array.from(children.children)).toEqual(
+        originalOrder.map((el) => (el === running ? frozen.el : el)),
+      )
+      expect([turn.el, children, before, after].map((el) => el.style.cssText)).toEqual(
+        originalStyles,
+      )
+      expect(running.isConnected).toBe(false)
+      expect(header.isConnected).toBe(false)
+    } finally {
+      turn.close('success')
+      controller.dispose()
+      pane.remove()
+      Element.prototype.scrollIntoView = scrollIntoView
+    }
   })
 })
 
@@ -977,7 +1111,7 @@ describe('the running live region follows its written rows', () => {
     expect(controller.mode).toBe('running')
   })
 
-  it('opens at nothing but the body padding for a command that has printed nothing yet', () => {
+  it('keeps the waiting fallback for a command that has printed nothing yet', () => {
     const renderer = makeRenderer()
     ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(0)
     const pane = document.createElement('div')
@@ -988,8 +1122,6 @@ describe('the running live region follows its written rows', () => {
       snapshotStore: new CommandSnapshotStore(),
     })
     document.body.appendChild(pane)
-    controller.terminalLiveContainer.style.paddingTop = '2px'
-    controller.terminalLiveContainer.style.paddingBottom = '6px'
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 360,
       configurable: true,

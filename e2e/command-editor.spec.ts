@@ -212,9 +212,7 @@ test.describe('command editor (nocx-4ff)', () => {
         const areaRect = area.getBoundingClientRect()
         return {
           editorHeight: Math.round(editor.getBoundingClientRect().height),
-          // The running footer (Process running · Send input · Interrupt · Stop)
-          // takes a row of its own while a command runs — the row cost the
-          // owner accepted with it (decision 2026-09-15, running state).
+          // ADR-3kqrem7v: no running footer takes space from the pane.
           processBarHeight: Math.round(
             document
               .querySelector<HTMLElement>('.pane.active .ui-process-bar:not([hidden])')

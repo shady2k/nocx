@@ -1251,22 +1251,98 @@ describe('resizeApplied', () => {
     client.close()
   })
 
-  it('does not treat the opening size or an identical pending report as applied', async () => {
+  it('shares one pending application receipt without assuming the opening size was applied', async () => {
     const { client, session, ws } = await connectedSession()
     const openingSize = { cols: OPEN_COLS, rows: OPEN_ROWS, xpixel: 0, ypixel: 0 }
     const first = session.resizeApplied(openingSize)
     const second = session.resizeApplied(openingSize)
+    const settled = vi.fn()
+    void second.then(settled)
     const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
-    expect(requests).toHaveLength(2)
-    expect(requests[0].id).not.toBe(requests[1].id)
-    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    expect(requests).toHaveLength(1)
+    expect(second).toBe(first)
+    await flushMicrotasks()
+    expect(settled).not.toHaveBeenCalled()
+    ws.deliverText({ jsonrpc: '2.0', id: requests[0].id, result: {} })
+    await expect(first).resolves.toBe('applied')
     await expect(second).resolves.toBe('applied')
+    client.close()
+  })
+
+  it('reuses an applied receipt without another resize RPC', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    ws.deliverText({ jsonrpc: '2.0', id: request.id, result: {} })
+    await expect(first).resolves.toBe('applied')
+
+    await expect(session.resizeApplied({ ...size })).resolves.toBe('applied')
+    expect(session.sendResize(size)).toBe(false)
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(1)
+    client.close()
+  })
+
+  it.each(['cols', 'rows', 'xpixel', 'ypixel'] as const)(
+    'waits for a changed %s even after the previous size applied',
+    async (dimension) => {
+      const { client, session, ws } = await connectedSession()
+      const first = session.resizeApplied(size)
+      const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+      ws.deliverText({ jsonrpc: '2.0', id: request.id, result: {} })
+      await expect(first).resolves.toBe('applied')
+
+      const changed = { ...size, [dimension]: size[dimension] + 1 }
+      const settled = vi.fn()
+      const pending = session.resizeApplied(changed)
+      void pending.then(settled)
+      const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+      expect(requests).toHaveLength(2)
+      expect(requests[1].params).toEqual({ sessionId: SID, ...changed })
+      await flushMicrotasks()
+      expect(settled).not.toHaveBeenCalled()
+      ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+      await expect(pending).resolves.toBe('applied')
+      client.close()
+    },
+  )
+
+  it('cannot reuse an older receipt when a newer report returns to the same geometry', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const middle = session.resizeApplied({ ...size, cols: 120 })
+    const latest = session.resizeApplied(size)
+    const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+    expect(requests).toHaveLength(3)
+    ws.deliverText({ jsonrpc: '2.0', id: requests[0].id, result: {} })
+    await expect(first).resolves.toBe('superseded')
+    const settled = vi.fn()
+    void latest.then(settled)
+    await flushMicrotasks()
+    expect(settled).not.toHaveBeenCalled()
+    ws.deliverText({ jsonrpc: '2.0', id: requests[2].id, result: {} })
+    await expect(latest).resolves.toBe('applied')
+    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    await expect(middle).resolves.toBe('superseded')
+    await expect(session.resizeApplied(size)).resolves.toBe('applied')
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(3)
+    client.close()
+  })
+
+  it('retries an equal report after its receipt was superseded', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
     ws.deliverText({
       jsonrpc: '2.0',
-      id: requests[0].id,
-      error: { code: -32013, message: 'a newer resize owns the pending slot' },
+      id: request.id,
+      error: { code: -32013, message: 'superseded' },
     })
     await expect(first).resolves.toBe('superseded')
+    const pending = session.resizeApplied(size)
+    const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+    expect(requests).toHaveLength(2)
+    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    await expect(pending).resolves.toBe('applied')
     client.close()
   })
 
@@ -1377,15 +1453,60 @@ describe('resizeApplied', () => {
     client.close()
   })
 
+  it('reuses a fire-and-forget application receipt after its acknowledgement', async () => {
+    const { client, session, ws } = await connectedSession()
+    expect(session.sendResize(size)).toBe(true)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    ws.deliverText({ jsonrpc: '2.0', id: request.id, result: {} })
+    await flushMicrotasks()
+
+    await expect(session.resizeApplied(size)).resolves.toBe('applied')
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(1)
+    client.close()
+  })
+
+  it('a changed fire-and-forget report supersedes an older fence', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const changed = { ...size, cols: 120 }
+    expect(session.sendResize(changed)).toBe(true)
+    const pending = session.resizeApplied(changed)
+    const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
+    expect(requests).toHaveLength(2)
+    ws.deliverText({ jsonrpc: '2.0', id: requests[0].id, result: {} })
+    await expect(first).resolves.toBe('superseded')
+    const settled = vi.fn()
+    void pending.then(settled)
+    await flushMicrotasks()
+    expect(settled).not.toHaveBeenCalled()
+    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    await expect(pending).resolves.toBe('applied')
+    client.close()
+  })
+
+  it('does not reuse an applied receipt after the local attachment closes', async () => {
+    const { client, session, ws } = await connectedSession()
+    const first = session.resizeApplied(size)
+    const request = ws.requests().find((candidate) => candidate.method === 'resize')!
+    ws.deliverText({ jsonrpc: '2.0', id: request.id, result: {} })
+    await expect(first).resolves.toBe('applied')
+    session.close()
+    await expect(session.resizeApplied(size)).resolves.toBe('closed')
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(1)
+    client.close()
+  })
+
   it('shares report bookkeeping with sendResize without changing its boolean contract', async () => {
     const { client, session, ws } = await connectedSession()
     expect(session.sendResize(size)).toBe(true)
     const pending = session.resizeApplied(size)
     const requests = ws.requests().filter((candidate) => candidate.method === 'resize')
-    expect(requests).toHaveLength(2)
+    expect(requests).toHaveLength(1)
     expect(session.sendResize(size)).toBe(false)
-    ws.deliverText({ jsonrpc: '2.0', id: requests[1].id, result: {} })
+    ws.deliverText({ jsonrpc: '2.0', id: requests[0].id, result: {} })
     await expect(pending).resolves.toBe('applied')
+    await expect(session.resizeApplied(size)).resolves.toBe('applied')
+    expect(ws.requests().filter((candidate) => candidate.method === 'resize')).toHaveLength(1)
     client.close()
   })
 })

@@ -35,6 +35,7 @@ import {
   createCommandBlockFrame,
   createCommandSuccess,
   setHeaderInProgress,
+  setCommandBlockFrameVariant,
 } from '../ui/command-block-frame'
 import { markShellCommand } from '../ui/shell-command'
 import { createAppVisibility, type AppVisibility } from '../app-visible'
@@ -42,7 +43,6 @@ import { createComponent } from 'solid-js'
 import { render } from 'solid-js/web'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { createIconButton } from '../ui/icon-button-element'
-import { createButton } from '../ui/button-element'
 import {
   ArrowDownUpIcon,
   ChevronRightIcon,
@@ -51,6 +51,7 @@ import {
   iconElement,
   MoreIcon,
   PinIcon,
+  PauseIcon,
   SquareIcon,
 } from '../ui/icons'
 import {
@@ -644,6 +645,9 @@ function comparableCloseRow(
 }
 
 export interface BlockRecord {
+  /** The same running header even while the controller seats it outside el.
+   *  Cleared after visual freeze; the frozen header belongs to el again. */
+  header?: HTMLElement
   id: number
   command: string
   cwd: string
@@ -860,20 +864,14 @@ export function settleBlockOutcome(
   // function: a second settle restates `false` rather than needing to
   // check whether it was already set.
   setHeaderInProgress(header, false)
+  setCommandBlockFrameVariant(header, undefined)
   for (const stale of right.querySelectorAll(
     // `.ui-meta__sep` is the standalone separator this function places
     // between the word and the duration (spec 2026-09-15 §4) — a second
     // settle must clear it along with the Metas either side, or it doubles.
-    // `.ui-button[data-block-control]` is the running Stop control
-    // (nocx-9bpeq.12 round 6 — `data-block-actions` is the ⋮'s identity
-    // alone again, so Stop is found by the shared "leave selection and
-    // focus-bounce alone" attribute instead): a settled block has no Stop,
-    // whatever kind or path settled it. The ordinary freeze path discards
-    // the whole running element rather than mutating it, so this never
-    // fires there in practice — it is here for whatever settles a block
-    // WITHOUT replacing it, present or future, rather than something only
-    // the common path is trusted to get right.
-    ':scope > .ui-command-block-frame__success, :scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > .ui-button[data-block-control]',
+    // Running signal controls leave together with the running variance;
+    // overflow remains the frozen block's normal menu (ADR-3kqrem7v).
+    ':scope > .ui-command-block-frame__success, :scope > .ui-meta, :scope > .ui-meta__sep, :scope > .ui-spinner, :scope > .cmd-header-waiting, :scope > [data-control="interrupt"], :scope > [data-control="stop"]',
   )) {
     stale.remove()
   }
@@ -935,7 +933,13 @@ function createHeader(
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
 ): HTMLElement {
-  const { header, metaRow, status: right } = createCommandBlockFrame()
+  const {
+    header,
+    metaRow,
+    status: right,
+  } = createCommandBlockFrame({
+    variant: status === 'running' ? 'running' : undefined,
+  })
   const rules = blockKindRules(kind)
 
   // Who ran it, when it was not the human (design §3.1, nocx-iadtt): the
@@ -1062,6 +1066,9 @@ function createHeader(
     // the identity is inert on that path rather than needing its own guard.
     markShellCommand(cmdSpan)
   }
+  // Keep the full displayed command available when the running row truncates.
+  // Use rendered text, never raw command bytes that may contain masked secrets.
+  cmdSpan.title = cmdSpan.textContent ?? ''
   // The sigil (spec 2026-09-15 §4): the mockup's `›`, as the kit's chevron
   // rather than a text glyph, for the command kind only — ask and tool rows
   // keep the anatomy they already have. It sits BESIDE `.cmd-header-text` in
@@ -1228,6 +1235,10 @@ export type DumpSource = (entryId: string) => Promise<{ request: Drive[]; respon
 export interface RunningBlockActions {
   /** Stop a live command through the backend's escalation ladder. */
   stop(): void
+  /** Interrupt is distinct from Stop. Absent for non-command embeddings. */
+  interrupt?(): void
+  /** Return chrome focus to the existing terminal input (ADR-3kqrem7v). */
+  returnToGrid?(): void
   /** Whether time-limited actions still belong to this specific block. */
   isActive(blockEl: HTMLElement): boolean
   /** Whether this block is currently granted to the next question. */
@@ -1268,7 +1279,7 @@ function buildOverflowMenu(
   }
 
   const btn = createIconButton({
-    size: 'xs',
+    size: blockEl.classList.contains('cmd-block-running') ? 'sm' : 'xs',
     ariaLabel: 'Block actions',
     icon: () => iconElement(MoreIcon),
     // `data-block-actions` is the ⋮'s OWN identity — the one element every
@@ -1520,7 +1531,7 @@ function wireBlockSelection(
   const mine = (e: Event): boolean => {
     const target = e.target as HTMLElement
     if (target.closest('[data-block-control], .ui-context-menu')) return false
-    // THE GRID'S OWN PRESS IS THE GRID'S (ADR-0091). The live region is this
+    // THE GRID'S OWN PRESS IS THE GRID'S (ADR-3kqrem7v). The live region is this
     // block's body while the command runs, and a press in it reaches this
     // listener — but the row under the pointer is the painter's, and the
     // grid's own gesture (painter/selection-gesture.ts) is the one owner of
@@ -1710,7 +1721,7 @@ export function createCommandBlock(
     // a turn contains the blocks it caused, so the same double-click reaches
     // every ancestor's listener (ADR-0040).
     if ((e.target as HTMLElement).closest('.cmd-block') !== wrapper) return
-    // THE GRID'S OWN ROWS ARE THE GRID'S (ADR-0091). The live region is this
+    // THE GRID'S OWN ROWS ARE THE GRID'S (ADR-3kqrem7v). The live region is this
     // block's body while the command runs, so a double click on one of its
     // rows reaches this listener — and this rule is not the one that owns it.
     // It reads the row's TEXT NODES, which in painted output are runs of
@@ -1808,65 +1819,60 @@ export function createRunningBlock(
   const header = createHeader('command', command, cwd, location, 'running', store, author)
   const right = header.querySelector('.cmd-header-right')
 
-  // Stop, the visible door (spec 2026-09-15 §4): the ⋮ menu keeps its own
-  // Stop item as the second door to the same handler, below. Built whenever
-  // running actions are injected at all (round 4, nocx-9bpeq.12) — NOT
-  // gated on `running.isActive(wrapper)` here, because in the real app
-  // (terminal-content.ts's `runningActions.isActive`) that reads
-  // `blockManager.runningBlock`, which this very call is IN THE MIDDLE OF
-  // setting (`startBlock` assigns it only after `createRunningBlock`
-  // returns) — so at construction it is always false and the button was
-  // never built at all, on every real running command; a unit test that
-  // injected `isActive: () => true` unconditionally missed this because it
-  // never asked what the real manager answers DURING construction. Whether
-  // the button DOES anything is still gated on `isActive` at CLICK time,
-  // below, which is the fact that can legitimately change after the block
-  // exists. Always visible (not opacity-hidden like ⋮), so it never asks a
-  // person to discover it by hovering. `data-block-control` (round 6) is
-  // the escape hatch from block-selection and the pane's focus-bounce
-  // listener (`wireBlockSelection` below, terminal-content.ts) that the ⋮
-  // button also carries — the SAME mechanism, not a second one. Never
-  // `data-block-actions`: that is the ⋮'s own identity, and giving Stop the
-  // same one made every "find the block-actions button" caller across the
-  // repo (placeHeaderChip here, a dozen e2e specs, restored-block.test.ts,
-  // turn-children.test.ts) find Stop first instead, since it is appended
-  // before the ⋮ (round 4's regression, fixed here rather than narrowed
-  // consumer by consumer, which would have made "which one is the ⋮" a
-  // second-owned fact — AGENTS.md).
+  // ADR-3kqrem7v: native, always-visible controls in the same header node.
+  // Build before assignment of runningBlock; gate actions at activation time.
   if (right && running) {
-    // `size: 'sm'` (22px, --font-size-2xs) read tiny beside the row's own
-    // 14px mono status text — the owner's screenshot, round 2 of the
-    // mockup pass. `md` (the kit's other size, button.ts's own
-    // `ButtonSize` — there is no third to reach for) is the default
-    // height for `variant: 'default'` (--control-height-sm, 24px) at
-    // --font-size-sm, which reads at the command row's own register
-    // instead of the smallest one in the type scale.
-    const stop = createButton({
-      label: 'Stop',
+    if (running.interrupt) {
+      const interrupt = createIconButton({
+        size: 'sm',
+        ariaLabel: 'Interrupt',
+        title: 'Interrupt (Ctrl+C) — focus controls: Alt+F10',
+        icon: () => iconElement(PauseIcon),
+        attrs: { 'data-block-control': 'interrupt', 'data-control': 'interrupt' },
+        onClick: (e) => {
+          e.stopPropagation()
+          if (!running.isActive(wrapper)) return
+          running.interrupt?.()
+          if (running.isActive(wrapper)) running.returnToGrid?.()
+        },
+      })
+      interrupt.setAttribute('aria-keyshortcuts', 'Alt+F10')
+      right.appendChild(interrupt)
+    }
+    const stop = createIconButton({
+      size: 'sm',
       ariaLabel: 'Stop',
-      variant: 'default',
+      title: 'Stop',
+      icon: () => iconElement(SquareIcon),
+      attrs: { 'data-block-control': 'stop', 'data-control': 'stop' },
       onClick: (e) => {
         e.stopPropagation()
-        e.preventDefault()
         if (running.isActive(wrapper)) running.stop()
       },
     })
-    // Rebuilt explicitly rather than `.prepend()`-ing onto the text node
-    // `createButton` already gave it (round 2, nocx-9bpeq.12): the icon and
-    // the label are two separate elements, replacing the button's content
-    // outright. `iconElement` (round 3) is what actually resolves the icon:
-    // SquareIcon is ALSO passed uncalled as `icon: SquareIcon` to the ⋮
-    // menu's Stop item below, and the first time Solid renders it there
-    // permanently marks the underlying function so a later bare call
-    // returns an HMR-proxy accessor instead of an element (see
-    // ui/icons/icon-element.ts's header) — order-dependent on which test
-    // opened that menu first.
-    const icon = iconElement(SquareIcon)
-    const label = document.createElement('span')
-    label.textContent = 'Stop'
-    stop.replaceChildren(icon, label)
-    stop.setAttribute('data-block-control', '')
     right.appendChild(stop)
+
+    // Only the running header owns these keys. Inner Tab/Shift+Tab and
+    // button activation remain native; program Tab never reaches this node.
+    header.addEventListener('keydown', (e) => {
+      if (header.dataset.variant !== 'running' || !running.returnToGrid) return
+      const target = e.target
+      if (!(target instanceof HTMLButtonElement) || !target.hasAttribute('data-block-control'))
+        return
+      const controls = [
+        ...header.querySelectorAll<HTMLButtonElement>('button[data-block-control]'),
+      ].filter((button) => !button.disabled && button.tabIndex >= 0)
+      const boundary =
+        e.key === 'Tab' &&
+        !e.altKey &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        (e.shiftKey ? target === controls[0] : target === controls[controls.length - 1])
+      if (e.key !== 'Escape' && !boundary) return
+      e.preventDefault()
+      e.stopPropagation()
+      running.returnToGrid()
+    })
   }
 
   // Overflow menu — copying the command, plus what can be done ABOUT the
@@ -1879,28 +1885,6 @@ export function createRunningBlock(
   setBlockAccessibility(wrapper, 'command')
   wireBlockSelection(wrapper, getContainer(), id, onSelect)
 
-  return wrapper
-}
-
-/**
- * The off-flow probe for "how tall will this command's running header be"
- * (nocx-2v80t.3.50): the same header a running block will carry, built for
- * MEASUREMENT alone — the caller appends it beside the real blocks, reads
- * its height, then removes it. The prompt's geometry prediction reads it so
- * a command's grid height is settled before the command exists; building
- * that header a second way here would be two owners of one markup, free to
- * drift apart and mispredict exactly the wraps the prediction is for.
- */
-export function createRunningHeaderProbe(
-  command: string,
-  cwd: string,
-  location: string,
-  store: CommandSnapshotStore,
-): HTMLElement {
-  const wrapper = document.createElement('div')
-  wrapper.className = 'cmd-block cmd-block-running'
-  wrapper.dataset.blockKind = 'command'
-  wrapper.appendChild(createHeader('command', command, cwd, location, 'running', store, 'shell'))
   return wrapper
 }
 
@@ -2209,7 +2193,7 @@ export class BlockManager {
    *  sharing one leading position). `.cmd-block` and `.scrollback-restore-
    *  boundary` are the only "entries" for this purpose — the live region
    *  never carries the leading rule, whether it is the stack's child or a
-   *  running block's body (ADR-0091), and a block nested inside a turn is not
+   *  running block's body (ADR-3kqrem7v), and a block nested inside a turn is not
    *  a TOP-LEVEL entry at all. */
   private _refreshFirstEntry(): void {
     const first = this._scrollbackInner.querySelector<HTMLElement>(
@@ -2242,7 +2226,7 @@ export class BlockManager {
    *  the block and the emptied region stays where it is.
    *
    *  WHILE A COMMAND RUNS THE REGION IS NOT HERE AT ALL: it is that block's
-   *  body, inside the block (ADR-0091, `holdLiveInRunningBlock`), so this
+   *  body, inside the block (ADR-3kqrem7v, `holdLiveInRunningBlock`), so this
    *  only seats it for the blocks that do not hold it and stands down while
    *  one does. A block nested inside a turn is followed at its turn's seat
    *  rather than inside it. */
@@ -2268,7 +2252,7 @@ export class BlockManager {
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
-  /** THE LIVE REGION'S SEAT, IN TWO ANSWERS (ADR-0091).
+  /** THE LIVE REGION'S SEAT, IN TWO ANSWERS (ADR-3kqrem7v).
    *
    *  A running command's output is ONE block. While a command runs on the
    *  normal screen the controller's live region IS that block's body — its
@@ -2870,7 +2854,7 @@ export class BlockManager {
     )
     this._ownNext(el)
     // The running command's BODY is the live region, and it goes INSIDE this
-    // block (ADR-0091): the block's box and its ground then cover every row
+    // block (ADR-3kqrem7v): the block's box and its ground then cover every row
     // the command writes, which is what a person reads as one block. The
     // "working, nothing written yet" stand-in stands there, where the first
     // output line will be written (nocx-vnirv.1) — it is absolutely
@@ -2891,6 +2875,7 @@ export class BlockManager {
       durationMs: null,
       exitCode: null,
       status: 'running',
+      header: el.querySelector<HTMLElement>(':scope > .cmd-header') ?? undefined,
       startLine,
       startAnchor,
       // Output start is unknown until the backend publishes its screen anchor.
@@ -3097,10 +3082,15 @@ export class BlockManager {
     // THE REGION LEAVES BEFORE THE ELEMENT DOES. `freezeBlock` builds a frozen
     // element and swaps it in, and a child of the element it replaces would
     // leave the document with it — the terminal would vanish at the freeze
-    // (ADR-0091). The region goes back to the stack, right after the block it
+    // (ADR-3kqrem7v). The region goes back to the stack, right after the block it
     // has just stopped being the body of.
     this.releaseLiveRegion()
 
+    // block.closed can finish independently of controller reconciliation.
+    // Reclaim its borrowed header before replacing the old block so no
+    // running chrome survives outside the frozen record (ADR-3kqrem7v).
+    if (rec.header && rec.header.parentElement !== rec.el) rec.el.prepend(rec.header)
+    rec.header = undefined
     const newEl = freezeBlock(
       rec.el,
       rec.id,
@@ -3627,7 +3617,7 @@ export class BlockManager {
 
   clearAll(): void {
     // Out of any block first: removing the element it is inside would take the
-    // terminal's own surface with it (ADR-0091).
+    // terminal's own surface with it (ADR-3kqrem7v).
     this.releaseLiveRegion()
     this.closeOverflowMenus()
     this._stopTicker()
@@ -3640,6 +3630,7 @@ export class BlockManager {
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
     // restored one under its boundary (nocx-0zb1m).
+    for (const rec of this._blocks) rec.header?.remove()
     for (const el of this._owned) el.remove()
     this._owned.clear()
     this._blocks = []
@@ -3701,6 +3692,9 @@ export class BlockManager {
     }
     for (const id of [...this._storedRowsCursor.keys()]) {
       if (id !== keepEntryId) this._storedRowsCursor.delete(id)
+    }
+    for (const rec of this._blocks) {
+      if (rec.el !== keep) rec.header?.remove()
     }
     for (const el of [...this._owned]) {
       if (el === keep) continue

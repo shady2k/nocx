@@ -31,6 +31,25 @@ for (const ratio of [1, 1.8, 2]) {
         await expect(grid.locator('.term-grid-row').last()).toContainText('LAST-ROW', {
           timeout: 15_000,
         })
+        // THE PANE'S OWN SETTLE IS PART OF THE MEASUREMENT. A block opening or
+        // a freeze plays a short glide (scrollback/controller: SETTLE_MS), and
+        // it is a TRANSFORM on the stack, so getBoundingClientRect reports the
+        // displaced box while it runs. Measuring then reads a fraction of the
+        // displacement, not the layout the pane lands on: at a device ratio of
+        // 2 in a 1027px window the last row sat 0.577px below the clip during
+        // that window and inside it a frame later. So wait on the animation —
+        // the same wait running-block-body-seam.spec.ts's `geometry()` makes,
+        // and never on a duration — then measure the settled box.
+        await page.evaluate(async () => {
+          const stack = document.querySelector<HTMLElement>('.pane.active .scrollback-inner')
+          if (!stack) return
+          for (;;) {
+            const settling = stack.getAnimations().filter((a) => a.playState !== 'finished')
+            await Promise.all(settling.map((a) => a.finished.catch(() => undefined)))
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+            if (stack.getAnimations().every((a) => a.playState === 'finished')) break
+          }
+        })
         const measurement = await page.evaluate(() => {
           const g = document.querySelector<HTMLElement>('.pane.active .terminal-live-grid')
           const rows = g?.querySelectorAll<HTMLElement>('.term-grid-row')

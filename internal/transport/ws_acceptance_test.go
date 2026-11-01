@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -812,6 +813,90 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 	default:
 		close(releaseResolve)
 	}
+}
+
+// A REFUSAL ENDS WITH THE OPERATION THAT SET IT (nocx-3an1s.1.1).
+//
+// The bead's criterion in one run, over the wire: one operation holds the
+// config domain past the wait bound, so a conflicting request is refused with
+// the saturation error — the LEGITIMATE refusal — and the moment that holder
+// returns, the same action is offered again and ACCEPTED. Nothing restarts,
+// nothing is reset by hand, and no state outlives the operation that set it.
+// This is the regression the owner's intermittent toast needs: the refusal is
+// a wait bound, not a stuck gate.
+func TestRefusalEndsWhenTheHoldingOperationReleases(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	resolveStarted := make(chan struct{})
+	releaseResolve := make(chan struct{})
+	var released sync.Once
+	release := func() { released.Do(func() { close(releaseResolve) }) }
+	t.Cleanup(release)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked")}
+		},
+	})
+	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
+	srv := NewWSServer(logger, reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				close(resolveStarted)
+				<-releaseResolve
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+		// Short, so the refusal is the bound exhausting rather than a wait.
+		WithDomainConflictWaitTimeout(150*time.Millisecond),
+	)
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	// The holder: an open whose resolve blocks under [config, session].
+	sendControl(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "ssh:p:1",
+		"cols": 80, "rows": 24,
+	}, 1)
+	select {
+	case <-resolveStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolve never started")
+	}
+
+	create := func(id int) string {
+		return string(jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
+			"id": "ssh:p:2", "name": "b", "type": "ssh",
+			"options": map[string]any{"host": "b.example.com"},
+		}, id))
+	}
+	// While the holder is in its domain, the conflicting write waits the bound
+	// out and is refused.
+	refused := create(2)
+	if !strings.Contains(refused, `"code":-32004`) {
+		t.Fatalf("the conflicting write must be refused while the resolve holds the domain, got %s", refused)
+	}
+
+	// The holder returns. The same write is offered again and must be
+	// answered — created, or refused for its own reason, but never as busy.
+	release()
+	deadline := time.Now().Add(5 * time.Second)
+	last := ""
+	for time.Now().Before(deadline) {
+		last = create(3)
+		if !strings.Contains(last, `"code":-32004`) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("the action stayed refused after the holding operation returned: %s", last)
 }
 
 // ── A DIAL HOLDS NO DOMAIN GATE (nocx-l21ib.1) ────────────────────────────

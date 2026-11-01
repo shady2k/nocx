@@ -549,9 +549,10 @@ fi
 # almost every command, so a working-tree read would judge backlog writes the
 # commit is not making.
 # The tracker store is outside the code branches, so a code commit stages no
-# tracker change. The backlog gate runs when the store is published and in CI,
-# against recorded revisions; running it here would judge other agents' live
-# tracker writes against this branch's parent.
+# tracker change. The rules run on the published store's delta
+# (.github/workflows/tracker-gate.yml, nocx-fg79x.3); running them here would
+# judge other agents' live tracker writes against this branch's parent. Section
+# 7 is therefore disabled, and this hook says so rather than calling it green.
 RUN_BACKLOG=0
 
 # The other parent of the merge being committed, or failure when this is not a

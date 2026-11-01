@@ -20,6 +20,10 @@ func TestAgentLaunchEventsRoundTripDataFields(t *testing.T) {
 		// answer (nocx-xn63t.6.49). It is the case that made the two fields
 		// necessary, so it is the case the round trip has to carry.
 		{Kind: lifecycle.KindAgentLaunchResolved, AgentLaunchResolved: &lifecycle.AgentLaunchResolved{RequestID: "r-launch-3", Agent: "claude", Local: false, ToolSurface: true}},
+		// The record's non-launch words (nocx-3an1s.1.3): the shell matches the
+		// typed word against this list, so the spelling on the wire is the
+		// contract here too.
+		{Kind: lifecycle.KindAgentLaunchResolved, AgentLaunchResolved: &lifecycle.AgentLaunchResolved{RequestID: "r-launch-4", Agent: "claude", Local: true, ToolSurface: true, NonLaunchSubcommands: "update update-config"}},
 		{Kind: lifecycle.KindAgentLaunchCancel, AgentLaunchCancel: &lifecycle.AgentLaunchCancel{Agent: "myagent", Ticket: ticket}},
 		{Kind: lifecycle.KindAgentEnrol, AgentEnrol: &lifecycle.AgentEnrol{RequestID: "r-enrol-1", Agent: "myagent", LaunchTicket: ticket, Cols: 80, Rows: 24}},
 	}
@@ -39,6 +43,10 @@ func TestAgentLaunchEventsRoundTripDataFields(t *testing.T) {
 			if event.Kind == lifecycle.KindAgentLaunchResolved && event.AgentLaunchResolved.ToolSurface &&
 				!bytes.Contains(frame.Bytes(), []byte(`"tool_surface":true`)) {
 				t.Fatalf("the tool-surface classification is not on the wire in the spelling the shell reads: %s", frame.Bytes())
+			}
+			if event.Kind == lifecycle.KindAgentLaunchResolved && event.AgentLaunchResolved.NonLaunchSubcommands != "" &&
+				!bytes.Contains(frame.Bytes(), []byte(`"non_launch_subcommands":"`+event.AgentLaunchResolved.NonLaunchSubcommands+`"`)) {
+				t.Fatalf("the non-launch words are not on the wire in the spelling the shell reads: %s", frame.Bytes())
 			}
 			got, err := NewDecoder(&frame, Config{}, nil).ReadFrame()
 			if err != nil {

@@ -433,9 +433,19 @@ type (
 		Agent       string    `json:"agent"`
 		Local       bool      `json:"local"`
 		ToolSurface bool      `json:"tool_surface,omitempty"`
-		Ticket      string    `json:"ticket,omitempty"`
-		Payload     string    `json:"payload,omitempty"`
-		Reason      string    `json:"reason,omitempty"`
+		// NonLaunchSubcommands is the local record's list of first argument
+		// words that are NOT a launch of this agent (`update` for
+		// `claude update`), so the wrapper can pass such an invocation
+		// through unchanged instead of appending its tool-surface argument
+		// (nocx-3an1s.1.3, GitHub #541). One space-joined string rather than a
+		// JSON array: the shell consumers read this frame without a JSON
+		// parser, and agentrecord validates every word to a spelling that
+		// cannot contain a space. Empty is every launch — an older backend, a
+		// worker's literal command, or a record that marks nothing.
+		NonLaunchSubcommands string `json:"non_launch_subcommands,omitempty"`
+		Ticket               string `json:"ticket,omitempty"`
+		Payload              string `json:"payload,omitempty"`
+		Reason               string `json:"reason,omitempty"`
 	}
 
 	// AgentLaunchCancel releases an unresolved launch ticket. It is best effort

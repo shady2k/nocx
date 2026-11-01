@@ -359,6 +359,11 @@ type wireEnvelope struct {
 	// where nocx's own MCP tool surface exists. Omitted when false, which is
 	// the honest shape for a published generation on somebody else's host.
 	ToolSurface bool `json:"tool_surface,omitempty"`
+	// NonLaunchSubcommands is the local record's list of first-argument words
+	// that are not a launch, space-joined (nocx-3an1s.1.3). The shell matches
+	// the typed word against it and appends no surface; the wire spelling is
+	// the contract because the shell reads the raw frame.
+	NonLaunchSubcommands *string `json:"non_launch_subcommands,omitempty"`
 	// Bootstrap remains last in the wire struct because remote domain_grant
 	// shells extract it from a fixed trailing position. All fields above it
 	// are omitted on that event.
@@ -477,13 +482,14 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		}
 	case lifecycle.KindAgentLaunchResolved:
 		env.Event.AgentLaunchResolved = &lifecycle.AgentLaunchResolved{
-			RequestID:   lifecycle.RequestID(str(w.Request)),
-			Agent:       str(w.Agent),
-			Local:       w.Local,
-			ToolSurface: w.ToolSurface,
-			Ticket:      str(w.Ticket),
-			Payload:     str(w.Payload),
-			Reason:      str(w.Reason),
+			RequestID:            lifecycle.RequestID(str(w.Request)),
+			Agent:                str(w.Agent),
+			Local:                w.Local,
+			ToolSurface:          w.ToolSurface,
+			NonLaunchSubcommands: str(w.NonLaunchSubcommands),
+			Ticket:               str(w.Ticket),
+			Payload:              str(w.Payload),
+			Reason:               str(w.Reason),
 		}
 	case lifecycle.KindAgentLaunchCancel:
 		env.Event.AgentLaunchCancel = &lifecycle.AgentLaunchCancel{Agent: str(w.Agent), Ticket: str(w.Ticket)}
@@ -634,6 +640,9 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			we.Agent = new(p.Agent)
 			we.Local = p.Local
 			we.ToolSurface = p.ToolSurface
+			if p.NonLaunchSubcommands != "" {
+				we.NonLaunchSubcommands = new(p.NonLaunchSubcommands)
+			}
 			if p.Ticket != "" {
 				we.Ticket = new(p.Ticket)
 			}

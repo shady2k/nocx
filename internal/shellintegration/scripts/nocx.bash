@@ -1086,6 +1086,7 @@ __nocx_agent_launch_read_answer() {
     local __rid="$1" __t=0 __raw __ticket __payload
     __nocx_agent_launch_local=0
     __nocx_agent_launch_surface=0
+    __nocx_agent_launch_non_launch=
     __nocx_agent_launch_valid=0
     __nocx_agent_launch_ticket=
     __nocx_agent_launch_payload=
@@ -1125,6 +1126,19 @@ __nocx_agent_launch_read_answer() {
         # alone is what started a spawned worker with no nocx tools.
         case "$__nocx_lc_frame" in
             *'"tool_surface":true'*) __nocx_agent_launch_surface=1 ;;
+        esac
+        # THE RECORD'S NON-LAUNCH WORDS (nocx-3an1s.1.3): `claude update` is
+        # the agent's own maintenance command, not an agent launch, so its argv
+        # reaches the CLI unchanged and without the tool surface. One
+        # space-joined field rather than an array because this script reads the
+        # frame without a JSON parser; agentrecord refuses a word that is not a
+        # plain spelling, so the split is exact.
+        case "$__nocx_lc_frame" in
+            *'"non_launch_subcommands":"'*)
+                __raw="${__nocx_lc_frame#*\"non_launch_subcommands\":\"}"
+                __raw="${__raw%%\"*}"
+                __nocx_agent_launch_non_launch="$__raw"
+                ;;
         esac
         case "$__nocx_lc_frame" in
             *'"local":true'*)
@@ -1219,8 +1233,28 @@ __nocx_agent_launch_clear() {
     __nocx_agent_launch_env=()
     __nocx_agent_launch_local=0
     __nocx_agent_launch_surface=0
+    __nocx_agent_launch_non_launch=
     __nocx_agent_launch_valid=0
     __nocx_agent_launch_reason=
+}
+
+# Is this invocation a subcommand the agent record says is NOT a launch?
+#
+# `claude update` is the agent's own maintenance command, and Claude rejects
+# nocx's tool-surface argument on it with "unknown option '--mcp-config'"
+# (nocx-3an1s.1.3, GitHub #541). A subcommand is not an agent session: it runs
+# the record's program with the person's argv and nothing else. The RECORD owns
+# the list — see agentrecord.Document.NonLaunchSubcommands — and the resolve
+# answer carries it, so the wrapper is never a second place the words live.
+# The first typed word is compared whole: a launch whose argument merely starts
+# with one ("update-config") is still a launch.
+__nocx_agent_launch_maintenance() {
+    [[ -n "$__nocx_agent_launch_non_launch" && $# -gt 0 ]] || return 1
+    local __word
+    for __word in $__nocx_agent_launch_non_launch; do
+        [[ "$1" == "$__word" ]] && return 0
+    done
+    return 1
 }
 
 # Run the agent this pane resolved, with or without the tool surface ($1 = 1

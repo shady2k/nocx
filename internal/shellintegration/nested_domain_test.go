@@ -90,6 +90,12 @@ type nestedKernel struct {
 	// published generation on somebody else's host — and the wrapper then
 	// passes no per-agent argument at all.
 	launchToolSurface bool
+	// launchNonLaunch is the local record's list of first argument words that
+	// are NOT a launch (agentrecord.Document.NonLaunchSubcommands), which the
+	// real answer carries as one space-joined field. `claude update` is the
+	// invocation the owner typed and Claude refused, so the shell must pass it
+	// through with no tool surface (nocx-3an1s.1.3).
+	launchNonLaunch []string
 	// agentMalformed sends a malformed lifecycle frame, so the wrapper must
 	// treat an answer it cannot parse as a refusal.
 	agentMalformed bool
@@ -423,12 +429,13 @@ func (k *nestedKernel) answerLaunchResolveLocked(f frame) {
 	k.encodeAgentAnswerLocked(f, lifecycle.Event{
 		Kind: lifecycle.KindAgentLaunchResolved,
 		AgentLaunchResolved: &lifecycle.AgentLaunchResolved{
-			RequestID:   lifecycle.RequestID(f.Request),
-			Agent:       f.Agent,
-			Local:       true,
-			ToolSurface: true,
-			Ticket:      strings.Repeat("a", 43),
-			Payload:     payload,
+			RequestID:            lifecycle.RequestID(f.Request),
+			Agent:                f.Agent,
+			Local:                true,
+			ToolSurface:          true,
+			NonLaunchSubcommands: strings.Join(k.launchNonLaunch, " "),
+			Ticket:               strings.Repeat("a", 43),
+			Payload:              payload,
 		},
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/agentapproval"
@@ -290,7 +291,19 @@ func (s *agentLaunchService) Resolve(ctx context.Context, binding lifecyclepub.A
 	}
 	// The record applies AND this machine has the surface the record's launch
 	// is pointed at; both are true here, and the shell reads them separately.
-	return lifecyclepub.AgentLaunchResolution{Local: true, ToolSurface: true, Ticket: ticket, Payload: payload}, nil
+	//
+	// THE RECORD'S NON-LAUNCH WORDS TRAVEL WITH IT (nocx-3an1s.1.3): the shell
+	// holds the typed argv and this side holds the record, so the split is one
+	// list in the answer rather than a second copy of "update" in three
+	// scripts. Joining with a space is exact because agentrecord refuses a
+	// word that is not a plain spelling.
+	return lifecyclepub.AgentLaunchResolution{
+		Local:                true,
+		ToolSurface:          true,
+		Ticket:               ticket,
+		Payload:              payload,
+		NonLaunchSubcommands: strings.Join(entry.Record.NonLaunchSubcommands, " "),
+	}, nil
 }
 
 func (s *agentLaunchService) Cancel(binding lifecyclepub.AgentLaunchBinding, ticket string) {

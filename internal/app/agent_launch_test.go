@@ -486,3 +486,67 @@ func TestPaneAgentLaunchReusesApprovalIssuedBeforeRestart(t *testing.T) {
 		t.Fatalf("restore did not reuse prior consent: %v", approveErr)
 	}
 }
+
+// THE RECORD'S NON-LAUNCH WORDS REACH THE SHELL (nocx-3an1s.1.3, GitHub #541).
+//
+// The shell holds the typed argv and this side holds the record, so the split
+// is one list in the resolve answer rather than a second copy of "update" in
+// three scripts. What this test pins is the wiring no shell test can reach:
+// the shipped record's words appearing in the answer a local pane receives,
+// and nothing invented for a launch that has no record of its own.
+func TestAgentLaunchResolveCarriesTheRecordsNonLaunchSubcommands(t *testing.T) {
+	dir := t.TempDir()
+	records, err := agentrecord.New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A record the person wrote, pointing at a program that really exists in
+	// the pane's PATH: resolve is the function that identifies it.
+	bin := t.TempDir()
+	command := filepath.Join(bin, "claude")
+	if writeErr := os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0o755); writeErr != nil { //nolint:gosec // executable fixture inside t.TempDir
+		t.Fatal(writeErr)
+	}
+	if saveErr := records.Save("claude", agentrecord.Document{
+		Command:              command,
+		NonLaunchSubcommands: []string{"update", "update-config"},
+	}); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	transports := newTransportRegistry()
+	transports.register(testLaunchBinding("claude").Transport, transportKind{local: true})
+	service := newAgentLaunchService(records, transports, newAgentLaunchTickets())
+
+	path := bin + string(os.PathListSeparator) + os.Getenv("PATH")
+	resolution, err := service.Resolve(
+		context.Background(),
+		testLaunchBinding("claude"),
+		lifecyclepub.AgentLaunchContext{Path: &path, Cwd: dir},
+	)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !resolution.Local || !resolution.ToolSurface {
+		t.Fatalf("resolution = %+v, want a local launch with a surface", resolution)
+	}
+	if resolution.NonLaunchSubcommands != "update update-config" {
+		t.Fatalf("non-launch subcommands = %q, want the record's list space-joined", resolution.NonLaunchSubcommands)
+	}
+
+	// A record that marks nothing answers with nothing: the field is the
+	// record's, never a default the backend invented.
+	if saveErr := records.Save("quiet", agentrecord.Document{Command: command}); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	quiet, err := service.Resolve(
+		context.Background(),
+		testLaunchBinding("quiet"),
+		lifecyclepub.AgentLaunchContext{Path: &path, Cwd: dir},
+	)
+	if err != nil {
+		t.Fatalf("resolve quiet: %v", err)
+	}
+	if quiet.NonLaunchSubcommands != "" {
+		t.Fatalf("a record that marks nothing answered %q", quiet.NonLaunchSubcommands)
+	}
+}

@@ -227,6 +227,18 @@ const agentLaunchSetupLocal = `__nocx_agent_launch_resolve "$__agent"
         builtin printf 'nocx: not started — %s\n' "${__nocx_agent_launch_reason:-local agent record has no usable launch configuration}" >&2
         __nocx_agent_launch_clear
         return 1
+    fi
+    # A SUBCOMMAND THE RECORD MARKS AS NOT A LAUNCH runs the record's program
+    # with the person's argv and nothing else (nocx-3an1s.1.3): no tool surface
+    # — Claude rejects its own --mcp-config on update — and no enrolment,
+    # because a maintenance command is not an agent session. The ticket the
+    # resolution issued is released rather than left live. The record owns the
+    # list; the answer carried it; __nocx_agent_launch_maintenance reads it.
+    if __nocx_agent_launch_maintenance "$@"; then
+        __nocx_agent_launch_cancel
+        if __nocx_agent_launch_exec 0 "$@"; then __rc=0; else __rc=$?; fi
+        __nocx_agent_launch_clear
+        return $__rc
     fi`
 
 const agentEnrolRefusalLocal = `if (( __nocx_agent_launch_local )); then

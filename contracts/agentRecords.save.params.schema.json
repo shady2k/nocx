@@ -50,6 +50,12 @@
         "type": "string"
       }
     },
+    "nonLaunchSubcommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "resume": {
       "$ref": "#/$defs/resume"
     }

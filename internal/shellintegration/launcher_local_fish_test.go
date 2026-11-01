@@ -672,3 +672,92 @@ function fish_greeting; end
 		t.Fatalf("conventional Fish lost native user startup: %q, %v", data, readErr)
 	}
 }
+
+// A SUBCOMMAND THE RECORD MARKS AS NOT A LAUNCH REACHES THE CLI UNCHANGED,
+// in Fish too (nocx-3an1s.1.3, GitHub #541). Fish's wrapper is built by
+// fish_agents.go rather than authored in the shell script, so this is the
+// third implementation that must read the same record answer: `fish-agent
+// update` gets the person's argv and no --mcp-config, and a plain
+// `fish-agent` still gets the staged tool surface.
+func TestNativeFish_NonLaunchSubcommandKeepsTheTypedArgv(t *testing.T) {
+	fish, home, opts := nativeFishFixture(t, `function fish_greeting; end
+function fish_prompt; printf 'NATIVE_FISH> '; end
+`)
+	opts.Agents = []string{"fish-agent"}
+	opts.AgentToolSocketPath = filepath.Join(t.TempDir(), "tool.sock")
+	result := filepath.Join(t.TempDir(), "args")
+	// The record's program writes the argv it received, to a file per kind of
+	// invocation: the first argument is the person's only one here, so it is
+	// also what tells the two runs apart.
+	program := `out="$RESULT"
+case "$1" in
+  update) out="$RESULT.maintenance" ;;
+  *) out="$RESULT.surface" ;;
+esac
+printf '%s\n' "$@" > "$out"`
+	payload, err := EncodeAgentLaunchPayload([]string{"/bin/sh", "-c", program, "fish-agent"}, []string{"RESULT=" + result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := newFakeKernel(t, testCap)
+	k.onEvent = func(conn net.Conn, event kernelEvent) {
+		reply := map[string]any{
+			"v": 1, "lane": testLane, "dom": testDom, "epoch": testEpoch, "seq": 0,
+			"request": event.Body["request"],
+		}
+		switch event.Evt {
+		case "agent_launch_resolve":
+			reply["evt"], reply["agent"] = "agent_launch_resolved", event.Body["agent"]
+			reply["local"], reply["tool_surface"] = true, true
+			// What the shipped Claude record's nonLaunchSubcommands arrive as.
+			reply["non_launch_subcommands"] = "update"
+			reply["ticket"], reply["payload"] = strings.Repeat("A", 43), payload
+		case "agent_enrol":
+			reply["evt"], reply["agent"], reply["enrolled"] = "agent_enrolled", event.Body["agent"], true
+		case "agent_withdraw":
+			reply["evt"] = "agent_withdrawn"
+		default:
+			return
+		}
+		body, marshalErr := json.Marshal(reply)
+		if marshalErr != nil {
+			t.Error(marshalErr)
+			return
+		}
+		if _, writeErr := lifecyclecodec.WriteRawFrame(conn, body); writeErr != nil {
+			t.Error(writeErr)
+		}
+	}
+	s := startLocalPaneMode(t, fish, ShellFish, home, opts, localPaneOptions{kernel: k, waitHandshake: true})
+	defer s.close()
+
+	s.run("fish-agent update")
+	assertFishExit(t, s, 0)
+	maintenance, err := os.ReadFile(result + ".maintenance") //nolint:gosec // this test's own temp directory
+	if err != nil {
+		t.Fatalf("the maintenance subcommand did not run: %v (events=%v output=%q)", err, k.events(), s.output())
+	}
+	if got := strings.Split(strings.TrimSpace(string(maintenance)), "\n"); len(got) != 1 || got[0] != "update" {
+		t.Fatalf("maintenance argv = %q, want exactly the typed word", got)
+	}
+	if k.count("agent_enrol") != 0 {
+		t.Fatalf("a maintenance subcommand was enrolled as an agent launch: %v", k.events())
+	}
+	if _, statErr := os.Stat(result + ".surface"); !os.IsNotExist(statErr) {
+		t.Fatal("the maintenance subcommand was reported as a tool-surface launch")
+	}
+
+	s.run("fish-agent")
+	assertFishExit(t, s, 0)
+	surface, err := os.ReadFile(result + ".surface") //nolint:gosec // this test's own temp directory
+	if err != nil {
+		t.Fatalf("the plain launch did not run: %v (events=%v output=%q)", err, k.events(), s.output())
+	}
+	argv := strings.Split(strings.TrimSpace(string(surface)), "\n")
+	if len(argv) != 2 || argv[0] != "--mcp-config" || !strings.HasSuffix(argv[1], "/mcp.json") {
+		t.Fatalf("plain launch argv = %q, want --mcp-config and the staged file", argv)
+	}
+	if k.count("agent_enrol") != 1 {
+		t.Fatalf("the plain launch was not enrolled exactly once: %v", k.events())
+	}
+}

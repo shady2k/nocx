@@ -67,6 +67,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -213,6 +214,17 @@ type Document struct {
 	// Env is environment lines — "KEY=VALUE" — set for everything this agent
 	// launches.
 	Env []string `json:"env,omitempty"`
+	// NonLaunchSubcommands names the FIRST argument words that are not a
+	// launch of this agent — `update` for `claude update` — so their argv
+	// reaches the CLI unchanged and without the tool surface
+	// (nocx-3an1s.1.3, GitHub #541). It is a fact about the AGENT, which is
+	// why it lives here rather than in a shell's list: the wrapper is one
+	// generated block per shell and the record is what all of them read.
+	//
+	// Each is compared as one whole word, never as a prefix or a glob, so a
+	// launch whose first argument merely starts with one ("update" vs
+	// "update-config") is still a launch.
+	NonLaunchSubcommands []string `json:"nonLaunchSubcommands,omitempty"`
 	// Resume is the three shapes above. Absent is legitimate and means this
 	// agent does not resume at all.
 	Resume Resume `json:"resume"`
@@ -269,11 +281,27 @@ func (d Document) validate() error {
 			return fmt.Errorf("environment line %d is %q, and each line must be KEY=VALUE with a shell-safe key and no line break", i+1, e)
 		}
 	}
+	if err := noEmptyElements("non-launch subcommand", d.NonLaunchSubcommands); err != nil {
+		return err
+	}
+	for i, sub := range d.NonLaunchSubcommands {
+		if !subcommandWord.MatchString(sub) {
+			return fmt.Errorf("non-launch subcommand %d is %q, and each is one plain word (letters, digits, '.', '_' or '-', not starting with '-') so a shell can compare it whole", i+1, sub)
+		}
+	}
 	if err := d.Resume.validate(); err != nil {
 		return err
 	}
 	return nil
 }
+
+// subcommandWord is the spelling a non-launch subcommand may have. The
+// consumers compare the first typed argument against these words one at a
+// time, and the wire carries the list space-joined (agentLaunchResolved.
+// NonLaunchSubcommands), so a word with a space in it, a glob it would be
+// matched with, or a leading '-' that a shell would read as an option is not
+// something the list can express.
+var subcommandWord = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // validLaunchText refuses data that cannot be carried in a UTF-8 launch
 // payload or represented in argv/environment. Unix process arguments and

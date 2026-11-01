@@ -21,6 +21,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
@@ -265,7 +266,7 @@ func install(fs RemoteFS, dir, binary string, compressed []byte) error {
 	if err := mkdirAll(fs, dir, dirMode); err != nil {
 		return fmt.Errorf("deploy: install directory: %w", err)
 	}
-	payload, err := gunzip(compressed)
+	payload, err := decompressedPayload(compressed)
 	if err != nil {
 		return fmt.Errorf("deploy: decompress helper: %w", err)
 	}
@@ -317,6 +318,53 @@ func install(fs RemoteFS, dir, binary string, compressed []byte) error {
 
 // gunzip decompresses one embedded artifact — the payload is uploaded
 // decompressed (D20).
+// decompressedArtifacts remembers every artifact this process has decompressed.
+//
+// The same artifact is decompressed once per install otherwise: an App that
+// opens a pane installs this machine's helper, every stand in a test process
+// installs its own copy, and the package's own profile measured 12.18 s of the
+// internal/app suite inside gunzip alone (nocx-atpw5.1.17). A process installs
+// at most the build's own artifact matrix — four targets plus this machine's
+// local variant — so the entries are bounded by the build rather than by how
+// many installs it performs.
+//
+// THE LOCK IS HELD ACROSS THE DECOMPRESSION, which is what makes "once" true
+// rather than likely: two panes opening at once install the same artifact at
+// once, and the second must read what the first produced rather than decompress
+// a second copy. The work it serialises is a cold start's, once per artifact,
+// and an install of a different artifact waits for it rather than repeating it.
+type decompressedArtifacts struct {
+	mu sync.Mutex
+	// byDigest is keyed by the COMPRESSED artifact's own digest — the input of
+	// the decompression — so two different artifacts can never answer for one
+	// another, and a corrupt or unexpected artifact is still decompressed (and
+	// still fails) rather than served a payload cached for its generation.
+	//
+	// THE PAYLOADS ARE SHARED: every caller writes one out and none modifies
+	// it, so what the map holds is the artifact's bytes rather than a copy per
+	// install.
+	byDigest map[[sha256.Size]byte][]byte
+}
+
+var decompressed = &decompressedArtifacts{byDigest: map[[sha256.Size]byte][]byte{}}
+
+// decompressedPayload answers the payload of one compressed artifact, reading
+// it from this process's memory when it has been decompressed before.
+func decompressedPayload(compressed []byte) ([]byte, error) {
+	digest := sha256.Sum256(compressed)
+	decompressed.mu.Lock()
+	defer decompressed.mu.Unlock()
+	if p, ok := decompressed.byDigest[digest]; ok {
+		return p, nil
+	}
+	p, err := gunzip(compressed)
+	if err != nil {
+		return nil, err
+	}
+	decompressed.byDigest[digest] = p
+	return p, nil
+}
+
 func gunzip(data []byte) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {

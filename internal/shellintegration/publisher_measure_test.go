@@ -270,9 +270,15 @@ import (
 // handed the ssh branch the whole frame to eval — the parse error that ate
 // every typed ssh. Both tiers moved by the same guard; posix was already
 // correct (no nested launch on that tier).
+//
+// The zsh cancel wait's MONITOR-off guard measured 92357 bytes (+21), still
+// 63 calls (nocx-6o5xe): `unsetopt monitor` for the duration of the trapped
+// launch wait keeps the shell in the terminal's foreground group, so an
+// interrupt cannot be lost to a child's process group. Comments are stripped
+// at publish; the published growth is that one line.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 92336
+	measuredMaxPublishBytes = 92357
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

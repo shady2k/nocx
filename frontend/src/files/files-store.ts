@@ -119,6 +119,12 @@ interface DirListing {
   nextOffset: number
   /** The generation whose response was last applied to this directory. */
   appliedGeneration: number
+  /** A "Show next" the person pressed while this directory was already
+   *  enumerating. It is an INPUT and not a second `busy`: the click is
+   *  serviced when the listing in flight settles (resumePendingPage), never
+   *  dropped, because a change-driven re-list owns the enumeration but not
+   *  the person's intent (nocx-atpw5.1.16). */
+  wantsNextPage: boolean
 }
 
 function emptyListing(): DirListing {
@@ -135,6 +141,7 @@ function emptyListing(): DirListing {
     hasMore: false,
     nextOffset: 0,
     appliedGeneration: -1,
+    wantsNextPage: false,
   }
 }
 
@@ -936,8 +943,16 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     dir.busy = true
     bumpTree()
     return services.list(ctx.bindingId as string, dir.path, offset, limit).then(
-      (res) => untrack(() => applyListing(dir, ctx, res)),
-      (e) => untrack(() => applyListError(dir, ctx, e)),
+      (res) =>
+        untrack(() => {
+          applyListing(dir, ctx, res)
+          resumePendingPage(dir)
+        }),
+      (e) =>
+        untrack(() => {
+          applyListError(dir, ctx, e)
+          resumePendingPage(dir)
+        }),
     )
   }
 
@@ -1278,6 +1293,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (node.busy || node.cyclic) return
     if (node.expanded) {
       node.expanded = false
+      // The collapse is a later input than any owed page: a page fetched for
+      // a directory nobody is looking at would be invisible work, and the
+      // flag must not fire on some later settle (nocx-atpw5.1.16).
+      node.wantsNextPage = false
       bumpTree()
       // The collapsed directory leaves the watch set: the set is what the
       // panel renders, and files.watch replaces it wholesale, so sending
@@ -1472,6 +1491,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         dir.busy = false
         bumpTree()
         if (walk === revealWalkId) onDone()
+        resumePendingPage(dir)
         return
       }
       if (res.state === 'ok') {
@@ -1500,12 +1520,14 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         // applyListing's wrapper: reconcile here for the same reason.
         void syncWatchSet()
         if (walk === revealWalkId) onDone()
+        resumePendingPage(dir)
         return
       }
       // tooLarge/timedOut: apply through the same path every other
       // refusal rides, so the state row renders identically.
       applyListing(dir, ctx, res)
       if (walk === revealWalkId) onDone()
+      resumePendingPage(dir)
     }
     services
       .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE)
@@ -1514,6 +1536,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
           if (!scopeCurrent(ctx)) return
           applyListError(dir, ctx, e)
           if (walk === revealWalkId) onDone()
+          resumePendingPage(dir)
         }),
       )
   }
@@ -1562,6 +1585,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     bumpTree()
     settleReveal(true)
     void syncWatchSet()
+    resumePendingPages()
   }
   /** A stopped walk (a refused level, a missing child) keeps what it did
    *  open and publishes it. A SUPERSEDED walk returns at the guard and
@@ -1575,68 +1599,149 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     settleReveal(false)
     maybeStartFilterSearch()
     void syncWatchSet()
+    resumePendingPages()
   }
 
+  /** Fetch the next page of an expanded directory (D10).
+   *
+   *  A CLICK THAT LANDS WHILE THE DIRECTORY IS ALREADY ENUMERATING IS
+   *  REMEMBERED, NOT DROPPED (nocx-atpw5.1.16). A change-driven re-list
+   *  (onFilesChanged → refreshDir) owns the enumeration for as long as its
+   *  answer is outstanding, and this used to return on `busy` — the person
+   *  pressed "Show next 20" and no files.list left the renderer at all. The
+   *  button's own disabled state was a second owner of the same input, so
+   *  the browser could swallow the click too; both are gone. The store is
+   *  the one owner of the directory's enumeration: the click is serviced
+   *  when the listing in flight settles (resumePendingPage), after the
+   *  window that listing established. */
   function showMore(dir: FilesRoot | FilesNode): void {
-    if (dir.busy || dir.state !== 'ok' || !dir.hasMore) return
+    if (dir.state !== 'ok' || !dir.hasMore) return
     const ctx = captureCtx()
     if (ctx === null) return
+    if (dir.busy) {
+      dir.wantsNextPage = true
+      return
+    }
+    requestNextPage(dir, ctx)
+  }
+
+  /** One page request: append the answer to what is already displayed. */
+  function requestNextPage(dir: FilesRoot | FilesNode, ctx: ListCtx): void {
     const offset = dir.nextOffset
     dir.busy = true
     bumpTree()
     services.list(ctx.bindingId as string, dir.path, offset, FILES_PAGE_SIZE).then(
       (res) => {
-        if (!scopeCurrent(ctx)) return
-        if (ctx.generation < dir.appliedGeneration || dir.state !== 'ok') {
-          dir.busy = false
-          bumpTree()
-          return
-        }
-        if (res.state === 'ok') {
-          // A directory that changed between pages must not have a page
-          // from the old snapshot appended to a page from the new one —
-          // that is how rows duplicate and skip (§7). Re-list the
-          // displayed window in one call instead (the refresh form).
-          if (res.rev !== dir.rev) {
-            refreshDir(dir)
-            return
-          }
-          // The pagination was reset while this page was in flight (a
-          // refresh landed first): appending would corrupt the fresh
-          // listing, so drop the page — the refresh already replaced it.
-          if (res.offset !== dir.nextOffset) {
-            dir.busy = false
-            bumpTree()
-            return
-          }
-          dir.children.push(...res.entries.map(entryToNode))
-          dir.nextOffset = res.offset + res.entries.length
-          dir.hasMore = res.hasMore
-          dir.total = res.total
-          dir.rev = res.rev
-          dir.appliedGeneration = ctx.generation
-          dir.busy = false
-          bumpTree()
-          return
-        }
-        // A page request refused: the directory is now too large or too
-        // slow. Render that state; the partial listing is discarded
-        // (D14: an apparently complete prefix is worse than a refusal).
-        dir.state = res.state === 'tooLarge' ? 'tooLarge' : 'timedOut'
-        if (res.state === 'tooLarge') {
-          dir.tooLargeLimit = res.limit
-          dir.observedCount = res.observedCount ?? null
-        } else {
-          dir.timeout = res.timeout
-        }
-        dir.children = []
-        dir.hasMore = false
-        dir.appliedGeneration = ctx.generation
+        untrack(() => applyNextPage(dir, ctx, res))
+        untrack(() => resumePendingPage(dir))
+      },
+      (e) =>
+        untrack(() => {
+          applyListError(dir, ctx, e)
+          resumePendingPage(dir)
+        }),
+    )
+  }
+
+  function applyNextPage(dir: FilesRoot | FilesNode, ctx: ListCtx, res: FilesListResult): void {
+    if (!scopeCurrent(ctx)) return
+    if (ctx.generation < dir.appliedGeneration || dir.state !== 'ok') {
+      dir.busy = false
+      bumpTree()
+      return
+    }
+    if (res.state === 'ok') {
+      // A directory that changed between pages must not have a page
+      // from the old snapshot appended to a page from the new one —
+      // that is how rows duplicate and skip (§7). Re-list the
+      // displayed window in one call instead (the refresh form).
+      if (res.rev !== dir.rev) {
+        refreshDir(dir)
+        return
+      }
+      // The pagination was reset while this page was in flight (a
+      // refresh landed first): appending would corrupt the fresh
+      // listing, so drop the page — the refresh already replaced it.
+      if (res.offset !== dir.nextOffset) {
         dir.busy = false
         bumpTree()
-      },
-      (e) => untrack(() => applyListError(dir, ctx, e)),
+        return
+      }
+      dir.children.push(...res.entries.map(entryToNode))
+      dir.nextOffset = res.offset + res.entries.length
+      dir.hasMore = res.hasMore
+      dir.total = res.total
+      dir.rev = res.rev
+      dir.appliedGeneration = ctx.generation
+      dir.busy = false
+      bumpTree()
+      return
+    }
+    // A page request refused: the directory is now too large or too
+    // slow. Render that state; the partial listing is discarded
+    // (D14: an apparently complete prefix is worse than a refusal).
+    dir.state = res.state === 'tooLarge' ? 'tooLarge' : 'timedOut'
+    if (res.state === 'tooLarge') {
+      dir.tooLargeLimit = res.limit
+      dir.observedCount = res.observedCount ?? null
+    } else {
+      dir.timeout = res.timeout
+    }
+    dir.children = []
+    dir.hasMore = false
+    dir.appliedGeneration = ctx.generation
+    dir.busy = false
+    bumpTree()
+  }
+
+  /** Service a "Show next" that landed while the directory was already
+   *  enumerating (nocx-atpw5.1.16). Called wherever a listing for the
+   *  directory settles — the change-driven re-list, a page, a walk step — so
+   *  the click follows the enumeration instead of racing it.
+   *
+   *  The watch is awaited first: the listing that just settled may have
+   *  published a new set, and files.watch takes its own baseline listing, so
+   *  the panel must not contend with itself for the capacity-one filesystem
+   *  gate. A listing that starts in that gap keeps the click owed, and the
+   *  next settle services it. */
+  function resumePendingPage(dir: FilesRoot | FilesNode): void {
+    if (!dir.wantsNextPage) return
+    if (dir.busy || revealing) return
+    if (dir.state !== 'ok' || !dir.hasMore) {
+      dir.wantsNextPage = false
+      return
+    }
+    if (captureCtx() === null) return
+    void watchInFlight.then(() =>
+      untrack(() => {
+        if (!dir.wantsNextPage) return
+        if (dir.busy || revealing) return
+        if (dir.state !== 'ok' || !dir.hasMore) {
+          dir.wantsNextPage = false
+          return
+        }
+        // Re-read after the wait: the click is serviced against the scope
+        // that is current when the page is actually asked for.
+        const ctx = captureCtx()
+        if (ctx === null) return
+        dir.wantsNextPage = false
+        requestNextPage(dir, ctx)
+      }),
     )
+  }
+
+  /** Every directory still owed a page, walked in tree order. The reveal
+   *  walk suppresses its own change refreshes and publishes its watch set
+   *  only when it ends, so its two endings are the moments a click that
+   *  landed mid-walk can be serviced (nocx-atpw5.1.16). */
+  function resumePendingPages(): void {
+    const r = untrack(root)
+    if (r === null) return
+    const visit = (dir: FilesRoot | FilesNode): void => {
+      resumePendingPage(dir)
+      for (const child of dir.children) if (child.expanded) visit(child)
+    }
+    visit(r)
   }
 
   function retry(dir: FilesRoot | FilesNode): void {

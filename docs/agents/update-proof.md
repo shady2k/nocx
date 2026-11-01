@@ -1,9 +1,15 @@
-# A published nightly replaces the installed Linux AppImage
+# A published release replaces the installed Linux AppImage
 
 `nocx-1ebrs.35.6` owns this acceptance harness. It does not build an updater or
-add a diagnostic to the product. It runs the downloaded previous nightly's real
-GTK/WebKit window, selects nightly through Settings, checks, installs and presses
-**Restart now**. It then hashes the installed AppImage **after restart**.
+add a diagnostic to the product. It runs the downloaded previous release's real
+GTK/WebKit window, selects the channel through Settings, checks, installs and
+presses **Restart now**. It then hashes the installed AppImage **after restart**.
+
+The same driver proves both channels, chosen by `--channel` (default
+`nightly`): the nightly pair, and since `nocx-86e2f` the previous stable
+AppImage updating to the stable release the release workflow just promoted.
+Only the channel's pair rules, the settings row it selects and the relay's
+manifest location differ; the assertions and the code path are one.
 
 ## Inputs and trust
 
@@ -33,6 +39,14 @@ different full commit and a strictly later stamped `build.builtAt`, matching
 `newerNightly` in `internal/update/manifest.go:137`. A later publication alone
 cannot turn an older build into an update. The equal-version pair still proves
 the daily-channel case that a semver-only updater cannot pass.
+
+The stable channel has none of that: `newerNightly` returns false for it, so the
+candidate must be **strictly newer** and no build stamp is read. Its two
+manifests must name `https://github.com/shady2k/nocx/releases/download/vX.Y.Z/`
+artifacts and `releases/tag/vX.Y.Z` notes, each with the manifest's own version;
+the promotion copies the tried nightly's bytes and rewrites only those URLs
+(ADR-0097), so the tag is what proves these are the promoted bytes rather than
+the nightly they came from.
 
 ## Run through the allowed test route
 
@@ -94,12 +108,14 @@ A failed upload without `NOCX_RUN_EXIT` means no test ran, not a failed assertio
    restart, never the extracted binary or mount.** The extracted candidate is
    only an identity reference, never a writable substitute for the installation.
 2. The lock lives under the disposable profile's data directory, not beside a
-   mounted executable. Settings selects nightly through the actual accessible
-   controls. A lower-semver signed manifest and an unsigned signature produce no
-   mutation; the unsigned check visibly fails signature verification.
-3. A positive check uses the production moving nightly URL. The relay forwards
-   real upstream bytes and refuses a candidate/alias mismatch. The real Install
-   control applies it. Before restart, the journal names the actual installed
+   mounted executable. Settings selects the proof's channel through the actual
+   accessible controls. A lower-semver signed manifest and an unsigned signature
+   produce no mutation; the unsigned check visibly fails signature
+   verification.
+3. A positive check uses the production location of the channel it proves —
+   the moving nightly tag, or `releases/latest` for stable. The relay forwards
+   real upstream bytes and refuses a candidate/location mismatch. The real
+   Install control applies it. Before restart, the journal names the actual installed
    AppImage and candidate digest; the install holds candidate bytes and the swap
    peer holds previous bytes.
 4. After the real Restart control, a different window PID executes the candidate
@@ -109,15 +125,58 @@ A failed upload without `NOCX_RUN_EXIT` means no test ran, not a failed assertio
    Coordinator identity is recorded separately: ADR-0104 explicitly permits a
    compatible same-Version/different-Commit coordinator to survive a nightly.
    A version increase must instead run the candidate coordinator.
-5. An already-current check does not offer the same artifact again. Replaying the
-   previous authentic nightly must not offer a downgrade. This is an assertion
-   against the product's ordering policy, not a harness-only `released` comparison.
+5. An already-current check does not offer the same artifact again. Replaying
+   the previous authentic published release must not offer a downgrade. This is
+   an assertion against the product's ordering policy, not a harness-only
+   `released` comparison.
 
 The loopback HTTPS relay in `scripts/update-proof/transport.py` is **test tooling
-only**, never shipped code. It can replace only the nightly manifest and its
-signature for negative probes. The real application, production keyring, artifact
-URL and desktop controls stay unchanged. Positive checks use the actual published
+only**, never shipped code. It can replace only the proved channel's manifest
+and its signature for negative probes — the moving `nightly` tag for a nightly
+proof, `releases/latest/download` for a stable one — so a check that used the
+other channel asks a URL the relay does not intercept and the proof fails
+rather than passing on the wrong channel. The real application, production
+keyring, artifact URL and desktop controls stay unchanged. Positive checks use the actual published
 channel. Temporary transport trust does not introduce a release signing key.
+
+## The stable channel, and its own workflow runs it
+
+`nocx-86e2f` needs no second driver: `--channel stable` is the same `run()`.
+The pair is chosen by version, never by publication order — `stable_releases()`
+in `prove-linux.py` sorts every non-prerelease, non-draft release tag by semver,
+takes the newest as the candidate, the one below it as the previous, and the
+one below that as the downgrade probe. Every such tag must be
+`vMAJOR.MINOR.PATCH`; one that does not parse fails the proof closed, for the
+reason ADR-79b6cy61 gives. Three releases are required, which is why this mode
+cannot run before v0.8.1 is promoted: v0.8.0 is the first stable whose updater
+the harness covers, so it has to be the _previous_ stable, v0.8.1 the
+candidate, and a real stable below v0.8.0 the downgrade probe. Blocked is exit
+2 and never a pass. To run it by hand, add `--channel stable --promoted
+vX.Y.Z` to the command above, with the previous stable, the promoted stable and
+a stable below the previous as the three staged pairs.
+
+`.github/workflows/stable-update-proof.yml` carries it, not `release.yml`: a
+promotion copies tried bytes, tags and signs, and the promotion test refuses any
+build command in the release workflow (ADR-0097, ADR-79b6cy61). The proof is a
+`workflow_run` on `Release` (completed), so it starts only after the tag, the
+published release and the cask all exist — the ordering `needs: promote` had.
+It reads the version this run promoted from `promotion/plan.json` in the
+promotion's own evidence artifact, and a dry run or a refused promotion that
+left no such artifact skips (does not fail). It asks readiness for the three
+tags with `--publication-status --channel stable --promoted vX.Y.Z`, refuses a
+newest stable that is not the promoted tag, downloads the three signed pairs,
+builds `cmd/manifest-sign` from the Release run's commit — the tree the
+promotion signed with — and runs the driver under `dbus-run-session`/`xvfb-run`.
+Its evidence is uploaded as `linux-stable-update-proof`. The host packages it
+needs are the `linux-update-proof-runtime` composite action, shared with the
+nightly job so the two cannot prove on different desktops.
+
+Consequences of it living in its own workflow: a failed proof fails that run,
+not the Release run that already shipped (the evidence names what failed), and
+it holds no `nocx-release` concurrency slot — it reads published bytes, and a
+nightly publication is a prerelease that cannot change what it reads. A second
+stable promotion during the proof would move `releases/latest` and fail the
+proof of the older stable, which is honest rather than wrong.
 
 ## The nightly workflow runs it
 

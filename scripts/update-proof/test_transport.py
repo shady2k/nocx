@@ -90,11 +90,12 @@ class TransportTests(unittest.TestCase):
                                    self.payloads["candidate"]):
             self.opener.responses[transport.BASE + suffix] = payload
 
-    def request(self, path, *, context=None):
+    def request(self, path, *, context=None, relay=None):
         # HTTPSConnection wraps the CONNECT socket with server_hostname set to
         # github.com, so normal CA and hostname verification remain enabled.
+        relay = relay or self.relay
         connection = http.client.HTTPSConnection(
-            "127.0.0.1", self.relay.server.server_port,
+            "127.0.0.1", relay.server.server_port,
             context=context or self.context, timeout=5)
         self.addCleanup(connection.close)
         connection.set_tunnel("github.com", 443)
@@ -255,6 +256,66 @@ class TransportTests(unittest.TestCase):
                     # Restore so each subtest reaches the intended document.
                     index = int(suffix.endswith(".sig"))
                     self.opener.responses[transport.BASE + suffix] = self.payloads["candidate"][index]
+
+    def stable_relay(self):
+        relay = transport.Relay(self.directory, self.pairs["stale"],
+                                self.pairs["candidate"], self.pairs["lower"],
+                                channel="stable")
+        self.addCleanup(relay.close)
+        return relay
+
+    def test_stable_relay_intercepts_only_the_latest_manifest_documents(self):
+        relay = self.stable_relay()
+        relay.mode = "stale"
+        opener = FixtureOpener()
+        relay.upstream = opener
+        context = ssl.create_default_context(cafile=str(relay.cert))
+        for suffix, payload in zip(("manifest.json", "manifest.json.sig"),
+                                   self.payloads["stale"]):
+            self.assertEqual(
+                self.request("/shady2k/nocx/releases/latest/download/" + suffix,
+                             context=context, relay=relay),
+                (200, payload))
+        self.assertEqual([entry["mode"] for entry in relay.requests], ["stale", "stale"])
+        self.assertTrue(all(entry.get("ok") for entry in relay.requests))
+        self.assertEqual(opener.requests, [], "a refusal pair must not fetch upstream")
+        # The versioned location the redirect resolves to is not the channel
+        # base: a stable check may request it after a real redirect, and that
+        # request must reach production, not a saved probe document.
+        versioned = "/shady2k/nocx/releases/download/v0.8.1/manifest.json"
+        payload = b"promoted stable manifest from production"
+        opener.responses["https://github.com" + versioned] = payload
+        self.assertEqual(self.request(versioned, context=context, relay=relay), (200, payload))
+        self.assertEqual(opener.requests, [("https://github.com" + versioned, 120)])
+
+    def test_stable_live_preflight_fetches_the_latest_documents(self):
+        relay = self.stable_relay()
+        opener = FixtureOpener()
+        relay.upstream = opener
+        for suffix, payload in zip(("manifest.json", "manifest.json.sig"),
+                                   self.payloads["candidate"]):
+            opener.responses[transport.BASES["stable"] + suffix] = payload
+        relay.verify_live()
+        self.assertEqual(opener.requests, [
+            (transport.BASES["stable"] + "manifest.json", 60),
+            (transport.BASES["stable"] + "manifest.json.sig", 60)])
+        self.assertEqual(relay.requests, [],
+                         "preflight must not satisfy a desktop request")
+
+    def test_stable_live_preflight_refuses_changed_production_documents(self):
+        relay = self.stable_relay()
+        opener = FixtureOpener()
+        relay.upstream = opener
+        opener.responses[transport.BASES["stable"] + "manifest.json"] = b"another release"
+        opener.responses[transport.BASES["stable"] + "manifest.json.sig"] = \
+            self.payloads["candidate"][1]
+        with self.assertRaisesRegex(RuntimeError, "stable release does not match"):
+            relay.verify_live()
+
+    def test_relay_refuses_an_unknown_channel(self):
+        with self.assertRaisesRegex(common.ProofError, "unknown update channel"):
+            transport.Relay(self.directory, self.pairs["stale"], self.pairs["candidate"],
+                            self.pairs["lower"], channel="beta")
 
     def test_unknown_mode_fails_closed_instead_of_silently_using_live_bytes(self):
         self.relay.mode = "typo"

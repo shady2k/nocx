@@ -14,15 +14,31 @@ import socketserver
 import ssl
 import threading
 import urllib.error
+from urllib.parse import urlparse
 import urllib.request
 
 from common import command, require
 
-BASE = "https://github.com/shady2k/nocx/releases/download/nightly/"
+# The two manifest locations the product reads (internal/update/channel.go):
+# nightly rides the moving prerelease tag, stable rides GitHub's `latest`
+# redirect. Both are the channel's base; the proof relays whichever channel
+# it is proving, so a stable proof intercepts the same two documents at the
+# stable base.
+BASES = {
+    "nightly": "https://github.com/shady2k/nocx/releases/download/nightly/",
+    "stable": "https://github.com/shady2k/nocx/releases/latest/download/",
+}
+BASE = BASES["nightly"]
 
 
 class Relay:
-    def __init__(self, root, previous, candidate, lower):
+    def __init__(self, root, previous, candidate, lower, channel="nightly"):
+        require(channel in BASES, "unknown update channel: " + str(channel))
+        self.channel = channel
+        self.base = BASES[channel]
+        self.base_path = urlparse(self.base).path
+        # How the positive check names the production location it read.
+        self.location = "nightly alias" if channel == "nightly" else "stable latest release"
         self.mode = "live"
         self.documents = {"stale": previous, "unsigned": candidate, "lower": lower}
         self.requests = []
@@ -74,7 +90,7 @@ class Relay:
                     self.handle_one_request()
 
             def do_GET(self):
-                suffix = self.path.removeprefix("/shady2k/nocx/releases/download/nightly/")
+                suffix = self.path.removeprefix(relay.base_path)
                 intercepted = suffix in ["manifest.json", "manifest.json.sig"]
                 mode = relay.mode
                 try:
@@ -99,7 +115,7 @@ class Relay:
                                 data = response.read()
                                 expected = Path(relay.candidate[1 if suffix.endswith(".sig") else 0]).read_bytes()
                                 require(data == expected,
-                                        "production nightly alias changed or differs from candidate")
+                                        "production " + relay.location + " changed or differs from candidate")
                                 self.send_response(200)
                                 self.send_header("Content-Length", str(len(data)))
                                 self.end_headers()
@@ -137,12 +153,13 @@ class Relay:
     def verify_live(self):
         for index, suffix in enumerate(["manifest.json", "manifest.json.sig"]):
             try:
-                with self.upstream.open(BASE + suffix, timeout=60) as response:
+                with self.upstream.open(self.base + suffix, timeout=60) as response:
                     data = response.read()
             except Exception as error:
-                raise RuntimeError("nightly producer is not live / no nightly published yet: " + str(error)) from error
+                raise RuntimeError(self.channel + " release is not live / no " + self.channel
+                                   + " release published yet: " + str(error)) from error
             require(data == Path(self.candidate[index]).read_bytes(),
-                    "published nightly does not match the candidate: " + suffix)
+                    "published " + self.channel + " release does not match the candidate: " + suffix)
 
     def close(self):
         self.release_check()

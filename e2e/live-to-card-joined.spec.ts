@@ -76,17 +76,30 @@ test('a drag from a historical card to live output copies the pinned text and ke
   await page.keyboard.type(`printf '%s\\n' '${live}'; cat`)
   await page.keyboard.press('Enter')
   const grid = page.locator('.pane.active [role="grid"][aria-label="Terminal output"]')
-  const liveRow = grid.locator('[role="row"]', { hasText: live }).last()
+  // THE PRINTED OUTPUT ROW, NOT THE SHELL'S ECHO OF THE COMMAND (nocx-atpw5.1.18).
+  // `live` is part of the typed command too, so a plain hasText filter matches
+  // the echo row first — and once the backend anchor places the output the
+  // running region translates that echo row ABOVE its own clip
+  // (controller._echoShiftPx, ADR-3kqrem7v). Playwright's visibility check does
+  // not look through an ancestor's overflow, so the echo row read as "visible"
+  // while its centre sat inside the 32px running header; the click then waited
+  // forever on a point the header legitimately owns (ci run 41315097338, job
+  // 124873463432). This row's own text is the printed marker: the row a person
+  // actually sees and clicks.
+  const liveRow = grid
+    .locator('[role="row"]')
+    .filter({ hasText: new RegExp(`^\\s*${live}\\s*$`) })
+    .last()
   await expect(liveRow).toBeVisible()
   const terminalInput = page.locator('.pane.active .ui-terminal-input')
   // THE ROW A PERSON CLICKS, NOT THE ELEMENT'S CENTRE. The grid element is the
   // whole SCREEN grid (every row the pty was sized to), while the running
   // region clips it to the output tail; the element's own centre is therefore
   // outside the clip and a synthetic click there is intercepted by the header
-  // or the scroller above it. A person clicks the visible row — the same grid,
-  // through the same gesture, which is what ADR-0092 promises — and that is
-  // what this line does. The assertion after it is unchanged: the click must
-  // reach the existing terminal input.
+  // or the scroller above it. The output row above is inside the clip and its
+  // centre is below the header, so the click is the gesture ADR-0092 promises.
+  // The assertion after it is unchanged: the click must reach the terminal
+  // input.
   await liveRow.click()
   await expect(terminalInput).toBeFocused()
 

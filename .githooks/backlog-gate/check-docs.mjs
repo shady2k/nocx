@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ValueNeeded, valueOf } from './argv.mjs';
 
-export const RULES_VERSION = '0.58.0';
+export const RULES_VERSION = '0.59.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
@@ -15,6 +15,25 @@ const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)
 export const digest = (x) => createHash('sha256').update(JSON.stringify(canonical(x))).digest('hex');
 const same = (a, b) => digest(a) === digest(b);
 const ref = (capability, requirement) => `${capability}/${requirement}`;
+
+// What a receipt stands for in the policy. A check's result is a statement about
+// what that check reads, so what can void it is that check's own definition and
+// the policy fields that apply to every check — `appliesTo`, `ignores`, `fixture`,
+// `kind` — never the rest of the required list: a change that adds a check asks
+// for that check's receipt and leaves every other receipt standing, and a change
+// to one check's entry asks again for that check alone. A policy-wide field
+// (whether approval is required, whether the review answers the design match)
+// applies to every check, so it voids every receipt. A check the policy does not
+// require — one a change names in its own coverage — stands for its absence from
+// the list, which adding or editing another check does not move.
+export const policyWide = (policy) => {
+  const { requiredChecks, ...wide } = policy;
+  return wide;
+};
+export const policyScope = (policy, id) => digest({
+  wide: digest(policyWide(policy)),
+  check: policy.requiredChecks.find((c) => c.id === id) ?? null,
+});
 
 // What an approval binds to: what the change COMMITS TO — its kind, its scope,
 // the requirements it moves and what it promises to leave alone. The rest of
@@ -152,10 +171,16 @@ const policySchema = {
   }),
 };
 const evidenceSchema = {
-  schemaVersion: enumeration(1), revision: optional('string'), policyDigest: 'string',
+  schemaVersion: enumeration(1), revision: optional('string'),
+  // The whole-policy digest an installation wrote before a receipt could stand
+  // for its own check's definition. Read only for a receipt that carries none.
+  policyDigest: optional('string'),
   approvals: array({ changeDigest: 'string', reference: 'string' }),
   checks: array({
     id: 'id', status: enumeration('passed', 'failed', 'skipped', 'unsupported'), reference: 'string', revision: optional('string'),
+    // What this receipt stands for in the policy: its own check's entry and the
+    // policy-wide fields (policyScope), never the whole required list.
+    policyDigest: optional('string'),
     // What the review answered about the build against the design.
     designMatch: optional({ matches: enumeration('yes', 'no'), divergences: array('string') }),
   }),
@@ -233,6 +258,13 @@ const WHY = {
   'unknown-vision-id': 'a judgement\'s entry names one of the owner\'s journeys or principles, because what this document serves or breaks is one of his own: an id the vision record does not declare names nothing, so no one can read the claim. Green looks like this: name an id the vision record carries, and say which passage of the document the claim rests on',
   'unfound-quote': 'a judgement\'s quote is a passage of the document it judged — found verbatim in the text the record is bound to: a charter\'s outcomes and exclusions, or what a design decides, its constraints and the principles it names — with only whitespace forgiven, and at least 20 characters and three words long, so that a word, a bare id, a line of markers or a description of a passage is not passed off as one. Green looks like this: copy the sentence out of the document instead of describing it',
 };
+// Two refusals say their likely cause when the state at hand shows it, and only
+// then. The refusal is the same one and the condition is unchanged: what green
+// looks like is said beside it, because a delta that adds what the base already
+// holds, and documents standing at the change's end outside closure, are states
+// whose cause is one thing and not a search.
+const STALE_BASE_ALREADY_THERE = 'the requirement the delta adds already exists where the change is judged from, so the commit that added it is likely not counted as this change\'s: it names another task, or this change\'s commits interleave with another\'s. Green looks like this: the delta\'s before is that requirement as the base holds it, or the range the push judges reaches the commit that added it';
+const UNSYNCED_CURRENT_AT_THE_END = 'current already stands where the change ends, and closing is the phase that accepts that: run the close phase, or keep current at the baseline until then';
 // A mutation run measures how strong the tests are; it never decides whether
 // the change is correct. What its run gave to this revision is reported and
 // never refused, and its survivors are filed tasks, not a verdict it passes.
@@ -243,8 +275,11 @@ export function checkDocuments(model, policy, evidence = null) {
   schema(policy, policySchema, 'policy');
   if (evidence !== null) schema(evidence, evidenceSchema, 'evidence');
   const violations = [];
-  const check = (id, condition, at) => {
-    if (condition) violations.push({ id, at, why: WHY[id] ?? null });
+  // `why` overrides the rule's standing wording where the state at hand shows a
+  // likely cause. It says the cause, never waives the refusal: same rule, same
+  // condition, same verdict.
+  const check = (id, condition, at, why) => {
+    if (condition) violations.push({ id, at, why: why ?? WHY[id] ?? null });
   };
   const unique = (items, at) => {
     const seen = new Set();
@@ -374,7 +409,8 @@ export function checkDocuments(model, policy, evidence = null) {
       || (d.after && d.after.id !== d.requirement) || same(d.before, d.after), key);
     if (d.before) inspectRequirement(d.before, `before/${key}`);
     if (d.after) inspectRequirement(d.after, `after/${key}`);
-    check('stale-base', !same(baseline.get(key) ?? null, d.before), key);
+    check('stale-base', !same(baseline.get(key) ?? null, d.before), key,
+      !d.before && baseline.has(key) ? STALE_BASE_ALREADY_THERE : null);
     if (d.after) expected.set(key, d.after); else expected.delete(key);
   }
   unique(change.preserves.map((r) => ref(r.capability, r.requirement)), 'change/preserves');
@@ -388,7 +424,11 @@ export function checkDocuments(model, policy, evidence = null) {
   // must equal the replayed change, including preservation of untouched requirements.
   const wanted = model.phase === 'close' ? expected : baseline;
   for (const key of new Set([...wanted.keys(), ...current.keys()])) {
-    check('unsynced-current', !same(wanted.get(key) ?? null, current.get(key) ?? null), key);
+    const drifted = !same(wanted.get(key) ?? null, current.get(key) ?? null);
+    // Before closure, current standing at the change's own end is not a lost
+    // document: it is the end brought forward, and saying so points at the phase.
+    const atTheEnd = model.phase !== 'close' && same(current.get(key) ?? null, expected.get(key) ?? null);
+    check('unsynced-current', drifted, key, atTheEnd ? UNSYNCED_CURRENT_AT_THE_END : null);
   }
 
   // The design's constraints, one closed section, each with an id and each
@@ -445,24 +485,34 @@ export function checkDocuments(model, policy, evidence = null) {
       && present(a.reference)), 'change');
   }
   if (model.phase === 'acceptance' || model.phase === 'close') {
-    check('stale-evidence', !evidence || evidence.policyDigest !== digest(policy), 'evidence');
+    // No receipts at all is not a stale receipt: it is every required check
+    // unproved, and the loop below says so check by check.
+    check('stale-evidence', !evidence, 'evidence');
     const needed = new Set([...applicable.map((c) => c.id), ...change.coverage.flatMap((c) => c.checks)]);
     // Each receipt stands for what its own check reads. A check that says
     // nothing about its inputs reads the whole revision, as before.
     const pinOf = (id) => model.checkRevisions?.find((r) => r.id === id)?.revision;
     for (const c of policy.requiredChecks) check('unpinned-check', (c.ignores?.length ?? 0) > 0 && !pinOf(c.id), `policy/${c.id}`);
     const kindOf = new Map(policy.requiredChecks.map((c) => [c.id, c.kind]));
+    // What a receipt stands for in the policy: its own check's entry and the
+    // policy-wide fields (policyScope above). A receipt that carries no digest of
+    // its own is the older form and is read against the whole policy, which is
+    // what it was given: an installation whose policy has not moved since keeps
+    // its receipts, and the next run records the narrower form.
+    const holdsPolicy = (receipt) => receipt.policyDigest !== undefined
+      ? receipt.policyDigest === policyScope(policy, receipt.id)
+      : evidence.policyDigest === digest(policy);
     const notes = [];
     for (const id of needed) {
       const receipt = evidence?.checks.find((c) => c.id === id);
       const stale = Boolean(evidence && receipt)
-        && (receipt.revision ?? evidence.revision) !== (pinOf(id) ?? model.revision);
+        && (!holdsPolicy(receipt) || (receipt.revision ?? evidence.revision) !== (pinOf(id) ?? model.revision));
       if (kindOf.get(id) === 'mutation' && (!receipt || receipt.status !== 'passed' || !present(receipt.reference) || stale)) {
         notes.push({ id: 'not-made', at: id, why: NOT_MADE });
         continue;
       }
       check('unproved-check', !receipt || receipt.status !== 'passed' || !present(receipt.reference), id);
-      if (evidence && receipt) check('stale-evidence', (receipt.revision ?? evidence.revision) !== (pinOf(id) ?? model.revision), id);
+      check('stale-evidence', stale, id);
     }
     // A review receipt is evidence only if it answered the design question too.
     // A receipt that never passed is refused by unproved-check above and is not
@@ -548,11 +598,26 @@ export function fixtureCases() {
         breaks: [],
       };
     }
-    // Fixtures may request fresh receipts, never production inputs.
+    // Fixtures may request fresh receipts, never production inputs. Each receipt
+    // is bound to its own check's scope under the policy the receipts were given
+    // at ('pristine' is the policy before the case's edits, so a case can ask
+    // whether an edit of one entry voids that receipt). The whole-policy digest
+    // is written too, in the older form: a case that asks for 'oldForm' records
+    // that form alone, which is what an installation that has not run since
+    // carries.
     if (c.receipts) {
       input.evidence.policyDigest = digest(approved.policy);
       input.evidence.approvals = approved.model.change
         ? [{ changeDigest: digest(decided(approved.model.change)), reference: 'fixture:approval' }] : [];
+      // 'oldForm' records the older shape: no digest of its own on any receipt,
+      // so every receipt stands or falls with the whole-policy digest. A receipt
+      // the case writes itself can say '@final': recorded under the policy as the
+      // case leaves it, which is how a wrapper records the check the change adds.
+      for (const receipt of input.evidence.checks) {
+        if (c.oldForm) delete receipt.policyDigest;
+        else if (receipt.policyDigest === undefined) receipt.policyDigest = policyScope(approved.policy, receipt.id);
+        else if (receipt.policyDigest === '@final') receipt.policyDigest = policyScope(input.policy, receipt.id);
+      }
     }
     return { ...c, ...input };
   });
@@ -562,19 +627,32 @@ export function selftest() {
   let failures = 0;
   const unexplained = new Set();
   for (const c of fixtureCases()) {
-    let actual, actualNotes;
+    let actual, actualNotes, found = [];
     try {
-      const found = checkDocuments(c.model, c.policy, c.evidence);
+      found = checkDocuments(c.model, c.policy, c.evidence);
       for (const v of found) if (!v.why) unexplained.add(v.id);
       const notes = notesOf(found);
       for (const n of notes) if (!n.why) unexplained.add(`not-made:${n.at}`);
       actual = [...new Set(found.map((v) => v.id))].sort();
       actualNotes = [...new Set(notes.map((n) => `not-made:${n.at}`))].sort();
-    } catch { actual = ['invalid-input']; actualNotes = []; }
+    } catch { actual = ['invalid-input']; actualNotes = []; found = []; }
     const wantedNotes = [...(c.notes ?? [])].sort();
-    const ok = same(actual, [...c.expected].sort()) && same(actualNotes, wantedNotes);
+    // A case may also ask WHICH subjects were refused ('at': the exact set, so a
+    // rule that voids one receipt is caught voiding a second), and WHAT the
+    // refusal says ('why': the wording, or the cause it names where the state
+    // shows one).
+    const said = found.map((v) => ({ id: v.id, at: v.at, why: v.why ?? '' }));
+    const subjects = [...new Set(found.map((v) => v.at))].sort();
+    const wrongAt = c.at === undefined || same(subjects, [...c.at].sort())
+      ? [] : [`refused ${JSON.stringify(subjects)}, wanted ${JSON.stringify([...c.at].sort())}`];
+    const wrongWhy = Object.entries(c.why ?? {}).filter(([id, fragment]) =>
+      !said.some((v) => v.id === id && v.why.includes(fragment)));
+    const ok = same(actual, [...c.expected].sort()) && same(actualNotes, wantedNotes)
+      && wrongAt.length === 0 && wrongWhy.length === 0;
     console.log(`${ok ? 'PASS' : 'FAIL'}  documents/${c.name}: ${JSON.stringify(actual)}` +
-      (wantedNotes.length || actualNotes?.length ? ` notes: ${JSON.stringify(actualNotes ?? [])}` : ''));
+      (wantedNotes.length || actualNotes?.length ? ` notes: ${JSON.stringify(actualNotes ?? [])}` : '') +
+      (wrongAt.length ? ` (${wrongAt[0]})` : '') +
+      (wrongWhy.length ? ` (nothing said ${wrongWhy.map(([id, f]) => `${id} ~ ${f}`).join(', ')})` : ''));
     if (!ok) failures++;
   }
   // A refusal that names no remedy sends its reader to read the rules instead.

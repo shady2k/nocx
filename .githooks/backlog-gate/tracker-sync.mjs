@@ -68,9 +68,17 @@
  * the maximum batch age, whichever comes first, so a stream of writes is still
  * published within the maximum age. Every network git operation is killed after
  * its timeout (10 s for a push, 20 s for a fetch) and reported as unreachable or
- * refused rather than hanging. Network operations run outside the store mutation
- * lock. A conditional operation snapshots and imports under the local lock, then
- * pushes its isolated candidate; unrelated live writes survive timeout or retry.
+ * refused rather than hanging. A recipe command is killed after the recipe
+ * timeout (--recipe-timeout, recorded by connect, 120 s by default). Network
+ * operations run outside the store mutation lock. A conditional operation
+ * snapshots under the local lock (a copy of the live database where the recipe
+ * can seed one, an import otherwise), then pushes its isolated candidate;
+ * unrelated live writes survive timeout or retry.
+ *
+ * WORK IN PROPORTION TO THE CHANGE: a merge where only one side moved the state
+ * merges nothing, and the database takes in only what changed where the recipe
+ * declares importChanged; a whole-store import runs only where the database's
+ * state is not known (a refused flush, a new machine) or the recipe asks for it.
  *
  * WHY A REF OUTSIDE THE BRANCHES STARTS NO CODE CI, and how far that goes: a
  * push event's ref is a branch or a tag. GitHub documents github.ref as "the
@@ -93,7 +101,7 @@
  */
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync, openSync, closeSync, unlinkSync, readSync, renameSync, rmdirSync, realpathSync, cpSync, lstatSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, writeSync, rmSync, statSync, readdirSync, openSync, closeSync, unlinkSync, readSync, renameSync, rmdirSync, realpathSync, cpSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve, basename, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -406,11 +414,26 @@ async function resolveRecipe() {
     + `This copy ships ${all.length ? all.map((r) => `${r.path}${r.broken ? ' (broken)' : ` (declares tracker ${r.tracker || r.name})`}`).join(', ') : 'none'}`);
 }
 
+/** How long one recipe command may run, in ms: --recipe-timeout, else the value
+ * connect recorded for this machine, else 120 s.
+ *
+ * Bounded on purpose: a tracker command that hangs (its own store lock, a slow
+ * disk) must not hold the store's lock with it, or the next session's claim
+ * would wait on it. But the bound is the store's, not the mechanism's: a whole-store
+ * import of thousands of items measured 32-38 s on an idle machine, and the
+ * fixed 20 s this replaced killed it under load (#52). It is recorded beside the
+ * other bounds (debounce, batch age, sync interval) so a project with a larger
+ * store raises it without editing the mechanism. */
+const RECIPE_TIMEOUT_S = 120;
+function recipeTimeoutMs() {
+  const v = CURRENT.flags['recipe-timeout'] ?? readConfig(CURRENT.flags, CURRENT.repoRoot).recipeTimeout ?? RECIPE_TIMEOUT_S;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) die(2, `the recipe timeout must be a number of seconds above 0, not ${JSON.stringify(v)} (--recipe-timeout, or recipeTimeout in ${configPath(CURRENT.flags, CURRENT.repoRoot)})`);
+  return n * 1000;
+}
+
 /** Run one of the recipe's declared commands in the store. */
-// Bounded on purpose: a tracker command that hangs (its own store lock, a slow
-// disk) must not hold the store's lock with it, or the next session's claim
-// would wait on it. 20 s is longer than any export this mechanism runs.
-async function recipe(decl, map, { cwd, timeoutMs = 20000 } = {}) {
+async function recipe(decl, map, { cwd, timeoutMs = recipeTimeoutMs() } = {}) {
   const r = CURRENT.recipe;
   const raw = decl.split('.').reduce((o, k) => (o === null || o === undefined ? o : o[k]), r);
   if (!raw) die(1, `the recipe ${r.path} declares no ${decl}`);
@@ -425,7 +448,9 @@ async function recipe(decl, map, { cwd, timeoutMs = 20000 } = {}) {
 async function recipeOk(decl, map, opts) {
   const r = await recipe(decl, map, opts);
   if (r.code !== 0) die(r.code === 127 || r.missing ? 2 : 1,
-    `the recipe's ${decl} command failed (${r.code}): ${text(r) || 'no output'}`);
+    r.timedOut
+      ? `the recipe's ${decl} command was stopped after ${(opts?.timeoutMs ?? recipeTimeoutMs()) / 1000} s, the recipe timeout (--recipe-timeout, recorded by connect): ${text(r) || 'no output'}`
+      : `the recipe's ${decl} command failed (${r.code}): ${text(r) || 'no output'}`);
   return r.stdout;
 }
 
@@ -506,7 +531,7 @@ async function mergeDatabaseIntoState({ code, said }) {
   const side = join(machineDir(CURRENT.flags, CURRENT.repoRoot), 'database-export');
   rmSync(side, { recursive: true, force: true });
   mkdirSync(side, { recursive: true });
-  const forced = await recipe('exportSide', { out: quote(side) }, { timeoutMs: 120000 });
+  const forced = await recipe('exportSide', { out: quote(side) }, { timeoutMs: Math.max(120000, recipeTimeoutMs()) });
   if (forced.code !== 0 || forced.missing)
     die(2, `the tracker refused to flush its database (${code}): ${said}. Its forced export to a side file failed (${forced.code}): ${text(forced).split('\n')[0] || 'no output'}. ${atRisk()}, so nothing is merged and nothing is written`);
   const fromDatabase = sideParts(side);
@@ -762,18 +787,94 @@ async function mergeParts({ ours, theirs, base, order = [], orderLocal = [] }) {
   return parseSide(readFileSync(paths.out, 'utf8'));
 }
 
+/** Bring the tracker's database to the state files.
+ *
+ * `before` is the state the database last held, when the caller knows it: the
+ * state files right after a flush. A recipe that declares `importChanged` is then
+ * handed that state and imports only what differs from it, and says so; one that
+ * does not, or a caller that does not know, imports the whole store. A tracker's
+ * whole-store import grows with the store, not with the change: on thousands of
+ * items it measured tens of seconds and hundreds of megabytes per run, once per
+ * merge (#52). */
+async function importState(before) {
+  if (!before || !CURRENT.recipe.importChanged) return recipeOk('import', {});
+  const f = join(machineDir(CURRENT.flags, CURRENT.repoRoot), 'import-before.txt');
+  // Written part by part: a state of thousands of items is not copied into one
+  // more string to be written.
+  const fd = openSync(f, 'w');
+  try {
+    let first = true;
+    for (const [p, c] of before) {
+      if (c === null) continue;
+      writeSync(fd, `${first ? '' : '\n'}=== ${p}\n`); writeSync(fd, c);
+      first = false;
+    }
+  } finally { closeSync(fd); }
+  try { return await recipeOk('importChanged', { before: quote(f) }); } finally { rmSync(f, { force: true }); }
+}
+
+/** The state files as the database holds them after a flush, or null where the
+ * flush does not prove that (see flushDatabase): only then may an import take in
+ * just the difference. */
+const heldByDatabase = (flushed, parts) => (flushed && flushed.ok && !flushed.nothing && !flushed.merged ? parts : null);
+
+/** The blob of each state file a commit can hold, as it stands in the store's
+ * working tree; a file that is not there is absent from the map. */
+async function worktreeStateBlobs() {
+  const out = new Map();
+  for (const p of await comparableStateFiles()) {
+    const f = join(CURRENT.store, p);
+    requireRegularFile(f, 'a state file');
+    if (!existsSync(f)) continue;
+    out.set(p, (await gitOk(['hash-object', '--', p], { cwd: CURRENT.store })).trim());
+  }
+  return out;
+}
+const sameBlobs = (a, b) => a.size === b.size && [...a].every(([p, oid]) => b.get(p) === oid);
+
 /** Merge the remote's tip into ours, per item, through the recipe, per F3.
- * Caller holds the lock: this is local work only. */
-async function mergeAndCommit(tip) {
+ * Caller holds the lock: this is local work only.
+ *
+ * The tracker's database is flushed first, so `ours` is the state it holds and a
+ * write that reached it after the last commit is merged, not overwritten. Then the
+ * work follows the change, not the store (#52): where the remote moved no state
+ * file since the merge base, ours IS the merge and nothing is merged or imported;
+ * where we moved none, theirs is, and only what it changed is imported; only where
+ * both sides moved does the recipe merge per item. */
+async function mergeAndCommit(tip, { flushed: done } = {}) {
+  // A caller that flushed a moment ago under the same lock hands its result on:
+  // a refused flush is merged from the database once, not twice.
+  const flushed = done || await flushDatabase();
   const head = await headOid();
   const base = (await git(['merge-base', head, tip], { cwd: CURRENT.store })).stdout.trim();
   const oursParts = await storeParts();
-  const theirsParts = await stateFrom(tip);
-  const baseParts = base ? await stateFrom(base) : stateFiles().map((p) => [p, null]);
-  const order = (await git(['log', '--first-parent', '--format=%H', base ? `${base}..${tip}` : tip], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean).reverse();
-  const orderLocal = (await git(['log', '--first-parent', '--format=%H', head], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
-  const merged = await mergeParts({ ours: oursParts, theirs: theirsParts, base: baseParts, order, orderLocal });
-  await writeState(merged);
+  const baseBlobs = base ? await stateBlobsAt(base) : null;
+  // The state the database holds, when it is known to be ours: a flush the
+  // tracker refused leaves state files that are not the database's (a merge of
+  // its side export, or a filled file over an empty database), and then only a
+  // whole import brings the database to the merged state.
+  const held = heldByDatabase(flushed, oursParts);
+  // Whether the database must take in the merged state, and from what.
+  let mustImport = !held;
+  if (baseBlobs && sameBlobs(await stateBlobsAt(tip), baseBlobs)) {
+    // Nothing of the tracker's moved on the remote: our state stands as it is.
+  } else if (baseBlobs && sameBlobs(await worktreeStateBlobs(), baseBlobs)) {
+    // Nothing of ours moved: the remote's state is the merge, exactly as a
+    // fast-forward takes it. A file the store's git ignores is never in a commit,
+    // so it is the machine's own and is left where it is.
+    const comparable = await comparableStateFiles();
+    const theirs = (await stateFrom(tip)).filter(([p]) => comparable.includes(p));
+    await writeStateExact(theirs);
+    mustImport = true;
+  } else {
+    const theirsParts = await stateFrom(tip);
+    const baseParts = base ? await stateFrom(base) : stateFiles().map((p) => [p, null]);
+    const order = (await git(['log', '--first-parent', '--format=%H', base ? `${base}..${tip}` : tip], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean).reverse();
+    const orderLocal = (await git(['log', '--first-parent', '--format=%H', head], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
+    const merged = await mergeParts({ ours: oursParts, theirs: theirsParts, base: baseParts, order, orderLocal });
+    await writeState(merged);
+    mustImport = true;
+  }
   // recordings travel beside the tracker items and are immutable: two different
   // states for one revision are a refusal, never a newer-wins choice.
   const listIn = async (rev) => (await git(['ls-tree', '-r', '--name-only', rev, '--', '.tracker-sync/recordings'], { cwd: CURRENT.store })).stdout.split('\n').filter(Boolean);
@@ -792,7 +893,7 @@ async function mergeAndCommit(tip) {
   }
   await recipeIsland(head, tip);
   keepIdentity();
-  await recipeOk('import', {});
+  if (mustImport) await importState(held);
   return commitState(`tracker store: merge ${head.slice(0, 12)} and ${tip.slice(0, 12)} per item`, [head, tip]);
 }
 /** The mechanism's own files under .tracker-sync travel beside the state. */
@@ -854,7 +955,7 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
     // flush is understood through the recipe: a refusal that proves nothing is
     // unexported is said and the state files stand, and every other refusal is
     // merged in per item, or stops here - never read as "nothing unexported".
-    await flushDatabase();
+    const flushed = await flushDatabase();
     if (fast) {
       // Our own unpublished writes are a commit of their own; the push that
       // follows merges the remote in rather than dropping them.
@@ -862,14 +963,17 @@ async function syncOnce({ needsRemote, push, quiet, skipOnTimeout = false } = {}
       // and committed, never merely committed and left as they are: a state that
       // is stale against the remote is exactly what makes a claim land twice,
       // because the recipe is asked about the state in front of it.
-      if (migrated.migrated || await hasUncommittedState()) return mergeAndCommit(remote.tip);
-      // Nothing of ours is unpublished: the remote's state replaces this store's.
+      if (migrated.migrated || await hasUncommittedState()) return mergeAndCommit(remote.tip, { flushed });
+      // Nothing of ours is unpublished: the remote's state replaces this store's,
+      // and the database, which holds exactly the state being replaced, takes in
+      // only what the remote changed.
+      const held = heldByDatabase(flushed, await storeParts());
       await gitOk(['reset', '--hard', remote.tip], { cwd: CURRENT.store });
       keepIdentity();
-      await recipeOk('import', {});
+      await importState(held);
       return remote.tip;
     }
-    return mergeAndCommit(remote.tip);
+    return mergeAndCommit(remote.tip, { flushed });
   };
   let oid;
   try {
@@ -1898,6 +2002,21 @@ async function isolatedCandidate(kind, item, prepare) {
       diagnostic.bytes = copied.bytes;
       diagnostic.snapshotMs = Date.now() - snapshotStart;
       save();
+      // The candidate's database, copied from the live one where the recipe can:
+      // the live database was flushed into `before` a moment ago, so a copy of it
+      // is the candidate's state without a whole-store import (#52). Run before
+      // the isolation below, because it is the one command that must name the
+      // live store; one that declines is not a failure, the import follows.
+      let seeded = false;
+      if (CURRENT.recipe.seed) {
+        const seedStart = Date.now();
+        const sd = await recipe('seed', { live: quote(live) }, { cwd: candidate });
+        seeded = sd.code === 0;
+        diagnostic.seeded = seeded;
+        diagnostic.seedMs = Date.now() - seedStart;
+        if (!seeded) diagnostic.seedSaid = text(sd).split('\n')[0] || `exit ${sd.code}`;
+        save();
+      }
       CURRENT.store = canonicalPath(candidate);
       CURRENT.isolatedFrom = live;
       // pointer.env is trusted recipe-produced launcher shell text. Preserve
@@ -1914,11 +2033,13 @@ async function isolatedCandidate(kind, item, prepare) {
         throw new Error('cannot isolate conditional recipe: pointer.env launcher returned invalid environment');
       }
       keepIdentity();
-      const importStart = Date.now();
-      const imported = await recipe('import', {});
-      diagnostic.importMs = Date.now() - importStart;
-      save();
-      if (imported.code !== 0) return { failed: imported, decl: 'import' };
+      if (!seeded) {
+        const importStart = Date.now();
+        const imported = await recipe('import', {});
+        diagnostic.importMs = Date.now() - importStart;
+        save();
+        if (imported.code !== 0) return { failed: imported, decl: 'import' };
+      }
       return prepare(before);
     });
     if (!step.oid) {
@@ -1998,7 +2119,6 @@ async function reconcileCandidate(step) {
 
 async function integrateCandidate(step) {
   await locked(async () => {
-    await flushDatabase();
     await mergeAndCommit(step.oid);
   });
 }
@@ -2446,6 +2566,9 @@ async function connectRun(flags) {
     }
     const machineName = String(flags.machine || (await run('hostname', [], {})).stdout.trim() || 'machine');
     writeConfig(flags, repoRoot, { machine: machineName });
+    // The recipe timeout is this machine's bound, read by every later command;
+    // the watcher's own bounds are on its launch line.
+    if (flags['recipe-timeout'] !== undefined) writeConfig(flags, repoRoot, { recipeTimeout: recipeTimeoutMs() / 1000 });
     if (CURRENT.recipe.ordinal) {
       const name = machineName;
       await recipeOk('ordinal', { machine: quote(name) });
@@ -2719,7 +2842,7 @@ function usage(code = 1) {
     '  watch [--interval <s>] [--debounce <s>] [--max-age <s>]',
     '  recipes | version | help',
     '',
-    'options:  --recipe <file>  --state <dir>  --repo <checkout>',
+    'options:  --recipe <file>  --state <dir>  --repo <checkout>  --recipe-timeout <s> (connect records it)',
     'The recipe names the tracker; this mechanism never does. TRACKER_RECIPE is read too.',
   ].join('\n');
   (code === 0 ? say : (s) => process.stderr.write(`${s}\n`))(t);

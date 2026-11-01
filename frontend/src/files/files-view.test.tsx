@@ -23,6 +23,7 @@ import { makeClient, mountPaneManager } from '../test-support/panes-fixtures'
 import { setDocumentHidden } from '../test-support/document-visibility'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
+import type { FilesChanged } from '../generated/files.changed'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
@@ -527,6 +528,72 @@ describe('files sidebar view', () => {
     moreBtn!.click()
 
     await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/', 1, expect.any(Number)))
+    await vi.waitFor(() => expect(rowNamed(panel, 'f2')).not.toBeUndefined())
+    expect(rowNamed(panel, 'f3')).not.toBeUndefined()
+    expect(panel.querySelector('[data-testid="files-show-more"]')).toBeNull()
+  })
+
+  it('"show next" pressed while a change-driven re-list is in flight still reveals the page (nocx-atpw5.1.16)', async () => {
+    // The e2e defect, through the seam a person uses: a files.changed
+    // re-list is on the wire and its answer is HELD, the button is pressed,
+    // and the page must arrive when that listing settles. The button must
+    // also stay clickable while the re-list runs — disabling it let the
+    // browser swallow the click before the store ever saw it.
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    let heldRelist: {
+      promise: Promise<FilesListResult>
+      resolve: (v: FilesListResult) => void
+    } | null = null
+    let holdNextRootList = false
+    const list = vi.fn((bindingId: string, path: string, offset: number) => {
+      if (holdNextRootList) {
+        holdNextRootList = false
+        heldRelist = deferred<FilesListResult>()
+        return heldRelist.promise
+      }
+      if (offset === 0) {
+        return Promise.resolve(
+          listFixture('C:/', [entryFixture({ name: 'f1', path: '/f1' })], {
+            total: 3,
+            hasMore: true,
+          }),
+        )
+      }
+      return Promise.resolve(
+        listFixture(
+          'C:/',
+          [entryFixture({ name: 'f2', path: '/f2' }), entryFixture({ name: 'f3', path: '/f3' })],
+          { offset: 1, total: 3, hasMore: false, rev: 'r2' },
+        ),
+      )
+    })
+    const { panel } = await mountApp(fakeServices({ list, subscribeFilesChanged }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'f1')).not.toBeUndefined())
+
+    // A change arrives; its re-list is on the wire and its answer is held.
+    holdNextRootList = true
+    handler!({ bindingId: 'b1', path: '/', rev: 'r2' })
+    await vi.waitFor(() => expect(list.mock.calls.filter(([, p]) => p === '/')).toHaveLength(2))
+
+    const moreBtn = panel.querySelector<HTMLButtonElement>('[data-testid="files-show-more"]')
+    expect(moreBtn?.disabled).toBe(false)
+    moreBtn!.click()
+
+    // The re-list answers the window the person had already paged to; the
+    // owed page follows it.
+    heldRelist!.resolve(
+      listFixture('C:/', [entryFixture({ name: 'f1', path: '/f1' })], {
+        total: 3,
+        hasMore: true,
+        rev: 'r2',
+      }),
+    )
+
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/', 1, FILES_PAGE_SIZE))
     await vi.waitFor(() => expect(rowNamed(panel, 'f2')).not.toBeUndefined())
     expect(rowNamed(panel, 'f3')).not.toBeUndefined()
     expect(panel.querySelector('[data-testid="files-show-more"]')).toBeNull()

@@ -122,6 +122,9 @@ func readoptLifecycleFixture(t *testing.T, spoken string) (content.PendingSessio
 		Spawner:    spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-lifecycle-window")

@@ -5,15 +5,16 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-test('pre-push status check does not consume Git ref input', () => {
+// A push that introduces no commit reads no tracker state (nocx-fg79x.3): the
+// backlog's rules run when the store is published, and pre-push keeps only the
+// commit-link check, which reads the commits the push introduces. The fake `br`
+// leaves a marker if anything on this path calls it.
+test('a push that introduces no commit does not read the tracker', () => {
   const bin = mkdtempSync(join(tmpdir(), 'nocx-pre-push-'))
+  const marker = join(bin, 'br-ran')
   try {
     const br = join(bin, 'br')
-    writeFileSync(
-      br,
-      `#!/bin/sh\nif [ "$3" = where ]; then exit 0; fi\ncat >/dev/null\nprintf "Dirty issues: 0\\n"\n`,
-    )
-    // The status command is allowed to read its stdin; the hook must not hand it Git ref input.
+    writeFileSync(br, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`)
     const chmod = spawnSync('chmod', ['+x', br])
     assert.equal(chmod.status, 0)
     const zero = '0'.repeat(40)
@@ -28,7 +29,8 @@ test('pre-push status check does not consume Git ref input', () => {
       },
     )
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-    assert.doesNotMatch(result.stderr, /pre-push input is empty|stdin contains no ref lines/)
+    assert.doesNotMatch(result.stderr, /backlog comparison skipped|tracker status/)
+    assert.equal(spawnSync('test', ['-e', marker]).status, 1, 'pre-push read the tracker')
   } finally {
     rmSync(bin, { recursive: true, force: true })
   }

@@ -1,8 +1,9 @@
 # Backlog integration
 
 Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.56.0 after this update lands. Setup task nocx-gkpwp owns the proof evidence
-and any unperformed checks; protocol 0.51.0 was installed by nocx-fs95y.
+0.59.0 (plugin 0.130.0), installed by nocx-fg79x.6, which owns the proof evidence
+and any unperformed checks. Protocol 0.56.0 was installed by nocx-gkpwp and
+protocol 0.51.0 by nocx-fs95y.
 Protocol 0.46.0 was installed by nocx-q8yjf.25,
 whose record — with nocx-q8yjf.26–.28 and root nocx-nl23a — the published
 export carries but this tracker's database has lost, so `br` cannot show them.
@@ -11,7 +12,9 @@ installed update. The protocol ships
 with the skills and is not restated here. This file holds project facts and
 commands; changing choices live only in the config. Each person's plugin,
 runtime and connected hooks are checked directly, never represented as shared
-installation-state settings.
+installation-state settings. A branch cut before the 0.128.0 store move still
+carries `.beads/issues.jsonl`; the merge procedure for it is under
+"A branch cut before the store move" below.
 
 AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
 bug.
@@ -179,9 +182,8 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` at source commit
-  `3fca4e833c56d708a95156a5a716d66492c9cc39` (plugin 0.126.0, setup protocol
-  0.56.0), never edited here. Compare each copy with that source. Run all five `--selftest`
+  `skills/backlog/setup-shady2k-skills/` of plugin 0.130.0 (setup protocol
+  0.59.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them. Compare each copy with that source. Run all five `--selftest`
   commands from the plugin directory, where their fixtures live; `check.mjs`
   additionally takes `--config <repo>/.githooks/backlog-gate/config.json` for
   portability.
@@ -270,11 +272,52 @@ keeps every later change.
   The tracker at a code revision is read from the store's recording of that exact
   revision; a missing recording is refused, never guessed from a later state. `make
 connect` runs this connector before it checks the backlog inputs.
+- **A branch cut before the store move carries `.beads/issues.jsonl`.** When one
+  merges, delete the conflicted file from the merge result and import its
+  branch-only rows before publishing:
+  `node scripts/import-branch-beads.mjs --branch <head-ref> --out <plan.jsonl>`
+  writes exactly the records to import and prints the dry-run plan. The store
+  is authoritative: a branch's edits to, or deletion of, an existing issue, and
+  an edit to an existing comment, are reported and never imported; a
+  branch-only issue is imported whole; a
+  branch-only comment on an existing issue is appended to the store's own row
+  with its text, author, timestamp, issue and order preserved, and only
+  colliding comment ids are remapped (existing ids never change).
+  `br sync --reconcile-additive` is not this path: on a shared issue with a new
+  comment it plans a `shared_relation_drift` conflict and applies no relation
+  rows. Import with:
+
+  ```sh
+  BEADS_JSONL=<plan.jsonl> br sync --import-only --allow-external-jsonl --no-auto-flush
+  br sync --flush-only
+  ```
+
+  then check the result against the branch export and the store before
+  publishing. Never `br sync --merge` (a row absent from the JSONL reads as a
+  deletion and becomes a tombstone) and never `--rebuild`. The script's test:
+  `node --test scripts/import-branch-beads.test.mjs`.
+
 - **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
-  and syncs every 10 seconds. The user systemd unit
+  (`--debounce 2 --max-age 5`) and syncs with the remote every 60 seconds
+  (`--interval 60`). The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
-  mechanism lives under `~/.local/state/nocx/mechanism/` so removing a worktree does
-  not stop it. Pushing `refs/tracker/state` starts no code CI.
+  mechanism — `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs`, `regular-file.mjs`
+  from plugin 0.130.0, with `tracker-sync.version` beside them — lives under
+  `~/.local/state/nocx/mechanism/` so removing a worktree does not stop it;
+  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version <plugin>`
+  says whether it lags the set. Pushing `refs/tracker/state` starts no code CI, so the
+  backlog's own rules are checked on that ref's delta by
+  `.github/workflows/tracker-gate.yml` rather than by a code push.
+  Measured 2026-11-01 on the coordinator machine: the watcher's publish loop runs
+  `br sync --flush-only` every second to see whether anything changed, about one
+  second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
+  (`tracker-sync.service.d/limit-cpu.conf`: `Nice=19`, `CPUQuota=50%`): about 34% CPU.
+  The flush holds the store lock, so a tighter quota starves the record hooks, which
+  swallow their own failure: at 25% a post-commit recording timed out and the push of
+  that commit was then refused for a missing recording. At 50% a record waits 1–2 s
+  once the watcher's startup sync has finished (records in its first minute can still
+  time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
+  hand-patched 0.128 copy it replaced.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
@@ -296,27 +339,33 @@ connect` runs this connector before it checks the backlog inputs.
   review and the tests of the tooling it changes, not the product suites and not
   `make ci-full`. In the document policy that is `appliesTo` on each required check.
   AGENTS.md "Git authority" carries the same exception.
-- **Backlog gate**, `block-new`. The pre-commit hook (section 7) and CI both run it:
+- **Backlog gate**, `block-new`, at the publish boundary (nocx-fg79x.3). The tracker
+  store is published on `refs/tracker/state`, outside every branch, and a code push or
+  pull request carries no tracker state — so the rules run on the published delta.
+  `.github/workflows/tracker-gate.yml` (hourly, and by hand) compares the published store
+  head with the last head the gate **accepted**, `refs/tracker-gate/checked`, through
+  [`publish-gate.mjs`](../../.githooks/backlog-gate/publish-gate.mjs):
 
   ```bash
   G=.githooks/backlog-gate
-  node $G/adapter.mjs --at HEAD > /tmp/backlog-baseline.json
-  git show HEAD:$G/config.json > /tmp/backlog-baseline-config.json
-  node $G/adapter.mjs --at :0 |
-    node $G/check.mjs --config $G/config.json --baseline /tmp/backlog-baseline.json \
-      --baseline-config /tmp/backlog-baseline-config.json -
+  node $G/publish-gate.mjs --baseline <last-checked-store-commit> --head <published-store-head>
   ```
 
-  It compares the staged export against HEAD, never the working tree: `br` rewrites the
-  export on almost every command. The baseline is judged by its own day's config, so a
-  config change that creates violations is new. The hook runs only when the export or the
-  gate itself is staged. A merge is judged against BOTH parents by
-  [`merge-gate.mjs`](../../.githooks/backlog-gate/merge-gate.mjs): an error is new only when
-  it is new against HEAD and against the other parent, which the hook takes from `MERGE_HEAD`
-  or, for a merge `git merge` commits by itself, from `GIT_REFLOG_ACTION` (git runs
-  pre-merge-commit before it writes `MERGE_HEAD`). Without it, merging `main` into a branch
-  was refused for debt `main` already carried (measured 2026-09-26). Its test:
-  `node --test .githooks/backlog-gate/merge-gate.test.mjs`.
+  It is the same `check.mjs`, with the same `block-new` strength the code hooks used: a
+  violation the baseline does not carry fails, and everything older is printed and fails
+  nothing. The baseline is the last head the gate accepted, not the head's parent, so a
+  violation introduced several publishes ago is still new; the marker advances only on a
+  green run, so a violation stays red until the store is fixed. Two limits are worth
+  knowing: the job cannot refuse the publish (GitHub starts no workflow for a push to a
+  ref that is not a branch or a tag, and the mechanism runs its own git calls with the
+  project's hooks disabled), and the marker leaves the checkout every time, so the check
+  runs on a schedule rather than on the publish itself. Its test:
+  `node --test .githooks/backlog-gate/publish-gate.test.mjs`.
+
+  Neither the pre-commit hook nor CI's `ci-backlog` runs the rules on a code change: a
+  code commit stages no tracker state, and the pre-commit section 7 is disabled with
+  `RUN_BACKLOG=0` for that reason. `ci-backlog` keeps the commit-link check, the
+  present-documents check and the gate's own tests.
 
 - **JSON report:** add `--json` to the `check.mjs` line.
 - **Recorded tracker states import into br:** every code revision the gate judges
@@ -341,8 +390,10 @@ connect` runs this connector before it checks the backlog inputs.
   Local-only tags and other remotes cannot hide a commit. A tag is peeled to a commit.
   None says `<ref> introduces no commits: nothing to check`; unreadable input is exit 2.
   `node --test .githooks/backlog-gate/commit-links.test.mjs`.
-- **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
-  and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
+- **Local entry points:** `.githooks/commit-msg` (links), `.githooks/pre-push` (links for
+  the commits a push introduces), and `.githooks/pre-merge-commit`, which delegates to
+  pre-commit; the backlog's own rules are not a local code-hook gate (they run on the
+  published store, above). A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
   the adapter, `check-commits.mjs` or the config, `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
   config (exit 2). A tree that never had the integration passes visibly; a configured
@@ -357,20 +408,21 @@ connect` runs this connector before it checks the backlog inputs.
   frontend or product build is started. It reports missing files together and imports
   the tracker successfully before connecting git hooks or clearing the retired driver.
   Failure does not leave a half-connected clone. Safe to rerun.
-- **CI:** `ci-backlog` in `.github/workflows/ci.yml`. Pull requests use the merge
-  base and actual PR head, not GitHub's synthetic merge. An unexpectedly empty
-  range refuses. Pushes use the same introduced-commit enumeration as the local
-  pre-push hook, against the remote's actual refs and the old tip where it exists;
-  a new ref carrying no new commits passes visibly. Backlog comparisons use the
-  preceding published state of those introduced commits, never the branch's own
-  merge base with itself. Product-document checks read the actual incoming revision.
-  The incoming backlog and its configuration both come from that actual revision;
-  the historical baseline is judged by its own configuration. An advertised
-  object absent from this clone cannot bound locally reachable history and is
-  skipped, regardless of its ref namespace; range enumeration never downloads
+- **CI:** `ci-backlog` in `.github/workflows/ci.yml` checks commit links and the
+  present documents on a code pull request; it does not compare backlog states, since a
+  code pull request carries none (nocx-fg79x.3). Pull requests use the merge base and
+  actual PR head, not GitHub's synthetic merge. An unexpectedly empty range refuses.
+  Pushes use the same introduced-commit enumeration as the local pre-push hook, against
+  the remote's actual refs and the old tip where it exists; a new ref carrying no new
+  commits passes visibly. Product-document checks read the actual incoming revision,
+  and the incoming backlog and its configuration both come from that revision.
+  An advertised object absent from this clone cannot bound locally reachable history
+  and is skipped, regardless of its ref namespace; range enumeration never downloads
   unrelated histories merely to exclude them (nocx-q8yjf.27).
-  **Pre-push** reads every stdin ref tuple and runs those range checks, preserving
-  warnings about unpublished tracker changes. It runs no product suite.
+  **The backlog's rules** run in `.github/workflows/tracker-gate.yml` on the published
+  store's delta (see the gate entry above).
+  **Pre-push** reads every stdin ref tuple and runs those range checks. It runs no
+  product suite and does not consult tracker synchronization status.
   **CI does not run on a push to `main`** (the triggers are PRs, `release/**`, dispatch and
   release.yml's call). A direct push to `main` — the owner's, deliberately ungated — is
   checked by the local hooks only.
@@ -442,7 +494,7 @@ guide`, `br <command> --help`.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| publish                          | `node .githooks/backlog-gate/tracker-sync.mjs publish --repo "$(git rev-parse --show-toplevel)" --recipe .githooks/backlog-gate/br-tracker.mjs`; the watcher usually does it. No tracker file is committed. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md).                                                                                                                                                                                                                                                                                                                      |
+| publish                          | `node .githooks/backlog-gate/tracker-sync.mjs publish --repo "$(git rev-parse --show-toplevel)" --recipe .githooks/backlog-gate/trackers/br.mjs`; the watcher usually does it. No tracker file is committed. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md).                                                                                                                                                                                                                                                                                                                     |
 
 For setup and other leaves outside a feature stage, the coordinator uses native
 `br --no-auto-import --no-auto-flush update <leaf> --claim --actor <full-agent-name>`

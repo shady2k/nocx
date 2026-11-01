@@ -207,9 +207,13 @@ func startFarPaneStand(t *testing.T) *farPaneStand {
 		SSHSpawner: spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc), home: t.TempDir()}
 	store, installs := testConsentStores(t)
 	_, reg := helperGitFactory(provider, stubArtifacts(t), store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 	tools := &fakeFarTools{}
 	reg.tools = tools

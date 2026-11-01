@@ -70,7 +70,7 @@ eslint-fixtures/
 .githooks/backlog-gate/regular-file.mjs
 .githooks/backlog-gate/argv.mjs
 .githooks/argv.mjs
-.githooks/backlog-gate/br-tracker.mjs
+.githooks/backlog-gate/trackers/br.mjs
 .githooks/backlog-gate/tracker-sync.mjs
 
 # Image-generation scratch: prompts and renders written by an agent session, in

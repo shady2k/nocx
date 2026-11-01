@@ -84,14 +84,15 @@ running, publish by hand:
 ```bash
 node .githooks/backlog-gate/tracker-sync.mjs publish \
   --repo "$(git rev-parse --show-toplevel)" \
-  --recipe .githooks/backlog-gate/br-tracker.mjs
+  --recipe .githooks/backlog-gate/trackers/br.mjs
 ```
 
 `scripts/connect-tracker-store.sh` connects a clone and installs the workflow policy; `make
 connect` runs it. `.githooks/pre-push` checks the commits a push actually introduces: each
-names a tracked leaf task and adds no new backlog problems. A tag or branch on commits the
-remote already holds passes without rechecking them. Pushing `refs/tracker/state` starts no
-code CI.
+names a tracked leaf task. The backlog's own rules do not run on a code push — a push
+carries no tracker state; they run on the published store in `tracker-gate`
+(`.github/workflows/tracker-gate.yml`). A tag or branch on commits the remote already holds
+passes without rechecking them. Pushing `refs/tracker/state` starts no code CI.
 
 `br` resolves the machine's store even when run from a linked worktree. Two branches cannot
 conflict on tracker state because neither carries it. Between machines they still can —
@@ -258,8 +259,7 @@ setup and is never committed.
 4. Keep it green, and let the gate cost what it is worth. `pre-commit` is static and takes
    seconds — formatting, linting, the ratchets, the wire contracts, the type checkers — so
    committing in small steps stays cheap. `pre-push` runs no product tests: it checks
-   task links and the backlog of genuinely introduced commits, then warns about
-   unpublished tracker changes. The suites remain one command away by hand
+   the task links of the commits it introduces. The suites remain one command away by hand
    (`.githooks/containerized-tests.sh`); CI and the merged-tree gate check product behavior.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
 

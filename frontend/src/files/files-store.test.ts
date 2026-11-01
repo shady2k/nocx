@@ -1205,6 +1205,148 @@ describe('files tree store', () => {
     expect(bigLists[bigLists.length - 1]?.slice(2)).toEqual([0, 2 * FILES_PAGE_SIZE])
   })
 
+  it('a "Show next" click that lands during a change-driven re-list still reveals the next page (nocx-atpw5.1.16)', async () => {
+    // The e2e failure this covers: the person pressed "Show next 20", a
+    // files.changed re-list was already on the wire, and the click was
+    // answered by nothing at all — no files.list left the renderer. The
+    // click is an INPUT; the re-list owns the enumeration, never the
+    // intent, so the page it asked for is fetched the moment that listing
+    // settles. The re-list's answer is HELD across the click, so the
+    // interleaving is driven rather than waited for.
+    const big = Array.from({ length: 120 }, (_, i) =>
+      entry({
+        name: `f${String(i).padStart(3, '0')}`,
+        path: `/big/f${String(i).padStart(3, '0')}`,
+      }),
+    )
+    let heldRelist: Deferred<FilesListResult> | null = null
+    let holdNextBigList = false
+    const list = vi.fn((bindingId: string, path: string, offset: number, limit: number) => {
+      if (path === '/') {
+        return Promise.resolve(
+          pageOf('C:/', '/', [entry({ name: 'big', path: '/big', kind: 'dir' })], offset, limit),
+        )
+      }
+      if (holdNextBigList) {
+        holdNextBigList = false
+        heldRelist = deferred<FilesListResult>()
+        return heldRelist.promise
+      }
+      return Promise.resolve(pageOf('C:/big', '/big', big, offset, limit))
+    })
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const dir = nodeRows(store, 'big')
+    store.toggle(dir)
+    await settle()
+    store.showMore(dir)
+    await settle()
+    expect(dir.children).toHaveLength(2 * FILES_PAGE_SIZE)
+
+    // A change arrives and its re-list is on the wire; its answer is held.
+    holdNextBigList = true
+    handler!({ bindingId: 'b1', path: '/big', rev: 'r-changed' })
+    await settle()
+    expect(dir.busy).toBe(true)
+    expect(list.mock.calls.filter(([, p]) => p === '/big')).toHaveLength(3)
+
+    // The person presses "Show next 20" now.
+    store.showMore(dir)
+    await settle()
+
+    // The re-list answers the window the person had already paged to; the
+    // owed page follows it, from the offset that listing just established.
+    heldRelist!.resolve(pageOf('C:/big', '/big', big, 0, 2 * FILES_PAGE_SIZE))
+    await settle()
+
+    expect(list.mock.calls.filter(([, p]) => p === '/big').map((c) => [c[2], c[3]])).toEqual([
+      [0, FILES_PAGE_SIZE],
+      [FILES_PAGE_SIZE, FILES_PAGE_SIZE],
+      [0, 2 * FILES_PAGE_SIZE],
+      [2 * FILES_PAGE_SIZE, FILES_PAGE_SIZE],
+    ])
+    expect(dir.children).toHaveLength(big.length)
+    expect(dir.hasMore).toBe(false)
+    expect(store.rows().some((r) => r.kind === 'more')).toBe(false)
+  })
+
+  it('a click the re-list answers by completing the directory fetches no page (nocx-atpw5.1.16)', async () => {
+    // The bound on the interleaving above: the owed click follows the
+    // listing that superseded it. When that listing shows the whole
+    // directory (the tail was deleted while the person was looking at it),
+    // the click is satisfied — the page it asked for no longer exists — and
+    // nothing is fetched behind a tree that has no "Show next" button. This
+    // test passes on the old code too, deliberately: it is the bound the
+    // fix must not buy with an over-fire, not a second copy of the defect.
+    const big = Array.from({ length: 120 }, (_, i) =>
+      entry({
+        name: `f${String(i).padStart(3, '0')}`,
+        path: `/big/f${String(i).padStart(3, '0')}`,
+      }),
+    )
+    let heldRelist: Deferred<FilesListResult> | null = null
+    let holdNextBigList = false
+    const list = vi.fn((bindingId: string, path: string, offset: number, limit: number) => {
+      if (path === '/') {
+        return Promise.resolve(
+          pageOf('C:/', '/', [entry({ name: 'big', path: '/big', kind: 'dir' })], offset, limit),
+        )
+      }
+      if (holdNextBigList) {
+        holdNextBigList = false
+        heldRelist = deferred<FilesListResult>()
+        return heldRelist.promise
+      }
+      return Promise.resolve(pageOf('C:/big', '/big', big, offset, limit))
+    })
+    let handler: ((p: FilesChanged) => void) | null = null
+    const subscribeFilesChanged = vi.fn((h: (p: FilesChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ list, subscribeFilesChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+    const dir = nodeRows(store, 'big')
+    store.toggle(dir)
+    await settle()
+    store.showMore(dir)
+    await settle()
+    expect(dir.children).toHaveLength(2 * FILES_PAGE_SIZE)
+
+    holdNextBigList = true
+    handler!({ bindingId: 'b1', path: '/big', rev: 'r-changed' })
+    await settle()
+    store.showMore(dir)
+    await settle()
+
+    // The re-list finds the directory shrunk to one short window.
+    const shrunk = big.slice(0, 40)
+    heldRelist!.resolve({
+      state: 'ok',
+      path: '/big',
+      canonical: 'C:/big',
+      entries: shrunk,
+      offset: 0,
+      total: shrunk.length,
+      hasMore: false,
+      rev: 'r-shrunk',
+    })
+    await settle()
+
+    const bigLists = list.mock.calls.filter(([, p]) => p === '/big')
+    expect(bigLists).toHaveLength(3)
+    expect(dir.children).toHaveLength(shrunk.length)
+    expect(dir.hasMore).toBe(false)
+    expect(store.rows().some((r) => r.kind === 'more')).toBe(false)
+  })
+
   it('a capped directory is still not re-listed when it changes (nocx-o97xj)', async () => {
     // D14: a tooLarge directory renders a state row and is deliberately not
     // polled. Widening the refresh window must not turn it back into an

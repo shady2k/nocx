@@ -235,6 +235,83 @@ test('scrollback: a markerless session scrolls the rows that left the screen bac
       expect(seenLabels.has(label(i)), label(i)).toBe(true)
     }
 
+    // ── Clause 1b: the scrollbar reaches the same history, with no wheel ──
+    //
+    // The owner's report paired "scrolling does not work" with "there is no
+    // side scrollbar" (nocx-zqr4z): the wheel clause above proves one route to
+    // the retained rows, and this proves the other. A native scrollbar's thumb
+    // cannot be dragged from a browser test, so what the drag does to this
+    // surface is what is driven here — the scroller's own `scroll` events, the
+    // same ones `LiveHistorySurface`'s `_pump` pages on, with no wheel, key or
+    // pointer involved. Before that, the surface must be one a scrollbar is
+    // drawn for at all: overflow that scrolls, and a scrollbar the stylesheet
+    // has not suppressed.
+    const scrollbar = await page.evaluate(() => {
+      const scroller = document.querySelector('.pane.active .scrollback-area')
+      if (!(scroller instanceof HTMLElement)) throw new Error('scrollback scroller is missing')
+      const style = getComputedStyle(scroller)
+      return {
+        overflowY: style.overflowY,
+        scrollbarWidth: style.getPropertyValue('scrollbar-width').trim(),
+        scrollHeight: scroller.scrollHeight,
+        clientHeight: scroller.clientHeight,
+        // The bar base.css styles is a CLASSIC one: `::-webkit-scrollbar` at
+        // 10px takes layout space from the box it scrolls. The owner's report
+        // was "there is no side scrollbar" (nocx-zqr4z), and a bar that is
+        // drawn but takes no space is that complaint returning.
+        inset: scroller.offsetWidth - scroller.clientWidth,
+      }
+    })
+    expect(['auto', 'scroll']).toContain(scrollbar.overflowY)
+    expect(scrollbar.scrollbarWidth).not.toBe('none')
+    expect(scrollbar.scrollHeight).toBeGreaterThan(scrollbar.clientHeight)
+    expect(scrollbar.inset).toBeGreaterThan(0)
+    const scrollBy = (delta: number): Promise<void> =>
+      page.evaluate((by) => {
+        const scroller = document.querySelector('.pane.active .scrollback-area')
+        if (!(scroller instanceof HTMLElement)) throw new Error('scrollback scroller is missing')
+        scroller.scrollBy(0, by)
+        // A gesture the clamp swallows still counts, and the surface has to
+        // hear it: at the top, a page prepended above may leave scrollTop where
+        // it was, and no scroll event would follow. A drag against either
+        // clamp emits the same event, so re-stating it is the gesture the
+        // scroller was already making.
+        scroller.dispatchEvent(new Event('scroll'))
+      }, delta)
+    // Back to the live end by scrolling alone, then upward the same way until
+    // the oldest retained page is the one on screen.
+    await expect
+      .poll(
+        async () => {
+          if (await atLiveEnd()) return true
+          await scrollBy(1400)
+          return false
+        },
+        { timeout: 30_000, intervals: [250] },
+      )
+      .toBe(true)
+    await expect
+      .poll(
+        async () => {
+          const start = await oldest.getAttribute('data-start').catch(() => null)
+          const visible = labelsInRows(await readVisibleRows())
+          if (
+            start === String(floor) &&
+            firstExpectedLabels.every((expected, index) => visible[index] === expected)
+          ) {
+            return true
+          }
+          await scrollBy(-400)
+          return false
+        },
+        {
+          timeout: 60_000,
+          intervals: [400],
+          message: 'the scrollbar path never reached the oldest retained row',
+        },
+      )
+      .toBe(true)
+
     // ── Clause 2: arriving output does not move the reader's anchor ─────
     // Arm the producer while following the live end. Submitting a command can
     // itself move the scroller; that is not arriving output. Wait for its

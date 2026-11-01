@@ -13,7 +13,7 @@ running, publish by hand:
 ```bash
 node .githooks/backlog-gate/tracker-sync.mjs publish \
   --repo "$(git rev-parse --show-toplevel)" \
-  --recipe .githooks/backlog-gate/br-tracker.mjs
+  --recipe .githooks/backlog-gate/trackers/br.mjs
 ```
 
 ## Conventions

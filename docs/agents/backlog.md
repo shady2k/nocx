@@ -1,8 +1,9 @@
 # Backlog integration
 
 Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.56.0 after this update lands. Setup task nocx-gkpwp owns the proof evidence
-and any unperformed checks; protocol 0.51.0 was installed by nocx-fs95y.
+0.59.0 (plugin 0.130.0), installed by nocx-fg79x.6, which owns the proof evidence
+and any unperformed checks. Protocol 0.56.0 was installed by nocx-gkpwp and
+protocol 0.51.0 by nocx-fs95y.
 Protocol 0.46.0 was installed by nocx-q8yjf.25,
 whose record — with nocx-q8yjf.26–.28 and root nocx-nl23a — the published
 export carries but this tracker's database has lost, so `br` cannot show them.
@@ -181,9 +182,8 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` at source commit
-  `3fca4e833c56d708a95156a5a716d66492c9cc39` (plugin 0.126.0, setup protocol
-  0.56.0), never edited here. Compare each copy with that source. Run all five `--selftest`
+  `skills/backlog/setup-shady2k-skills/` of plugin 0.130.0 (setup protocol
+  0.59.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them. Compare each copy with that source. Run all five `--selftest`
   commands from the plugin directory, where their fixtures live; `check.mjs`
   additionally takes `--config <repo>/.githooks/backlog-gate/config.json` for
   portability.
@@ -298,12 +298,26 @@ connect` runs this connector before it checks the backlog inputs.
   `node --test scripts/import-branch-beads.test.mjs`.
 
 - **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
-  and syncs every 10 seconds. The user systemd unit
+  (`--debounce 2 --max-age 5`) and syncs with the remote every 60 seconds
+  (`--interval 60`). The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
-  mechanism lives under `~/.local/state/nocx/mechanism/` so removing a worktree does
-  not stop it. Pushing `refs/tracker/state` starts no code CI, so the backlog's own
-  rules are checked on that ref's delta by `.github/workflows/tracker-gate.yml` rather
-  than by a code push.
+  mechanism — `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs`, `regular-file.mjs`
+  from plugin 0.130.0, with `tracker-sync.version` beside them — lives under
+  `~/.local/state/nocx/mechanism/` so removing a worktree does not stop it;
+  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version <plugin>`
+  says whether it lags the set. Pushing `refs/tracker/state` starts no code CI, so the
+  backlog's own rules are checked on that ref's delta by
+  `.github/workflows/tracker-gate.yml` rather than by a code push.
+  Measured 2026-11-01 on the coordinator machine: the watcher's publish loop runs
+  `br sync --flush-only` every second to see whether anything changed, about one
+  second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
+  (`tracker-sync.service.d/limit-cpu.conf`: `Nice=19`, `CPUQuota=50%`): about 34% CPU.
+  The flush holds the store lock, so a tighter quota starves the record hooks, which
+  swallow their own failure: at 25% a post-commit recording timed out and the push of
+  that commit was then refused for a missing recording. At 50% a record waits 1–2 s
+  once the watcher's startup sync has finished (records in its first minute can still
+  time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
+  hand-patched 0.128 copy it replaced.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
@@ -480,7 +494,7 @@ guide`, `br <command> --help`.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| publish                          | `node .githooks/backlog-gate/tracker-sync.mjs publish --repo "$(git rev-parse --show-toplevel)" --recipe .githooks/backlog-gate/br-tracker.mjs`; the watcher usually does it. No tracker file is committed. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md).                                                                                                                                                                                                                                                                                                                      |
+| publish                          | `node .githooks/backlog-gate/tracker-sync.mjs publish --repo "$(git rev-parse --show-toplevel)" --recipe .githooks/backlog-gate/trackers/br.mjs`; the watcher usually does it. No tracker file is committed. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md).                                                                                                                                                                                                                                                                                                                     |
 
 For setup and other leaves outside a feature stage, the coordinator uses native
 `br --no-auto-import --no-auto-flush update <leaf> --claim --actor <full-agent-name>`

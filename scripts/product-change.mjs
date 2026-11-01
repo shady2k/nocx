@@ -7,6 +7,8 @@ const pipelineFiles = new Set([
   '.github/workflows/release-build.yml',
   'scripts/product-change.mjs',
   'scripts/product-change.test.mjs',
+  'scripts/changed-tests.mjs',
+  'scripts/changed-tests.test.mjs',
   'scripts/publish-nightly.mjs',
   'scripts/publish-nightly.test.mjs',
   'scripts/verify-built-artifact.py',

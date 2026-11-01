@@ -301,7 +301,9 @@ connect` runs this connector before it checks the backlog inputs.
   and syncs every 10 seconds. The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
   mechanism lives under `~/.local/state/nocx/mechanism/` so removing a worktree does
-  not stop it. Pushing `refs/tracker/state` starts no code CI.
+  not stop it. Pushing `refs/tracker/state` starts no code CI, so the backlog's own
+  rules are checked on that ref's delta by `.github/workflows/tracker-gate.yml` rather
+  than by a code push.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
@@ -323,27 +325,33 @@ connect` runs this connector before it checks the backlog inputs.
   review and the tests of the tooling it changes, not the product suites and not
   `make ci-full`. In the document policy that is `appliesTo` on each required check.
   AGENTS.md "Git authority" carries the same exception.
-- **Backlog gate**, `block-new`. The pre-commit hook (section 7) and CI both run it:
+- **Backlog gate**, `block-new`, at the publish boundary (nocx-fg79x.3). The tracker
+  store is published on `refs/tracker/state`, outside every branch, and a code push or
+  pull request carries no tracker state — so the rules run on the published delta.
+  `.github/workflows/tracker-gate.yml` (hourly, and by hand) compares the published store
+  head with the last head the gate **accepted**, `refs/tracker-gate/checked`, through
+  [`publish-gate.mjs`](../../.githooks/backlog-gate/publish-gate.mjs):
 
   ```bash
   G=.githooks/backlog-gate
-  node $G/adapter.mjs --at HEAD > /tmp/backlog-baseline.json
-  git show HEAD:$G/config.json > /tmp/backlog-baseline-config.json
-  node $G/adapter.mjs --at :0 |
-    node $G/check.mjs --config $G/config.json --baseline /tmp/backlog-baseline.json \
-      --baseline-config /tmp/backlog-baseline-config.json -
+  node $G/publish-gate.mjs --baseline <last-checked-store-commit> --head <published-store-head>
   ```
 
-  It compares the staged export against HEAD, never the working tree: `br` rewrites the
-  export on almost every command. The baseline is judged by its own day's config, so a
-  config change that creates violations is new. The hook runs only when the export or the
-  gate itself is staged. A merge is judged against BOTH parents by
-  [`merge-gate.mjs`](../../.githooks/backlog-gate/merge-gate.mjs): an error is new only when
-  it is new against HEAD and against the other parent, which the hook takes from `MERGE_HEAD`
-  or, for a merge `git merge` commits by itself, from `GIT_REFLOG_ACTION` (git runs
-  pre-merge-commit before it writes `MERGE_HEAD`). Without it, merging `main` into a branch
-  was refused for debt `main` already carried (measured 2026-09-26). Its test:
-  `node --test .githooks/backlog-gate/merge-gate.test.mjs`.
+  It is the same `check.mjs`, with the same `block-new` strength the code hooks used: a
+  violation the baseline does not carry fails, and everything older is printed and fails
+  nothing. The baseline is the last head the gate accepted, not the head's parent, so a
+  violation introduced several publishes ago is still new; the marker advances only on a
+  green run, so a violation stays red until the store is fixed. Two limits are worth
+  knowing: the job cannot refuse the publish (GitHub starts no workflow for a push to a
+  ref that is not a branch or a tag, and the mechanism runs its own git calls with the
+  project's hooks disabled), and the marker leaves the checkout every time, so the check
+  runs on a schedule rather than on the publish itself. Its test:
+  `node --test .githooks/backlog-gate/publish-gate.test.mjs`.
+
+  Neither the pre-commit hook nor CI's `ci-backlog` runs the rules on a code change: a
+  code commit stages no tracker state, and the pre-commit section 7 is disabled with
+  `RUN_BACKLOG=0` for that reason. `ci-backlog` keeps the commit-link check, the
+  present-documents check and the gate's own tests.
 
 - **JSON report:** add `--json` to the `check.mjs` line.
 - **Recorded tracker states import into br:** every code revision the gate judges
@@ -368,8 +376,10 @@ connect` runs this connector before it checks the backlog inputs.
   Local-only tags and other remotes cannot hide a commit. A tag is peeled to a commit.
   None says `<ref> introduces no commits: nothing to check`; unreadable input is exit 2.
   `node --test .githooks/backlog-gate/commit-links.test.mjs`.
-- **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
-  and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
+- **Local entry points:** `.githooks/commit-msg` (links), `.githooks/pre-push` (links for
+  the commits a push introduces), and `.githooks/pre-merge-commit`, which delegates to
+  pre-commit; the backlog's own rules are not a local code-hook gate (they run on the
+  published store, above). A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
   the adapter, `check-commits.mjs` or the config, `commit-links.mjs` without `br` or with an empty export, the backlog gate without its adapter, its rules, `time-format.mjs` or its
   config (exit 2). A tree that never had the integration passes visibly; a configured
@@ -384,20 +394,21 @@ connect` runs this connector before it checks the backlog inputs.
   frontend or product build is started. It reports missing files together and imports
   the tracker successfully before connecting git hooks or clearing the retired driver.
   Failure does not leave a half-connected clone. Safe to rerun.
-- **CI:** `ci-backlog` in `.github/workflows/ci.yml`. Pull requests use the merge
-  base and actual PR head, not GitHub's synthetic merge. An unexpectedly empty
-  range refuses. Pushes use the same introduced-commit enumeration as the local
-  pre-push hook, against the remote's actual refs and the old tip where it exists;
-  a new ref carrying no new commits passes visibly. Backlog comparisons use the
-  preceding published state of those introduced commits, never the branch's own
-  merge base with itself. Product-document checks read the actual incoming revision.
-  The incoming backlog and its configuration both come from that actual revision;
-  the historical baseline is judged by its own configuration. An advertised
-  object absent from this clone cannot bound locally reachable history and is
-  skipped, regardless of its ref namespace; range enumeration never downloads
+- **CI:** `ci-backlog` in `.github/workflows/ci.yml` checks commit links and the
+  present documents on a code pull request; it does not compare backlog states, since a
+  code pull request carries none (nocx-fg79x.3). Pull requests use the merge base and
+  actual PR head, not GitHub's synthetic merge. An unexpectedly empty range refuses.
+  Pushes use the same introduced-commit enumeration as the local pre-push hook, against
+  the remote's actual refs and the old tip where it exists; a new ref carrying no new
+  commits passes visibly. Product-document checks read the actual incoming revision,
+  and the incoming backlog and its configuration both come from that revision.
+  An advertised object absent from this clone cannot bound locally reachable history
+  and is skipped, regardless of its ref namespace; range enumeration never downloads
   unrelated histories merely to exclude them (nocx-q8yjf.27).
-  **Pre-push** reads every stdin ref tuple and runs those range checks, preserving
-  warnings about unpublished tracker changes. It runs no product suite.
+  **The backlog's rules** run in `.github/workflows/tracker-gate.yml` on the published
+  store's delta (see the gate entry above).
+  **Pre-push** reads every stdin ref tuple and runs those range checks. It runs no
+  product suite and does not consult tracker synchronization status.
   **CI does not run on a push to `main`** (the triggers are PRs, `release/**`, dispatch and
   release.yml's call). A direct push to `main` — the owner's, deliberately ungated — is
   checked by the local hooks only.

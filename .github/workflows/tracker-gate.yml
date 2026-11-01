@@ -1,0 +1,93 @@
+# Tracker gate — the backlog's own rules, checked where the tracker is published
+# (nocx-fg79x.3).
+#
+# A code push or pull request carries no tracker state. The store lives on a ref
+# no branch contains and the sync mechanism publishes it from each machine, so
+# that ref's history is the only place a backlog change can be judged.
+#
+# IT CANNOT REFUSE THE PUBLISH, and that is a limit of the ground: GitHub starts
+# no workflow for a push to a ref that is not a branch or a tag, and the
+# mechanism runs its own git calls with the project's hooks disabled. What this
+# job does instead is hold every publish to account. It compares the published
+# store head with the last head this gate ACCEPTED
+# (`refs/tracker-gate/checked`), using the same check.mjs and the same
+# block-new strength the code hooks use: a violation in the head that the
+# baseline does not carry fails; everything older is printed and fails nothing.
+# The marker advances only on a green run, so a violation keeps every later run
+# red until the store is fixed — it cannot be quietly buried under the next
+# publish.
+#
+# Scheduled because a publish triggers nothing here; run it by hand after a
+# publish when a new bead must be checked now.
+name: Tracker gate
+
+on:
+  schedule:
+    # A publish can happen at any minute; the check needs no code change.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  published-backlog:
+    runs-on: ubuntu-latest
+    # The checked head is a ref on this repository. Only this job writes it.
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `landed` reads the main-line commit messages merged-but-open needs,
+          # so the commit history is required. Blobs arrive on demand: this job
+          # reads a handful of files from the tree.
+          fetch-depth: 0
+          filter: blob:none
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      # The ref name comes from the recipe, which is its one owner. The store is
+      # fetched two commits deep so the bootstrap baseline (the previous
+      # published state) is here without the store's whole history.
+      - name: Fetch the published store and the last checked head
+        run: |
+          set -eu
+          ref=$(node --input-type=module -e '
+            const m = await import("./.githooks/backlog-gate/br-tracker.mjs");
+            if (!m.default || !m.default.ref) process.exit(2);
+            process.stdout.write(m.default.ref);
+          ')
+          git fetch --no-tags --depth=2 origin "$ref:refs/tracker/published"
+          head=$(git rev-parse refs/tracker/published)
+          checked=
+          if git fetch --no-tags --depth=1 origin refs/tracker-gate/checked:refs/tracker-gate/checked 2>/dev/null; then
+            checked=$(git rev-parse refs/tracker-gate/checked)
+          fi
+          if [ -n "$checked" ]; then
+            baseline=$checked
+          else
+            # First run: the previous published store state. A store with one
+            # commit has no parent, and then there is nothing to compare.
+            baseline=$(git rev-parse --verify "refs/tracker/published^" 2>/dev/null || printf '%s' "$head")
+          fi
+          echo "published store head: $head"
+          echo "gate baseline:        $baseline"
+          printf 'CHECKED=%s\nHEAD_SHA=%s\nBASELINE=%s\n' "$checked" "$head" "$baseline" >> "$GITHUB_ENV"
+
+      - name: The backlog gate on the published delta
+        run: node .githooks/backlog-gate/publish-gate.mjs --baseline "$BASELINE" --head "$HEAD_SHA"
+
+      # Only an accepted head moves the baseline: a red run keeps checking the
+      # same delta, so the violation cannot be buried by the next publish.
+      - name: Record the checked head
+        run: |
+          set -eu
+          if [ -n "$CHECKED" ] && [ "$CHECKED" = "$HEAD_SHA" ]; then
+            echo "the published head $HEAD_SHA was already checked"
+            exit 0
+          fi
+          git push origin "$HEAD_SHA:refs/tracker-gate/checked"

@@ -332,7 +332,10 @@ connect` runs this connector before it checks the backlog inputs.
   message; tasks come from the export `br where` names, which is the database's own view,
   so a bead created a minute ago resolves. `--range <base>..<head>` checks every commit the
   range introduces, with tasks from the export at `<head>`. An empty range is exit 2, never
-  a pass. `--introduced <tip> --by <ref> [--before <sha>] --remote <remote>` checks
+  a pass. `--pull-request <base-sha> --head <head-sha>` is the form CI uses: the base is the
+  event's own `pull_request.base.sha`, so a rerun of an already-merged PR still checks the
+  commits it introduced instead of collapsing to `head..head` (nocx-1ebrs.66.1.32).
+  `--introduced <tip> --by <ref> [--before <sha>] --remote <remote>` checks
   commits not reached by the target remote's other actual refs or the pushed ref's
   old tip. CI already sees the published ref, so that ref itself is excluded.
   Local-only tags and other remotes cannot hide a commit. A tag is peeled to a commit.

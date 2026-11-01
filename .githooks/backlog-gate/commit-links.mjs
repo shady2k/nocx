@@ -34,7 +34,19 @@
  *
  * Usage:
  *   commit-links.mjs --message <file>           the pending message (commit-msg)
- *   commit-links.mjs --range <base>..<head>     every commit it introduces (CI, a PR)
+ *   commit-links.mjs --range <base>..<head>     every commit it introduces
+ *   commit-links.mjs --pull-request <base-sha> --head <head-sha>
+ *                                               every commit a pull request
+ *                                               introduced (CI). <base-sha> is the
+ *                                               event's own
+ *                                               pull_request.base.sha, never the
+ *                                               tip of the base branch: a rerun of
+ *                                               an already-merged PR re-reads its
+ *                                               original event, and by then the
+ *                                               base branch contains the head, so
+ *                                               a range from the branch tip is
+ *                                               head..head -- it checks nothing
+ *                                               and fails as misuse instead
  *   commit-links.mjs --introduced <tip> --by <ref> [--before <sha>]
  *                                               every commit a push of <ref> brings
  *                                               that no other remote ref reaches (CI, a
@@ -267,6 +279,8 @@ function main() {
       [
         '--message',
         '--range',
+        '--pull-request',
+        '--head',
         '--introduced',
         '--by',
         '--before',
@@ -281,10 +295,14 @@ function main() {
       return 2
     }
   }
-  if ([opt.message, opt.range, opt.introduced].filter(Boolean).length !== 1) {
+  if ([opt.message, opt.range, opt.introduced, opt['pull-request']].filter(Boolean).length !== 1) {
     console.error(
-      'commit-links.mjs: give exactly one of --message <file>, --range <base>..<head> or --introduced <tip> --by <ref>',
+      'commit-links.mjs: give exactly one of --message <file>, --range <base>..<head>, --pull-request <base-sha> --head <head-sha> or --introduced <tip> --by <ref>',
     )
+    return 2
+  }
+  if (!!opt['pull-request'] !== !!opt.head) {
+    console.error('commit-links.mjs: --pull-request <base-sha> takes --head <head-sha>')
     return 2
   }
   if (
@@ -334,12 +352,30 @@ function main() {
     })
   } else {
     let listed
+    // A pull request's base is the commit its event named, not the tip of its
+    // base branch: the two are different on a rerun of an already-merged PR,
+    // where the base branch contains the head and a merge-base range collapses
+    // to head..head (nocx-1ebrs.66.1.32).
+    let range = opt.range
     if (opt.range) {
       if (!/^[^.\s]+\.\.[^.\s]+$/.test(opt.range)) {
         console.error(`commit-links.mjs: --range wants <base>..<head>, got ${opt.range}`)
         return 2
       }
-      listed = git('rev-list', '--reverse', '--format=%H %P%x00%ct', opt.range)
+    } else if (opt['pull-request']) {
+      for (const [flag, rev] of [
+        ['--pull-request', opt['pull-request']],
+        ['--head', opt.head],
+      ]) {
+        if (spawnSync('git', ['rev-parse', '-q', '--verify', `${rev}^{commit}`]).status !== 0) {
+          console.error(`commit-links.mjs: ${flag} ${rev} is not a commit git can read`)
+          return 2
+        }
+      }
+      range = `${opt['pull-request']}..${opt.head}`
+    }
+    if (range) {
+      listed = git('rev-list', '--reverse', '--format=%H %P%x00%ct', range)
     } else {
       // The pushed tip must be local; an advertised old tip may need fetching.
       if (opt.before && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(opt.before)) {
@@ -366,7 +402,7 @@ function main() {
     }
     if (!list.length) {
       console.error(
-        `commit-links.mjs: the range ${opt.range} introduces no commit, so there is nothing it could have checked`,
+        `commit-links.mjs: the range ${range} introduces no commit, so there is nothing it could have checked`,
       )
       return 2
     }
@@ -387,7 +423,7 @@ function main() {
         recordsOnly: parents.length === 1 && recordsOnly(parents[0], sha),
       })
     }
-    if (!opt['export-at']) opt['export-at'] = opt.introduced || opt.range.split('..')[1]
+    if (!opt['export-at']) opt['export-at'] = opt.introduced || range.split('..')[1]
   }
 
   if (before.length) {

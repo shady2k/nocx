@@ -1165,6 +1165,77 @@ export async function setUpVaultThroughTheSheet(page: Page, passphrase: string):
 }
 
 /**
+ * Reissue the vault's recovery code through the Reissue sheet, and hand back
+ * the new code exactly as the sheet showed it (nocx-1ebrs.47).
+ *
+ * THE SAME TWO MECHANISMS AS setUpVaultThroughTheSheet, one sheet later, and
+ * they are why this is a helper rather than four lines in a spec.
+ *
+ * There is no notification and no second owner behind the code: pressing
+ * "Generate new recovery code" sends `vault.regenerateRecovery`, the sheet
+ * advances only when the answer arrives, and the code block IS that answer's
+ * appearance. An answer can outlive a blind budget (measured in CI: a
+ * vault.setup answer took 12.78 s on a webkit runner where every other setup
+ * that day took 0.14–0.59 s), so the wait is on the code block, not on a
+ * duration. And the press itself can be lost while the top-sheet is still
+ * settling — mousedown and mouseup land on different elements and the browser
+ * fires the click on their common ancestor, which has no handler. Nothing then
+ * moves: no request leaves the wire, no error is painted, the button stays
+ * live. That is the nocx-17ihs signature the setup sheet's helper carries; the
+ * reissue sheet had the same exposure, and it is why a lost press here is
+ * retried while the passphrase step is still on screen — which is what a
+ * person does with a button that appeared to do nothing.
+ *
+ * The dialog is identified by its OWN field, not by its title: the title
+ * "Reissue recovery code" is on screen before the ask (it names the request),
+ * so a wait on it is satisfied by the sheet merely being open and says nothing
+ * about the code having arrived.
+ */
+export async function reissueRecoveryCodeThroughTheSheet(
+  page: Page,
+  passphrase: string,
+): Promise<string> {
+  const field = page.locator('#vault-reissue-passphrase')
+  // By the prompt's own accessible name, which is stable across BOTH steps:
+  // the passphrase field is replaced by the code, so a `has: field` dialog
+  // would stop matching the moment the answer arrived.
+  const dialog = page.getByRole('dialog', { name: 'Reissue recovery code' })
+  const open = page.getByRole('button', { name: 'Reissue recovery code' })
+
+  // Open: press, then look for the step the press is supposed to produce. The
+  // guard keeps a press that DID arrive from being repeated — the field being
+  // visible means the sheet is already open.
+  await baseExpect(async () => {
+    if (!(await field.isVisible())) {
+      await open.click({ timeout: 2_000 }).catch(() => undefined)
+    }
+    baseExpect(await field.isVisible()).toBe(true)
+  }).toPass({ timeout: 10_000 })
+
+  await field.fill(passphrase)
+
+  const codeBlock = dialog.locator('.ui-code-block')
+  await baseExpect(async () => {
+    // The passphrase step still on screen means no answer has been accepted:
+    // the press was lost, or the answer is still on its way (the button is
+    // disabled then, so the press is swallowed rather than owed). Both end on
+    // the code block, which is the answer's own appearance.
+    if (await field.isVisible()) {
+      await dialog
+        .getByRole('button', { name: /Generate new recovery code/i })
+        .click({ timeout: 2_000 })
+        .catch(() => undefined)
+    }
+    baseExpect(await codeBlock.isVisible()).toBe(true)
+  }).toPass({ timeout: 15_000 })
+
+  const code = (await codeBlock.textContent()) ?? ''
+  await dialog.getByRole('button', { name: 'Done', exact: true }).click()
+  await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
+  return code
+}
+
+/**
  * Choose the DEFAULT model on Settings → Roles — the one choice the whole
  * ladder exists to lead a person to (nocx-rikz5).
  *

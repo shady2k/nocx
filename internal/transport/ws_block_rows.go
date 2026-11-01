@@ -181,6 +181,14 @@ type blockStream struct {
 	// in order, and popped one at a time as the open in flight (and each one
 	// after it) finishes — never dropped. Cleared by detach.
 	reopen map[session.ID][]string
+	// completed holds the attempts whose AUTHENTICATED COMPLETION has arrived
+	// (nocx-atpw5.1.12). It is not the same fact as an end marker stated on the
+	// rows stream: the completion is the carrier the renderer's prompt_ready
+	// follows, while the fence's sighting is the rows-plane half, and ADR-0074
+	// says the two are ordered independently. An erase sighted after this has
+	// arrived cannot be inside the attempt's interval, whatever the rows plane
+	// has not yet delivered.
+	completed map[session.ID]map[string]bool
 	// closedWhileOpening names the attempts that were told block.closed — by
 	// an ordinary close or by abandonAttempt — before their OWN open ever
 	// installed a block for them (nocx-2v80t.3.48): either the session's
@@ -1189,6 +1197,7 @@ func (bs *blockStream) detachCoordinator(sid session.ID) {
 	delete(bs.closeTries, sid)
 	delete(bs.entered, sid)
 	delete(bs.lost, sid)
+	delete(bs.completed, sid)
 	delete(bs.reopen, sid)
 	delete(bs.closedWhileOpening, sid)
 	delete(bs.unrecorded, sid)
@@ -1245,6 +1254,7 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	delete(bs.closeTries, sid)
 	delete(bs.entered, sid)
 	delete(bs.lost, sid)
+	delete(bs.completed, sid)
 	delete(bs.reopen, sid)
 	delete(bs.closedWhileOpening, sid)
 	delete(bs.unrecorded, sid)
@@ -2477,10 +2487,14 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 // everything on screen, which is also what a reload has to show.
 func (bs *blockStream) erasingIntervalLocked(sid session.ID) (keep, ended string) {
 	cur := bs.current[sid]
-	if cur != nil && !bs.endStatedLocked(sid, cur.attempt) {
+	if cur != nil && !bs.authenticatedEndLocked(sid, cur.attempt) && !bs.endStatedLocked(sid, cur.attempt) {
 		return cur.entry, ""
 	}
 	if cur != nil {
+		// Either the end has been stated on the rows stream, or the interval's
+		// authenticated completion has arrived and the end marker is still in
+		// flight (ADR-0074's two carriers). Both say the interval is over, so
+		// the block it left is one the erase hides.
 		ended = cur.entry
 	}
 	// The interval that follows: installed behind the current block
@@ -2496,6 +2510,31 @@ func (bs *blockStream) erasingIntervalLocked(sid session.ID) (keep, ended string
 		}
 	}
 	return "", ended
+}
+
+// markAuthenticatedEndLocked records that the attempt's authenticated
+// completion has arrived (nocx-atpw5.1.12). The renderer's prompt_ready
+// follows exactly this fact, and the rows-plane end marker is the other half
+// of the same boundary (ADR-0074), so from here the interval is over for
+// attribution even while its end marker is still in flight.
+func (bs *blockStream) markAuthenticatedEndLocked(sid session.ID, attempt string) {
+	if attempt == "" {
+		return
+	}
+	if bs.completed == nil {
+		bs.completed = make(map[session.ID]map[string]bool)
+	}
+	if bs.completed[sid] == nil {
+		bs.completed[sid] = make(map[string]bool)
+	}
+	bs.completed[sid][attempt] = true
+}
+
+// authenticatedEndLocked answers whether this attempt's completion has
+// arrived. A settled attempt is forgotten, so a later erase is decided by the
+// interval that is current then.
+func (bs *blockStream) authenticatedEndLocked(sid session.ID, attempt string) bool {
+	return bs.completed[sid][attempt]
 }
 
 // endStatedLocked answers whether the block `attempt` is current for has
@@ -2634,6 +2673,12 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 			delete(bs.current, sid)
 		}
 		delete(bs.open[sid], attempt)
+		if bs.completed[sid] != nil {
+			delete(bs.completed[sid], attempt)
+			if len(bs.completed[sid]) == 0 {
+				delete(bs.completed, sid)
+			}
+		}
 		delete(bs.fences[sid], hexNonce)
 		// A block settled by any other end than its own fence's — the zero
 		// nonce, a lost boundary — leaves that fence behind with no end ever
@@ -3066,6 +3111,12 @@ func (bs *blockStream) attemptFact(ctx context.Context, s *WSServer, f lifecycle
 				f.Attempt.ID = cur.attempt
 			}
 		}
+		// THE ATTRIBUTION HALF (nocx-atpw5.1.12): the completion is what the
+		// renderer's prompt_ready follows, so an erase sighted after it — by a
+		// person typing `clear` the moment the prompt is back — belongs to the
+		// interval that follows, not to this one, even though its end marker
+		// has not reached the rows stream yet.
+		bs.markAuthenticatedEndLocked(sid, f.Attempt.ID)
 		var entry, artifact string
 		if block := bs.open[sid][f.Attempt.ID]; block != nil && block.kept && !block.settled {
 			entry, artifact = block.entry, block.artifactID

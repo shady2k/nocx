@@ -19,8 +19,11 @@ on:
         default: false
 permissions:
   contents: read
+# The nightly and the stable promotion share one release group: promotion
+# tags a commit the nightly published, so the two must never overlap. Queued,
+# never cancelled (ADR-79b6cy61).
 concurrency:
-  group: nightly-publication
+  group: nocx-release
   cancel-in-progress: false
 jobs:
   prepare:
@@ -38,6 +41,9 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'main' }}
           fetch-depth: 0
+          # The version comes from the reachable stable tags, so they are part
+          # of the input, not an accident of the clone (ADR-79b6cy61).
+          fetch-tags: true
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
@@ -54,7 +60,7 @@ jobs:
           set -euo pipefail
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
-          import { readFileSync, appendFileSync } from 'node:fs';
+          import { appendFileSync } from 'node:fs';
           import { prepare, authorize, releaseKeys, verifyFile } from './scripts/publish-nightly.mjs';
           authorize({ ref: process.env.GITHUB_REF, dryRun: process.env.DRY_RUN === 'true', linuxOnly: process.env.LINUX_ONLY === 'true' });
           const git = args => execFileSync('git', args, { encoding: 'utf8' }).trim();
@@ -71,7 +77,10 @@ jobs:
           // A rewritten main is not a publishable successor.
           if (previous) git(['merge-base', '--is-ancestor', previous, sha]);
           const files = previous ? git(['diff', '--name-only', previous, sha]).split('\n').filter(Boolean) : [];
-          const plan = prepare({ sha, previous, files, version: readFileSync('VERSION', 'utf8').trim(),
+          // The version is read from the stable tags this commit can reach, by
+          // nextVersion in the module: one owner, no VERSION file, no describe.
+          const tags = git(['tag', '--list', '--merged', sha]).split('\n').filter(Boolean);
+          const plan = prepare({ sha, previous, files, tags,
             date: new Date().toISOString().slice(0, 10).replaceAll('-', ''), runId: process.env.RUN_ID });
           if (process.env.DRY_RUN === 'true') plan.moved = true;
           for (const [key, value] of Object.entries(plan)) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);

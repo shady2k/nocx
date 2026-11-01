@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { generateKeyPairSync, sign, createHash } from 'node:crypto'
-import { decide, publish, prepare, attest, authorize } from './publish-nightly.mjs'
+import { decide, publish, prepare, attest, authorize, nextVersion } from './publish-nightly.mjs'
 
 const buildIdentity = { commit: 'a'.repeat(40), builtAt: '2026-10-27T03:17:00Z' }
 
@@ -286,11 +286,28 @@ test('wrong stamped version refuses', (t) => {
   const { input } = fixture(t)
   assert.throws(() => decide({ ...input, version: '0.9.0' }), /version/)
 })
+// THE VERSION COMES FROM THE TAGS (ADR-79b6cy61). After v0.8.0 every
+// nightly is 0.8.1, with no VERSION bump waiting between a release and the
+// next nightly; the tag that promotion creates IS the next input.
+test('nextVersion is the next patch after the highest stable tag, nightly tags excluded', () => {
+  assert.equal(nextVersion(['v0.7.2', 'v0.8.0', 'nightly-20261027-42', 'nightly']), '0.8.1')
+  // Order of the tag list is not a policy: the highest release wins.
+  assert.equal(nextVersion(['v0.8.0', 'v0.7.2', 'v0.6.1']), '0.8.1')
+  // After promotion the SAME rule gives the version after it.
+  assert.equal(nextVersion(['v0.8.1', 'v0.8.0']), '0.8.2')
+  // A nightly-only history names no version at all.
+  assert.throws(() => nextVersion(['nightly', 'nightly-20261027-42']), /no stable release tag/)
+  assert.throws(() => nextVersion([]), /no stable release tag/)
+  // Missing or unreadable tags fail closed rather than picking a lower release.
+  assert.throws(() => nextVersion(undefined), /tags must be the tag names/)
+  assert.throws(() => nextVersion(['v0.8', 'v0.8.0']), /unreadable release tag v0\.8/)
+})
+
 test('prepare distinguishes moved, unchanged, and supporting-only commits', () => {
   const base = {
     sha: 'a'.repeat(40),
     previous: 'b'.repeat(40),
-    version: '0.8.0',
+    tags: ['v0.8.0', 'nightly-20261027-42'],
     date: '20261027',
     runId: '42',
   }
@@ -314,6 +331,48 @@ test('publication failure does not move nightly tag', async (t) => {
 })
 
 // Static wiring checks supplement, never replace, the executed decisions above.
+test('prepare derives the version from the tags instead of reading VERSION', () => {
+  const plan = prepare({
+    sha: 'a'.repeat(40),
+    previous: null,
+    files: [],
+    tags: ['v0.8.0'],
+    date: '20261031',
+    runId: '7',
+  })
+  assert.equal(plan.version, '0.8.1')
+  // A version handed in beside the tags is not a second source: the tags are.
+  const after = prepare({
+    sha: 'a'.repeat(40),
+    previous: null,
+    files: [],
+    tags: ['v0.8.1', 'v0.8.0'],
+    version: '0.0.0',
+    date: '20261031',
+    runId: '8',
+  })
+  assert.equal(after.version, '0.8.2')
+})
+
+test('the nightly workflow reads the reachable tags and never the VERSION file', () => {
+  const workflow = readFileSync(
+    new URL('../.github/workflows/nightly.yml', import.meta.url),
+    'utf8',
+  )
+  assert.match(workflow, /git\(\['tag', '--list', '--merged', sha\]\)/)
+  assert.match(workflow, /prepare\(\{[^}]*tags/s)
+  assert.match(workflow, /fetch-tags: true/)
+  assert.doesNotMatch(workflow, /readFileSync\('VERSION'/)
+  // Nightly and promotion must not run at the same time: both are in one
+  // concurrency group that queues rather than cancels.
+  assert.match(workflow, /concurrency:\s*\n\s*group: nocx-release/)
+  assert.match(workflow, /cancel-in-progress: false/)
+  const release = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8')
+  assert.match(release, /concurrency:\s*\n\s*group: nocx-release/)
+  assert.match(release, /cancel-in-progress: false/)
+  assert.doesNotMatch(release, /promotion-github\.mjs bump/)
+})
+
 test('nightly workflow calls the shared build without CI or Homebrew and gates unchanged main', () => {
   const workflow = readFileSync(
     new URL('../.github/workflows/nightly.yml', import.meta.url),

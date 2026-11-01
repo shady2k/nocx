@@ -873,6 +873,16 @@ jobs:
         working-directory: .
         run: node e2e/check-coverage.mjs
 
+      # The helper unit tests beside the specs: the pure decisions the harness
+      # and the spec readers are built on. None needs a browser, the stand or a
+      # built backend, and none was run by any job, so one could go stale
+      # without anything saying so (nocx-1ebrs.66.1.30). Node 24 strips the
+      # types itself; this is seconds, not a suite. A FIXTURE is a spec: the
+      # e2e job still owns what needs the product running.
+      - name: e2e helper unit tests
+        working-directory: .
+        run: node --test e2e/*.unit.mts
+
       - name: Duration shard planner tests
         working-directory: .
         run: node --test scripts/shard-files.test.mjs
@@ -944,16 +954,21 @@ jobs:
       # refs/tracker/state. The backlog gate belongs to that publish, not here.
       - name: Every new commit names a task
         env:
-          BASE_REF: ${{ github.base_ref }}
+          # The event's own base sha, not the tip of the base branch: on a rerun
+          # of an already-merged pull request the base branch contains the head,
+          # so a range from a merge-base with it is head..head and the check
+          # exits 2 on a PR that introduced commits (nocx-1ebrs.66.1.32). The
+          # event is re-read unchanged on a rerun, so this sha is the base the
+          # original run measured from.
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           set -eu
           gate=.githooks/backlog-gate
-          if [ -n "${BASE_REF:-}" ]; then
-            range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
-            echo "range: $range"
-            node "$gate/commit-links.mjs" --range "$range"
+          if [ -n "${BASE_SHA:-}" ]; then
+            echo "pull request base: $BASE_SHA head: $HEAD_SHA"
+            node "$gate/commit-links.mjs" --pull-request "$BASE_SHA" --head "$HEAD_SHA"
           else
             set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF" --remote origin
             case "${BEFORE:-}" in
@@ -991,15 +1006,32 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
         env:
           BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
           gate=.githooks/backlog-gate
           # From the merge base to the PR's head, not GitHub's synthetic merge,
-          # as the commit check above.
+          # as the commit check above: a newer base would report drift the pull
+          # request did not cause. The one case the merge base cannot serve is a
+          # rerun of a merged pull request, where the base branch contains the
+          # head and the merge base IS the head; the event's own base sha is the
+          # change's other end then (nocx-1ebrs.66.1.32).
           base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          if [ "$base" = "$HEAD_SHA" ] && [ -n "${BASE_SHA:-}" ]; then
+            base=$BASE_SHA
+          fi
           echo "base: $base"
           node "$gate/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
+
+      # The gate's own tests: commit-links, the adapter and the merge gate are
+      # tooling, and a change to them was guarded only by whoever remembered the
+      # by-hand command in docs/agents/backlog.md (nocx-fg79x.5). This job runs
+      # on every pull request and push, so a change to .githooks/backlog-gate/
+      # owes these whether or not it owes the product suites. The glob is the
+      # point: a new *.test.mjs beside them is run without another edit here.
+      - name: The backlog gate's own tests
+        run: node --test .githooks/backlog-gate/*.test.mjs
 
   # e2e — the suite, in the same container a developer runs it in.
   #

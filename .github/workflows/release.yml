@@ -23,8 +23,10 @@ on:
 permissions:
   contents: read
 
+# One release group with the nightly (ADR-79b6cy61): the promotion tags the
+# commit a nightly published, so a nightly must not publish over it mid-run.
 concurrency:
-  group: stable-promotion
+  group: nocx-release
   cancel-in-progress: false
 
 jobs:
@@ -120,12 +122,6 @@ jobs:
             git -C tap commit -m "chore: update nocx cask to v${version}"
             git -C tap push origin HEAD:main
           fi
-
-      - name: Propose the next nightly version through a normal PR
-        if: ${{ !cancelled() && steps.publish.outcome == 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/release/promotion-github.mjs bump promotion
 
       # Evidence survives a failed tap push/version PR as well as a success.
       - name: Preserve promotion evidence and exact stable digest plan

@@ -27,7 +27,10 @@ nocx-sky-test "$PWD" 'node --test --test-reporter=tap scripts/release/promotion*
 1. Merge the nightly producer and this promotion implementation. Prepare the
    next stable's README and release notes **before** its nightly: the unique
    `**Status:**` line must name `` `vX.Y.Z` `` and link
-   `docs/release-notes/vX.Y.Z.md` on that same line. `VERSION` must be `X.Y.Z`.
+   `docs/release-notes/vX.Y.Z.md` on that same line. There is no `VERSION` file
+   to edit: the nightly's version is the next patch after the highest stable tag
+   its commit reaches, so prepare the next release's README and notes, merge
+   them, and that nightly already carries `X.Y.Z`.
    Dispatch **Nightly** on `main` rather than waiting for its schedule. Wait for
    its verified publication to finish successfully.
 2. Install and try that dated nightly. As the repository owner, dispatch
@@ -39,9 +42,8 @@ nocx-sky-test "$PWD" 'node --test --test-reporter=tap scripts/release/promotion*
    verified; stable manifest signed and checked against the candidate's keyring;
    draft upload downloaded and compared; stable published and downloaded again;
    stable cask updated from that exact zip hash. The evidence artifact contains
-   `evidence.json` and `plan.json`. Review the generated next-`VERSION` PR, start
-   CI on it (close/reopen as the owner, because `GITHUB_TOKEN` cannot trigger CI),
-   then merge it before the next nightly. The workflow never merges it.
+   `evidence.json` and `plan.json`. The stable tag is the whole record: the next
+   nightly computes its version from it, so nothing else is advanced or merged.
 
 ### What the CI gate accepts
 
@@ -83,9 +85,6 @@ particular:
 - **Update the stable Homebrew cask** needs `HOMEBREW_TAP_TOKEN`, permitted to
   push `Casks/nocx.rb` in `shady2k/homebrew-nocx`. Check the cask version and
   sha256 against `plan.json`, not against a fresh hash chosen after publication.
-- **Propose the next nightly version** needs Actions to be allowed to create PRs
-  with `github.token`. Enable that repository setting before the run. The owner
-  must start CI and merge the normal bump PR; no direct push to `main` occurs.
 
 ### Refusals and partial failures
 
@@ -97,7 +96,7 @@ fails before any write. A changed upload fails before making the draft stable.
 
 There is no automatic retry that overwrites a tag or an asset. A fresh promotion
 refuses an existing stable tag or release. This also makes a repeat click safe.
-Promotions serialize under `stable-promotion`; the nightly tag remains unchanged.
+Promotions and nightlies serialize under the `nocx-release` concurrency group; the nightly tag remains unchanged. The next nightly reads the new stable tag, so promotion and nightly must not overlap.
 
 If a tag/draft was created and a later upload/check failed, inspect it and the
 saved plan. Delete only that **unpublished** draft and tag after checking that no
@@ -110,10 +109,10 @@ without rebuilding or republishing: download the saved evidence artifact and
 all `plan.json` stable assets into `promotion/published/`, hash them against
 `plan.assets` using `verifyFiles`, then run `node
 scripts/release/promotion-github.mjs cask promotion tap/Casks/nocx.rb` and review
-and push that cask delta with the tap token. If the version PR failed, verify
-that same release and run the `bump` command with PR permissions (or prepare
-and review the one-line `VERSION` patch by hand). Do not rerun live promotion
-to repair a tap/PR: it deliberately refuses the existing stable tag.
+and push that cask delta with the tap token. There is no version PR to recover:
+the stable tag already names the version the next nightly will use. Do not rerun
+live promotion to repair a tap push: it deliberately refuses the existing stable
+tag.
 
 ## Producer contract
 

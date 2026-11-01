@@ -13,7 +13,6 @@ const pipelineFiles = new Set([
   'scripts/verify_built_artifact_test.py',
   'scripts/verify-built-artifact.md',
   'scripts/test-nightly.sh',
-  'VERSION',
   'Casks/nocx.rb',
   'Casks/nocx@nightly.rb',
   'scripts/release/promotion.mjs',

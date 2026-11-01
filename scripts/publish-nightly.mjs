@@ -48,9 +48,52 @@ export function authorize({ ref, dryRun, linuxOnly }) {
   if (!dryRun && linuxOnly) fail('publication requires both platforms')
   return { publish: !dryRun }
 }
-export function prepare({ sha, previous, files, version, date, runId }) {
+const STABLE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+
+/**
+ * The version a nightly embeds: the next patch after the highest STABLE tag
+ * on the revision's ancestry (ADR-79b6cy61, partially superseding
+ * ADR-0097's VERSION source).
+ *
+ * `tags` is every tag this revision can reach, as `git tag --list --merged`
+ * prints them, and this function is the ONE place that picks among them.
+ * `git describe` is not used: its "nearest tag" is a different policy, and it
+ * walks toward a commit rather than answering "which release is the newest".
+ *
+ * The nightly's own tags are excluded by name, and every other tag must be a
+ * stable `vX.Y.Z` — a release tag the version is read from cannot be one this
+ * function guesses about, so an unreadable one fails the nightly closed rather
+ * than silently picking the next lower release.
+ */
+export function nextVersion(tags) {
+  if (!Array.isArray(tags)) fail('tags must be the tag names reachable from the nightly revision')
+  let best = null
+  for (const name of tags) {
+    if (typeof name !== 'string' || name === '') continue
+    if (name.startsWith('nightly')) continue
+    const match = STABLE_TAG.exec(name)
+    if (!match)
+      fail(
+        `unreadable release tag ${name}: the nightly version comes from stable tags, so an unknown tag cannot be skipped`,
+      )
+    const parts = match.slice(1, 4).map(Number)
+    if (
+      !best ||
+      parts[0] > best[0] ||
+      (parts[0] === best[0] && (parts[1] > best[1] || (parts[1] === best[1] && parts[2] > best[2])))
+    )
+      best = parts
+  }
+  if (!best)
+    fail(
+      'no stable release tag is reachable from this revision; a nightly cannot name the next version',
+    )
+  return `${best[0]}.${best[1]}.${best[2] + 1}`
+}
+
+export function prepare({ sha, previous, files, tags, date, runId }) {
   if (!/^[a-f0-9]{40}$/.test(sha)) fail('sha must be a full main revision')
-  if (!/^\d+\.\d+\.\d+$/.test(version)) fail('VERSION must be the next stable version')
+  const version = nextVersion(tags)
   if (!/^\d{8}$/.test(date) || !/^\d+$/.test(runId)) fail('invalid dated tag inputs')
   if (previous && previous !== sha && files.length === 0)
     fail('empty diff between different main revisions')

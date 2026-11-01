@@ -40,7 +40,6 @@ test('release tooling is supporting but CI, stable release and app wiring stay p
     'scripts/verify-built-artifact.py',
     'Casks/nocx.rb',
     'Casks/nocx@nightly.rb',
-    'VERSION',
   ])
     assert.equal(isProductFile(file), false, file)
   for (const file of [

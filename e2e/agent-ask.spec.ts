@@ -259,6 +259,91 @@ async function assignAnsweringRole(page: Page, endpointName: string, model: stri
   await expect(answering.locator('select').nth(1).locator('option:checked')).toHaveText(model)
 }
 
+/** Create this file's endpoint through the surface a user uses, and the vault
+ *  its key is minted into. The Endpoints page must already be open.
+ *
+ *  A fresh home has NO vault, and the endpoint's key is minted INTO the vault
+ *  (design §4.5.3). The first save therefore FAILS the mint — and the surface
+ *  must answer with the vault setup sheet (the operation-first wrapper nocx-8rwj
+ *  added, saveSecretWithVault) and retry THIS save once the vault exists. This
+ *  is the owner's exact path (nocx-4egm): the key was typed before the vault
+ *  existed, and the save must land WITH the key.
+ *
+ *  The assertions are part of the walk rather than left to the caller: a helper
+ *  that only clicked would let a silent refusal through, and every asking case
+ *  depends on this having worked. */
+async function createEndpointThroughTheSurface(page: Page): Promise<void> {
+  await page.getByRole('button', { name: '+ New endpoint' }).first().click()
+  const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
+  await expect(dialog).toBeVisible()
+  await dialog.locator('#endpoint-name').fill(`E2E Fake ${nonce}`)
+  // The fake's base URL: http://127.0.0.1:<port>/v1 — loopback, which is
+  // exactly the address rule internal/assistant/httpguard.go permits.
+  await dialog.locator('#endpoint-base-url').fill(fake.baseUrl())
+  await dialog.locator('#endpoint-key').fill(`e2e-key-${nonce}`)
+  await dialog.getByRole('button', { name: 'Add model' }).click()
+  await dialog.locator('#endpoint-model-0-name').fill('e2e-model')
+  await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
+
+  // The setup sheet, raised BY THE SAVE — not by a detour through the Vault
+  // page: the backend refused the mint (vault-uninitialized) and the wrapper
+  // answered with the sheet instead of a toast.
+  const setupSheet = page
+    .locator('.ui-prompt-overlay')
+    .filter({ has: page.locator('#vault-setup-passphrase') })
+  await expect(setupSheet).toBeVisible({ timeout: 10_000 })
+  // The sheet's journey is the one owner's (harness.ts): press-and-look, code,
+  // Done, sheet gone. This file's private copy was the shape that waited blind
+  // on the code block while the press it sent never landed (nocx-17ihs).
+  await setUpVaultThroughTheSheet(page, `vault-pass-${nonce}`)
+
+  // The deferred save ran with the vault now existing: the dialog closes and
+  // the record is in the list. That the KEY landed is not asserted from any
+  // caption — it is proved where this same endpoint answers a real question
+  // through the fake.
+  await expect(dialog).not.toBeVisible({ timeout: 10_000 })
+  // The record landed and the row says so. The page deliberately shows no
+  // assistant-readiness badge: readiness belongs on the ask chip, where a
+  // person is actually asking, not floating above this page's frame
+  // (nocx-q27y removed `.ep-status-row`, so nothing here may assert on it).
+  const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
+  await expect(savedRow).toBeVisible({ timeout: 10_000 })
+}
+
+/** Answer the measured read, then assign the answering role to this file's
+ *  endpoint and model. The endpoint must exist; the answer is idempotent
+ *  (harness.ts says so), and selecting the role a row already holds writes
+ *  nothing. */
+async function answerAndAssign(page: Page): Promise<void> {
+  // Allow the measured session.read so the model request can reach a second
+  // completion without an approval sheet unrelated to the join under test.
+  await page.locator(SETTINGS_POLICY_NAV).click()
+  await answerPermission(page, 'observe', 'Allowed')
+  // Askable only once the role names an endpoint-model pair: an unassigned
+  // role refuses with "no model assigned" before any request reaches the
+  // fake. The assignment goes through the surface a person uses.
+  await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
+}
+
+/** THE PREREQUISITES AN ASKING CASE NEEDS, said by the case that needs them.
+ *
+ *  The file is serial, so the endpoint case normally creates the endpoint and
+ *  the role before any later case asks, and the later ones inherited that.
+ *  A serial file does not run its earlier tests under --grep, so the second
+ *  streaming ask met an unassigned role and failed with "the answering role
+ *  has no model assigned" instead of at what it measures (nocx-atpw5.1.11).
+ *
+ *  Idempotent on purpose: a full run finds both already done and changes
+ *  nothing, an isolated run performs exactly the walk the endpoint case
+ *  performs. */
+async function ensureAskingPrerequisites(page: Page): Promise<void> {
+  await openAIEndpoints(page)
+  if ((await page.locator('.ep-root').textContent())?.includes('No endpoints yet')) {
+    await createEndpointThroughTheSurface(page)
+  }
+  await answerAndAssign(page)
+}
+
 /** Run one command and wait for its finished (frozen) block. */
 async function runCommand(
   page: Page,
@@ -527,59 +612,8 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // empty state owns the no-endpoint sentence here, and the readiness badge
     // is deliberately absent until there is something to be ready about.
     await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
-
-    // A fresh home has NO vault, and the endpoint's key is minted INTO the
-    // vault (design §4.5.3). The first save therefore FAILS the mint — and
-    // the surface must answer with the vault setup sheet (the operation-
-    // first wrapper nocx-8rwj added, saveSecretWithVault) and retry THIS
-    // save once the vault exists. This is the owner's exact path (nocx-4egm):
-    // the key was typed before the vault existed, and the save must land
-    // WITH the key.
-    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
-    const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
-    await expect(dialog).toBeVisible()
-    await dialog.locator('#endpoint-name').fill(`E2E Fake ${nonce}`)
-    // The fake's base URL: http://127.0.0.1:<port>/v1 — loopback, which is
-    // exactly the address rule internal/assistant/httpguard.go permits.
-    await dialog.locator('#endpoint-base-url').fill(fake.baseUrl())
-    await dialog.locator('#endpoint-key').fill(`e2e-key-${nonce}`)
-    await dialog.getByRole('button', { name: 'Add model' }).click()
-    await dialog.locator('#endpoint-model-0-name').fill('e2e-model')
-    await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
-
-    // The setup sheet, raised BY THE SAVE — not by a detour through the
-    // Vault page: the backend refused the mint (vault-uninitialized) and the
-    // wrapper answered with the sheet instead of a toast.
-    const setupSheet = page
-      .locator('.ui-prompt-overlay')
-      .filter({ has: page.locator('#vault-setup-passphrase') })
-    await expect(setupSheet).toBeVisible({ timeout: 10_000 })
-    // The sheet's journey is the one owner's (harness.ts): press-and-look,
-    // code, Done, sheet gone. This file's private copy was the shape that
-    // waited blind on the code block while the press it sent never landed
-    // (nocx-17ihs).
-    await setUpVaultThroughTheSheet(page, `vault-pass-${nonce}`)
-
-    // The deferred save ran with the vault now existing: the dialog closes
-    // and the record is in the list. That the KEY landed is not asserted
-    // from any caption — it is proved below, where this same endpoint
-    // answers a real question through the fake.
-    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-    // The record landed and the row says so. The page deliberately shows no
-    // assistant-readiness badge: readiness belongs on the ask chip, where a
-    // person is actually asking, not floating above this page's frame
-    // (nocx-q27y removed `.ep-status-row`, so nothing here may assert on it).
-    // The row is selected by the endpoint's own name rather than by the page
-    const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await expect(savedRow).toBeVisible({ timeout: 10_000 })
-    // askable until the role names it — the refusal for an unassigned
-    // role is "no model assigned", and the ask would never reach the
-    // fake. The assignment goes through the surface a person uses.
-    // Allow the measured session.read so the model request can reach the
-    // second completion without an approval sheet unrelated to this join.
-    await page.locator(SETTINGS_POLICY_NAV).click()
-    await answerPermission(page, 'observe', 'Allowed')
-    await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
+    await createEndpointThroughTheSurface(page)
+    await answerAndAssign(page)
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
@@ -745,6 +779,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     page,
   }) => {
     await openApp(page)
+    // This case's own prerequisites, not the endpoint case's: under --grep
+    // that case does not run, and without these the ask is refused for a
+    // reason this test does not measure (nocx-atpw5.1.11).
+    await ensureAskingPrerequisites(page)
     await backToTerminal(page)
 
     // Fresh blocks for this test (a fresh page has a fresh scrollback).

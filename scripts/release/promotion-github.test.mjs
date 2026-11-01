@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -265,6 +265,17 @@ test('manual promotion has no build route, secret-free authorization and post-up
   assert.match(release, /cancel-in-progress: false/)
   assert.ok(release.indexOf('publish promotion') < release.indexOf('cask promotion'))
   assert.ok(release.indexOf('collect promotion') < release.indexOf('secrets.RELEASE_SIGNING_KEY'))
+})
+
+// PROMOTION CHANGES TAGS AND SIGNATURES ONLY (ADR-79b6cy61). The next
+// nightly's version is read from the tag this promotion creates, so nothing and
+// no one advances a version file between the release and the next nightly.
+test('promotion has no version file to advance: its stable tag is the next version', () => {
+  const source = readFileSync('scripts/release/promotion-github.mjs', 'utf8')
+  assert.doesNotMatch(source, /VERSION|bump/)
+  const release = readFileSync('.github/workflows/release.yml', 'utf8')
+  assert.doesNotMatch(release, /promotion-github\.mjs bump/)
+  assert.equal(existsSync('VERSION'), false)
 })
 
 test('publishing explicitly pins the tag, verifies draft downloads before latest, and never overwrites a conflict', (t) => {

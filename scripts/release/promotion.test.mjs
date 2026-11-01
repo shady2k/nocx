@@ -155,6 +155,21 @@ test('only the owner on main who confirms trying this nightly may promote', () =
   }
 })
 
+// THE VERSION A NIGHTLY EMBEDS IS ALREADY NEXT (ADR-79b6cy61), so a
+// candidate whose version is at or below the latest stable release describes
+// bytes that exist under another name: promotion refuses it, never retags.
+test('a candidate version that is already released, or lower, is refused before any byte is copied', (t) => {
+  for (const previousVersion of ['0.8.0', '0.9.0']) {
+    const { input } = fixture(t)
+    input.previousVersion = previousVersion
+    assert.throws(() => verifyCandidate(input), /not newer than stable v/)
+  }
+  // The boundary is strict: exactly one patch above the latest stable passes.
+  const { input } = fixture(t)
+  input.previousVersion = '0.7.2'
+  assert.doesNotThrow(() => verifyCandidate(input))
+})
+
 test('a verified candidate promotes the exact payload bytes and signs the stable URL manifest', (t) => {
   const { input, source, root, nightly } = fixture(t)
   const candidate = verifyCandidate(input)

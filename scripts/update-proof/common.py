@@ -104,15 +104,32 @@ def stamped_build_time(manifest, side):
         raise ProofError(f"{side} nightly stamped build.builtAt is invalid: {error}") from error
 
 
+def plain_version(manifest, side, kind):
+    """The manifest's version as a number triple; stable and nightly share it."""
+    version = manifest.get("version")
+    require(isinstance(version, str)
+            and re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) is not None,
+            f"{side} {kind} version must stamp a plain next-stable semver")
+    return tuple(map(int, version.split(".")))
+
+
+def require_release_instants(previous, candidate):
+    """The candidate must have been published after the previous release."""
+    for manifest in [previous, candidate]:
+        require(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                             r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})", manifest["released"])
+                is not None, "release timestamp must use RFC3339")
+    old_time = datetime.fromisoformat(previous["released"].replace("Z", "+00:00"))
+    new_time = datetime.fromisoformat(candidate["released"].replace("Z", "+00:00"))
+    require(old_time.utcoffset() is not None and new_time.utcoffset() is not None
+            and new_time > old_time, "candidate must have a later release timestamp")
+
+
 def nightly_pair(previous, candidate, platform, arch):
     versions = []
     for side, manifest in (("previous", previous), ("candidate", candidate)):
         require(isinstance(manifest, dict), f"{side} manifest must be an object")
-        version = manifest.get("version")
-        require(isinstance(version, str)
-                and re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) is not None,
-                f"{side} nightly version must stamp a plain next-stable semver")
-        versions.append(tuple(map(int, version.split("."))))
+        versions.append(plain_version(manifest, side, "nightly"))
     require(versions[1] >= versions[0], "candidate version must not be lower than previous")
     if versions[1] == versions[0]:
         # Check uses IsNewer OR newerNightly (internal/update/transaction.go).
@@ -127,16 +144,61 @@ def nightly_pair(previous, candidate, platform, arch):
     before, after = artifact(previous, platform, arch), artifact(candidate, platform, arch)
     require(nightly_tag(previous, before) != nightly_tag(candidate, after),
             "proof requires two different published nightlies")
-    for manifest in [previous, candidate]:
-        require(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-                             r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})", manifest["released"])
-                is not None, "release timestamp must use RFC3339")
-    old_time = datetime.fromisoformat(previous["released"].replace("Z", "+00:00"))
-    new_time = datetime.fromisoformat(candidate["released"].replace("Z", "+00:00"))
-    require(old_time.utcoffset() is not None and new_time.utcoffset() is not None
-            and new_time > old_time, "candidate must have a later release timestamp")
-    require(before["sha256"] != after["sha256"], "nightlies must have different bytes")
+    require_release_instants(previous, candidate)
+    require(before["sha256"] != after["sha256"], "the two releases must have different bytes")
     return before, after
+
+
+def stable_tag(manifest, item):
+    """The stable tag a promoted manifest names, or a refusal.
+
+    Promotion copies the tried nightly's bytes and rewrites only its URLs
+    (ADR-0097): the artifact moves from the nightly tag to v<version> and the
+    notes move with it. So the tag is what proves this manifest is the stable
+    release and not the nightly it was copied from, and the manifest's own
+    version is the only tag it may name.
+    """
+    tag = "v" + manifest["version"]
+    url = urlparse(item["url"])
+    require(url.netloc == "github.com" and not url.query and not url.fragment
+            and re.fullmatch(r"/shady2k/nocx/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/[^/]+",
+                             url.path) is not None,
+            "stable artifact must use its immutable v<version> release URL")
+    require(url.path.startswith("/shady2k/nocx/releases/download/" + tag + "/"),
+            "stable artifact URL does not name the manifest's own version " + tag)
+    require(manifest["notesUrl"] == "https://github.com/shady2k/nocx/releases/tag/" + tag,
+            "stable manifest notes and artifact must name the same stable tag")
+    return tag
+
+
+def stable_pair(previous, candidate, platform, arch):
+    """A stable release updating to the next promoted stable (nocx-86e2f).
+
+    Stable has no equal-version rule: internal/update/transaction.go offers a
+    candidate only when IsNewer, and newerNightly returns false for this
+    channel, so the candidate must be strictly newer. No stamped build is
+    required — the promotion carries the nightly's build object through, and
+    the version is what decides.
+    """
+    versions = []
+    for side, manifest in (("previous", previous), ("candidate", candidate)):
+        require(isinstance(manifest, dict), f"{side} manifest must be an object")
+        versions.append(plain_version(manifest, side, "stable"))
+    require(versions[1] > versions[0],
+            "candidate version must be strictly newer than the installed stable version")
+    before, after = artifact(previous, platform, arch), artifact(candidate, platform, arch)
+    require(stable_tag(previous, before) != stable_tag(candidate, after),
+            "proof requires two different published stable releases")
+    require_release_instants(previous, candidate)
+    require(before["sha256"] != after["sha256"], "the two releases must have different bytes")
+    return before, after
+
+
+def channel_pair(channel, previous, candidate, platform, arch):
+    """The pair a proof of `channel` may install, one answer per channel."""
+    pairs = {"nightly": nightly_pair, "stable": stable_pair}
+    require(channel in pairs, "unknown update channel: " + str(channel))
+    return pairs[channel](previous, candidate, platform, arch)
 
 
 def download_artifact(item, destination):

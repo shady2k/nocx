@@ -441,5 +441,120 @@ class CommonTests(unittest.TestCase):
                 common.nightly_pair(*pair, "linux", "amd64")
 
 
+class StablePairTests(unittest.TestCase):
+    """The stable channel's pair rules (nocx-86e2f), no key and no display."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+
+    def artifact(self, version, payload):
+        tag = "v" + version
+        return {
+            "os": "linux", "arch": "amd64", "format": "AppImage",
+            "url": ("https://github.com/shady2k/nocx/releases/download/"
+                    f"{tag}/nocx-{version}-linux-amd64.AppImage"),
+            "sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload),
+        }
+
+    def manifest(self, version, released, payload):
+        return {
+            "version": version,
+            "released": released,
+            "notesUrl": f"https://github.com/shady2k/nocx/releases/tag/v{version}",
+            "artifacts": [self.artifact(version, payload)],
+        }
+
+    def pair(self):
+        return (self.manifest("0.8.0", "2026-10-25T04:00:00Z", b"stable 0.8.0 bytes"),
+                self.manifest("0.8.1", "2026-10-26T04:00:00Z", b"stable 0.8.1 bytes"))
+
+    def test_accepts_a_strictly_newer_promoted_release_without_a_build_stamp(self):
+        previous, candidate = self.pair()
+        self.assertNotIn("build", previous)
+        self.assertEqual(common.stable_pair(previous, candidate, "linux", "amd64"),
+                         (previous["artifacts"][0], candidate["artifacts"][0]))
+        self.assertEqual(common.channel_pair("stable", previous, candidate, "linux", "amd64"),
+                         (previous["artifacts"][0], candidate["artifacts"][0]))
+
+    def test_channel_dispatch_keeps_the_nightly_pair_on_nightly(self):
+        # Version order is valid for both channels; the URLs are what differ,
+        # and nightly_pair is the one that insists on dated nightly tags.
+        previous, candidate = self.pair()
+        for version, value in ((5, previous), (6, candidate)):
+            tag = "nightly-2026102%d-1" % version
+            value["notesUrl"] = "https://github.com/shady2k/nocx/releases/tag/" + tag
+            value["artifacts"][0]["url"] = (
+                "https://github.com/shady2k/nocx/releases/download/" + tag + "/nocx.AppImage")
+        self.assertEqual(common.channel_pair("nightly", previous, candidate, "linux", "amd64"),
+                         (previous["artifacts"][0], candidate["artifacts"][0]))
+
+    def test_refuses_an_unknown_channel(self):
+        with self.assertRaisesRegex(common.ProofError, "unknown update channel"):
+            common.channel_pair("beta", *self.pair(), "linux", "amd64")
+
+    def test_refuses_equal_or_lower_versions_on_the_stable_channel(self):
+        for version in ("0.8.0", "0.7.9"):
+            previous, candidate = self.pair()
+            candidate = self.manifest(version, "2026-10-26T04:00:00Z", b"other bytes")
+            with self.subTest(version=version), \
+                    self.assertRaisesRegex(common.ProofError, "strictly newer"):
+                common.stable_pair(previous, candidate, "linux", "amd64")
+
+    def test_refuses_a_mutable_or_foreign_stable_url(self):
+        bad_urls = [
+            "https://github.com/shady2k/nocx/releases/download/nightly/nocx.AppImage",
+            "https://github.com/shady2k/nocx/releases/latest/download/nocx.AppImage",
+            "https://github.com/another/nocx/releases/download/v0.8.1/nocx.AppImage",
+            "https://github.com/shady2k/nocx/releases/download/v0.8.1/nocx.AppImage?x=1",
+        ]
+        for url in bad_urls:
+            for altered_side in (0, 1):
+                pair = self.pair()
+                pair[altered_side]["artifacts"][0]["url"] = url
+                with self.subTest(url=url, side=altered_side), \
+                        self.assertRaises(common.ProofError):
+                    common.stable_pair(*pair, "linux", "amd64")
+
+    def test_refuses_an_artifact_url_naming_another_stable_version(self):
+        # The previous artifact must name v0.8.0 and the candidate v0.8.1;
+        # swapping them is the mistake this rule exists to catch.
+        pair = self.pair()
+        pair[0]["artifacts"][0]["url"], pair[1]["artifacts"][0]["url"] = (
+            pair[1]["artifacts"][0]["url"], pair[0]["artifacts"][0]["url"])
+        with self.assertRaisesRegex(common.ProofError, "does not name the manifest's own version"):
+            common.stable_pair(*pair, "linux", "amd64")
+
+    def test_refuses_notes_that_name_another_stable_tag(self):
+        for altered_side in (0, 1):
+            pair = self.pair()
+            pair[altered_side]["notesUrl"] = (
+                "https://github.com/shady2k/nocx/releases/tag/v9.9.9")
+            with self.subTest(side=altered_side), \
+                    self.assertRaises(common.ProofError):
+                common.stable_pair(*pair, "linux", "amd64")
+
+    def test_refuses_identical_bytes_or_non_increasing_release_times(self):
+        previous, candidate = self.pair()
+        candidate["artifacts"][0]["sha256"] = previous["artifacts"][0]["sha256"]
+        with self.assertRaises(common.ProofError):
+            common.stable_pair(previous, candidate, "linux", "amd64")
+        for released in ("2026-10-24T04:00:00Z", "2026-10-25T04:00:00Z",
+                         "2026-10-26T04:00:00"):
+            previous, candidate = self.pair()
+            candidate["released"] = released
+            with self.subTest(released=released), self.assertRaises(common.ProofError):
+                common.stable_pair(previous, candidate, "linux", "amd64")
+
+    def test_refuses_non_plain_semver(self):
+        for version in ("0.8.1-nightly.1", "0.8.1+build", "v0.8.1", "01.8.1"):
+            previous, candidate = self.pair()
+            candidate["version"] = version
+            with self.subTest(version=version), self.assertRaisesRegex(
+                    common.ProofError, "plain next-stable semver"):
+                common.stable_pair(previous, candidate, "linux", "amd64")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,19 @@ async function leftWithin(
 
 test('the tab strip carries no update offer at all', async ({ page }) => {
   await page.goto('/')
-  await expect(page.locator(BAR)).toBeVisible()
+  // THE STRIP IS NOT IN THE FIRST PAINT, AND `.tabbar` IS NOT EVIDENCE THAT IT
+  // IS (nocx-1ebrs.66.1.31). `.tabbar` is static markup in the shell
+  // (frontend/src/App.tsx:34); the strip mounts into it when the socket
+  // connects, and the activity bar in the same generation
+  // (frontend/src/main.tsx:1530, `mountConnectedSidebar`). This test used to
+  // wait for the tabbar and then read both surfaces once. On a loaded runner
+  // that read the empty shell: the update assertions below held vacuously
+  // while the seam's failed with `Expected: 1, Received: 0`, and the page's
+  // own snapshot still said "Connecting to nocx…" (CI run 40884397691).
+  // Readiness is therefore asked of the two things this test is about, and
+  // waited for the way the rest of this file waits for anything.
+  await expect(page.locator(LEAD)).toBeVisible()
+  await expect(page.locator('.activity-bar-bottom')).toHaveCount(1)
 
   // The offer lives on the activity bar now; the strip must not have one —
   // not visible, not hidden, not reserving width. `count` rather than
@@ -53,7 +65,8 @@ test('the tab strip carries no update offer at all', async ({ page }) => {
 
   // And the activity bar is where a person finds it: the bottom group carries
   // the update entry (absent until a release is available, so the control is
-  // asserted by its seam rather than by its presence).
+  // asserted by its seam rather than by its presence). The seam was waited for
+  // above, so this read is of a mounted bar rather than of the shell.
   const bottomZone = await page.evaluate(
     () => document.querySelectorAll('.activity-bar-bottom').length,
   )

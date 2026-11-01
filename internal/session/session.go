@@ -439,6 +439,11 @@ type Registry interface {
 	// want this session again (nocx-isjh4) — see Reg.EndSession's own doc for
 	// the full rule of which callers use which verb.
 	EndSession(id ID) error
+	// PrepareEndSession atomically removes id and returns the original session
+	// and its teardown. On success the caller must immediately defer the
+	// completion and invoke it exactly once, even after cancellation, outside
+	// any global registry-operation gate. On failure both results are nil.
+	PrepareEndSession(id ID) (Session, func() error, error)
 	List() []Session
 	// InstanceID is the backend instance every session this registry opens is
 	// stamped with — see Reg.InstanceID for why a claim cannot be judged
@@ -901,23 +906,48 @@ func (r *Reg) Close(id ID) error {
 // names: whichever verb reaches a session first decides its fate, and only
 // one of them may ever be the wrong answer for shutdown.
 func (r *Reg) EndSession(id ID) error {
+	s, err := r.removeSession(id)
+	if err != nil {
+		return err
+	}
+	return r.finishEndSession(s)
+}
+
+// PrepareEndSession separates authoritative removal from potentially slow
+// teardown, so unrelated sessions need not wait for this session's channel.
+// The returned session is the removed incarnation; the completion performs
+// EndSession's teardown and profile accounting, not Close's detach. After
+// success the caller must immediately defer completion and invoke it exactly
+// once, even if cancelled, after releasing any global registry-operation gate.
+// An unknown id returns an error with no session or completion.
+func (r *Reg) PrepareEndSession(id ID) (Session, func() error, error) {
+	s, err := r.removeSession(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return s, func() error { return r.finishEndSession(s) }, nil
+}
+
+func (r *Reg) removeSession(id ID) (*realSession, error) {
 	r.mu.Lock()
 	s, ok := r.sessions[id]
 	if ok {
 		delete(r.sessions, id)
 	}
 	r.mu.Unlock()
-
 	if !ok {
-		return fmt.Errorf("session not found: %s", id)
+		return nil, fmt.Errorf("session not found: %s", id)
 	}
+	return s, nil
+}
 
+func (r *Reg) finishEndSession(s *realSession) error {
 	// Logged as "session closed" — the same phrase Close uses — because a log
 	// reader asking "did this session's row leave the registry" (worker_trace_
 	// test.go's own check, among others) cares that it did, not which of the
 	// two verbs did it; the verb split is a today's-caller distinction, not a
 	// second vocabulary for one outcome.
-	s.log.Info("session closed", "id", string(id))
+	s.log.Info("session closed", "id", string(s.id))
 	err := s.EndSession()
 	if r.usageTracker != nil && s.profileID != "" {
 		r.usageTracker.SessionClosed(s.profileID)

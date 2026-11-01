@@ -83,6 +83,24 @@
 # with release.yml calling this workflow, keeping it would run the whole suite
 # twice for every release for no added protection (see distribution design §5).
 
+# THE TEST QUARANTINE DECIDES A JOB, ONCE, AT THE END (ADR-0bawnmfg,
+# ADR-xf4p9fzd). A red test step does not fail its job by itself: it runs through
+# scripts/ci-run-logged.sh, which keeps the step's own output and exit status in
+# $NOCX_TEST_LOG_DIR, and the job's last step — scripts/quarantine-gate.mjs,
+# under `if: always()` — decides. A job that failed only on tests
+# docs/testing/quarantine.json holds under an open bead PASSES and prints every
+# one of them with its bead; a test no open bead holds, a bead that has been
+# closed, and a failure that names no test all keep the job red.
+#
+# The failure list reaches that check without the API: GitHub serves a job's log
+# only to a token this workflow does not carry, so the job keeps what it already
+# has. The tee'd file is byte-for-byte the step's job log, which is why the
+# promotion and the gate parse it with one function (scripts/quarantine.mjs).
+#
+# Only the jobs that run tests are gated, and a step this file does not route
+# through the helper still fails its job the ordinary way — fail-closed, so a
+# step somebody adds later cannot go unnoticed and green.
+
 name: CI
 
 on:
@@ -158,7 +176,7 @@ jobs:
           node-version: '24'
       - name: Workflow decision and refusal tests
         run: |
-          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
           node --test .githooks/check-log-context.test.mjs
       - name: Promotion and cask fixtures by path
@@ -171,6 +189,17 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: macos-latest
+    # The evidence the quarantine gate reads: one .log and one .status per test
+    # step, written by scripts/ci-run-logged.sh (see the header).
+    #
+    # A literal path, not `${{ runner.temp }}`: a job's `env:` may use only the
+    # github, needs, strategy, matrix, vars, secrets and inputs contexts, and
+    # `runner` is not one of them. actionlint says so, and GitHub fails the WHOLE
+    # workflow at startup for it — measured on PR #595's first push, whose only
+    # run was a zero-job failure named after this file. /tmp is the runner VM's,
+    # dies with the job, and two matrix legs are two VMs.
+    env:
+      NOCX_TEST_LOG_DIR: /tmp/nocx-test-logs
     steps:
       - uses: actions/checkout@v7
 
@@ -294,7 +323,7 @@ jobs:
         run: scripts/install-zsh-zle-plugins.sh "$RUNNER_TEMP/zsh-plugins"
 
       - name: Test (the widget-wrapping zsh plugin stack, both orders)
-        run: go test -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestLocalZshPane_ThePluginStackIntegratesInEitherOrder' ./internal/shellintegration/
+        run: scripts/ci-run-logged.sh go-mac-zsh-plugins go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestLocalZshPane_ThePluginStackIntegratesInEitherOrder' ./internal/shellintegration/
 
       - name: Install the pinned native Fish
         run: scripts/install-fish-ci.sh "$RUNNER_TEMP/fish-ci"
@@ -302,19 +331,19 @@ jobs:
       - name: Test (native Fish startup and lifecycle)
         env:
           NOCX_REQUIRE_NATIVE_FISH: '1'
-        run: go test -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
+        run: scripts/ci-run-logged.sh go-mac-fish go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
 
       - name: Test (the OS-specific packages, per-test timings)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        # Keep go test's JSON stream in the log and summarize test-level pass/fail events
-        # per package. PIPESTATUS is copied on the very next command so the step
-        # returns go test's status, not the summarizer's.
+        # Keep go test's JSON stream in the log and summarize test-level pass/fail
+        # events per package. Save the raw JSON before summarizing it, so the
+        # gate can prove package/test completion and the summarizer cannot hide
+        # the runner's exit status or strip its structured evidence.
         run: |
-          set +e
-          go test -json -race -tags gtk3,nocx_framecheck -count=1 $PKGS | node scripts/summarize-go-test-json.mjs
-          pipeline_status=("${PIPESTATUS[@]}")
-          exit "${pipeline_status[0]}"
+          scripts/ci-run-logged.sh go-mac-os \
+            go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+          node scripts/summarize-go-test-json.mjs < "$NOCX_TEST_LOG_DIR/go-mac-os.log"
 
       # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
       # not appear in `go list ./...` at all, so it was not merely failing to be
@@ -326,14 +355,14 @@ jobs:
       - name: Test (the local helper's ssh client, nocx_local_ssh)
         env:
           PKGS: ${{ steps.localssh.outputs.list }}
-        run: go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
+        run: scripts/ci-run-logged.sh go-mac-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
       # package, one assertion — but without it a typo there ships an app that
       # cannot find any existing installation's documents.
       - name: Test (release build tag)
-        run: go test -race -count=1 -tags release ./internal/storage/...
+        run: scripts/ci-run-logged.sh go-mac-release-tag go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -count=1 -tags release ./internal/storage/...
 
       # THE FIRST COMMAND'S BLOCK, ON THE OS IT FAILED ON (nocx-ruf5o). A
       # 0.6.1 build on macOS never settled a fresh tab's first command — the
@@ -393,7 +422,17 @@ jobs:
           npm ci --prefer-offline --no-audit --no-fund
           (cd frontend && npm ci --prefer-offline --no-audit --no-fund)
           npx playwright install chromium
-          PW_PROJECTS=chromium e2e/run-headless-macos.sh e2e/first-command-completes.spec.ts
+          PW_PROJECTS=chromium NOCX_QUARANTINE_WRAPPER_STATUS=/tmp/nocx-macos-wrapper.status NOCX_QUARANTINE_REPORT=test-results/quarantine-macos.json PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/quarantine-macos.json scripts/ci-run-logged.sh e2e-macos-first-command e2e/run-headless-macos.sh e2e/first-command-completes.spec.ts --reporter=line,json
+
+      # The quarantine decides this job, once, here: see the header for why the
+      # evidence is the job's own output and why this step runs `always()`.
+      - name: Quarantined failures decide this job
+        if: always()
+        env:
+          NOCX_EXPECTED_STEPS: go-mac-zsh-plugins go-mac-fish go-mac-os go-mac-local-ssh go-mac-release-tag e2e-macos-first-command
+          NOCX_QUARANTINE_JOB: ci-mac
+          NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
+        run: node scripts/quarantine-gate.mjs
 
   # ci-backend — the PORTABLE half of the Go suite on Linux, with and without a
   # Secret Service. Its OS-specific half is ci-linux, immediately below.
@@ -417,6 +456,17 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
+    # The evidence the quarantine gate reads: one .log and one .status per test
+    # step, written by scripts/ci-run-logged.sh (see the header).
+    #
+    # A literal path, not `${{ runner.temp }}`: a job's `env:` may use only the
+    # github, needs, strategy, matrix, vars, secrets and inputs contexts, and
+    # `runner` is not one of them. actionlint says so, and GitHub fails the WHOLE
+    # workflow at startup for it — measured on PR #595's first push, whose only
+    # run was a zero-job failure named after this file. /tmp is the runner VM's,
+    # dies with the job, and two matrix legs are two VMs.
+    env:
+      NOCX_TEST_LOG_DIR: /tmp/nocx-test-logs
     strategy:
       fail-fast: false
       matrix:
@@ -519,17 +569,21 @@ jobs:
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        # Ordinary test failures are recorded by the helper, which returns zero
+        # so both suites run. Fixture and helper infrastructure failures must
+        # stop the step before a later successful command can hide them.
         run: |
           dbus-run-session -- bash <<'TESTEOF'
           set -euo pipefail
           echo "=== Starting gnome-keyring-daemon ==="
-          eval "$(echo -n "nocx-ci" | gnome-keyring-daemon --daemonize --login)"
+          daemon_env=$(printf '%s' "nocx-ci" | gnome-keyring-daemon --daemonize --login) || exit "$?"
+          eval "$daemon_env"
           echo "=== Unlocking login keyring ==="
-          echo -n "nocx-ci" | gnome-keyring-daemon --unlock
+          printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+          scripts/ci-run-logged.sh go-backend go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-backend-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -538,9 +592,9 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+          scripts/ci-run-logged.sh go-backend go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-backend-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
       # THE ALLOCATION BUDGETS, WITHOUT -race (nocx-zg3k3.5.8). Every pass above
       # runs -race, which instruments and adds allocations (the pump's window
@@ -550,7 +604,17 @@ jobs:
       # pattern belong to the Makefile.
       - name: Test (allocation budgets, no race detector)
         if: matrix.keyring == 'no-secret-service'
-        run: make -s test-alloc-budgets
+        run: scripts/ci-run-logged.sh go-backend-alloc-budgets make -s test-alloc-budgets GO='scripts/go-test-json.sh'
+
+      # The quarantine decides this job, once, here: see the header for why the
+      # evidence is the job's own output and why this step runs `always()`.
+      - name: Quarantined failures decide this job
+        if: always()
+        env:
+          NOCX_EXPECTED_STEPS: ${{ matrix.keyring == 'no-secret-service' && 'go-backend go-backend-local-ssh go-backend-alloc-budgets' || 'go-backend go-backend-local-ssh' }}
+          NOCX_QUARANTINE_JOB: 'ci-backend (${{ matrix.keyring }})'
+          NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
+        run: node scripts/quarantine-gate.mjs
 
   # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
   #
@@ -572,6 +636,17 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
+    # The evidence the quarantine gate reads: one .log and one .status per test
+    # step, written by scripts/ci-run-logged.sh (see the header).
+    #
+    # A literal path, not `${{ runner.temp }}`: a job's `env:` may use only the
+    # github, needs, strategy, matrix, vars, secrets and inputs contexts, and
+    # `runner` is not one of them. actionlint says so, and GitHub fails the WHOLE
+    # workflow at startup for it — measured on PR #595's first push, whose only
+    # run was a zero-job failure named after this file. /tmp is the runner VM's,
+    # dies with the job, and two matrix legs are two VMs.
+    env:
+      NOCX_TEST_LOG_DIR: /tmp/nocx-test-logs
     strategy:
       fail-fast: false
       matrix:
@@ -623,7 +698,7 @@ jobs:
       - name: Test (native Fish startup and lifecycle)
         env:
           NOCX_REQUIRE_NATIVE_FISH: '1'
-        run: go test -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
+        run: scripts/ci-run-logged.sh go-linux-fish go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 -v -run 'TestNativeFish|TestFishComment' ./internal/shellintegration/
 
       - name: Test Linux installer refusals
         run: dash scripts/install/test-install.sh
@@ -700,17 +775,21 @@ jobs:
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        # Ordinary test failures are recorded by the helper, which returns zero
+        # so both suites run. Fixture and helper infrastructure failures must
+        # stop the step before a later successful command can hide them.
         run: |
           dbus-run-session -- bash <<'TESTEOF'
           set -euo pipefail
           echo "=== Starting gnome-keyring-daemon ==="
-          eval "$(echo -n "nocx-ci" | gnome-keyring-daemon --daemonize --login)"
+          daemon_env=$(printf '%s' "nocx-ci" | gnome-keyring-daemon --daemonize --login) || exit "$?"
+          eval "$daemon_env"
           echo "=== Unlocking login keyring ==="
-          echo -n "nocx-ci" | gnome-keyring-daemon --unlock
+          printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -719,9 +798,19 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
+          scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+          scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+
+      # The quarantine decides this job, once, here: see the header for why the
+      # evidence is the job's own output and why this step runs `always()`.
+      - name: Quarantined failures decide this job
+        if: always()
+        env:
+          NOCX_EXPECTED_STEPS: go-linux-fish go-linux go-linux-local-ssh
+          NOCX_QUARANTINE_JOB: 'ci-linux (${{ matrix.keyring }})'
+          NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
+        run: node scripts/quarantine-gate.mjs
 
   ci-frontend:
     needs: changes
@@ -833,9 +922,9 @@ jobs:
         with:
           node-version: '24'
 
-      # br itself, pinned by version and checksum: the export has to be one
-      # br imports, and the adapter the gate reads it through is lenient
-      # (nocx-8t2lo). 0.7.0 is the version the tracker is written with.
+      # br itself, pinned by version and checksum: the store's database is
+      # rebuilt from the ref before the gate or the commit check reads it.
+      # 0.7.0 is the version the tracker is written with.
       - name: Install br
         run: |
           set -eu
@@ -846,65 +935,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/br.tgz" -C "$RUNNER_TEMP/bin" br
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: The tracker export imports into br
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: .githooks/check-tracker-import.sh "${HEAD_SHA:-HEAD}"
+      # The store lives on refs/tracker/state, not in any code branch. Connect
+      # it so br and the adapter read the published state at this code revision.
+      - name: Import the tracker store (read-only)
+        run: bash scripts/connect-tracker-ci.sh
 
-      - name: The backlog is still a queue
-        env:
-          # Through the environment rather than into the script: an expression
-          # interpolated into a shell line is a shell line somebody else can
-          # write.
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -eu
-          gate=.githooks/backlog-gate
-          # A PR compares the actual PR head to its merge-base. A push compares
-          # its tip to the advertised old ref when that is an ancestor; for a
-          # new/unrelated ref, use the first introduced commit's real parent.
-          # There is no synthetic HEAD^ fallback.
-          base=""
-          if [ -n "${BASE_REF:-}" ]; then
-            base=$(git merge-base "origin/$BASE_REF" "${HEAD_SHA:-HEAD}")
-            tip=${HEAD_SHA:-HEAD}
-          else
-            tip=$(git rev-parse HEAD)
-            set -- --introduced "$tip" --by "$GITHUB_REF" --remote origin
-            case "${BEFORE:-}" in
-              *[!0]*) set -- "$@" --before "$BEFORE" ;;
-            esac
-            introduced=$(node "$gate/commit-links.mjs" --list-introduced "$@")
-            if [ -z "$introduced" ]; then
-              echo "no introduced commits; backlog policy has nothing new to check"
-              exit 0
-            fi
-            base=""
-            case "${BEFORE:-}" in
-              *[!0]*) base=$BEFORE ;;
-            esac
-            if [ -z "$base" ] || ! git merge-base --is-ancestor "$base" "$tip"; then
-              base=$(printf '%s\n' "$introduced" | while IFS= read -r row; do printf '%s\n' "$row"; break; done | cut -d' ' -f2)
-            fi
-          fi
-          if [ -z "$base" ] || ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
-            echo "no valid preceding backlog revision" >&2
-            exit 2
-          fi
-          echo "baseline: $base"
-          node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
-          node "$gate/adapter.mjs" --at "$tip" > "$RUNNER_TEMP/backlog-tip.json"
-          git show "$tip:$gate/config.json" > "$RUNNER_TEMP/backlog-tip-config.json"
-          baseline_config=""
-          if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
-            baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
-          fi
-          # shellcheck disable=SC2086
-          node "$gate/check.mjs" --config "$RUNNER_TEMP/backlog-tip-config.json" \
-            --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config "$RUNNER_TEMP/backlog-tip.json"
-
+      # A code pull request carries no tracker state: the store is published on
+      # refs/tracker/state. The backlog gate belongs to that publish, not here.
       - name: Every new commit names a task
         env:
           BASE_REF: ${{ github.base_ref }}
@@ -1004,6 +1041,17 @@ jobs:
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    # The evidence the quarantine gate reads: one .log and one .status per test
+    # step, written by scripts/ci-run-logged.sh (see the header).
+    #
+    # A literal path, not `${{ runner.temp }}`: a job's `env:` may use only the
+    # github, needs, strategy, matrix, vars, secrets and inputs contexts, and
+    # `runner` is not one of them. actionlint says so, and GitHub fails the WHOLE
+    # workflow at startup for it — measured on PR #595's first push, whose only
+    # run was a zero-job failure named after this file. /tmp is the runner VM's,
+    # dies with the job, and two matrix legs are two VMs.
+    env:
+      NOCX_TEST_LOG_DIR: /tmp/nocx-test-logs
     # ONE JOB PER BROWSER PER SHARD, and the split is about wall clock, not
     # coverage: every project still runs and every test still runs, they run at
     # the same time. The suite is one Playwright worker per job
@@ -1162,7 +1210,10 @@ jobs:
             echo "A list and its total disagree in .github/workflows/ci.yml — fix both. Left alone, the shards no longer cover the suite and the tests in the missing shard simply never run." >&2
             exit 1
           fi
-          NOCX_E2E_SHARD_FILES=1 NOCX_E2E_SHARD="${{ matrix.shard }}" e2e/run-in-container.sh
+          # The container's own output is the job's, so the gate reads it the
+          # same way it reads a Go step's: the Playwright failure list is in it.
+          NOCX_QUARANTINE_REPORT="test-results/playwright-${{ matrix.project }}-${{ matrix.shard }}.json" NOCX_E2E_SHARD_FILES=1 NOCX_E2E_SHARD="${{ matrix.shard }}" \
+            scripts/ci-run-logged.sh "e2e-${{ matrix.project }}-${{ matrix.shard }}" e2e/run-in-container.sh
         env:
           # The two totals are the matrix lists' lengths, written again because
           # GitHub has no expression for a matrix leg's own length. Keeping them
@@ -1193,3 +1244,13 @@ jobs:
             test-results/
             test-results/playwright-${{ matrix.project }}-${{ matrix.shard }}.json
           retention-days: 7
+
+      # The quarantine decides this job, once, here: see the header for why the
+      # evidence is the job's own output and why this step runs `always()`.
+      - name: Quarantined failures decide this job
+        if: always()
+        env:
+          NOCX_EXPECTED_STEPS: e2e-${{ matrix.project }}-${{ matrix.shard }}
+          NOCX_QUARANTINE_JOB: 'ci-e2e (${{ matrix.project }}, ${{ matrix.shard }})'
+          NOCX_QUARANTINE_PULL: ${{ github.event.pull_request.number }}
+        run: node scripts/quarantine-gate.mjs

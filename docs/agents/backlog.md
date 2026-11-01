@@ -259,17 +259,22 @@ keeps every later change.
   parent, not this repository. That transcript is present, not missing;
   this setup's elapsed time is unmeasured. Do not fabricate a claim, mark a present
   transcript missing, edit its metadata or add a new time-record exemption.
-- **Tracker layout:** the store is the SQLite database of the main checkout, outside git;
-  `br` resolves it from every worktree. Its export `.beads/issues.jsonl` is a tracked file,
-  and each publish commits the WHOLE export on whichever branch commits it — a code branch
-  or a `chore/run-*-tracker` branch — so a branch carries every other run's states with its
-  own. That does not yet meet the set's rule that state every branch shares is not versioned
-  inside one. The owner decided on 2026-09-26 to move the export to a ref no code branch
-  contains; until "The tracker export lives on its own ref outside the code branches, and
-  the hooks and CI read it there" (nocx-q8yjf.11) lands, the layout is as described here. The
-  tracker at a revision is `adapter.mjs --at <rev>`; its transitions over a range are the
-  exports at both ends compared by `check.mjs --baseline` (the hook and CI below). AGENTS.md's
-  end-of-session publishing steps follow this layout.
+- **Tracker layout:** the store lives outside every code branch, at
+  `refs/tracker/state` in this repository. Each machine keeps one working copy at
+  `$XDG_STATE_HOME/nocx/tracker` (default `~/.local/state/nocx/tracker`), and every
+  checkout and worktree of that machine reaches it through a `.beads` symlink. No
+  code branch carries `.beads/issues.jsonl`. `scripts/connect-tracker-store.sh`
+  connects a clone: it puts `core.hooksPath` outside the tree, runs tracker-sync
+  connect, installs `.githooks/backlog-gate/tracker-policy.yaml` as the published
+  `.tracker-sync/policy.yaml` and the store-local `.beads/policy.yaml`, and publishes.
+  The tracker at a code revision is read from the store's recording of that exact
+  revision; a missing recording is refused, never guessed from a later state. `make
+connect` runs this connector before it checks the backlog inputs.
+- **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
+  and syncs every 10 seconds. The user systemd unit
+  (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
+  mechanism lives under `~/.local/state/nocx/mechanism/` so removing a worktree does
+  not stop it. Pushing `refs/tracker/state` starts no code CI.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
@@ -314,12 +319,14 @@ keeps every later change.
   `node --test .githooks/backlog-gate/merge-gate.test.mjs`.
 
 - **JSON report:** add `--json` to the `check.mjs` line.
-- **The export imports into br:** [`check-tracker-import.sh`](../../.githooks/check-tracker-import.sh)
-  hands the staged export (or the export at a revision) to an empty scratch `br` tracker and
-  asks for its import plan. The adapter above parses leniently, so an export `br` refuses
-  as a whole once passed every check and broke `br` for everyone who pulled (nocx-dpbgx).
-  Pre-commit runs it beside the backlog gate; CI's `ci-backlog` installs `br` 0.7.0 by
-  checksum and runs it on the tip (nocx-8t2lo).
+- **Recorded tracker states import into br:** every code revision the gate judges
+  must have a recording under `.tracker-sync/recordings/`, and the recorded store
+  commit's `.beads/issues.jsonl` must import into br. A connected checkout reads it
+  through the mechanism (`tracker-sync.mjs export --at <rev>`), which owns the store
+  layout and verifies the recording's digest; a clone with no store — CI, which fetches
+  `refs/tracker/state` in `scripts/connect-tracker-ci.sh` — reads the same recording
+  from that ref. `adapter.mjs` refuses a missing or malformed recording instead of
+  falling back to a later state.
 - **Commit-link check:** [`commit-links.mjs`](../../.githooks/backlog-gate/commit-links.mjs)
   parses messages and calls `check-commits.mjs`. `--message <file>` checks a pending
   message; tasks come from the export `br where` names, which is the database's own view,
@@ -432,7 +439,7 @@ guide`, `br <command> --help`.
 | pending integration / acceptance | `br list --status submitted` / `br list --status implemented`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | children                         | `br dep list <id> --direction up -t parent-child` (every status, closed included) · counts: `br show <id> --json \| jq '.[0].rollup'`                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | search / show                    | `br search "<phrase>"` (title, body, comments) · `br list --label <area> --status all` · `br show <id>` · `br comments <id>`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| publish                          | `br sync --flush-only`, copy or stage `.beads/issues.jsonl` in the checkout being committed, commit with a leaf id, push. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md)                                                                                                                                                                                                                                                                                                                                                                                                         |
+| publish                          | `node .githooks/backlog-gate/tracker-sync.mjs publish --repo "$(git rev-parse --show-toplevel)" --recipe .githooks/backlog-gate/br-tracker.mjs`; the watcher usually does it. No tracker file is committed. **Never `br sync --merge` on a database that is merely ahead** (AGENTS.md).                                                                                                                                                                                                                                                                                                                      |
 
 For setup and other leaves outside a feature stage, the coordinator uses native
 `br --no-auto-import --no-auto-flush update <leaf> --claim --actor <full-agent-name>`

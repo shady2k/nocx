@@ -13,7 +13,7 @@ import (
 
 // silentRawProcess is a local-PTY-shaped Process (it answers the owner's raw
 // read seam) whose readiness wait ENDS when it is closed but whose drain
-// never reports that close: RawReadUntilAgain answers "nothing right now"
+// never reports that close: RawReadChunk answers EAGAIN
 // before and after alike. That is the window nocx-mrfe5 hung in on macOS,
 // built deterministically instead of raced for — the readiness goroutine
 // has returned and will signal nothing again, while the last drain the owner
@@ -43,8 +43,8 @@ func (p *silentRawProcess) WaitReadable(ctx context.Context) error {
 	}
 }
 
-func (p *silentRawProcess) RawReadUntilAgain([]byte, func([]byte)) (bool, error) {
-	return false, nil
+func (p *silentRawProcess) RawReadChunk([]byte) (int, bool, error) {
+	return 0, true, nil
 }
 
 func (p *silentRawProcess) Read([]byte) (int, error)    { <-p.closed; return 0, os.ErrClosed }

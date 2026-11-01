@@ -699,101 +699,96 @@ func blockRowsForClose(ctx context.Context, tx *sql.Tx, in CloseBlockRows) (bloc
 	return blockRowsArtifactFor(ctx, tx, in.EntryID, in.ArtifactID)
 }
 
-// evictBlockRowsToCap drops the oldest droppable chunks until the artifact
-// fits. A chunk is droppable when it starts at or after the head boundary —
-// derived from the seq-ordered scan, never stored, so it cannot disagree
-// with the bytes. Eviction never fails the write and never touches the head.
+// evictBlockRowsToCap drops oldest middle chunks until the artifact fits or
+// only protected ends remain. It reads ordered chunk lengths once: removing
+// middle chunks cannot change the leading head or the newest half-cap tail.
+// Whole chunks can leave those protected ends over the cap; that is not an
+// error. SQL errors still abort the caller's append transaction.
 func evictBlockRowsToCap(ctx context.Context, tx *sql.Tx, artifactID string, capBytes int64) error {
-	for {
-		var held int64
-		if err := tx.QueryRowContext(ctx,
-			`SELECT byte_len FROM artifacts WHERE id = ?`, artifactID).Scan(&held); err != nil {
-			return err
-		}
-		if held <= capBytes {
-			return nil
-		}
-		rows, err := tx.QueryContext(ctx,
-			`SELECT seq, length(body) FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`,
-			artifactID)
-		if err != nil {
-			return err
-		}
-		// Head and tail are ROLES OF SURVIVING SEQ ORDER, not absolute
-		// offsets — which is what makes the walk honest after any deletion
-		// pattern: the head is a leading run of chunks (cut at the head
-		// boundary when they were written, never taken, so it stays a
-		// prefix), the tail is the newest half-cap of bytes, and the cap
-		// owns only what sits between them. The oldest middle chunk is the
-		// victim, which is what makes the bound "head and tail together".
-		var payloadRaw string
-		if err := tx.QueryRowContext(ctx,
-			`SELECT payload FROM artifacts WHERE id = ?`, artifactID).Scan(&payloadRaw); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		payload := decodeBlockRowsPayload(payloadRaw)
-		headEnd := int64(-1)
-		if payload.HeadEnd != nil {
-			headEnd = *payload.HeadEnd
-		}
-		type chunkRow struct {
-			seq  int
-			size int64
-		}
-		var survivors []chunkRow
-		for rows.Next() {
-			var c chunkRow
-			if err := rows.Scan(&c.seq, &c.size); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			survivors = append(survivors, c)
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		_ = rows.Close()
-		// The tail: the newest chunks totalling at least half the cap.
-		tailFrom := len(survivors)
-		var tailBytes int64
-		for tailFrom-1 >= 0 && tailBytes < capBytes/2 {
-			tailFrom--
-			tailBytes += survivors[tailFrom].size
-		}
-		// The head: leading chunks while they still sit inside the
-		// reservation. A store without a reservation yet has no head.
-		headTo := 0
-		var headCursor int64
-		for headTo < len(survivors) && headEnd >= 0 && headCursor < headEnd {
-			headCursor += survivors[headTo].size
-			headTo++
-		}
-		// The oldest chunk that is neither head nor tail.
-		var victim int
-		var victimBytes int64
-		if headTo < tailFrom {
-			victim = survivors[headTo].seq
-			victimBytes = survivors[headTo].size
-		}
-		if victim == 0 {
-			// Nothing droppable and still over the cap: the protected ends
-			// alone exceed it. The ends win — they are what the reservation
-			// and the reserve are.
-			return nil
-		}
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM artifact_chunks WHERE artifact_id = ? AND seq = ?`,
-			artifactID, victim); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE artifacts SET byte_len = byte_len - ? WHERE id = ?`,
-			victimBytes, artifactID); err != nil {
-			return err
-		}
+	var held int64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT byte_len FROM artifacts WHERE id = ?`, artifactID).Scan(&held); err != nil {
+		return err
 	}
+	if held <= capBytes {
+		return nil
+	}
+	var payloadRaw string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT payload FROM artifacts WHERE id = ?`, artifactID).Scan(&payloadRaw); err != nil {
+		return err
+	}
+	payload := decodeBlockRowsPayload(payloadRaw)
+	headEnd := int64(-1)
+	if payload.HeadEnd != nil {
+		headEnd = *payload.HeadEnd
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT seq, length(body) FROM artifact_chunks WHERE artifact_id = ? ORDER BY seq`,
+		artifactID)
+	if err != nil {
+		return err
+	}
+	type chunkRow struct {
+		seq  int
+		size int64
+	}
+	var survivors []chunkRow
+	for rows.Next() {
+		var c chunkRow
+		if err = rows.Scan(&c.seq, &c.size); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		survivors = append(survivors, c)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	// The tail: the newest chunks totalling at least half the cap.
+	tailFrom := len(survivors)
+	var tailBytes int64
+	for tailFrom-1 >= 0 && tailBytes < capBytes/2 {
+		tailFrom--
+		tailBytes += survivors[tailFrom].size
+	}
+	// The head: leading chunks while they still sit inside the reservation.
+	// A store without a reservation yet has no head.
+	headTo := 0
+	var headCursor int64
+	for headTo < len(survivors) && headEnd >= 0 && headCursor < headEnd {
+		headCursor += survivors[headTo].size
+		headTo++
+	}
+	// Each removal leaves both protected runs intact, so the next victim
+	// is the next original middle chunk, even with seq gaps or unequal
+	// sizes. Stop at the same byte threshold (or seq-zero sentinel) as an
+	// iterative survivor scan; never round a victim to a partial chunk.
+	victimTo := headTo
+	var victimBytes int64
+	for victimTo < tailFrom && held-victimBytes > capBytes {
+		if survivors[victimTo].seq == 0 {
+			break
+		}
+		victimBytes += survivors[victimTo].size
+		victimTo++
+	}
+	if victimTo == headTo {
+		return nil
+	}
+	// The selected victims are a contiguous span in surviving seq order.
+	// Gaps contain no rows, and the transaction excludes another writer.
+	if _, err = tx.ExecContext(ctx,
+		`DELETE FROM artifact_chunks WHERE artifact_id = ? AND seq BETWEEN ? AND ?`,
+		artifactID, survivors[headTo].seq, survivors[victimTo-1].seq); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE artifacts SET byte_len = byte_len - ? WHERE id = ?`,
+		victimBytes, artifactID)
+	return err
 }
 
 // deriveBlockRowsDropped counts the rows the cap took: the block spans

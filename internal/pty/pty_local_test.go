@@ -109,9 +109,13 @@ func TestLocalPty_CloseTwice(t *testing.T) {
 
 func mustSpawn(t testing.TB, cols, rows uint16) *LocalPty {
 	t.Helper()
+	// These tests exercise PTY/job-control behavior with bash commands, not
+	// the developer's login shell or its personal startup configuration.
 	lp, err := NewLocal(log.NewSlogAdapter(nil), Config{
-		Cols: cols,
-		Rows: rows,
+		Command: "/bin/bash",
+		Args:    []string{"--noprofile", "--norc", "-i"},
+		Cols:    cols,
+		Rows:    rows,
 	})
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
@@ -289,11 +293,11 @@ func TestNewLocal_LogsTheShellItResolved(t *testing.T) {
 // regression test for nocx-6q1uh.18 on a real PTY: a goroutine parked in
 // WaitReadable on a silent program used to hold the master file's own read
 // lock (internal/poll's SyscallConn().Read semantics) for as long as it
-// stayed parked, which is exactly the lock RawReadUntilAgain needed next —
+// stayed parked, which is exactly the lock RawReadChunk needed next —
 // so a drain called from a second goroutine, on the same idle program,
 // blocked forever. WaitReadable no longer touches the master file at all
 // (its own doc explains the dup-fd-plus-self-pipe mechanism), so this
-// proves both halves of that fix at once: RawReadUntilAgain succeeds while
+// proves both halves of that fix at once: RawReadChunk succeeds while
 // a wait is parked, and WakeReadiness is what unparks that wait afterward.
 //
 // No sleep synchronises the two goroutines, deliberately (AGENTS.md, "a
@@ -320,17 +324,13 @@ func TestWaitReadableReturnsWhenWokenWithoutHoldingTheDrainLock(t *testing.T) {
 
 	// The observable assertion that the deadlock is gone: on the broken
 	// code this call never returns.
-	var got []byte
 	buf := make([]byte, 4096)
-	eof, err := lp.RawReadUntilAgain(buf, func(p []byte) { got = append(got, p...) })
+	n, barrier, err := lp.RawReadChunk(buf)
 	if err != nil {
-		t.Fatalf("RawReadUntilAgain while a readiness wait may be parked: %v", err)
+		t.Fatalf("RawReadChunk while a readiness wait may be parked: %v", err)
 	}
-	if eof {
-		t.Fatalf("RawReadUntilAgain reported eof against a program that has not exited")
-	}
-	if len(got) != 0 {
-		t.Fatalf("a silent program (`sleep 30`) produced %d bytes, want 0", len(got))
+	if n != 0 || !barrier {
+		t.Fatalf("a silent program read = (%d, barrier=%t), want (0, true)", n, barrier)
 	}
 
 	select {

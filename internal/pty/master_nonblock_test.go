@@ -33,13 +33,9 @@ func newRawPTYPair(t *testing.T) (lp *LocalPty, slave *os.File) {
 	return &LocalPty{file: master, done: make(chan struct{})}, s
 }
 
-// TestOneDrainConsumesEverythingReadable is the owner's drain step made
-// concrete (spec §5.3.1): a batch of bytes written to the slave before the
-// call, one RawReadUntilAgain delivers all of it and returns without
-// blocking, and a second call on the now-idle fd delivers nothing and
-// returns at once — both assertions with no sleep, because the write to the
-// slave and the master's read of it are one kernel-level path with nothing
-// in between to wait on.
+// TestOneDrainConsumesEverythingReadable proves lossless bounded reads and the
+// separate EAGAIN barrier on a real master/slave pair. A data read must never
+// claim the barrier, even when it consumed the last byte already readable.
 //
 // THE PAYLOAD IS DELIBERATELY SMALL, not the 4 KiB spec §5.3.1 first named.
 // A synchronous write with nobody draining the master concurrently can only
@@ -57,9 +53,8 @@ func newRawPTYPair(t *testing.T) (lp *LocalPty, slave *os.File) {
 // that follows it (mac4.log, run 35150838522, nocx-4c1rd). 64 bytes is
 // comfortably under TTMINHIWAT — the LOWEST that mark can be configured to,
 // regardless of the pty's nominal speed — so the write completes on its own
-// on every platform, and the behaviour under test (one drain call empties
-// whatever is already sitting in the kernel buffer) is unchanged by the
-// smaller number.
+// on every platform. The scratch buffer is deliberately smaller still, so
+// unread bytes must survive across several owner-sized work quanta.
 func TestOneDrainConsumesEverythingReadable(t *testing.T) {
 	lp, slave := newRawPTYPair(t)
 
@@ -69,33 +64,23 @@ func TestOneDrainConsumesEverythingReadable(t *testing.T) {
 	}
 
 	var got []byte
-	buf := make([]byte, 8192)
-	eof, err := lp.RawReadUntilAgain(buf, func(p []byte) { got = append(got, p...) })
-	if err != nil {
-		t.Fatalf("RawReadUntilAgain: %v", err)
-	}
-	if eof {
-		t.Fatalf("RawReadUntilAgain reported eof with the slave still open")
-	}
-	if len(got) != len(payload) {
-		t.Fatalf("one drain delivered %d bytes, want all %d written before the call", len(got), len(payload))
+	buf := make([]byte, 7)
+	for len(got) < len(payload) {
+		n, barrier, err := lp.RawReadChunk(buf)
+		if err != nil {
+			t.Fatalf("RawReadChunk: %v", err)
+		}
+		if barrier || n == 0 {
+			t.Fatalf("premature read barrier after %d of %d bytes", len(got), len(payload))
+		}
+		got = append(got, buf[:n]...)
 	}
 	if !bytes.Equal(got, payload) {
-		t.Fatalf("the delivered bytes do not match what was written to the slave")
+		t.Fatal("bounded reads lost or reordered the slave's output")
 	}
-
-	// The second call: nothing was written since, so it must deliver nothing
-	// and return immediately rather than blocking for more.
-	got = nil
-	eof, err = lp.RawReadUntilAgain(buf, func(p []byte) { got = append(got, p...) })
-	if err != nil {
-		t.Fatalf("second RawReadUntilAgain: %v", err)
-	}
-	if eof {
-		t.Fatalf("second RawReadUntilAgain reported eof with the slave still open")
-	}
-	if len(got) != 0 {
-		t.Fatalf("second RawReadUntilAgain delivered %d bytes with nothing written since, want 0", len(got))
+	n, barrier, err := lp.RawReadChunk(buf)
+	if err != nil || n != 0 || !barrier {
+		t.Fatalf("idle read = (%d, barrier=%t, %v), want (0, true, nil)", n, barrier, err)
 	}
 }
 

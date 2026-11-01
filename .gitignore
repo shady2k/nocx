@@ -88,3 +88,4 @@ __pycache__/
 internal/helper/deploy/artifacts/*.gz
 # Agent worktrees: a nested checkout, never ours to commit or lint (nocx-04noc)
 .claude/worktrees/
+.beads

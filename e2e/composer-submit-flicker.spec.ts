@@ -1,304 +1,436 @@
 import { appReadyForInput, test, expect } from './harness'
+import type { Page, TestInfo } from '@playwright/test'
 
 /**
- * nocx-1ebrs.40 — the composer flickers on submit.
+ * nocx-1ebrs.40: ink fades, layout steps, and the restored tail settles.
  *
- * The submit hand-off must not blink the input panel. From painted frames
- * (one sample per animation frame across the hand-off) this asserts the
- * shape the fix is:
- *
- *  1. the pane-level geometry the grid and the pty are sized from never
- *     animates — the box's own height is always its full height or gone
- *     (display:none), never anything between;
- *  2. the INK fades — the departure's ink passes through intermediate
- *     opacities on the ghost that replaces the box on screen (the box itself
- *     leaves the layout in one frame — that is what keeps every fit number
- *     and every visible-waiting consumer honest), and the return fades in on
- *     the panel;
- *  3. the tail never detaches — while the person is following, content does
- *     not stay below the fold across frames, so no late pin lands as a jump.
+ * A compositor can skip an entire 140ms fade. Observe the product's animation
+ * recipes and their completion, not a lucky rAF sample inside that interval.
+ * Layout changes are recorded at DOM mutations and resize delivery. The two
+ * closing frames are requested explicitly AFTER the block and its ink settle;
+ * they are not the last two entries of a free-running sampler.
  */
-
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
+const BLOCK = '.pane.active .scrollback-inner > .cmd-block[data-block-kind="command"]'
 
-interface Frame {
-  t: number
-  disp: string
-  eH: number
-  op: number
-  st: number
-  ch: number
-  sh: number
-  iT: number
-  gl: number
-  /** Active inner-element Web Animations API durations, in milliseconds. */
-  glDurations: number[]
-  /** The departure ghost's opacity, or -1 where there is no ghost this
-   *  frame. The box's own departure is one frame (that is the fix); the
-   *  ink the person sees fade is on this copy. */
-  gOp: number
+interface State {
+  display: string
+  height: number
+  opacity: number
+  top: number
+  below: number
+  ghosts: number
+  active: number
+  generation: number
 }
 
-async function sampleAcrossSubmit(page: import('@playwright/test').Page, command: string) {
+interface Motion {
+  target: 'editor' | 'ghost' | 'inner' | 'layout'
+  duration: number | string | undefined
+  easing: string | undefined
+  keyframes: Record<string, unknown>[]
+  state: State
+  outcome: 'running' | 'finished' | 'cancelled'
+  end?: State
+  departureTask?: State
+}
+
+interface Observation {
+  fullHeight: number
+  initial: State
+  layouts: State[]
+  motions: Motion[]
+  cssGeometry: string[]
+  read: () => State
+}
+
+declare global {
+  interface Window {
+    __handoff: Observation
+  }
+}
+
+async function begin(page: Page, command: string, interruptDeparture = false) {
   await page.goto('/')
-  await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15000 })
+  await expect(page.locator(TITLE).first(), 'initial tab has a title').not.toHaveText('', {
+    timeout: 15000,
+  })
   await appReadyForInput(page)
   const input = page.locator(INPUT)
-  await expect(input).toBeVisible({ timeout: 8000 })
+  await expect(input, 'composer owns a visible input before submit').toBeVisible({ timeout: 8000 })
   await input.fill(command)
+  // Do not install the recorder inside an unrelated startup return fade.
+  await expect
+    .poll(
+      () =>
+        page.locator('.pane.active .nocx-editor').evaluate((editor) => ({
+          opacity: Number(getComputedStyle(editor).opacity),
+          active: editor.getAnimations().length,
+        })),
+      { message: 'initial composer has full ink and no return animation' },
+    )
+    .toEqual({ opacity: 1, active: 0 })
 
-  await page.evaluate(() => {
+  await page.evaluate((interrupt) => {
     const pane = document.querySelector('.pane.active') as HTMLElement
-    const editor = pane.querySelector<HTMLElement>('.nocx-editor') as HTMLElement
-    const area = pane.querySelector<HTMLElement>('.scrollback-area') as HTMLElement
-    const inner = pane.querySelector<HTMLElement>('.scrollback-inner') as HTMLElement
-    const w = window as unknown as { __frames: unknown[]; __t0: number; __stop?: boolean }
-    w.__frames = []
-    w.__t0 = performance.now()
-    const sample = (): void => {
-      if (w.__stop) return
-      const ghost = document.querySelector('[data-nocx-motion-ghost]')
-      w.__frames.push({
-        t: +(performance.now() - w.__t0).toFixed(1),
-        disp: getComputedStyle(editor).display,
-        eH: +editor.getBoundingClientRect().height.toFixed(1),
-        op: +getComputedStyle(editor).opacity.slice(0, 5),
-        st: +area.scrollTop.toFixed(1),
-        ch: area.clientHeight,
-        sh: area.scrollHeight,
-        iT: +inner.getBoundingClientRect().top.toFixed(1),
-        gl: inner.getAnimations().length,
-        glDurations: inner
-          .getAnimations()
-          .filter((animation) => animation.playState === 'running')
-          .map((animation) => animation.effect?.getComputedTiming().duration ?? Number.NaN),
-        gOp: ghost ? +getComputedStyle(ghost).opacity.slice(0, 5) : -1,
-      })
-      requestAnimationFrame(sample)
+    const editor = pane.querySelector('.nocx-editor') as HTMLElement
+    const area = pane.querySelector('.scrollback-area') as HTMLElement
+    const inner = pane.querySelector('.scrollback-inner') as HTMLElement
+    const layout = new Set<Element>([editor, area])
+    for (let el = editor.parentElement; el && pane.contains(el); el = el.parentElement)
+      layout.add(el)
+    const observation: Observation = {
+      fullHeight: editor.getBoundingClientRect().height,
+      initial: {} as State,
+      layouts: [],
+      motions: [],
+      cssGeometry: [],
+      read: () => ({
+        display: getComputedStyle(editor).display,
+        height: editor.getBoundingClientRect().height,
+        opacity: Number(getComputedStyle(editor).opacity),
+        top: inner.getBoundingClientRect().top,
+        below: area.scrollHeight - area.scrollTop - area.clientHeight,
+        ghosts: document.querySelectorAll('[data-nocx-motion-ghost]').length,
+        active: [editor, inner].flatMap((el) => el.getAnimations()).length,
+        generation: observation.motions.length,
+      }),
     }
-    requestAnimationFrame(sample)
-  })
-
-  // The panel's resting height and ink, read before anything moves.
-  const fullH = await page.evaluate(
-    () => document.querySelector('.pane.active .nocx-editor')?.getBoundingClientRect().height ?? 0,
-  )
-
-  // An idle page paints on its own clock: without this wait the sampler's
-  // first tick can land after the submit (measured: a first frame already
-  // display:none, t=21ms), and the visible phase the assertions read from
-  // never existed in `frames` at all.
-  await page.waitForFunction(
-    () =>
-      ((window as unknown as { __frames: Frame[] }).__frames ?? []).some(
-        (f) => f.disp !== 'none' && f.eH > 1,
-      ),
-    undefined,
-    { timeout: 15_000 },
-  )
-
-  await page.keyboard.press('Enter')
-
-  // The hand-back: the box is back at its full height and its full ink. NOT
-  // toBeVisible — a mid-fade box is non-empty and Playwright-visible.
-  await page.waitForFunction(
-    (full) => {
-      const ed = document.querySelector('.pane.active .nocx-editor')
-      return (
-        ed !== null &&
-        getComputedStyle(ed).display !== 'none' &&
-        ed.getBoundingClientRect().height >= full * 0.9 &&
-        Number(getComputedStyle(ed).opacity) >= 0.95
-      )
-    },
-    fullH,
-    { timeout: 15000 },
-  )
-  await page.waitForFunction(
-    () =>
-      (document.querySelector('.pane.active .scrollback-inner')?.getAnimations().length ?? 0) === 0,
-  )
-  await page.evaluate(() => {
-    const w = window as unknown as { __stop?: boolean }
-    requestAnimationFrame(() => {
-      w.__stop = true
+    window.__handoff = observation
+    observation.initial = observation.read()
+    const recordLayout = () => {
+      observation.layouts.push(observation.read())
+      for (const element of layout) {
+        const style = getComputedStyle(element)
+        // CSS transitions do not call Element.animate. Inspect their declared
+        // geometry policy too, including transitions too brief to be sampled.
+        const durations = style.transitionDuration.split(',')
+        if (
+          style.transitionProperty
+            .split(',')
+            .some(
+              (property, index) =>
+                !['none', 'opacity'].includes(property.trim()) &&
+                parseFloat(durations[index % durations.length]) > 0,
+            )
+        ) {
+          observation.cssGeometry.push(
+            `${element.className}: ${style.transitionProperty} ${style.transitionDuration}`,
+          )
+        }
+        for (const animation of element.getAnimations()) {
+          if (!(animation instanceof CSSAnimation)) continue
+          const keys = (animation.effect as KeyframeEffect).getKeyframes()
+          if (
+            keys.some((keyframe) =>
+              Object.keys(keyframe).some(
+                (key) =>
+                  !['offset', 'computedOffset', 'easing', 'composite', 'opacity'].includes(key),
+              ),
+            )
+          ) {
+            observation.cssGeometry.push(`${element.className}: ${animation.animationName}`)
+          }
+        }
+      }
+    }
+    // Layout milestones, not paint samples. Mutation delivery is batched;
+    // the ghost's creation-task record below catches the immediate hide.
+    new MutationObserver(recordLayout).observe(pane, {
+      attributes: true,
+      attributeFilter: ['style', 'class'],
+      subtree: true,
     })
+    const resize = new ResizeObserver(recordLayout)
+    resize.observe(editor)
+    const animate = Element.prototype.animate
+    Element.prototype.animate = function (...args: Parameters<Element['animate']>): Animation {
+      const animation = animate.apply(this, args)
+      const target =
+        this === editor
+          ? 'editor'
+          : this.hasAttribute('data-nocx-motion-ghost')
+            ? 'ghost'
+            : this === inner
+              ? 'inner'
+              : layout.has(this)
+                ? 'layout'
+                : null
+      if (target) {
+        const effect = animation.effect as KeyframeEffect
+        const motion: Motion = {
+          target,
+          duration:
+            typeof effect.getTiming().duration === 'number'
+              ? Number(effect.getTiming().duration)
+              : String(effect.getTiming().duration),
+          easing: effect.getTiming().easing,
+          keyframes: effect.getKeyframes(),
+          state: observation.read(),
+          outcome: 'running',
+        }
+        observation.motions.push(motion)
+        if (target === 'ghost') {
+          if (
+            interrupt &&
+            !observation.motions.some((other) => other !== motion && other.target === 'ghost')
+          ) {
+            // Construct the quick-return overlap even if the shell/backend is
+            // slower than 140ms. Native WAAPI seeking is not page.clock:
+            // preserve the recipe and let ONLY the product cancel this ghost.
+            animation.pause()
+            animation.currentTime = Number(motion.duration) / 2
+          }
+          queueMicrotask(() => {
+            motion.departureTask = observation.read()
+          })
+        }
+        void animation.finished.then(
+          () => {
+            motion.outcome = 'finished'
+            // Let the product's own finished handlers remove the ghost first.
+            queueMicrotask(() => {
+              motion.end = observation.read()
+            })
+          },
+          () => {
+            motion.outcome = 'cancelled'
+          },
+        )
+      }
+      return animation
+    }
+  }, interruptDeparture)
+  await page.keyboard.press('Enter')
+}
+
+async function settled(page: Page): Promise<State> {
+  // Lifecycle closure precedes the stored body read. Wait for BOTH before
+  // accepting an animation-free frame; otherwise the body can start a fresh
+  // settle after the return, which caused nocx-atpw5.1.9.
+  await expect(
+    page.locator(BLOCK),
+    'submitted command reached its success outcome',
+  ).toHaveAttribute('data-outcome', 'success')
+  await expect(
+    page.locator(`${BLOCK} > .cmd-output, ${BLOCK} > [data-output-empty]`),
+    'closed command has materialized its stored body',
+  ).toHaveCount(1)
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const state = window.__handoff.read()
+          return {
+            display: state.display !== 'none',
+            ink: state.opacity >= 0.95,
+            height: state.height >= window.__handoff.fullHeight - 1,
+            active: state.active,
+            ghosts: state.ghosts,
+          }
+        }),
+      {
+        message:
+          'materialized command restored full-height/full-ink composer with no active motion or ghost',
+      },
+    )
+    .toEqual({ display: true, ink: true, height: true, active: 0, ghosts: 0 })
+  return page.evaluate(() => window.__handoff.read())
+}
+
+async function finish(page: Page, testInfo: TestInfo) {
+  const restored = await settled(page)
+  // Construct exactly two frames after the observable settle. Do not retry
+  // this pair: a new fade or motion here is evidence of a late hand-off, not
+  // a reason to discard the failure and seek a luckier pair.
+  const pair = await page.evaluate(async () => {
+    const next = () =>
+      new Promise<State>((resolve) => requestAnimationFrame(() => resolve(window.__handoff.read())))
+    return [await next(), await next()]
   })
-  await page.waitForTimeout(120)
-  return {
-    fullH,
-    frames: (await page.evaluate(
-      () => (window as unknown as { __frames: unknown[] }).__frames,
-    )) as Frame[],
-  }
+  const records = await page.evaluate(() => {
+    const { fullHeight, initial, layouts, motions, cssGeometry } = window.__handoff
+    return { fullHeight, initial, layouts, motions, cssGeometry }
+  })
+  const dump = JSON.stringify({ ...records, restored, pair })
+  await testInfo.attach('handoff-records', { body: dump, contentType: 'application/json' })
+  return { ...records, restored, pair, dump }
+}
+
+function assertMotion(records: Awaited<ReturnType<typeof finish>>) {
+  const { fullHeight, initial, layouts, motions, pair, dump } = records
+  expect(
+    pair.every(
+      (state) =>
+        state.active === 0 &&
+        state.ghosts === 0 &&
+        state.opacity >= 0.95 &&
+        state.display !== 'none',
+    ),
+    `wanted two full-ink, animation-free closing frames; saw ${dump}`,
+  ).toBe(true)
+  expect(pair[1].generation, `wanted no fresh motion between closing frames; saw ${dump}`).toBe(
+    pair[0].generation,
+  )
+  expect(
+    pair[0].generation,
+    `wanted no fresh motion after the completed restore; saw ${dump}`,
+  ).toBe(records.restored.generation)
+  expect(initial.opacity, `wanted full ink before submit; saw ${dump}`).toBe(1)
+  expect(initial.height, `wanted measurable initial composer; saw ${dump}`).toBeGreaterThan(1)
+  expect(
+    layouts.filter((s) => s.height > 1 && s.height < fullHeight - 1),
+    `wanted layout height full or gone at each layout change; saw ${dump}`,
+  ).toEqual([])
+
+  // A recipe proves interpolation was requested, NOT that a throttled
+  // compositor painted an intermediate opacity. page.clock does not drive
+  // WAAPI in WebKit (see bead evidence); demanding such a paint is a lottery.
+  const recipe = (target: Motion['target'], from: string, to: string) =>
+    motions.some(
+      (m) =>
+        m.target === target &&
+        typeof m.duration === 'number' &&
+        m.duration === 140 &&
+        m.easing === 'cubic-bezier(0.2, 0, 0, 1)' &&
+        m.keyframes.every((frame) => frame.easing === 'linear') &&
+        m.keyframes[0]?.opacity === from &&
+        m.keyframes.at(-1)?.opacity === to,
+    )
+  expect(recipe('ghost', '1', '0'), `wanted a finite ghost ink fade 1 → 0; saw ${dump}`).toBe(true)
+  expect(recipe('editor', '0', '1'), `wanted a finite composer ink fade 0 → 1; saw ${dump}`).toBe(
+    true,
+  )
+  const firstDeparture = motions.find((motion) => motion.target === 'ghost')
+  expect(
+    firstDeparture?.departureTask?.display,
+    `wanted composer display:none in the departure creation task, not after fading a live input; saw ${dump}`,
+  ).toBe('none')
+  expect(
+    firstDeparture?.departureTask?.height,
+    `wanted composer removed from layout in the departure creation task; saw ${dump}`,
+  ).toBe(0)
+  const completedReturn = motions.find(
+    (m) => m.target === 'editor' && m.outcome === 'finished' && m.end?.opacity === 1,
+  )
+  expect(
+    completedReturn,
+    `wanted completed return with computed full ink, not the sampler's last frame; saw ${dump}`,
+  ).toBeDefined()
+
+  expect(
+    records.cssGeometry,
+    `wanted no CSS geometry transitions/animations on pane layout elements; saw ${dump}`,
+  ).toEqual([])
+  // Read every configured keyframe, not height at a handful of paint times.
+  // Only opacity on the editor and translation on the stack may animate.
+  const metadata = new Set(['offset', 'computedOffset', 'easing', 'composite'])
+  const geometryMotion = motions.filter(
+    (m) =>
+      m.target !== 'ghost' &&
+      m.keyframes.some((kf) =>
+        Object.keys(kf).some(
+          (key) =>
+            !metadata.has(key) &&
+            !(m.target === 'editor' && key === 'opacity') &&
+            !(m.target === 'inner' && key === 'transform'),
+        ),
+      ),
+  )
+  expect(
+    geometryMotion,
+    `wanted ink/stack-only motion, no pane-level animated geometry; saw ${dump}`,
+  ).toEqual([])
+  // This bounded observation cannot promise that no future asynchronous
+  // product event will ever move the pane. It proves two explicitly requested
+  // frames AFTER materialization and animation completion agree.
+  expect(
+    Math.abs(pair[1].top - pair[0].top),
+    `wanted stable post-restore stack position; saw ${dump}`,
+  ).toBeLessThanOrEqual(1)
+  expect(pair[1].below, `wanted tail in view after restore; saw ${dump}`).toBeLessThanOrEqual(2)
+  expect(
+    pair[1].height,
+    `wanted full-height restored composer; saw ${dump}`,
+  ).toBeGreaterThanOrEqual(fullHeight - 1)
 }
 
 test.describe('the submit hand-off (nocx-1ebrs.40)', () => {
   test('a quick command dips the panel and turns it around; the geometry never animates', async ({
     page,
   }, testInfo) => {
-    // The owner's case: a command that finishes while the departure is still
-    // on screen. The panel must dim and come back — never vanish, never pop.
-    const { fullH, frames } = await sampleAcrossSubmit(page, 'true')
-    const dump = JSON.stringify(frames)
-    await testInfo.attach('frames', { body: dump, contentType: 'application/json' })
-    expect(frames.length, `frames sampled: ${dump}`).toBeGreaterThan(6)
-
-    // 1. The box's own height is full or gone, never between: the pane-level
-    // geometry the grid and the pty are fitted from does not animate.
-    const midHeight = frames.filter((f) => f.eH > 1 && f.eH < fullH - 1)
+    await begin(page, 'true', true)
+    const records = await finish(page, testInfo)
+    assertMotion(records)
     expect(
-      midHeight,
-      `box at intermediate heights: ${JSON.stringify(midHeight)}; all: ${dump}`,
-    ).toEqual([])
-
-    // 2. The ink moved gradually and came back. On a THROTTLED clock
-    // (headless WebKit paints every ~80-150ms) a 140ms fade yields one or
-    // two samples, so no single sampled threshold is honest; what holds on
-    // every frame budget is: a mid-fade ink state EXISTS somewhere in the
-    // hand-off — on the panel or on the ghost — where the old code painted
-    // full ink or nothing at all. The ghost's decay across samples is the
-    // second witness; either settles it.
-    const ghostOps = frames.filter((f) => f.gOp >= 0).map((f) => f.gOp)
-    const ghostDecayed = ghostOps.length >= 2 && Math.max(...ghostOps) - Math.min(...ghostOps) > 0.3
-    const dipped =
-      frames.some((f) => f.disp !== 'none' && f.op < 1) ||
-      frames.some((f) => f.gOp > 0 && f.gOp < 1) ||
-      ghostDecayed
-    expect(dipped, `panel ink dipped during the hand-off: ${dump}`).toBe(true)
-    const last = frames[frames.length - 1]
-    expect(last.op, `panel back at full ink: ${dump}`).toBeGreaterThanOrEqual(0.95)
-    expect(last.eH, `panel back at full height: ${dump}`).toBeGreaterThanOrEqual(fullH - 1)
+      records.motions.find((motion) => motion.target === 'ghost')?.outcome,
+      `wanted the real return to cancel the in-flight departure ghost; saw ${records.dump}`,
+    ).toBe('cancelled')
   })
 
   test('a real command departs through a fade, and the tail never detaches', async ({
     page,
   }, testInfo) => {
-    // Long enough that the departure completes and the panel is genuinely
-    // gone for a while — the shape the owner sees on any ordinary command.
-    const { fullH, frames } = await sampleAcrossSubmit(page, 'sleep 0.4')
-    const dump = JSON.stringify(frames)
-    await testInfo.attach('frames', { body: dump, contentType: 'application/json' })
-    expect(frames.length, `frames sampled: ${dump}`).toBeGreaterThan(6)
-
-    // 1. Two-valued layout height, all the way through.
-    const midHeight = frames.filter((f) => f.eH > 1 && f.eH < fullH - 1)
+    // Hold the real shell command open until its departure finishes. Unlike
+    // sleep 0.4 this cannot finish before the browser observes the hidden box.
+    await begin(page, "read -r nocx_handoff; printf 'handoff complete\\n'")
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const o = window.__handoff
+            return {
+              hidden: o.read().display === 'none',
+              active: o.read().active,
+              ghostFinished: o.motions.some(
+                (m) => m.target === 'ghost' && m.outcome === 'finished',
+              ),
+            }
+          }),
+        { message: 'held command has a hidden composer and a completed departure fade' },
+      )
+      .toEqual({ hidden: true, ghostFinished: true, active: 0 })
+    // A throttled compositor cannot prove an interval of painted tail
+    // positions. Check the attached tail at the actual departure completion,
+    // while PTY input still holds the command open, rather than counting
+    // consecutive detached samples with an unknown time gap.
+    const absent = await page.evaluate(() => window.__handoff.read())
     expect(
-      midHeight,
-      `box at intermediate heights: ${JSON.stringify(midHeight)}; all: ${dump}`,
-    ).toEqual([])
-
-    // 2. The departure: the box leaves the layout in ONE frame — that is the
-    // fix, it is what keeps every fit number and every consumer honest — and
-    // the INK the person sees fade belongs to the ghost that replaces it on
-    // screen. The first cut faded the box itself and kept it in the flow for
-    // 140ms; a submit helper then typed into that dying window and the keys
-    // fell through to the pty, unrecorded (nocxify-journey, run 39592338852).
-    // So: the box steps visible → gone (asserted by `absent` below landing
-    // with no intermediate-height, mid-ink running state), and the ghost
-    // passes through intermediate ink before it is gone.
-    let submitAt = frames.findIndex((f) => f.disp === 'none' || f.op < 0.95 || f.eH < fullH - 1)
-    if (submitAt < 0) submitAt = frames.length - 1
-    const absent = frames.map((f, i) => ({ f, i })).filter(({ f }) => f.disp === 'none')
-    expect(absent.length, `panel fully departs: ${dump}`).toBeGreaterThan(0)
-    const lastFullInk = frames
-      .slice(0, absent[0].i)
-      .map((f, i) => ({ f, i }))
-      .filter(({ f }) => f.op >= 0.95 && f.eH >= fullH - 1)
-      .pop()
-    expect(lastFullInk, `panel was full before it left: ${dump}`).toBeTruthy()
-    const boxSteppedOut = frames.slice(lastFullInk!.i + 1, absent[0].i + 1).every((f) => f.eH < 1)
-    expect(boxSteppedOut, `box leaves in one frame, not a shrink: ${dump}`).toBe(true)
-    // Same throttle rule as test 1: a sampled ghost strictly between full
-    // ink and none, or two ghost samples that decayed — the fast-out easing
-    // spends almost no time mid-range on a slow clock, so a strict window
-    // would flake on the sample that caught the fade's tail.
-    const ghostOps2 = frames.filter((f) => f.gOp >= 0).map((f) => f.gOp)
-    const ghostDecayed2 =
-      ghostOps2.length >= 2 && Math.max(...ghostOps2) - Math.min(...ghostOps2) > 0.3
-    const ghostFaded = frames.some((f) => f.gOp > 0 && f.gOp < 1) || ghostDecayed2
-    expect(ghostFaded, `departure passes through intermediate ghost ink: ${dump}`).toBe(true)
-
-    // And the return fades back in from nothing rather than popping.
-    const lastAbsent = absent[absent.length - 1].i
-    const restoredAt = frames.findIndex(
-      (f, i) => i > lastAbsent && f.eH >= fullH - 1 && f.op >= 0.95,
+      absent.height,
+      `wanted departed composer out of layout; saw ${JSON.stringify(absent)}`,
+    ).toBe(0)
+    expect(
+      absent.below,
+      `wanted tail attached after departure finished while command remains running; saw ${JSON.stringify(absent)}`,
+    ).toBeLessThanOrEqual(2)
+    await page.keyboard.press('Enter')
+    const records = await finish(page, testInfo)
+    assertMotion(records)
+    const restoreGlides = records.motions.filter(
+      (m) => m.target === 'inner' && m.state.display !== 'none',
     )
-    expect(restoredAt, `panel returns at full ink: ${dump}`).toBeGreaterThan(0)
-    // And the ghost does not outlive the hand-off: once the box is back at
-    // its full ink, no later frame still carries one (show() cancels it).
-    const ghostAfterReturn = frames.some((f, i) => i > restoredAt && f.gOp >= 0)
-    expect(ghostAfterReturn, `ghost outlived the return: ${dump}`).toBe(false)
-    // The return's mid-flight ink: on a throttled clock the window between
-    // the last absent frame and the restored one can hold no sample at all,
-    // so the witness is page-wide — some visible frame at LESS than full
-    // ink (impossible without a fade; the old code painted exactly 1 or was
-    // gone) — while `restoredAt` stays the strict arrival assertion.
-    const fadeIn =
-      frames.slice(lastAbsent + 1, restoredAt).some((f) => f.disp !== 'none' && f.op < 1) ||
-      frames.some((f) => f.disp !== 'none' && f.op < 1)
-    expect(fadeIn, `return passes through intermediate ink: ${dump}`).toBe(true)
-
-    // 3. The tail never detaches while the panel is gone: content below the
-    // fold on the ABSENT frames. The old code let ~130px accumulate there
-    // (echo + process bar, nothing re-pinning) and sat on it for frames
-    // before a late pin snapped scrollTop 98px in one frame. After the
-    // panel is back the hand-off settle owns the transition and the idle
-    // re-fit drains the content glided — the fold metric decays without a
-    // scroll — so the drain is asserted by its painted glide below, not
-    // here. (A per-frame bound would fail on main itself; see assertion 4.)
-    const belowAbsent = frames
-      .slice(submitAt + 1)
-      .map((f) => ({ disp: f.disp, below: +(f.sh - f.st - f.ch).toFixed(1) }))
-      .filter(({ disp }) => disp === 'none')
-    const stuck = belowAbsent.filter(({ below: b }, i) => {
-      if (b <= 2) return false
-      const next = belowAbsent[i + 1]
-      return next !== undefined && next.below > 2
+    // _glide cancels the previous animation before EVERY layout mutation.
+    // Its replacement may have zero displacement and need no animation at
+    // all. CI run 41014311723 created two valid restore recipes (74px and
+    // 50px), then retargeted both: zero completions is not a failed restore.
+    // Check every recipe that exists; full ink/height, attached tail and the
+    // unchanged settled pair above remain mandatory even when none is needed.
+    const invalidRestoreGlides = restoreGlides.filter((m) => {
+      const offset = /^translateY\((-?[\d.]+)px\)$/.exec(String(m.keyframes[0]?.transform))
+      return !(
+        m.duration === 140 &&
+        m.easing === 'cubic-bezier(0.2, 0, 0, 1)' &&
+        m.keyframes.every((frame) => frame.easing === 'linear') &&
+        offset !== null &&
+        Math.abs(Number(offset[1])) >= 1 &&
+        m.keyframes.at(-1)?.transform === 'translateY(0px)' &&
+        (m.outcome === 'finished' || m.outcome === 'cancelled')
+      )
     })
     expect(
-      stuck,
-      `fold stayed detached while the panel was gone (px): ${JSON.stringify(stuck)}; all: ${dump}`,
+      invalidRestoreGlides,
+      `wanted each created restore glide to have a smooth 140ms nonzero recipe to identity; saw ${restoreGlides.length} created, ${restoreGlides.filter((m) => m.outcome === 'finished').length} finished, ${restoreGlides.filter((m) => m.outcome === 'cancelled').length} cancelled; records: ${records.dump}`,
     ).toEqual([])
-
-    // 4. Scroll stability is a user-visible end state, not a count of how
-    // many intermediate positions happened to land on the sampler's clock.
-    // CI Chromium shard 2 (run 39830472460, job 120005304954) sampled only
-    // two distinct positions over eleven frames. The animation can still
-    // reach its settled state correctly; requiring four samples made frame
-    // scheduling part of the contract. sampleAcrossSubmit waits until the
-    // inner element has no active animations, then records another frame.
-    // Its last two painted positions must therefore agree: no late scroll
-    // jump after the hand-off has settled.
-    // The composer can become fully opaque before the settle glide finishes.
-    // Keep sampling through animation completion, not only through restoredAt.
-    const restoredGlideFrames = frames
-      .slice(lastAbsent + 1)
-      .filter((frame) =>
-        frame.glDurations.some((duration) => Number.isFinite(duration) && duration > 0),
-      )
-    expect(
-      restoredGlideFrames.length,
-      `scrollbackInner restore glide ran with finite nonzero duration: ${dump}`,
-    ).toBeGreaterThan(0)
-    const restoredPositions = new Set(restoredGlideFrames.map((frame) => Math.round(frame.iT)))
-    expect(
-      restoredPositions.size,
-      `restore painted changing positions while the glide was running: ${dump}`,
-    ).toBeGreaterThan(1)
-    const settledPair = frames.slice(-2)
-    expect(settledPair.length, `two settled frames were recorded: ${dump}`).toBe(2)
-    expect(
-      Math.abs(settledPair[1].iT - settledPair[0].iT),
-      `scroll position changed after the hand-off settled: ${JSON.stringify(settledPair)}; all: ${dump}`,
-    ).toBeLessThanOrEqual(1)
-    // And the hand-off ends with the tail where the reader can see it.
-    const lastBelow = +(
-      frames[frames.length - 1].sh -
-      frames[frames.length - 1].st -
-      frames[frames.length - 1].ch
-    ).toFixed(1)
-    expect(lastBelow, `fold at rest: ${dump}`).toBeLessThanOrEqual(2)
   })
 })

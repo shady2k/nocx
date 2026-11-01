@@ -24,10 +24,15 @@ Supply these downloaded, unmodified release assets as file paths:
   uses the compiled production keyring. The shipped previous AppImage independently
   verifies every update check with its own compiled keyring.
 
-Both nightlies must stamp the same plain next-stable version, name different
-immutable `nightly-YYYYMMDD-RUNID` tags, have increasing RFC3339 `released` instants,
-and name different AppImage SHA-256 values. This forces the daily-channel case;
-a semver-only updater cannot pass by testing a version bump instead.
+Both nightlies must stamp plain next-stable versions, name different immutable
+`nightly-YYYYMMDD-RUNID` tags, have increasing RFC3339 `released` instants, and
+name different AppImage SHA-256 values. A higher-version successor is expected
+after a stable promotion: a nightly installed at 0.8.0 must update to 0.8.1.
+A lower version is always refused. At equal versions, the candidate must have a
+different full commit and a strictly later stamped `build.builtAt`, matching
+`newerNightly` in `internal/update/manifest.go:137`. A later publication alone
+cannot turn an older build into an update. The equal-version pair still proves
+the daily-channel case that a semver-only updater cannot pass.
 
 ## Run through the allowed test route
 
@@ -103,6 +108,7 @@ A failed upload without `NOCX_RUN_EXIT` means no test ran, not a failed assertio
    health finalization rather than only a completed download or a reported version.
    Coordinator identity is recorded separately: ADR-0104 explicitly permits a
    compatible same-Version/different-Commit coordinator to survive a nightly.
+   A version increase must instead run the candidate coordinator.
 5. An already-current check does not offer the same artifact again. Replaying the
    previous authentic nightly must not offer a downgrade. This is an assertion
    against the product's ordering policy, not a harness-only `released` comparison.
@@ -145,6 +151,18 @@ with neither an `id` nor an `aria-label` is announced unnamed, and
 `named("Update channel", "combo box")` then times out — which is how this proof
 found that the Update-channel row's label pointed at the row instead of at the
 control.
+
+Announced is not the same as reachable, and listed is not the same as chosen.
+The rail holds more rows than the default 1024x768 window shows, so its last
+rows are in the tree, `FOCUSABLE`, and not `SHOWING`; `rail_click` asks the
+engine to focus the row first, which is what Tab does and which scrolls the
+rail to it (measured on WebKitGTK 2.52), and refuses with the rail's own
+reading if that does not put the row on screen. A `<select>` exposes every
+option as a menu item at all times, so a row named Nightly proves nothing; the
+channel is the row the combo marks `SELECTED`, which is what
+`channel_settled` waits for. Both rules live in `controls.py`, with unit
+checks that need no display, so a future change to them fails somewhere other
+than a 20-minute nightly job.
 
 ## Shared macOS evidence collector
 

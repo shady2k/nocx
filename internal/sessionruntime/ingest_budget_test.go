@@ -3,8 +3,8 @@ package sessionruntime
 // The ingest window's speed budget (nocx-zg3k3.5.8), restored by the round-2
 // review of nocx-zg3k3.5.9. The stage's criterion is about the INGEST hot
 // path — taking a program's output in through the real emulator and
-// capturing its departed rows — which carries ~99% of the whole path's cost
-// (8.4M allocs/MiB against the pump's 53k), and which the pump-only gate in
+// capturing its departed rows — which before bulk capture carried ~99% of
+// the whole path's cost (8.4M allocs/MiB against the pump's 53k), and which the pump-only gate in
 // internal/helper/session cannot see. This file gates THAT window; the
 // pump's own window stays gated where the pump lives
 // (internal/helper/session/rows_budget_test.go). Two windows, one
@@ -206,11 +206,11 @@ func BenchmarkIngestCapture(b *testing.B) {
 
 // The budget: the measured baseline on this tree plus a stated margin, held
 // by TestIngestCaptureStaysWithinItsBudget. Both numbers came off THIS tree
-// with BenchmarkIngestCapture on 2026-09-29, on the x86-64 Linux box this
-// worktree runs on (AMD Ryzen 5 8600G), with:
+// with BenchmarkIngestCapture on 2026-10-29, on x86-64 Linux
+// (AMD Ryzen 7 5700X, Go 1.26.5), with:
 //
 //	go test -tags gtk3 -run '^$' -bench BenchmarkIngestCapture \
-//		-benchtime 10x ./internal/sessionruntime
+//		-benchtime 10x -count 3 -benchmem ./internal/sessionruntime
 //
 // The margin is 25%, the brief's stated figure. A change that crosses
 // either number has put a new allocation on the ingest-and-capture path —
@@ -219,12 +219,13 @@ func BenchmarkIngestCapture(b *testing.B) {
 // benchmark, says in a bead why the new shape is right, and dates the new
 // numbers the same way these are dated.
 const (
-	// baseline 2026-09-29: 8,368,759 allocs/MiB and 219,635,855 B/MiB, so
-	// each gate is that number plus 25%, rounded up. Measured over the
+	// Baseline 2026-10-29 after bulk departed capture (nocx-zg3k3.12):
+	// maxima of three samples, 1,896,596 allocs/MiB and 196,289,695 B/MiB.
+	// Each gate is that number plus 25%, rounded up. Measured over the
 	// ingest window only — the real emulator's take-in and the capture of
 	// its departed rows, ending at the RowStream hand-off.
-	budgetAllocsPerMiB = 10_470_000 // baseline 8,368,759 allocs/MiB, +25%
-	budgetBytesPerMiB  = 275_000_000
+	budgetAllocsPerMiB = 2_370_745
+	budgetBytesPerMiB  = 245_362_119
 )
 
 // TestIngestCaptureStaysWithinItsBudget runs the same feed the benchmark
@@ -283,10 +284,10 @@ func TestIngestCaptureStaysWithinItsBudget(t *testing.T) {
 
 	if allocsPerMiB > budgetAllocsPerMiB {
 		t.Fatalf("the ingest-and-capture path spent %.0f allocs/MiB, over the budget of %d (+25%% over the %s baseline): a new allocation has landed on the path",
-			allocsPerMiB, budgetAllocsPerMiB, "2026-09-29")
+			allocsPerMiB, budgetAllocsPerMiB, "2026-10-29")
 	}
 	if bytesPerMiB > budgetBytesPerMiB {
 		t.Fatalf("the ingest-and-capture path allocated %.0f B/MiB, over the budget of %d (+25%% over the %s baseline): a new copy has landed on the path",
-			bytesPerMiB, budgetBytesPerMiB, "2026-09-29")
+			bytesPerMiB, budgetBytesPerMiB, "2026-10-29")
 	}
 }

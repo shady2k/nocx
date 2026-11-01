@@ -1,7 +1,7 @@
 {
   "strength": "block-new",
-  "currentMilestone": "v0-8",
-  "milestoneLabels": ["v0-5", "v0-6", "v0-7", "v0-8"],
+  "currentMilestone": "busy-terminal",
+  "milestoneLabels": ["v0-5", "v0-6", "v0-7", "v0-8", "busy-terminal"],
   "areaLabels": [
     "transport",
     "session",
@@ -143,5 +143,18 @@
     "idPattern": "nocx-[a-z0-9]+(?:\\.\\d+)*",
     "maskPatterns": []
   },
-  "notifyPushes": false
+  "notifyPushes": true,
+  "openQuestions": "one-at-a-time",
+  "codePaths": [
+    "*.go",
+    "**/*.go",
+    "frontend/src/**",
+    "frontend/e2e/**",
+    "scripts/**",
+    "e2e/**",
+    "cmd/**",
+    "internal/**",
+    "contracts/**"
+  ],
+  "requireDesignMatch": true
 }

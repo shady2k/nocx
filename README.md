@@ -226,17 +226,17 @@ all:frontend/dist` needs populated before the Go compiler runs, and then runs
 
 `make init` is safe to re-run, and does three things:
 
-| Step                | Why it matters                                                                                                                                                                                                            |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `make connect`      | `git config core.hooksPath .githooks` and `br sync --import-only`, after checking every input a hook reads: `node`, `br`, the hook scripts, the backlog gate's files. Anything missing is named and nothing is connected. |
-| `npm ci` (root)     | `@playwright/test`, for the e2e suite.                                                                                                                                                                                    |
-| `npm ci` (frontend) | The app's own dependencies.                                                                                                                                                                                               |
+| Step                | Why it matters                                                                                                                                                              |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `make connect`      | Connects the external tracker store, points `core.hooksPath` outside the checkout, and checks every input a hook reads. Anything missing is named and nothing is connected. |
+| `npm ci` (root)     | `@playwright/test`, for the e2e suite.                                                                                                                                      |
+| `npm ci` (frontend) | The app's own dependencies.                                                                                                                                                 |
 
-The backlog needs no bootstrapping: `.beads/issues.jsonl` is a tracked file, so a
-clone already has every issue and `br` builds its SQLite from it on the first
-command. `make connect` just does that eagerly. What a clone can lack is `br` itself
-— git carries the data, not the tool — and without it `make connect` refuses and says
-where to get it, because the commit-message hook resolves tasks through `br`.
+The backlog lives on `refs/tracker/state`, not in any code branch. `make connect`
+fetches it, builds this machine's SQLite copy and links `.beads` to it. What a clone
+can lack is `br` itself — git carries the data, not the tool — and without it `make
+connect` refuses and says where to get it, because the commit-message hook resolves
+tasks through `br`.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
@@ -289,9 +289,8 @@ must add no new problems. A new tag or branch on commits already held by that
 remote passes visibly without rechecking history. Empty hook input or unreadable
 gate inputs refuse the push and name `make connect`; no product suite runs here.
 
-The tracker still travels as the tracked `.beads/issues.jsonl` export, not a
-separate push. Unflushed database changes or an uncommitted export produce a
-warning so the publisher can send their tracker changes with their code.
+The tracker travels on `refs/tracker/state`, outside every code branch. The sync
+watcher publishes a write within seconds; pushing that ref starts no code CI.
 
 There are no post-merge or post-rewrite hooks. `git pull` brings a colleague's
 export in as a file change; the database can also hold newer local work.
@@ -411,18 +410,21 @@ terminal are distinct input owners, and automatic handoff is part of the contrac
 
 ## Task tracking — beads (br)
 
-The executable backlog lives in beads, not markdown, and in `.beads/issues.jsonl`,
-which is a tracked file — so a clone has it:
+The executable backlog lives in beads, outside the code branches on
+`refs/tracker/state`:
 
 ```bash
 br ready                     # what to work on next (--epic/--parent/-t/-l to narrow)
 br show <id>                 # view an issue
 br update <id> --claim       # claim work
 br close <id> --reason "..." # complete work, with evidence a stranger can check
-br sync --flush-only && git add .beads/issues.jsonl   # send it out with the code
+node .githooks/backlog-gate/tracker-sync.mjs publish \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --recipe .githooks/backlog-gate/br-tracker.mjs
 ```
 
-`br` never runs git: the last line is yours to type, and nothing does it for you.
+The sync watcher usually publishes for you. `br` never runs git, and no tracker
+file is committed with code.
 See `AGENTS.md` for the full workflow and for the `bd` → `br` table, which the
 `beads-superpowers` plugin still needs.
 

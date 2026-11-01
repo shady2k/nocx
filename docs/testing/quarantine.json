@@ -30,10 +30,6 @@
       "bead": "nocx-atpw5.1.3"
     },
     {
-      "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
-      "bead": "nocx-atpw5.1.7"
-    },
-    {
       "test": "e2e:e2e/vault-settings.spec.ts › Vault settings — reissue recovery code › reissue recovery code then unseal with new code and connect",
       "bead": "nocx-1ebrs.47"
     },

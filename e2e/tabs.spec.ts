@@ -1,4 +1,4 @@
-import { appReadyForInput, test, expect, clickIntoEditor } from './harness'
+import { appReadyForInput, test, expect, clickIntoEditor, settingsReady } from './harness'
 
 // Regression guard for the layout regression fixed in 2314a2a: the gutter no
 // longer overrides pane.style.position, so multiple tabs don't collapse the
@@ -56,10 +56,13 @@ test.describe('vertical tab placement', () => {
     // become visible without navigating times out on a control that is right
     // there — which reads like a broken selector and is not one.
     await page.keyboard.press('Meta+,')
+    // Settings mounts on "Loading settings…" and draws its rail only once
+    // settings.describe and the snapshot have both arrived. The rail is the
+    // harness's one readiness signal, so wait on the load the open produces
+    // and not on the control it happens to draw (nocx-atpw5.1.7).
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible()
     await page.selectOption(PLACEMENT_SELECT, 'horizontal')
     await page.keyboard.press('Meta+w')
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, {
@@ -74,10 +77,13 @@ test.describe('vertical tab placement', () => {
     value: 'horizontal' | 'vertical',
   ) => {
     await page.keyboard.press('Meta+,')
+    // Settings mounts on "Loading settings…" and draws its rail only once
+    // settings.describe and the snapshot have both arrived. The rail is the
+    // harness's one readiness signal, so wait on the load the open produces
+    // and not on the control it happens to draw (nocx-atpw5.1.7).
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible()
     await page.selectOption(PLACEMENT_SELECT, value)
     await page.keyboard.press('Meta+w')
     // Each orientation mounts into its own host:
@@ -331,10 +337,13 @@ test.describe('vertical tab placement', () => {
   // the last line of defense — it runs even if the test body fails.
   test.afterEach(async ({ page }) => {
     await page.keyboard.press('Meta+,')
+    // Settings mounts on "Loading settings…" and draws its rail only once
+    // settings.describe and the snapshot have both arrived. The rail is the
+    // harness's one readiness signal, so wait on the load the open produces
+    // and not on the control it happens to draw (nocx-atpw5.1.7).
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
-    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible({
-      timeout: 5000,
-    })
+    await expect(page.locator(PLACEMENT_SELECT)).toBeVisible()
     await page.selectOption(PLACEMENT_SELECT, 'horizontal')
     await page.keyboard.press('Meta+w')
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/, {

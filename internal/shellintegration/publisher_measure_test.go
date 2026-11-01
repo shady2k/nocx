@@ -262,9 +262,17 @@ import (
 // the wrapper now asks whether the line it is about to announce is one of the
 // prompt hooks before it spends the latch (nocx-1ebrs.66.1.18). Only the Bash
 // tier moved; zsh and posix publish the same bytes.
+//
+// The grant-refusal guard measured 92336 bytes (+306), still 63 calls
+// (nocx-40rlu): the Bash and zsh tiers' grant reader now MATCHES the
+// bootstrap field before slicing it out, because a refused grant OMITS the
+// field on the wire (`bootstrap,omitempty`) and the unconditional slice
+// handed the ssh branch the whole frame to eval — the parse error that ate
+// every typed ssh. Both tiers moved by the same guard; posix was already
+// correct (no nested launch on that tier).
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 92030
+	measuredMaxPublishBytes = 92336
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

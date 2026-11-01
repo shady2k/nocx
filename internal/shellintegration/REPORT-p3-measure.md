@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **92,030**.
+- Maximum bytes written per publish: **92,336**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -100,3 +100,13 @@ the prompt hooks and returns without spending the latch when it is. Only
 `nocx.bash` moved; `nocx.zsh` and `nocx.posix` publish the same bytes, and the
 worst path is unchanged. The source file grew by more than the measured
 figure because the comment explaining the probe is stripped at publish time.
+
+The 2026-10-30 measurement on branch `fix/ssh-zsh-eval-parse-error` is
+**306 bytes above** that 92,030-byte figure, at **92,336**, and keeps the
+**63**-call maximum. The growth is the grant-refusal guard (nocx-40rlu): the
+Bash and zsh tiers' grant reader now matches the `bootstrap` field before
+slicing it out, because a refused grant OMITS the field on the wire
+(`bootstrap,omitempty`) and the unconditional slice handed the ssh branch the
+whole frame to eval - the parse error that ate every typed ssh. Both tiers
+carry the same guard; `nocx.posix` was already correct, and the worst path is
+unchanged.

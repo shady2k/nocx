@@ -138,6 +138,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       product: ${{ steps.classify.outputs.product }}
+      # The tests this pull request adds or changes, for the jobs that own
+      # them (nocx-1ebrs.66.1.37). Empty on every event that is not a pull
+      # request, and empty when the change touches no test.
+      e2e_specs: ${{ steps.repeat.outputs.e2e_specs }}
+      go_tests: ${{ steps.repeat.outputs.go_tests }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -165,6 +170,30 @@ jobs:
           printf '%s\n' "$files" | sed 's/^/changed: /'
           echo "product=$product"
           echo "product=$product" >> "$GITHUB_OUTPUT"
+
+      # WHICH TESTS THIS PULL REQUEST ADDS OR CHANGES (nocx-1ebrs.66.1.37).
+      #
+      # This is a diff, not a second classifier: scripts/changed-tests.mjs
+      # reads the same `base...head` this job already diffs, keeps only
+      # e2e/*.spec.ts files and only `func TestX` bodies in `_test.go` files,
+      # and drops everything that does not exist at head. The product decision
+      # above is untouched, and the individual test jobs decide which of these
+      # packages they own — `print-portable-pkgs`, `print-os-pkgs` and their
+      # local-ssh halves stay the one owner of that split.
+      #
+      # It writes GitHub outputs rather than a file: the test jobs do not
+      # check out the PR's history (only this job has fetch-depth: 0), and a
+      # second checkout of it would be a second copy of a sha pair that is
+      # already here as an output. An empty value is what tells those jobs
+      # there is nothing to repeat.
+      - name: The tests this pull request adds or changes
+        id: repeat
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          node scripts/changed-tests.mjs --base "$BASE_SHA" --head "$HEAD_SHA" --format github >> "$GITHUB_OUTPUT"
   # Supporting release-pipeline edits still owe their executable checks.
   # Always run, independent of changes.product and draft status.
   ci-pipeline:
@@ -176,7 +205,7 @@ jobs:
           node-version: '24'
       - name: Workflow decision and refusal tests
         run: |
-          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
           node --test .githooks/check-log-context.test.mjs
       - name: Promotion and cask fixtures by path
@@ -356,6 +385,26 @@ jobs:
         env:
           PKGS: ${{ steps.localssh.outputs.list }}
         run: scripts/ci-run-logged.sh go-mac-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
+
+      # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
+      #
+      # The third Go job, because "the changed tests" includes the six
+      # `//go:build darwin` test files no Linux job can compile: ci-backend and
+      # ci-linux partition ./... on Linux, and a change confined to one of
+      # those files would otherwise be repeated nowhere. This job's own OS set
+      # is the filter, exactly as on the other two, so a portable test costs it
+      # nothing. Same 20 runs and the same two passes; no keyring wrapper,
+      # because a Mac has its own keystore and no session bus.
+      - name: Repeat the Go tests this pull request adds or changes
+        if: github.event_name == 'pull_request' && needs.changes.outputs.go_tests != ''
+        env:
+          GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+          PKGS: ${{ steps.pkgs.outputs.list }}
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        run: |
+          set -euo pipefail
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -596,6 +645,47 @@ jobs:
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           scripts/ci-run-logged.sh go-backend-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
+      # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
+      #
+      # A test that fails one run in ten passes nine PRs out of ten; repeating
+      # only the tests the PR touched costs seconds where repeating the suite
+      # would cost hours, and the changed test is exactly the one whose author
+      # can fix it. -count=20 is the bead's number: a 10% flake is caught
+      # 1 - 0.9^20 = 88% of the time per PR, and -count=30 would be 96%.
+      # Twenty is what the bead asked for and what is run here.
+      #
+      # IT RUNS TWICE PER JOB BECAUSE THE JOB ALREADY RUNS TWO PASSES: the
+      # untagged set and the nocx_local_ssh set, whose files a single tagged
+      # run would exclude. scripts/changed-tests.mjs intersects the plan with
+      # each pass's own list from the Makefile, so a tagged-only package is
+      # never handed to the untagged build. This job owns the portable half of
+      # ./...; ci-linux owns the OS-specific half and ci-mac the darwin-only
+      # files, and each repeats its own.
+      #
+      # ONE LEG: with-secret-service. The keyring is a fixture dimension of the
+      # suite, and it is the leg where a test that reaches the keystore really
+      # runs rather than skips; repeating it on both legs would run the same
+      # tests twice for the same answer. The step is not routed through
+      # scripts/ci-run-logged.sh and not in NOCX_EXPECTED_STEPS: a failure is
+      # the flake this step exists to catch, and quarantining it would hide
+      # exactly that. Go names the test in its own output, and a red step fails
+      # the PR.
+      - name: Repeat the Go tests this pull request adds or changes (portable)
+        if: github.event_name == 'pull_request' && matrix.keyring == 'with-secret-service' && needs.changes.outputs.go_tests != ''
+        env:
+          GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+          PKGS: ${{ steps.pkgs.outputs.list }}
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        run: |
+          dbus-run-session -- bash <<'REPEATEOF'
+          set -euo pipefail
+          daemon_env=$(printf '%s' "nocx-ci" | gnome-keyring-daemon --daemonize --login) || exit "$?"
+          eval "$daemon_env"
+          printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race
+          REPEATEOF
+
       # THE ALLOCATION BUDGETS, WITHOUT -race (nocx-zg3k3.5.8). Every pass above
       # runs -race, which instruments and adds allocations (the pump's window
       # reads 8.3-8.7 MB/MiB under it against 5.56 without), so each budget
@@ -801,6 +891,32 @@ jobs:
           scripts/ci-run-logged.sh go-linux go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           scripts/ci-run-logged.sh go-linux-local-ssh go test -json -exec "$PWD/scripts/ci-go-test-exec.sh" -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+
+      # THE TESTS THIS PULL REQUEST ADDS OR CHANGES, REPEATED (nocx-1ebrs.66.1.37).
+      #
+      # ci-backend's twin, on this job's half of ./...: same 20 runs, same two
+      # passes, and the same rule that scripts/changed-tests.mjs intersects the
+      # plan with the list from the Makefile rather than running a pattern from
+      # another job. A changed test in internal/pty, internal/storage or
+      # internal/app repeats here; one in a portable package repeats in
+      # ci-backend, and one that only compiles on darwin repeats in ci-mac. The
+      # with-secret-service leg is the one that runs, for the reason given in
+      # ci-backend.
+      - name: Repeat the Go tests this pull request adds or changes (OS-specific)
+        if: github.event_name == 'pull_request' && matrix.keyring == 'with-secret-service' && needs.changes.outputs.go_tests != ''
+        env:
+          GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+          PKGS: ${{ steps.pkgs.outputs.list }}
+          LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
+        run: |
+          dbus-run-session -- bash <<'REPEATEOF'
+          set -euo pipefail
+          daemon_env=$(printf '%s' "nocx-ci" | gnome-keyring-daemon --daemonize --login) || exit "$?"
+          eval "$daemon_env"
+          printf '%s' "nocx-ci" | gnome-keyring-daemon --unlock
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$PKGS" --tags gtk3,nocx_framecheck --count 20 --race
+          node scripts/changed-tests.mjs run --plan "$GO_TESTS" --packages "$LOCAL_SSH_PKGS" --tags gtk3,nocx_local_ssh,nocx_framecheck --count 20 --race
+          REPEATEOF
 
       # The quarantine decides this job, once, here: see the header for why the
       # evidence is the job's own output and why this step runs `always()`.
@@ -1072,7 +1188,16 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.product == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # 90, up from 40, for the one step below that repeats the specs a pull
+    # request adds or changes (nocx-1ebrs.66.1.37). That cost is 10x the
+    # changed specs and is not part of the duration-balanced plan. The
+    # committed timings put the median changed spec at 8.6 s and the worst at
+    # 254 s (transcript-scroll-budget), so ten repeats of the worst add 42
+    # minutes to a leg measured around 20 — 60 would have killed exactly the
+    # PR this gate is for, on the clock, where a reader learns nothing. Two
+    # heavy specs in one PR can still exceed this; the cap is a ceiling, not a
+    # target, and a run that finishes in 20 still does.
+    timeout-minutes: 90
     # The evidence the quarantine gate reads: one .log and one .status per test
     # step, written by scripts/ci-run-logged.sh (see the header).
     #
@@ -1261,6 +1386,48 @@ jobs:
           PW_PROJECTS: ${{ matrix.project }}
           NOCX_E2E_IMAGE: nocx-e2e:local
           NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
+
+      # THE SPECS THIS PULL REQUEST ADDS OR CHANGES, REPEATED TEN TIMES
+      # (nocx-1ebrs.66.1.37).
+      #
+      # The suite walks every test once, so a new test that fails one time in
+      # ten passes nine pull requests out of ten and reddens somebody else's.
+      # This runs only the files the PR itself touched, through the same image
+      # and the same stand as the step above, with Playwright's own
+      # --repeat-each. Nothing here decides what a spec is beyond the diff the
+      # `changes` job published; the ordinary run above still covers every
+      # spec once.
+      #
+      # ONE LEG: chromium, shard 1. Both browsers would double the added time,
+      # and what an unlucky run loses is almost always product or renderer
+      # logic rather than the engine — the full suite still runs both browsers
+      # once. Within chromium the repeats are one run, not one per shard: the
+      # shard split exists to divide the fixed suite, and a file repeated on
+      # both shards would be the same ten runs twice.
+      #
+      # NOT QUARANTINE-GATED, deliberately. The gate reads one result per test
+      # (scripts/quarantine.mjs refuses a report with any other shape, and with
+      # reason), while --repeat-each has ten by construction; routing this
+      # through scripts/ci-run-logged.sh would hand the gate evidence it cannot
+      # judge and turn every red into "named none". The point of the step is a
+      # flake caught, and a quarantine entry would hide exactly that. A failure
+      # fails the job and Playwright prints the spec and test.
+      #
+      # --pass-with-no-tests: a changed spec this platform does not collect —
+      # e2e/first-command-completes.spec.ts is ignored on Linux by
+      # playwright.config.ts — must not turn an empty selection into a red.
+      # --output keeps the repeat's traces beside the ordinary run's instead of
+      # letting a second run wipe test-results/ before the upload below.
+      - name: Repeat the specs this pull request adds or changes
+        if: github.event_name == 'pull_request' && matrix.project == 'chromium' && matrix.shard == 1 && needs.changes.outputs.e2e_specs != ''
+        env:
+          REPEAT_SPECS: ${{ needs.changes.outputs.e2e_specs }}
+          PW_PROJECTS: chromium
+          NOCX_E2E_IMAGE: nocx-e2e:local
+          NOCX_E2E_CACHE_ROOT: ${{ runner.temp }}/nocx-e2e-cache
+        run: |
+          # shellcheck disable=SC2086 # the list is spec paths, split on purpose
+          e2e/run-in-container.sh $REPEAT_SPECS --repeat-each=10 --pass-with-no-tests --output=test-results/repeat-changed
 
       # Named per project AND per shard: two jobs uploading one name is a
       # collision, and the trace you want is the one from the browser and the

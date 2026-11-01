@@ -305,6 +305,12 @@ func TestNeverDowngradesNewer(t *testing.T) {
 	if res.Reason != "already-installed" {
 		t.Errorf("reason = %q, want already-installed", res.Reason)
 	}
+	// The caller retires the legacy loader against the generation this
+	// result names, published or skipped, so a skipped publish must still
+	// carry the committed one.
+	if res.Generation != "v10" {
+		t.Errorf("generation = %q, want v10", res.Generation)
+	}
 	if got := readFileT(t, filepath.Join(root, manifestName)); string(got) != string(before) {
 		t.Error("manifest changed despite the equality skip")
 	}

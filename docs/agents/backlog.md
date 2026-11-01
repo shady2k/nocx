@@ -309,9 +309,13 @@ connect` runs this connector before it checks the backlog inputs.
   Measured 2026-11-01 on the coordinator machine: the watcher's publish loop runs
   `br sync --flush-only` every second to see whether anything changed, about one
   second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
-  (`tracker-sync.service.d/limit-cpu.conf`: `Nice=10`, `CPUQuota=25%`); with it a
-  change still published 7.7 s after it was made. Memory under 0.130.0 is about
-  50 MB, against 1.3–1.7 GB under the hand-patched 0.128 copy it replaced.
+  (`tracker-sync.service.d/limit-cpu.conf`: `Nice=19`, `CPUQuota=50%`): about 34% CPU.
+  The flush holds the store lock, so a tighter quota starves the record hooks, which
+  swallow their own failure: at 25% a post-commit recording timed out and the push of
+  that commit was then refused for a missing recording. At 50% a record waits 1–2 s
+  once the watcher's startup sync has finished (records in its first minute can still
+  time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
+  hand-patched 0.128 copy it replaced.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the

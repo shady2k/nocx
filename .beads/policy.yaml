@@ -1,0 +1,27 @@
+# br's workflow policy for this repository (nocx-q8yjf.20).
+#
+# submitted and implemented are statuses of their own, so `in_progress` means
+# only that somebody holds the issue now (AGENTS.md). Entering either needs a
+# comment written in the same transaction, and that comment is the record the
+# backlog gate reads: `<status>: <revision> -- <evidence>`
+# (docs/agents/backlog.md, "Submitted and implemented").
+#
+# strict makes br refuse a status not listed here, so a typo cannot become a
+# status the adapter stops on. br also reads this file from the MAIN checkout's
+# .beads, whichever worktree runs it.
+workflow:
+  strict: true
+  statuses:
+    - open
+    - in_progress
+    - submitted
+    - implemented
+    - blocked
+    - deferred
+    - draft
+    - closed
+    - tombstone
+    - pinned
+  required_fields:
+    submitted: [transition_comment]
+    implemented: [transition_comment]

@@ -65,9 +65,14 @@ func neverAnsweringHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) in
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(neverAnsweringGitFactory{}))
-		h.Register(helpersession.New(helpersession.Options{
+		svc := helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
-		}))
+		})
+		// The peer is this test's helper process: its sessions end when the
+		// connection that served them does, which here is the test's own end
+		// (nocx-1ebrs.66.1.29).
+		defer svc.Close()
+		h.Register(svc)
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}
@@ -96,7 +101,8 @@ func TestGitOpenNeverAnsweredIsBoundedRatherThanHungForever(t *testing.T) {
 	provider := &fakeLaneProvider{peer: neverAnsweringHelperPeer(t)}
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
-	factory, _ := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	factory, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 
 	sel := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
 	if sel.Factory == nil {

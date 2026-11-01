@@ -203,11 +203,17 @@ func newIntegratedCoordinator(t *testing.T, provider *fakeLaneProvider) *integra
 // helperWithIntegratedShells builds the shared daemon whose one shell holds a
 // lifecycle channel.
 func helperWithIntegratedShells(t testing.TB, spawner *lifecycleSpawner) *helpersession.Service {
-	return helpersession.New(helpersession.Options{
+	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon's process ends with the test, and its sessions end with the
+	// process (Service.Close's own doc). A test that skipped this left a row
+	// pump and a write loop parked for the rest of the package's run
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
+	return svc
 }
 
 // ── the happy path ────────────────────────────────────────────────────────

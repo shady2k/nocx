@@ -50,6 +50,9 @@ func realHelperPeerWithSpawner(t testing.TB) func(in io.Reader, out io.Writer) i
 		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}, ""),
 		Log:        logger,
 	})
+	// The peer IS this test's helper process, so its sessions end when the
+	// test does — the real binary's own exit (nocx-1ebrs.66.1.29).
+	t.Cleanup(daemon.Close)
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", logger)
 		h.Register(hostsvc.New(localgit.NewFactory()))
@@ -79,7 +82,7 @@ func remoteConfigFor(mode profile.DesiredMode) session.Config {
 
 func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.Store) *helperRegistry {
 	t.Helper()
-	return &helperRegistry{
+	reg := &helperRegistry{
 		lanes:           provider,
 		install:         provider,
 		source:          stubArtifacts(t),
@@ -90,6 +93,10 @@ func newTestRegistry(t *testing.T, provider *fakeLaneProvider, store *consent.St
 		pendingReadopts: make(map[session.ID]*hostHelper),
 		closing:         make(map[string]struct{}),
 	}
+	// The stand is a coordinator, so its process ends with the test
+	// (nocx-1ebrs.66.1.29).
+	endStandOnCleanup(t, provider, reg)
+	return reg
 }
 
 // TestOpenHoldingLease_AutoUnansweredAsksInsteadOfFallingThrough is the bug
@@ -166,6 +173,7 @@ func TestOpenHoldingLease_GrantedMachineIsFoundAgainByGitOpen(t *testing.T) {
 	store := seedGrantedDocument(t, t.TempDir(), "SHA256:fake")
 	installs := consent.NewInstallStore(log.NewSlogAdapter(discardLogger(t)), storage.NewDocumentStore(t.TempDir()), "installs.json")
 	factoryFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), &reachPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(discardLogger(t)))})
 
 	opened, hold, selected, err := reg.openHoldingLease(context.Background(), remoteConfigFor(profile.DesiredAuto), "claim-1")

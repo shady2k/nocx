@@ -64,6 +64,7 @@ func TestGitOpenOnALiveFarHelperConnectionLeavesTheSessionAndLifecycleChannelOpe
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
 	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 	sessReg := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sessReg
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
@@ -240,6 +241,7 @@ func TestGitOpenRefusingNotARepositoryOnALiveFarHelperConnectionLeavesTheSession
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
 	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 	sessReg := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sessReg
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))

@@ -76,6 +76,7 @@ func sshTokenRoute(t *testing.T) (*localHelperOpener, *spawnTokens, *fakeLocalEn
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 	rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)

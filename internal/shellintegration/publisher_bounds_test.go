@@ -932,7 +932,9 @@ func TestResidueBudgetsAreCountedSeparately(t *testing.T) {
 func TestPanickingLeaderReleasesItsWaiters(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, dirName)
-	fsys := &panicOnceFS{FS: NewOSFS(), gate: make(chan struct{}), entered: make(chan struct{})}
+	fsys := &gateOnceFS{FS: NewOSFS(), gate: make(chan struct{}), entered: make(chan struct{}), then: func() {
+		panic("shellintegration: no entropy for publish nonce")
+	}}
 
 	leader := NewPublisher(testLogger(), fsys, root)
 	waiter := NewPublisher(testLogger(), fsys, root)
@@ -975,20 +977,26 @@ func TestPanickingLeaderReleasesItsWaiters(t *testing.T) {
 	}
 }
 
-// panicOnceFS panics on its first call, after letting the test see that the
-// call was reached.
-type panicOnceFS struct {
+// gateOnceFS holds its first call until the test closes gate, reporting the
+// hold through entered first; then, if set, runs inside the hold — a first
+// call that must fail. A test uses it to keep a leader in flight while a
+// second caller joins its flight, which is an observable state change, rather
+// than hoping the scheduler runs the two callers the way the test assumes.
+type gateOnceFS struct {
 	FS
 	gate    chan struct{}
 	entered chan struct{}
+	then    func()
 	once    sync.Once
 }
 
-func (f *panicOnceFS) Lstat(path string) (fs.FileInfo, error) {
+func (f *gateOnceFS) Lstat(path string) (fs.FileInfo, error) {
 	f.once.Do(func() {
 		close(f.entered)
 		<-f.gate
-		panic("shellintegration: no entropy for publish nonce")
+		if f.then != nil {
+			f.then()
+		}
 	})
 	return f.FS.Lstat(path)
 }

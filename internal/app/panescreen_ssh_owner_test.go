@@ -61,6 +61,7 @@ func TestAnSSHPaneOpenedByThisMachinesHelperAnswersItsScreen(t *testing.T) {
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 	rc, err := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if err != nil {
 		t.Fatalf("ssh.NewReal: %v", err)
@@ -135,6 +136,7 @@ func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 
 	// A LOCAL session, opened into the registry directly — so this machine's
 	// opener never saw it and does not hold it. Nothing else could hold a local
@@ -166,6 +168,7 @@ func TestAPaneNoHelperHoldsIsStillTheNamedLoss(t *testing.T) {
 func TestReAdoptingARemoteOnLocalBindingRefusesWhenTheProfileMoved(t *testing.T) {
 	logger := log.NewSlogAdapter(discardLogger(t))
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 	route := &countingLocalRoute{entries: []helperclient.SessionEntry{{
 		HostSessionID: helperclient.HostSessionID{Generation: "gen-1", Session: "sess-1"},
 		Launch:        &helperclient.LaunchRecord{Cwd: "/home/alice"},
@@ -226,6 +229,7 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 	// The coordinator that is replaced: it opens the pane, and the pane becomes
 	// the daemon's.
 	firstReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, firstReg)
 	first := newOpener(firstReg)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -255,6 +259,7 @@ func TestReAdoptingAnSSHPaneKeepsItsDestinationAndAnswersItsScreen(t *testing.T)
 	// The replacement: same daemon, same socket, a new coordinator and a new
 	// registry.
 	secondReg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, secondReg)
 	second := newOpener(secondReg)
 	if second.holds(sid) {
 		t.Fatal("the replacement holds the session before the pass has run, so the test cannot tell adoption from a no-op")
@@ -319,6 +324,7 @@ func TestReAdoptingABindingTheDaemonNoLongerHoldsIsALossNotAnOwnership(t *testin
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if rerr != nil {
 		t.Fatalf("ssh.NewReal: %v", rerr)
@@ -376,6 +382,7 @@ func TestASessionThatEndsLeavesTheOpenersSet(t *testing.T) {
 	logger := log.NewSlogAdapter(discardLogger(t))
 	lg := discardLogger(t)
 	reg := session.New(logger, &reachPTYFactory{stub: pty.NewStub(logger)})
+	endSessionsOnCleanup(t, reg)
 	rc, rerr := ssh.NewReal(logger, ssh.WithKnownHostsFile(home+"/known_hosts"))
 	if rerr != nil {
 		t.Fatalf("ssh.NewReal: %v", rerr)

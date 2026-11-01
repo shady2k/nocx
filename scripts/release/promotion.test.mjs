@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, createPublicKey, sign, verify } from 'node:crypto'
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,11 +12,39 @@ import {
   verifyCI,
   updateCask,
   runBelongsTo,
+  signingKey,
 } from './promotion.mjs'
 
 const sha = 'a'.repeat(40)
 const digest = (body) => createHash('sha256').update(body).digest('hex')
-const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+
+// FIXED Ed25519 MATERIAL (nocx-atpw5.1.5). A fresh pair per run made this
+// suite a lottery: a random base64 key holds "//" about one time in a hundred,
+// and when the reader stripped comments before literals that key read as an
+// EMPTY keyring — the once-seen ci-pipeline red on PR #579. The reader is
+// fixed, but a test whose input is drawn cannot prove it stays fixed, and the
+// draw is one more thing a runner can differ in. Both pairs below are seeds
+// for the contract's own signingKey(), so the private half is derived exactly
+// like production's and the public half is whatever that derivation says.
+const RELEASE_SEED = 'RrPxO9g5jdFEU/r/RYD5mnx0JTv65EpicoELS/ob+Ao='
+const SLASH_SEED = 'NyHCWVIbxvYr/Y0S5+X2fpc4WRbXFtCtSHM7Ub+FS4U='
+
+// The contract's own derivation, with a refusal that names the runtime it got:
+// a runner whose OpenSSL has no Ed25519 must say so here, not fail a signature
+// check that reads like a bad key (nocx-atpw5.1.5).
+function fixedKey(seed) {
+  try {
+    return signingKey(seed)
+  } catch (error) {
+    throw new Error(
+      `node ${process.versions.node} links OpenSSL ${process.versions.openssl}; ` +
+        `the release contract's Ed25519 is unavailable: ${error.message}`,
+    )
+  }
+}
+
+const privateKey = fixedKey(RELEASE_SEED)
+const publicKey = createPublicKey(privateKey)
 const keys = [publicKey]
 const signature = (body) => sign(null, body, privateKey).toString('base64') + '\n'
 
@@ -346,15 +374,13 @@ test('stable cask pins the promoted zip and preserves unrelated cask text; malfo
 
 test('a release key whose base64 holds "//" is read whole, beside a real comment', async () => {
   const { readKeyring } = await import('./promotion.mjs')
-  // Base64 uses "/", so roughly one key in a hundred contains "//". Draw keys
-  // until one does: the outcome is fixed even though the key is not.
-  let raw
-  do {
-    raw = generateKeyPairSync('ed25519')
-      .publicKey.export({ format: 'der', type: 'spki' })
-      .subarray(-32)
-      .toString('base64')
-  } while (!raw.includes('//'))
+  // Base64 uses "/", and this seed's public half is FIXED with "//" in it, so
+  // the case runs on every run rather than when the draw cooperates.
+  const raw = createPublicKey(fixedKey(SLASH_SEED))
+    .export({ format: 'der', type: 'spki' })
+    .subarray(-32)
+    .toString('base64')
+  assert.ok(raw.includes('//'), 'the fixed slash key lost its "//"')
   const keys = readKeyring(
     `package update\nvar releaseKeys = []string{\n\t// a comment // with slashes\n\t"${raw}", // trailing\n}\n`,
   )
@@ -363,6 +389,20 @@ test('a release key whose base64 holds "//" is read whole, beside a real comment
     keys[0].export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64'),
     raw,
   )
+})
+
+test('the runner provides the Ed25519 primitive the release contract is written on', () => {
+  // node:crypto is the only tool this file uses: no gpg, no ssh-keygen, no
+  // openssl binary, no HOME and no tmpdir. Its Ed25519 is an OpenSSL
+  // primitive, so a runner without it refuses HERE, naming the versions it
+  // has, rather than inside a signature check that reads like a bad key.
+  const [major, minor] = process.versions.openssl.split('.').map(Number)
+  assert.ok(
+    major > 1 || (major === 1 && minor >= 1),
+    `node ${process.versions.node} links OpenSSL ${process.versions.openssl}; the release contract's Ed25519 needs 1.1.1 or newer`,
+  )
+  const body = Buffer.from('keyring capability probe\n')
+  assert.equal(verify(null, body, publicKey, sign(null, body, privateKey)), true)
 })
 
 test('candidate keyring and seed interoperate with the raw detached Ed25519 contract', async () => {
@@ -430,7 +470,9 @@ test('a missing download or an existing staging directory cannot become a promot
 
 test('a substituted signing secret cannot sign a manifest clients of this nightly can verify', (t) => {
   const { input, source, root } = fixture(t)
-  const other = generateKeyPairSync('ed25519')
+  // A fixed DIFFERENT secret, not a fresh pair: the point is the key the
+  // keyring does not hold, and a draw adds a runner input for nothing.
+  const other = { privateKey: fixedKey(SLASH_SEED) }
   assert.throws(
     () =>
       prepareStable(verifyCandidate(input), source, join(root, 'stable'), other.privateKey, keys),

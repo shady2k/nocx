@@ -287,3 +287,29 @@ test('records-only classification uses the staged and committed JSONL changes, n
     if (example.status) assert.match(historical.stdout, /carries only records/)
   }
 })
+
+// A rerun of an already-merged pull request re-reads the original event, whose
+// base the base branch has since passed. The base branch then contains the PR's
+// head, so a range built from a merge-base with it is head..head -- nothing is
+// checked and the check exits 2 on a PR that introduced commits. The event's own
+// base sha still names the commits the PR introduced (nocx-1ebrs.66.1.32).
+test('a rerun of a merged pull request checks the commits it introduced', () => {
+  git('checkout', '-q', '-B', 'pr/merged', 'main')
+  const base = git('rev-parse', 'HEAD')
+  const tip = commit("fix: the pull request's own commit (nocx-t1)")
+  git('checkout', '-q', '-B', 'merged', 'main')
+  git('merge', '-q', '--no-ff', '-m', 'Merge pull request #1 (nocx-t1)', 'pr/merged')
+  // The premise: the merged base branch now contains the head, so the merge
+  // base the old range used is the head itself.
+  assert.equal(git('merge-base', 'merged', tip), tip)
+  const run = links('--pull-request', base, '--head', tip)
+  assert.equal(run.status, 0, run.stdout + run.stderr)
+  assert.match(run.stdout, /1 commit\(s\) checked, 0 link problem/)
+  git('checkout', '-q', 'main')
+})
+
+test('a pull request range needs both the event base and the head', () => {
+  const run = links('--pull-request', git('rev-parse', 'HEAD'))
+  assert.equal(run.status, 2)
+  assert.match(run.stderr, /--pull-request <base-sha> takes --head <head-sha>/)
+})

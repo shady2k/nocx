@@ -286,6 +286,51 @@ def extract_identities(appimage, destination):
             "coordinator": sha256(appdir / "usr/bin/nocx-server")}
 
 
+def permitted_coordinators(previous, candidate, initial, identities):
+    # ADR-0104 allows reuse only within one Version. A version change must
+    # replace the serving coordinator, even when its protocol is compatible.
+    permitted = {identities["coordinator"]}
+    if previous["version"] == candidate["version"]:
+        permitted.update(p["sha256"] for p in initial if "nocx-server" in p["executable"])
+    return permitted
+
+
+class RestartObservation:
+    """One restart observation, shared by the wait predicate and its diagnostic."""
+
+    def __init__(self, previous, candidate, initial, identities, install, old_windows,
+                 home, journal, backup):
+        self.permitted = permitted_coordinators(previous, candidate, initial, identities)
+        self.policy = ("same-Version coordinator reuse permitted"
+                       if previous["version"] == candidate["version"] else
+                       "version change requires candidate-only coordinator")
+        self.identities, self.install, self.old_windows = identities, install, old_windows
+        self.home, self.journal, self.backup = home, journal, backup
+        self.processes = []
+        self.windows = []
+        self.servers = []
+        self.old_still_running = False
+
+    def observe(self):
+        self.processes = profile_processes(self.home)
+        self.windows = [p for p in self.processes
+                        if p["sha256"] == self.identities["window"]
+                        and p["pid"] not in self.old_windows
+                        and p["appimage"] == str(self.install)]
+        self.servers = [p for p in self.processes if "nocx-server" in p["executable"]
+                        and p["sha256"] in self.permitted]
+        self.old_still_running = any(p["pid"] in self.old_windows for p in self.processes)
+        return self.processes if (self.windows and self.servers and not self.old_still_running
+                                  and not self.journal.exists() and self.backup.exists()) else None
+
+    def describe(self):
+        observed = [p["sha256"] for p in self.processes if "nocx-server" in p["executable"]]
+        return (f"{self.policy}; expected coordinator SHA-256={sorted(self.permitted)}; "
+                f"observed coordinator SHA-256={observed}; candidate windows="
+                f"{[p['pid'] for p in self.windows]}; old window running={self.old_still_running}; "
+                f"journal exists={self.journal.exists()}; backup exists={self.backup.exists()}")
+
+
 def run(args, evidence):
     require(sys.platform == "linux", "this is the Linux proof")
     require(os.environ.get("DISPLAY") and os.environ.get("DBUS_SESSION_BUS_ADDRESS"),
@@ -382,7 +427,7 @@ def run(args, evidence):
         relay.verify_live()
         relay.mode = "live"
         desktop.check()
-        wait_for("same-semver different-byte nightly offer (.66.1.8)",
+        wait_for("newer published nightly offer",
                  lambda: desktop.named("Install now", "push button")
                  or desktop.named("Install", "push button"))
         desktop.click("Install now" if desktop.named("Install now", "push button") else "Install")
@@ -396,23 +441,17 @@ def run(args, evidence):
         # ADR-0104 deliberately permits a protocol-compatible same-Version
         # coordinator to survive a different-Commit nightly. Require a REAL
         # serving executable, but do not invent a coordinator takeover policy.
-        permitted_servers = {identities["coordinator"]} | {
-            p["sha256"] for p in initial if "nocx-server" in p["executable"]}
+        restarted = RestartObservation(previous, candidate, initial, identities, install,
+                                       old_windows, home, journal, backup)
         desktop.click("Restart now")
-        def restarted_pair():
-            processes = profile_processes(home)
-            windows = [p for p in processes if p["sha256"] == identities["window"]
-                       and p["pid"] not in old_windows and p["appimage"] == str(install)]
-            servers = [p for p in processes if "nocx-server" in p["executable"]
-                       and p["sha256"] in permitted_servers]
-            old_still_running = any(item["pid"] in old_windows for item in processes)
-            return processes if (windows and servers and not old_still_running
-                                 and not journal.exists() and backup.exists()) else None
-        evidence["restartedProcesses"] = wait_for("new window and serving coordinator, ReportHealthy finalization",
-                                                   restarted_pair)
+        evidence["restartedProcesses"] = wait_for(
+            "new window and serving coordinator, ReportHealthy finalization",
+            restarted.observe, describe=restarted.describe)
         evidence["coordinatorPolicy"] = (
             "ADR-0104 acceptance #3: same-Version/different-Commit nightlies may run "
-            "the new window against the previous coordinator by design")
+            "the new window against the previous coordinator by design"
+            if previous["version"] == candidate["version"] else
+            "ADR-0104 acceptance #1: a version change requires the candidate coordinator")
         # The decisive assertion happens AFTER the new window has run, not merely
         # after Apply or after an app-reported version string.
         require(sha256(install) == after["sha256"], "post-restart installed digest is not candidate")

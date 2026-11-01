@@ -74,6 +74,8 @@ interface Geometry {
   /** Every saved and live row has the shared terminal pitch. */
   rowsSharePitch: boolean
   rowsOffPitch: string[]
+  /** Last two record rows and first two live rows, from the same cached boxes. */
+  seamRows: Array<{ text: string; top: number; bottom: number; height: number }>
 }
 
 interface RowLayout {
@@ -84,13 +86,26 @@ interface RowLayout {
   chain: Array<{ className: string; lineHeight: string; height: number; top: number }>
 }
 
-/** Read inside an animation frame, after the painter's own callback for it:
- *  a frame's rows are painted there while its layout is applied when the
- *  frame is accepted, and a read between the two sees a screen nobody does. */
+/** Read after the shared stack's settle has finished and the painter has
+ *  painted its accepted frame. A single evaluate/rAF is not a layout snapshot:
+ *  WebKit can advance an ancestor's animated transform between rect reads.
+ *  Measuring a moving stack manufactured a 20.10px pitch from 17px rows
+ *  (nocx-1ebrs.73.3). Wait on the animation, not on a duration, then cache each
+ *  box once so every assertion and its diagnostic use the same rectangles. */
 async function geometry(page: Page): Promise<Geometry> {
   return page.evaluate(async () => {
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     const pane = document.querySelector<HTMLElement>('.pane.active')!
+    const stack = pane.querySelector<HTMLElement>('.scrollback-inner')!
+    for (;;) {
+      const settling = stack
+        .getAnimations()
+        .filter((animation) => animation.playState !== 'finished')
+      // A replacement glide cancels the old animation. Its replacement must
+      // settle too; cancellation is not the state we are waiting for.
+      await Promise.all(settling.map((animation) => animation.finished.catch(() => undefined)))
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+      if (stack.getAnimations().every((animation) => animation.playState === 'finished')) break
+    }
     const running = pane.querySelector<HTMLElement>('.cmd-block.cmd-block-running')
     const body = running?.querySelector<HTMLElement>(':scope > .cmd-output') ?? null
     const grid = pane.querySelector<HTMLElement>('.terminal-live-grid')
@@ -111,11 +126,23 @@ async function geometry(page: Page): Promise<Geometry> {
         expectedPitch: 0,
         rowsSharePitch: true,
         rowsOffPitch: [],
+        seamRows: [],
       }
     }
     const bodyRows = [...(body?.querySelectorAll<HTMLElement>('.term-grid-row') ?? [])]
     const liveRows = [...grid.querySelectorAll<HTMLElement>('.term-grid-row')]
-    const box = (el: Element): DOMRect => el.getBoundingClientRect()
+    const boxes = new Map<Element, DOMRect>()
+    const box = (el: Element): DOMRect => {
+      let rect = boxes.get(el)
+      if (!rect) {
+        rect = el.getBoundingClientRect()
+        boxes.set(el, rect)
+      }
+      return rect
+    }
+    // Capture in document order, before deriving any comparison. A row must
+    // not acquire a new viewport position when its diagnostic reads it again.
+    for (const row of [...bodyRows, ...liveRows]) box(row)
     const text = (el: Element | undefined): string =>
       (el?.textContent ?? '').trim().replace(/\s+/g, ' ')
     const rowLayout = (row: HTMLElement | undefined): RowLayout | null => {
@@ -181,6 +208,10 @@ async function geometry(page: Page): Promise<Geometry> {
       expectedPitch,
       rowsSharePitch: rowsOffPitch.length === 0,
       rowsOffPitch: rowsOffPitch.slice(0, 8),
+      seamRows: [...bodyRows.slice(-2), ...liveRows.slice(0, 2)].map((row) => {
+        const rect = box(row)
+        return { text: text(row), top: rect.top, bottom: rect.bottom, height: rect.height }
+      }),
     }
   })
 }

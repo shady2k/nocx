@@ -19,8 +19,8 @@ rule and the reason it is not a preference.
 
 The backlog lives in **beads** (`br`), not in prose.
 
-**Fresh clone:** install the tooling, then `make init`. The backlog comes with the clone —
-`.beads/issues.jsonl` is tracked — and `make init` only builds the SQLite from it.
+**Fresh clone:** install the tooling, then `make init`. The backlog comes from
+`refs/tracker/state`, and `make connect` builds this machine's SQLite copy from it.
 
 ## Work goes through the skills
 
@@ -72,27 +72,32 @@ said to the person in front of you, it is their language.
 
 ## The tracker: `br`
 
-`br` is a single binary over SQLite plus a tracked JSONL export, and **`br` never runs git
-— that is the design, not an oversight.** Nothing commits, pushes or pulls the backlog for
-you, and no hook stages it. A `git pull` that changes the JSONL is imported by the next
-`br` command on its own. Sending yours out is two lines you type:
+`br` is a single binary over SQLite, and **`br` never runs git — that is the design, not
+an oversight.** The tracker's state lives outside every code branch on
+`refs/tracker/state`. Each machine keeps one working copy at
+`$XDG_STATE_HOME/nocx/tracker`, reached through a `.beads` symlink in every checkout and
+worktree of that machine. No branch carries `.beads/issues.jsonl`.
+
+The sync watcher publishes a write within seconds and syncs every 10 seconds. When it is not
+running, publish by hand:
 
 ```bash
-br sync --flush-only          # db -> .beads/issues.jsonl
-git add .beads/issues.jsonl   # and commit it with the code
+node .githooks/backlog-gate/tracker-sync.mjs publish \
+  --repo "$(git rev-parse --show-toplevel)" \
+  --recipe .githooks/backlog-gate/br-tracker.mjs
 ```
 
-`.githooks/pre-push` checks the commits a push actually introduces: each names a
-tracked leaf task and adds no new backlog problems. A tag or branch on commits the
-remote already holds passes without rechecking them. Unpublished tracker changes
-still produce a warning; no product test suite runs in this hook.
+`scripts/connect-tracker-store.sh` connects a clone and installs the workflow policy; `make
+connect` runs it. `.githooks/pre-push` checks the commits a push actually introduces: each
+names a tracked leaf task and adds no new backlog problems. A tag or branch on commits the
+remote already holds passes without rechecking them. Pushing `refs/tracker/state` starts no
+code CI.
 
-`br` resolves the database of the **main checkout** even when run from a worktree that has
-its own `.beads/` in the tree. So a feature branch cannot touch the JSONL, and two branches
-cannot conflict on it. Between machines they still can — `br sync --reconcile-additive`
-resolves that without deleting anything. If your database and a pulled JSONL both changed,
-`br sync --merge` does the three-way; `--force-db`, `--force-jsonl` and `--force` are the
-explicit policies.
+`br` resolves the machine's store even when run from a linked worktree. Two branches cannot
+conflict on tracker state because neither carries it. Between machines they still can —
+`br sync --reconcile-additive` resolves that without deleting anything. If your database and
+a pulled store both changed, `br sync --merge` does the three-way; `--force-db`,
+`--force-jsonl` and `--force` are the explicit policies.
 
 **`br sync --merge` DELETES every issue your database holds that the JSONL does not**, and
 the ordinary shape of a session here is exactly that. It reads their absence as a deletion
@@ -271,9 +276,9 @@ steps for you.
 3. **Accept and close through `close-out`**, never merely because implementation ended.
    Preserve `submitted` and `implemented` results waiting for integration or acceptance.
    Release unfinished work when its holder stops; an external wait needs a durable record.
-4. **Publish only your tracker delta with your code**, using the integration's publish
-   procedure. The shared database and export can contain another agent's unpublished work:
-   a blind `git add .beads/issues.jsonl` is not ownership.
+4. **Publish only your tracker delta**, using the integration's publish procedure. The
+   machine's store can contain another agent's unpublished work, so publish the ref, never
+   a code-tree file.
 
 5. **Write down anything that was bought.** If something in this session cost a
    measurement or a wrong turn and is not derivable from the repository, it goes in this
@@ -985,7 +990,7 @@ writing-plans, test-driven-development, systematic-debugging — and they are wo
 Its tracker half is not: those skills were written for an older tracker under a different
 binary name, and by the plugin's own rule repository instructions win over skills.
 **Translate every tracker command in a skill to `br`.** One does not survive a rename:
-export is `br sync --flush-only` to `.beads/issues.jsonl`.
+publishing is the `tracker-sync publish` command above, never a commit of a tracker file.
 
 The official `br` skill is installed too and carries the same kind of leftovers — config
 keys that do not exist in `br config schema`, and an id prefix that was never ours. Believe

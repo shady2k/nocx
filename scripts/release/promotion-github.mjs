@@ -296,9 +296,26 @@ async function collect(directory, github) {
     .filter(Boolean)
   // This is CI's own classifier, shared with nightly (not copied into promotion).
   const { touchesProduct } = await import('../product-change.mjs')
+  // The tracker is not in the code tree. Read the store's recording of this
+  // revision; a repository whose merge commits were never recorded on a machine
+  // falls back to the published store and says so in the release log.
+  const trackerIssues = (() => {
+    git('fetch', '--no-tags', 'origin', 'refs/tracker/state:refs/tracker/state')
+    try {
+      const recording = JSON.parse(
+        git('show', `refs/tracker/state:.tracker-sync/recordings/${sha}.jsonl`),
+      )
+      return git('show', `${recording.store}:.beads/issues.jsonl`)
+    } catch {
+      process.stderr.write(
+        `promotion: no tracker recording for ${sha}; reading the published store state instead\n`,
+      )
+      return git('show', 'refs/tracker/state:.beads/issues.jsonl')
+    }
+  })()
   const quarantine = readQuarantine(
     showIfPresent(sha, 'docs/testing/quarantine.json'),
-    git('show', `${sha}:.beads/issues.jsonl`),
+    trackerIssues,
   )
   const ci = await collectCI({
     repo,

@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ValueNeeded, valueOf } from './argv.mjs';
 
-export const RULES_VERSION = '0.56.0';
+export const RULES_VERSION = '0.58.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const object = (x) => x !== null && typeof x === 'object' && !Array.isArray(x);
 const canonical = (x) => Array.isArray(x) ? x.map(canonical) : object(x)

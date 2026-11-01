@@ -272,7 +272,9 @@ async function runCommand(
   // block's output (a running block's rows still move), so waiting on the
   // block alone would hand back the running one — visible, with no output
   // element at all — and the gesture would have nothing to select.
-  const block = page.locator('.cmd-block:not(.cmd-block-running)', { hasText: marker }).first()
+  const block = page
+    .locator('.cmd-block[data-block-kind="command"]:not(.cmd-block-running)', { hasText: marker })
+    .first()
   await expect(block).toBeVisible({ timeout: 15_000 })
   await expect(block.locator('.cmd-output .term-grid-row').first()).toBeVisible({ timeout: 15_000 })
   return { block }
@@ -460,6 +462,24 @@ function answerFromAttachedItem(body: string, marker: string): string[] {
 
 test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
+
+  test('a restored tool mentioning a command does not hide its frozen output', async ({ page }) => {
+    await openApp(page)
+    await backToTerminal(page)
+    const marker = `tool-collision-${nonce}`
+    // A restored session.read tool block can precede a new command and name
+    // that same command in its header. It is not the command's output block.
+    await page.evaluate((text) => {
+      const tool = document.createElement('div')
+      tool.className = 'cmd-block'
+      tool.dataset.blockKind = 'tool'
+      tool.textContent = `session.read session="echo ${text}"`
+      document.querySelector('.pane.active')!.prepend(tool)
+    }, marker)
+    const { block } = await runCommand(page, `echo ${marker}`, marker)
+    await expect(block).toHaveAttribute('data-block-kind', 'command')
+    await expect(block.locator('.cmd-output .term-grid-row').first()).toContainText(marker)
+  })
 
   test('with no endpoint configured, the surfaces say so (agent.status)', async ({ page }) => {
     // The first state a dev stand is in — no endpoint — and it needs no fake

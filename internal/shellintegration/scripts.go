@@ -339,7 +339,13 @@ var (
 // and never runs the typed ssh. 68 is also the bump that carries the agent-
 // launch helper changes that reached these scripts on main without one, so an
 // install holding 67 is rewritten once, for both.
-const version = "68"
+// 69: the zsh agent-launch cancel wait turns MONITOR off for its duration, as
+// the bash twin has since nocx-xn63t.6.29 (nocx-6o5xe). With it on, the
+// terminal's foreground group is the wait's `sleep` child, and an interrupt in
+// the gap after that child exits reached no process: the shell's trap never ran
+// and the open-question wait, which has no deadline, never ended — the pane
+// showed ^C and then nothing. A shell still sourcing 68 has the window.
+const version = "69"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

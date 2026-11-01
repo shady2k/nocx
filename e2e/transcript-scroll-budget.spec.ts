@@ -501,18 +501,30 @@ test.describe('long transcript scroll budget', () => {
    */
   const PAINTED_SLACK = 6
 
+  /**
+   * What every block STORES and what it PAINTS, read so that the second fact
+   * has caught up with the first (nocx-atpw5.1.19).
+   *
+   * The store is read first, and the DOM is then awaited until each block
+   * paints that many rows. A block freezes on the backend's block.closed and is
+   * painted from the rows the read that close starts brings back — two round
+   * trips later — so "no block is running" says the block CLOSED, not that its
+   * body is whole. Measured on webkit: block 500 painted 64 rows for 100
+   * stored, because this census ran between the two, and the row batch that
+   * completed it arrived a moment later (the failure report's own snapshot of
+   * the same block, taken seconds afterwards, holds all hundred).
+   *
+   * The wait is for the fact the census asserts and nothing weaker: the same
+   * count per block, from the same artifact. A block that never paints what it
+   * stores still fails the census below, with the block's own number —
+   * the wait is a synchronisation, so its timeout falls through to that
+   * assertion rather than replacing it, and it is read natively in the page,
+   * once per poll, the same way runBlock waits (no ARIA snapshots).
+   */
   async function everyBlockRows(page: Page, endpoint: { port: number; token: string }) {
     const ids = await page
       .locator(BLOCK)
       .evaluateAll((blocks) => blocks.map((block) => (block as HTMLElement).dataset.entryId ?? ''))
-    const dom = await page.locator(BLOCK).evaluateAll((blocks) =>
-      blocks.map((block, index) => ({
-        own: `transcript-${String(index + 1).padStart(4, '0')}-`,
-        texts: [...block.querySelectorAll('.cmd-output .term-grid-row')].map((row) =>
-          (row.textContent ?? '').replace(/\s+$/, ''),
-        ),
-      })),
-    )
     const wire = await openControlPlane(endpoint.port, endpoint.token)
     const stored: string[][] = []
     try {
@@ -547,6 +559,35 @@ test.describe('long transcript scroll budget', () => {
     } finally {
       wire.close()
     }
+    // THE SETTLE'S OTHER HALF: every frozen block painting the rows it stores.
+    await page
+      .waitForFunction(
+        ({ frozen, rows, running, counts }) => {
+          if (document.querySelector(running) !== null) return false
+          const blocks = document.querySelectorAll<HTMLElement>(frozen)
+          if (blocks.length !== counts.length) return false
+          for (let index = 0; index < blocks.length; index += 1) {
+            if (blocks[index].querySelectorAll(rows).length !== counts[index]) return false
+          }
+          return true
+        },
+        {
+          frozen: BLOCK,
+          rows: '.cmd-output .term-grid-row',
+          running: RUNNING_BLOCK,
+          counts: stored.map((rows) => rows.length),
+        },
+        { timeout: 60_000, polling: 250 },
+      )
+      .catch(() => undefined)
+    const dom = await page.locator(BLOCK).evaluateAll((blocks) =>
+      blocks.map((block, index) => ({
+        own: `transcript-${String(index + 1).padStart(4, '0')}-`,
+        texts: [...block.querySelectorAll('.cmd-output .term-grid-row')].map((row) =>
+          (row.textContent ?? '').replace(/\s+$/, ''),
+        ),
+      })),
+    )
     return { dom, stored }
   }
 

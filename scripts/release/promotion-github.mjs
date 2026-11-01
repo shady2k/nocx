@@ -10,7 +10,6 @@ import {
   ciStepManifests,
   cleanCICover,
   readQuarantineEvidence,
-  isNewerVersion,
   prepareStable,
   readKeyring,
   runBelongsTo,
@@ -448,54 +447,9 @@ function cask(directory, path) {
   writeFileSync(path, updateCask(readFileSync(path, 'utf8'), plan.version, plan.macSHA256))
 }
 
-// VERSION changes through a normal PR, never by rewriting the promoted commit.
-function bump(directory, github) {
-  const plan = readJSON(join(directory, 'plan.json'))
-  const repo = 'shady2k/nocx'
-  git('fetch', 'origin', 'main')
-  git('checkout', '-b', `release/after-${plan.tag}`, 'origin/main')
-  const current = readFileSync('VERSION', 'utf8').trim()
-  if (isNewerVersion(current, plan.version)) {
-    console.log(`VERSION already advanced to ${current}`)
-    return
-  }
-  fail(current === plan.version, 'VERSION changed unexpectedly since the promoted nightly')
-  const [major, minor, patch] = plan.version.split('.').map(Number)
-  const next = `${major}.${minor}.${patch + 1}`
-  writeFileSync('VERSION', next + '\n')
-  git('config', 'user.name', 'github-actions[bot]')
-  git('config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-  git('add', 'VERSION')
-  git(
-    'commit',
-    '-m',
-    `chore(release): advance next nightly version after ${plan.tag} (nocx-1ebrs.35.3)`,
-    '-m',
-    `Promotion preserved the tried nightly bytes as ${plan.tag}. Advance VERSION\nthrough review so the next nightly does not reuse the stable version.`,
-  )
-  git('push', 'origin', `HEAD:refs/heads/release/after-${plan.tag}`)
-  github.gh([
-    'pr',
-    'create',
-    '--repo',
-    repo,
-    '--base',
-    'main',
-    '--head',
-    `release/after-${plan.tag}`,
-    '--title',
-    `Advance next nightly version to ${next}`,
-    '--body',
-    `Promotion ${plan.tag} published the exact bytes of ${plan.nightly} (${plan.sha}).\n\nAdvance VERSION to ${next}. This PR is not auto-merged. GITHUB_TOKEN cannot trigger CI: the owner must close/reopen this PR (or push with their own token) to start CI, review, then merge before the next nightly.`,
-  ])
-}
-
 export async function main(args = process.argv.slice(2), github = githubClient()) {
   const [command, location, path] = args
-  fail(
-    location,
-    'usage: promotion-github.mjs collect|prepare|publish|cask|bump <directory> [cask path]',
-  )
+  fail(location, 'usage: promotion-github.mjs collect|prepare|publish|cask <directory> [cask path]')
   const directory = resolve(location)
   if (command === 'collect') return collect(directory, github)
   if (command === 'prepare') {
@@ -513,7 +467,6 @@ export async function main(args = process.argv.slice(2), github = githubClient()
   }
   if (command === 'publish') return publish(directory, github)
   if (command === 'cask') return cask(directory, path)
-  if (command === 'bump') return bump(directory, github)
   throw new Error(`unknown promotion command: ${command}`)
 }
 

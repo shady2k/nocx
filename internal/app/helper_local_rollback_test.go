@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -143,6 +144,19 @@ func TestRefusedLocalPaneReleasesItsHelperBudgetAndRegistryEntry(t *testing.T) {
 			var refusal *helperclient.RefusalError
 			if !errors.As(budgetErr, &refusal) || refusal.Code != helperproto.ErrCodeWindowBudget {
 				t.Fatalf("full live inventory must refuse another pane: %v", budgetErr)
+			}
+			// The refusal a person reads names what the number is (reserved
+			// capacity), the one action that frees an existing reservation,
+			// and that changing the setting cannot do it. The bead's
+			// acceptance asks for exactly that explanation, not only a code.
+			for _, want := range []string{
+				"reserved for output windows and row buffers",
+				"Close sessions you no longer need",
+				"does not free existing ones",
+			} {
+				if !strings.Contains(refusal.Message, want) {
+					t.Errorf("budget refusal does not explain %q: %s", want, refusal.Message)
+				}
 			}
 			if err := reg.EndSession(replacement.Session.ID()); err != nil {
 				t.Fatal(err)

@@ -103,6 +103,13 @@ var (
 	ErrRemotePgid = errors.New("session: a remote process group cannot be addressed from this host")
 )
 
+// budgetRefusal is the one refusal an exhausted helper budget gives. It names
+// the reservation, not printed text, and the only action that frees an existing
+// one: the setting governs future reservations and cannot shrink the live ones.
+func budgetRefusal(committed, budget int64) error {
+	return fmt.Errorf("%w: %d of %d bytes reserved for output windows and row buffers. Close sessions you no longer need to release their reservations. Lower \"Output buffer on the shell's machine\" in Settings for smaller future reservations; changing it does not free existing ones", ErrBudget, committed, budget)
+}
+
 // Limits are the helper's bounds on output windows: D8 asks for all three,
 // because raising a default sixteenfold makes simultaneous pressure real, and
 // the cost is spent on somebody else's machine.
@@ -992,7 +999,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// from the field after unlocking is a read of shared state that another
 		// spawn may already have changed, which is a data race whatever it
 		// prints.
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d of %d bytes reserved for output windows and row buffers. Close sessions you no longer need to release their reservations. Lower \"Output buffer on the shell's machine\" in Settings for smaller future reservations; changing it does not free existing ones", ErrBudget, committed, s.limits.BudgetBytes)
+		return proto.SpawnResult{}, budgetRefusal(committed, s.limits.BudgetBytes)
 	}
 	reserved += rowBuffer
 	s.budget += reserved
@@ -1157,7 +1164,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// from the field after unlocking is a read of shared state that another
 		// spawn may already have changed, which is a data race whatever it
 		// prints.
-		return proto.SpawnResult{}, fmt.Errorf("%w: %d of %d bytes reserved for output windows and row buffers. Close sessions you no longer need to release their reservations. Lower \"Output buffer on the shell's machine\" in Settings for smaller future reservations; changing it does not free existing ones", ErrBudget, committed, s.limits.BudgetBytes)
+		return proto.SpawnResult{}, budgetRefusal(committed, s.limits.BudgetBytes)
 	}
 	reserved += rowBuffer
 	s.budget += reserved

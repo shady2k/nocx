@@ -11142,6 +11142,26 @@ describe('reconnecting a lost pane (nocx-rtzo4)', () => {
     }
   })
 
+  it('marks the tab while the session is not attached, and clears the mark when it returns', async () => {
+    const warnings: [boolean, string | undefined][] = []
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const session = client._sessions[0]
+      session.fireAttachment({ kind: 'unavailable', message: 'Replay is unavailable' })
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Session not attached'])
+      session.fireAttachment({ kind: 'attached' })
+      expect(warnings[warnings.length - 1]?.[0]).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
   it('does not offer attachment recovery after a replacement shell fails to open', async () => {
     const client = makeClient()
     const { content, tab, teardown } = await mountTerminal(

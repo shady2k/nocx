@@ -1522,13 +1522,24 @@ export class WSClient {
     err: unknown,
   ): 'lost' | 'unavailable' {
     if (claimRefusalReason(err) === 'unknown-session') return this._loseSession(sessionId, state)
-    return this._attachUnavailable(state, err)
+    return this._attachUnavailable(sessionId, state, err)
   }
 
-  private _attachUnavailable(state: SessionState, err: unknown): 'unavailable' {
-    const detail = err instanceof Error ? err.message : String(err)
-    const message = `Could not reattach this session: ${detail}. The shell has not been confirmed ended.`
-    this._setAttachment(state, { kind: 'unavailable', message })
+  private _attachUnavailable(sessionId: string, state: SessionState, err: unknown): 'unavailable' {
+    // WHAT THE PERSON READS IS NOT THE RPC'S SENTENCE. A transport error, a
+    // replay refusal and an offset refusal all mean one thing here — the
+    // shell is not proven gone and the same session can be retried — so the
+    // card states that once, and the diagnostic that distinguishes them goes
+    // to the log with the session it is about.
+    log.warn('nocx: session attach failed without proof of exit', {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    this._setAttachment(state, {
+      kind: 'unavailable',
+      message:
+        'Could not reattach this session. The shell has not been confirmed ended; retry the same session.',
+    })
     return 'unavailable'
   }
 
@@ -1543,7 +1554,7 @@ export class WSClient {
     try {
       entry = (await this.listLiveSessions()).find((s) => s.sessionId === sessionId)
     } catch (err) {
-      return this._attachUnavailable(state, err)
+      return this._attachUnavailable(sessionId, state, err)
     }
     if (!entry) return this._loseSession(sessionId, state)
     const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }

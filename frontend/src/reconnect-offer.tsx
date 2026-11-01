@@ -9,9 +9,12 @@
 // free, because a lost session hides the editor anyway. The scrollback above
 // it stays readable in full; not losing it is why the tab was never closed.
 //
-// Reconnecting here opens a NEW shell, not a resumed connection. A helper
-// can own the old shell on either a local or remote endpoint, so losing the
-// coordinator does not establish that the shell or its work ended.
+// Reconnecting here opens a NEW shell, not a resumed connection. This card is
+// for a session the backend has authoritatively declared absent: the helper no
+// longer holds it, so the shell is gone, while a process it had detached may
+// still be running. A session whose attach merely failed is the OTHER card
+// (mountAttachOffer): its helper-owned shell may still be there, so it offers
+// a retry of the same binding rather than a replacement.
 //
 // AND IT IS OFFERED ONLY FOR `lost`. A host that has merely stopped answering
 // gets no button: the session may still be running on the far side, and
@@ -57,7 +60,7 @@ function description(
   const spent = attempt && attempt.spent > 0 ? 'Automatic attempts are spent. ' : ''
   const fate = host
     ? `Reconnecting opens a NEW shell at the same endpoint — anything the old one was running may still be going on ${host}.`
-    : 'Reconnecting opens a NEW shell. Anything the old one was running may still be going on this machine.'
+    : 'Reconnecting opens a NEW shell. The old session is gone; anything it had started as a separate process may still be running.'
   return `${spent}${fate} What it printed stays above.`
 }
 
@@ -125,7 +128,7 @@ export function mountAttachOffer(
     const current = state()
     return current.kind === 'unavailable'
       ? current.message
-      : 'Input is paused while the existing session is attached. No new shell is opened.'
+      : 'Input is paused while the existing session is being attached. No new shell is opened.'
   }
   const dispose = render(
     () => (

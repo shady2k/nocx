@@ -2025,8 +2025,17 @@ describe('reconnect and reattach', () => {
     })
     for (let i = 0; i < 8; i++) await Promise.resolve()
     const attachmentStates: string[] = []
-    session.onAttachment((state) => attachmentStates.push(state.kind))
+    const unavailableMessages: string[] = []
+    session.onAttachment((state) => {
+      attachmentStates.push(state.kind)
+      if (state.kind === 'unavailable') unavailableMessages.push(state.message)
+    })
     expect(attachmentStates).toEqual(['unavailable'])
+    // The card states the retryable fact in its own words; the RPC's
+    // diagnostic belongs in the log, not in a sentence a person reads.
+    expect(unavailableMessages[0]).not.toContain('replay unavailable')
+    expect(unavailableMessages[0]).toContain('not been confirmed ended')
+    expect(unavailableMessages[0]).toContain('retry the same session')
     const restored = vi.fn()
     client.onReconnectResult(restored)
     await expect(session.intent('text', 'must not reach the shell')).rejects.toThrow('not attached')

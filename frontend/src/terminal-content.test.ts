@@ -5014,6 +5014,130 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('repaints a frozen block with the rows its close made final, so a settled block is whole (nocx-atpw5.1.19)', async () => {
+    // THE WINDOW THE CI FAILURE FELL IN. block.closed freezes the card at once
+    // and paints it from the rows the last OPEN read returned; the sealed read
+    // that close starts is two RPC round trips behind and repaints. A census
+    // taken between the two read 64 rows painted for 100 stored — the last
+    // block of a 500-block transcript on webkit. What this pins is the other
+    // half, which the census now waits for: the sealed read lands on the frozen
+    // card and the block ends holding every row it stores.
+    const row = (grapheme: string, from: number): string =>
+      `${JSON.stringify({ from, row: wireRowOf([[grapheme, 1, true] as CellSpec]) })}\n`
+    const bodies = [row('a', 0), `${row('a', 0)}${row('b', 1)}`]
+    const releases: Array<() => void> = []
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const body = bodies[releases.length]
+        return new Promise((resolve) => {
+          releases.push(() =>
+            resolve({
+              id: 'art-rows',
+              mediaType: 'application/x-nocx-rows',
+              body,
+              truncated: null,
+              byteLen: body.length,
+            }),
+          )
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const paintedRows = (): number =>
+      withScrollback.scrollback.blockManager
+        .blockForAttempt('att-1')!
+        .el.querySelectorAll('.cmd-output .term-grid-row').length
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: 'make',
+        },
+      })
+      const blockGrew = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.grew',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const blockClosed = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'block.closed',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(blockGrew).toBeDefined()
+      expect(blockClosed).toBeDefined()
+
+      // The growth read: one row, painted on the running block.
+      blockGrew?.({ entryId: 'att-1' })
+      await vi.waitFor(() => expect(releases).toHaveLength(1))
+      releases[0]()
+      await vi.waitFor(() => expect(paintedRows()).toBe(1))
+
+      // The command finishes (the logical freeze), and the backend's close —
+      // which freezes the card on screen — arrives while its sealed read is
+      // what is still in flight.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'c'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      blockClosed?.({ entryId: 'att-1', kept: true })
+      await vi.waitFor(() => expect(releases).toHaveLength(2))
+      await vi.waitFor(() =>
+        expect(
+          withScrollback.scrollback.blockManager
+            .blockForAttempt('att-1')!
+            .el.classList.contains('cmd-block-running'),
+        ).toBe(false),
+      )
+      // Frozen on the rows it already had: the sealed read has not landed.
+      expect(paintedRows()).toBe(1)
+
+      // The rows the close made final land on the frozen card.
+      releases[1]()
+      await vi.waitFor(() => expect(paintedRows()).toBe(2))
+      expect(
+        withScrollback.scrollback.blockManager
+          .blockForAttempt('att-1')!
+          .el.classList.contains('cmd-block-running'),
+      ).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
   it('coalesces a growth burst and fetches final rows once after block.closed', async () => {
     const releases: Array<() => void> = []
     const body = `${JSON.stringify({

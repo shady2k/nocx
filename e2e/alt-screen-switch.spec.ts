@@ -23,6 +23,7 @@
 // three ways a pane changes size around a mode switch; all three ended in the
 // same stale interval before the fix.
 import { test, expect, promptReady, type Page } from './harness'
+import { clickGesture } from './pointer-click.mts'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -33,6 +34,14 @@ function read(path: string): string {
   } catch {
     return ''
   }
+}
+
+/** The bytes the fixture's program printed, one hex chunk per read. */
+function programBytes(log: string): string[] {
+  return log
+    .split('\n')
+    .filter((line) => line.includes(' BYTE '))
+    .map((line) => line.trim().split(/\s+/).at(-1) ?? '')
 }
 
 type TraceEvent = Record<string, unknown> & { at: number; kind: string }
@@ -348,6 +357,18 @@ setInterval(() => {
             await expect(page.locator('.pane.active .terminal-live-container')).toHaveClass(
               /live-fullscreen/,
             )
+            // THE SWITCH IS PRESENTED BEFORE THE PANE GROWS, or this variant
+            // does not exist: `.live-fullscreen` is set when the frame is
+            // ACCEPTED, while the first alternate paint is queued for the next
+            // animation frame. Widening at acceptance raced that paint, and
+            // the `first-presented` snapshot then read the NEW pane width
+            // beside the grid of the width it had been painted at — a pane the
+            // product never produced, reported as the product's
+            // (nocx-1ebrs.66.1.25). ALT-READY in the live grid is the
+            // observable "the switch is on screen".
+            await expect(page.locator('.pane.active .terminal-live-grid')).toContainText(
+              'ALT-READY',
+            )
             observations.resizeAfterAt = Date.now()
             await page.setViewportSize({ width: 1700, height: 800 })
           }
@@ -372,6 +393,19 @@ setInterval(() => {
           })
           .toBe(true)
         if (probeDone) await probeDone
+        // THE CLICK IS STILL TRAVELLING when the mouse returns: the pane
+        // sends one intent at a time, and a receptive pane fences them until
+        // the pending resize applies. A wire snapshot taken here can hold the
+        // press alone, or neither, while the program goes on to receive both
+        // — and taking that snapshot for the gesture reports as lost a
+        // release the program already has (nocx-1ebrs.66.1.26). The
+        // program's bytes say the click got through; the wire is read after
+        // them, not instead.
+        await expect
+          .poll(() => clickGesture(programBytes(read(events))), {
+            message: 'the program received the whole click: a press and its release',
+          })
+          .not.toBeNull()
         const trace = await page.evaluate(() => (window as unknown as SwitchHost).__altTrace ?? [])
         const switchIndex = trace.findIndex(
           (event) =>
@@ -450,7 +484,7 @@ setInterval(() => {
               `\x1b[<0;${Number(x) + 1};${Number(y) + 1}${action === 'press' ? 'M' : 'm'}`,
             )
         }
-        expect(pointerReports).toHaveLength(2)
+        expect(pointerReports, 'the wire spells the click the program received').toHaveLength(2)
         // THE FIRST FRAME PRESENTED IS THE PANE'S OWN GRID.
         const painted = trace.find((event) => event.kind === 'first-presented')
         expect(painted, 'an alternate-screen frame is actually presented').toBeDefined()

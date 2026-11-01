@@ -507,10 +507,18 @@ type openBlock struct {
 	// outputStartRow is the helper's ordered command-output mark. A fresh
 	// block trusts it only after the authenticated start reserved this open;
 	// a pre-start mark alone cannot authorize a block or move its boundary.
-	outputStartKnown        bool
-	outputStartMarked       bool
-	outputStartRow          uint64
-	expectedFirstRow        uint64
+	outputStartKnown  bool
+	outputStartMarked bool
+	outputStartRow    uint64
+	expectedFirstRow  uint64
+	// successorMarked records that a LATER command's output-start mark has
+	// reached this stream after this block's own (nocx-atpw5.1.12). The shell
+	// writes exactly one OSC 133 C per command, by its preexec hook, before
+	// that command's output — and the rows stream is ordered — so a second
+	// mark means the interval that follows has begun its output and this
+	// block's interval is over, whatever the lifecycle and fence carriers
+	// have not yet said. Guarded by blockStream.mu.
+	successorMarked         bool
 	awaitingOutputReplay    bool
 	recoveredOutputInterval bool
 	preOutputStart          []pendingRows
@@ -1399,6 +1407,11 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 	currentReplayMark := block != nil && block.recoveredOutputInterval && block.awaitingOutputReplay && (!block.outputStartMarked || fromRow == block.outputStartRow)
 	saveForNext := !currentReplayMark && (block == nil || bs.queued[sid] != "" || bs.opening[sid] != "")
 	if saveForNext {
+		if block != nil && block.outputStartMarked && fromRow > block.outputStartRow {
+			// This mark is a later command's: the block on screen has its own
+			// already, and one command writes one (nocx-atpw5.1.12).
+			block.successorMarked = true
+		}
 		if bs.outputStartMarks == nil {
 			bs.outputStartMarks = make(map[session.ID]uint64)
 		}
@@ -1421,6 +1434,13 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 				block.expectedFirstRow = fromRow
 			}
 			block.outputStartRow = block.expectedFirstRow
+		} else if fromRow > block.outputStartRow {
+			// A SECOND mark after this block's own is the next command's
+			// preexec hook — one mark per command, and this stream is ordered
+			// (nocx-atpw5.1.12). The block's interval is over for attribution
+			// even when the completion and the fence's sighting are still in
+			// flight, which is the window a type-ahead `clear` lands in.
+			block.successorMarked = true
 		}
 		bs.mu.Unlock()
 		return
@@ -1459,6 +1479,7 @@ func (s *WSServer) BlockOutputStartRow(sid session.ID, fromRow uint64) {
 	}
 	if block.outputStartKnown && block.outputStartMarked {
 		if fromRow > block.outputStartRow {
+			block.successorMarked = true
 			if bs.outputStartMarks == nil {
 				bs.outputStartMarks = make(map[session.ID]uint64)
 			}
@@ -2482,12 +2503,24 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 // the block the erase hides — the e2e run that caught it saw one block too
 // many after `clear`, for as long as the assertion waited.
 //
+// The same reading covers a block whose successor has ALREADY written its
+// own output-start mark on this stream (nocx-atpw5.1.12). One command writes
+// one such mark, by its preexec hook and before its own output, so a second
+// mark after the current block's is the next command beginning — and the
+// erase that follows it is in that next command's interval. That fact is on
+// the ordered rows carrier, so it is here even when the previous command's
+// two other halves are not: the lifecycle completion waits on a frame commit
+// that is a store write, and the fence's sighting waits on their join. A
+// person who types `clear` while the previous command runs has the shell run
+// it the instant the prompt is back, and the erase can be sighted inside that
+// window.
+//
 // The interval that follows may not be nameable yet — its submit has not
 // reached this stream — and then nothing is kept: `clearAll` removes
 // everything on screen, which is also what a reload has to show.
 func (bs *blockStream) erasingIntervalLocked(sid session.ID) (keep, ended string) {
 	cur := bs.current[sid]
-	if cur != nil && !bs.authenticatedEndLocked(sid, cur.attempt) && !bs.endStatedLocked(sid, cur.attempt) {
+	if cur != nil && !cur.successorMarked && !bs.authenticatedEndLocked(sid, cur.attempt) && !bs.endStatedLocked(sid, cur.attempt) {
 		return cur.entry, ""
 	}
 	if cur != nil {

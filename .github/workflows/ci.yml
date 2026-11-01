@@ -793,6 +793,12 @@ jobs:
       - name: Test Linux installer refusals
         run: dash scripts/install/test-install.sh
 
+      # The macOS LAN diagnosis is POSIX sh with every macOS tool stubbed, so
+      # its argument handling, output shape and missing-tool behaviour are
+      # checked here; the real reading happens on the owner's Mac.
+      - name: Test the macOS LAN-after-update diagnosis
+        run: dash scripts/diagnose/test-macos-lan-after-update.sh
+
       # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
       # selects the 4.1 surface this product ships (ADR-0007). `go build ./...`
       # below compiles the whole tree including the adapter.

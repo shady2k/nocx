@@ -122,6 +122,12 @@ type Client struct {
 	waitCh    chan waitResult
 	doneOnce  sync.Once
 	closeOnce sync.Once
+	// closed is this SIDE ending the client, which is deliberately not the same
+	// event as done: Done reports transport loss and never closes on Close, so a
+	// watcher keyed on it alone would outlive every client the coordinator
+	// closed (see the loss watcher in Dial).
+	closed     chan struct{}
+	closedOnce sync.Once
 
 	// reverseCtx is the lifetime every reverse HANDLER runs under (reverse.go):
 	// it ends when the connection does, so a handler blocked on a person does
@@ -301,9 +307,25 @@ func (c *Client) Close() error {
 		// lose, because a caller that closes a client whose carrier never
 		// reports the loss would otherwise leave a handler waiting.
 		c.cancelReverse()
+		// AND THE LOSS WATCHER ENDS HERE. conn.Done cannot be what ends it: a
+		// SocketConn's Done closes when the loss is NOT ours and never on this
+		// side's Close (socket.go says why), so a watcher keyed on the lane
+		// alone outlived every client this side closed — one goroutine per
+		// pane-close, helper retirement and shutdown, for the life of the
+		// process (nocx-1ebrs.66.1.29: 81 of them on ci-linux, 121 with
+		// nocx_local_ssh).
+		c.stopLossWatch()
 		_ = c.conn.Close()
 	})
 	return nil
+}
+
+// stopLossWatch ends the goroutine Dial started to watch this lane's loss. It
+// is idempotent and safe from any goroutine; Close is its ordinary caller, and
+// Dial's own failure paths are the other (a lane that never became a client
+// still must not leave a watcher behind).
+func (c *Client) stopLossWatch() {
+	c.closedOnce.Do(func() { close(c.closed) })
 }
 
 func (c *Client) mintID() uint64 {

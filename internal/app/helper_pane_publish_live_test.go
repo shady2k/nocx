@@ -115,6 +115,9 @@ func startPaneJourneyWithSecrets(t *testing.T, srv *pwSSHServer, secrets credent
 		SSHSpawner: helpersession.NewSSHSpawner(svc, logger),
 		Log:        logger,
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(sessions.Close)
 	engine := host.New(helperEnd, helperEnd, filesFixtureGenera, "instance-1", logger)
 	engine.Register(svc)
 	engine.Register(sessions)

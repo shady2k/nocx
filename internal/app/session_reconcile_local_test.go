@@ -127,6 +127,9 @@ func startLocalEndpointWith(t *testing.T, dir, generation string,
 		SSHSpawner: scripted,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	ep := &fakeLocalEndpoint{generation: generation, dir: dir, ln: ln, svc: svc, spawner: scripted}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {

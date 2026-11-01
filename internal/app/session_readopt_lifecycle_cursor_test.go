@@ -277,6 +277,9 @@ func TestACursorTheHelperNoLongerHoldsSettlesTheBlockTheLostRangeCouldHaveEnded(
 		// The smallest window the helper allows, so the test can out-talk it.
 		Limits: helpersession.Limits{MinWindowBytes: 1, DefaultWindowBytes: 1, MaxWindowBytes: 1},
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	store := newMemCursorStore()
 

@@ -23,6 +23,7 @@ import {
   bindEndpoint,
   settingsReady,
   setUpVaultThroughTheSheet,
+  reissueRecoveryCodeThroughTheSheet,
   type DisposableRoot,
 } from './harness'
 import { addSecretFromLock, pressLock } from './secret-field'
@@ -331,29 +332,16 @@ test.describe('Vault settings — reissue recovery code', () => {
     // Phase 2: Navigate to Vault section and reissue recovery code.
     await openVaultSettings(page)
 
-    // Click "Reissue recovery code" button.
-    await page.getByRole('button', { name: 'Reissue recovery code' }).click()
-
-    // Fill in passphrase in RecoveryCodeDialog.
-    await page.locator('#vault-reissue-passphrase').fill('test-passphrase')
-    await page
-      .getByRole('dialog')
-      .getByRole('button', { name: 'Generate new recovery code', exact: true })
-      .click()
-
-    // Read the new recovery code.
-    await expect(page.getByRole('dialog').filter({ hasText: 'Reissue recovery code' })).toBeVisible(
-      {
-        timeout: 10_000,
-      },
-    )
-    const newCodeBlock = page.locator('.ui-code-block')
-    const newCode = await newCodeBlock.textContent()
-    expect(newCode).not.toBeNull()
-    expect((newCode ?? '').length).toBeGreaterThan(10)
-
-    // Click Done.
-    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    // ONE OWNER ANSWERS THE REISSUE SHEET (harness.ts, nocx-1ebrs.47). The
+    // press that opens it and the press that generates the code are both
+    // retried while the step they are supposed to advance is still on screen,
+    // and the wait is on the code block — the answer's own appearance. The
+    // sheet's title is on screen BEFORE the ask, so waiting for it said
+    // nothing about whether the code had arrived; the old lines here did
+    // exactly that, then read a page-wide `.ui-code-block` with Playwright's
+    // implicit wait.
+    const newCode = await reissueRecoveryCodeThroughTheSheet(page, 'test-passphrase')
+    expect(newCode.length).toBeGreaterThan(10)
 
     // Phase 3: Restart backend (vault seals).
     const tabsBefore = await page.locator('.nocx-tab-title').count()
@@ -388,7 +376,7 @@ test.describe('Vault settings — reissue recovery code', () => {
       .getByRole('dialog')
       .getByRole('button', { name: 'Recovery code', exact: true })
       .click()
-    await page.locator('#vault-unlock-recovery').fill(newCode ?? '')
+    await page.locator('#vault-unlock-recovery').fill(newCode)
     await page.getByRole('dialog').getByRole('button', { name: 'Unlock', exact: true }).click()
 
     await expect(unlockSheet(page)).not.toBeVisible({

@@ -35,6 +35,17 @@ func routingApp(t *testing.T) (*App, *recordingToast) {
 	t.Cleanup(func() { a.Shutdown(context.Background()) })
 	p := &recordingToast{}
 	a.notifyToast.Set(p)
+	// BOTH ATTENTION SURFACES ARE BOUND, and the banner half is why this
+	// fixture exists at all rather than a detail: the socket this stand opens
+	// is a raw client that answers no host ask, so every banner delivery sat
+	// out the router's ten-second DeliveryTimeout before the test could move
+	// on. Three raises in TestNotifyRoutingFollowsASettingsChangeWithoutARestart
+	// made it the package's slowest test at 30 s — 9% of the whole package on
+	// a runner where the package is already close to go test's default
+	// (nocx-1ebrs.66.1.29). binding the surface the route resolves to changes
+	// no assertion here: the ROUTE is still the routing table's to decide, and
+	// what this fixture records is the toast.
+	a.SetAttentionHost(&countingHost{})
 	return a, p
 }
 

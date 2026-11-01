@@ -1,5 +1,13 @@
 #!/bin/sh
 set -eu
+# pre-push — every commit a code push introduces names a parked leaf task.
+#
+# The backlog's own rules are NOT checked here (nocx-fg79x.3). The store lives
+# on refs/tracker/state and is published outside any code push; a push carries
+# no tracker state, so a comparison here could only judge other agents' writes
+# against this branch's parent. The gate runs on the published delta in
+# .github/workflows/tracker-gate.yml. What remains here is the commit-link
+# check, which reads only the commits this push introduces.
 
 gate=.githooks/backlog-gate
 if [ ! -e "$gate/config.json" ] && [ ! -e "$gate/commit-links.mjs" ] &&
@@ -19,34 +27,6 @@ for command in node br git; do
         exit 2
     }
 done
-
-# Publish and sync the external tracker ref, not a code-tree JSONL file.
-# status --json can return zero while reporting an unreachable remote, a
-# checkout that does not reach the store, unpublished work, or a stopped
-# supervisor. Read what it says instead of treating the exit code as the answer.
-status_json=$(node "$gate/tracker-sync.mjs" status --json --repo "$(git rev-parse --show-toplevel)" --recipe "$gate/trackers/br.mjs" </dev/null) || {
-    printf 'pre-push: tracker-sync status failed; run make connect\n' >&2
-    exit 2
-}
-if ! printf '%s' "$status_json" | node -e '
-let s = "";
-process.stdin.on("data", (d) => (s += d));
-process.stdin.on("end", () => {
-  const x = JSON.parse(s);
-  const bad = [];
-  if (x.unreachable) bad.push(`remote unreachable${x.said ? `: ${x.said}` : ""}`);
-  if (x.errorClass) bad.push(`status error class ${x.errorClass}`);
-  for (const c of x.checks || []) if (!c.ok) bad.push(`${c.checkout} does not reach the store`);
-  if (bad.length) {
-    console.error(`pre-push: tracker status: ${bad.join("; ")}`);
-    process.exit(1);
-  }
-  if (x.queued && x.queued.unpublished) console.error(`pre-push: WARN ${x.queued.unpublished} tracker change(s) unpublished`);
-  if (!x.supervisor || !x.supervisor.alive) console.error("pre-push: WARN tracker sync supervisor is not running");
-});
-'; then
-    exit 2
-fi
 
 remote=${1:-}
 url=${2:-$remote}
@@ -75,11 +55,6 @@ while IFS="$(printf '\t')" read -r local_ref local_sha remote_ref remote_sha; do
         *[!0]*) set -- "$@" --before "$remote_sha" ;;
     esac
     node "$gate/commit-links.mjs" "$@" || { status=$?; exit "$status"; }
-
-    # A code push carries no tracker state: the store lives on
-    # refs/tracker/state and is published separately. Comparing this branch's
-    # parent with the live store would gate the push on other agents' writes.
-    printf 'pre-push: backlog comparison skipped (tracker state is not part of a code push)\n' >&2
 done <<EOF_REFS
 $refs
 EOF_REFS

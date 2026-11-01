@@ -14,6 +14,8 @@ test('CI and nightly share the supporting-path exceptions', () => {
     'scripts/connect-clone.sh',
     '.githooks/adr-identifier.mjs',
     '.githooks/check-adr-identifiers.test.mjs',
+    'scripts/changed-tests.mjs',
+    'scripts/changed-tests.test.mjs',
     'README.md',
   ]) {
     assert.equal(isProductFile(file), false, file)
@@ -61,6 +63,7 @@ test('new supporting pipeline files always owe ci-pipeline checks', async () => 
   assert.doesNotMatch(job, /needs:|if:/)
   assert.match(job, /scripts\/release\/\*\.test\.\*/)
   assert.match(job, /scripts\/publish-nightly.test.mjs/)
+  assert.match(job, /scripts\/changed-tests.test.mjs/)
   for (const f of [
     'scripts/release/promotion.mjs',
     'scripts/release/promotion-github.test.mjs',

@@ -873,6 +873,16 @@ jobs:
         working-directory: .
         run: node e2e/check-coverage.mjs
 
+      # The helper unit tests beside the specs: the pure decisions the harness
+      # and the spec readers are built on. None needs a browser, the stand or a
+      # built backend, and none was run by any job, so one could go stale
+      # without anything saying so (nocx-1ebrs.66.1.30). Node 24 strips the
+      # types itself; this is seconds, not a suite. A FIXTURE is a spec: the
+      # e2e job still owns what needs the product running.
+      - name: e2e helper unit tests
+        working-directory: .
+        run: node --test e2e/*.unit.mts
+
       - name: Duration shard planner tests
         working-directory: .
         run: node --test scripts/shard-files.test.mjs

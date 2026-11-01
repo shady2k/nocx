@@ -139,7 +139,7 @@ rather than passing on the wrong channel. The real application, production
 keyring, artifact URL and desktop controls stay unchanged. Positive checks use the actual published
 channel. Temporary transport trust does not introduce a release signing key.
 
-## The stable channel, and the release workflow runs it
+## The stable channel, and its own workflow runs it
 
 `nocx-86e2f` needs no second driver: `--channel stable` is the same `run()`.
 The pair is chosen by version, never by publication order — `stable_releases()`
@@ -155,24 +155,28 @@ candidate, and a real stable below v0.8.0 the downgrade probe. Blocked is exit
 vX.Y.Z` to the command above, with the previous stable, the promoted stable and
 a stable below the previous as the three staged pairs.
 
-`.github/workflows/release.yml` carries it as the `prove-linux-stable` job with
-`needs: promote`, so it starts only after the promotion that created the tag,
-published the release and updated the cask has finished. It reads the version
-this run promoted from `promotion/plan.json` in the promotion's own evidence
-artifact, asks readiness for the three tags with
-`--publication-status --channel stable --promoted vX.Y.Z`, refuses a newest
-stable that is not the promoted tag, downloads the three signed pairs, builds
-`cmd/manifest-sign` from main — the tree the promotion signed with — and runs
-the driver under `dbus-run-session`/`xvfb-run`. Its evidence is uploaded as
-`linux-stable-update-proof`. The host packages it needs are the
-`linux-update-proof-runtime` composite action, shared with the nightly job so
-the two cannot prove on different desktops.
+`.github/workflows/stable-update-proof.yml` carries it, not `release.yml`: a
+promotion copies tried bytes, tags and signs, and the promotion test refuses any
+build command in the release workflow (ADR-0097, ADR-79b6cy61). The proof is a
+`workflow_run` on `Release` (completed), so it starts only after the tag, the
+published release and the cask all exist — the ordering `needs: promote` had.
+It reads the version this run promoted from `promotion/plan.json` in the
+promotion's own evidence artifact, and a dry run or a refused promotion that
+left no such artifact skips (does not fail). It asks readiness for the three
+tags with `--publication-status --channel stable --promoted vX.Y.Z`, refuses a
+newest stable that is not the promoted tag, downloads the three signed pairs,
+builds `cmd/manifest-sign` from the Release run's commit — the tree the
+promotion signed with — and runs the driver under `dbus-run-session`/`xvfb-run`.
+Its evidence is uploaded as `linux-stable-update-proof`. The host packages it
+needs are the `linux-update-proof-runtime` composite action, shared with the
+nightly job so the two cannot prove on different desktops.
 
-Two consequences of it living in the `Release` workflow: a failed proof fails
-the release run (the release stays published; the job's evidence names what
-failed), and the run holds the `nocx-release` concurrency group until the proof
-ends, so a nightly that fires meanwhile queues behind it rather than publishing
-during it.
+Consequences of it living in its own workflow: a failed proof fails that run,
+not the Release run that already shipped (the evidence names what failed), and
+it holds no `nocx-release` concurrency slot — it reads published bytes, and a
+nightly publication is a prerelease that cannot change what it reads. A second
+stable promotion during the proof would move `releases/latest` and fail the
+proof of the older stable, which is honest rather than wrong.
 
 ## The nightly workflow runs it
 

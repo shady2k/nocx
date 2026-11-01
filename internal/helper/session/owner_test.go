@@ -47,7 +47,7 @@ type ownerFakeProcess struct {
 	// mirrors rawReaderFakeProcess (owner_adversarial_test.go): a queue and a
 	// readiness signal that carries no data of its own, so WaitReadable
 	// consumes nothing and every byte is still delivered exactly once,
-	// through RawReadUntilAgain.
+	// through RawReadChunk.
 	rawQueue  [][]byte
 	rawReady  chan struct{}
 	rawEOFSet bool
@@ -143,31 +143,27 @@ func (p *ownerFakeProcess) WaitReadable(ctx context.Context) error {
 	}
 }
 
-// RawReadUntilAgain delivers everything queued since the last drain, whole,
-// and reports eof in the SAME call once endRead has run — never deferred to
-// a later drain, because rawReady's single-slot buffer can already have
-// collapsed a produce-then-endRead pair (owner_test.go's own
-// TestExitWithUnreadTailIngestsTheTail: both calls back to back) into the one
-// signal this call is answering, and nothing would wake a further drain to
-// report it. Mirrors rawReaderFakeProcess's own RawReadUntilAgain
-// (owner_adversarial_test.go) for exactly this reason.
-func (p *ownerFakeProcess) RawReadUntilAgain(_ []byte, deliver func([]byte)) (eof bool, err error) {
+// RawReadChunk preserves queued output across bounded reads and reports a
+// barrier only after the queue is empty, exactly like the local syscall seam.
+func (p *ownerFakeProcess) RawReadChunk(buf []byte) (int, bool, error) {
 	p.mu.Lock()
-	q := p.rawQueue
-	p.rawQueue = nil
-	eofSet := p.rawEOFSet
-	eofErr := p.rawEOFErr
-	p.mu.Unlock()
-	for _, chunk := range q {
-		deliver(chunk)
-	}
-	if eofSet {
-		if eofErr == nil {
-			eofErr = io.EOF
+	defer p.mu.Unlock()
+	if len(p.rawQueue) > 0 {
+		n := copy(buf, p.rawQueue[0])
+		p.rawQueue[0] = p.rawQueue[0][n:]
+		if len(p.rawQueue[0]) == 0 {
+			p.rawQueue = p.rawQueue[1:]
 		}
-		return true, eofErr
+		return n, false, nil
 	}
-	return false, nil
+	if p.rawEOFSet {
+		err := p.rawEOFErr
+		if err == nil {
+			err = io.EOF
+		}
+		return 0, false, err
+	}
+	return 0, true, nil
 }
 
 var _ rawReader = (*ownerFakeProcess)(nil)
@@ -826,7 +822,7 @@ printf 'REPLY:%%s\n' "$answer"
 	// reading "until EOF" after termination, and everything the flood wrote
 	// but this owner had not yet read off the kernel's own pty buffer still
 	// has to pass through the real VT emulator (Session.Ingest) before
-	// RawReadUntilAgain ever reaches the EIO Linux answers once the slave
+	// RawReadChunk ever reaches the EIO Linux answers once the slave
 	// closes and finishRead closes the window. A bare isClosed() check right
 	// here asserted a synchrony the design never promises — exactly the
 	// "wait on a duration, not a state change" mistake AGENTS.md's testing
@@ -853,13 +849,13 @@ printf 'REPLY:%%s\n' "$answer"
 // test for nocx-6q1uh.18, on a real PTY: the merged-tree gate hung for 8+
 // minutes with the readiness goroutine parked in WaitReadable (idle
 // program, nothing to read) and the owner's own goroutine blocked in
-// RawReadUntilAgain, in drainLocal, called from processHead's unconditional
+// RawReadChunk, in drainLocal, called from advance's unconditional
 // "opportunistic extra drain" for a queued item.
 //
 // The original cause: internal/poll's SyscallConn().Read holds the master
 // file's own read lock for the WHOLE call it wraps, a parked wait included,
 // not only while a read(2) is actually in flight. WaitReadable and
-// RawReadUntilAgain both went through that call, on the SAME *os.File, so a
+// RawReadChunk both went through that call, on the SAME *os.File, so a
 // readiness goroutine idling in WaitReadable held exactly the lock the
 // owner's own drain needed next — and on an idle program there was nothing
 // left to make the fd readable and release it: no output was coming until

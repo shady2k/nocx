@@ -22,12 +22,36 @@
       "bead": "nocx-1ebrs.66.1.33"
     },
     {
-      "test": "e2e:e2e/tab-strip-lead.spec.ts › the tab strip carries no update offer at all",
-      "bead": "nocx-1ebrs.66.1.31"
-    },
-    {
       "test": "job:ci-backlog#557",
       "bead": "nocx-1ebrs.66.1.32"
+    },
+    {
+      "test": "e2e:e2e/running-block-body-seam.spec.ts › the body of a running block that has outgrown its screen › keeps one row pitch across the rows the record holds and the rows still live",
+      "bead": "nocx-atpw5.1.3"
+    },
+    {
+      "test": "e2e:e2e/tabs.spec.ts › vertical tab placement › vertical label text starts near the left edge (not centred)",
+      "bead": "nocx-atpw5.1.7"
+    },
+    {
+      "test": "e2e:e2e/alt-screen-switch.spec.ts › an alternate-screen switch during the resize › fits the pane, sends the resize first, and holds early input until it applies",
+      "bead": "nocx-1ebrs.66.1.25"
+    },
+    {
+      "test": "e2e:e2e/vault-settings.spec.ts › Vault settings — reissue recovery code › reissue recovery code then unseal with new code and connect",
+      "bead": "nocx-1ebrs.47"
+    },
+    {
+      "test": "e2e:e2e/backend-clear-boundary.spec.ts › clear hides the earlier block, and the record still holds it",
+      "bead": "nocx-atpw5.1.12"
+    },
+    {
+      "test": "e2e:e2e/agent-ask.spec.ts › agent ask about a frozen block (nocx-x8s2.2) › a second ask while the first streams lands its deltas on the right entry",
+      "bead": "nocx-1ebrs.73.7"
+    },
+    {
+      "test": "job:ci-mac#575",
+      "bead": "nocx-1ebrs.66.1.29"
     }
   ]
 }

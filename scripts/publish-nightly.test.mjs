@@ -1,9 +1,17 @@
 import { test } from 'node:test'
 import { execFileSync, spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, cpSync } from 'node:fs'
+import {
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  cpSync,
+  mkdirSync,
+  readdirSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { generateKeyPairSync, sign, createHash } from 'node:crypto'
 import { decide, publish, prepare, attest, authorize } from './publish-nightly.mjs'
 
@@ -109,6 +117,28 @@ function fixture(t) {
   sealProvenance(candidate)
   return candidate
 }
+
+test('attest refuses a directory by name and still attests a clean artifact directory', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'nightly-attest-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const bytes = Buffer.from('built artifact')
+  const name = 'nocx.AppImage'
+  writeFileSync(join(dir, name), bytes)
+  const input = { dir, sha: buildIdentity.commit, version: '0.8.0', tag: 'nightly-20261027-42' }
+  const expected = {
+    name,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    size: bytes.length,
+  }
+  assert.deepEqual(attest(input).artifacts, [expected])
+  const evidence = join(dir, 'appimage-verification')
+  mkdirSync(evidence)
+  assert.throws(() => attest(input), {
+    message: `${evidence} is a directory, not an artifact`,
+  })
+  rmSync(evidence, { recursive: true })
+  assert.deepEqual(attest(input).artifacts, [expected])
+})
 
 test('unchanged main publishes nothing, without artifacts or signing keys', async () => {
   const calls = []
@@ -446,3 +476,39 @@ test('branch publication is refused while branch Linux dry run is allowed', () =
     publish: true,
   })
 })
+
+for (const location of ['runner temp', 'sibling temp', 'caller override']) {
+  test(`AppImage verification evidence uses ${location}, outside dist`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'appimage-evidence-'))
+    t.after(() => rmSync(root, { recursive: true, force: true }))
+    const dist = join(root, 'dist')
+    const bin = join(root, 'bin')
+    const runner = join(root, 'runner')
+    for (const path of [dist, bin, runner]) mkdirSync(path)
+    const appimage = join(dist, 'nocx.AppImage')
+    writeFileSync(appimage, 'fixture artifact')
+    // Stop at the container boundary. The real wrapper still owns path
+    // selection, directory creation, mount arguments and its job-log output.
+    writeFileSync(join(bin, 'docker'), '#!/bin/sh\nprintf "%s\n" "$@"\n', { mode: 0o755 })
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` }
+    delete env.RUNNER_TEMP
+    delete env.NOCX_APPIMAGE_VERIFY_EVIDENCE
+    if (location === 'runner temp') env.RUNNER_TEMP = runner
+    if (location === 'caller override') {
+      env.RUNNER_TEMP = runner
+      env.NOCX_APPIMAGE_VERIFY_EVIDENCE = join(root, 'chosen')
+    }
+    const result = spawnSync('bash', ['scripts/appimage/verify-appimage.sh', appimage, 'none'], {
+      encoding: 'utf8',
+      env,
+    })
+    assert.equal(result.status, 0, result.stdout + result.stderr)
+    assert.deepEqual(readdirSync(dist), ['nocx.AppImage'])
+    const evidence = result.stdout.match(/^AppImage verification evidence: (.+)$/m)?.[1]
+    assert.ok(evidence, 'the job log must name the evidence directory')
+    assert.ok(result.stdout.includes(`${evidence}:/evidence`))
+    if (location === 'runner temp') assert.equal(dirname(evidence), runner)
+    if (location === 'sibling temp') assert.equal(dirname(evidence), root)
+    if (location === 'caller override') assert.equal(evidence, env.NOCX_APPIMAGE_VERIFY_EVIDENCE)
+  })
+}

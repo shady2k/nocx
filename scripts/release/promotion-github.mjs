@@ -3,14 +3,16 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { failedTests, readQuarantine } from '../quarantine.mjs'
 import {
   authorize,
   ciJobNames,
-  failedTests,
+  ciStepManifests,
+  cleanCICover,
+  readQuarantineEvidence,
   isNewerVersion,
   prepareStable,
   readKeyring,
-  readQuarantine,
   runBelongsTo,
   signedRunNumber,
   signingKey,
@@ -25,7 +27,14 @@ const fail = (condition, message) => {
   if (!condition) throw new Error(message)
 }
 export function githubClient(run = execFileSync) {
-  const gh = (args) => run('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  // Successful product logs can be large; the final gate record is at their
+  // end. Bound the read, but do not use execFileSync's 1 MiB default.
+  const gh = (args) =>
+    run('gh', args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 256 * 1024 * 1024,
+    })
   const api = (path) => JSON.parse(gh(['api', path]))
   // Explicit pagination on every list. A missing page/API error throws, never means green.
   const pages = (path, field) => {
@@ -96,6 +105,27 @@ export async function collectCI({
       `repos/${repo}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs`,
       'jobs',
     )
+    const workflow = loadWorkflow(pr.head.sha)
+    const manifests = ciStepManifests(workflow)
+    const gatedJobs = Object.keys(manifests)
+    fail(
+      !workflow.includes('quarantine-gate.mjs') || gatedJobs.length > 0,
+      'CI: cannot locate workflow quarantine gates',
+    )
+    const jobLog = (job) =>
+      github.gh(['api', '--allow-escape-sequences', `repos/${repo}/actions/jobs/${job.id}/logs`])
+    const readGatedJob = (job, attempt) =>
+      gatedJobs.includes(job.name) && job.conclusion === 'success'
+        ? {
+            ...job,
+            quarantineEvidence: readQuarantineEvidence(jobLog(job), job.name, pr.number, {
+              runId: run.id,
+              attempt,
+              expectedSteps: manifests[job.name],
+            }),
+          }
+        : job
+    const recordedJobs = jobs.map((job) => readGatedJob(job, run.run_attempt))
     const entry = {
       number: pr.number,
       head: pr.head.sha,
@@ -103,36 +133,39 @@ export async function collectCI({
       headRepo: pr.head.repo?.full_name,
       product: touchesProduct(files.map((f) => f.filename)),
       run,
-      jobs,
-      requiredJobs: ciJobNames(loadWorkflow(pr.head.sha)),
+      jobs: recordedJobs,
+      requiredJobs: ciJobNames(workflow),
+      ...(gatedJobs.length ? { gatedJobs, quarantine, workflow } : {}),
     }
-    // A run that is not plainly green is read whole: every attempt, and the
-    // log of every failed job, so the policy can tell a quarantined flake
-    // from a real failure (promotion.mjs verifyCI).
-    if (run.conclusion !== 'success' || jobs.some((job) => job.conclusion === 'failure')) {
+    // Gated reruns also need their earlier records: an API-green attempt can
+    // contain accepted failures even when the newest attempt is truly clean.
+    // Legacy green runs keep their original collection policy.
+    if (
+      run.conclusion !== 'success' ||
+      jobs.some((job) => job.conclusion === 'failure') ||
+      (gatedJobs.length > 0 && run.run_attempt > 1)
+    ) {
       entry.quarantine = quarantine
       entry.attempts = []
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
         const attemptJobs =
           attempt === run.run_attempt
-            ? jobs
-            : github.pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
+            ? recordedJobs
+            : github
+                .pages(`repos/${repo}/actions/runs/${run.id}/attempts/${attempt}/jobs`, 'jobs')
+                .map((job) => readGatedJob(job, attempt))
         entry.attempts.push({
           attempt,
           jobs: attemptJobs.map((job) => ({
             name: job.name,
             status: job.status,
             conclusion: job.conclusion,
+            ...(job.quarantineEvidence ? { quarantineEvidence: job.quarantineEvidence } : {}),
             ...(job.conclusion === 'failure'
               ? {
-                  failures: failedTests(
-                    github.gh([
-                      'api',
-                      // Job logs carry ANSI colour; gh refuses them without this.
-                      '--allow-escape-sequences',
-                      `repos/${repo}/actions/jobs/${job.id}/logs`,
-                    ]),
-                  ),
+                  failures: failedTests(jobLog(job)),
+                  // Legacy text names cannot prove a whole command completed.
+                  complete: false,
                 }
               : {}),
           })),
@@ -154,8 +187,7 @@ export async function collectCI({
         (later) =>
           !later.direct &&
           later.product &&
-          later.run.conclusion === 'success' &&
-          !later.attempts &&
+          cleanCICover(later) &&
           isAncestor(entry.commit, later.head),
       )
     fail(cover, `CI: direct commit ${entry.commit} touches product and no later green PR covers it`)
@@ -264,9 +296,26 @@ async function collect(directory, github) {
     .filter(Boolean)
   // This is CI's own classifier, shared with nightly (not copied into promotion).
   const { touchesProduct } = await import('../product-change.mjs')
+  // The tracker is not in the code tree. Read the store's recording of this
+  // revision; a repository whose merge commits were never recorded on a machine
+  // falls back to the published store and says so in the release log.
+  const trackerIssues = (() => {
+    git('fetch', '--no-tags', 'origin', 'refs/tracker/state:refs/tracker/state')
+    try {
+      const recording = JSON.parse(
+        git('show', `refs/tracker/state:.tracker-sync/recordings/${sha}.jsonl`),
+      )
+      return git('show', `${recording.store}:.beads/issues.jsonl`)
+    } catch {
+      process.stderr.write(
+        `promotion: no tracker recording for ${sha}; reading the published store state instead\n`,
+      )
+      return git('show', 'refs/tracker/state:.beads/issues.jsonl')
+    }
+  })()
   const quarantine = readQuarantine(
     showIfPresent(sha, 'docs/testing/quarantine.json'),
-    git('show', `${sha}:.beads/issues.jsonl`),
+    trackerIssues,
   )
   const ci = await collectCI({
     repo,

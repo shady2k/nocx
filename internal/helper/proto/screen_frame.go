@@ -71,7 +71,6 @@ package proto
 // not at all, and never to interleave two frames to one subscriber.
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 )
@@ -250,8 +249,9 @@ type ScreenKey struct {
 type AssembledScreenFrame struct {
 	Key      ScreenKey
 	Revision uint64
-	// Payload is the whole document, the bytes the sender split — a copy,
-	// owned by the receiver, never a view into any part.
+	// Payload is the whole document, owned by the receiver and independent
+	// of the input parts. Completion transfers the assembler's private
+	// accumulation buffer; the assembler never retains or reuses it.
 	Payload []byte
 }
 
@@ -353,7 +353,7 @@ func (a *ScreenAssembler) Feed(f ScreenDataFrame) (*AssembledScreenFrame, error)
 		return &AssembledScreenFrame{
 			Key:      key,
 			Revision: f.Revision,
-			Payload:  bytes.Clone(partial.buf),
+			Payload:  partial.buf,
 		}, nil
 	}
 	return nil, nil

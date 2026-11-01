@@ -5,7 +5,7 @@
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { parsePrePush } from './commit-links.mjs'
@@ -21,6 +21,11 @@ const TASK = {
   created_at: '2026-09-28T00:00:00Z',
   updated_at: '2026-09-28T00:00:00Z',
 }
+// The flake a quarantine entry names, and the bookkeeping task that publishes
+// the entry. Both must exist at the export revision the check reads.
+const FLAKE = { ...TASK, id: 'nocx-t2', title: 'a flaky test' }
+const BOOK = { ...TASK, id: 'nocx-t3', title: 'publish the quarantine' }
+const QUARANTINE = 'docs/testing/quarantine.json'
 
 let root, work
 const git = (...args) => execFileSync('git', args, { cwd: work, encoding: 'utf8' }).trim()
@@ -43,6 +48,11 @@ before(() => {
   git('config', 'commit.gpgsign', 'false')
   mkdirSync(join(work, '.beads'))
   writeFileSync(join(work, '.beads/issues.jsonl'), `${JSON.stringify(TASK)}\n`)
+  mkdirSync(join(work, 'docs/testing'), { recursive: true })
+  writeFileSync(
+    join(work, QUARANTINE),
+    JSON.stringify({ schema: 1, tests: [{ test: 'go:TestEarlier', bead: TASK.id }] }),
+  )
   commit('chore: the first commit (nocx-t1)')
   git('push', '-q', 'origin', 'HEAD:main')
 })
@@ -286,6 +296,86 @@ test('records-only classification uses the staged and committed JSONL changes, n
     )
     if (example.status) assert.match(historical.stdout, /carries only records/)
   }
+})
+
+// Both tasks a quarantine test needs exist in the branch's base export: the
+// tracker file is JSONL, and adding rows is a commit of its own so the range
+// under test is exactly the quarantine change.
+function quarantineBase(name) {
+  git('checkout', '-q', '-b', name, 'main')
+  const path = join(work, '.beads/issues.jsonl')
+  const issues = readFileSync(path, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  writeFileSync(
+    path,
+    [...issues, FLAKE, BOOK].map((issue) => JSON.stringify(issue)).join('\n') + '\n',
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 'chore: file the quarantine tasks (nocx-t1)')
+  return git('rev-parse', 'HEAD')
+}
+
+function addQuarantineEntry(test, bead) {
+  const path = join(work, QUARANTINE)
+  const entries = JSON.parse(readFileSync(path, 'utf8'))
+  entries.tests.push({ test, bead })
+  writeFileSync(path, JSON.stringify(entries))
+}
+
+test('a commit that only adds a quarantine entry names the bookkeeping task, not the flake', () => {
+  const base = quarantineBase('quarantine-proof')
+  addQuarantineEntry('go:TestFlake', FLAKE.id)
+  git('add', '-A')
+
+  const message = join(root, 'quarantine-message')
+  writeFileSync(message, `chore: hold TestFlake (${FLAKE.id})\n`)
+  const staged = links('--message', message, '--export-at', base)
+  assert.equal(staged.status, 1, staged.stdout + staged.stderr)
+  assert.match(staged.stdout, /bookkeeping/)
+  assert.match(staged.stdout, new RegExp(FLAKE.id))
+
+  git('commit', '-q', '-m', `chore: hold TestFlake (${FLAKE.id})`)
+  const committed = links('--range', `${base}..HEAD`, '--export-at', base)
+  assert.equal(committed.status, 1, committed.stdout + committed.stderr)
+  assert.match(committed.stdout, /1 commit\(s\) checked, 1 link problem/)
+
+  git(
+    'commit',
+    '-q',
+    '--amend',
+    '-m',
+    `chore: publish the TestFlake quarantine (${BOOK.id})\n\nHolds ${FLAKE.id} until it is fixed.\n`,
+  )
+  const named = links('--range', `${base}..HEAD`, '--export-at', base)
+  assert.equal(named.status, 0, named.stdout + named.stderr)
+  assert.match(named.stdout, /1 commit\(s\) checked, 0 link problem/)
+  git('checkout', '-q', 'main')
+})
+
+test('a commit that changes more than the quarantine may name the flake it fixes', () => {
+  const base = quarantineBase('quarantine-with-fix')
+  addQuarantineEntry('go:TestFlake', FLAKE.id)
+  writeFileSync(join(work, 'fixed-product'), 'the flake is gone\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', `fix: make TestFlake reliable (${FLAKE.id})`)
+  const run = links('--range', `${base}..HEAD`, '--export-at', base)
+  assert.equal(run.status, 0, run.stdout + run.stderr)
+  git('checkout', '-q', 'main')
+})
+
+test('a commit that removes an entry is not "only adds", so it may name that bead', () => {
+  const base = quarantineBase('quarantine-retire')
+  const path = join(work, QUARANTINE)
+  const entries = JSON.parse(readFileSync(path, 'utf8'))
+  entries.tests = entries.tests.filter((entry) => entry.test !== 'go:TestEarlier')
+  writeFileSync(path, JSON.stringify(entries))
+  git('add', '-A')
+  git('commit', '-q', '-m', `chore: retire the earlier quarantine (${TASK.id})`)
+  const run = links('--range', `${base}..HEAD`, '--export-at', base)
+  assert.equal(run.status, 0, run.stdout + run.stderr)
+  git('checkout', '-q', 'main')
 })
 
 // A rerun of an already-merged pull request re-reads the original event, whose

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -512,13 +513,23 @@ func assertBoundedFootprint(t *testing.T, root, active string) {
 // TestConcurrentPublishSameVersion: two concurrent publishes of the same
 // version produce ONE remote publish, no duplicated work and no lost bytes.
 // Both callers are told the same thing, because local singleflight joined
-// them to one attempt: "exactly one caller sees Published" was a property
-// of the lock serialising two remote attempts, and the remote attempt one
-// of them made is precisely what is now not made at all. What must stay
-// exactly one is the number of remote publishes. Run under -race.
+// them to one attempt — and the join is made certain here rather than hoped
+// for: the leader is held inside its first seam call (prepareRoot's lstat,
+// which it reaches only after its flight exists) until the second caller has
+// joined that flight, observed on flight.joined().
+//
+// Starting two goroutines and comparing their results measured the scheduler
+// instead: on a starved runner the leader finished first, the second call
+// correctly found the version already installed, and this test failed (ci run
+// 41298696145, PR #647). What singleflight promises is that a caller which
+// JOINS sees the leader's publish. What the product promises a caller that
+// does not overlap the leader — TestNeverDowngradesNewer pins it — is
+// already-installed naming the committed generation, which is what the
+// caller's retirement step reads. Run under -race.
 func TestConcurrentPublishSameVersion(t *testing.T) {
 	home := t.TempDir()
-	fsys := newFaultFS(NewOSFS())
+	counted := newFaultFS(NewOSFS())
+	fsys := &gateOnceFS{FS: counted, gate: make(chan struct{}), entered: make(chan struct{})}
 	root := filepath.Join(home, dirName)
 	b := testBundle("10")
 
@@ -526,14 +537,26 @@ func TestConcurrentPublishSameVersion(t *testing.T) {
 	results := make([]PublishResult, workers)
 	errs := make([]error, workers)
 	var wg sync.WaitGroup
-	for i := range workers {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			pub := NewPublisher(testLogger(), fsys, root)
-			results[i], errs[i] = pub.Publish(b)
-		}(i)
+	publish := func(i int) {
+		defer wg.Done()
+		results[i], errs[i] = NewPublisher(testLogger(), fsys, root).Publish(b)
 	}
+	wg.Add(1)
+	go publish(0)
+	<-fsys.entered // the leader is inside its attempt: the flight exists
+
+	wg.Add(1)
+	go publish(1)
+	// Join as one more waiter to observe the count, and release the leader
+	// only once the second caller is in.
+	flight, isLeader := joinPublishFlight(fsys, root, b)
+	if isLeader {
+		t.Fatal("the observer became the leader: no flight was in progress")
+	}
+	for flight.joined() < 2 { // the second worker and this observer
+		runtime.Gosched()
+	}
+	close(fsys.gate)
 	wg.Wait()
 
 	for i := range workers {
@@ -548,9 +571,9 @@ func TestConcurrentPublishSameVersion(t *testing.T) {
 	// One remote publish: one generation rename and one manifest rename,
 	// and the generation files and manifest temp written once each. A
 	// second attempt — joined or serialised — would double both.
-	fsys.mu.Lock()
-	creates, renames := fsys.counts["create"], fsys.counts["rename"]
-	fsys.mu.Unlock()
+	counted.mu.Lock()
+	creates, renames := counted.counts["create"], counted.counts["rename"]
+	counted.mu.Unlock()
 	if wantCreates := 1 + len(b.Files) + 1; creates != wantCreates {
 		t.Errorf("create calls = %d, want %d (one lock nonce, one bundle, one manifest temp)", creates, wantCreates)
 	}

@@ -732,6 +732,56 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     }
   })
 
+  it('keeps the header above the live clip: only the shifted echo row, never a visible row, lies under it', () => {
+    // nocx-atpw5.1.18. The 32px running header is layout space before the live
+    // container, not an overlay on it; the echo shift is what puts the shell's
+    // echoed command above the clip. So the row whose centre falls inside the
+    // header is the echo row — a row the region does not show — and the first
+    // row a person can see and click starts at the container's top, below the
+    // header. jsdom computes no layout, so this pins the block order and the
+    // controller's own numbers (the same seam the tests above use).
+    const renderer = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      liveContentHeight: () => renderer.liveContentHeight(),
+      cellMetrics: () => ({ cellWidth: renderer.cellWidth, cellHeight: renderer.cellHeight }),
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(pane)
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    try {
+      controller.beginBlock('cat', '~', 0)
+      const block = controller.blockManager.runningBlock!.el
+      const header = block.querySelector<HTMLElement>(':scope > .cmd-header')!
+      expect(header).not.toBeNull()
+      expect(controller.terminalLiveContainer.parentElement).toBe(block)
+      expect(block.lastElementChild).toBe(controller.terminalLiveContainer)
+      expect(Array.from(block.children).indexOf(header)).toBeLessThan(
+        Array.from(block.children).indexOf(controller.terminalLiveContainer),
+      )
+      expect(controller.runningHeaderHeightPx).toBe(32)
+
+      // Anchor the output one row below the echoed command: the grid moves up
+      // by that row. Row 0 (the echo) then ends at the container's top, so its
+      // centre is 8px above the clip — inside the header's 32px box — while
+      // row 1, the printed output, starts at the top of the clip.
+      controller.blockManager.runningBlock!.outputAnchorOffset = 1
+      controller.outputAnchorChanged()
+      controller.setLiveHeight(3 * 16)
+      expect(controller.terminalLiveInner.style.transform).toBe('translateY(-16px)')
+      expect(controller.terminalLiveViewport.style.height).toBe('32px')
+      expect(controller.terminalLiveContainer.style.height).toBe('32px')
+    } finally {
+      controller.blockManager.clearAll()
+      pane.remove()
+    }
+  })
+
   it('reserves the same header and full live capacity before and after an alternate round trip', () => {
     const { controller } = makeController()
     controller.beginBlock('top', '~', 0)

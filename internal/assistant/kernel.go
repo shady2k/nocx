@@ -34,7 +34,6 @@ package assistant
 //     prompt promises this, and the promise is kept at this seam.
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/gob"
@@ -629,16 +628,8 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 // arguments (design §6.2: the model is a LESS trusted source than the
 // renderer and gets the same discipline, never a weaker one).
 func compileToolSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.ParamsSchema))
-	if err != nil {
-		return nil, fmt.Errorf("tool %s: params schema: %w", t.Name, err)
-	}
 	url := "https://nocx.local/contracts/tools/" + t.Name + ".schema.json"
-	c := jsonschema.NewCompiler()
-	if addErr := c.AddResource(url, doc); addErr != nil {
-		return nil, fmt.Errorf("tool %s: params schema: %w", t.Name, addErr)
-	}
-	s, err := c.Compile(url)
+	s, err := compiledSchema(url, t.ParamsSchema)
 	if err != nil {
 		return nil, fmt.Errorf("tool %s: params schema: %w", t.Name, err)
 	}
@@ -650,16 +641,8 @@ func compileToolSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
 // executor's output. The url is distinct from the params one because they are
 // two schemas, not two readings of one.
 func compileResultSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
-	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.ResultSchema))
-	if err != nil {
-		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, err)
-	}
 	url := "https://nocx.local/contracts/tools/" + t.Name + ".result.schema.json"
-	c := jsonschema.NewCompiler()
-	if addErr := c.AddResource(url, doc); addErr != nil {
-		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, addErr)
-	}
-	sch, err := c.Compile(url)
+	sch, err := compiledSchema(url, t.ResultSchema)
 	if err != nil {
 		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, err)
 	}

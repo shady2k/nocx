@@ -129,6 +129,20 @@ describe('a running block whose body outgrew its screen (nocx-zg3k3.14.26, ADR-3
     expect(declared('.cmd-block.cmd-block-running', 'padding-bottom')).toBe('0')
   })
 
+  it('seats the running header in flow above the live clip, not over a grid row', () => {
+    // nocx-atpw5.1.18: the 32px box is layout space in front of the live
+    // container. A running header that took itself out of flow (absolute or
+    // fixed), or a live container pulled up under it with a margin, would
+    // paint the header over the first visible row; the click at that row
+    // would then be the header's, as it legitimately is over the clipped
+    // echo row.
+    expect(declared('.cmd-header', 'position')).toBe('relative')
+    expect(declared(".ui-command-block-frame[data-variant='running']", 'position')).toBeNull()
+    expect(declared(".ui-command-block-frame[data-variant='running']", 'margin')).toBe('0')
+    expect(declared('.terminal-live-container.live-running', 'margin')).toBeNull()
+    expect(declared('.terminal-live-container.live-running', 'position')).toBe('relative')
+  })
+
   it('restores the frozen body pads, so a freeze is the same rows in the transcript box', () => {
     // The frozen body is where the transcript's spacing lives — the contrast
     // that makes "no active padding" a decision rather than an omission.

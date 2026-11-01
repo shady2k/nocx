@@ -705,6 +705,20 @@ __nocx_agent_cancel_on_int() {
     setopt localoptions localtraps
     local __rc
     __nocx_agent_cancelled=0
+    # THE INT TRAP IS NOT ENOUGH WITH JOB CONTROL ON (nocx-6o5xe). With MONITOR,
+    # every external child is its own process group and holds the terminal, so
+    # the terminal's foreground group is that child's and not this shell's. zsh
+    # synthesises the interrupt when the child dies of SIGINT, which covers most
+    # presses; the window left is the gap after the child exits and before zsh
+    # takes the terminal back, where the signal names a group with no member and
+    # is LOST — the wait then never sees the cancel, and the open-question wait
+    # has no deadline, so the pane sits inside the wrapper. Measured on the
+    # deterministic test: the held wait's `sleep 1` is the terminal's foreground
+    # group, not this shell. Without MONITOR the children stay in this shell's
+    # group, the shell is the foreground group for the whole wait, and the
+    # interrupt reaches it. `localoptions` restores MONITOR when the wait ends;
+    # the bash twin carries the same argument (nocx-xn63t.6.29).
+    unsetopt monitor
     trap '__nocx_agent_cancelled=1' INT
     "$@"
     __rc=$?

@@ -6,10 +6,6 @@
       "bead": "nocx-6o5xe"
     },
     {
-      "test": "go:TestCrossProcessAtMostOneCommitPerDigest",
-      "bead": "nocx-1ebrs.66.1.34"
-    },
-    {
       "test": "e2e:e2e/enhanced-input.spec.ts › enhanced input raw routing › keys typed while the keyboard is unclaimed still reach the program",
       "bead": "nocx-1ebrs.66.1.27"
     },

@@ -22,7 +22,26 @@ type ptyCapture struct {
 
 func newPTYCapture(t *testing.T, cmd *exec.Cmd) *ptyCapture {
 	t.Helper()
-	ptmx, err := pty.Start(cmd)
+	return newPTYCaptureSize(t, cmd, nil)
+}
+
+// promptPTYSize is the terminal the prompt-dependent tests hand their shell:
+// wide enough that a prompt carrying a hostname, an absolute path and the
+// integration's markers still fits, so readline draws it (nocx-atpw5.1.13).
+var promptPTYSize = &pty.Winsize{Rows: 50, Cols: 200}
+
+// newPTYCaptureSize starts cmd on a pty of the given size, or on the default
+// pty when size is nil. A real terminal always has a window; bash's readline
+// DISPLAYS NOTHING for a prompt wider than the terminal it is on (measured:
+// a marker-bearing prompt of 88 visible+invisible columns on an 80-column
+// pty writes only "\r"). A test that waits for a prompt is therefore waiting
+// for a prompt the shell may have decided not to draw, and the decision moves
+// with the hostname, the checkout path and TERM — none of which the test
+// fixes. The callers that wait for a prompt give the pty a size wide enough
+// that the prompt is always drawn (nocx-atpw5.1.13).
+func newPTYCaptureSize(t *testing.T, cmd *exec.Cmd, size *pty.Winsize) *ptyCapture {
+	t.Helper()
+	ptmx, err := pty.StartWithSize(cmd, size)
 	if err != nil {
 		t.Fatalf("pty start: %v", err)
 	}

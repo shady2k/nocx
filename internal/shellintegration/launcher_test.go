@@ -126,7 +126,7 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 	t.Helper()
 	c := exec.Command(shPath, "-c", cmd)
 	c.Env = append(os.Environ(), env...)
-	capture := newPTYCapture(t, c)
+	capture := newPTYCaptureSize(t, c, promptPTYSize)
 
 	// The first prompt or fixture readiness marker is the observable boundary
 	// before typing commands. Native fallback shells do not share the

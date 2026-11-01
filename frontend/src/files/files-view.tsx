@@ -600,10 +600,15 @@ function FilesPanel(props: FilesPanelProps) {
       const remaining = Math.max(0, row.dir.total - row.dir.children.length)
       return (
         <div class="files-row" data-depth={row.depth}>
+          {/* NOT disabled while the directory is enumerating: the store
+              remembers a click that lands mid-re-list and fetches the page
+              once that listing settles (nocx-atpw5.1.16). Disabling it here
+              made the browser drop the click before it ever reached the
+              store — a second owner of the person's input, which is what
+              lost the page in e2e/files.spec.ts. */}
           <Button
             size="sm"
             data-testid="files-show-more"
-            disabled={row.dir.busy}
             onClick={() => props.store.showMore(row.dir)}
           >
             Show next {remaining}

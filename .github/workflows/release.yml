@@ -134,3 +134,9 @@ jobs:
             promotion/plan.json
           if-no-files-found: warn
           retention-days: 90
+
+# The stable-channel update proof runs in .github/workflows/stable-update-proof.yml
+# on this workflow's completion, not here: a promotion tags and signs only
+# (ADR-0097, ADR-79b6cy61), and the promotion test refuses any build command in
+# this file. That separate workflow gets its verifier the same way the nightly
+# proof does — a job of its own that checks out the publishing tree and builds it.

@@ -182,6 +182,9 @@ func startFilesStand(t *testing.T, srv *pwSSHServer, secrets credential.Resolver
 		SSHSpawner: helpersession.NewSSHSpawner(svc, logger),
 		Log:        logger,
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(sessions.Close)
 	engine.Register(sessions)
 	// The session service is BOUND to its connection, as cmd/nocx-helper binds
 	// it: an attach names the subscriber as the connection it arrived on, and

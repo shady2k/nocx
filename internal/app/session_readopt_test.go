@@ -75,11 +75,18 @@ func sharedHelperPeer(t testing.TB, svc *helpersession.Service) func(in io.Reade
 }
 
 func sharedHelperService(t testing.TB) *helpersession.Service {
-	return helpersession.New(helpersession.Options{
+	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
 		Spawner:    &scriptedSpawner{},
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test that started it, which is what a helper
+	// does when its process exits (Service.Close's own doc). Without this the
+	// sessions it spawned outlive the test: their row pump and write loop are
+	// still parked on 0 rows.go:685 when the package ends
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
+	return svc
 }
 
 // scriptedSpawner is the helper's Spawner with nothing behind it: a process
@@ -372,7 +379,16 @@ func newCoordinator(t *testing.T, provider *fakeLaneProvider) *coordinator {
 	gitFor, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
 	sess := session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	reg.registry = sess
-	return &coordinator{t: t, provider: provider, reg: reg, sess: sess, consent: store, gitFor: gitFor}
+	c := &coordinator{t: t, provider: provider, reg: reg, sess: sess, consent: store, gitFor: gitFor}
+	// THE STAND'S PROCESS ENDS WITH THE TEST, which is what quit is, and it
+	// is registered here rather than at each of the thirty call sites for the
+	// reason this bead exists: a test that forgot it left its helper's own
+	// Serve, its sessions' row pumps and its lanes' watchers running for the
+	// rest of the package's run (nocx-1ebrs.66.1.29, 867 goroutines in the
+	// package's end-of-run dump). A test that already quits in its body is
+	// unaffected — quitting twice is quitting once.
+	t.Cleanup(c.quit)
+	return c
 }
 
 // helperConnection is a saved connection whose destination mode is an explicit
@@ -401,17 +417,14 @@ func helperConnection(user string) *ssh.ConnectConfig {
 // is on the fact — every lane this quit closed has had its helper end — never
 // on a duration.
 func (c *coordinator) quit() {
-	c.reg.mu.Lock()
-	helpers := make([]*hostHelper, 0, len(c.reg.hosts))
-	for _, h := range c.reg.hosts {
-		helpers = append(helpers, h)
-	}
-	c.reg.mu.Unlock()
-	for _, h := range helpers {
-		h.mu.Lock()
-		h.closeLocked()
-		h.mu.Unlock()
-	}
+	// AND ITS SESSIONS DETACH, before the helpers they are hosted on go away:
+	// Reg.Close is the product's own word for a coordinator ending — the
+	// session stays on the host for whoever comes next (D1) and THIS process
+	// stops writing to it. A session left open is a write loop parked in
+	// session.go for the rest of the package's run, which is the leak the
+	// package's own end-of-run dump named (nocx-1ebrs.66.1.29).
+	endSessions(c.sess)
+	endHelperChannels(c.reg)
 	c.provider.awaitClosedPeers(c.t)
 }
 
@@ -918,6 +931,9 @@ func TestASessionThatEndedWhileNocxWasAwayCarriesTheHostsExitStatus(t *testing.T
 		Spawner:    spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")
@@ -983,6 +999,9 @@ func TestAReadoptedAlreadyExitedSessionReleasesItsHelperWindow(t *testing.T) {
 		Spawner:    spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	provider := &fakeLaneProvider{peer: sharedHelperPeer(t, svc)}
 	first := newCoordinator(t, provider)
 	binding := openHostedFixture(t, first, "pane-1")

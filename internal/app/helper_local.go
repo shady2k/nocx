@@ -719,6 +719,9 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 	if o == nil || (cfg.Kind != session.KindLocal && cfg.Kind != session.KindRemote) {
 		return transport.HostedSessionOpen{}, false, nil, nil
 	}
+	if o.registry == nil {
+		return transport.HostedSessionOpen{}, true, nil, errors.New("local helper opener has no session registry")
+	}
 	c, generation, err := o.connect(ctx)
 	if err != nil {
 		return transport.HostedSessionOpen{}, true, nil, err
@@ -784,12 +787,17 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		return transport.HostedSessionOpen{}, true, c, fmt.Errorf("open a pane on this machine's helper: %w", err)
 	}
 	sid := res.Session.ID()
-	if o.registry == nil {
+	// Adoption transferred the shell to the registry, but no pane owns it
+	// until this open succeeds. A later refusal ends that ownership; Close
+	// would only detach and strand both the registry entry and helper budget.
+	rollback := func() {
 		if res.AbortLifecycle != nil {
 			res.AbortLifecycle()
 		}
-		_ = res.Session.Close()
-		return transport.HostedSessionOpen{}, true, c, errors.New("local helper opener has no session registry")
+		if err := o.registry.EndSession(sid); err != nil {
+			log.From(ctx).Error("failed local pane could not end its helper session",
+				"session", string(sid), "error", err)
+		}
 	}
 	// THE THREE THINGS THAT ARE ABOUT A PROCESS ON THIS MACHINE ARE LOCAL ONLY,
 	// and the launch record is what says so: a remote session's branch has no
@@ -820,20 +828,14 @@ func (o *localHelperOpener) openHostedOnce(ctx context.Context, cfg session.Conf
 		// recorded as a pid of 0.
 		launch := res.Entry.Launch
 		if launch == nil {
-			if res.AbortLifecycle != nil {
-				res.AbortLifecycle()
-			}
-			_ = res.Session.Close()
+			rollback()
 			return transport.HostedSessionOpen{}, true, c, fmt.Errorf(
 				"this machine's helper reported no launch record for session %s", sid)
 		}
 		shell = launch.Shell
 		shellVersion = launch.ShellVersion
 		if err := o.registry.RecordOwnedProcessPID(sid, launch.Pid); err != nil {
-			if res.AbortLifecycle != nil {
-				res.AbortLifecycle()
-			}
-			_ = res.Session.Close()
+			rollback()
 			return transport.HostedSessionOpen{}, true, c, fmt.Errorf("recording local helper launch pid: %w", err)
 		}
 		status, reason = localIntegrationStatus(launch, res.LifecycleLane)

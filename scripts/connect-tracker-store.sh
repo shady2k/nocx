@@ -7,9 +7,9 @@ repo=$(git rev-parse --show-toplevel)
 cd "$repo"
 gate=.githooks/backlog-gate
 mechanism="$gate/tracker-sync.mjs"
-recipe="$gate/br-tracker.mjs"
+recipe="$gate/trackers/br.mjs"
 policy="$gate/tracker-policy.yaml"
-for path in "$mechanism" "$recipe" "$policy"; do
+for path in "$mechanism" "$recipe" "$policy" "$gate/argv.mjs" "$gate/regular-file.mjs" "$gate/tracker-sync.version"; do
     [ -r "$path" ] || { printf 'tracker connect: %s is missing; run setup-shady2k-skills\n' "$path" >&2; exit 2; }
 done
 command -v node >/dev/null 2>&1 || { printf 'tracker connect: node is missing\n' >&2; exit 2; }
@@ -35,6 +35,21 @@ hooks="$state_base/$machine_key/hooks/$checkout_key"
 mkdir -p "$hooks"
 git config extensions.worktreeConfig true
 git config --worktree core.hooksPath "$hooks"
+
+# The watcher and every checkout's record hook run the machine's own copy of the
+# mechanism, never a checkout's: a worktree that is removed must not take the
+# sync or the recordings with it. Install that copy from this checkout's
+# byte-for-byte copies of the plugin (docs/agents/backlog.md, Tracker
+# synchronization), then connect through it.
+machine_mech_dir="$state_base/$machine_key/mechanism"
+mkdir -p "$machine_mech_dir/trackers"
+for f in tracker-sync.mjs argv.mjs regular-file.mjs tracker-sync.version; do
+    install -m 0644 "$gate/$f" "$machine_mech_dir/$f"
+done
+install -m 0644 "$recipe" "$machine_mech_dir/trackers/br.mjs"
+rm -f "$machine_mech_dir/br-tracker.mjs"
+mechanism="$machine_mech_dir/tracker-sync.mjs"
+recipe="$machine_mech_dir/trackers/br.mjs"
 
 machine=${NOCX_TRACKER_MACHINE:-$(hostname -s 2>/dev/null || hostname)}
 node "$mechanism" connect --checkout "$repo" --machine "$machine" --prefix nocx --recipe "$recipe"

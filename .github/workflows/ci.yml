@@ -922,9 +922,9 @@ jobs:
         with:
           node-version: '24'
 
-      # br itself, pinned by version and checksum: the export has to be one
-      # br imports, and the adapter the gate reads it through is lenient
-      # (nocx-8t2lo). 0.7.0 is the version the tracker is written with.
+      # br itself, pinned by version and checksum: the store's database is
+      # rebuilt from the ref before the gate or the commit check reads it.
+      # 0.7.0 is the version the tracker is written with.
       - name: Install br
         run: |
           set -eu
@@ -935,65 +935,13 @@ jobs:
           tar -xzf "$RUNNER_TEMP/br.tgz" -C "$RUNNER_TEMP/bin" br
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: The tracker export imports into br
-        env:
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: .githooks/check-tracker-import.sh "${HEAD_SHA:-HEAD}"
+      # The store lives on refs/tracker/state, not in any code branch. Connect
+      # it so br and the adapter read the published state at this code revision.
+      - name: Import the tracker store (read-only)
+        run: bash scripts/connect-tracker-ci.sh
 
-      - name: The backlog is still a queue
-        env:
-          # Through the environment rather than into the script: an expression
-          # interpolated into a shell line is a shell line somebody else can
-          # write.
-          BASE_REF: ${{ github.base_ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BEFORE: ${{ github.event.before }}
-        run: |
-          set -eu
-          gate=.githooks/backlog-gate
-          # A PR compares the actual PR head to its merge-base. A push compares
-          # its tip to the advertised old ref when that is an ancestor; for a
-          # new/unrelated ref, use the first introduced commit's real parent.
-          # There is no synthetic HEAD^ fallback.
-          base=""
-          if [ -n "${BASE_REF:-}" ]; then
-            base=$(git merge-base "origin/$BASE_REF" "${HEAD_SHA:-HEAD}")
-            tip=${HEAD_SHA:-HEAD}
-          else
-            tip=$(git rev-parse HEAD)
-            set -- --introduced "$tip" --by "$GITHUB_REF" --remote origin
-            case "${BEFORE:-}" in
-              *[!0]*) set -- "$@" --before "$BEFORE" ;;
-            esac
-            introduced=$(node "$gate/commit-links.mjs" --list-introduced "$@")
-            if [ -z "$introduced" ]; then
-              echo "no introduced commits; backlog policy has nothing new to check"
-              exit 0
-            fi
-            base=""
-            case "${BEFORE:-}" in
-              *[!0]*) base=$BEFORE ;;
-            esac
-            if [ -z "$base" ] || ! git merge-base --is-ancestor "$base" "$tip"; then
-              base=$(printf '%s\n' "$introduced" | while IFS= read -r row; do printf '%s\n' "$row"; break; done | cut -d' ' -f2)
-            fi
-          fi
-          if [ -z "$base" ] || ! git rev-parse -q --verify "$base^{commit}" >/dev/null; then
-            echo "no valid preceding backlog revision" >&2
-            exit 2
-          fi
-          echo "baseline: $base"
-          node "$gate/adapter.mjs" --at "$base" > "$RUNNER_TEMP/backlog-baseline.json"
-          node "$gate/adapter.mjs" --at "$tip" > "$RUNNER_TEMP/backlog-tip.json"
-          git show "$tip:$gate/config.json" > "$RUNNER_TEMP/backlog-tip-config.json"
-          baseline_config=""
-          if git show "$base:$gate/config.json" > "$RUNNER_TEMP/backlog-baseline-config.json" 2>/dev/null; then
-            baseline_config="--baseline-config $RUNNER_TEMP/backlog-baseline-config.json"
-          fi
-          # shellcheck disable=SC2086
-          node "$gate/check.mjs" --config "$RUNNER_TEMP/backlog-tip-config.json" \
-            --baseline "$RUNNER_TEMP/backlog-baseline.json" $baseline_config "$RUNNER_TEMP/backlog-tip.json"
-
+      # A code pull request carries no tracker state: the store is published on
+      # refs/tracker/state. The backlog gate belongs to that publish, not here.
       - name: Every new commit names a task
         env:
           BASE_REF: ${{ github.base_ref }}

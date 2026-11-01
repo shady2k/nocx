@@ -205,7 +205,7 @@ jobs:
           node-version: '24'
       - name: Workflow decision and refusal tests
         run: |
-          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
           node --test .githooks/check-log-context.test.mjs
       - name: Promotion and cask fixtures by path

@@ -11,7 +11,9 @@ installed update. The protocol ships
 with the skills and is not restated here. This file holds project facts and
 commands; changing choices live only in the config. Each person's plugin,
 runtime and connected hooks are checked directly, never represented as shared
-installation-state settings.
+installation-state settings. A branch cut before the 0.128.0 store move still
+carries `.beads/issues.jsonl`; the merge procedure for it is under
+"A branch cut before the store move" below.
 
 AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
 bug.
@@ -270,6 +272,31 @@ keeps every later change.
   The tracker at a code revision is read from the store's recording of that exact
   revision; a missing recording is refused, never guessed from a later state. `make
 connect` runs this connector before it checks the backlog inputs.
+- **A branch cut before the store move carries `.beads/issues.jsonl`.** When one
+  merges, delete the conflicted file from the merge result and import its
+  branch-only rows before publishing:
+  `node scripts/import-branch-beads.mjs --branch <head-ref> --out <plan.jsonl>`
+  writes exactly the records to import and prints the dry-run plan. The store
+  is authoritative: a branch's edits to, or deletion of, an existing issue, and
+  an edit to an existing comment, are reported and never imported; a
+  branch-only issue is imported whole; a
+  branch-only comment on an existing issue is appended to the store's own row
+  with its text, author, timestamp, issue and order preserved, and only
+  colliding comment ids are remapped (existing ids never change).
+  `br sync --reconcile-additive` is not this path: on a shared issue with a new
+  comment it plans a `shared_relation_drift` conflict and applies no relation
+  rows. Import with:
+
+  ```sh
+  BEADS_JSONL=<plan.jsonl> br sync --import-only --allow-external-jsonl --no-auto-flush
+  br sync --flush-only
+  ```
+
+  then check the result against the branch export and the store before
+  publishing. Never `br sync --merge` (a row absent from the JSONL reads as a
+  deletion and becomes a tombstone) and never `--rebuild`. The script's test:
+  `node --test scripts/import-branch-beads.test.mjs`.
+
 - **Tracker synchronization:** `tracker-sync watch` publishes a change within seconds
   and syncs every 10 seconds. The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied

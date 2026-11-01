@@ -787,6 +787,60 @@ describe('control-plane saturation visibility', () => {
     expect(toasts()).toHaveLength(1)
   })
 
+  it('names what holds the terminal, from the refusal’s own scope (nocx-3an1s.1.1)', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+
+    // A settings or connections write in another surface holds the config
+    // domain: the person did nothing in this pane and can still be told what
+    // is holding it, because the refusal carries the admission's scope.
+    const call = d.call('ssh.connect', {})
+    const id = socket().requests()[0].id!
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id,
+      error: {
+        ...SATURATION_ERROR,
+        data: { ...SATURATION_ERROR.data, scope: 'config' },
+      },
+    })
+    await expect(call).rejects.toMatchObject({ code: -32004 })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(1)
+    expect(toasts()[0].message).toContain('settings or connections change')
+    expect(toasts()[0].message).toContain('Try again in a moment')
+  })
+
+  it('names the holder for a refused notification too, and falls back for a scope it does not know', async () => {
+    const provider = new TestEndpointProvider()
+    const d = new Dispatcher(provider)
+    await connected(d)
+
+    socket().deliverText({
+      jsonrpc: '2.0',
+      method: 'control.saturated',
+      params: { methodClass: 'session', scope: 'session' },
+    })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(1)
+    expect(toasts()[0].message).toContain('another pane')
+
+    // A scope this build does not know names no cause rather than inventing
+    // one; the sentence still says the action was refused and may be retried.
+    vi.advanceTimersByTime(SATURATION_TOAST_WINDOW_MS)
+    socket().deliverText({
+      jsonrpc: '2.0',
+      method: 'control.saturated',
+      params: { methodClass: 'other', scope: 'exec' },
+    })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(2)
+    expect(toasts()[1].message).toBe(
+      'The terminal is busy — that action was refused. Try again in a moment.',
+    )
+  })
+
   it('raises a fresh toast once the dedup window has passed', async () => {
     const provider = new TestEndpointProvider()
     const d = new Dispatcher(provider)

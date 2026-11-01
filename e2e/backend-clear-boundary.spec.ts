@@ -1,5 +1,4 @@
 import { test, expect, promptReady, openControlPlane } from './harness'
-import { runCommand } from './ask-gesture'
 import { readStand } from './stand'
 
 // nocx-2v80t.3.17: a `clear` boundary hides the blocks before it as a
@@ -18,16 +17,10 @@ test('clear hides the earlier block, and the record still holds it', async ({ pa
 
   // Command A: prints a marker and finishes. This is the block the clear
   // boundary must hide.
-  // …and it must have CLOSED before `clear` is typed, not merely started. A
-  // block is visible from its command's first frame, and the failing run
-  // (trace 39b3ca8d98598465c26db4da8ef7d6ca) was in exactly that window: the
-  // erase was sighted while A's interval was still the one the backend's block
-  // stream knew, so block.cleared named A as the interval to keep and the
-  // client kept the one block the test was waiting to see go. The client's
-  // prompt returns on its lifecycle fact, which can precede the block stream's
-  // own statement of the interval end; the block leaving `.cmd-block-running`
-  // is the state that completion produces, and it is what runCommand waits on.
-  const frozenA = await runCommand(page, `echo ${marker}`, marker)
+  await input.fill(`echo ${marker}`)
+  await page.keyboard.press('Enter')
+  const frozenA = page.locator('.pane.active .cmd-block').filter({ hasText: marker })
+  await expect(frozenA).toBeVisible({ timeout: 15_000 })
   const entryIdA = await frozenA.getAttribute('data-entry-id')
   expect(entryIdA).toBeTruthy()
 
@@ -86,10 +79,10 @@ test('erasing the display alone hides nothing', async ({ page }) => {
   const marker = `ED2-ALONE-${nonce}`
   const input = page.locator('.pane.active .nocx-editor-input')
 
-  // The same premise as the case above: the ED2 probe is the NEXT command, and
-  // `clear`'s boundary is only sighted correctly when the interval it lands in
-  // is the one the backend has actually reached (nocx-atpw5.1.12).
-  const frozen = await runCommand(page, `echo ${marker}`, marker)
+  await input.fill(`echo ${marker}`)
+  await page.keyboard.press('Enter')
+  const frozen = page.locator('.pane.active .cmd-block').filter({ hasText: marker })
+  await expect(frozen).toBeVisible({ timeout: 15_000 })
   const entryId = await frozen.getAttribute('data-entry-id')
   expect(entryId).toBeTruthy()
 

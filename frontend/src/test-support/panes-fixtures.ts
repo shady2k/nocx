@@ -7,7 +7,7 @@
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
 import type { PaneIdentity } from '../terminal-content'
-import type { OpenAnchor, SessionIntentKind, WSClient } from '../ipc'
+import type { OpenAnchor, SessionIntentKind, SessionAttachment, WSClient } from '../ipc'
 import { vi, type Mock } from 'vitest'
 import type { SessionFrame } from '../generated/session.frame'
 import type { SessionEffect } from '../generated/session.effect'
@@ -200,7 +200,9 @@ export interface SessionFake {
   signal: Mock<(signal: SessionSignal['signal']) => Promise<SessionSignal>>
   detach: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
-  onData: ReturnType<typeof vi.fn>
+  onAttachment: (cb: (attachment: SessionAttachment) => void) => void
+  fireAttachment(attachment: SessionAttachment): void
+  retryAttach: Mock<() => Promise<boolean>>
   /** Subscribe to the latest integration fact, matching SessionHandle. */
   onIntegrationChanged: (handler: (fact: SessionIntegrationChanged) => void) => () => void
   /** Fire the integration fact seen by a mounted pane. */
@@ -248,14 +250,6 @@ export interface SessionFake {
    *  is the grid the BACKEND says the session runs at — the one the recovered
    *  bytes were wrapped at (nocx-eidfb.3). Mirrors SessionHandle exactly. */
   recovered: SessionRecovery | null
-  /** Bytes waiting for a data callback, flushed synchronously the moment one
-   *  is registered — exactly what WSClient.onSessionData does with what
-   *  reclaimSession queued ahead of the live stream (ipc.ts). A fixture that
-   *  only stored the callback could not show a caller writing recovered
-   *  scrollback into the wrong grid, because in it nothing was ever written. */
-  pendingData?: string
-  /** Fire the registered data callback. */
-  fireData(data: string): void
   /** Fire the registered liveness callback with one observation. */
   fireLiveness(liveness: 'alive' | 'unknown', livenessEpoch?: number): void
   /** Fire a liveness observation whose round trip the BACKEND graded slow.
@@ -275,10 +269,11 @@ export interface SessionFake {
  * `{ cwd: '~/other' }` without repeating every other field.
  */
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
-  let dataCb: ((data: string) => void) | null = null
   let screenCb: ((frame: SessionFrame) => void) | null = null
   let effectCb: ((effect: SessionEffect) => void) | null = null
   let protocolErrorCb: ((message: string) => void) | null = null
+  let attachment: SessionAttachment = { kind: 'attached' }
+  let attachmentCb: ((attachment: SessionAttachment) => void) | null = null
   let outputGapCb: ((gap: SessionOutputGap) => void) | null = null
   let integrationCb: ((fact: SessionIntegrationChanged) => void) | null = null
   let integrationFact: SessionIntegrationChanged | null = null
@@ -307,14 +302,15 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     ),
     detach: vi.fn(),
     close: vi.fn(),
-    onData: vi.fn((cb: (data: string) => void) => {
-      dataCb = cb
-      // The flush the real client does at registration time, not later: the
-      // recovered scrollback is already queued when the surface subscribes,
-      // so the grid it lands in is whatever the grid is at THIS moment.
-      const queued = overrides?.pendingData
-      if (queued) cb(queued)
-    }),
+    onAttachment: (cb) => {
+      attachmentCb = cb
+      cb(attachment)
+    },
+    fireAttachment: (next) => {
+      attachment = next
+      attachmentCb?.(next)
+    },
+    retryAttach: vi.fn(() => Promise.resolve(true)),
     onIntegrationChanged: vi.fn((cb: (fact: SessionIntegrationChanged) => void) => {
       integrationCb = cb
       if (integrationFact) cb(integrationFact)
@@ -379,9 +375,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
         rows: 24,
       }),
     ),
-    fireData: (data: string) => {
-      dataCb?.(data)
-    },
     fireObservation: (state: DriverState, agent = 'claude') => {
       observationCb?.({
         sessionId,
@@ -467,7 +460,6 @@ export interface ClientFake {
   sendResize: ReturnType<typeof vi.fn>
   detachSession: ReturnType<typeof vi.fn>
   closeSession: ReturnType<typeof vi.fn>
-  onSessionData: ReturnType<typeof vi.fn>
   onSessionExit: ReturnType<typeof vi.fn>
   onSessionReset: ReturnType<typeof vi.fn>
   onBlockOutputStart: (cb: (anchor: BlockOutputStart) => void) => () => void
@@ -658,7 +650,6 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     sendResize: vi.fn(),
     detachSession: vi.fn(),
     closeSession: vi.fn(),
-    onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
     onBlockOutputStart: (cb) => {

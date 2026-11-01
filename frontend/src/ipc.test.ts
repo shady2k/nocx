@@ -688,39 +688,32 @@ describe('send', () => {
 })
 
 describe('inbound data', () => {
-  it('delivers the payload of a frame for this session', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-
-    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('hello\r\n')))
-    expect(seen).toEqual(['hello\r\n'])
+  it('acks raw bytes without a text consumer and ignores unknown or malformed frames', async () => {
+    vi.useFakeTimers()
+    try {
+      const { ws, client } = await connectedSession()
+      ws.deliverBinary(encodeFrame(OTHER_SID, new Uint8Array(12)))
+      ws.deliverBinary(new Uint8Array([FRAME_VERSION, MSG_TYPE_DATA, 0x00]).buffer)
+      // Invalid UTF-8 and split sequences are still byte offsets, not text.
+      ws.deliverBinary(encodeFrame(SID, new Uint8Array([0xff, 0xe2])))
+      ws.deliverBinary(encodeFrame(SID, new Uint8Array([0x82, 0xac])))
+      vi.advanceTimersByTime(ACK_INTERVAL_MS)
+      expect(
+        ws
+          .requests()
+          .filter((r) => r.method === 'ack')
+          .map((r) => r.params),
+      ).toEqual([{ sessionId: SID, offset: 4 }])
+      expect(client.connected).toBe(true)
+      client.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it('ignores a frame addressed to another session', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-
-    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('not mine')))
-    expect(seen).toEqual([])
-  })
-
-  it('ignores a malformed frame without tearing down the connection', async () => {
+  it('jumps the live byte cursor across an ordered gap', async () => {
     const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-
-    ws.deliverBinary(new Uint8Array([FRAME_VERSION, MSG_TYPE_DATA, 0x00]).buffer)
-    expect(seen).toEqual([])
-    expect(client.connected).toBe(true)
-  })
-
-  it('resets only the stream decoder and jumps the live cursor across an ordered gap', async () => {
-    const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
     const gaps: { start: number; end: number; reason: string }[] = []
-    session.onData((data) => seen.push(data))
     session.onOutputGap((gap) => gaps.push(gap))
 
     const euro = new TextEncoder().encode('€')
@@ -738,8 +731,6 @@ describe('inbound data', () => {
     })
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
 
-    expect(seen.join('')).toBe('later')
-    expect(seen.join('')).not.toContain('�')
     expect(
       (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(SID)
         ?.offset,
@@ -748,9 +739,7 @@ describe('inbound data', () => {
 
   it('surfaces an already-crossed gap informationally without changing stream state', async () => {
     const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
     const gaps: { start: number; end: number; reason: string }[] = []
-    session.onData((data) => seen.push(data))
     session.onOutputGap((gap) => gaps.push(gap))
 
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
@@ -790,15 +779,12 @@ describe('inbound data', () => {
     ).toEqual(acksBeforeInfo)
 
     ws.deliverBinary(encodeFrame(SID, new Uint8Array([0x82, 0xac])))
-    expect(seen.join('')).toBe('abc€')
     expect(state.offset).toBe(6)
   })
 
   it('surfaces an inconsistent gap as a protocol error and stops later bytes', async () => {
     const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
     const errors: string[] = []
-    session.onData((data) => seen.push(data))
     session.onProtocolError((message) => errors.push(message))
 
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
@@ -827,7 +813,6 @@ describe('inbound data', () => {
         .map((request) => request.params),
     ).toEqual(acksBeforeError)
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
-    expect(seen.join('')).toBe('abc')
     expect(state.offset).toBe(3)
   })
 
@@ -838,9 +823,7 @@ describe('inbound data', () => {
     { name: 'missing end', start: 3 },
   ])('reports malformed known-session gap bounds ($name) and stops later bytes', async (bounds) => {
     const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
     const errors: string[] = []
-    session.onData((data) => seen.push(data))
     session.onProtocolError((message) => errors.push(message))
 
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('abc')))
@@ -869,16 +852,13 @@ describe('inbound data', () => {
         .map((request) => request.params),
     ).toEqual(acksBeforeError)
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
-    expect(seen.join('')).toBe('abc')
     expect(state.offset).toBe(3)
   })
 
   it('shows a visible protocol error instead of growing an unbounded gap dedupe set', async () => {
     const { session, ws, client } = await connectedSession()
-    const seen: string[] = []
     const gaps: { start: number; end: number }[] = []
     const errors: string[] = []
-    session.onData((data) => seen.push(data))
     session.onOutputGap((gap) => gaps.push(gap))
     session.onProtocolError((message) => errors.push(message))
 
@@ -895,7 +875,6 @@ describe('inbound data', () => {
       })
     }
     expect(gaps).toHaveLength(128)
-    const beforeLimitFailure = seen.join('')
 
     ws.deliverText({
       jsonrpc: '2.0',
@@ -907,67 +886,7 @@ describe('inbound data', () => {
     expect(gaps).toHaveLength(128)
     expect(state.offset).toBe(129)
     ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('later')))
-    expect(seen.join('')).toBe(beforeLimitFailure)
-  })
-
-  it('reassembles a UTF-8 rune split across two frames', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-
-    const euro = new TextEncoder().encode('€')
-    ws.deliverBinary(encodeFrame(SID, euro.slice(0, 1)))
-    ws.deliverBinary(encodeFrame(SID, euro.slice(1)))
-
-    expect(seen.join('')).toBe('€')
-    expect(seen.join('')).not.toContain('�')
-  })
-
-  it('reassembles a rune split three ways, one byte per frame', async () => {
-    const { session, ws } = await connectedSession()
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-
-    const emoji = new TextEncoder().encode('🚀')
-    for (const byte of emoji) {
-      ws.deliverBinary(encodeFrame(SID, new Uint8Array([byte])))
-    }
-
-    expect(seen.join('')).toBe('🚀')
-  })
-
-  it('starts each connection with a clean decoder', async () => {
-    const client = new WSClient(mockDispatcher())
-    client.start()
-    await Promise.resolve()
-    socket().serverAccepts()
-
-    const opening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
-    socket().deliverText({
-      jsonrpc: '2.0',
-      id: socket().requests()[0].id,
-      result: { sessionId: SID, ...OPEN_IDENTITY },
-    })
-    await opening
-
-    socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('€').slice(0, 1)))
-
-    client.start()
-
-    await Promise.resolve()
-    socket().serverAccepts()
-
-    const reopening = client.openSession({ cols: 80, rows: 24, xpixel: 0, ypixel: 0 })
-    const reqs = socket().requests()
-    const id = reqs[reqs.length - 1]?.id
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
-    const second = await reopening
-
-    const seen: string[] = []
-    second.onData((d) => seen.push(d))
-    socket().deliverBinary(encodeFrame(SID, new TextEncoder().encode('ok')))
-
-    expect(seen.join('')).toBe('ok')
+    expect(state.offset).toBe(129)
   })
 })
 
@@ -1014,8 +933,6 @@ describe('screen frames (msg-type 0x02)', () => {
     vi.useFakeTimers()
     try {
       const { client, session, ws } = await connectedSession()
-      const seen: string[] = []
-      session.onData((d) => seen.push(d))
       const frames: unknown[] = []
       session.onScreenFrame((f) => frames.push(f))
 
@@ -1027,7 +944,6 @@ describe('screen frames (msg-type 0x02)', () => {
         encodeFrame(SID, new TextEncoder().encode('{"revision":2}'), MSG_TYPE_METADATA),
       )
 
-      expect(seen).toEqual(['abc'])
       expect(frames).toEqual([{ revision: 1 }, { revision: 2 }])
       expect(offsetOf(client, session.sessionId)).toBe(3)
 
@@ -1552,61 +1468,14 @@ describe('multi-session', () => {
     expect(sessionA.sessionId).not.toBe(sessionB.sessionId)
   })
 
-  it('routes a data frame for session A only to callback A', async () => {
-    const { sessionA, sessionB, ws } = await twoSessions()
-    const seenA: string[] = []
-    const seenB: string[] = []
-    sessionA.onData((d) => seenA.push(d))
-    sessionB.onData((d) => seenB.push(d))
-
-    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('hello from A\r\n')))
-    expect(seenA).toEqual(['hello from A\r\n'])
-    expect(seenB).toEqual([])
-  })
-
-  it('routes a data frame for session B only to callback B', async () => {
-    const { sessionA, sessionB, ws } = await twoSessions()
-    const seenA: string[] = []
-    const seenB: string[] = []
-    sessionA.onData((d) => seenA.push(d))
-    sessionB.onData((d) => seenB.push(d))
-
-    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('hello from B\r\n')))
-    expect(seenA).toEqual([])
-    expect(seenB).toEqual(['hello from B\r\n'])
-  })
-
-  it('reassembles a UTF-8 rune split across two frames of A when a B frame is interleaved between the halves', async () => {
-    const { sessionA, sessionB, ws } = await twoSessions()
-    const seenA: string[] = []
-    const seenB: string[] = []
-    sessionA.onData((d) => seenA.push(d))
-    sessionB.onData((d) => seenB.push(d))
-
-    const euro = new TextEncoder().encode('€')
-    ws.deliverBinary(encodeFrame(SID, euro.slice(0, 1)))
-    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('X')))
-    ws.deliverBinary(encodeFrame(SID, euro.slice(1)))
-
-    expect(seenA.join('')).toBe('€')
-    expect(seenA.join('')).not.toContain('�')
-    expect(seenB.join('')).toBe('X')
-  })
-
   it('closing session A leaves session B usable', async () => {
     const { sessionA, sessionB, ws } = await twoSessions()
     sessionA.close()
 
-    const seenB: string[] = []
-    sessionB.onData((d) => seenB.push(d))
-
-    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('still alive\r\n')))
-    expect(seenB).toEqual(['still alive\r\n'])
-
-    const seenA: string[] = []
-    sessionA.onData((d) => seenA.push(d))
-    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('should not arrive')))
-    expect(seenA).toEqual([])
+    sessionB.send('still alive\n')
+    expect(ws.binaryFrames()).toHaveLength(1)
+    sessionA.send('should not send\n')
+    expect(ws.binaryFrames()).toHaveLength(1)
   })
 
   it('fires onExit only for the session specified in the notification', async () => {
@@ -1634,10 +1503,8 @@ describe('multi-session', () => {
     sessionA.send('echo should not send\n')
     expect(ws.binaryFrames()).toHaveLength(0)
 
-    const seenB: string[] = []
-    sessionB.onData((d) => seenB.push(d))
-    ws.deliverBinary(encodeFrame(OTHER_SID, new TextEncoder().encode('B alive\n')))
-    expect(seenB).toEqual(['B alive\n'])
+    sessionB.send('B alive\n')
+    expect(ws.binaryFrames()).toHaveLength(1)
   })
 })
 
@@ -1941,7 +1808,7 @@ describe('reconnect and reattach', () => {
     expect(resetFired).toBe(false)
   })
 
-  it('fires reset callback and renames decoder on reset response', async () => {
+  it('fires reset callback on reset response', async () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
@@ -1969,48 +1836,62 @@ describe('reconnect and reattach', () => {
     expect(resetFired).toBe(true)
   })
 
-  // DEFECT 1 regression: recreating the decoder on reset prevents stale
-  // mid-rune bytes from splicing onto the resynced stream (nocx-ao7).
-  it('recreates the per-session decoder on reset so stale mid-rune bytes are discarded', async () => {
+  it('keeps raw output byte-only while screen frames and effects survive reconnect', async () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
-
-    // Feed the session a frame that ends mid-rune: the first byte of '€'
-    // (UTF-8 E2 82 AC). The decoder now holds 0xE2, waiting for
-    // continuation bytes.
-    const euro = new TextEncoder().encode('€')
-    firstWS.deliverBinary(encodeFrame(SID, euro.slice(0, 1))) // just E2
+    // No raw-output consumer exists, including while a pane is mounting.
+    const chunk = new Uint8Array(64 * 1024).fill(0x61)
+    for (let i = 0; i < 128; i++) firstWS.deliverBinary(encodeFrame(SID, chunk))
+    vi.advanceTimersByTime(ACK_INTERVAL_MS)
+    const offset = chunk.byteLength * 128
     expect(
-      (client as unknown as { sessions: Map<string, { offset: number }> }).sessions.get(SID)
-        ?.offset,
-    ).toBe(1)
-
+      firstWS
+        .requests()
+        .filter((r) => r.method === 'ack')
+        .pop()?.params,
+    ).toEqual({
+      sessionId: SID,
+      offset,
+    })
+    const frames: unknown[] = []
+    const effects: SessionEffect[] = []
+    session.onScreenFrame((frame) => frames.push(frame))
+    session.onEffect((effect) => effects.push(effect))
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
     await Promise.resolve()
     const reconnectedWS = socket()
     reconnectedWS.serverAccepts()
-    await Promise.resolve()
-
-    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    const attach = reconnectedWS.requests().find((r) => r.method === 'attach')!
+    expect(attach.params?.offset).toBe(offset)
     reconnectedWS.deliverText({
       jsonrpc: '2.0',
-      id: attaches[0].id,
-      result: { reset: true, from: 0 },
+      id: attach.id,
+      result: { reset: false, from: offset },
     })
-    await Promise.resolve()
-
-    // After reset, deliver 'ñ' (UTF-8 C3 B1). If the stale E2 leaked,
-    // the decoder would try E2 C3 → invalid → U+FFFD, then B1 (lonely
-    // continuation) → U+FFFD. A clean decoder produces just 'ñ'.
-    const seen: string[] = []
-    session.onData((d) => seen.push(d))
-    const nTilde = new TextEncoder().encode('ñ')
-    reconnectedWS.deliverBinary(encodeFrame(SID, nTilde))
-    await Promise.resolve()
-
-    expect(seen.join('')).toBe('ñ')
-    expect(seen.join('')).not.toContain('\uFFFD')
+    await flushMicrotasks()
+    reconnectedWS.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":9}'), MSG_TYPE_METADATA),
+    )
+    reconnectedWS.deliverText({
+      jsonrpc: '2.0',
+      method: 'session.effect',
+      params: { sessionId: SID, generation: '1', effectId: '1', kind: 'bell', title: '', body: '' },
+    })
+    reconnectedWS.deliverBinary(encodeFrame(SID, new Uint8Array([0xe2, 0x82, 0xac])))
+    vi.advanceTimersByTime(ACK_INTERVAL_MS)
+    expect(frames).toEqual([{ revision: 9 }])
+    expect(effects).toHaveLength(1)
+    expect(
+      reconnectedWS
+        .requests()
+        .filter((r) => r.method === 'ack')
+        .pop()?.params,
+    ).toEqual({
+      sessionId: SID,
+      offset: offset + 3,
+    })
+    client.close()
   })
 
   it('updates offset from reset response', async () => {
@@ -2039,7 +1920,225 @@ describe('reconnect and reattach', () => {
     expect(state.get(SID)?.offset).toBe(99)
   })
 
-  it('a failed reattach delivers a loss, never a clean exit', async () => {
+  it.each([
+    {
+      code: -32000,
+      message: 'session output gap history exceeded 128 ranges; cannot safely attach',
+    },
+    { code: -32602, message: 'Invalid params' },
+    { code: -32000, message: 'unknown session', data: { reason: 'unknown-session' } },
+  ])('retains a session after an inconclusive attach refusal ($message)', async (error) => {
+    const client = new WSClient(mockDispatcher())
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+    const exits = vi.fn()
+    const errors = vi.fn()
+    const reports: { resumed: number; lost: number }[] = []
+    session.onExit(exits)
+    session.onAttachment((state) => {
+      if (state.kind === 'unavailable') errors(state.message)
+    })
+    client.onReconnectResult((report) => reports.push(report))
+    firstWS.deliverBinary(encodeFrame(SID, new Uint8Array(7)))
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+    const refusedWS = socket()
+    refusedWS.serverAccepts()
+    const attach = refusedWS.requests().find((r) => r.method === 'attach')!
+    refusedWS.deliverText({ jsonrpc: '2.0', id: attach.id, error })
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(exits).not.toHaveBeenCalled()
+    expect(errors).toHaveBeenCalledTimes(1)
+    expect(reports[reports.length - 1]).toEqual({ resumed: 0, lost: 0 })
+    expect(refusedWS.requests().filter((r) => r.method === 'attach')).toHaveLength(1)
+    expect(refusedWS.requests().some((r) => r.method === 'open')).toBe(false)
+
+    // The existing socket reconnect owner, not a second client retry loop,
+    // recovers the same handle and cursor on its next connection.
+    refusedWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+    const recoveredWS = socket()
+    recoveredWS.serverAccepts()
+    const retry = recoveredWS.requests().find((r) => r.method === 'attach')!
+    expect(retry.params).toMatchObject({ sessionId: SID, offset: 7, ...OPEN_IDENTITY })
+    recoveredWS.deliverText({
+      jsonrpc: '2.0',
+      id: retry.id,
+      result: { resumed: true, reset: false, from: 7 },
+    })
+    await flushMicrotasks()
+    const frames = vi.fn()
+    session.onScreenFrame(frames)
+    recoveredWS.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":2}'), MSG_TYPE_METADATA),
+    )
+    expect(frames).toHaveBeenCalledWith({ revision: 2 })
+    expect(exits).not.toHaveBeenCalled()
+    client.close()
+  })
+
+  it('retains the session when the socket drops during its attach', async () => {
+    const client = new WSClient(mockDispatcher())
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+    const exits = vi.fn()
+    session.onExit(exits)
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+    socket().serverAccepts()
+    expect(
+      socket()
+        .requests()
+        .filter((r) => r.method === 'attach'),
+    ).toHaveLength(1)
+    socket().serverHangsUp()
+    await flushMicrotasks()
+    expect(exits).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+    socket().serverAccepts()
+    expect(
+      socket()
+        .requests()
+        .filter((r) => r.method === 'attach'),
+    ).toHaveLength(1)
+    client.close()
+  })
+
+  it('retries only the retained session on explicit request and refuses input until attached', async () => {
+    const client = new WSClient(mockDispatcher())
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+    const exits = vi.fn()
+    session.onExit(exits)
+    firstWS.deliverBinary(encodeFrame(SID, new Uint8Array(9)))
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+    await Promise.resolve()
+    const ws = socket()
+    ws.serverAccepts()
+    const firstAttach = ws.requests().find((r) => r.method === 'attach')!
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: firstAttach.id,
+      error: { code: -32000, message: 'replay unavailable' },
+    })
+    for (let i = 0; i < 8; i++) await Promise.resolve()
+    const attachmentStates: string[] = []
+    session.onAttachment((state) => attachmentStates.push(state.kind))
+    expect(attachmentStates).toEqual(['unavailable'])
+    const restored = vi.fn()
+    client.onReconnectResult(restored)
+    await expect(session.intent('text', 'must not reach the shell')).rejects.toThrow('not attached')
+    expect(() => session.send('must not reach the shell')).toThrow('not attached')
+    expect(ws.requests().filter((r) => r.method === 'session.intent')).toHaveLength(0)
+    expect(ws.binaryFrames()).toHaveLength(0)
+
+    const retry = session.retryAttach()
+    const duplicate = session.retryAttach()
+    const attaches = ws.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(2)
+    expect(attaches[1].params).toMatchObject({ sessionId: SID, offset: 9, ...OPEN_IDENTITY })
+    await expect(session.intent('key', 'Enter')).rejects.toThrow('not attached')
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attaches[1].id,
+      result: { resumed: true, reset: false, from: 9 },
+    })
+    expect(await retry).toBe(true)
+    expect(await duplicate).toBe(true)
+    expect(attachmentStates).toEqual(['unavailable', 'attaching', 'attached'])
+    expect(restored).toHaveBeenCalledTimes(1)
+    expect(restored).toHaveBeenCalledWith({ resumed: 1, lost: 0 })
+    expect(exits).not.toHaveBeenCalled()
+    expect(ws.requests().filter((r) => r.method === 'open')).toHaveLength(0)
+    const input = session.intent('text', 'accepted')
+    const request = ws.requests().find((r) => r.method === 'session.intent')!
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: request.id,
+      result: { state: 'executed', bytesWritten: 8, fenceAfter: 9 },
+    })
+    await expect(input).resolves.toMatchObject({ state: 'executed' })
+    client.close()
+  })
+
+  it.each(['sessions.live', 'attach'] as const)(
+    'does not lose a foreign-bound session when its %s recovery request fails',
+    async (failedMethod) => {
+      const client = new WSClient(mockDispatcher())
+      const { session, firstWS } = await connectedSessionWithBackoff(client)
+      const exits = vi.fn()
+      const errors = vi.fn()
+      session.onExit(exits)
+      session.onAttachment((state) => {
+        if (state.kind === 'unavailable') errors(state.message)
+      })
+      firstWS.serverHangsUp()
+      vi.advanceTimersByTime(475)
+      await Promise.resolve()
+      const ws = socket()
+      ws.serverAccepts()
+      const attach = ws.requests().find((r) => r.method === 'attach')!
+      ws.deliverText({
+        jsonrpc: '2.0',
+        id: attach.id,
+        error: { code: -32602, message: 'foreign binding', data: { reason: 'foreign-instance' } },
+      })
+      await flushMicrotasks()
+      const listing = ws.requests().find((r) => r.method === 'sessions.live')!
+      if (failedMethod === 'sessions.live') {
+        ws.deliverText({
+          jsonrpc: '2.0',
+          id: listing.id,
+          error: { code: -32000, message: 'temporarily unavailable' },
+        })
+      } else {
+        ws.deliverText({
+          jsonrpc: '2.0',
+          id: listing.id,
+          result: {
+            sessions: [
+              {
+                sessionId: SID,
+                instanceId: READOPTED_INSTANCE,
+                sessionEpoch: 1,
+                paneId: 'pane-1',
+                replayFrom: 512,
+                attached: false,
+              },
+            ],
+          },
+        })
+        await flushMicrotasks()
+        const reclaim = ws.requests().filter((r) => r.method === 'attach')[1]
+        ws.deliverText({
+          jsonrpc: '2.0',
+          id: reclaim.id,
+          error: { code: -32000, message: 'replay temporarily unavailable' },
+        })
+      }
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+      expect(exits).not.toHaveBeenCalled()
+      expect(errors).toHaveBeenCalledTimes(1)
+      expect(ws.requests().some((r) => r.method === 'open')).toBe(false)
+      ws.serverHangsUp()
+      vi.advanceTimersByTime(475)
+      await Promise.resolve()
+      socket().serverAccepts()
+      expect(
+        socket()
+          .requests()
+          .find((r) => r.method === 'attach')?.params,
+      ).toMatchObject({
+        sessionId: SID,
+        ...OPEN_IDENTITY,
+      })
+      client.close()
+    },
+  )
+
+  it('an authoritative absent session delivers a loss, never a clean exit', async () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
@@ -2065,7 +2164,7 @@ describe('reconnect and reattach', () => {
     reconnectedWS.deliverText({
       jsonrpc: '2.0',
       id: attaches[0].id,
-      error: { code: -32602, message: 'unknown sessionId' },
+      error: { code: -32602, message: 'unknown sessionId', data: { reason: 'unknown-session' } },
     })
 
     await Promise.resolve() // P1 rejection → P2 rejection
@@ -2327,7 +2426,7 @@ describe('reconnect and reattach', () => {
     reconnectedWS.deliverText({
       jsonrpc: '2.0',
       id: bySession.get(OTHER_SID),
-      error: { code: -32602, message: 'unknown session' },
+      error: { code: -32602, message: 'unknown session', data: { reason: 'unknown-session' } },
     })
     // The aggregate chain: attach rejection → catch → Promise.all → report.
     for (let i = 0; i < 5; i++) {
@@ -2758,16 +2857,18 @@ describe('reclaiming a live session', () => {
     expect(session.awaitsIntegration).toBe(true)
   })
 
-  it('delivers the live data-plane stream after it holds the session', async () => {
+  it('delivers live screen frames after it holds the session', async () => {
     const { client, ws } = await freshClient()
     const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 8 }))
     await answerRecoveryStatus(ws, { produced: 8 })
     answerLast(ws, 'attach', { resumed: true, reset: false, from: 8 })
     const session = await reclaiming
-    const seen: string[] = []
-    session.onData((data) => seen.push(data))
-    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('output')))
-    expect(seen).toEqual(['output'])
+    const seen: unknown[] = []
+    session.onScreenFrame((frame) => seen.push(frame))
+    ws.deliverBinary(
+      encodeFrame(SID, new TextEncoder().encode('{"revision":3}'), MSG_TYPE_METADATA),
+    )
+    expect(seen).toEqual([{ revision: 3 }])
   })
 
   it('holds nothing when the claim is refused', async () => {

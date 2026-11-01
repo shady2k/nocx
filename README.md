@@ -420,7 +420,7 @@ br update <id> --claim       # claim work
 br close <id> --reason "..." # complete work, with evidence a stranger can check
 node .githooks/backlog-gate/tracker-sync.mjs publish \
   --repo "$(git rev-parse --show-toplevel)" \
-  --recipe .githooks/backlog-gate/br-tracker.mjs
+  --recipe .githooks/backlog-gate/trackers/br.mjs
 ```
 
 The sync watcher usually publishes for you. `br` never runs git, and no tracker

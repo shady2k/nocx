@@ -7,8 +7,9 @@
 // every br command here discovers that store by walking up from cwd.
 //
 // Facts this recipe relies on (measured on br 0.7.0):
-// - The tracker's settings (config.yaml, exclusive claims among them) are state
-//   like the items: they are declared as a state file, so they travel on the ref
+// - The tracker's settings (config.yaml, exclusive claims among them) and its
+//   workflow policy (policy.yaml, custom statuses and what entering one
+//   requires) are state like the items: they are declared as state files, so they travel on the ref
 //   and a second machine's connect rebuilds the same behaviour instead of the
 //   tracker's own default.
 // - A fresh store needs ONLY .beads/issues.jsonl to rebuild the database with
@@ -101,6 +102,14 @@ function storeDir(cwd) {
 // on every machine that connects. It travels on the ref and is read through the
 // same merge, never parsed as a JSON line.
 const CONFIG_PATH = '.beads/config.yaml';
+// The tracker's workflow policy (custom statuses, what entering one requires) is
+// the same kind of state: a store that moved without it silently drops the
+// project's workflow on every machine that connects, and a project once carried
+// it by hand beside the mechanism's own files.
+const POLICY_PATH = '.beads/policy.yaml';
+const SETTINGS_PATHS = [CONFIG_PATH, POLICY_PATH];
+const ISSUES_PATH = '.beads/issues.jsonl';
+const BASE_PATH = '.beads/beads.base.jsonl';
 
 // ---- machine ordinals -------------------------------------------------------
 
@@ -176,28 +185,53 @@ function checkPrefix(cwd, items) {
 // `=== <path>` markers. --order is the remote's first-parent commits from the
 // merge base to the remote tip, oldest first; --order-local names the local
 // tip, which ranks as the newest because it is being published now.
+//
+// An item is kept as its line of text until something has to read it. In a
+// store of thousands of items a sync changes a few, and parsing every item of
+// three sides held several hundred megabytes for a one-comment change (#52):
+// an item whose line is the same on both sides is the merge's answer as it
+// stands, and only an item the sides disagree on is parsed. The ancestor file
+// (beads.base.jsonl) is a copy of the items the merge writes itself, so its
+// sides are never read.
 function parseSides(file, name) {
   if (!fs.existsSync(file)) fail(`missing ${name} side file: ${file}`);
-  const sides = {};
-  let current = null;
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    const m = line.match(/^=== (.+)$/);
-    if (m) {
-      current = m[1].trim();
-      sides[current] = [];
-    } else if (current) {
-      sides[current].push(line);
-    }
-  }
+  return parseSideText(fs.readFileSync(file, 'utf8'));
+}
+function parseSideText(txt) {
+  // Sections are found by their markers and read in place: a line is a slice of
+  // the one string read, never a copy, and the ancestor's section is skipped.
+  const marks = [];
+  const re = /^=== (.+)$/gm;
+  let m;
+  while ((m = re.exec(txt))) marks.push([m[1].trim(), m.index, m.index + m[0].length + 1]);
   const out = {};
-  for (const [p, lines] of Object.entries(sides)) {
-    out[p] = p === CONFIG_PATH
-      ? lines.join('\n').replace(/\n+$/, '')
-      : lines.filter((l) => l.trim() !== '').map((l) => JSON.parse(l));
+  for (let i = 0; i < marks.length; i++) {
+    const [p, , start] = marks[i];
+    const end = i + 1 < marks.length ? marks[i + 1][1] : txt.length;
+    if (p === BASE_PATH) { out[p] = new Map(); continue; }
+    if (SETTINGS_PATHS.includes(p)) { out[p] = txt.slice(Math.min(start, end), end).replace(/\n+$/, ''); continue; }
+    const items = new Map();
+    let at = Math.min(start, end);
+    while (at < end) {
+      let nl = txt.indexOf('\n', at);
+      if (nl === -1 || nl > end) nl = end;
+      const line = txt.slice(at, nl);
+      if (line.trim() !== '') items.set(idOfLine(line), line);
+      at = nl + 1;
+    }
+    out[p] = items;
   }
   return out;
 }
 
+// One item per line, keyed by its id without parsing the line where the id
+// opens it, as this tracker's export writes it; any other line is parsed.
+const LEADING_ID = /^\{"id":"((?:[^"\\]|\\.)*)"/;
+function idOfLine(line) {
+  const m = line.match(LEADING_ID);
+  if (m && !m[1].includes('\\')) return m[1];
+  return JSON.parse(line).id;
+}
 // Fields compared for the three-way rule. `updated_at` is the tracker's own
 // order for every field; the machine clock is never consulted beyond it.
 const FIELD_ORDER = 'updated_at';
@@ -214,6 +248,15 @@ function newerByOrder(a, b) {
   return 'ours';
 }
 
+function prefixesOfIds(ids) {
+  const found = new Set();
+  for (const id of ids) {
+    if (typeof id !== 'string' || !id.includes('-')) fail(`item with unusable id ${JSON.stringify(id)}`);
+    found.add(id.slice(0, id.indexOf('-')));
+  }
+  return found;
+}
+
 function cmdMerge(argv) {
   const want = {};
   for (const k of ['ours', 'theirs', 'base', 'out', 'order', 'store']) {
@@ -227,18 +270,16 @@ function cmdMerge(argv) {
   const theirsSides = parseSides(want.theirs, 'theirs');
   const baseSides = parseSides(want.base, 'base');
 
-  const issuesPath = '.beads/issues.jsonl';
-  const basePath = '.beads/beads.base.jsonl';
   for (const s of [sides, theirsSides, baseSides]) {
-    if (!s[issuesPath]) fail(`merge: a side file does not hold ${issuesPath}`);
+    if (!s[ISSUES_PATH]) fail(`merge: a side file does not hold ${ISSUES_PATH}`);
   }
 
-  const ours = Object.fromEntries(sides[issuesPath].map((i) => [i.id, i]));
-  const theirs = Object.fromEntries(theirsSides[issuesPath].map((i) => [i.id, i]));
-  const base = Object.fromEntries(baseSides[issuesPath].map((i) => [i.id, i]));
+  const ours = sides[ISSUES_PATH];
+  const theirs = theirsSides[ISSUES_PATH];
+  const base = baseSides[ISSUES_PATH];
 
-  const op = prefixesOf(Object.values(ours));
-  const tp = prefixesOf(Object.values(theirs));
+  const op = prefixesOfIds(ours.keys());
+  const tp = prefixesOfIds(theirs.keys());
   const overlap = [...op].filter((x) => tp.has(x));
   if (overlap.length === 0 && (op.size || tp.size)) {
     fail(`store prefix mismatch between the merged sides: ours has prefix ${[...op].join(', ') || '(none)'}, theirs has ${[...tp].join(', ') || '(none)'}`);
@@ -246,14 +287,18 @@ function cmdMerge(argv) {
   if (op.size > 1 || tp.size > 1) fail(`store prefix mismatch inside a merged side (${op.size > 1 ? [...op].join(', ') : [...tp].join(', ')})`);
 
   // The unique-id space for records and recorded overwrites comes from this
-  // store's machine ordinal, so ids never collide across machines.
+  // store's machine ordinal, so ids never collide across machines. Which ids are
+  // taken is read only when a fresh one is first needed: most merges need none.
   const ordinal = thisOrdinal(want.store);
   let nextSeq = 500000;
-  const taken = new Set();
-  for (const it of [...Object.values(ours), ...Object.values(theirs)]) {
-    for (const c of it.comments || []) taken.add(String(c.id));
-  }
+  let taken = null;
   function freshId() {
+    if (!taken) {
+      taken = new Set();
+      for (const side of [ours, theirs]) {
+        for (const line of side.values()) for (const c of JSON.parse(line).comments || []) taken.add(String(c.id));
+      }
+    }
     let id;
     do {
       id = ordinal * 1000000 + nextSeq++;
@@ -262,30 +307,34 @@ function cmdMerge(argv) {
     return id;
   }
 
-  const ids = new Set([...Object.keys(base), ...Object.keys(ours), ...Object.keys(theirs)]);
+  const parse = (line) => (line === undefined ? undefined : JSON.parse(line));
+  const ids = new Set([...base.keys(), ...ours.keys(), ...theirs.keys()]);
   const merged = [];
   for (const id of ids) {
-    const b = base[id], o = ours[id], t = theirs[id];
+    const ol = ours.get(id), tl = theirs.get(id);
+    // The same line on both sides is the merge's answer for that item.
+    if (ol !== undefined && ol === tl) { merged.push([id, ol]); continue; }
+    const b = parse(base.get(id)), o = parse(ol), t = parse(tl);
     if (b && !o && !t) continue; // deleted on both sides
     if (b && !o && t) {
       if (JSON.stringify(strip(t)) === JSON.stringify(strip(b))) continue; // deleted on ours, untouched on theirs
-      merged.push({ ...t, comments: mergeComments(b, undefined, t, freshId, id, `deleted on ours`) });
+      merged.push([id, JSON.stringify({ ...t, comments: mergeComments(b, undefined, t, freshId, id, `deleted on ours`) })]);
       continue;
     }
     if (b && o && !t) {
       if (JSON.stringify(strip(o)) === JSON.stringify(strip(b))) continue;
-      merged.push({ ...o, comments: mergeComments(b, o, undefined, freshId, id, `deleted on theirs`) });
+      merged.push([id, JSON.stringify({ ...o, comments: mergeComments(b, o, undefined, freshId, id, `deleted on theirs`) })]);
       continue;
     }
     if (!b) {
       // Only on one side: keep it whole (a record that only appends).
-      const it = o && t ? pickSide(b, o, t, freshId, id) : (o || t);
-      merged.push(it);
+      if (o && t) merged.push([id, JSON.stringify(pickSide(b, o, t, freshId, id))]);
+      else merged.push([id, o ? ol : tl]);
       continue;
     }
-    merged.push(pickSide(b, o, t, freshId, id));
+    merged.push([id, JSON.stringify(pickSide(b, o, t, freshId, id))]);
   }
-  merged.sort((a, b2) => (a.id < b2.id ? -1 : 1));
+  merged.sort((a, b2) => (a[0] < b2[0] ? -1 : 1));
 
   // One item, field by field, against the common ancestor: a field only one
   // side moved away from the base takes that side, so two independent edits to
@@ -316,6 +365,9 @@ function cmdMerge(argv) {
     for (const n of notes) {
       out.comments.push({ id: freshId(), issue_id: id, author: 'tracker-sync', text: n, created_at: out[FIELD_ORDER] });
     }
+    // An item with no comments on either side keeps the tracker's own shape: an
+    // empty list it never wrote would make the item's line differ on every merge.
+    if (!out.comments.length && !('comments' in o) && !('comments' in t)) delete out.comments;
     return out;
   }
 
@@ -390,22 +442,31 @@ function cmdMerge(argv) {
   // The side that moved away from the ancestor takes the merge; two sides that moved
   // differently are a refusal for a person, exactly as two different recordings of
   // one revision are.
-  const [oc, tc, bc] = [sides[CONFIG_PATH], theirsSides[CONFIG_PATH], baseSides[CONFIG_PATH]];
-  let settings; // undefined: the merged state carries no settings file at all
-  if (oc === tc) settings = oc;
-  else if (bc === oc) settings = tc;
-  else if (bc === tc) settings = oc;
-  else fail(`the tracker's own settings (${CONFIG_PATH}) differ between the two sides and neither is the merged ancestor's: a person must decide which setting this store keeps`);
-  // The mechanism writes what --out names and leaves anything else as it is, so a
-  // merged deletion is applied here, in the store this merge runs in.
-  if (settings === undefined) fs.rmSync(path.join(process.cwd(), CONFIG_PATH), { force: true });
+  let settingsText = '';
+  for (const p of SETTINGS_PATHS) {
+    const [oc, tc, bc] = [sides[p], theirsSides[p], baseSides[p]];
+    let settings; // undefined: the merged state carries no such file at all
+    if (oc === tc) settings = oc;
+    else if (bc === oc) settings = tc;
+    else if (bc === tc) settings = oc;
+    else fail(`the tracker's own settings (${p}) differ between the two sides and neither is the merged ancestor's: a person must decide which setting this store keeps`);
+    // The mechanism writes what --out names and leaves anything else as it is, so a
+    // merged deletion is applied here, in the store this merge runs in.
+    if (settings === undefined) fs.rmSync(path.join(process.cwd(), p), { force: true });
+    else settingsText += `=== ${p}\n${settings}${settings.endsWith('\n') ? '' : '\n'}`;
+  }
 
   // Write the merged state files to --out: the merged issues.jsonl, the base
   // file as the merged ancestor, and the tracker's settings when either side has
   // them.
-  const mergedText = merged.map((i) => JSON.stringify(i)).join('\n') + (merged.length ? '\n' : '');
-  const settingsText = settings === undefined ? '' : `=== ${CONFIG_PATH}\n${settings}${settings.endsWith('\n') ? '' : '\n'}`;
-  fs.writeFileSync(want.out, `=== ${issuesPath}\n${mergedText}=== ${basePath}\n${mergedText}${settingsText}`);
+  const fd = fs.openSync(want.out, 'w');
+  try {
+    for (const p of [ISSUES_PATH, BASE_PATH]) {
+      fs.writeSync(fd, `=== ${p}\n`);
+      for (const [, line] of merged) fs.writeSync(fd, `${line}\n`);
+    }
+    fs.writeSync(fd, settingsText);
+  } finally { fs.closeSync(fd); }
   process.stdout.write(`merged ${merged.length} items\n`);
 }
 
@@ -473,10 +534,93 @@ function pruneRecovery(cwd) {
 // the rebuild left. This is the recipe's declared import command, run by the
 // mechanism on every conditional write. Nothing it does here changes what the
 // import wrote: pruning happens only after br exited with status 0.
-function cmdImport() {
-  br(['sync', '--import-only', '--rebuild'], process.cwd());
-  pruneRecovery(process.cwd());
-  process.stdout.write('imported from JSONL and rebuilt\n');
+//
+// With --before (the state files as the database last held them, in the side
+// format the merge reads), only what changed is imported. A rebuild of a store of
+// thousands of items measured 32-38 s and ~440 MB on br 0.7.0, and the mechanism
+// ran one on every merge, so two or three agents writing at once ran a machine
+// out of memory (#52). What br offers instead, measured on the same store:
+// - a plain import (no --rebuild) of a file holding only the changed items
+//   updates those and leaves every other item and the item count alone, ~7 s
+//   and ~190 MB, most of it br's own cache rebuild over the whole store;
+// - it SKIPS an item whose updated_at did not move, so a comment that arrived
+//   without moving it, or a comment id rewritten on an existing item, is not
+//   imported ("Updated: 0");
+// - a forced flush after it writes the whole state from the database again
+//   (~3 s), which is what br certifies the state file against afterwards.
+// So the partial import is checked rather than trusted: every changed item, as
+// br exports it, must equal the item it was given, or the state file is put back
+// and the store is rebuilt from it. A deleted item always rebuilds, because only
+// a rebuild removes one. Nothing changed means nothing is run at all.
+function cmdImport(argv = []) {
+  const before = opt(argv, '--before');
+  const cwd = process.cwd();
+  let why = '';
+  if (before !== undefined) {
+    const r = importChanged(cwd, before);
+    if (r.done) { process.stdout.write(`${r.done}\n`); return; }
+    why = ` (${r.rebuild})`;
+  }
+  br(['sync', '--import-only', '--rebuild'], cwd);
+  pruneRecovery(cwd);
+  process.stdout.write(`imported from JSONL and rebuilt${why}\n`);
+}
+
+// br writes no key for an empty list or an absent value, and this recipe's merge
+// may, so the two are one item: a key holding [] or null is no key.
+const canonical = (v) => (Array.isArray(v) ? v.map(canonical)
+  : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort()
+    .filter((k) => v[k] !== null && !(Array.isArray(v[k]) && v[k].length === 0)).map((k) => [k, canonical(v[k])])) : v);
+const sameItem = (a, b) => JSON.stringify(canonical(JSON.parse(a))) === JSON.stringify(canonical(JSON.parse(b)));
+
+// Import the changed items only: { done: what was done } or { rebuild: why not }.
+const PARTIAL_IMPORT_FLOOR = 50;
+function importChanged(cwd, beforeFile) {
+  if (!fs.existsSync(beforeFile)) return { rebuild: `no prior state at ${beforeFile}` };
+  const was = parseSides(beforeFile, 'before')[ISSUES_PATH];
+  if (!was) return { rebuild: `the prior state holds no ${ISSUES_PATH}` };
+  const file = path.join(storeDir(cwd), 'issues.jsonl');
+  const full = fs.readFileSync(file, 'utf8');
+  const now = parseSideText(`=== ${ISSUES_PATH}\n${full}`)[ISSUES_PATH];
+  for (const id of was.keys()) if (!now.has(id)) return { rebuild: `${id} was deleted, and only a rebuild removes an item` };
+  const changed = [...now].filter(([id, line]) => was.get(id) !== line);
+  if (!changed.length) return { done: 'nothing to import: the database already holds this state' };
+  // br's partial import costs per item what its rebuild costs for the whole
+  // store at about a tenth of it (measured: thousands of changed items ran past
+  // two minutes, a rebuild of the same store 32-38 s). A change that touches
+  // most of the store - an export format that moved with a tracker upgrade - is
+  // rebuilt.
+  if (changed.length > Math.max(PARTIAL_IMPORT_FLOOR, now.size / 10)) {
+    return { rebuild: `${changed.length} of ${now.size} items changed, which a rebuild takes in faster` };
+  }
+  // br skips an item whose updated_at is not newer than the one it holds
+  // (measured: equal, and earlier, both "Skipped ... up-to-date"), so such a
+  // change is known not to land before br is asked: a comment renumbered by the
+  // merge (two machines' comments share br's per-store counter) and an edit from
+  // a machine whose clock runs behind are the usual ones.
+  for (const [id, line] of changed) {
+    const prior = was.get(id);
+    if (prior !== undefined && !(String(JSON.parse(line)[FIELD_ORDER] ?? '') > String(JSON.parse(prior)[FIELD_ORDER] ?? ''))) {
+      return { rebuild: `${id} changed without its ${FIELD_ORDER} moving forward, which br's partial import skips` };
+    }
+  }
+  const putBack = (why) => { fs.writeFileSync(file, full); return { rebuild: why }; };
+  try {
+    fs.writeFileSync(file, changed.map(([, line]) => line).join('\n') + '\n');
+    const imp = br(['sync', '--import-only'], cwd, { allowFailure: true });
+    if (imp.status !== 0) return putBack(`the partial import failed (${imp.status}): ${(imp.stderr || imp.stdout || '').trim().split('\n')[0]}`);
+    const fl = br(['sync', '--flush-only', '--force'], cwd, { allowFailure: true });
+    if (fl.status !== 0) return putBack(`the export after the partial import failed (${fl.status}): ${(fl.stderr || fl.stdout || '').trim().split('\n')[0]}`);
+    const exported = parseSideText(`=== ${ISSUES_PATH}\n${fs.readFileSync(file, 'utf8')}`)[ISSUES_PATH];
+    for (const id of now.keys()) if (!exported.has(id)) return putBack(`${id} is missing from the export after the partial import`);
+    for (const [id, line] of changed) if (!sameItem(exported.get(id), line)) return putBack(`br did not take ${id} as given`);
+  } catch (e) {
+    return putBack(`the partial import stopped: ${e.message}`);
+  }
+  // Keep br's own merge clean: base == the file just written (facts round 2 §5).
+  fs.copyFileSync(file, path.join(storeDir(cwd), 'beads.base.jsonl'));
+  pruneRecovery(cwd);
+  return { done: `imported ${changed.length} changed item${changed.length === 1 ? '' : 's'}` };
 }
 
 // The same bound as a command of its own: the mechanism runs it when it repairs an
@@ -621,6 +765,20 @@ function opt(argv, flag, dflt) {
 // the copy and again after the export, and the whole attempt is repeated while
 // they changed: a store being written is retried, and one that will not stand
 // still is refused by name rather than exported as an older state.
+// What a store's own regular files are, so a copy taken between two writes is
+// told apart from one taken while nothing was writing.
+function storeFingerprint(store) {
+  const seen = [];
+  for (const n of fs.readdirSync(store).sort()) {
+    if (/\.lock$/.test(n)) continue;
+    const f = path.join(store, n);
+    let st;
+    try { st = fs.lstatSync(f); } catch { continue; }
+    if (st.isFile()) seen.push(`${n}:${st.size}:${st.mtimeMs}`);
+  }
+  return seen.join('|');
+}
+
 function cmdExportSide(argv) {
   const out = opt(argv, '--out');
   if (!out) fail('export-side: missing --out <folder>');
@@ -628,19 +786,7 @@ function cmdExportSide(argv) {
   const store = storeDir(cwd);
   if (!fs.existsSync(store)) fail(`export-side: no store at ${store}`);
   const copy = path.join(out, '.beads');
-  // What the store's own regular files are, so a copy taken between two writes
-  // is told apart from one taken while nothing was writing.
-  const fingerprint = () => {
-    const seen = [];
-    for (const n of fs.readdirSync(store).sort()) {
-      if (/\.lock$/.test(n)) continue;
-      const f = path.join(store, n);
-      let st;
-      try { st = fs.lstatSync(f); } catch { continue; }
-      if (st.isFile()) seen.push(`${n}:${st.size}:${st.mtimeMs}`);
-    }
-    return seen.join('|');
-  };
+  const fingerprint = () => storeFingerprint(store);
   const state = path.join(copy, 'issues.jsonl');
   let exported = false;
   for (let attempt = 0; attempt < 3 && !exported; attempt++) {
@@ -675,6 +821,60 @@ function cmdExportSide(argv) {
   if (!exported)
     fail(`export-side: the store at ${store} changed while its database was being exported three times over, so the copy may lack a write another command accepted; nothing is exported. Let the running command finish and try again`);
   process.stdout.write(`${state}\n`);
+}
+
+// ---- seed a candidate from the live database ---------------------------------
+// A conditional write runs in a candidate: a checkout of the store's last
+// commit, beside the live one, with a database of its own. Rebuilding that
+// database from the state file is the same whole-store rebuild the import
+// avoids (32-38 s and ~440 MB on thousands of items, #52), and the candidate is
+// cut from a commit the live database was just flushed into. So the live
+// database is copied instead (measured: a claim on the copy, 0.4 s), with the
+// same care export-side takes: the copy is repeated while the live store moved,
+// and refused when the live state file is not the candidate's - the database
+// then holds a write the candidate's state lacks, and br would refuse the
+// candidate's export. A refusal is not a failure: the mechanism imports instead.
+// cwd = the candidate; --from names the live store's worktree.
+const SEED_SKIP = new Set(['issues.jsonl', 'beads.base.jsonl', 'config.yaml', 'policy.yaml', '.gitignore']);
+function cmdSeed(argv) {
+  const from = opt(argv, '--from');
+  if (!from) fail('seed: missing --from <the live store>');
+  const live = storeDir(from);
+  const here = storeDir(process.cwd());
+  if (!fs.existsSync(path.join(live, 'beads.db'))) fail(`seed: no database in ${live} to copy`);
+  const same = () => {
+    try { return fs.readFileSync(path.join(live, 'issues.jsonl')).equals(fs.readFileSync(path.join(here, 'issues.jsonl'))); } catch { return false; }
+  };
+  fs.mkdirSync(here, { recursive: true });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const before = storeFingerprint(live);
+    if (!same()) fail(`seed: the live state file differs from the candidate's, so its database holds a write the candidate's state lacks; import instead`);
+    const copied = [];
+    for (const n of fs.readdirSync(live)) {
+      if (/\.lock$/.test(n) || SEED_SKIP.has(n)) continue;
+      const f = path.join(live, n);
+      let st;
+      try { st = fs.lstatSync(f); } catch { continue; }
+      // A lock is not state, a folder is br's own history or backups, and a named
+      // pipe or a socket is never opened.
+      if (!st.isFile()) continue;
+      fs.copyFileSync(f, path.join(here, n));
+      copied.push(n);
+    }
+    if (storeFingerprint(live) === before && same()) {
+      // A copied file that names the live store would route the candidate's
+      // writes back to it; br's own files name the database relatively.
+      for (const n of copied) {
+        const f = path.join(here, n);
+        if (fs.statSync(f).size < 1024 * 1024 && fs.readFileSync(f).includes(Buffer.from(path.resolve(from)))) {
+          fail(`seed: ${n} names the live store, so the copy is not isolated; import instead`);
+        }
+      }
+      process.stdout.write(`seeded the candidate's database from ${live}\n`);
+      return;
+    }
+  }
+  fail(`seed: the live store at ${live} changed while its database was being copied three times over; import instead`);
 }
 
 // ---- pointer ----------------------------------------------------------------
@@ -815,12 +1015,13 @@ const commands = {
   'pointer-env': cmdPointerEnv,
   ordinal: cmdOrdinal,
   prune: cmdPrune,
+  seed: cmdSeed,
 };
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) {
   const [cmd, ...argv] = process.argv.slice(2);
   if (!cmd || !commands[cmd]) {
-    process.stderr.write(`usage: node trackers/br.mjs <init|import|prune|merge|export-side|claim|transition|post|pointer-install|pointer-check|pointer-env|ordinal> [options]\n`);
+    process.stderr.write(`usage: node trackers/br.mjs <init|import|prune|merge|export-side|seed|claim|transition|post|pointer-install|pointer-check|pointer-env|ordinal> [options]\n`);
     process.exit(cmd ? 1 : 0);
   }
   commands[cmd](argv);
@@ -831,7 +1032,7 @@ export default {
   tracker: 'beads_rust',
   ref: 'refs/tracker/state',
   storePath: '.beads',
-  stateFiles: ['.beads/issues.jsonl', '.beads/beads.base.jsonl', '.beads/config.yaml'],
+  stateFiles: ['.beads/issues.jsonl', '.beads/beads.base.jsonl', '.beads/config.yaml', '.beads/policy.yaml'],
   export: 'br sync --flush-only',
   // How this tracker refuses a flush, and what each refusal means. The mechanism
   // knows no tracker: a refusal it does not find here is the dangerous one -
@@ -852,6 +1053,11 @@ export default {
   // The database's own state in a side file, for a flush the tracker refuses.
   exportSide: 'node <recipeFile> export-side --out <out>',
   import: 'node <recipeFile> import',
+  // The import that takes the state the database last held, and imports only
+  // what differs from it; the mechanism uses it wherever it knows that state.
+  importChanged: 'node <recipeFile> import --before <before>',
+  // A candidate's database, copied from the live store's instead of rebuilt.
+  seed: 'node <recipeFile> seed --from <live>',
   // Bounds the tracker's own database backups inside the store; the import runs it
   // too, and the mechanism runs it when it repairs an installation.
   prune: 'node <recipeFile> prune',

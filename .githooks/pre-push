@@ -24,7 +24,7 @@ done
 # status --json can return zero while reporting an unreachable remote, a
 # checkout that does not reach the store, unpublished work, or a stopped
 # supervisor. Read what it says instead of treating the exit code as the answer.
-status_json=$(node "$gate/tracker-sync.mjs" status --json --repo "$(git rev-parse --show-toplevel)" --recipe "$gate/br-tracker.mjs" </dev/null) || {
+status_json=$(node "$gate/tracker-sync.mjs" status --json --repo "$(git rev-parse --show-toplevel)" --recipe "$gate/trackers/br.mjs" </dev/null) || {
     printf 'pre-push: tracker-sync status failed; run make connect\n' >&2
     exit 2
 }

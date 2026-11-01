@@ -124,9 +124,23 @@ func (osFS) ReadDir(path string) ([]fs.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	return dirInfos(entries)
+}
+
+// dirInfos resolves the listed entries to lstat results. A name that another
+// publisher removed between the listing and its lstat is skipped, not an
+// error: two invocations share this root, and one finishing its publish
+// removes its lock and staging entries while the other is still reading the
+// directory (nocx-1ebrs.66.1.34). An entry that no longer exists is not
+// foreign data and not an unreadable directory, so the read of the directory
+// succeeded. Every other failure is real and returned.
+func dirInfos(entries []fs.DirEntry) ([]fs.FileInfo, error) {
 	infos := make([]fs.FileInfo, 0, len(entries))
 	for _, e := range entries {
 		info, err := e.Info() // lstat semantics: a symlink entry reports the link
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

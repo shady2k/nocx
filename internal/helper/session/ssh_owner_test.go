@@ -188,44 +188,26 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 	}
 	_ = tailLost
 
-	// THE INVARIANT, BOTH ENDS (spec §5.7), read from what the owner states
-	// rather than from which mechanism ended the write. A forced stop never
-	// waits on a write the far side can never complete, and it never claims a
-	// detach it did not make: writerDetached is set only when an item was
-	// still in flight when the deadline fired (owner_ssh.go's performDetach
-	// returns without it when there was nothing to detach — "a forced stop
-	// against an idle writer must not report writerDetached"). So after the
-	// stop the write must be out of flight, and the doomed chunk must have an
-	// outcome on one of the two sides: detached by this owner, or resolved by
-	// its own write before the deadline. A third state — out of flight with
-	// no outcome, or still in flight after the stop returned — is the defect.
-	//
-	// The detach MECHANISM itself is pinned deterministically next door
-	// (owner_detach_test.go, over a Process whose next write blocks until
-	// released), so this test's job is the real ssh wire: a stop that returns,
-	// an outcome that is stated, and the sibling that survives it.
+	// THE ASSERTION THIS TEST EXISTS FOR, and it stays strict: the chunk
+	// dispatched at exactly fitChunks cannot fit in what the far side's window
+	// has left (the derivation above), and this fixture never reads that
+	// channel, so it can never resolve — it can only be detached. A run in
+	// which it resolved means the far side adjusted a window this peer must
+	// never adjust: a fixture defect, said as one, never accepted as an
+	// alternative outcome (AGENTS.md: a report is not converted into silence).
+	// The fence numbers are in the failure so the next occurrence names the
+	// state it hit rather than repeating the sentence.
 	if stand.sessions.TestWriteInFlight(stuckID) {
-		t.Fatal("the forced stop returned with the stuck write still in flight: the stop did not give up on a write no peer can complete")
+		t.Fatalf("the forced stop returned with the stuck write still in flight (fence %d -> %d, %d chunks fit): the stop did not give up on a write no peer can complete",
+			fenceBefore, fenceBefore+fitChunks, fitChunks)
 	}
 	after, ferr := stand.sessions.TestCompletedFence(stuckID)
 	if ferr != nil {
 		t.Fatalf("fence after the forced stop: %v", ferr)
 	}
-	switch {
-	case writerDetached:
-		// The owner detached the doomed chunk: the bytes' fate is not claimed
-		// in either direction (errDeliveryUnknown), and the stop did not wait.
-	case after >= fenceBefore+fitChunks+1:
-		// The chunk resolved on its own before the deadline — the far side
-		// took those bytes, so there was nothing to detach and the owner says
-		// so. Not a joined write: it was no longer stuck when the stop's
-		// deadline fired. The numbers are logged because this is the state a
-		// run that expected a detach lands in, and the next CI occurrence
-		// should name it rather than repeat the assertion.
-		t.Logf("the doomed chunk resolved before the forced stop (fence %d -> %d, %d chunks fit); nothing was in flight to detach",
-			fenceBefore, after, fitChunks)
-	default:
-		t.Fatalf("the doomed chunk has no outcome after the forced stop: fence %d -> %d with %d chunks fitting, and no detach reported", fenceBefore, after, fitChunks)
+	if !writerDetached {
+		t.Fatalf("writerDetached = false after the forced stop: fence %d -> %d with %d chunks fitting, so the chunk dispatched at the gate (%d) was the one that could not fit — it resolved instead of being detached, which means the far side adjusted its window (this fixture must never read) or the detach found nothing in flight",
+			fenceBefore, after, fitChunks, fenceBefore+fitChunks+1)
 	}
 
 	// The sibling, on the SAME pooled connection, still round-trips a

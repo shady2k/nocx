@@ -440,7 +440,11 @@ rules exist to prevent.
 **A known flake is quarantined by its bead, never by a retry**
 ([ADR-xf4p9fzd](docs/decisions/xf4p9fzd-a-flaky-test-is-quarantined-by-its-open-bead.md)).
 File the flake, then add `{test, bead}` to `docs/testing/quarantine.json` with the key the
-suite printed (`go:<TestName>` or `e2e:<spec> › <title path>`, no line numbers). The
+suite printed (`go:<TestName>` or `e2e:<spec> › <title path>`, no line numbers). A commit
+that only adds an entry names the bookkeeping task publishing it, never the flake's bead:
+`merged-but-open` reads a header id as the leaf landing, and the bead must stay open for the
+entry to protect anything ([ADR-h1n5ren6](docs/decisions/h1n5ren6-a-quarantine-commit-names-the-bookkeeping-task.md);
+the rules are in [`docs/testing/quarantine.md`](docs/testing/quarantine.md)). The
 promotion then accepts a red job whose every failed test is quarantined by a bead that is
 still open, and so does the pull request's own CI
 ([ADR-0bawnmfg](docs/decisions/0bawnmfg-a-pull-requests-ci-honours-the-test-quarantine.md)):

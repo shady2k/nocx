@@ -6947,6 +6947,66 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('keys typed at an unclaimed keyboard after the write landed are the program’s before its running fact (nocx-atpw5.1.20)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, visibleBeforeMount: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const session = sessionOf(content)
+      const input = intentElementOf(content)
+      /** What the program receives as INPUT, in the order it was produced. */
+      const sent = (): unknown[] => session.intent.mock.calls.filter((call) => call[0] !== 'focus')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // THE WRITE HAS LANDED and the running fact has not been applied: the
+      // held window is spent and there is no running command yet. That is
+      // neither of the two states the earlier fixes cover, and the command is
+      // already ahead of every key in the queue.
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+        ]),
+      )
+
+      // The same focus-losing DOM operations as 66.1.19 can leave the
+      // keyboard on <body> here. A person answering `read` types at once:
+      // the letters must be adopted, not lost while the Enter after them is
+      // kept (the reported block showed `got-`).
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'h', code: 'KeyH', bubbles: true, cancelable: true }),
+      )
+      typeIntoPane(content, 'i', '\r')
+
+      await vi.waitFor(() =>
+        expect(sent()).toEqual([
+          ['paste', 'read x'],
+          ['key', 'enter'],
+          ['text', 'hi'],
+          ['key', 'enter'],
+        ]),
+      )
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
   it('keeps session intents ordered when the control call is still in flight', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard())
     try {

@@ -3783,6 +3783,15 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
+        // The running fact makes the command the owner (hasRunningCommand);
+        // the prompt_ready fact ends it. Either one closes the interval a
+        // submitted command's write opened (nocx-atpw5.1.20).
+        if (
+          this.lifecycle.state.kind === 'running' ||
+          this.lifecycle.state.kind === 'prompt_ready'
+        ) {
+          this._submittedAwaitingStart = false
+        }
         if (this.lifecycle.state.kind === 'running') {
           this._screenHandbackAwaitingBoundary = true
         }
@@ -5356,6 +5365,7 @@ export class TerminalContent extends BasePaneContent {
       // The session is gone: an origin naming it would name a machine
       // that no longer exists (B.9). True for a clean exit AND a loss.
       this._sessionExited = true
+      this._submittedAwaitingStart = false
       // Nothing this pane asks for can be applied by a session that has
       // ended, and the transport answers a resize cancelled by a close with
       // the same supersession code it answers a newer one — which is not a
@@ -8795,7 +8805,7 @@ export class TerminalContent extends BasePaneContent {
     if (this.editor?.isVisible !== false) return false
     if (e.metaKey) return false
     if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) return false
-    return this._heldRaw !== null || this.hasRunningCommand()
+    return this._heldRaw !== null || this._submittedAwaitingStart || this.hasRunningCommand()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before
@@ -8817,6 +8827,22 @@ export class TerminalContent extends BasePaneContent {
    *  window, which cancels the submission rather than flushing the interrupt
    *  behind it (see HeldWindow, and onSessionIntent, which arms this). */
   private _heldRaw: HeldWindow | null = null
+
+  /** A person's submitted command has been handed to the pty queue and its
+   *  running fact has not been applied yet (nocx-atpw5.1.20).
+   *
+   *  `_heldRaw` covers the window BEFORE that write: the keys belong after
+   *  the command and wait here for it. It covers nothing after the write —
+   *  the window is taken, the command is on the queue — and `hasRunningCommand`
+   *  covers nothing until the lifecycle fact the runtime sends behind the
+   *  bytes is applied to this pane. Between the two is a real interval in
+   *  which the command is ahead of every key and nobody says so: a keyboard
+   *  dropped by the same DOM operations 66.1.19 names refuses the keys as
+   *  unclaimed, the letters are lost and the Enter that follows the fact is
+   *  kept, so the program reading stdin is answered with an empty line. This
+   *  is the statement that interval needs, and it is cleared at the fact that
+   *  makes the command the running owner. */
+  private _submittedAwaitingStart = false
 
   /** The pane's input element (nocx-zg3k3.3.1): a real focusable textarea that
    *  the keyboard, the IME and the focus are read from, and whose position
@@ -9066,6 +9092,10 @@ export class TerminalContent extends BasePaneContent {
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
+      // The composer is back, so no submitted command can still be waiting
+      // for its start: a conventional shell may never publish one, and the
+      // next prompt is the end of the interval regardless (nocx-atpw5.1.20).
+      this._submittedAwaitingStart = false
       if (summoned) {
         // The attribute is set before show/focus and CSS takes the editor out
         // of flow, so this branch never settles or measures the scrollback.
@@ -9578,6 +9608,12 @@ export class TerminalContent extends BasePaneContent {
           focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
           sendDoc: sendLine,
         })
+        // The command is on the pane's intent queue, ahead of any key that
+        // follows it, and the running fact has not been applied yet. That is
+        // not the held window and not the running command: it is the
+        // interval an unclaimed keyboard must still be read in
+        // (nocx-atpw5.1.20).
+        if (takeKeys) this._submittedAwaitingStart = true
       } finally {
         // In a `finally`, and fail-open: a write that threw sent nothing,
         // and holding the keys anyway would swallow them for the rest of

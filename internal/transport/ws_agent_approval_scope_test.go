@@ -24,6 +24,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/providertest"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -728,7 +729,10 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 		}
 		return string(raw)
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
+			return
+		}
 		switch requests.Add(1) {
 		case 1:
 			streamToolCallChunk(w, "session.run", argsFor("df -h"))

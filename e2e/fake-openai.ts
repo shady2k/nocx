@@ -37,10 +37,12 @@
  * never a timing bet.
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import type { AddressInfo, Socket } from 'node:net'
 
 export interface FakeRequest {
   readonly id: number
+  /** Server-side TCP connection identity, stable across keep-alive requests. */
+  readonly connectionId: number
   /** The raw request body the backend sent (the OpenAI chat-completions
    *  request: model, messages, stream). */
   readonly body: string
@@ -183,12 +185,24 @@ export class FakeOpenAI {
   private readonly requests_: FakeRequest[] = []
   private readonly releases = new Map<number, () => void>()
   private nextId = 1
+  private nextConnectionId = 1
+  private readonly connections = new Map<Socket, number>()
+  private readonly closeOnReuse = new Set<number>()
+  private readonly rejectedReuses_: { connectionId: number; path: string }[] = []
 
   /** Bind 127.0.0.1:0 (OS-assigned port). Resolves with the base URL the
    *  endpoint form should be given: http://127.0.0.1:<port>/v1. */
   start(): Promise<string> {
     const { promise, resolve, reject } = Promise.withResolvers<string>()
     const server = createServer((req, res) => this.handle(req, res))
+    server.on('connection', (socket) => {
+      const id = this.nextConnectionId++
+      this.connections.set(socket, id)
+      socket.once('close', () => {
+        this.connections.delete(socket)
+        this.closeOnReuse.delete(id)
+      })
+    })
     server.once('error', reject)
     server.listen(0, '127.0.0.1', () => {
       this.server = server
@@ -197,6 +211,23 @@ export class FakeOpenAI {
       resolve(this.baseUrl_)
     })
     return promise
+  }
+
+  /** Reject the next request that reuses any previously accepted socket,
+   *  before reading its body or consuming a response script. No timeout:
+   *  this models a peer close racing with reuse, only when the spec arms it.
+   *  A client opening a fresh connection is unaffected. */
+  closeOnNextReuse(): readonly number[] {
+    if (!this.server) throw new Error('fake-openai: not started')
+    this.closeOnReuse.clear()
+    for (const request of this.requests_) this.closeOnReuse.add(request.connectionId)
+    if (this.closeOnReuse.size === 0) throw new Error('fake-openai: no previous request')
+    return [...this.closeOnReuse]
+  }
+
+  /** Requests rejected at the reuse boundary, not accepted model calls. */
+  rejectedReuses(): readonly { connectionId: number; path: string }[] {
+    return this.rejectedReuses_.map((r) => ({ ...r }))
   }
 
   /** The base URL the endpoint form should be given
@@ -306,6 +337,13 @@ export class FakeOpenAI {
   }
 
   private handle(req: IncomingMessage, res: ServerResponse): void {
+    const connectionId = this.connections.get(req.socket)!
+    if (this.closeOnReuse.has(connectionId)) {
+      this.closeOnReuse.clear()
+      this.rejectedReuses_.push({ connectionId, path: req.url ?? '' })
+      req.socket.destroy()
+      return
+    }
     const id = this.nextId++
     let body = ''
     req.on('data', (chunk: Buffer) => {
@@ -314,6 +352,7 @@ export class FakeOpenAI {
     req.on('end', () => {
       const record: FakeRequest = {
         id,
+        connectionId,
         body,
         authorization: req.headers.authorization ?? '',
         path: req.url ?? '',

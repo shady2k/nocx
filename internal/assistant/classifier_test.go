@@ -36,6 +36,7 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/providertest"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -109,7 +110,10 @@ type failCountingServer struct {
 
 func newFailCountingServer() *failCountingServer {
 	f := &failCountingServer{}
-	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !providertest.ConsumeRequestBeforeResponse(w, r) {
+			return
+		}
 		f.requests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

@@ -81,6 +81,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		forwards:        make(map[proto.ForwardID]*Forward),
 		parkedForwards:  make(map[proto.ForwardID][]proto.ForwardedTCPIPEvent),
 		done:            make(chan struct{}),
+		closed:          make(chan struct{}),
 		hsCh:            make(chan error, 1),
 	}
 	// The reverse handlers' lifetime (reverse.go): the CONNECTION's, not the
@@ -122,15 +123,36 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 
 	// The transport-loss watcher: the lane's connection died under us. This
 	// is the deterministic answer when a handshake failure races the loss.
+	//
+	// IT ALSO ENDS WHEN THIS SIDE ENDS THE CLIENT, and that arm is not
+	// tidiness: conn.Done reports a loss that is not ours and never fires for
+	// our own Close (SocketConn's Done says so in as many words), so a watcher
+	// that watched only the lane stayed parked after every client the
+	// coordinator closed — one goroutine per pane close, per helper retirement,
+	// per shutdown, for the life of the process.
 	go func() {
-		<-c.conn.Done()
-		c.lose(c.conn.LostErr())
+		select {
+		case <-c.conn.Done():
+			c.lose(c.conn.LostErr())
+		case <-c.closed:
+		}
 	}()
 
 	// The pump scans for the sentinel, then feeds the decoder. It delivers
 	// the handshake outcome on hsCh exactly once, and otherwise runs until
 	// the stream ends.
 	go c.pump()
+
+	// A Dial that fails leaves the lane to its caller, so the loss watcher
+	// above must not outlive it either: the caller closes the lane, and a
+	// SocketConn's Done does not fire for that, which is the same reason the
+	// watcher watches this side's Close.
+	dialled := false
+	defer func() {
+		if !dialled {
+			c.stopLossWatch()
+		}
+	}()
 
 	deadline := time.NewTimer(cfg.SentinelTTL)
 	defer deadline.Stop()
@@ -161,6 +183,7 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	case <-deadline.C:
 		return nil, ErrSentinelTimeout
 	}
+	dialled = true
 	return c, nil
 }
 

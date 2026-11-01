@@ -643,9 +643,13 @@ func realHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
-		h.Register(helpersession.New(helpersession.Options{
+		sessions := helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
-		}))
+		})
+		// The peer IS this test's helper process, so its sessions end with the
+		// connection that served them (nocx-1ebrs.66.1.29).
+		defer sessions.Close()
+		h.Register(sessions)
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}

@@ -16,7 +16,7 @@ import { createSignal, type Accessor } from 'solid-js'
 
 import { CheckForUpdate } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { log } from './log'
-import type { UpdateController } from './update-controller'
+import type { UpdateController, UpdateOffer } from './update-controller'
 
 /** The persisted setting's road into the window (nocx-1ebrs.35.1, ADR-0097):
  *  the channel is stored by the backend's settings store, and the check runs
@@ -100,7 +100,15 @@ export function createUpdateCheck(
       const info = await CheckForUpdate()
       setError(null)
       if (info) {
-        notice.showAvailable(info.Version, info.NotesURL)
+        // The build behind the offer, from the signed manifest the check
+        // verified: the notice names it, and on nightly it is what
+        // distinguishes an offered build from the one already running
+        // (nocx-vh2hr.1.5).
+        const offer: UpdateOffer = {
+          channel: info.Channel,
+          build: { commit: info.Commit, builtAt: info.BuiltAt },
+        }
+        notice.showAvailable(info.Version, info.NotesURL, offer)
         const found: UpdateCheckOutcome = {
           kind: 'available',
           version: info.Version,

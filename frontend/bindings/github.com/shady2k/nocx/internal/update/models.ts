@@ -13,6 +13,9 @@ import { Create as $Create } from "@wailsio/runtime";
 export class UpdateInfo {
     "Version": string;
     "NotesURL": string;
+    "Channel": string;
+    "Commit": string;
+    "BuiltAt": string;
     "URL": string;
     "SHA256": string;
     "Size": number;
@@ -24,6 +27,15 @@ export class UpdateInfo {
         }
         if (!("NotesURL" in $$source)) {
             this["NotesURL"] = "";
+        }
+        if (!("Channel" in $$source)) {
+            this["Channel"] = "";
+        }
+        if (!("Commit" in $$source)) {
+            this["Commit"] = "";
+        }
+        if (!("BuiltAt" in $$source)) {
+            this["BuiltAt"] = "";
         }
         if (!("URL" in $$source)) {
             this["URL"] = "";

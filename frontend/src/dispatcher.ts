@@ -74,6 +74,40 @@ const OUTBOUND_STALLED = 'outbound.stalled'
 const SATURATION_TOAST_MESSAGE =
   'The terminal is busy — that action was refused. Try again in a moment.'
 
+/**
+ * WHAT IS HOLDING THE TERMINAL, in the person's words (nocx-3an1s.1.1).
+ *
+ * A refusal carries `scope`: the backend admission that refused the work, set
+ * from server vocabulary at the composition root (`capability.GateConfig`…
+ * and the execution lane's own name) and never request text. A refusal that
+ * says only "busy" leaves the person with nothing to act on — the owner saw
+ * the toast while no command of theirs was running, which is exactly what a
+ * background write in another surface looks like. Naming the domain is as
+ * specific as the backend's answer is: the admission knows the resource, not
+ * the caller's method.
+ *
+ * An unknown scope falls back to the generic sentence rather than inventing a
+ * cause; a new admission is a new row here, deliberately.
+ */
+const SATURATION_HOLDERS: Record<string, string> = {
+  config: 'a settings or connections change is still being saved',
+  session: 'another pane is still completing a terminal operation',
+  vault: 'the vault is still being used',
+  content: 'another command or answer is still being recorded',
+  git: 'a git operation is still running',
+  filesystem: 'a file operation is still running',
+  api: 'an API request is still running',
+}
+
+/** The toast's sentence for one refusal, naming the holder where the scope
+ *  names a domain this build knows. */
+function saturationMessage(scope?: string): string {
+  const holder = scope === undefined ? undefined : SATURATION_HOLDERS[scope]
+  return holder === undefined
+    ? SATURATION_TOAST_MESSAGE
+    : `The terminal is busy — ${holder}. Try again in a moment.`
+}
+
 // null = no saturation toast raised yet. Nullable on purpose: a numeric
 // sentinel of 0 would suppress the FIRST toast under a fake clock that
 // starts at epoch (Date.now() === 0 in tests).
@@ -214,11 +248,10 @@ export class Dispatcher {
     this.subscribe('control.saturated', (params: unknown) => {
       // Consume the generated params type (the contract file must be
       // reachable from main() — dead-exports ratchet). The notification's
-      // shape is the contract; the toast does not read it, so the cast is
-      // the consumption.
-      const _: ControlSaturatedNotification = params as ControlSaturatedNotification
-      void _
-      this.raiseSaturationToast()
+      // shape is the contract: `scope` is what it names, and the toast uses
+      // it to say what holds the terminal (nocx-3an1s.1.1).
+      const note = params as ControlSaturatedNotification
+      this.raiseSaturationToast(typeof note.scope === 'string' ? note.scope : undefined)
     })
     this.subscribe(OUTBOUND_STALLED, () => {
       // The OUTBOUND twin of control.saturated, and it needs the opposite
@@ -855,7 +888,8 @@ export class Dispatcher {
    */
   private handleSaturationData(data: unknown): void {
     if (!isSaturationData(data)) return
-    this.raiseSaturationToast()
+    const scope = (data as { scope?: unknown }).scope
+    this.raiseSaturationToast(typeof scope === 'string' ? scope : undefined)
   }
 
   /**
@@ -864,7 +898,7 @@ export class Dispatcher {
    * so the server emits the notification instead of an error — it must be
    * visible the same way).
    */
-  private raiseSaturationToast(): void {
+  private raiseSaturationToast(scope?: string): void {
     const now = Date.now()
     if (
       lastSaturationToastAt !== null &&
@@ -882,8 +916,9 @@ export class Dispatcher {
     // failure is logged rather than swallowed. A refusal the user is never
     // told about is the exact degrade this whole surface exists to prevent —
     // it would be perverse for the notifier to go quiet without a trace.
+    const message = saturationMessage(scope)
     void import('./ui/toast')
-      .then((m) => m.showToast({ level: 'danger', message: SATURATION_TOAST_MESSAGE }))
+      .then((m) => m.showToast({ level: 'danger', message }))
       .catch((err: unknown) => {
         log.error('saturation toast could not be shown', { error: String(err) })
       })

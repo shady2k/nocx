@@ -53,34 +53,141 @@ test.describe('enhanced input raw routing', () => {
   // Enter after it is kept — the command never sees the answer a person typed.
   //
   // THIS TEST DOES NOT WAIT FOR FOCUS, and that is its subject: the assertion is
-  // that the keys reach the program wherever the keyboard happens to be. The
-  // unclaimed state is made certain rather than hoped for — on WebKit it is what
-  // the engine's own timing produces, and a test that waited for the accident
-  // would be the test that stopped exercising the window.
+  // that the keys reach the program wherever the keyboard happens to be.
+  //
+  // WHERE THE UNCLAIMED STATE IS MADE IS THE WHOLE OF 66.1.27. The product takes
+  // the keyboard back after Enter, deliberately and twice — at the running fact
+  // and again when the deferred write lands (terminal-content.ts,
+  // `takeKeyboardToGridAfterSubmit` and `submitCommand`'s focusGrid). A blur
+  // inside that window is therefore undone at a moment the test cannot see: on
+  // chromium the state between a blur and the very next round trip came back
+  // claimed, so this test's own premise assertion failed while the adoption
+  // itself was fine (CI run 40866954718, `Received: false`; 3 of 20 locally for
+  // the same reason). The old version asserted a state that scheduling decided.
+  //
+  // So the state is made where nothing is left to undo it: the command prints a
+  // marker first, and the marker's presence proves the write — and its repair —
+  // has already landed. Only then is the keyboard taken away. A keyboard lost to
+  // a later DOM operation is exactly this state, and it is the one 66.1.19 is
+  // about.
   test('keys typed while the keyboard is unclaimed still reach the program', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
     await promptReady(page)
 
-    await page.keyboard.type('read x; printf \'got-%s\\n\' "$x"')
+    // The marker is assembled by the shell, so it does not occur in the command
+    // text, and it is printed BEFORE `read` blocks: seeing it proves the command
+    // reached the pty, which is after the last repair the submit brings.
+    await page.keyboard.type("printf 'G%s-%s\\n' O zz; read x; printf 'got-%s\\n' \"$x\"")
     await page.keyboard.press('Enter')
+    await expect(page.locator('.cmd-block', { hasText: 'GO-zz' }).first()).toBeVisible()
 
-    // The keyboard was handed to the grid at commit; take it away again before
-    // the running fact lands, exactly as a display:none host or the live
-    // region's move does. NO FOCUS GATE AFTER THIS — the person believes the
-    // keys are theirs, and the product is what has to be right about it.
+    // The keyboard was handed to the grid at commit; take it away again exactly
+    // as a display:none host or the live region's move does. NO FOCUS GATE AFTER
+    // THIS — the person believes the keys are theirs, and the product is what has
+    // to be right about it.
     await page.evaluate(() => {
       const holder = document.activeElement
       if (holder instanceof HTMLElement) holder.blur()
     })
-    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+
+    // AND THE PREMISE IS READ WHERE IT IS CONSUMED. An observer on the document
+    // records who held the keyboard at each keydown the browser dispatches, so
+    // the claim this test makes — the keys were typed at a keyboard nobody held
+    // — is checked at the keystroke rather than a round trip earlier. Without
+    // it, a keyboard claimed in between would let the test pass on the ordinary
+    // path and measure nothing.
+    await page.evaluate(() => {
+      const record = window as unknown as { __unclaimedKeys: string[] }
+      record.__unclaimedKeys = []
+      document.addEventListener(
+        'keydown',
+        (e) => {
+          const holder = document.activeElement
+          record.__unclaimedKeys.push(holder === document.body ? e.key : `claimed:${e.key}`)
+        },
+        true,
+      )
+    })
 
     await page.keyboard.type('hello')
     await page.keyboard.press('Enter')
 
+    // The first letter was dispatched at <body>: the keyboard really was
+    // unclaimed when the answer began.
+    const first = await page.evaluate(
+      () => (window as unknown as { __unclaimedKeys: string[] }).__unclaimedKeys[0],
+    )
+    expect(first).toBe('h')
+
     // The completed block proves `read` saw the letters, not that a DOM
     // property moved: the bytes a person typed reached the pty.
+    await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
+      timeout: 5000,
+    })
+  })
+
+  test('unclaimed keys during submit reach the command after its write', async ({ page }) => {
+    // Hold the real submit RPC at the socket boundary. This makes the interval
+    // before its response and the command write observable without a timer.
+    await page.addInitScript(() => {
+      const state = window as unknown as {
+        __heldSubmit?: { socket: WebSocket; data: string }
+        __submitKeys: string[]
+      }
+      state.__submitKeys = []
+      const send = WebSocket.prototype.send
+      WebSocket.prototype.send = function (data) {
+        if (typeof data === 'string') {
+          const message = JSON.parse(data) as { method?: string }
+          if (message.method === 'lifecycle.submitAttempt' && !state.__heldSubmit) {
+            state.__heldSubmit = { socket: this, data }
+            return
+          }
+        }
+        send.call(this, data)
+      }
+      document.addEventListener(
+        'keydown',
+        (event) => {
+          if (state.__heldSubmit) {
+            state.__submitKeys.push(
+              document.activeElement === document.body ? event.key : `claimed:${event.key}`,
+            )
+          }
+        },
+        true,
+      )
+    })
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await promptReady(page)
+    await page.keyboard.type('read x; printf \'got-%s\\n\' "$x"')
+    await page.keyboard.press('Enter')
+    await page.waitForFunction(() =>
+      Boolean((window as unknown as { __heldSubmit?: unknown }).__heldSubmit),
+    )
+
+    // The RPC has not left the renderer: neither its running fact nor its
+    // deferred focus repair can overtake this blur or these keystrokes.
+    await page.evaluate(() => {
+      const holder = document.activeElement
+      if (holder instanceof HTMLElement) holder.blur()
+    })
+    await page.keyboard.type('hello')
+    await page.keyboard.press('Enter')
+    const keys = await page.evaluate(
+      () => (window as unknown as { __submitKeys: string[] }).__submitKeys,
+    )
+    expect(keys[0]).toBe('h')
+
+    // Let the actual backend process the held request. The answer must have
+    // been adopted and queued behind the command, not lost or sent before it.
+    await page.evaluate(() => {
+      const state = window as unknown as { __heldSubmit: { socket: WebSocket; data: string } }
+      state.__heldSubmit.socket.send(state.__heldSubmit.data)
+    })
     await expect(page.locator('.cmd-block', { hasText: 'got-hello' }).first()).toBeVisible({
       timeout: 5000,
     })

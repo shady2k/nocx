@@ -58,6 +58,11 @@ func newGuardedHTTPClient(logger log.Logger, resolve func(ctx context.Context, h
 		Route:     route,
 		Log:       logger,
 	})
+	// Completion POSTs are not safely replayable: a lost response may
+	// already have been billed. Use fresh connections instead of racing a
+	// provider's idle close on a pooled socket. This also applies to model
+	// discovery through this client; it must not seed an idle connection.
+	pt.Inner.DisableKeepAlives = true
 	tr := &guardedTransport{Transport: pt, inner: pt.Inner, proxy: pt.Proxy}
 	return &http.Client{
 		// The wire tap is OUTSIDE the guard, so what it records is what the

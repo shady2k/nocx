@@ -1754,6 +1754,54 @@ func TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock(t *testing.
 // TestBlockCleared_OverTheWireConformsToContract validates the REAL result
 // off the real socket (AGENTS.md rule 5's third check), rather than a
 // payload the test built.
+// TestBlockClearBoundary_DoesNotKeepAnIntervalWhoseCompletionArrived
+// (nocx-atpw5.1.12): a command's end reaches the coordinator twice, on two
+// carriers ADR-0074 says are ordered independently — the authenticated
+// completion and the fence's sighting. The client's prompt returns on the
+// completion, so a person who types `clear` the moment the prompt is back can
+// have the erase sighted while the rows plane has not yet delivered the
+// previous interval's end marker. That interval is over all the same: its
+// authenticated completion has arrived, so the erase cannot be inside it, and
+// the block it left must not be the one the client is told to keep.
+func TestBlockClearBoundary_DoesNotKeepAnIntervalWhoseCompletionArrived(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+
+	// A finishes. The completion is the half the client's prompt_ready
+	// follows, so it has arrived by the time a person can type `clear`; the
+	// fence's own sighting — a rows-plane event — has not.
+	fence := lifecycleFence(0x61)
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(before), 0, fence)))
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	msg, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID != nil {
+		t.Fatalf("keepEntryId = %q, want null: %q's authenticated completion has arrived, so the erase cannot be inside its interval",
+			*params.KeepEntryID, before)
+	}
+}
+
 func TestBlockCleared_OverTheWireConformsToContract(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	createSessionRow(t, db, sid)

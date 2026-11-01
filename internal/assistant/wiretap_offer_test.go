@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/shady2k/nocx/internal/content"
 	internalLog "github.com/shady2k/nocx/internal/log"
@@ -235,5 +236,69 @@ func TestWireTap_LogsEmptyStructuralOffer(t *testing.T) {
 	}
 	if tools, ok := record["tools"].([]any); !ok || len(tools) != 0 {
 		t.Fatalf("tools = %v, want []", record["tools"])
+	}
+}
+
+// A transport may return response headers while its request-body goroutine is
+// still finishing. Completion must wait for that goroutine's diagnostics,
+// rather than treating the start of recording as the end of recording.
+func TestWireTap_RequestCompletionWaitsForOfferLog(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs bytes.Buffer
+		logger := internalLog.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		recorder := &heldRequestRecorder{started: make(chan struct{}), release: make(chan struct{})}
+		readDone := make(chan struct{})
+		inner := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			go func() {
+				_, _ = io.Copy(io.Discard, req.Body)
+				close(readDone)
+			}()
+			<-recorder.started
+			return &http.Response{Status: "200 OK", StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		})
+		grant := content.Grant{}
+		ctx := WithWireIdentity(context.Background(), "run-7", "entry-7")
+		ctx = WithWireToolOfferState(ctx, "run-7", &grant, NewWireToolOfferState())
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.test/v1", strings.NewReader(`{"tools":[{"function":{"name":"session.run"}}]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tap := newWireTapWith(inner, "", recorder, logger)
+		returned := make(chan struct{})
+		var resp *http.Response
+		var exchangeErr error
+		go func() {
+			resp, exchangeErr = tap.RoundTrip(req)
+			close(returned)
+		}()
+		synctest.Wait()
+		select {
+		case <-returned:
+			t.Error("exchange completed while request diagnostics were still blocked before the offer log")
+		default:
+		}
+		close(recorder.release)
+		<-returned
+		<-readDone
+		if exchangeErr != nil {
+			t.Fatal(exchangeErr)
+		}
+		_ = resp.Body.Close()
+		record := lineWithMsg(t, logs.Bytes(), "agent ask: tools offered")
+		if record["run"] != "run-7" || record["count"] != float64(1) {
+			t.Fatalf("completed exchange offer = %v, want run-7 with one tool", record)
+		}
+	})
+}
+
+type heldRequestRecorder struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (r *heldRequestRecorder) RecordWire(_ context.Context, _, _, kind string, _ []byte, _ bool) {
+	if kind == "request" {
+		close(r.started)
+		<-r.release
 	}
 }

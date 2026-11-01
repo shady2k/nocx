@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -407,5 +408,67 @@ func TestGuardedHTTPClient_IPv6Loopback(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "ok" {
 		t.Fatalf("body = %q, want ok", body)
+	}
+}
+
+// A provider closing an idle pooled socket at the next request must not
+// turn a completion into an ambiguous, potentially billed failure. Reject
+// reused connections before responding; no timer and no replay are involved.
+func TestGuardedHTTPClient_CompletionsUseFreshConnections(t *testing.T) {
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	connections := make(chan string, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connections <- r.RemoteAddr
+		mu.Lock()
+		reused := seen[r.RemoteAddr]
+		seen[r.RemoteAddr] = true
+		mu.Unlock()
+		if reused {
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("response writer cannot hijack the reused connection")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack reused connection: %v", err)
+				return
+			}
+			_ = conn.Close()
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = io.WriteString(w, "delivered")
+	}))
+	defer srv.Close()
+	cl := newGuardedHTTPClient(nil, nil, nil)
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPost} {
+		req, err := http.NewRequest(method, srv.URL, strings.NewReader("question"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatalf("%s failed at the reuse boundary: %v", method, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil || string(body) != "delivered" {
+			t.Fatalf("%s body = %q, err = %v", method, body, err)
+		}
+	}
+	close(connections)
+	unique := make(map[string]bool)
+	count := 0
+	for addr := range connections {
+		count++
+		if unique[addr] {
+			t.Fatalf("request reused connection %s", addr)
+		}
+		unique[addr] = true
+	}
+	if count != 3 {
+		t.Fatalf("provider received %d requests, want exactly 3 (no replay)", count)
 	}
 }

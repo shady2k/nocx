@@ -26,10 +26,6 @@
       "bead": "nocx-atpw5.1.3"
     },
     {
-      "test": "e2e:e2e/vault-settings.spec.ts › Vault settings — reissue recovery code › reissue recovery code then unseal with new code and connect",
-      "bead": "nocx-1ebrs.47"
-    },
-    {
       "test": "e2e:e2e/agent-ask.spec.ts › agent ask about a frozen block (nocx-x8s2.2) › a second ask while the first streams lands its deltas on the right entry",
       "bead": "nocx-1ebrs.73.7"
     },

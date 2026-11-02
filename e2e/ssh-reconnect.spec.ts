@@ -118,14 +118,25 @@ async function openConnection(page: Page, profileName: string): Promise<void> {
   const search = page.locator('.quick-connect__search input')
   await expect(search).toBeVisible()
   await search.fill(profileName)
-  // Wait for the saved row before Enter. The palette renders its search box
-  // before its providers have answered, and on an EMPTY list Enter used to
-  // reach the ad-hoc "Connect to <host>" fallback — dialling root@<the profile
-  // name> with no credential, which is what CI caught (nocx-k1691). The row is
-  // the observable state that says the saved profile is the thing Enter picks.
-  await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
-    timeout: 10_000,
+  // Wait for the SAVED row before Enter — and say saved, not "some row whose
+  // text contains the name".
+  //
+  // The palette renders its search box before its providers have answered, and
+  // on an EMPTY list Enter used to reach the ad-hoc "Connect to <host>"
+  // fallback — dialling root@<the profile name> with no credential, which is
+  // what CI caught (nocx-k1691). The old guard here was
+  // `.quick-connect__item:has-text(<name>)`, and the fallback row's own label
+  // CONTAINS that name: `Connect to e2e-reconnect-<n>`. So the guard passed on
+  // exactly the row it existed to exclude, Enter dialled the profile's name,
+  // and the run died in DNS with
+  // `lookup e2e-reconnect-<n> ... no such host` while the editor stayed hidden
+  // (nocx-atpw5.1.31). The saved row is the non-system one, and it must also be
+  // the SELECTED one, because Enter activates the selection.
+  const savedRow = page.locator('.quick-connect__item:not(.quick-connect__item--system)', {
+    hasText: profileName,
   })
+  await expect(savedRow).toBeVisible({ timeout: 10_000 })
+  await expect(savedRow).toHaveAttribute('aria-selected', 'true')
   await page.keyboard.press('Enter')
   await expect(page.locator(EDITOR)).toBeVisible({ timeout: 30_000 })
 }

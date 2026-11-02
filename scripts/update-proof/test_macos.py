@@ -90,6 +90,42 @@ class VersionTests(unittest.TestCase):
             proof.parse_version("Usage: nocx [--version]\n")
 
 
+class ArgumentTests(unittest.TestCase):
+    """The driver has to START before it can prove anything.
+
+    Nightly 41398991857 died in main() before its first step:
+    `AttributeError: 'int' object has no attribute 'resolve'`. The
+    normalisation resolved EVERY argument, and `--ui-timeout` is an int.
+    """
+
+    # The exact command line nightly.yml's prove-macos step runs, with paths
+    # relative to the runner's workspace as they are there.
+    NIGHTLY = [
+        "--previous-manifest", "proof-inputs/previous/manifest.json",
+        "--previous-signature", "proof-inputs/previous/manifest.json.sig",
+        "--candidate-manifest", "proof-inputs/candidate/manifest.json",
+        "--candidate-signature", "proof-inputs/candidate/manifest.json.sig",
+        "--verifier", "/tmp/manifest-sign",
+        "--work", "/tmp/nocx-macos-proof",
+        "--evidence", "proof-results/macos.json",
+    ]
+
+    def test_the_nightly_command_line_is_normalised_and_starts(self):
+        args = proof.parse_arguments(self.NIGHTLY)
+        self.assertIsInstance(args.ui_timeout, int)
+        self.assertEqual(args.ui_timeout, 300, "the default the workflow relies on")
+        self.assertEqual(str(args.work), "/tmp/nocx-macos-proof")
+        self.assertEqual(str(args.evidence), str(Path("proof-results/macos.json").resolve()))
+        self.assertEqual(str(args.previous_manifest),
+                         str(Path("proof-inputs/previous/manifest.json").resolve()))
+        self.assertIsInstance(args.previous_signature, Path)
+
+    def test_an_explicit_ui_timeout_is_kept_as_an_integer(self):
+        args = proof.parse_arguments(self.NIGHTLY + ["--ui-timeout", "45"])
+        self.assertEqual(args.ui_timeout, 45)
+        self.assertIsInstance(args.work, Path)
+
+
 class LayoutTests(unittest.TestCase):
     def test_the_layout_is_the_products_own(self):
         layout = proof.install_layout("/Users/runner/proof/home")

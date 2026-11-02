@@ -47,6 +47,29 @@ def wait_for(description, probe, timeout=120, describe=None):
     raise ProofError("not observed: " + description)
 
 
+def application_log(home):
+    """Where a release build on Linux writes its OWN log.
+
+    Read from the layout the product defines, never guessed: the driver hands
+    the app `XDG_DATA_HOME=<work>/home/data`, internal/storage's Linux data
+    directory is `<XDG_DATA_HOME>/nocx`, and internal/app writes `nocx.log`
+    inside it. This is the file the app describes itself in; the launcher's
+    stdout (`app.log`) is only what the process printed, and the candidate the
+    PREVIOUS build launches inherits nothing of it (nocx-vh2hr.1.8), so this is
+    the only account of a candidate that ran and did not finalise.
+    """
+    return Path(home) / "data" / "nocx" / "nocx.log"
+
+
+def log_tail(path, lines=40):
+    """The last `lines` of a file, or '' when it is not there yet."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
 def descendants(node):
     """Every accessible at or below `node`; objects that went away are skipped.
 
@@ -328,6 +351,7 @@ class RestartObservation:
                        "version change requires candidate-only coordinator")
         self.identities, self.install, self.old_windows = identities, install, old_windows
         self.home, self.journal, self.backup = home, journal, backup
+        self.log = application_log(home)
         self.processes = []
         self.windows = []
         self.servers = []
@@ -347,10 +371,16 @@ class RestartObservation:
 
     def describe(self):
         observed = [p["sha256"] for p in self.processes if "nocx-server" in p["executable"]]
-        return (f"{self.policy}; expected coordinator SHA-256={sorted(self.permitted)}; "
-                f"observed coordinator SHA-256={observed}; candidate windows="
-                f"{[p['pid'] for p in self.windows]}; old window running={self.old_still_running}; "
-                f"journal exists={self.journal.exists()}; backup exists={self.backup.exists()}")
+        reading = (f"{self.policy}; expected coordinator SHA-256={sorted(self.permitted)}; "
+                   f"observed coordinator SHA-256={observed}; candidate windows="
+                   f"{[p['pid'] for p in self.windows]}; old window running={self.old_still_running}; "
+                   f"journal exists={self.journal.exists()}; backup exists={self.backup.exists()}")
+        # THE CANDIDATE'S OWN WORDS. The window that has to finalise writes its
+        # startup, its reconciliation and its pair judgment to this file, and
+        # nothing else in the proof can see them (nocx-vh2hr.1.10).
+        tail = log_tail(self.log)
+        return reading + ("; app log tail: " + tail if tail
+                          else f"; app log absent at {self.log}")
 
 
 def require_lower_probe(channel, lower, previous, candidate):
@@ -457,6 +487,7 @@ def run(args, evidence):
                                    start_new_session=True, cwd=home)
     except Exception:
         app_log.close()
+        evidence["applicationLog"] = log_tail(application_log(home), 200)
         relay.close()
         raise
     evidence["initialLauncherPID"] = process.pid
@@ -685,6 +716,14 @@ def main():
         run(args, evidence)
     except Exception as error:
         evidence["error"] = str(error)
+        # THE PROOF'S ONLY ACCOUNT of a candidate that ran and did not report.
+        # The launcher's stdout stops at the previous window's last line, and
+        # the candidate it starts inherits none of it (nocx-vh2hr.1.8); the
+        # app's own log is where that window said what it did.
+        tail = log_tail(application_log(Path(args.work).resolve() / "home"))
+        print(str(error), file=sys.stderr)
+        print("--- the application's own log ---", file=sys.stderr)
+        print(tail if tail else "(no log: the app never wrote one)", file=sys.stderr)
         raise
     finally:
         args.evidence.parent.mkdir(parents=True, exist_ok=True)

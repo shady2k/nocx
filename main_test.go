@@ -31,6 +31,21 @@ import (
 	"github.com/shady2k/nocx/internal/version"
 )
 
+// The restarted window is the only account of a finalisation that refuses or
+// a first pane that never opens, and the proof reads this process's stream.
+// A nil Stdout is /dev/null; that is how a nightly that stopped finalising sent
+// its whole startup, including the reason, to nothing (nocx-vh2hr.1.8).
+func TestTheRestartedWindowKeepsThisWindowsOutput(t *testing.T) {
+	cmd := installedApplicationCommand("linux", "/chosen/nocx.AppImage")
+	if cmd.Path != "/chosen/nocx.AppImage" {
+		t.Fatalf("the restart launches %q, want the installed build", cmd.Path)
+	}
+	if cmd.Stdout != os.Stdout || cmd.Stderr != os.Stderr {
+		t.Fatalf("the restarted window must write where this one writes: stdout=%v stderr=%v",
+			cmd.Stdout, cmd.Stderr)
+	}
+}
+
 func TestRestartWindowStartsInstalledPathBeforeQuitting(t *testing.T) {
 	started := ""
 	quit := 0

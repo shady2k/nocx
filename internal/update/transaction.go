@@ -434,6 +434,15 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 
 	// Must hold newBundleID — only finalise if the exchange actually happened.
 	if !currentID.equal(rec.NewBundleID) {
+		// NOTHING TO FINALISE IS SAID OUT LOUD (nocx-vh2hr.1.8). This branch is
+		// the one outcome that changes no file and leaves no trace, so a
+		// transaction that somehow disagrees about the exchange looks exactly
+		// like a completed one to the person, the log and the proof: journal
+		// still there, no backup, no word. It is the state the nightly's Linux
+		// proof was left in and could not describe.
+		u.log.Info("report healthy: the exchanged bundle is not at the install path",
+			"install", rec.InstallPath, "onDisk", currentID, "newBundleID", rec.NewBundleID,
+			"fromVersion", rec.FromVersion, "toVersion", rec.ToVersion)
 		return nil // exchange not yet applied, nothing to report
 	}
 

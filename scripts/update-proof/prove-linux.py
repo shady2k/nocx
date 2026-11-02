@@ -48,7 +48,18 @@ def wait_for(description, probe, timeout=120, describe=None):
 
 
 def descendants(node):
-    """Every accessible at or below `node`; objects that went away are skipped."""
+    """Every accessible at or below `node`; objects that went away are skipped.
+
+    A vanished child is not an exception somewhere up the tree: `getChildAtIndex`
+    answers None for a row the toolkit has already dropped, and yielding that
+    None put a literal "no accessible" in the middle of every caller's loop —
+    2026-10-31 died on it as `'NoneType' object has no attribute 'getRoleName'`
+    while it read the update-channel menu of a live desktop (nocx-vh2hr.1.8).
+    The list is a snapshot of a moving tree; the iterator's job is to skip what
+    is gone, never to hand it on.
+    """
+    if node is None:
+        return
     try:
         yield node
         for index in range(node.childCount):
@@ -165,7 +176,10 @@ class Desktop:
                 options.append(Option(node.name or "",
                                       state.contains(self.atspi.STATE_SELECTED),
                                       state.contains(self.atspi.STATE_SHOWING)))
-            except RuntimeError:
+            except (RuntimeError, AttributeError):
+                # The row went away between the listing and this read. One
+                # menu item that is no longer there is a shorter menu, not a
+                # proof failure (nocx-vh2hr.1.8).
                 continue
         return Channel(tuple(options), expanded)
 

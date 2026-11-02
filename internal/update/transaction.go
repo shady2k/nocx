@@ -351,10 +351,16 @@ func (u *updater) State(ctx context.Context) UpdateState {
 	if err != nil || !currentID.equal(rec.NewBundleID) {
 		return UpdateState{}
 	}
+	u.progressMu.Lock()
+	downloading, downloaded, total := u.downloading, u.downloaded, u.downloadTotal
+	u.progressMu.Unlock()
 	return UpdateState{
 		Pending:                true,
 		Version:                rec.ToVersion,
 		HeldByOlderCoordinator: rec.HeldByCoordinator != "",
+		Downloading:            downloading,
+		Downloaded:             downloaded,
+		Total:                  total,
 	}
 }
 

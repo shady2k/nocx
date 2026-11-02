@@ -10,7 +10,7 @@
         <key>CFBundleIdentifier</key>
             <string>dev.nocx</string>
         <key>CFBundleVersion</key>
-            <string>0.8.0</string>
+            <string>202610271000</string>
         <key>CFBundleGetInfoString</key>
             <string>A local-first, Warp-style terminal</string>
         <key>CFBundleShortVersionString</key>

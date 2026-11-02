@@ -21,10 +21,14 @@ class BuiltArtifactGate(unittest.TestCase):
         self.bundle = self.root / "nocx.app"
         self.bin = self.bundle / "Contents/MacOS"
         self.bin.mkdir(parents=True)
+        # CFBundleVersion is the BUILD NUMBER, twelve digits, never the
+        # marketing version (nocx-vh2hr.1.5).
+        self.build = "202610271000"
         self.info = dict(Version="0.8.0", Commit="a" * 40, Date="2026-10-27T10:00:00Z",
+                         Build=self.build,
                          Go="go1.26.1", Wails="v3.0.0-beta.9", Platform="darwin/arm64", Development=False)
         self.plist = dict(CFBundleIdentifier="dev.nocx", CFBundleName="nocx", CFBundleExecutable="nocx",
-                          CFBundleVersion="0.8.0", CFBundleShortVersionString="0.8.0",
+                          CFBundleVersion="202610271000", CFBundleShortVersionString="0.8.0",
                           CFBundleGetInfoString="A local-first, Warp-style terminal",
                           NSHumanReadableCopyright="Copyright © 2026 shady2k")
         self.manifest = dict(manifest={"version": "0.7.2", "artifacts": []},
@@ -56,6 +60,7 @@ class BuiltArtifactGate(unittest.TestCase):
         self.pack()
         return subprocess.run([sys.executable, str(SCRIPT), '--artifact', str(self.archive),
                                '--version', '0.8.0', '--commit', 'a' * 40,
+                               '--build', self.build,
                                '--report', str(self.root / 'report.json'), *extra],
                               text=True, capture_output=True, check=False)
 
@@ -66,6 +71,29 @@ class BuiltArtifactGate(unittest.TestCase):
         self.assertEqual(report['executables']['nocx-server']['about']['Wails'], self.info['Wails'])
         self.assertEqual(len(report['archive']['sha256']), 64)
         self.assertEqual(report['updater']['manifest']['version'], '0.7.2')
+
+    def test_accepts_a_build_whose_cfbundleversion_is_the_build_number(self):
+        # The contract after nocx-vh2hr.1.5: the short string is the version a
+        # person reads, the build number is what an installed bundle compares
+        # across updates. Both are asserted, and they are different values.
+        self.assertNotEqual(self.plist['CFBundleVersion'],
+                            self.plist['CFBundleShortVersionString'])
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads((self.root / 'report.json').read_text())
+        self.assertEqual(report['identity']['CFBundleVersion'], self.build)
+        self.assertEqual(report['identity']['CFBundleShortVersionString'], '0.8.0')
+
+    def test_refuses_a_cfbundleversion_that_still_says_the_version(self):
+        # The regression PR #661 shipped: the plist carried "0.8.1" where the
+        # build number belongs, and the nightly's build-macos was refused after
+        # packaging (nocx-vh2hr.1.5). The gate must keep refusing it.
+        self.plist['CFBundleVersion'] = '0.8.0'
+        self.write_package()
+        result = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('CFBundleVersion', result.stderr)
+        self.assertIn('packaged', result.stderr)
 
     def test_malformed_plist_failure_names_the_bytes_and_parser_reason(self):
         for payload, reason in [(b"not a plist\n", "Invalid file"),
@@ -116,6 +144,7 @@ class BuiltArtifactGate(unittest.TestCase):
         self.archive.write_bytes(b'not a zip')
         result = subprocess.run([sys.executable, str(SCRIPT), '--artifact', str(self.archive),
                                  '--version', '0.8.0', '--commit', 'a' * 40,
+                                 '--build', self.build,
                                  '--report', str(self.root / 'report.json')],
                                 text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 1, result.stderr)
@@ -178,7 +207,8 @@ class BuiltArtifactGate(unittest.TestCase):
                 try:
                     result = subprocess.run([sys.executable, str(checkout / 'scripts/verify-built-artifact.py'),
                                              '--artifact', str(self.archive), '--version', '0.8.0',
-                                             '--commit', 'a' * 40, '--report', str(self.root / 'report.json')],
+                                             '--commit', 'a' * 40, '--build', self.build,
+                                             '--report', str(self.root / 'report.json')],
                                             text=True, capture_output=True, check=False)
                     self.assertEqual(result.returncode, 1, result.stderr)
                     self.assertIn(str(path), result.stderr)
@@ -235,6 +265,15 @@ class BuiltArtifactGate(unittest.TestCase):
                 self.assertIn(field, result.stderr)
                 self.plist[field] = original
 
+    def test_refuses_a_build_number_that_is_not_twelve_digits(self):
+        for bad in ['0.8.0', '2026102710', '2026102710001', '2026-10-27']:
+            with self.subTest(build=bad):
+                result = self.run_gate('--build', bad)
+                # The last one wins over the fixture's own, so this exercises
+                # the argument's own shape check.
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('Build', result.stderr)
+
     def test_manifest_fetch_or_verification_failure_is_fatal(self):
         exe = self.bin / 'nocx'
         exe.write_text('#!/bin/sh\nif [ "$1" = --verify-release-manifest ]; then echo "manifest verification failed" >&2; exit 7; fi\nprintf \'%s\\n\' \'' + json.dumps(self.info) + "'\n")
@@ -263,6 +302,7 @@ class BuiltArtifactGate(unittest.TestCase):
         appimage.chmod(0o755)
         result = subprocess.run([sys.executable, str(SCRIPT), '--artifact', str(appimage),
                                  '--version', '0.8.0', '--commit', 'a' * 40,
+                                 '--build', self.build,
                                  '--report', str(self.root / 'report.json')],
                                 text=True, capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

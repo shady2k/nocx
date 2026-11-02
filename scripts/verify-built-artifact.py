@@ -147,7 +147,7 @@ def extract_package(artifact, dest):
     return appdir, 'linux'
 
 
-def expectations(version):
+def expectations(version, build):
     module = read_text(ROOT / 'go.mod')
     wails = re.search(r'github.com/wailsapp/wails/v3\s+(v\S+)', module)
     require(wails is not None, 'Wails', f'{found(ROOT / "go.mod", module.encode("utf-8"))}: no pin in go.mod')
@@ -164,7 +164,10 @@ def expectations(version):
             f'{found(ROOT / "main.go", main_text.encode("utf-8"))}: no main description')
     return wails.group(1), {
         'CFBundleIdentifier': bundle_id.group(1), 'CFBundleName': 'nocx', 'CFBundleExecutable': 'nocx',
-        'CFBundleVersion': version, 'CFBundleShortVersionString': version,
+        # CFBundleVersion is the BUILD NUMBER, not the marketing version
+        # (nocx-vh2hr.1.5): an installed bundle compares CFBundleVersion across
+        # updates, so a nightly of the same version must still differ there.
+        'CFBundleVersion': build, 'CFBundleShortVersionString': version,
         'CFBundleGetInfoString': description.group(1),
         'NSHumanReadableCopyright': 'Copyright © ' + license_line.group(1),
     }
@@ -174,7 +177,9 @@ def inspect(args):
     artifact = args.artifact.resolve()
     require(re.fullmatch(r'\d+\.\d+\.\d+', args.version), 'Version', 'expected MAJOR.MINOR.PATCH')
     require(re.fullmatch(r'[0-9a-f]{40}', args.commit), 'Commit', 'expected full git SHA')
-    wails, declared = expectations(args.version)
+    require(re.fullmatch(r'\d{12}', args.build), 'Build',
+            f'expected the stamped build number, YYYYMMDDHHMM, got {args.build!r}')
+    wails, declared = expectations(args.version, args.build)
     archive_hash = sha256(artifact)
     with tempfile.TemporaryDirectory(prefix='nocx-artifact-') as temp:
         package, platform = extract(artifact, Path(temp))
@@ -196,12 +201,13 @@ def inspect(args):
             require(exe.is_file(), name, 'executable absent from package')
             command = launch if name == 'nocx' else exe
             info, info_source = read_json([command, '--build-info'])
-            for field in ['Version', 'Commit', 'Date', 'Go', 'Wails', 'Platform']:
+            for field in ['Version', 'Commit', 'Date', 'Build', 'Go', 'Wails', 'Platform']:
                 value = info.get(field)
                 require(isinstance(value, str) and value.strip() and value.lower() not in ['unknown', 'dev', '(devel)']
                         and 'My Company' not in value and '{{' not in value, field,
                         f'{info_source}: template or missing About value: {value!r}')
-            for field, expected in [('Version', args.version), ('Commit', args.commit), ('Wails', wails)]:
+            for field, expected in [('Version', args.version), ('Commit', args.commit),
+                                    ('Build', args.build), ('Wails', wails)]:
                 require(info[field] == expected, field, f'{info_source}: {info[field]!r} != declared {expected!r}')
             require(re.fullmatch(platform + r'/(amd64|arm64)', info['Platform']), 'Platform', f'{info_source}: {info["Platform"]!r}')
             require(re.fullmatch(r'go\d+\.\d+(?:\.\d+)?', info['Go']), 'Go', f'{info_source}: {info["Go"]!r}')
@@ -235,6 +241,8 @@ def main():
     parser.add_argument('--artifact', type=Path, required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--commit', required=True)
+    parser.add_argument('--build', required=True,
+                        help='the stamped build number (YYYYMMDDHHMM), the value CFBundleVersion carries')
     parser.add_argument('--report', type=Path, required=True)
     args = parser.parse_args()
     args.report.unlink(missing_ok=True)

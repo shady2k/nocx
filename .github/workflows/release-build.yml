@@ -251,12 +251,14 @@ jobs:
           path: dist/nocx-helper-*
           retention-days: 7
 
-      # The hashes of those same bytes — what `sign` holds both build jobs
-      # against, and what the manifest publishes as each helper's sha256. The
-      # local variants' hashes travel in this one artifact rather than a second
-      # one: they are read by the same step, in the same directory, one file
-      # apart, and a separate artifact would be a second download for a check
-      # that never looks at them alone.
+      # The hashes of those same bytes — what the manifest publishes as each
+      # helper's sha256, and what the signing job checks its input against
+      # before it signs the darwin local variants (nocx-vh2hr.1.7). The local
+      # variants' hashes travel in this one artifact rather than a second one:
+      # they are read by the same step, in the same directory, one file apart,
+      # and a separate artifact would be a second download for a check that
+      # never looks at them alone. What the BUILD JOBS must embed is the
+      # signed file the signing job publishes, not these unsigned lines.
       - uses: actions/upload-artifact@v7
         with:
           name: helper-hashes
@@ -265,13 +267,136 @@ jobs:
             helper-local-hashes.txt
           retention-days: 7
 
+  # THE LOCAL DARWIN HELPERS CARRY A STABLE CODE IDENTITY (nocx-vh2hr.1.7).
+  #
+  # macOS attributes a pane shell's local-network access to its RESPONSIBLE
+  # code. That is the app while the app exists; after an in-place replacement
+  # the old helper outlives it (ADR-0104 keeps helpers and their shells alive),
+  # is reparented to launchd, and becomes the nearest surviving process. An
+  # ad-hoc helper takes its identifier from the output file name — "a.out" in
+  # the owner's evidence — so every build is a different program to Local
+  # Network Privacy and no grant can survive. The owner's decision
+  # (2026-11-02) is a stable signature: the app's certificate, a fixed
+  # identifier, no responsibility-disclaim API.
+  #
+  # SIGNING HAS TO HAPPEN ON macOS, and the helpers' one origin is the Linux
+  # `helpers` job, so this job is the transformation between them: it takes the
+  # bytes that job produced, checks they are those bytes, signs the two darwin
+  # local variants, and republishes the whole local directory plus the hashes
+  # of the SIGNED bytes. Both build jobs embed this artifact, and `sign` holds
+  # their embeddings against the signed hashes — the chain of custody is
+  # helpers job -> this job's input check -> signed bytes, stated rather than
+  # assumed. The deployable (remote) helpers are untouched: they run on hosts
+  # this product does not own, and LNP is not their question.
+  sign-local-helpers:
+    needs: [validate, helpers]
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # A LINUX-ONLY RUN HAS NO macOS SECRETS BY DESIGN (the dispatch input
+      # exists to iterate Linux without them). This job still runs, because
+      # build-linux needs the artifact it publishes, but it passes the local
+      # helpers through unsigned: the Linux app never executes a darwin helper,
+      # and `sign` — the job that would compare its hashes — is skipped on that
+      # path too.
+      - uses: ./.github/actions/macos-signing-identity
+        if: ${{ !inputs.linux-only }}
+        with:
+          p12: ${{ secrets.MACOS_SIGNING_P12 }}
+          password: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+
+      - name: Download the local helpers the helpers job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-local-artifacts
+          path: internal/helper/deploy/artifacts/bin/local
+
+      - name: Download the helpers job's unsigned hashes
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-hashes
+          path: hashes/unsigned
+
+      - name: Sign the darwin local helpers with the app's identity
+        if: ${{ !inputs.linux-only }}
+        run: |
+          set -euo pipefail
+          [ -n "${SIGN_IDENTITY:-}" ] || { echo "::error::SIGN_IDENTITY is empty"; exit 1; }
+          for arch in amd64 arm64; do
+            plat="darwin/$arch"
+            gz="internal/helper/deploy/artifacts/bin/local/nocx-helper-darwin-$arch.gz"
+            [ -s "$gz" ] || { echo "::error::$gz is missing; the helpers job built no local darwin/$arch helper"; exit 1; }
+            bin="$RUNNER_TEMP/nocx-helper-darwin-$arch"
+            gunzip -c "$gz" > "$bin"
+            # THE CHAIN OF CUSTODY, asserted before the bytes change: what
+            # this signs is what the helpers job built, not a rebuild here.
+            want="$(awk -v p="$plat" '$1 == p { print $2 }' hashes/unsigned/helper-local-hashes.txt)"
+            [ -n "$want" ] || { echo "::error::the helpers job published no unsigned hash for $plat"; exit 1; }
+            got="$(shasum -a 256 "$bin" | awk '{print $1}')"
+            [ "$got" = "$want" ] || { echo "::error::$plat is not the helpers job's bytes: $got != $want"; exit 1; }
+            chmod +x "$bin"
+            # -i is the whole point (ADR-0052: a bare Mach-O takes its
+            # identifier from its file name). A fixed identifier plus the
+            # app's certificate gives the helper a designated requirement
+            # that is the same in every build, so a Local Network grant
+            # recorded for it survives the next update.
+            codesign --force --sign "$SIGN_IDENTITY" -i dev.nocx.helper "$bin"
+            # The gate: identifier, authority, and never ad-hoc. Unit-tested
+            # in internal/helper/signing; a shell grep would have none.
+            go run ./cmd/check-helper-signature -identifier dev.nocx.helper \
+              -authority "nocx Project Code Signing" "$bin"
+            gzip -9 -c "$bin" > "$gz"
+            rm -f "$bin"
+          done
+
+      # The hashes of the bytes the BUILD JOBS will embed. The darwin lines
+      # moved when the helpers were signed; the linux line did not. `sign`
+      # compares both build jobs' embedded-local-hashes.txt against this file,
+      # replacing the unsigned local file in that comparison.
+      - name: Hash the local helpers the build jobs must embed
+        run: |
+          set -euo pipefail
+          : > helper-local-hashes-signed.txt
+          for gz in internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"
+            plat="${name#nocx-helper-}"
+            out="$RUNNER_TEMP/nocx-helper-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-local-hashes-signed.txt
+          done
+          sort -o helper-local-hashes-signed.txt helper-local-hashes-signed.txt
+          cat helper-local-hashes-signed.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-local-artifacts-signed
+          path: internal/helper/deploy/artifacts/bin/local/nocx-helper-*.gz
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-local-signed-hashes
+          path: helper-local-hashes-signed.txt
+          retention-days: 7
+
   # Named for its platform, like build-linux. It was `build` back when macOS was
   # the only target and the qualifier carried no information; once ADR-0007
   # reversed D1 and added the AppImage, an unqualified `build` next to a
   # `build-linux` read as "the build" and hid which platform had failed.
   build-macos:
     if: ${{ !inputs.linux-only }}
-    needs: [validate, helpers]
+    needs: [validate, helpers, sign-local-helpers]
     runs-on: macos-15
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -379,61 +504,13 @@ jobs:
         run: npm ci && npm run build
         working-directory: frontend
 
-      # The code-signing key is present in a job that runs build tooling, and
-      # unlike the manifest key (§5, the `sign` job) it cannot be anywhere
-      # else: codesign works on the assembled bundle, on macOS, in the job
-      # that assembles it. The two keys stay distinct, so the manifest key's
-      # isolation is exactly as strong as it was.
-      - name: Import the signing certificate
-        env:
-          MACOS_SIGNING_P12: ${{ secrets.MACOS_SIGNING_P12 }}
-          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
-        run: |
-          set -euo pipefail
-          [ -n "$MACOS_SIGNING_P12" ] || { echo "::error::MACOS_SIGNING_P12 is empty — the release cannot sign, and it must not fall back to ad-hoc"; exit 1; }
-          [ -n "$MACOS_SIGNING_P12_PASSWORD" ] || { echo "::error::MACOS_SIGNING_P12_PASSWORD is empty"; exit 1; }
-          kc_pass="$(openssl rand -hex 32)"
-          echo "::add-mask::$kc_pass"
-          security create-keychain -p "$kc_pass" build.keychain
-          # -lut: no auto-lock during the job. A keychain that relocks
-          # mid-run makes codesign prompt, and a prompt on a runner is a
-          # six-hour hang rather than a failure.
-          security set-keychain-settings -lut 21600 build.keychain
-          security unlock-keychain -p "$kc_pass" build.keychain
-          printf '%s' "$MACOS_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
-          security import "$RUNNER_TEMP/signing.p12" -k build.keychain \
-            -P "$MACOS_SIGNING_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12
-          # SELF-SIGNED MEANS UNTRUSTED, and `find-identity -v` lists only
-          # VALID identities — an untrusted certificate is not one. The
-          # first run of this step reported "0 valid identities found" and
-          # codesign failed 90 seconds later with "The specified item could
-          # not be found in the keychain". Trusting our own certificate for
-          # code signing is what makes the identity resolvable, and it
-          # grants nothing beyond this ephemeral runner VM.
-          openssl pkcs12 -in "$RUNNER_TEMP/signing.p12" -clcerts -nokeys \
-            -passin "pass:$MACOS_SIGNING_P12_PASSWORD" -out "$RUNNER_TEMP/signing.crt"
-          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
-            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.crt"
-          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/signing.crt"
-          # WITHOUT THIS LINE codesign asks for the keychain password
-          # interactively and the job hangs instead of failing. -T on the
-          # import grants codesign the ACL entry; the partition list is the
-          # second half of the same permission on modern macOS.
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pass" build.keychain >/dev/null
-          security list-keychains -d user -s build.keychain login.keychain
-          # The SHA-1 is matched as a 40-hex field wherever it appears,
-          # never by column on line 1: that parse read `0 valid identities
-          # found` and yielded the word "valid", which is non-empty, so the
-          # guard below passed and the failure surfaced in codesign instead
-          # of here. A guard that cannot reject a wrong answer is not one.
-          id="$(security find-identity -v -p codesigning build.keychain | awk '{ if (match($0, /[0-9A-F]{40}/)) { print substr($0, RSTART, RLENGTH); exit } }')"
-          if ! printf '%s' "$id" | grep -Eq '^[0-9A-F]{40}$'; then
-            echo "::error::no code-signing identity in the imported keychain (got '$id')"
-            security find-identity -p codesigning build.keychain
-            exit 1
-          fi
-          echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
-          security find-identity -v -p codesigning build.keychain
+      # The code-signing identity: one import, shared with sign-local-helpers
+      # (nocx-vh2hr.1.7). The guard that refuses an empty secret is in the
+      # action, so neither job can drift into an ad-hoc fallback.
+      - uses: ./.github/actions/macos-signing-identity
+        with:
+          p12: ${{ secrets.MACOS_SIGNING_P12 }}
+          password: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
 
       # The helpers are EMBEDDED in the app (//go:embed all:bin), so
       # they must exist before the Go build that embeds them. Until
@@ -457,10 +534,10 @@ jobs:
       # the whole of this job's local bytes: neither build job installs the
       # pinned Zig, so a variant built here would be a second origin AND a build
       # that cannot even run.
-      - name: Download this machine's helpers the `helpers` job built
+      - name: Download this machine's signed helpers
         uses: actions/download-artifact@v8
         with:
-          name: helper-local-artifacts
+          name: helper-local-artifacts-signed
           path: internal/helper/deploy/artifacts/bin/local
 
       # The gate, expressed as a test rather than as a file listing: a
@@ -973,7 +1050,7 @@ jobs:
   # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
   # promises (see ADR-0007 and the Linux section in README.md).
   build-linux:
-    needs: [validate, helpers]
+    needs: [validate, helpers, sign-local-helpers]
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -1047,10 +1124,10 @@ jobs:
       # the whole of this job's local bytes: neither build job installs the
       # pinned Zig, so a variant built here would be a second origin AND a build
       # that cannot even run.
-      - name: Download this machine's helpers the `helpers` job built
+      - name: Download this machine's signed helpers
         uses: actions/download-artifact@v8
         with:
-          name: helper-local-artifacts
+          name: helper-local-artifacts-signed
           path: internal/helper/deploy/artifacts/bin/local
 
       # The gate, expressed as a test rather than as a file listing: a
@@ -1241,7 +1318,7 @@ jobs:
   # behind it in the job below. This job keeps the workflow's read-only default.
   sign:
     if: ${{ !inputs.linux-only }}
-    needs: [validate, helpers, build-macos, build-linux]
+    needs: [validate, helpers, sign-local-helpers, build-macos, build-linux]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -1286,6 +1363,15 @@ jobs:
           name: helper-hashes
           path: hashes/published
 
+      # The local variants' SIGNED hashes, from the job that signed them. The
+      # `helper-hashes` file above still carries the pre-signature local
+      # hashes; it is that job's input evidence, not what the build jobs
+      # embedded (nocx-vh2hr.1.7).
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-local-signed-hashes
+          path: hashes/signed
+
       - uses: actions/download-artifact@v8
         with:
           name: embedded-hashes-macos
@@ -1315,8 +1401,16 @@ jobs:
           # for. It is the same claim — one origin, and each build job's account
           # of what it embedded is held against it.
           for sfx in '' '-local'; do
-            want="hashes/published/helper${sfx}-hashes.txt"
-            [ -s "$want" ] || { echo "::error::the helpers job published no helper${sfx}-hashes.txt"; exit 1; }
+            if [ "$sfx" = "-local" ]; then
+              # THE SIGNED FILE. The signing job checked its input against
+              # the helpers job's unsigned hash before it changed the bytes;
+              # what the build jobs must embed is the signed result.
+              want="hashes/signed/helper-local-hashes-signed.txt"
+              [ -s "$want" ] || { echo "::error::the signing job published no helper-local-hashes-signed.txt"; exit 1; }
+            else
+              want="hashes/published/helper${sfx}-hashes.txt"
+              [ -s "$want" ] || { echo "::error::the helpers job published no helper${sfx}-hashes.txt"; exit 1; }
+            fi
             for job in macos linux; do
               got="hashes/$job/embedded${sfx}-hashes.txt"
               [ -s "$got" ] || { echo "::error::build-$job uploaded no embedded${sfx}-hashes.txt"; exit 1; }

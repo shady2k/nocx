@@ -40,6 +40,14 @@
     {
       "test": "go:TestAnAttachWithNoSizeReceivesTheScreenTheRuntimeHolds",
       "bead": "nocx-atpw5.1.24"
+    },
+    {
+      "test": "e2e:e2e/settings-scroll.spec.ts › settings scroll — normal › scrolls the last section into view in a short window (nocx-82l9.2)",
+      "bead": "nocx-atpw5.1.27"
+    },
+    {
+      "test": "e2e:e2e/agent-reads-the-screen.spec.ts › the assistant reads the screen of the pane it was asked in (nocx-avogl) › the answer names what was on that pane’s screen, and nothing else could have told it",
+      "bead": "nocx-atpw5.1.28"
     }
   ]
 }

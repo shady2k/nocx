@@ -99,6 +99,29 @@ test.describe('a running block', () => {
       .poll(async () => visibleLiveRows(page), { timeout: 15_000 })
       .toEqual(expect.arrayContaining(['OWN-LINE']))
     const gridRows = page.locator('.pane.active .terminal-live-grid .term-grid-row')
+    // THE BASELINE MUST BE THE RUNNING LAYOUT'S, NOT THE PROMPT'S
+    // (nocx-atpw5.1.23). Submit takes the editor's space away, so the grid
+    // GROWS at the moment the block opens — ADR-3kqrem7v's "the editor being
+    // taken away again when a program fills the pane", about four rows here.
+    // A `before` sampled before that refit landed is smaller than the settled
+    // count, and the three-row shrink below can then never make the count
+    // smaller than it: measured 30 read, 34 painted after the shrink, with
+    // nothing wrong on screen. So wait for the grid to be the one this
+    // window's own fit committed — the pane-screen seam's geometry.rows, the
+    // same fact every other spec reads — and only then take the baseline.
+    const settledRows = async (): Promise<{ painted: number; committed: number }> =>
+      page.evaluate(async () => {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        const painted = document.querySelectorAll('.pane.active .terminal-live-grid .term-grid-row')
+        return {
+          painted: painted.length,
+          committed: window.__nocxPaneScreen?.()?.geometry?.rows ?? -1,
+        }
+      })
+    const committed = (await settledRows()).committed
+    await expect
+      .poll(async () => (await settledRows()).painted, { timeout: 15_000 })
+      .toBe(committed)
     const before = await gridRows.count()
     const size = page.viewportSize()!
     // Three rows shorter: the emulator pushes the top of the screen into

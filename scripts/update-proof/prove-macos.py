@@ -46,6 +46,7 @@ from common import (ProofError, artifact, command, download_artifact, nightly_pa
 # One owner of the step names: the failure message and the evidence both read
 # this table, and its test pins the fragments to internal/update's messages.
 STEPS = (
+    ("update apply: starting", "start the updater"),
     ("update check: fetch manifest", "download the release manifest"),
     ("update check: manifest verification", "signature verification (manifest)"),
     ("update check: no artefact", "artifact selection"),
@@ -60,6 +61,16 @@ STEPS = (
     ("report healthy: refused — the coordinator could not be identified", "pair check (probe)"),
     ("report healthy: refused — the reporting build is not the installed version", "pair check (version)"),
     ("report healthy: pair certified", "pair check"),
+)
+
+# The update driver is a capability of the INSTALLED build. A build packaged
+# before the driver existed does not refuse the flag — it treats it as unknown
+# and starts the window, which on a headless runner never exits. That is a
+# driver-side refusal, so no updater line can name it.
+APPLY_DIAGNOSTIC = "--apply-release-update"
+DRIVER_REFUSALS = (
+    ("has no " + APPLY_DIAGNOSTIC + " diagnostic",
+     "start (the installed build has no update diagnostic)"),
 )
 
 # Which step a run of output got as far as: the LAST step fragment seen is the
@@ -83,6 +94,9 @@ def failing_step(output, error_text=""):
     reached = step_reached(output)
     if reached != "start":
         return reached
+    for fragment, name in DRIVER_REFUSALS:
+        if fragment in error_text:
+            return name
     for fragment, name in STEPS:
         if fragment in error_text:
             return name
@@ -175,7 +189,89 @@ def environment(home):
     return env
 
 
-def run_applicator(install, home, channel, timeout=1800):
+def apply_diagnostic_present(strings_output):
+    """Whether a packaged build implements the update driver.
+
+    The flag's usage text is a literal in the binary's read-only data
+    (release_diagnostics.go), so `strings` answers the question without
+    starting anything. A build packaged before the driver existed has neither
+    the flag nor its usage line; it treats the argument as unknown and starts
+    the window, which on a headless runner never exits (nightly 41407342443
+    waited thirty minutes for exactly that).
+    """
+    return "usage: " + APPLY_DIAGNOSTIC in strings_output
+
+
+def require_apply_diagnostic(binary):
+    """Refuse, by name, a build that cannot be asked to update itself."""
+    result = command(["/usr/bin/strings", "-a", str(binary)])
+    require(result.returncode == 0,
+            "cannot read " + str(binary) + ": " + result.stderr.strip())
+    require(apply_diagnostic_present(result.stdout),
+            "the installed build has no " + APPLY_DIAGNOSTIC + " diagnostic: "
+            + str(binary) + " was packaged before the driver existed, so asking "
+            "it to update would start the app instead")
+
+
+def _text(value):
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value or ""
+
+
+def _kill(process):
+    """Kill the process group, not only the direct child.
+
+    The diagnostic starts a session of its own and may have spawned a
+    coordinator; leaving that behind is how an orphan nocx-server survived the
+    timed-out run (nightly 41407342443).
+    """
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def speak(process, start_timeout, timeout):
+    """The process's combined output, or a ProofError that keeps what it said.
+
+    subprocess.run discards the captured output with its TimeoutExpired, which
+    is why the failed run's evidence said "the updater logged nothing" while
+    the pipe held the updater's lines. Silence now has a deadline of its own:
+    the diagnostic logs its first step before it can block, so a process that
+    has said nothing after start_timeout never reached the updater, and is
+    killed and named rather than waited out for thirty minutes.
+    """
+    started = time.monotonic()
+    try:
+        output, _ = process.communicate(timeout=start_timeout)
+        return output or ""
+    except subprocess.TimeoutExpired as silence:
+        partial = _text(silence.output)
+        if not partial.strip():
+            _kill(process)
+            raise ProofError("start (the updater logged nothing in "
+                             + str(start_timeout) + " s); killed it") from None
+    remaining = max(1, timeout - (time.monotonic() - started))
+    try:
+        output, _ = process.communicate(timeout=remaining)
+        return output or partial
+    except subprocess.TimeoutExpired as late:
+        partial = _text(late.output) or partial
+        _kill(process)
+        raise ProofError("the update did not finish within " + str(timeout)
+                         + " s at " + step_reached(partial) + ": "
+                         + tail(partial)) from None
+
+
+def run_applicator(install, home, channel, timeout=1800, start_timeout=120):
     """Run the installed bundle's own update diagnostic, as the extension point.
 
     Returns the parsed result line, the step it reached, and the raw output —
@@ -183,16 +279,17 @@ def run_applicator(install, home, channel, timeout=1800):
     only account of which step refused.
     """
     binary = bundle_binary(install)
-    result = subprocess.run([str(binary), "--apply-release-update", "--channel", channel],
-                            capture_output=True, text=True, timeout=timeout,
-                            env=environment(home), cwd=home, start_new_session=True)
-    output = (result.stdout or "") + (result.stderr or "")
+    process = subprocess.Popen([str(binary), APPLY_DIAGNOSTIC, "--channel", channel],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, env=environment(home), cwd=home,
+                               start_new_session=True)
+    output = speak(process, start_timeout, timeout)
     step = step_reached(output)
-    if result.returncode != 0:
+    if process.returncode != 0:
         raise ProofError("the update failed at " + failing_step(output)
                          + ": " + tail(output))
     payload = None
-    for line in reversed(result.stdout.splitlines()):
+    for line in reversed(output.splitlines()):
         try:
             payload = json.loads(line)
         except ValueError:
@@ -326,7 +423,12 @@ def run(args, evidence):
     candidate_sha = sha256(bundle_binary(candidate_dir / "nocx.app"))
     previous_sha = sha256(bundle_binary(installed_from))
 
-    # THE UPDATE, from inside the installed bundle.
+    # THE UPDATE, from inside the installed bundle. The driver is a capability
+    # of that build, so ask whether it has one before starting it: a build
+    # packaged before the diagnostic existed would open its window instead and
+    # never exit, which is the timeout this proof used to report as "the
+    # updater logged nothing".
+    require_apply_diagnostic(bundle_binary(layout["install"]))
     payload, reached, output = run_applicator(layout["install"], home, "nightly")
     evidence["applicator"] = {"step": payload["step"], "channel": payload["channel"],
                               "reached": reached, "stdout": output}

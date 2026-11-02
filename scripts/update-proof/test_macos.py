@@ -9,7 +9,10 @@ instead of quietly turning a named failure back into "the update failed".
 
 import importlib.util
 from pathlib import Path
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 
 
@@ -51,11 +54,14 @@ class StepTests(unittest.TestCase):
         self.assertEqual(proof.step_reached(certified), "pair check")
 
     def test_every_step_fragment_is_the_updaters_own_vocabulary(self):
-        # One owner: the strings the driver classifies live in internal/update.
+        # One owner: the strings the driver classifies live in internal/update
+        # and in the packaged diagnostic that first says "starting".
         # A log line reworded there without this table is a diagnosis that
         # silently stops naming the step.
-        source = "".join(path.read_text() for path in (REPOSITORY / "internal/update").glob("*.go")
-                         if not path.name.endswith("_test.go"))
+        sources = [path.read_text() for path in (REPOSITORY / "internal/update").glob("*.go")
+                   if not path.name.endswith("_test.go")]
+        sources.append((REPOSITORY / "release_diagnostics.go").read_text())
+        source = "".join(sources)
         for fragment, step in proof.STEPS:
             with self.subTest(step=step):
                 self.assertIn(fragment, source,
@@ -66,7 +72,9 @@ class StepTests(unittest.TestCase):
         # fragments; a step listed before the step that must precede it would
         # make the earlier one win.
         names = [name for _, name in proof.STEPS]
-        self.assertEqual(names[0], "download the release manifest")
+        self.assertEqual(names[0], "start the updater")
+        self.assertLess(names.index("start the updater"), names.index("download the release manifest"))
+        self.assertLess(names.index("download the release manifest"), names.index("download"))
         self.assertLess(names.index("download"), names.index("extraction (ditto)"))
         self.assertLess(names.index("extraction (ditto)"), names.index("bundle seal (codesign/lipo)"))
         self.assertLess(names.index("bundle seal (codesign/lipo)"),
@@ -142,6 +150,106 @@ class LayoutTests(unittest.TestCase):
         packaging = (REPOSITORY / ".github/workflows/release-build.yml").read_text()
         self.assertTrue("dev.nocx" in packaging,
                         "release-build.yml no longer stamps dev.nocx; the driver still expects it")
+
+
+class DiagnosticCapabilityTests(unittest.TestCase):
+    """The installed build must know the driver before it is asked to run it.
+
+    The previous nightly used by the failed run (commit 92aba45) predates
+    --apply-release-update. Handed the flag it did not refuse it: it treated it
+    as an unknown argument and started the window, which on the headless runner
+    never exits. The proof waited thirty minutes and could only say "the updater
+    logged nothing" (nightly 41407342443). The driver's usage line is embedded
+    in the binary, so the capability is decidable without starting anything.
+    """
+
+    def test_a_build_that_carries_the_usage_line_has_the_driver(self):
+        self.assertTrue(proof.apply_diagnostic_present(
+            "usage: --apply-release-update [--channel stable|nightly]"))
+
+    def test_a_build_packaged_before_the_driver_does_not(self):
+        self.assertFalse(proof.apply_diagnostic_present(
+            "usage: nocx [--version]\n--verify-release-manifest\n--build-info\n"))
+
+    def test_the_refusal_is_named_as_a_start_failure(self):
+        self.assertEqual(
+            proof.failing_step("", "the installed build has no "
+                               "--apply-release-update diagnostic: /x was "
+                               "packaged before the driver existed, so asking "
+                               "it to update would start the app instead"),
+            "start (the installed build has no update diagnostic)")
+
+    def test_a_build_without_the_driver_is_refused_before_it_starts(self):
+        class Result:
+            returncode = 0
+            stdout = "no update diagnostic in these strings"
+            stderr = ""
+
+        original = proof.command
+        proof.command = lambda argv, **kwargs: Result()
+        self.addCleanup(setattr, proof, "command", original)
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.require_apply_diagnostic("/proof/home/Applications/nocx.app/Contents/MacOS/nocx")
+        self.assertIn("has no --apply-release-update diagnostic", str(caught.exception))
+
+
+class ApplicatorTests(unittest.TestCase):
+    """The diagnostic's silence and its output both have deadlines.
+
+    subprocess.run's timeout discards the captured output, so the failed run's
+    evidence named no step even though the answering line was already in the
+    pipe. A diagnostic that never reaches the updater has said nothing at all,
+    and that is a different failure from one that reached a step and stalled.
+    """
+
+    def bundle(self, script):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        app = root / "Applications" / "nocx.app"
+        binary = app / "Contents" / "MacOS" / "nocx"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n" + script)
+        binary.chmod(0o755)
+        home = root / "home"
+        home.mkdir()
+        return app, home
+
+    def test_a_silent_updater_is_killed_at_the_startup_deadline(self):
+        app, home = self.bundle("sleep 30\n")
+        started = time.monotonic()
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.run_applicator(app, home, "nightly", timeout=30, start_timeout=0.2)
+        self.assertIn("logged nothing", str(caught.exception))
+        self.assertLess(time.monotonic() - started, 10,
+                        "a silent run was waited out instead of killed")
+
+    def test_a_stalled_update_keeps_the_lines_it_printed(self):
+        app, home = self.bundle(
+            'echo ' + "'" + 'level=INFO msg="update apply: starting" channel=nightly' + "'" + '\n'
+            "sleep 30\n")
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.run_applicator(app, home, "nightly", timeout=1, start_timeout=0.5)
+        text = str(caught.exception)
+        self.assertIn("start the updater", text)
+        self.assertIn("update apply: starting", text)
+
+    def test_a_complete_run_returns_its_result_line(self):
+        app, home = self.bundle(
+            'echo ' + "'" + 'level=INFO msg="update apply: journal written, starting download"' + "'" + '\n'
+            'echo ' + "'" + '{"step":"applied","channel":"nightly","toVersion":"0.8.1"}' + "'" + '\n')
+        payload, reached, output = proof.run_applicator(app, home, "nightly", timeout=30)
+        self.assertEqual(payload["step"], "applied")
+        self.assertEqual(reached, "journal")
+        self.assertIn("journal written", output)
+
+    def test_a_failing_run_names_its_step_and_keeps_its_output(self):
+        app, home = self.bundle(
+            'echo ' + "'" + 'level=INFO msg="update apply: extract"' + "'" + '\n'
+            'echo "codesign refused the staged bundle" >&2\n'
+            "exit 1\n")
+        with self.assertRaises(proof.ProofError) as caught:
+            proof.run_applicator(app, home, "nightly", timeout=30)
+        self.assertIn("extraction (ditto)", str(caught.exception))
 
 
 if __name__ == "__main__":

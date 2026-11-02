@@ -114,6 +114,11 @@ func releaseDiagnostic(ctx context.Context, args []string, out io.Writer) (bool,
 	}
 }
 
+// applyReleaseUpdateDeadline bounds the whole diagnostic update. It exists so
+// the command answers before the proof's own thirty-minute kill: a bound on the
+// operation, not a retry behind it.
+const applyReleaseUpdateDeadline = 15 * time.Minute
+
 // applyReleaseUpdate runs the WINDOW's own updater — the same placement, the
 // same compiled trust root, the same transaction — without a window, for the
 // packaged update proof (nocx-1ebrs.35.5).
@@ -148,6 +153,21 @@ func applyReleaseUpdate(ctx context.Context, args []string, out io.Writer) error
 		channel = parsed
 		args = args[2:]
 	}
+	ctx, cancel := context.WithTimeout(ctx, applyReleaseUpdateDeadline)
+	defer cancel()
+	// THE FIRST LINE, BEFORE ANYTHING THAT CAN BLOCK (nocx-vh2hr.1.11).
+	//
+	// Below this point the path resolves the executable, reads the profile
+	// directories, probes the install folder, fetches the signed manifest over
+	// the network and waits for the update lock. Every one of those can stall,
+	// and until this line existed the first thing the process ever said was
+	// "update apply: journal written" — after all of them. The macOS proof's
+	// run therefore had no line at all to name the step it was stuck in, and
+	// its evidence read "start (the updater logged nothing)". A run that says
+	// this line and then stops names the block; a run that never says it never
+	// reached the updater.
+	log.From(ctx).Info("update apply: starting",
+		"channel", channel.String(), "version", version.Version)
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("updater: cannot determine executable path: %w", err)

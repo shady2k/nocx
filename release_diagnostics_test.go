@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,7 +18,9 @@ import (
 	"github.com/shady2k/nocx/internal/update"
 
 	"github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
+	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/version"
 )
 
@@ -151,6 +155,48 @@ func TestWindowUpdaterOffersLaterNightlyThroughProductionWrapper(t *testing.T) {
 	fetch.SetChannel(update.ChannelStable)
 	if info, err := updater.Check(ctx); err != nil || info != nil {
 		t.Fatalf("stable comparison changed: %v, %v", info, err)
+	}
+}
+
+// THE DIAGNOSTIC NAMES ITS FIRST STEP BEFORE ANYTHING CAN BLOCK
+// (nocx-vh2hr.1.11).
+//
+// On the macOS proof's runner the command produced no line at all for thirty
+// minutes, so the proof could only say "the updater logged nothing". The apply
+// path now says what it is doing before it resolves a profile, probes the
+// install folder, fetches the manifest or waits for the lock. This pins the
+// line to the very start: the context is already cancelled, so the fetch that
+// follows cannot succeed, and the record must already be there.
+func TestApplyReleaseUpdateNamesItsFirstStepBeforeItCanBlock(t *testing.T) {
+	old := version.Version
+	version.Version = "0.8.0"
+	t.Cleanup(func() { version.Version = old })
+	// A disposable HOME too: the install-placement probe creates the user's
+	// Applications directory, and a unit test has no business writing to the
+	// developer's own.
+	storagetest.IsolateWithHome(t)
+
+	var buf bytes.Buffer
+	ctx := log.WithLogger(context.Background(),
+		log.NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, nil))))
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+
+	handled, err := releaseDiagnostic(ctx,
+		[]string{"--apply-release-update", "--channel", "nightly"}, io.Discard)
+	if !handled {
+		t.Fatal("--apply-release-update was not handled")
+	}
+	if err == nil {
+		t.Fatal("a cancelled context must stop the update")
+	}
+	text := buf.String()
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	if len(lines) == 0 || !strings.Contains(lines[0], `msg="update apply: starting"`) {
+		t.Fatalf("the starting line is not the first thing the path says; got:\n%s", text)
+	}
+	if !strings.Contains(lines[0], "channel=nightly") {
+		t.Fatalf("the starting line does not name the channel it will use; got:\n%s", lines[0])
 	}
 }
 

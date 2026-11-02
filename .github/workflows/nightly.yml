@@ -426,7 +426,11 @@ jobs:
         run: |
           mkdir -p proof-results
           cp "$RUNNER_TEMP/nocx-macos-proof/app.log" proof-results/ 2>/dev/null || true
-          cp "$RUNNER_TEMP/nocx-macos-proof/home/Library/Logs/nocx/nocx.log" proof-results/ 2>/dev/null || true
+          # <DataDir>/nocx.log with the driver's disposable HOME: on darwin
+          # internal/storage makes DataDir the profile under Application
+          # Support, and internal/app opens nocx.log inside it. The product
+          # writes no ~/Library/Logs entry, so that copy always found nothing.
+          cp "$RUNNER_TEMP/nocx-macos-proof/home/Library/Application Support/nocx/nocx.log" proof-results/ 2>/dev/null || true
 
       - uses: actions/upload-artifact@v7
         if: always()

@@ -491,7 +491,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
   const COMPARE = `https://github.com/shady2k/nocx/compare/${FROM}...${OFFERED}`
   const NIGHTLY = {
     channel: 'nightly',
-    build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z' },
+    build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z', number: '202610300750' },
   }
 
   it('names the offered build beside the version it shares with the installed one', () => {
@@ -500,7 +500,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
     mountIndicator(controller)
     controller.showAvailable('0.8.1', COMPARE, NIGHTLY)
 
-    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.1, build 60caa03')
+    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.1, build 202610300750')
     expect(screen.getByRole('status').textContent).toContain('is available')
     expect(screen.getByRole('link', { name: 'What changed' }).getAttribute('href')).toBe(COMPARE)
   })
@@ -511,7 +511,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
     mountIndicator(controller)
     controller.showAvailable('0.8.2', COMPARE, NIGHTLY)
 
-    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.2, build 60caa03')
+    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.2, build 202610300750')
     expect(screen.getByRole('link', { name: 'What changed' }).getAttribute('href')).toBe(COMPARE)
   })
 
@@ -521,7 +521,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
     mountIndicator(controller)
     controller.showAvailable('0.8.1', '', NIGHTLY)
 
-    expect(screen.getByRole('status').textContent).toContain('build 60caa03')
+    expect(screen.getByRole('status').textContent).toContain('build 202610300750')
     expect(screen.queryByRole('link')).toBeNull()
   })
 
@@ -531,7 +531,7 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
     mountIndicator(controller)
     controller.showAvailable('2.0.1', NOTES, {
       channel: 'stable',
-      build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z' },
+      build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z', number: '202610300750' },
     })
 
     const message = screen.getByRole('status').textContent ?? ''
@@ -550,10 +550,10 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
     const later = '70caa03d' + 'c'.repeat(32)
     controller.showAvailable('0.8.1', COMPARE, {
       channel: 'nightly',
-      build: { commit: later, builtAt: '2026-10-31T07:50:35Z' },
+      build: { commit: later, builtAt: '2026-10-31T07:50:35Z', number: '202610310750' },
     })
 
     expect(document.querySelectorAll('.ui-toast')).toHaveLength(1)
-    expect(screen.getByRole('status').textContent).toContain('build 70caa03')
+    expect(screen.getByRole('status').textContent).toContain('build 202610310750')
   })
 })

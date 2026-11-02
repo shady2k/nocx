@@ -16,6 +16,7 @@ export class UpdateInfo {
     "Channel": string;
     "Commit": string;
     "BuiltAt": string;
+    "BuildNumber": string;
     "URL": string;
     "SHA256": string;
     "Size": number;
@@ -36,6 +37,9 @@ export class UpdateInfo {
         }
         if (!("BuiltAt" in $$source)) {
             this["BuiltAt"] = "";
+        }
+        if (!("BuildNumber" in $$source)) {
+            this["BuildNumber"] = "";
         }
         if (!("URL" in $$source)) {
             this["URL"] = "";

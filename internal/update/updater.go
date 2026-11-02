@@ -59,9 +59,15 @@ type UpdateInfo struct {
 	// person does not have yet.
 	Commit  string
 	BuiltAt string
-	URL     string
-	SHA256  string
-	Size    int64
+	// BuildNumber is the OFFERED build's number beside the version —
+	// YYYYMMDDHHMM, derived from the signed builtAt by the one derivation
+	// (version.BuildNumberOf). It is what the notice names on a nightly, where
+	// the version alone would describe the build the person already runs
+	// (nocx-vh2hr.1.5). Empty when the manifest carried no usable instant.
+	BuildNumber string
+	URL         string
+	SHA256      string
+	Size        int64
 }
 
 // buildIdentity is the offered build as the journal records it.

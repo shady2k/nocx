@@ -93,6 +93,11 @@ func TestCheckNightlySameVersionOfferNamesTheBuildAndLinksTheRange(t *testing.T)
 	if got.Commit != offered || got.BuiltAt != "2026-10-30T07:50:35Z" {
 		t.Fatalf("offered build = %q built %q, want %q built 2026-10-30T07:50:35Z", got.Commit, got.BuiltAt, offered)
 	}
+	// THE BUILD NUMBER BESIDE THE VERSION (nocx-vh2hr.1.5): the signed
+	// instant, in the one YYYYMMDDHHMM derivation, is what the notice names.
+	if got.BuildNumber != "202610300750" {
+		t.Fatalf("offered build number = %q, want 202610300750 from the signed builtAt", got.BuildNumber)
+	}
 	want := "https://github.com/shady2k/nocx/compare/" + installed + "..." + offered
 	if got.NotesURL != want {
 		t.Fatalf("link = %q, want the compare range %q", got.NotesURL, want)

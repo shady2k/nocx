@@ -21,7 +21,7 @@ export interface UpdateOffer {
    *  changes the notice's words and link. */
   channel: string
   /** The offered build's stamped identity. */
-  build: { commit: string; builtAt: string }
+  build: { commit: string; builtAt: string; number: string }
 }
 
 type AvailableOffer = {
@@ -73,6 +73,15 @@ export interface UpdateController {
  *  manifest named no commit. Empty when it named neither — then the version is
  *  all the notice can say, and it must not invent a build (nocx-vh2hr.1.5). */
 function offeredBuildLabel(offer: UpdateOffer): string {
+  // THE BUILD NUMBER FIRST (nocx-vh2hr.1.5, the owner's decision of 2026-10-30):
+  // every build carries YYYYMMDDHHMM beside the version, monotonic across
+  // reruns and preserved by promotion, and it is the number macOS carries in
+  // CFBundleVersion — so the notice names the same build the bundle does. The
+  // commit and the build time remain the fallback for a manifest whose instant
+  // cannot be read; the commit is the last resort because two nightlies can
+  // share one when nothing rebuilt.
+  const number = offer.build.number.trim()
+  if (/^[0-9]{12}$/.test(number)) return number
   const commit = offer.build.commit.trim()
   if (/^[0-9a-f]{40}$/.test(commit)) return commit.slice(0, 7)
   const builtAt = offer.build.builtAt.trim()
@@ -88,7 +97,10 @@ function offerKey(version: string, offer: UpdateOffer): string {
   return `${version} ${offeredBuildLabel(offer)}`
 }
 
-const STABLE_OFFER: UpdateOffer = { channel: 'stable', build: { commit: '', builtAt: '' } }
+const STABLE_OFFER: UpdateOffer = {
+  channel: 'stable',
+  build: { commit: '', builtAt: '', number: '' },
+}
 
 /** One owner for update state and its one kit surface. The sidebar is rebuilt
  * on reconnect; this controller lives for the whole window run (AD-8). */

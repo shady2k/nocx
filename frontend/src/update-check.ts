@@ -106,7 +106,7 @@ export function createUpdateCheck(
         // (nocx-vh2hr.1.5).
         const offer: UpdateOffer = {
           channel: info.Channel,
-          build: { commit: info.Commit, builtAt: info.BuiltAt },
+          build: { commit: info.Commit, builtAt: info.BuiltAt, number: info.BuildNumber },
         }
         notice.showAvailable(info.Version, info.NotesURL, offer)
         const found: UpdateCheckOutcome = {

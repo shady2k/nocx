@@ -12,6 +12,7 @@
  * through the kit's createFormValidation + createSubmitGate.
  */
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
+import { t, tPlural } from './i18n/locale-model'
 import { Badge } from './ui/badge'
 import { Checkbox } from './ui/checkbox'
 import { Button } from './ui/button'
@@ -59,9 +60,13 @@ function probeOutcomeLine(
   p: EndpointsProbeResult | null,
 ): { tone: 'danger' | 'success'; text: string } | null {
   if (!p) return null
-  if (!p.ok) return { tone: 'danger', text: `Test failed: ${p.error}` }
+  if (!p.ok)
+    return { tone: 'danger', text: `${t('endpoints.probe.failedHead', 'Test failed:')} ${p.error}` }
   if (p.kind === 'model') {
-    return { tone: 'success', text: `${p.model} answered in ${Math.max(p.elapsedMs, 1)} ms` }
+    return {
+      tone: 'success',
+      text: `${p.model} ${t('endpoints.probe.answeredInTail', 'answered in')} ${Math.max(p.elapsedMs, 1)} ms`,
+    }
   }
   const found = p.models?.length ?? 0
   return {
@@ -69,7 +74,10 @@ function probeOutcomeLine(
     // An endpoint that lists nothing is reachable and usable — GET /models
     // is not universally implemented — so the sentence says what happened
     // rather than implying something is missing.
-    text: found > 0 ? `Connected — ${found} models offered` : 'Connected — it lists no models',
+    text:
+      found > 0
+        ? `${t('endpoints.probe.connectedHead', 'Connected —')} ${tPlural('endpoints.probe.modelsOffered', found, '{count} models offered')}`
+        : t('endpoints.probe.connectedNone', 'Connected — it lists no models'),
   }
 }
 
@@ -586,12 +594,15 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   const validation = createFormValidation(
     {
-      name: () => required('Name')(draft().name),
-      baseUrl: () => combine(required('Base URL'), absoluteHttpUrl())(draft().baseUrl),
+      name: () => required(t('endpoints.name', 'Name'))(draft().name),
+      baseUrl: () =>
+        combine(required(t('endpoints.baseUrl', 'Base URL')), absoluteHttpUrl())(draft().baseUrl),
       models: () => {
         const rows = draft().models
-        if (rows.length === 0) return 'Add at least one model'
-        return rows.some((m) => m.name.trim() === '') ? 'Model name is required' : undefined
+        if (rows.length === 0) return t('endpoints.addAtLeastOneModel', 'Add at least one model')
+        return rows.some((m) => m.name.trim() === '')
+          ? t('endpoints.modelNameRequired', 'Model name is required')
+          : undefined
       },
       // A header row needs a name; the refused-name and control-character
       // rules are the BACKEND's (profile.ValidateEndpointHeaders, one
@@ -599,7 +610,9 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       // can see, the backend refuses what it must.
       headers: () => {
         const rows = draft().headers
-        return rows.some((h) => h.name.trim() === '') ? 'Header name is required' : undefined
+        return rows.some((h) => h.name.trim() === '')
+          ? t('endpoints.headerNameRequired', 'Header name is required')
+          : undefined
       },
     },
     {
@@ -670,27 +683,33 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       // which is what a person saw one second after saving it. Reload it
       // beside the endpoints, from the same success.
       await loadInventory('list')
-      showToast({ level: 'success', message: `Saved "${input.name}"` })
+      showToast({ level: 'success', message: `${t('endpoints.saved', 'Saved')} "${input.name}"` })
     } catch (err) {
       // A cancelled setup/unlock is not an error: the sheet is the surface
       // while it is up, and the editor behind it still holds the draft.
       if (err instanceof VaultOperationCancelledError) return
       const message = (err as Error).message
       log.error('Failed to save endpoint', { message })
-      showToast({ level: 'danger', message: `Could not save the endpoint: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('endpoints.saveFailed', 'Could not save the endpoint:')} ${message}`,
+      })
     }
   }
 
   async function remove(ep: Endpoint) {
-    if (!(await showConfirm(`Delete "${ep.name}"?`))) return
+    if (!(await showConfirm(`${t('endpoints.delete', 'Delete')} "${ep.name}"?`))) return
     try {
       await props.client.deleteEndpoint(ep.id)
       await load()
-      showToast({ level: 'success', message: `Deleted "${ep.name}"` })
+      showToast({ level: 'success', message: `${t('endpoints.deleted', 'Deleted')} "${ep.name}"` })
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to delete endpoint', { message })
-      showToast({ level: 'danger', message: `Could not delete "${ep.name}": ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('endpoints.deleteFailedHead', 'Could not delete')} "${ep.name}": ${message}`,
+      })
     }
   }
 
@@ -705,8 +724,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   })
 
   function modelSummary(models: Endpoint['models']): string {
-    const n = models.length
-    return `${n} model${n === 1 ? '' : 's'}`
+    return tPlural('endpoints.modelSummary', models.length, '{count} models')
   }
 
   // ── Rows ─────────────────────────────────────────────────────────────
@@ -777,15 +795,18 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  actually hit: a grey button and silence. */
   const testDisabledReason = () => {
     if (probing()) return undefined
-    if (draft().baseUrl.trim() === '') return 'Add a base URL to test the connection'
+    if (draft().baseUrl.trim() === '')
+      return t('endpoints.testNeedsBaseUrl', 'Add a base URL to test the connection')
     return undefined
   }
 
   /** What pressing Test will do right now, so the label never promises the
    *  check it is not about to run. */
   const testLabel = () => {
-    if (probing()) return 'Testing…'
-    return (draft().models[0]?.name.trim() ?? '') === '' ? 'Test connection' : 'Test endpoint'
+    if (probing()) return t('endpoints.testing', 'Testing…')
+    return (draft().models[0]?.name.trim() ?? '') === ''
+      ? t('endpoints.testConnection', 'Test connection')
+      : t('endpoints.testEndpoint', 'Test endpoint')
   }
 
   /** The row's Test: the SAME probe the editor runs on a saved endpoint
@@ -895,7 +916,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       props.vaultController?.status()?.state,
       inventoryFact(),
     )
-    if (state === 'none') return { tone: 'neutral', text: 'No key' }
+    if (state === 'none') return { tone: 'neutral', text: t('endpoints.noKey', 'No key') }
     if (state === 'not-required' || state === 'resolvable' || state === 'sealed') return undefined
     // deleted / unavailable: the sentences agent-status-line owns, always in
     // the StatusDot's warning — the Badge tone that mapping speaks (warning)
@@ -915,16 +936,16 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           <>
             <IconButton
               size="sm"
-              title="Edit"
-              ariaLabel={`Edit ${ep.name}`}
+              title={t('endpoints.edit', 'Edit')}
+              ariaLabel={`${t('endpoints.edit', 'Edit')} ${ep.name}`}
               onClick={() => openEdit(ep)}
             >
               <PencilIcon />
             </IconButton>
             <IconButton
               size="sm"
-              title="Test connection"
-              ariaLabel={`Test ${ep.name}`}
+              title={t('endpoints.testConnection', 'Test connection')}
+              ariaLabel={`${t('endpoints.testAriaHead', 'Test')} ${ep.name}`}
               disabled={rowTestDisabled(ep) || rowProbing().has(ep.id)}
               onClick={() => void runRowProbe(ep)}
             >
@@ -932,8 +953,8 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             </IconButton>
             <IconButton
               size="sm"
-              title="Delete"
-              ariaLabel={`Delete ${ep.name}`}
+              title={t('endpoints.delete', 'Delete')}
+              ariaLabel={`${t('endpoints.delete', 'Delete')} ${ep.name}`}
               onClick={() => void remove(ep)}
             >
               <TrashIcon />
@@ -949,7 +970,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       <div class="ep-model-row">
         <SuggestionField
           id={`endpoint-model-${index}-name`}
-          label="Model id"
+          label={t('endpoints.modelId', 'Model id')}
           required
           value={row().name}
           onInput={(v) => updateModel(index, { name: v })}
@@ -964,10 +985,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         />
         <TextField
           id={`endpoint-model-${index}-alias`}
-          label="Picker label"
+          label={t('endpoints.pickerLabel', 'Picker label')}
           value={row().alias}
           onInput={(v) => updateModel(index, { alias: v })}
-          placeholder="Optional"
+          placeholder={t('endpoints.optional', 'Optional')}
         />
       </div>
     )
@@ -983,7 +1004,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       <div class="ep-header-row">
         <TextField
           id={`endpoint-header-${index}-name`}
-          label="Header"
+          label={t('endpoints.header', 'Header')}
           value={row().name}
           onInput={(v) => updateHeader(index, { name: v })}
           onBlur={() => validation.touch('headers')}
@@ -991,7 +1012,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         />
         <SecretTextField
           id={`endpoint-header-${index}-value`}
-          label="Value"
+          label={t('endpoints.value', 'Value')}
           value={row().value}
           onInput={(v) => updateHeader(index, { value: v })}
           source={pickerSource()}
@@ -1006,16 +1027,16 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   const emptyContent = () => {
     if (loadState() === 'loading') {
-      return <EmptyState title="Loading endpoints" />
+      return <EmptyState title={t('endpoints.loading', 'Loading endpoints')} />
     }
     if (loadState() === 'failed') {
       return (
         <EmptyState
-          title="Couldn't load endpoints"
+          title={t('endpoints.loadFailed', "Couldn't load endpoints")}
           description={loadError()}
           action={
             <Button variant="default" onClick={() => void load()}>
-              Retry
+              {t('endpoints.retry', 'Retry')}
             </Button>
           }
         />
@@ -1023,11 +1044,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     }
     return (
       <EmptyState
-        title="No endpoints yet"
-        description="Add an AI endpoint to configure the assistant's model provider."
+        title={t('endpoints.emptyTitle', 'No endpoints yet')}
+        description={t(
+          'endpoints.emptyDescription',
+          "Add an AI endpoint to configure the assistant's model provider.",
+        )}
         action={
           <Button variant="primary" onClick={openNew}>
-            + New endpoint
+            {t('endpoints.newEndpoint', '+ New endpoint')}
           </Button>
         }
       />
@@ -1041,25 +1065,25 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       <CollectionView
         searchValue={searchQuery()}
         onSearch={setSearchQuery}
-        searchPlaceholder="Filter endpoints"
-        searchLabel="Filter endpoints"
+        searchPlaceholder={t('endpoints.filter', 'Filter endpoints')}
+        searchLabel={t('endpoints.filter', 'Filter endpoints')}
         actions={
           <Button variant="primary" onClick={openNew}>
-            + New endpoint
+            {t('endpoints.newEndpoint', '+ New endpoint')}
           </Button>
         }
         hasItems={endpoints().length > 0}
         empty={emptyContent()}
       >
-        <div role="list" aria-label="Endpoint list">
+        <div role="list" aria-label={t('endpoints.listAria', 'Endpoint list')}>
           <For each={filteredEndpoints()}>{(ep) => renderRow(ep)}</For>
         </div>
         {/* A filter that matches nothing hid every row and said nothing,
             which is indistinguishable from the list failing to load. */}
         <Show when={searchQuery().trim() !== '' && filteredEndpoints().length === 0}>
           <EmptyState
-            title="Nothing matches this filter"
-            description={`No endpoint's name or base URL contains "${searchQuery().trim()}".`}
+            title={t('endpoints.noFilterMatch', 'Nothing matches this filter')}
+            description={`${t('endpoints.noFilterMatchDescriptionHead', "No endpoint's name or base URL contains")} "${searchQuery().trim()}".`}
           />
         </Show>
       </CollectionView>
@@ -1068,15 +1092,21 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         open={dialogOpen()}
         onClose={closeDialog}
         onSubmit={() => void save()}
-        title={editing() ? `Edit Endpoint: ${editing()!.name}` : 'New Endpoint'}
+        title={
+          editing()
+            ? `${t('endpoints.editTitleHead', 'Edit Endpoint:')} ${editing()!.name}`
+            : t('endpoints.newTitle', 'New Endpoint')
+        }
         size="lg"
         footer={
           <>
             <Button variant="default" onClick={closeDialog}>
-              Cancel
+              {t('endpoints.cancel', 'Cancel')}
             </Button>
             <Button variant="primary" onClick={() => void save()}>
-              {editing() ? 'Save Endpoint' : 'Create Endpoint'}
+              {editing()
+                ? t('endpoints.save', 'Save Endpoint')
+                : t('endpoints.create', 'Create Endpoint')}
             </Button>
           </>
         }
@@ -1084,17 +1114,17 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         <Stack>
           <TextField
             id="endpoint-name"
-            label="Name"
+            label={t('endpoints.name', 'Name')}
             required
             value={draft().name}
             onInput={(v) => setDraftField('name', v)}
             onBlur={() => validation.touch('name')}
             error={validation.error('name')}
-            placeholder="My provider"
+            placeholder={t('endpoints.namePlaceholder', 'My provider')}
           />
           <TextField
             id="endpoint-base-url"
-            label="Base URL"
+            label={t('endpoints.baseUrl', 'Base URL')}
             required
             value={draft().baseUrl}
             onInput={(v) => setDraftField('baseUrl', v)}
@@ -1103,7 +1133,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             placeholder="https://api.example.com/v1"
           />
           <Checkbox
-            label="This endpoint does not require an API key"
+            label={t('endpoints.noKeyRequired', 'This endpoint does not require an API key')}
             checked={draft().noKey}
             onChange={(checked) => {
               setDraft((d) => ({
@@ -1126,13 +1156,16 @@ export function EndpointsSection(props: EndpointsSectionProps) {
                 person and a `secrow:` handle. */}
             <SecretTextField
               id="endpoint-key"
-              label="API key"
+              label={t('endpoints.apiKey', 'API key')}
               type={boundSecret(draft().key) === undefined ? 'password' : 'text'}
               value={draft().key}
               onInput={(v) => setDraftField('key', v)}
               source={pickerSource()}
               marks={fieldMarks(draft().key)}
-              description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
+              description={t(
+                'endpoints.apiKeyDescription',
+                'The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy.',
+              )}
             />
           </Show>
           {/* Custom headers belong to the CONNECTION, so they come before the
@@ -1143,10 +1176,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
               the model field discovers them from a successful test. */}
           <EditableRowList
             rows={draft().headers}
-            ariaLabel="Custom headers"
-            addLabel="Add header"
-            emptyLabel="No custom headers — requests go out with just the credential."
-            removeLabel={(i) => `Remove header ${i + 1}`}
+            ariaLabel={t('endpoints.customHeaders', 'Custom headers')}
+            addLabel={t('endpoints.addHeader', 'Add header')}
+            emptyLabel={t(
+              'endpoints.noHeaders',
+              'No custom headers — requests go out with just the credential.',
+            )}
+            removeLabel={(i) => `${t('endpoints.removeHeader', 'Remove header')} ${i + 1}`}
             onRemove={removeHeader}
             onAdd={addHeader}
             error={validation.error('headers')}
@@ -1162,7 +1198,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
               {testLabel()}
             </Button>
             <Show when={probing()}>
-              <Spinner size="sm" label="Testing endpoint" />
+              <Spinner size="sm" label={t('endpoints.testingEndpoint', 'Testing endpoint')} />
             </Show>
             <Show when={testDisabledReason()}>
               <span class="ep-test-reason">{testDisabledReason()}</span>
@@ -1173,10 +1209,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           </div>
           <EditableRowList
             rows={draft().models}
-            ariaLabel="Endpoint models"
-            addLabel="Add model"
-            emptyLabel="No models — add the model id the API understands."
-            removeLabel={(i) => `Remove model ${i + 1}`}
+            ariaLabel={t('endpoints.endpointModels', 'Endpoint models')}
+            addLabel={t('endpoints.addModel', 'Add model')}
+            emptyLabel={t(
+              'endpoints.noModels',
+              'No models — add the model id the API understands.',
+            )}
+            removeLabel={(i) => `${t('endpoints.removeModel', 'Remove model')} ${i + 1}`}
             onRemove={removeModel}
             onAdd={addModel}
             error={validation.error('models')}

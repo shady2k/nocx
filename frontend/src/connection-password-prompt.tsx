@@ -15,6 +15,7 @@
  * component only reports the decision.
  */
 import { createSignal, Show } from 'solid-js'
+import { t } from './i18n/locale-model'
 import { Button, Checkbox, Prompt, Stack, TextField } from './ui'
 import type { ProfileClient } from './profiles'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
@@ -35,14 +36,16 @@ export function ConnectionPasswordPrompt(props: ConnectionPasswordPromptProps) {
   const [error, setError] = createSignal('')
 
   const title = () =>
-    props.ask.connection ? `Password for ${props.ask.connection}` : 'Password required'
+    props.ask.connection
+      ? `${t('connections.passwordPrompt.forHead', 'Password for ')}${props.ask.connection}`
+      : t('connections.passwordPrompt.required', 'Password required')
   // The account the password belongs to: user@host, so the same host with
   // a different user is visibly a different password.
   const account = () => `${props.ask.user}@${props.ask.host}`
 
   const submit = async () => {
     if (!password()) {
-      setError('Enter the password for this connection')
+      setError(t('connections.passwordPrompt.enterError', 'Enter the password for this connection'))
       return
     }
     setError('')
@@ -58,7 +61,7 @@ export function ConnectionPasswordPrompt(props: ConnectionPasswordPromptProps) {
     } catch (e) {
       setBusy(false)
       const message = (e as Error).message
-      setError(message || 'Could not send the password')
+      setError(message || t('connections.passwordPrompt.sendFailed', 'Could not send the password'))
     }
   }
 
@@ -84,21 +87,22 @@ export function ConnectionPasswordPrompt(props: ConnectionPasswordPromptProps) {
       actions={
         <>
           <Button variant="primary" disabled={busy()} onClick={() => void submit()}>
-            Connect
+            {t('connections.passwordPrompt.connect', 'Connect')}
           </Button>
           <Button variant="default" disabled={busy()} onClick={cancel}>
-            Cancel
+            {t('connections.passwordPrompt.cancel', 'Cancel')}
           </Button>
         </>
       }
     >
       <Stack>
         <p class="ui-vault-desc-text">
-          {props.ask.reason} Enter the password for <strong>{account()}</strong>.
+          {props.ask.reason} {t('connections.passwordPrompt.enterFor', 'Enter the password for')}{' '}
+          <strong>{account()}</strong>.
         </p>
         <TextField
           id="connection-password"
-          label="Password"
+          label={t('connections.passwordPrompt.password', 'Password')}
           type="password"
           value={password()}
           onInput={(v) => {
@@ -113,7 +117,10 @@ export function ConnectionPasswordPrompt(props: ConnectionPasswordPromptProps) {
             variant="switch"
             checked={remember()}
             onChange={setRemember}
-            label="Remember this password — the next open will not ask"
+            label={t(
+              'connections.passwordPrompt.remember',
+              'Remember this password — the next open will not ask',
+            )}
           />
         </Show>
       </Stack>

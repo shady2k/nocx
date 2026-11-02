@@ -106,6 +106,7 @@ import { ResetIcon } from './ui/icons'
 import { Slider } from './ui/slider'
 import { PetPreview } from './pets/preview'
 import { systemPromptText } from './systemprompt'
+import { t } from './i18n/locale-model'
 import {
   detachedOutputSentence,
   historyUnavailableSentence,
@@ -1128,11 +1129,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const nextState = recordSaveOutcome(toMirror(), key, outcome)
     applyMirror(nextState)
     if (outcome.kind === 'rejected') {
-      const label = declarations().find((d) => d.key === key)?.label ?? key
       if (rejectionNeedsToast(key, outcome.attemptedValue, outcome.error)) {
+        const decl = declarations().find((d) => d.key === key)
         showToast({
           level: 'danger',
-          message: `Could not save "${label}": ${settingSaveErrorSentence(outcome.error)}`,
+          message: `Could not save "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(outcome.error)}`,
         })
       }
     }
@@ -1156,10 +1157,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
     } catch (err) {
       const message = (err as Error).message
       setErrors(key, message)
-      const label = declarations().find((d) => d.key === key)?.label ?? key
+      const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not reset "${label}": ${settingSaveErrorSentence(message)}`,
+        message: `Could not reset "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
       })
     }
   }
@@ -1172,10 +1173,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
     } catch (err) {
       const message = (err as Error).message
       setErrors(key, message)
-      const label = declarations().find((d) => d.key === key)?.label ?? key
+      const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not save "${label}": ${settingSaveErrorSentence(message)}`,
+        message: `Could not save "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
       })
     }
   }
@@ -1188,10 +1189,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
     } catch (err) {
       const message = (err as Error).message
       setErrors(key, message)
-      const label = declarations().find((d) => d.key === key)?.label ?? key
+      const decl = declarations().find((d) => d.key === key)
       showToast({
         level: 'danger',
-        message: `Could not clear "${label}": ${settingSaveErrorSentence(message)}`,
+        message: `Could not clear "${decl ? declLabel(decl) : key}": ${settingSaveErrorSentence(message)}`,
       })
     }
   }
@@ -1317,16 +1318,46 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   // ── Search scoring ─────────────────────────────────────────────────
 
+  // Localisation (nocx-dej6.2): the wire ships the minted key beside the
+  // English prose, and every visible string a declaration owns resolves
+  // through the key first. The prose remains the fallback, which is what a
+  // payload from before the keys existed — or a locale with no entry yet —
+  // renders. The label helper is also the owner of the ONE translated
+  // spelling: toasts, aria-labels, the search and the reset affordance all
+  // read it rather than `decl.label` directly.
+  function declLabel(decl: Declaration): string {
+    return t(decl.labelKey ?? '', decl.label)
+  }
+
+  /** The description's twin of declLabel. Empty stays empty: a description
+   * the declaration does not carry is absent, not untranslated. */
+  function declDescription(decl: Declaration): string {
+    return t(decl.descriptionKey ?? '', decl.description)
+  }
+
+  /** One option's label, through its minted settings.<key>.option.<value>
+   * key with the wire's English label as the fallback. */
+  function optionLabel(option: { label: string; labelKey?: string }): string {
+    return t(option.labelKey ?? '', option.label)
+  }
+
   function searchScore(decl: Declaration, query: string): number {
     const q = query.toLowerCase()
-    if (decl.label.toLowerCase() === q || decl.key.toLowerCase() === q) return 2
-    if (decl.label.toLowerCase().includes(q)) return 1
-    if (decl.description.toLowerCase().includes(q)) return 1
+    // Match BOTH spellings: the English prose (so the words already in the
+    // person's head still find the row) and the active-locale string (so a
+    // person reading Russian finds it in Russian). An either-side match is
+    // one hit, not two.
+    const label = `${decl.label}\n${declLabel(decl)}`
+    const description = `${decl.description}\n${declDescription(decl)}`
+    if (label.toLowerCase() === q || decl.key.toLowerCase() === q) return 2
+    if (label.toLowerCase().includes(q)) return 1
+    if (description.toLowerCase().includes(q)) return 1
     if (decl.section.toLowerCase().includes(q)) return 1
     if (decl.key.toLowerCase().includes(q)) return 1
     if (decl.options) {
       for (const opt of decl.options) {
-        if (opt.label.toLowerCase().includes(q) || opt.value.toLowerCase().includes(q)) return 1
+        const optText = `${opt.label}\n${optionLabel(opt)}`
+        if (optText.toLowerCase().includes(q) || opt.value.toLowerCase().includes(q)) return 1
       }
     }
     return 0
@@ -1438,7 +1469,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show when={decl.default !== undefined && decision().canReset}>
           <IconButton
             size="xs"
-            ariaLabel={'Reset "' + decl.label + '" to default'}
+            ariaLabel={'Reset "' + declLabel(decl) + '" to default'}
             title="Reset to default"
             onClick={() => void resetSetting(decl.key)}
           >
@@ -1473,12 +1504,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
         class="ui-settings-matrix-cell"
         id={keyToDomId(decl.key)}
         data-key={decl.key}
-        title={decl.description || undefined}
+        title={declDescription(decl) || undefined}
       >
         <Checkbox
           variant="switch"
           checked={!!eff()}
-          ariaLabel={decl.label}
+          ariaLabel={declLabel(decl)}
           onChange={(c) => saveSetting(decl.key, c)}
         />
         <ProvenanceBadge decl={decl} />
@@ -1573,7 +1604,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       >
         <Field
           for={controlId}
-          label={decl.label}
+          label={declLabel(decl)}
           labelMarker={
             // Always rendered, coloured only when modified. Under a `Show` the
             // dot's 6px box and its margin entered the flow the moment a value
@@ -1586,7 +1617,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
               aria-hidden="true"
             />
           }
-          description={decl.description || undefined}
+          description={declDescription(decl) || undefined}
           orientation="horizontal"
           labelAdornment={
             // The storage-class tag (Public / Private / Secret) used to sit here.
@@ -1607,7 +1638,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
               <Checkbox
                 variant="switch"
                 checked={!!eff()}
-                ariaLabel={decl.label}
+                ariaLabel={declLabel(decl)}
                 onChange={(c) => saveSetting(decl.key, c)}
               />
             </Show>
@@ -1654,7 +1685,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 min={decl.min ?? 0}
                 max={decl.max ?? 100}
                 unit={decl.unit}
-                ariaLabel={decl.label}
+                ariaLabel={declLabel(decl)}
                 onInput={setDragValue}
                 onCommit={(n) => {
                   setDragValue(null)
@@ -1686,7 +1717,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 id={controlId}
                 value={displayValue(eff(), decl)}
                 onChange={(v) => void saveSetting(decl.key, v)}
-                options={decl.options ?? []}
+                options={(decl.options ?? []).map((opt) => ({
+                  value: opt.value,
+                  label: optionLabel(opt),
+                }))}
               />
             </Show>
 
@@ -1698,7 +1732,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 <Button
                   variant="default"
                   onClick={() => {
-                    const value = prompt('Enter new value for "' + decl.label + '":')
+                    const value = prompt('Enter new value for "' + declLabel(decl) + '":')
                     if (value === null) return
                     void saveSecret(decl.key, value)
                   }}
@@ -1757,7 +1791,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 by railItems. It renders only once the catalogue has arrived —
                 the guard refuses an empty catalogue with named pages. */}
             <Show when={loadState() === 'ready'}>
-              <GroupedRail label="Settings sections" groups={groups()} items={railItems()} />
+              <GroupedRail
+                label="Settings sections"
+                groups={groups().map((g) => ({
+                  id: g.id,
+                  title: g.key ? t(g.key, g.title) : g.title,
+                  order: g.order,
+                }))}
+                items={railItems()}
+              />
             </Show>
           </div>
         }

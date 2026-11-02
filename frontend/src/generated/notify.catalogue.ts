@@ -39,7 +39,15 @@ export interface Kind {
    */
   label: string
   /**
+   * Translation key the label resolves through (localisation design Q2, Option B): notify.kind.<id>.label, minted in Go. Optional so payloads from before the keys existed still validate; the English label is the fallback.
+   */
+  labelKey?: string
+  /**
    * The sentence explaining what produces this notification kind.
    */
   description: string
+  /**
+   * Translation key the description resolves through: notify.kind.<id>.description, minted in Go. Optional for the same reason as labelKey.
+   */
+  descriptionKey?: string
 }

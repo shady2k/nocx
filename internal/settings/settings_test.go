@@ -1141,6 +1141,80 @@ func TestRegistry_GroupsAndSectionGroups(t *testing.T) {
 	}
 }
 
+// ── Translation keys (localisation design Q2, Option B) ────────────────
+// Every declaration, select option and rail group ships a translation key
+// beside its English prose; the renderer resolves key → catalogue entry →
+// fallback. These tests hold the "minted, never hand-declared" half.
+
+func TestDeclarations_CarryTranslationKeys(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	for _, d := range reg.Declarations() {
+		if want := "settings." + d.Key + ".label"; d.LabelKey != want {
+			t.Errorf("declaration %q labelKey = %q, want %q", d.Key, d.LabelKey, want)
+		}
+		if want := "settings." + d.Key + ".description"; d.DescriptionKey != want {
+			t.Errorf("declaration %q descriptionKey = %q, want %q", d.Key, d.DescriptionKey, want)
+		}
+		for _, o := range d.Options {
+			if want := "settings." + d.Key + ".option." + o.Value; o.LabelKey != want {
+				t.Errorf("declaration %q option %q labelKey = %q, want %q", d.Key, o.Value, o.LabelKey, want)
+			}
+		}
+	}
+}
+
+func TestGroups_CarryTranslationKeys(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	groups := reg.Groups()
+	if len(groups) == 0 {
+		t.Fatal("the rail group catalogue is empty")
+	}
+	seen := make(map[string]bool, len(groups))
+	for _, g := range groups {
+		if g.Key == "" {
+			t.Errorf("group %q has no translation key", g.ID)
+			continue
+		}
+		if !strings.HasPrefix(g.Key, "settings.group.") {
+			t.Errorf("group %q key = %q, want a settings.group.* key", g.ID, g.Key)
+		}
+		if seen[g.Key] {
+			t.Errorf("groups share translation key %q", g.Key)
+		}
+		seen[g.Key] = true
+	}
+}
+
+// TestKeyMintingIsDeterministic pins the exact key spellings the frontend
+// catalogues are written against: a pure function of the id, identical on
+// every call, so a key that drifts is a wire break the tests catch here
+// rather than a blank label the renderer discovers at runtime.
+func TestKeyMintingIsDeterministic(t *testing.T) {
+	if got := settings.LabelKeyFor("ui.theme"); got != "settings.ui.theme.label" {
+		t.Errorf("LabelKeyFor = %q", got)
+	}
+	if got := settings.DescriptionKeyFor("ui.theme"); got != "settings.ui.theme.description" {
+		t.Errorf("DescriptionKeyFor = %q", got)
+	}
+	if got := settings.OptionLabelKeyFor("ui.theme", "tokyo-night"); got != "settings.ui.theme.option.tokyo-night" {
+		t.Errorf("OptionLabelKeyFor = %q", got)
+	}
+	// Determinism: the same input mints the same key, twice. Written through
+	// two reads so the assertion is about the function, not about a constant
+	// compared with itself (staticcheck's SA4000).
+	first, second := settings.LabelKeyFor("ui.theme"), settings.LabelKeyFor("ui.theme")
+	if first != second {
+		t.Errorf("LabelKeyFor is not deterministic: %q then %q", first, second)
+	}
+	// A group title with a space: one dash, lowercased.
+	if got := settings.GroupKeyFor("Application"); got != "settings.group.application" {
+		t.Errorf("GroupKeyFor(Application) = %q", got)
+	}
+	if got := settings.GroupKeyFor("Backup & Restore"); got != "settings.group.backup-restore" {
+		t.Errorf("GroupKeyFor(Backup & Restore) = %q", got)
+	}
+}
+
 // ── Contract conformance (nocx-dgsp addendum 2) ────────────────────────
 // The settings.describe result shape is declared once, in
 // contracts/settings.describe.schema.json; the renderer's types are

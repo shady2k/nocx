@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint . --max-warnings 0 && npm run lint:static",
-    "lint:static": "node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs && node lint-fixtures/check-row-grammar.mjs && node lint-fixtures/check-error-vocabulary.mjs && node lint-fixtures/check-menu-icons.mjs && node lint-fixtures/check-glyph-icons.mjs",
+    "lint:static": "node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs && node lint-fixtures/check-row-grammar.mjs && node lint-fixtures/check-error-vocabulary.mjs && node lint-fixtures/check-menu-icons.mjs && node lint-fixtures/check-glyph-icons.mjs && node lint-fixtures/check-i18n-catalogues.mjs",
     "lint:dead-exports": "node lint-fixtures/check-dead-exports.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

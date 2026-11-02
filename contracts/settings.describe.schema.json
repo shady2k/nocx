@@ -46,7 +46,15 @@
         "label": {
           "type": "string"
         },
+        "labelKey": {
+          "description": "Translation key the label resolves through (localisation design Q2, Option B): settings.<key>.label, minted in Go. Optional so payloads from before the keys existed still validate; the English label is the fallback.",
+          "type": "string"
+        },
         "description": {
+          "type": "string"
+        },
+        "descriptionKey": {
+          "description": "Translation key the description resolves through: settings.<key>.description, minted in Go. Optional for the same reason as labelKey.",
           "type": "string"
         },
         "control": {
@@ -71,6 +79,10 @@
                 "type": "string"
               },
               "label": {
+                "type": "string"
+              },
+              "labelKey": {
+                "description": "Translation key the option's label resolves through: settings.<key>.option.<value>, minted in Go. Optional so old payloads validate.",
                 "type": "string"
               }
             }
@@ -109,6 +121,10 @@
           "type": "string"
         },
         "title": {
+          "type": "string"
+        },
+        "key": {
+          "description": "Translation key the title resolves through: settings.group.<lowercased-with-dashes title>, minted in Go. Optional so old payloads validate.",
           "type": "string"
         },
         "order": {

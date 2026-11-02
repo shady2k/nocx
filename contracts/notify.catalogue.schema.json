@@ -42,10 +42,18 @@
           "type": "string",
           "minLength": 1
         },
+        "labelKey": {
+          "description": "Translation key the label resolves through (localisation design Q2, Option B): notify.kind.<id>.label, minted in Go. Optional so payloads from before the keys existed still validate; the English label is the fallback.",
+          "type": "string"
+        },
         "description": {
           "description": "The sentence explaining what produces this notification kind.",
           "type": "string",
           "minLength": 1
+        },
+        "descriptionKey": {
+          "description": "Translation key the description resolves through: notify.kind.<id>.description, minted in Go. Optional for the same reason as labelKey.",
+          "type": "string"
         }
       }
     }

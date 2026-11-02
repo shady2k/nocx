@@ -19,6 +19,47 @@ proof = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proof)
 
 
+class ApplicationLogTests(unittest.TestCase):
+    """The candidate's own words, at the path the product actually uses.
+
+    The proof's launcher stdout stops at the previous window; the window that
+    has to finalise writes to its own log, and the Linux data directory is
+    `<XDG_DATA_HOME>/nocx` with `nocx.log` inside it (nocx-vh2hr.1.10).
+    """
+
+    def test_the_log_sits_under_the_xdg_data_home_the_driver_hands_the_app(self):
+        self.assertEqual(str(proof.application_log("/work/nocx-macos-proof/home")),
+                         "/work/nocx-macos-proof/home/data/nocx/nocx.log")
+
+    def test_the_driver_still_points_xdg_data_home_at_that_home(self):
+        # The path above is only right because the driver sets
+        # XDG_DATA_HOME=<work>/home/data for every process it starts, including
+        # the ones the app starts for itself.
+        source = (DIRECTORY / "prove-linux.py").read_text()
+        self.assertIn('XDG_DATA_HOME=str(home / "data")', source)
+
+    def test_the_tail_is_bounded_and_absent_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "nocx.log"
+            path.write_text("\n".join(f"line {i}" for i in range(100)) + "\n")
+            tail = proof.log_tail(path, 3)
+            self.assertEqual(tail.splitlines(), ["line 97", "line 98", "line 99"])
+            self.assertEqual(proof.log_tail(Path(temp) / "never-written.log"), "")
+
+    def test_the_restart_reading_quotes_the_candidates_log(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            log = proof.application_log(home)
+            log.parent.mkdir(parents=True)
+            log.write_text('level=INFO msg="report healthy: refused — the reporting identity is not the installed build"\n')
+            observation = proof.RestartObservation(
+                {"version": "0.8.1"}, {"version": "0.8.1"}, [], {"coordinator": "c"},
+                home / "nocx.AppImage", set(), home, home / "journal.json", home / "backup.app")
+            reading = observation.describe()
+            self.assertIn("app log tail:", reading)
+            self.assertIn("report healthy: refused", reading)
+
+
 class VanishingAccessibleTests(unittest.TestCase):
     """The accessibility tree moves under the reader: rows and children go away
     between the listing and the read. A live desktop is exactly that race, and

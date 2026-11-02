@@ -390,15 +390,33 @@ def run(args, evidence):
     evidence["result"] = "passed"
 
 
-def main():
+def parse_arguments(argv=None):
+    """The driver's own command line, with every PATH resolved.
+
+    ONLY paths. The normalisation used to run over every value and call
+    `.resolve()` on it, so `--ui-timeout` — an int — killed the proof before its
+    first step:
+
+        AttributeError: 'int' object has no attribute 'resolve'
+
+    which is what nightly 41398991857 did on every run (nocx-vh2hr.1.10). A
+    defaulted argument reaches the loop just like a passed one, which is why the
+    workflow never had to mention it to trigger this.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ["previous-manifest", "previous-signature", "candidate-manifest",
                  "candidate-signature", "verifier", "work", "evidence"]:
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--ui-timeout", type=int, default=300)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     for key, value in vars(args).items():
-        setattr(args, key, value.resolve())
+        if isinstance(value, Path):
+            setattr(args, key, value.resolve())
+    return args
+
+
+def main():
+    args = parse_arguments()
     evidence = {"result": "failed", "proof": "nocx-1ebrs.35.5"}
     try:
         run(args, evidence)

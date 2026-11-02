@@ -171,7 +171,10 @@ func TestApplyReleaseUpdateNamesItsFirstStepBeforeItCanBlock(t *testing.T) {
 	old := version.Version
 	version.Version = "0.8.0"
 	t.Cleanup(func() { version.Version = old })
-	storagetest.Isolate(t)
+	// A disposable HOME too: the install-placement probe creates the user's
+	// Applications directory, and a unit test has no business writing to the
+	// developer's own.
+	storagetest.IsolateWithHome(t)
 
 	var buf bytes.Buffer
 	ctx := log.WithLogger(context.Background(),

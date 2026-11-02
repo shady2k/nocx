@@ -394,6 +394,15 @@ func agentWrapperCancelsTheLaunchOnCtrlC(t *testing.T, start nestedParentStarter
 	if _, err := s.ptmx.Write([]byte{0x03}); err != nil {
 		t.Fatalf("press Ctrl+C: %v", err)
 	}
+	// THE SHELL HAS TO BE BACK BEFORE THE NEXT LINE IS TYPED (nocx-atpw5.1.32).
+	// The interrupt is caught inside the wrapper's bounded wait, so for up to
+	// that wait's remainder the shell is still inside the wrapper: a line typed
+	// there is echoed by the terminal and then lost when the prompt returns.
+	// Measured on a loaded machine, about once in fifty: the pane showed
+	// `^Cecho "RC=$?"`, then `nocx: cancelled — claude was not started`, and
+	// never `RC=130`. Waiting on the sentence is waiting on what the interrupt
+	// produces — the same fact the next assertion would otherwise race.
+	waitForOutput(t, s, "nocx: cancelled — claude was not started")
 	if _, err := s.ptmx.Write([]byte("echo \"RC=$?\"\n")); err != nil {
 		t.Fatalf("type echo: %v", err)
 	}

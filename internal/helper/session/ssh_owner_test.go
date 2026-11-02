@@ -167,9 +167,12 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 			t.Fatal("the doomed chunk never reached the owner's writer: nothing to force-stop against")
 		default:
 		}
-		fence, ferr := stand.sessions.TestCompletedFence(stuckID)
-		if ferr != nil {
-			t.Fatalf("fence poll: %v", ferr)
+		// One name for one failure: the poll's error is not the pre-write
+		// fence's (ferr, above), and a shadow here reads like the same fact
+		// twice in `go vet -shadow`'s eyes (nocx-atpw5.1.22).
+		fence, pollErr := stand.sessions.TestCompletedFence(stuckID)
+		if pollErr != nil {
+			t.Fatalf("fence poll: %v", pollErr)
 		}
 		// EXACTLY fitChunks, not "at least": the arithmetic above proves the
 		// NEXT chunk cannot fit only at that count. A gate that accepted more

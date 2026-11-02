@@ -22,6 +22,7 @@ type aboutInfo struct {
 	Version     string `json:"version"`
 	Commit      string `json:"commit"`
 	Date        string `json:"date"`
+	Build       string `json:"build"`
 	Go          string `json:"go"`
 	Wails       string `json:"wails"`
 	Platform    string `json:"platform"`
@@ -44,6 +45,7 @@ func wireAbout(b version.BuildInfo) aboutInfo {
 		Version:     version.OrUnknown(b.Version),
 		Commit:      version.OrUnknown(b.Commit),
 		Date:        version.OrUnknown(b.Date),
+		Build:       version.OrUnknown(b.Build),
 		Go:          version.OrUnknown(b.Go),
 		Wails:       version.OrUnknown(b.Wails),
 		Platform:    version.OrUnknown(b.Platform),

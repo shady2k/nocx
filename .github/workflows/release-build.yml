@@ -50,6 +50,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       build-date: ${{ steps.v.outputs.build-date }}
+      build-number: ${{ steps.v.outputs.build-number }}
     steps:
       - id: v
         env:
@@ -65,6 +66,14 @@ jobs:
           # One identity for both platforms and their signed manifest. A
           # publication or promotion time is not the time these bytes were built.
           echo "build-date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # THE BUILD NUMBER (nocx-vh2hr.1.5, the owner's decision of
+          # 2026-10-30): the same instant as YYYYMMDDHHMM, in UTC, computed
+          # HERE and nowhere else. It is stamped into the binary
+          # (internal/version.Build), into macOS CFBundleVersion and — through
+          # the manifest's own build.builtAt — signed for every reader, which is
+          # what a CI run number cannot be: a rerun of an older revision takes a
+          # higher run number for an older build.
+          echo "build-number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
   helpers:
     needs: [validate]
     runs-on: ubuntu-latest
@@ -268,6 +277,7 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
       RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
       # WHICH PLATFORMS THIS APP CAN RUN ON, stated by the job that knows: the
       # macOS bundle is universal, so either slice may be the one executing and
@@ -493,6 +503,7 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${BUILD_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Build=${BUILD_NUMBER}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Wails=${WAILS_VERSION}"
           # v3 has no -platform flag: build each slice and join with lipo (§4).
           #
@@ -540,6 +551,18 @@ jobs:
           lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx-server \
             build/bin/darwin-amd64/nocx-server build/bin/darwin-arm64/nocx-server
           cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
+          # CFBundleVersion IS THE BUILD NUMBER, NOT THE MARKETING VERSION
+          # (nocx-vh2hr.1.5, the owner's decision of 2026-10-30): every build
+          # carries its own monotonically increasing number beside the version,
+          # Sparkle-style, and on macOS this is where a person and the system
+          # read it. The short version stays the stable-to-be, so promotion
+          # keeps identical bytes (ADR-0097) and the promoted stable carries
+          # the nightly's number — the same build, not a new one.
+          #
+          # Patched AFTER the template is copied and BEFORE the signature: a
+          # file written into a signed bundle is an unsealed resource.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" \
+            build/bin/nocx.app/Contents/Info.plist
           cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
           # THE PINNED THIRD-PARTY NOTICES, AND BEFORE THE SIGNATURE BELOW.
           # The bundle is how our distribution reaches a user: it carries the
@@ -696,7 +719,13 @@ jobs:
           short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
           bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
           [ "$short" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString=$short != $VERSION"; exit 1; }
-          [ "$bundle" = "$VERSION" ] || { echo "::error::CFBundleVersion=$bundle != $VERSION"; exit 1; }
+          # NUMERIC AND EQUAL TO THE STAMPED NUMBER (nocx-vh2hr.1.5): the
+          # marketing version is where it belongs, CFBundleShortVersionString,
+          # and CFBundleVersion is the build's own increasing number.
+          case "$bundle" in
+            ''|*[!0-9]*) echo "::error::CFBundleVersion=$bundle is not numeric"; exit 1 ;;
+          esac
+          [ "$bundle" = "$BUILD_NUMBER" ] || { echo "::error::CFBundleVersion=$bundle != stamped build number $BUILD_NUMBER"; exit 1; }
           # 3. The About window's identity is nocx's own, not the Wails
           #    template's. The app menu's About item is
           #    orderFrontStandardAboutPanel:, which prints
@@ -745,6 +774,54 @@ jobs:
           echo "$srv_archs" | grep -qw x86_64
           echo "$srv_archs" | grep -qw arm64
           codesign --verify --strict "$SRV"
+
+      # THE BUILD NUMBER INCREASES BUILD TO BUILD (nocx-vh2hr.1.5, the
+      # owner's decision of 2026-10-30). The number is the UTC build minute, so
+      # "monotonic" is a claim about the clock the pipeline itself stamped —
+      # and a claim worth asserting, because a clock that went backwards would
+      # publish a build the updater orders BELOW the one a person already runs
+      # (internal/update/manifest.go:137 compares the same builtAt). The
+      # previous build is the one the moving `nightly` alias serves right now,
+      # verified with this checkout's keyring and read from ITS signed
+      # build.builtAt. The derivation is internal/version.BuildNumberOf's
+      # (internal/version/build_number_test.go); this line spells the same
+      # YYYYMMDDHHMM from the same instant.
+      - name: CFBundleVersion is the build number and it increased
+        if: ${{ !inputs.linux-only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          plist="build/bin/nocx.app/Contents/Info.plist"
+          number="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          case "$number" in
+            ''|*[!0-9]*) echo "::error::CFBundleVersion=$number is not numeric"; exit 1 ;;
+          esac
+          [ "${#number}" -eq 12 ] || { echo "::error::CFBundleVersion=$number is not YYYYMMDDHHMM"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/previous-nightly"
+          if gh release download nightly --pattern 'manifest.json' --pattern 'manifest.json.sig' \
+               --dir "$RUNNER_TEMP/previous-nightly" 2>/dev/null; then
+            go run ./cmd/manifest-sign -verify -in "$RUNNER_TEMP/previous-nightly/manifest.json" \
+              -sig "$RUNNER_TEMP/previous-nightly/manifest.json.sig"
+            previous="$(node -e '
+              const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+              const t = new Date(m.build.builtAt);
+              if (Number.isNaN(t.getTime())) { console.error("previous build.builtAt unreadable"); process.exit(2); }
+              const p = (n) => String(n).padStart(2, "0");
+              process.stdout.write(`${t.getUTCFullYear()}${p(t.getUTCMonth()+1)}${p(t.getUTCDate())}${p(t.getUTCHours())}${p(t.getUTCMinutes())}`);
+            ' "$RUNNER_TEMP/previous-nightly/manifest.json")"
+            echo "build number $number; the published nightly's is $previous"
+            if [ "$number" -le "$previous" ]; then
+              echo "::error::CFBundleVersion=$number does not increase on the published nightly's $previous: this build would order below a build a person already runs"
+              exit 1
+            fi
+          else
+            # THE FIRST NIGHTLY HAS NOTHING TO BE GREATER THAN. Said, not
+            # assumed: the assertion is skipped only when the alias does not
+            # exist, never when it failed to download.
+            echo "no published nightly to compare against yet; numeric check only"
+          fi
 
       - name: The designated requirement is the one we committed
         run: |
@@ -901,6 +978,7 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
       RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
       # The AppImage is amd64 and nothing else, so one local variant. See the
       # macOS job's line for why this is a job-level fact.
@@ -1010,6 +1088,7 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${BUILD_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
+          LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Build=${BUILD_NUMBER}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Wails=${WAILS_VERSION}"
           # `gtk3` is not optional here, it is what makes the step above
           # mean anything: Wails v3 defaults to GTK4/WebKitGTK-6.0, so a job
@@ -1166,6 +1245,7 @@ jobs:
       VERSION: ${{ needs.validate.outputs.version }}
       BUILD_SHA: ${{ inputs.sha || github.sha }}
       BUILD_DATE: ${{ needs.validate.outputs.build-date }}
+      BUILD_NUMBER: ${{ needs.validate.outputs.build-number }}
       RELEASE_TAG: ${{ inputs.release-tag || format('nightly-19700101-{0}', github.run_id) }}
     steps:
       - uses: actions/checkout@v7

@@ -17,6 +17,7 @@ function loadAbout(platform: string): () => Promise<AppAbout> {
   const about: AppAbout = {
     version: '0.7.0',
     commit: 'abc',
+    build: '202611012200',
     date: 'today',
     go: '1.26',
     wails: 'v3.0.0',

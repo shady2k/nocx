@@ -42,12 +42,37 @@ type FetchedManifest struct {
 // after manifest verification, channel-aware build comparison, and artefact matching.
 // The caller passes it to [Updater.Apply].
 type UpdateInfo struct {
-	Version  string
+	Version string
+	// NotesURL is the link the notice offers. Stable keeps the manifest's own
+	// notes page; the nightly channel has no notes of its own, so it is the
+	// commit range between the installed build and the offered one — or empty
+	// when that range cannot be named (nocx-vh2hr.1.5).
 	NotesURL string
-	URL      string
-	SHA256   string
-	Size     int64
-	build    version.BuildIdentity // target identity from the verified manifest; not renderer input
+	// Channel is the channel whose signed manifest offered this build. The
+	// notice's words depend on it: a nightly of the version a person already
+	// runs is still a different build, and saying so takes more than the
+	// version (ADR-0097, ADR-79b6cy61, nocx-vh2hr.1.5).
+	Channel string
+	// Commit and BuiltAt are the OFFERED build's stamped identity, from the
+	// verified manifest — what the notice names and what the nightly channel
+	// compares. They are the only renderer-visible description of a build the
+	// person does not have yet.
+	Commit  string
+	BuiltAt string
+	// BuildNumber is the OFFERED build's number beside the version —
+	// YYYYMMDDHHMM, derived from the signed builtAt by the one derivation
+	// (version.BuildNumberOf). It is what the notice names on a nightly, where
+	// the version alone would describe the build the person already runs
+	// (nocx-vh2hr.1.5). Empty when the manifest carried no usable instant.
+	BuildNumber string
+	URL         string
+	SHA256      string
+	Size        int64
+}
+
+// buildIdentity is the offered build as the journal records it.
+func (i *UpdateInfo) buildIdentity() version.BuildIdentity {
+	return version.BuildIdentity{Commit: i.Commit, BuiltAt: i.BuiltAt}
 }
 
 // ---------------------------------------------------------------------------

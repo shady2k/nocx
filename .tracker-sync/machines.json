@@ -1,6 +1,7 @@
 {
   "ordinals": {
-    "vm-agents": 1
+    "vm-agents": 1,
+    "homepc": 2
   },
-  "thisMachine": "vm-agents"
+  "thisMachine": "homepc"
 }

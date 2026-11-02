@@ -475,3 +475,85 @@ describe('shared update offer', () => {
     expect(onFailure).toHaveBeenCalledWith('socket closed')
   })
 })
+
+// ── A nightly offer names the build it would install (nocx-vh2hr.1.5) ──────
+//
+// The owner's report: installed 0.8.1 (commit b905772), offered a nightly of
+// the same 0.8.1 built from 60caa03d — and the notice said "nocx 0.8.1 is
+// available" to someone already on 0.8.1, with release notes that do not
+// exist for a nightly. On the nightly channel the notice names the offered
+// build, and its link is the range the backend composed, or nothing.
+describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
+  // What the backend composes when the installed and offered builds are both
+  // stamped: the manifest's own host and repository, one commit range.
+  const FROM = 'a'.repeat(40)
+  const OFFERED = '60caa03d' + 'b'.repeat(32)
+  const COMPARE = `https://github.com/shady2k/nocx/compare/${FROM}...${OFFERED}`
+  const NIGHTLY = {
+    channel: 'nightly',
+    build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z', number: '202610300750' },
+  }
+
+  it('names the offered build beside the version it shares with the installed one', () => {
+    const controller = createUpdateController({ apply: vi.fn() })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.8.1', COMPARE, NIGHTLY)
+
+    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.1, build 202610300750')
+    expect(screen.getByRole('status').textContent).toContain('is available')
+    expect(screen.getByRole('link', { name: 'What changed' }).getAttribute('href')).toBe(COMPARE)
+  })
+
+  it('names the build on a nightly that also moves the version', () => {
+    const controller = createUpdateController({ apply: vi.fn() })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.8.2', COMPARE, NIGHTLY)
+
+    expect(screen.getByRole('status').textContent).toContain('nocx 0.8.2, build 202610300750')
+    expect(screen.getByRole('link', { name: 'What changed' }).getAttribute('href')).toBe(COMPARE)
+  })
+
+  it('renders no link when the backend could not compose a range', () => {
+    const controller = createUpdateController({ apply: vi.fn() })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.8.1', '', NIGHTLY)
+
+    expect(screen.getByRole('status').textContent).toContain('build 202610300750')
+    expect(screen.queryByRole('link')).toBeNull()
+  })
+
+  it('leaves the stable offer exactly as it was', () => {
+    const controller = createUpdateController({ apply: vi.fn() })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('2.0.1', NOTES, {
+      channel: 'stable',
+      build: { commit: OFFERED, builtAt: '2026-10-30T07:50:35Z', number: '202610300750' },
+    })
+
+    const message = screen.getByRole('status').textContent ?? ''
+    expect(message).toContain('nocx 2.0.1 is available')
+    expect(message).not.toContain('build')
+    expect(screen.getByRole('link', { name: 'Release notes' }).getAttribute('href')).toBe(NOTES)
+  })
+
+  it('announces a second nightly of the same version as its own build', () => {
+    const controller = createUpdateController({ apply: vi.fn() })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.8.1', COMPARE, NIGHTLY)
+    fireEvent.click(screen.getByRole('button', { name: 'Later' }))
+
+    const later = '70caa03d' + 'c'.repeat(32)
+    controller.showAvailable('0.8.1', COMPARE, {
+      channel: 'nightly',
+      build: { commit: later, builtAt: '2026-10-31T07:50:35Z', number: '202610310750' },
+    })
+
+    expect(document.querySelectorAll('.ui-toast')).toHaveLength(1)
+    expect(screen.getByRole('status').textContent).toContain('build 202610310750')
+  })
+})

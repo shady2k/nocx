@@ -60,6 +60,7 @@ export interface AboutSectionProps {
  *  was added to one of them. */
 const FACTS: { label: string; of: (a: AppAbout) => string; headline?: true }[] = [
   { label: 'Version', of: (a) => a.version, headline: true },
+  { label: 'Build', of: (a) => a.build },
   { label: 'Commit', of: (a) => a.commit },
   { label: 'Built', of: (a) => a.date },
   { label: 'Platform', of: (a) => a.platform },

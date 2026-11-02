@@ -26,6 +26,7 @@ vi.mock('./ui/toast', () => ({
 const RELEASE: AppAbout = {
   version: '0.2.0',
   commit: '9f1c2b7d',
+  build: '202608200941',
   date: '2026-08-20T09:41:00Z',
   go: 'go1.25.0',
   wails: 'v3.0.0-beta.9',
@@ -36,6 +37,7 @@ const RELEASE: AppAbout = {
 const DEV: AppAbout = {
   version: 'dev',
   commit: 'none',
+  build: 'unknown',
   date: 'unknown',
   go: 'go1.25.0',
   wails: 'v3.0.0-beta.9',

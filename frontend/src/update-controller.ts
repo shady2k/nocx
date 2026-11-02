@@ -9,9 +9,31 @@ import { showToast, dismissToast, type ToastOptions } from './ui/toast'
 import { log } from './log'
 import { updateFailureMessage } from './update-failure'
 
+/** What an offer says about the build behind it (nocx-vh2hr.1.5).
+ *
+ *  A nightly of the version a person already runs is still a different build
+ *  (ADR-79b6cy61: the version comes from the last stable tag), so the notice
+ *  needs more than the version to mean anything. Both values come from the
+ *  signed manifest the check verified; empty strings are an older manifest
+ *  that named no build, and the notice then says only what it can. */
+export interface UpdateOffer {
+  /** The channel whose signed manifest offered the build. Only `nightly`
+   *  changes the notice's words and link. */
+  channel: string
+  /** The offered build's stamped identity. */
+  build: { commit: string; builtAt: string; number: string }
+}
+
+type AvailableOffer = {
+  kind: 'available'
+  version: string
+  notesUrl: string
+  offer: UpdateOffer
+}
+
 type UpdateState =
   | { kind: 'hidden' }
-  | { kind: 'available'; version: string; notesUrl: string }
+  | AvailableOffer
   | { kind: 'downloading'; version: string }
   | { kind: 'pending'; version: string }
   | { kind: 'held'; version: string }
@@ -20,9 +42,7 @@ type UpdateState =
       kind: 'error'
       message: string
       retry:
-        | { kind: 'available'; version: string; notesUrl: string }
-        | { kind: 'held'; version: string }
-        | { kind: 'pending'; version: string }
+        AvailableOffer | { kind: 'held'; version: string } | { kind: 'pending'; version: string }
     }
 
 export interface UpdateControllerDeps {
@@ -33,7 +53,9 @@ export interface UpdateControllerDeps {
 
 export interface UpdateController {
   state: () => UpdateState
-  showAvailable: (version: string, notesUrl: string) => void
+  /** Announce an available update. `offer` is the build behind it; without
+   *  one the announcement is the stable-shaped one it has always been. */
+  showAvailable: (version: string, notesUrl: string, offer?: UpdateOffer) => void
   showOffer: () => void
   apply: () => Promise<void>
   showHeldByCoordinator: (version: string) => void
@@ -44,6 +66,40 @@ export interface UpdateController {
      *  updater to warn about). */
     onFailure?: (reason: string) => void
   }) => Promise<void>
+}
+
+/** The shortest honest name for an offered build: the commit's first seven
+ *  characters (the same short sha About shows), or the built-at stamp when the
+ *  manifest named no commit. Empty when it named neither — then the version is
+ *  all the notice can say, and it must not invent a build (nocx-vh2hr.1.5). */
+function offeredBuildLabel(offer: UpdateOffer): string {
+  // THE BUILD NUMBER FIRST (nocx-vh2hr.1.5, the owner's decision of 2026-10-30):
+  // every build carries YYYYMMDDHHMM beside the version, monotonic across
+  // reruns and preserved by promotion, and it is the number macOS carries in
+  // CFBundleVersion — so the notice names the same build the bundle does. The
+  // commit and the build time remain the fallback for a manifest whose instant
+  // cannot be read; the commit is the last resort because two nightlies can
+  // share one when nothing rebuilt.
+  const number = offer.build.number.trim()
+  if (/^[0-9]{12}$/.test(number)) return number
+  const commit = offer.build.commit.trim()
+  if (/^[0-9a-f]{40}$/.test(commit)) return commit.slice(0, 7)
+  const builtAt = offer.build.builtAt.trim()
+  return builtAt === '' ? '' : builtAt.slice(0, 16).replace('T', ' ')
+}
+
+/** The key an announcement is remembered by. Stable keys on the version;
+ *  nightly keys on the build, because two nightlies of one version are two
+ *  offers and the second must not be swallowed as the first
+ *  (nocx-vh2hr.1.5). */
+function offerKey(version: string, offer: UpdateOffer): string {
+  if (offer.channel !== 'nightly') return version
+  return `${version} ${offeredBuildLabel(offer)}`
+}
+
+const STABLE_OFFER: UpdateOffer = {
+  channel: 'stable',
+  build: { commit: '', builtAt: '', number: '' },
 }
 
 /** One owner for update state and its one kit surface. The sidebar is rebuilt
@@ -98,16 +154,34 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     switch (current.kind) {
       case 'hidden':
         return
-      case 'available':
+      case 'available': {
+        const nightly = current.offer.channel === 'nightly'
+        const build = offeredBuildLabel(current.offer)
+        // A nightly of the installed version is the normal nightly case
+        // (ADR-79b6cy61), and the version alone would claim the person is
+        // being offered what they already run — so the build is named. Stable
+        // is unchanged: its version is the offer (nocx-vh2hr.1.5).
+        const message =
+          nightly && build !== ''
+            ? `nocx ${current.version}, build ${build} is available`
+            : `nocx ${current.version} is available`
         present({
-          message: `nocx ${current.version} is available`,
-          link: { label: 'Release notes', href: current.notesUrl },
+          message,
+          ...(current.notesUrl === ''
+            ? {}
+            : {
+                // The nightly link is a commit range, not notes: label it for
+                // what it shows. The backend composes it, and leaves it empty
+                // when there is no range to show.
+                link: { label: nightly ? 'What changed' : 'Release notes', href: current.notesUrl },
+              }),
           actions: [
             { label: installLabel, variant: 'primary', onClick: () => void apply() },
             { label: 'Later', onClick: () => {} },
           ],
         })
         return
+      }
       case 'finishing':
         present({ message: `Finishing the update to nocx ${current.version}…` })
         return
@@ -157,7 +231,7 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     state,
     showOffer,
     apply,
-    showAvailable: (version, notesUrl) => {
+    showAvailable: (version, notesUrl, offer) => {
       const current = state()
       if (
         current.kind === 'downloading' ||
@@ -167,9 +241,11 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
         (current.kind === 'error' && current.retry.kind !== 'available')
       )
         return
-      setState({ kind: 'available', version, notesUrl })
-      if (!announced.has(version)) {
-        announced.add(version)
+      const resolved = offer ?? STABLE_OFFER
+      setState({ kind: 'available', version, notesUrl, offer: resolved })
+      const key = offerKey(version, resolved)
+      if (!announced.has(key)) {
+        announced.add(key)
         showOffer('Install now')
       }
     },

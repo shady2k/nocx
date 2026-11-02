@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+
+	"github.com/shady2k/nocx/internal/version"
 )
 
 // ---------------------------------------------------------------------------
@@ -51,12 +53,15 @@ func (u *updater) Check(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	return &UpdateInfo{
-		Version:  m.Version,
-		NotesURL: m.NotesURL,
-		URL:      art.URL,
-		SHA256:   art.SHA256,
-		Size:     art.Size,
-		build:    m.Build,
+		Version:     m.Version,
+		NotesURL:    offerLink(fetched.Channel, m, u.currentBuild),
+		Channel:     fetched.Channel.String(),
+		Commit:      m.Build.Commit,
+		BuiltAt:     m.Build.BuiltAt,
+		BuildNumber: version.BuildNumberOf(m.Build.BuiltAt),
+		URL:         art.URL,
+		SHA256:      art.SHA256,
+		Size:        art.Size,
 	}, nil
 }
 
@@ -109,7 +114,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		OldBundleID:    oldID,
 		FromVersion:    u.currentVersion,
 		ToVersion:      info.Version,
-		ToBuild:        info.build,
+		ToBuild:        info.buildIdentity(),
 		ArtifactSHA256: info.SHA256,
 	}
 	if err = writeJournal(jp, rec); err != nil {

@@ -72,6 +72,14 @@ export class UpdateState {
     "Pending": boolean;
     "Version": string;
     "HeldByOlderCoordinator": boolean;
+    /**
+     * Downloading is true while an artefact body is arriving, and Downloaded
+     * and Total are its bytes against the signed manifest's size. The notice
+     * reads them as percent and size (nocx-vh2hr.1.15).
+     */
+    "Downloading": boolean;
+    "Downloaded": number;
+    "Total": number;
 
     /** Creates a new UpdateState instance. */
     constructor($$source: Partial<UpdateState> = {}) {
@@ -83,6 +91,15 @@ export class UpdateState {
         }
         if (!("HeldByOlderCoordinator" in $$source)) {
             this["HeldByOlderCoordinator"] = false;
+        }
+        if (!("Downloading" in $$source)) {
+            this["Downloading"] = false;
+        }
+        if (!("Downloaded" in $$source)) {
+            this["Downloaded"] = 0;
+        }
+        if (!("Total" in $$source)) {
+            this["Total"] = 0;
         }
 
         Object.assign(this, $$source);

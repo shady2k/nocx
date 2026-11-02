@@ -61,6 +61,17 @@ def application_log(home):
     return Path(home) / "data" / "nocx" / "nocx.log"
 
 
+def window_log(home):
+    """Where the WINDOW process on Linux writes its own log.
+
+    The backend's `nocx.log` belongs to nocx-server and holds no update line:
+    Check/Apply/ReportHealthy run in the window, which until nocx-vh2hr.1.12
+    wrote to stderr only. The window now owns this sibling file, so a candidate
+    that ran and did not finalise is readable in it.
+    """
+    return Path(home) / "data" / "nocx" / "nocx-window.log"
+
+
 def log_tail(path, lines=40):
     """The last `lines` of a file, or '' when it is not there yet."""
     try:
@@ -352,6 +363,7 @@ class RestartObservation:
         self.identities, self.install, self.old_windows = identities, install, old_windows
         self.home, self.journal, self.backup = home, journal, backup
         self.log = application_log(home)
+        self.window = window_log(home)
         self.processes = []
         self.windows = []
         self.servers = []
@@ -379,8 +391,11 @@ class RestartObservation:
         # startup, its reconciliation and its pair judgment to this file, and
         # nothing else in the proof can see them (nocx-vh2hr.1.10).
         tail = log_tail(self.log)
+        window = log_tail(self.window)
         return reading + ("; app log tail: " + tail if tail
-                          else f"; app log absent at {self.log}")
+                          else f"; app log absent at {self.log}") + (
+            "; window log tail: " + window if window
+            else f"; window log absent at {self.window}")
 
 
 def require_lower_probe(channel, lower, previous, candidate):
@@ -488,6 +503,7 @@ def run(args, evidence):
     except Exception:
         app_log.close()
         evidence["applicationLog"] = log_tail(application_log(home), 200)
+        evidence["windowLog"] = log_tail(window_log(home), 200)
         relay.close()
         raise
     evidence["initialLauncherPID"] = process.pid
@@ -570,6 +586,11 @@ def run(args, evidence):
         evidence["staleRefused"] = True
         evidence["result"] = "passed"
     finally:
+        # THE TWO PROCESSES' OWN FILES, whatever the verdict: the backend's
+        # (nocx.log) and the window's (nocx-window.log, where the update path
+        # speaks). The launcher's stdout is only what the process printed.
+        evidence["applicationLog"] = log_tail(application_log(home), 200)
+        evidence["windowLog"] = log_tail(window_log(home), 200)
         evidence["transportRequests"] = relay.requests
         try:
             evidence["accessibilitySnapshot"] = desktop.text() if desktop else "driver unavailable"
@@ -720,10 +741,14 @@ def main():
         # The launcher's stdout stops at the previous window's last line, and
         # the candidate it starts inherits none of it (nocx-vh2hr.1.8); the
         # app's own log is where that window said what it did.
-        tail = log_tail(application_log(Path(args.work).resolve() / "home"))
+        home = Path(args.work).resolve() / "home"
+        tail = log_tail(application_log(home))
+        window = log_tail(window_log(home))
         print(str(error), file=sys.stderr)
         print("--- the application's own log ---", file=sys.stderr)
         print(tail if tail else "(no log: the app never wrote one)", file=sys.stderr)
+        print("--- the window's own log ---", file=sys.stderr)
+        print(window if window else "(no window log: the app never wrote one)", file=sys.stderr)
         raise
     finally:
         args.evidence.parent.mkdir(parents=True, exist_ok=True)

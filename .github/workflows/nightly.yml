@@ -277,8 +277,11 @@ jobs:
             --appimage "$RUNNER_TEMP/nocx-nightly-proof/nocx.AppImage" \
             --evidence proof-results/linux.json
 
-      # Keep the application's own log beside the evidence: when a check fails,
-      # the product's stderr is the only account of what it did.
+      # Keep the application's own logs beside the evidence: when a check fails,
+      # the product's stderr is the only account of what it did — and for the
+      # candidate the launcher starts, the app's OWN file is the only account
+      # there is, because that window inherits none of the launcher's stdout
+      # (nocx-vh2hr.1.8, nocx-vh2hr.1.10). Same two files the macOS job keeps.
       - name: Keep the application log with the evidence
         if: always()
         run: |
@@ -286,6 +289,10 @@ jobs:
           # upload below fails on a missing path, not only on an empty one.
           mkdir -p proof-results
           cp "$RUNNER_TEMP/nocx-nightly-proof/app.log" proof-results/ 2>/dev/null || true
+          # <XDG_DATA_HOME>/nocx with the driver's disposable HOME: the file
+          # internal/app opens for a release build (internal/storage, Linux).
+          cp "$RUNNER_TEMP/nocx-nightly-proof/home/data/nocx/nocx.log" proof-results/ 2>/dev/null || true
+          tail -n 80 proof-results/nocx.log 2>/dev/null || echo "no nocx.log from the app"
 
       - uses: actions/upload-artifact@v7
         if: always()

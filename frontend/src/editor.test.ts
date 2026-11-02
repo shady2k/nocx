@@ -706,6 +706,65 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       }),
   })
 
+  // The completion asks a question about the editor's DOCUMENT, and in a
+  // browser the document is not the DOM: a typed character lands in the
+  // content DOM first and CM6 applies it when its mutation observer runs, one
+  // microtask later. A synthetic burst that presses Tab in the same task asks
+  // about the line as it was a keystroke ago — `cd ` becoming the completion
+  // for `c`, which is what e2e/completion.spec.ts:442 reported as
+  // "c_rehash command" where it expected `alpha/` (nocx-atpw5.1.30).
+  //
+  // This pins the mechanism from both sides: the document is behind for the
+  // rest of that task, and the query is right as soon as the edit is applied.
+  // A reader must wait for the edit, not fire inside the task that made it.
+  it('the completion asks about the document the person typed, once that edit has been applied (nocx-atpw5.1.30)', async () => {
+    const seen: string[] = []
+    const captureProvider: SuggestionProvider = {
+      id: 'capture',
+      targetId: 'shell',
+      applicable: () => true,
+      suggest: (ctx) => {
+        seen.push(ctx.doc)
+        return Promise.resolve({ candidates: [] })
+      },
+    }
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+    const controller = new CompletionController({
+      providers: [captureProvider],
+      dropdown,
+      env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+      latencyBudgetMs: 0,
+      now: () => 1_750_000_000_000,
+    })
+    const ed = new CommandEditor(
+      { submit: vi.fn(), cancel: vi.fn(), onTab: () => controller.open() },
+      controller.extensions(),
+    )
+    ed.mount(container)
+    controller.attach(ed, container)
+    ed.setKeyArbiter((e) => controller.handleKey(e))
+    ed.show()
+    ed.insertText('c')
+
+    // The rest of the burst, as the browser leaves it: in the content DOM,
+    // not yet in the document CM6 reads.
+    const line = viewOf(ed).contentDOM.querySelector('.cm-line')
+    expect(line).not.toBeNull()
+    line!.appendChild(document.createTextNode('d '))
+
+    key(viewOf(ed), { key: 'Tab' })
+    expect(seen[seen.length - 1]).toBe('c')
+
+    // The observer's turn — the next microtask — and the same gesture asks
+    // about what was actually typed.
+    await Promise.resolve()
+    expect(ed.getDoc()).toBe('cd ')
+    key(viewOf(ed), { key: 'Tab' })
+    expect(seen[seen.length - 1]).toBe('cd ')
+  })
+
   it('under ssh the completion dropdown gets the keys its footer advertises: Tab opens it, ArrowDown moves its selection, Enter accepts, Escape dismisses', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

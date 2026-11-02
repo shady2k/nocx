@@ -1088,6 +1088,10 @@ export class TerminalContent extends BasePaneContent {
    *  has been observed. This closes the gap where the shell prompt bytes parse
    *  before their control-plane boundary arrives. */
   private _screenHandbackAwaitingBoundary = false
+  /** A prompt boundary whose screen has not been accepted yet. It stays the
+   *  one fact that ends the frozen screen's hold, so it is applied by the
+   *  accepted-frame handler rather than discarded (nocx-atpw5.1.28). */
+  private _deferredPromptBoundary: number | null = null
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
    *  active; neither surface is rebuilt. */
@@ -2844,6 +2848,7 @@ export class TerminalContent extends BasePaneContent {
           this._pendingAutomaticAttachment = null
           this._screenHandbackRevision = -1
           this._screenHandbackSnapshot = null
+          this._deferredPromptBoundary = null
           this._screenHandbackAwaitingBoundary = false
           this.clearGrants()
         },
@@ -5170,28 +5175,29 @@ export class TerminalContent extends BasePaneContent {
       // prompt redraw interval; it never mutates authenticated lifecycle state.
       if (effect.kind === 'promptBoundary') {
         const requiredScreenRevision = effect.screenRevision
-        const acceptedScreenRevision = cellModel.current()?.revision ?? 0
-        if (
-          requiredScreenRevision === undefined ||
-          acceptedScreenRevision < requiredScreenRevision
-        ) {
-          log.debug('nocx: prompt boundary dropped before its screen revision was accepted', {
+        if (requiredScreenRevision === undefined) {
+          log.debug('nocx: prompt boundary dropped for carrying no screen revision', {
             pane: this.pane.paneId,
-            required: requiredScreenRevision ?? null,
+          })
+          return
+        }
+        const acceptedScreenRevision = cellModel.current()?.revision ?? 0
+        if (acceptedScreenRevision < requiredScreenRevision) {
+          // HELD, NOT DROPPED (nocx-atpw5.1.28). This boundary is the one that
+          // ends the frozen screen's hold, and throwing it away left the hold
+          // forever: `_screenHandbackAwaitingBoundary` stayed true, so the
+          // finished command could never become the automatic attachment and
+          // the ask left with an empty chip and nothing to read. The frame it
+          // names is on its way; the accepted-frame handler applies it.
+          this._deferredPromptBoundary = requiredScreenRevision
+          log.debug('nocx: prompt boundary held until its screen revision is accepted', {
+            pane: this.pane.paneId,
+            required: requiredScreenRevision,
             accepted: acceptedScreenRevision,
           })
           return
         }
-        if (!this._awaitsIntegration) this._settle()
-        this._screenHandbackRevision = requiredScreenRevision
-        const handback = cellModel.current()
-        this._screenHandbackSnapshot =
-          handback?.revision === requiredScreenRevision ? handback : null
-        this._screenHandbackAwaitingBoundary = false
-        // A repaint may have been accepted while this boundary was still in
-        // flight. It is the screen the person asked about, so offer it now
-        // rather than requiring another frame to arrive.
-        this._offerPendingAutomaticAttachment()
+        this._applyPromptBoundary(requiredScreenRevision)
       }
       if (effect.kind === 'commandSnapshot') {
         this.snapshotStore.applyBackendSnapshot(effect.commandNames)
@@ -5329,6 +5335,10 @@ export class TerminalContent extends BasePaneContent {
           }
           if (frame.state.title !== null) this._applyTerminalTitle(frame.state.title)
           if (frame.state.cwd !== null) this._applyTerminalCwd(frame.state.cwd.path)
+          // A boundary can arrive before the frame it names. This accepted
+          // frame is that state, and applying it here settles the handback
+          // the boundary was about (nocx-atpw5.1.28).
+          this._applyDeferredPromptBoundary()
           // The chord may have landed before the repaint that makes the
           // frozen owner eligible. This accepted frame is that state.
           this._offerPendingAutomaticAttachment()
@@ -7843,6 +7853,33 @@ export class TerminalContent extends BasePaneContent {
     } finally {
       this._automaticCapturePending = false
     }
+  }
+
+  /** End the frozen screen's hold at the boundary that names it. */
+  private _applyPromptBoundary(requiredScreenRevision: number): void {
+    if (!this._awaitsIntegration) this._settle()
+    this._screenHandbackRevision = requiredScreenRevision
+    const handback = this._cellModel?.current() ?? null
+    // The screen AT handback, never a later one: if the named revision is no
+    // longer the accepted one, there is no baseline to compare against and
+    // every later screen counts as written (which can only attach more, and
+    // never hides the screen the person asked about).
+    this._screenHandbackSnapshot = handback?.revision === requiredScreenRevision ? handback : null
+    this._screenHandbackAwaitingBoundary = false
+    // A repaint may have been accepted while this boundary was still in
+    // flight. It is the screen the person asked about, so offer it now
+    // rather than requiring another frame to arrive.
+    this._offerPendingAutomaticAttachment()
+  }
+
+  /** Apply a boundary that arrived before its screen (nocx-atpw5.1.28). */
+  private _applyDeferredPromptBoundary(): void {
+    const required = this._deferredPromptBoundary
+    if (required === null) return
+    const accepted = this._cellModel?.current() ?? null
+    if (accepted === null || accepted.revision < required) return
+    this._deferredPromptBoundary = null
+    this._applyPromptBoundary(required)
   }
 
   /** Attach the frozen owner whose requested accepted frame has now arrived.

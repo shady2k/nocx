@@ -13440,6 +13440,75 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('keeps a prompt boundary that outran its screen, so the frozen screen still attaches (nocx-atpw5.1.28)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlock('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      const session = sessionOf(content)
+      session.fireScreenFrame(screenFrame(1, ['top output']))
+      // The freeze happens while the command is still the running one, so the
+      // handback waits for the prompt boundary before the screen counts.
+      const handler = lifecycleHandler(client)
+      closeRunningBlock(scrollback.blockManager)
+      // The command ends: the shell is back at its prompt, and no command is
+      // running for the chord to summon over. Only the boundary settles the
+      // handback, which is the state the ask is made in.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'c'.repeat(64),
+          completedAt: '2026-08-23T12:00:00Z',
+        },
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      // The boundary and the prompt bytes it names are two channels: the
+      // control-plane effect can arrive before the frame is accepted. It must
+      // still end the hold — discarding it left `_screenHandbackAwaitingBoundary`
+      // true forever, the frozen command never became the automatic
+      // attachment, and the ask left with "marked for the question · 0" and
+      // nothing for the model to read (the webkit run of
+      // agent-reads-the-screen.spec.ts).
+      session.fireEffect({
+        sessionId: session.sessionId,
+        generation: '1',
+        effectId: '1',
+        kind: 'promptBoundary',
+        screenRevision: 2,
+        title: '',
+        body: '',
+      })
+      await Promise.resolve()
+      session.fireScreenFrame(screenFrame(2, ['$ ']))
+      session.fireScreenFrame(screenFrame(3, ['top output', 'marker']))
+
+      await summonChord(content)
+
+      expect(ed.root.querySelector('[data-control="grant"]')?.getAttribute('aria-label')).toContain(
+        'frozen screen attached automatically',
+      )
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
   it('gives the person the seam between the frozen screen and the assistant (nocx-hp8p2.6)', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(

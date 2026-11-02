@@ -940,6 +940,7 @@ jobs:
           python3 scripts/verify-built-artifact.py \
             --artifact "dist/nocx-${VERSION}-darwin-universal.zip" \
             --version "$VERSION" --commit "$BUILD_SHA" \
+            --build "$BUILD_NUMBER" \
             --report dist/verified-darwin.json
 
       - uses: actions/upload-artifact@v7
@@ -1204,6 +1205,7 @@ jobs:
           python3 scripts/verify-built-artifact.py \
             --artifact "dist/nocx-${VERSION}-linux-amd64.AppImage" \
             --version "$VERSION" --commit "$BUILD_SHA" \
+            --build "$BUILD_NUMBER" \
             --report dist/verified-linux.json
 
       - uses: actions/upload-artifact@v7

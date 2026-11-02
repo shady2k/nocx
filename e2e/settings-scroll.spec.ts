@@ -1,4 +1,4 @@
-import { appReadyForInput, test, expect, settingsReady, type Page } from './harness'
+import { appReadyForInput, promptReady, test, expect, settingsReady, type Page } from './harness'
 
 // nocx-82l9.2: SettingsContent.mount appended an unclassed <div> into .pane, so
 // flex:1 on .ui-page__scroll never received a bounded block size and the pane
@@ -17,8 +17,17 @@ const BACKUP_SECTION = '.ui-grouped-nav__item[data-item="backup"]'
 
 async function openOverflowingSection(page: Page): Promise<void> {
   await page.goto('/')
-  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+  // WHAT THIS TEST NEEDS IS A WINDOW THAT CAN TAKE A KEYSTROKE, and that is
+  // promptReady's statement — the prompt editor owns input. It used to open by
+  // waiting for a non-empty tab title, which is the LAST fact of startup: the
+  // pane's directory arrives after the shell has run, behind the connection
+  // overlay this helper now waits on first. On a loaded webkit worker the title
+  // was still empty after ten seconds while the app was perfectly usable, and
+  // the settings scroll this spec is about never got a chance (nocx-atpw5.1.27).
+  // The title canary lives where a title is what is under test (tab.test.tsx,
+  // tab-title.spec.ts).
   await appReadyForInput(page)
+  await promptReady(page)
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(`${BACKUP_SECTION} button`).click()

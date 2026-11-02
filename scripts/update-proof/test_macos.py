@@ -146,6 +146,9 @@ class LayoutTests(unittest.TestCase):
         # this product writes, and copying it collected nothing.
         self.assertEqual(str(layout["log"]),
                          "/Users/runner/proof/home/Library/Application Support/nocx/nocx.log")
+        self.assertEqual(str(layout["windowLog"]),
+                         "/Users/runner/proof/home/Library/Application Support/nocx/"
+                         "nocx-window.log")
         self.assertEqual(proof.bundle_binary(layout["install"]).name, "nocx")
 
     def test_the_bundle_identifier_is_the_one_the_release_build_stamps(self):

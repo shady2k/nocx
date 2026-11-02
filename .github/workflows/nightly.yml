@@ -292,7 +292,11 @@ jobs:
           # <XDG_DATA_HOME>/nocx with the driver's disposable HOME: the file
           # internal/app opens for a release build (internal/storage, Linux).
           cp "$RUNNER_TEMP/nocx-nightly-proof/home/data/nocx/nocx.log" proof-results/ 2>/dev/null || true
+          # The WINDOW's own file, beside the backend's (nocx-vh2hr.1.12):
+          # the update runs in the window, and its lines are not in nocx.log.
+          cp "$RUNNER_TEMP/nocx-nightly-proof/home/data/nocx/nocx-window.log" proof-results/ 2>/dev/null || true
           tail -n 80 proof-results/nocx.log 2>/dev/null || echo "no nocx.log from the app"
+          tail -n 80 proof-results/nocx-window.log 2>/dev/null || echo "no nocx-window.log from the window"
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -431,6 +435,9 @@ jobs:
           # Support, and internal/app opens nocx.log inside it. The product
           # writes no ~/Library/Logs entry, so that copy always found nothing.
           cp "$RUNNER_TEMP/nocx-macos-proof/home/Library/Application Support/nocx/nocx.log" proof-results/ 2>/dev/null || true
+          # The WINDOW's own file under the disposable profile (nocx-vh2hr.1.12):
+          # the update and the pair check run in the window process.
+          cp "$RUNNER_TEMP/nocx-macos-proof/home/Library/Application Support/nocx/nocx-window.log" proof-results/ 2>/dev/null || true
 
       - uses: actions/upload-artifact@v7
         if: always()

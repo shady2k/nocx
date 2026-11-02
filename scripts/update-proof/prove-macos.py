@@ -131,6 +131,12 @@ def install_layout(home):
         # ~/Library/Logs/nocx entry in this product; the old path here was a
         # guess, and the copy step kept finding nothing (nocx-vh2hr.1.11).
         "log": home / "Library/Application Support/nocx/nocx.log",
+        # The WINDOW process's own file (nocx-vh2hr.1.12): Check/Apply/
+        # ReportHealthy run in the window, not in nocx-server, so this is
+        # where an update that refused after the swap says why. It is a
+        # sibling of the backend's file under the profile, owned solely by
+        # the window.
+        "windowLog": home / "Library/Application Support/nocx/nocx-window.log",
         "profile": home / "Library/Application Support/nocx",
     }
 
@@ -491,6 +497,12 @@ def run(args, evidence):
         app_log = layout["log"]
         if app_log.exists():
             evidence["applicationLog"] = tail(app_log.read_text(errors="replace"), 200)
+        # THE WINDOW'S OWN ACCOUNT (nocx-vh2hr.1.12). The relaunch below and
+        # the pair check both run in the window process, which writes here,
+        # not to the backend's nocx.log.
+        window_log = layout["windowLog"]
+        if window_log.exists():
+            evidence["windowLog"] = tail(window_log.read_text(errors="replace"), 200)
         evidence["applicatorLog"] = tail(output, 200)
     evidence["installedAfterRelaunch"] = sha256(bundle_binary(layout["install"]))
     evidence["result"] = "passed"

@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -279,7 +278,9 @@ const contentCompactionFloor = 0.8
 // logLevelEnvVar turns the backend's log level up without a rebuild. Read
 // from the environment rather than from settings because the sessions worth
 // debugging are the ones failing during startup, before any store is open.
-const logLevelEnvVar = "NOCX_LOG_LEVEL"
+// The name and its parsing live in internal/log, because the window process
+// reads the same variable and one variable must have one answer.
+const logLevelEnvVar = log.LevelEnvVar
 
 // budgetFromSettings builds the store's two-number budget from the History
 // settings (nocx-rtg0.11): the user's retention size and disk ceiling, in
@@ -717,39 +718,14 @@ func New(opts ...Option) (*App, error) {
 	// and a shipped one says what a person's own disk should carry
 	// (internal/log's build split, nocx-4l2a5.2). The variable below still
 	// wins over both.
-	logLevel := log.DefaultLevel()
-	levelName := strings.ToLower(strings.TrimSpace(os.Getenv(logLevelEnvVar)))
-	badLevel := ""
-	switch levelName {
-	case "":
-	case "debug":
-		logLevel = slog.LevelDebug
-	case "info":
-		// SET, not skipped. It was a bare case while the default was info, and
-		// leaving it bare now would make NOCX_LOG_LEVEL=info a no-op on the
-		// build whose default is debug — the one build somebody would type it
-		// on (nocx-4l2a5.2).
-		logLevel = slog.LevelInfo
-	case "warn", "warning":
-		logLevel = slog.LevelWarn
-	case "error":
-		logLevel = slog.LevelError
-	default:
-		badLevel = levelName
-	}
-	// AddSource everywhere: every line names the module, function and line
-	// that wrote it (internal/log says why the adapter is what makes this
-	// true rather than pointing every record at the adapter itself).
-	handlerOpts := &slog.HandlerOptions{Level: logLevel, AddSource: true}
+	// The rules themselves live in internal/log (ConfiguredLevel,
+	// HandlerOptions, OpenFile): the window process logs too, and two copies of
+	// "which level, which flags" is the pair that drifts (nocx-vh2hr.1.12).
+	logLevel, badLevel := log.ConfiguredLevel(os.Getenv(logLevelEnvVar))
+	handlerOpts := log.HandlerOptions(logLevel)
 	slogger := slog.New(slog.NewTextHandler(os.Stderr, handlerOpts))
 	if logFilePath != "" {
-		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
-			slogger.Warn("backend log file unavailable; logging to stderr only",
-				"path", logFilePath, "error", mkErr)
-			logFilePath = ""
-			// #nosec G304 — the path is the app data dir plus a fixed name,
-			// or a test override; never external input.
-		} else if f, openErr := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); openErr != nil {
+		if f, openErr := log.OpenFile(logFilePath); openErr != nil {
 			slogger.Warn("backend log file unavailable; logging to stderr only",
 				"path", logFilePath, "error", openErr)
 			logFilePath = ""

@@ -50,6 +50,21 @@ const appName = "nocx"
 const launchTimeout = 45 * time.Second
 
 func main() {
+	// THE WINDOW'S OWN LOG HAS A FILE, BEFORE ANYTHING WRITES A LINE
+	// (nocx-vh2hr.1.12). This process runs the update, and an app opened from
+	// Finder has no stderr anyone keeps — the owner's failed update left a red
+	// toast and no log at all. The backend's nocx.log is the COORDINATOR's
+	// file, in another process; this is its sibling, owned by this process
+	// (windowlog.go).
+	logger, logFile := openWindowLog()
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
+	}
+	// The same logger answers both routes a line can take: log.From(ctx)
+	// (the updater and the diagnostics) and bare slog.Default (the
+	// constructors that take no logger).
+	installProcessLogger(logger)
+
 	if handled, err := releaseDiagnostic(context.Background(), os.Args[1:], os.Stdout); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -64,13 +79,6 @@ func main() {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
 		return
 	}
-
-	// The window's own logger, on stderr. THE BACKEND'S LOG IS NOT THIS
-	// PROCESS'S ANY MORE: nocx-server owns the sessions, so it owns the log
-	// file that records what they did. What is left here is the handful of
-	// lines about finding a coordinator, which is exactly what a person
-	// needs when the window comes up blank.
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	wailsApp := &WailsApp{logger: logger}
 
@@ -409,8 +417,9 @@ type WailsApp struct {
 
 // Log logs a message from the frontend.
 //
-// It reaches this process's stderr rather than the backend's log file: the
-// renderer is this window's, and the file belongs to the daemon now.
+// It reaches this process's own file (windowlog.go) and stderr, never the
+// backend's nocx.log: the renderer is this window's, and the backend's file
+// belongs to the daemon.
 func (w *WailsApp) Log(message string) {
 	w.logger.Info("frontend", "message", message)
 }
@@ -431,7 +440,9 @@ func (w *WailsApp) RestartWindow() error {
 		start = startInstalledApplication
 	}
 	if err := start(installPath); err != nil {
-		return fmt.Errorf("starting the installed nocx build: %w", err)
+		err = fmt.Errorf("starting the installed nocx build: %w", err)
+		logUpdateFailure(at(w.logger), "restart", err)
+		return err
 	}
 	w.quit.request(quitFromUpdateRestart)
 	return nil
@@ -1293,6 +1304,7 @@ func (w *WailsApp) SetUpdateChannel(channel string) error {
 func (w *WailsApp) ApplyUpdate() error {
 	if w.updater == nil {
 		if w.updatePlacementErr != nil {
+			logUpdateFailure(at(w.logger), "apply", w.updatePlacementErr)
 			return w.updatePlacementErr
 		}
 		return errors.New("the updater is not available in this window")
@@ -1300,7 +1312,24 @@ func (w *WailsApp) ApplyUpdate() error {
 	if w.updateInfo == nil {
 		return errors.New("no update available — call CheckForUpdate first")
 	}
-	return w.updater.Apply(context.Background(), w.updateInfo)
+	if err := w.updater.Apply(context.Background(), w.updateInfo); err != nil {
+		// THE ERROR BEHIND THE TOAST (nocx-vh2hr.1.6, nocx-vh2hr.1.12).
+		// The renderer turns this error into "The update could not finish" or
+		// one of its remedies (frontend/src/update-failure.ts); the cause is
+		// deliberately not shown to the person, so this line is the only place
+		// it exists.
+		logUpdateFailure(at(w.logger), "apply", err)
+		return err
+	}
+	return nil
+}
+
+// logUpdateFailure records the error the renderer turns into the update
+// toast, with its cause. lg is a log.Logger so the line carries whatever
+// trace the caller has and so the ratchet can see it is a log.From path;
+// `stage` names the binding the person's click reached.
+func logUpdateFailure(lg log.Logger, stage string, err error) {
+	lg.Error("update failed", "stage", stage, "error", err)
 }
 
 // ReportHealthy signals that the frontend is running correctly.
@@ -1315,7 +1344,11 @@ func (w *WailsApp) ReportHealthy() error {
 	if w.updater == nil {
 		return errors.New("the updater is not available in this window")
 	}
-	return w.updater.ReportHealthy(context.Background())
+	if err := w.updater.ReportHealthy(context.Background()); err != nil {
+		logUpdateFailure(at(w.logger), "report healthy", err)
+		return err
+	}
+	return nil
 }
 
 // GetUpdateState returns what a person can be told about an update in

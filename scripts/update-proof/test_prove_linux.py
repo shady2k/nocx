@@ -60,6 +60,32 @@ class ApplicationLogTests(unittest.TestCase):
             self.assertIn("report healthy: refused", reading)
 
 
+class WindowLogTests(unittest.TestCase):
+    """The window process's own file, beside the backend's (nocx-vh2hr.1.12).
+
+    Check/Apply/ReportHealthy run in the window; nocx.log belongs to
+    nocx-server and holds none of their lines. The window owns
+    `nocx-window.log` in the same data directory.
+    """
+
+    def test_the_window_log_sits_beside_the_backends(self):
+        self.assertEqual(str(proof.window_log("/work/home")),
+                         "/work/home/data/nocx/nocx-window.log")
+
+    def test_the_restart_reading_quotes_the_windows_log_too(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            log = proof.window_log(home)
+            log.parent.mkdir(parents=True)
+            log.write_text('level=INFO msg="update apply: journal written, starting download"\n')
+            observation = proof.RestartObservation(
+                {"version": "0.8.1"}, {"version": "0.8.1"}, [], {"coordinator": "c"},
+                home / "nocx.AppImage", set(), home, home / "journal.json", home / "backup.app")
+            reading = observation.describe()
+            self.assertIn("window log tail:", reading)
+            self.assertIn("update apply: journal written", reading)
+
+
 class VanishingAccessibleTests(unittest.TestCase):
     """The accessibility tree moves under the reader: rows and children go away
     between the listing and the read. A live desktop is exactly that race, and

@@ -29,7 +29,7 @@ func (r *heldSessionEndRegistry) PrepareEndSession(id session.ID) (session.Sessi
 	}, nil
 }
 
-func TestSessionEndRetiresBeforeTeardownAndKeepsItsLaneUntilCompletion(t *testing.T) {
+func TestSessionEndRetiresBeforeTeardownAndReleasesItsLaneAtRetirement(t *testing.T) {
 	for _, fail := range []bool{false, true} {
 		name := "success"
 		if fail {
@@ -80,9 +80,14 @@ func TestSessionEndRetiresBeforeTeardownAndKeepsItsLaneUntilCompletion(t *testin
 				}
 				permit.Release()
 			}
-			if permit, rej := lane.TryAcquire(context.Background()); rej == nil {
+			// Retirement is the commit point: the lane's interval ends there.
+			// Holding it across the teardown would refuse unrelated control
+			// work for as long as a helper or ssh channel takes to settle,
+			// while the session is already gone.
+			if permit, rej := lane.TryAcquire(context.Background()); rej != nil {
+				t.Error("a retired session's teardown still holds the execution lane")
+			} else {
 				permit.Release()
-				t.Error("teardown released its execution allowance before completion")
 			}
 			close(reg.release)
 			got := <-result

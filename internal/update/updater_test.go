@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -650,7 +651,7 @@ func TestFlock_AcquireAndRelease(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "lock")
 
-	lk, err := acquireLock(lockPath)
+	lk, err := acquireLock(context.Background(), lockPath)
 	if err != nil {
 		t.Fatalf("acquireLock failed: %v", err)
 	}
@@ -664,7 +665,7 @@ func TestFlock_TryLockBlocks(t *testing.T) {
 	lockPath := filepath.Join(dir, "lock")
 
 	// Hold the lock.
-	holder, err := acquireLock(lockPath)
+	holder, err := acquireLock(context.Background(), lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,11 +685,66 @@ func TestFlock_TryLockBlocks(t *testing.T) {
 	}
 }
 
+// THE LOCK IS AN OPERATION, NOT AN INDEFINITE WAIT (nocx-vh2hr.1.11).
+//
+// Apply used to call a blocking flock with no deadline. On the macOS proof's
+// headless runner that is exactly the shape of the failure it produced: the
+// command sat for thirty minutes with not one line, and the proof could only
+// say "the updater logged nothing". The wait now ends when the caller's
+// context does, so the same contention is an error naming the lock.
+func TestFlock_AcquireGivesUpWhenTheContextDeadlinePasses(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "lock")
+
+	holder, err := acquireLock(context.Background(), lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holder.release() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	lk, err := acquireLock(ctx, lockPath)
+	elapsed := time.Since(started)
+	if err == nil {
+		if lk != nil {
+			_ = lk.release()
+		}
+		t.Fatal("acquired a lock another process held")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error does not name the deadline: %v", err)
+	}
+	if !strings.Contains(err.Error(), "another process holds the update lock") {
+		t.Fatalf("error does not say what blocked: %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("waited %s after the deadline; the wait is not bounded", elapsed)
+	}
+}
+
+// The lock is still taken when it is free, on the same path the deadline case
+// uses — a bounded wait must not turn every acquisition into a refusal.
+func TestFlock_AcquireStillTakesAFreeLockWithinTheDeadline(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), "lock")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	lk, err := acquireLock(ctx, lockPath)
+	if err != nil {
+		t.Fatalf("acquireLock: %v", err)
+	}
+	if err := lk.release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+}
+
 func TestFlock_TryLockSucceedsAfterRelease(t *testing.T) {
 	dir := t.TempDir()
 	lockPath := filepath.Join(dir, "lock")
 
-	holder, err := acquireLock(lockPath)
+	holder, err := acquireLock(context.Background(), lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}

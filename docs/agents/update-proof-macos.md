@@ -41,13 +41,24 @@ afterwards, its renderer reports healthy, and finalisation certifies the pair
 
 The driver prints `FAILED STEP: <step>` and the updater's own log lines, and the
 job uploads `macos.json` (the evidence), `app.log` (the relaunch) and the
-application's `nocx.log`. The steps are named from the updater's vocabulary in
-`internal/update`:
+application's `nocx.log` at `<HOME>/Library/Application Support/nocx/nocx.log`
+— the file `internal/app` opens, which is the only path this product writes on
+macOS. The steps are named from the updater's vocabulary in `internal/update`
+and in the diagnostic that enters it:
 
-download the release manifest · signature verification (manifest) · artifact
-selection · preflight (Applications not writable) · journal · download ·
-extraction (ditto) · bundle seal (codesign/lipo) · bundle swap (renameatx_np) ·
-pair check (mixed pair / probe / version) · pair check.
+start the updater · download the release manifest · signature verification
+(manifest) · artifact selection · preflight (Applications not writable) ·
+journal · download · extraction (ditto) · bundle seal (codesign/lipo) · bundle
+swap (renameatx_np) · pair check (mixed pair / probe / version) · pair check.
+
+The driver is a capability of the **installed** build, not of this checkout:
+`--apply-release-update` must already exist in the nightly being updated. A
+build packaged before the driver existed treats the flag as unknown and starts
+its window, which on a headless runner never exits. The driver therefore reads
+the flag's usage line out of the binary and refuses such a build by name
+(`start (the installed build has no update diagnostic)`) before starting it,
+and a run that says nothing within its startup deadline is killed and named
+rather than waited out.
 
 `scripts/update-proof/test_macos.py` holds that table against
 `internal/update`'s own messages, so a reworded log line breaks a test instead

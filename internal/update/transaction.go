@@ -82,7 +82,7 @@ func (u *updater) Apply(ctx context.Context, info *UpdateInfo) error {
 		return fmt.Errorf("update apply: create state directory: %w", err)
 	}
 	// Step 1: acquire lock.
-	lk, err := acquireLock(u.lockPath)
+	lk, err := acquireLock(ctx, u.lockPath)
 	if err != nil {
 		return fmt.Errorf("update apply: %w", err)
 	}
@@ -411,7 +411,7 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 	if err := os.MkdirAll(u.stateDir, 0o750); err != nil {
 		return fmt.Errorf("report healthy: create state directory: %w", err)
 	}
-	lk, err := acquireLock(u.lockPath)
+	lk, err := acquireLock(ctx, u.lockPath)
 	if err != nil {
 		return fmt.Errorf("report healthy: lock: %w", err)
 	}

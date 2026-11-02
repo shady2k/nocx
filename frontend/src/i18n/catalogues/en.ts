@@ -405,7 +405,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.editor.create': 'Create Connection',
   'connections.editor.delete': 'Delete Connection',
   'connections.editor.deleteConfirmHead': 'Delete',
-  'connections.editor.deleteConfirmOk': 'Delete',
+  'connections.editor.deleteConfirmOk': 'OK',
   'connections.editor.passwordForHead': 'Password for',
   'connections.editor.connectionWord': 'connection',
   'connections.editor.passwordDescription':

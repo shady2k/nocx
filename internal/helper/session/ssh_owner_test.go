@@ -167,11 +167,19 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 			t.Fatal("the doomed chunk never reached the owner's writer: nothing to force-stop against")
 		default:
 		}
-		fence, ferr := stand.sessions.TestCompletedFence(stuckID)
-		if ferr != nil {
-			t.Fatalf("fence poll: %v", ferr)
+		// One name for one failure: the poll's error is not the pre-write
+		// fence's (ferr, above), and a shadow here reads like the same fact
+		// twice in `go vet -shadow`'s eyes (nocx-atpw5.1.22).
+		fence, pollErr := stand.sessions.TestCompletedFence(stuckID)
+		if pollErr != nil {
+			t.Fatalf("fence poll: %v", pollErr)
 		}
-		if fence-fenceBefore >= fitChunks && stand.sessions.TestWriteInFlight(stuckID) {
+		// EXACTLY fitChunks, not "at least": the arithmetic above proves the
+		// NEXT chunk cannot fit only at that count. A gate that accepted more
+		// would also be satisfied by any later chunk — including one dispatched
+		// while the far side is still reading, which then resolves and leaves
+		// nothing for the stop to detach (the shape this test failed with on CI).
+		if fence-fenceBefore == fitChunks && stand.sessions.TestWriteInFlight(stuckID) {
 			break // arithmetically the doomed chunk: see the derivation above.
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -182,8 +190,27 @@ func TestAWriterBlockedOnAZeroWindowIsDetachedAndTheSessionCloses(t *testing.T) 
 		t.Fatalf("force stop: %v", err)
 	}
 	_ = tailLost
+
+	// THE ASSERTION THIS TEST EXISTS FOR, and it stays strict: the chunk
+	// dispatched at exactly fitChunks cannot fit in what the far side's window
+	// has left (the derivation above), and this fixture never reads that
+	// channel, so it can never resolve — it can only be detached. A run in
+	// which it resolved means the far side adjusted a window this peer must
+	// never adjust: a fixture defect, said as one, never accepted as an
+	// alternative outcome (AGENTS.md: a report is not converted into silence).
+	// The fence numbers are in the failure so the next occurrence names the
+	// state it hit rather than repeating the sentence.
+	if stand.sessions.TestWriteInFlight(stuckID) {
+		t.Fatalf("the forced stop returned with the stuck write still in flight (fence %d -> %d, %d chunks fit): the stop did not give up on a write no peer can complete",
+			fenceBefore, fenceBefore+fitChunks, fitChunks)
+	}
+	after, ferr := stand.sessions.TestCompletedFence(stuckID)
+	if ferr != nil {
+		t.Fatalf("fence after the forced stop: %v", ferr)
+	}
 	if !writerDetached {
-		t.Fatal("writerDetached = false, want true: a write stuck behind a peer that never adjusts its window must be detached, not joined")
+		t.Fatalf("writerDetached = false after the forced stop: fence %d -> %d with %d chunks fitting, so the chunk dispatched at the gate (%d) was the one that could not fit — it resolved instead of being detached, which means the far side adjusted its window (this fixture must never read) or the detach found nothing in flight",
+			fenceBefore, after, fitChunks, fenceBefore+fitChunks+1)
 	}
 
 	// The sibling, on the SAME pooled connection, still round-trips a

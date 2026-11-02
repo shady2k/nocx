@@ -62,11 +62,45 @@ describe('createUpdateCheck', () => {
     expect(check.error()).toBe('dns is down')
 
     // The next successful check reports the update and clears it.
-    checkForUpdate.mockResolvedValue({ Version: '0.6.1', NotesURL: 'https://example.com/n' })
+    checkForUpdate.mockResolvedValue({
+      Version: '0.6.1',
+      NotesURL: 'https://example.com/n',
+      Channel: 'stable',
+      Commit: '',
+      BuiltAt: '',
+    })
     await check.run()
 
-    expect(notice.showAvailable).toHaveBeenCalledWith('0.6.1', 'https://example.com/n')
+    expect(notice.showAvailable).toHaveBeenCalledWith('0.6.1', 'https://example.com/n', {
+      channel: 'stable',
+      build: { commit: '', builtAt: '' },
+    })
     expect(check.error()).toBeNull()
+  })
+
+  it('hands the notice the offered build the manifest named (nocx-vh2hr.1.5)', async () => {
+    const notice = fakeNotice()
+    const check = createUpdateCheck(notice)
+    // A nightly of the version already installed: only the build tells the two
+    // apart, so the check must not drop it on the way to the notice.
+    checkForUpdate.mockResolvedValue({
+      Version: '0.8.1',
+      NotesURL: 'https://github.com/shady2k/nocx/compare/aaa...bbb',
+      Channel: 'nightly',
+      Commit: '60caa03d' + 'b'.repeat(32),
+      BuiltAt: '2026-10-30T07:50:35Z',
+    })
+
+    await check.run()
+
+    expect(notice.showAvailable).toHaveBeenCalledWith(
+      '0.8.1',
+      'https://github.com/shady2k/nocx/compare/aaa...bbb',
+      {
+        channel: 'nightly',
+        build: { commit: '60caa03d' + 'b'.repeat(32), builtAt: '2026-10-30T07:50:35Z' },
+      },
+    )
   })
 
   it('treats a check that found nothing as a success, not a failure', async () => {

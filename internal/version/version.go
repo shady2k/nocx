@@ -11,6 +11,8 @@
 // `version` field so the two never need translating.
 package version
 
+import "time"
+
 // Values injected at link time. The defaults mark a non-release build.
 //
 // The full -X paths the release build must use, kept here so a typo in the
@@ -38,7 +40,39 @@ var (
 	// list, which is the right answer for a build that does link the shell
 	// (wails dev, the packaged app binary).
 	Wails = ""
+	// Build is this build's own number beside the version: YYYYMMDDHHMM in UTC,
+	// the minute the artifact was built, stamped by the release pipeline from
+	// the same instant it stamps into Date (nocx-vh2hr.1.5, the owner's
+	// decision of 2026-10-30). It is what tells two nightlies of one marketing
+	// version apart — ADR-79b6cy61 makes that the normal nightly case — and it
+	// is the number macOS carries in CFBundleVersion and the update notice
+	// names.
+	//
+	// THE BUILD TIME AND NOT THE CI RUN NUMBER: the number has to be derivable
+	// from what the release has already signed. The manifest signs
+	// build.builtAt, so any reader can compute a build's number from the bytes
+	// it was offered; a run number is not in the manifest, and a rerun of an
+	// older revision would take a HIGHER run number for an OLDER build.
+	// Promotion copies the nightlies' bytes (ADR-0097), so the stable build
+	// keeps the nightly's number, which is the same identity, not a new one.
+	Build = ""
 )
+
+// BuildNumberOf is the number one build instant carries: its UTC date and
+// minute with the separators removed, "202611012200" for
+// "2026-11-01T22:00:00Z". It is the ONE derivation of a build's number from a
+// signed instant, so the pipeline's stamp and an offer read from a manifest
+// cannot spell it differently.
+//
+// An instant that is not RFC 3339 (or is "unknown") answers "" — the number is
+// absent rather than invented, which is what a surface then shows.
+func BuildNumberOf(builtAt string) string {
+	instant, err := time.Parse(time.RFC3339, builtAt)
+	if err != nil {
+		return ""
+	}
+	return instant.UTC().Format("200601021504")
+}
 
 // Requested reports whether args — os.Args[1:] — asks only for the build
 // metadata.

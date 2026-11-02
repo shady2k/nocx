@@ -22,6 +22,10 @@ export interface AppAbout {
    */
   commit: string
   /**
+   * This build's own number beside the version: the UTC build minute as YYYYMMDDHHMM ("202611012200"), or "unknown". Two nightlies of one marketing version differ by it (ADR-79b6cy61), and it is the number macOS carries in CFBundleVersion and the update notice names (nocx-vh2hr.1.5).
+   */
+  build: string
+  /**
    * When the build was made, or "unknown". A stamped build writes RFC 3339; the field is not constrained to it, because the value is quoted into a bug report rather than parsed.
    */
   date: string

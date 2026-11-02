@@ -39,6 +39,10 @@ type BuildInfo struct {
 	Commit string
 	// Date is when it was built.
 	Date string
+	// Build is this build's number beside the version: the UTC build minute as
+	// YYYYMMDDHHMM, or "unknown" for a build nothing stamped. Two nightlies of
+	// one marketing version differ by it (ADR-79b6cy61).
+	Build string
 	// Go is the toolchain that compiled it, as runtime.Version reports it.
 	Go string
 	// Wails is the desktop shell's module version, from the build's own
@@ -64,6 +68,7 @@ func Info() BuildInfo {
 		Version:     OrUnknown(Version),
 		Commit:      OrUnknown(Commit),
 		Date:        OrUnknown(Date),
+		Build:       OrUnknown(Build),
 		Go:          runtime.Version(),
 		Wails:       wailsVersion(),
 		Platform:    runtime.GOOS + "/" + runtime.GOARCH,

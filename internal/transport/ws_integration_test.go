@@ -622,6 +622,55 @@ func TestIntegration_StartupBoundSaysNothingOnceTheAxisAnswered(t *testing.T) {
 	}
 }
 
+// A STARTUP BOUND THAT RAN LATE IS STILL NOT AN ANSWER (nocx-n85cu). The
+// bound is armed at registration and its callback runs on its own goroutine;
+// Timer.Stop does not join a callback that has already started, so a callback
+// can resume AFTER the live note that answered the axis. Applying the net then
+// reads everLive — true, because the session came back — and publishes `lost`
+// for a session that is live, one bound into every slow start.
+//
+// THE INTERLEAVING IS DRIVEN, not timed: the bound is a day long, so the timer
+// cannot fire on its own, and the callback goroutine is held at the point
+// Timer.Stop cannot reach until the live note has landed.
+func TestIntegration_AStartupBoundThatRunsAfterTheLiveNoteChangesNothing(t *testing.T) {
+	e := newIntegrationEnvTuned(t, func(ws *WSServer) { ws.integrationStartupBound = 24 * time.Hour })
+	sid := session.ID(e.sid)
+
+	// The callback a fired timer would be running: paused before the answer.
+	release := make(chan struct{})
+	applied := make(chan struct{})
+	go func() {
+		defer close(applied)
+		<-release
+		e.ws.expireIntegrationStartup(sid)
+	}()
+
+	// The session comes back before the callback applies its net.
+	if got := e.establish(t); got.Status != IntegrationIntegrated {
+		t.Fatalf("status = %q, want integrated before the late callback", got.Status)
+	}
+
+	close(release)
+	<-applied
+
+	e.ws.integrationMu.Lock()
+	after := *e.ws.integrations[sid]
+	e.ws.integrationMu.Unlock()
+	if !after.everLive {
+		t.Fatal("a startup-bound callback that ran after the live note cleared everLive")
+	}
+	if after.status != IntegrationIntegrated {
+		t.Fatalf("status = %q after the late net, want integrated: a session that came back was degraded", after.status)
+	}
+	out, err := e.ws.AwaitIntegration(t.Context(), sid)
+	if err != nil {
+		t.Fatalf("AwaitIntegration: %v", err)
+	}
+	if out.Status != IntegrationIntegrated {
+		t.Fatalf("AwaitIntegration = %+v, want the integrated answer", out)
+	}
+}
+
 // ── the process observation (nocx-cgzc, nocx-viil.3) ──────────────────────
 
 // The bead's own sentence: a takeover is reported in well under a second,

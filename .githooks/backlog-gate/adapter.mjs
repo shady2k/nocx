@@ -169,7 +169,7 @@ const ISSUES_SECTION = '=== .beads/issues.jsonl\n'
 // of the store format, with its own answer to "which commit is this revision".
 function mechanismExport(repo, extra, what) {
   const mechanism = join(HERE, 'tracker-sync.mjs')
-  const recipe = join(HERE, 'br-tracker.mjs')
+  const recipe = join(HERE, 'trackers', 'br.mjs')
   if (!existsSync(mechanism) || !existsSync(recipe))
     throw new Error('tracker-sync integration is missing; run make connect')
   const result = spawnSync(

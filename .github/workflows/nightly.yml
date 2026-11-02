@@ -14,7 +14,7 @@ on:
         type: boolean
         default: true
       proof-only:
-        description: Prove the two published Linux nightlies alone; skips prepare, build and publish
+        description: Prove the two published nightlies alone, Linux and macOS; skips prepare, build and publish
         type: boolean
         default: false
 permissions:
@@ -180,45 +180,9 @@ jobs:
           ref: ${{ needs.prepare.outputs.sha || github.sha }}
           persist-credentials: false
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version: '1.26'
-          cache: true
-
-      # The window is a real GTK/WebKit one, so the host needs what a desktop
-      # needs: a display, a session bus, and an accessibility tree to read.
-      # `/usr/bin/python3` below is deliberate — python3-pyatspi installs into
-      # the distro's dist-packages and a setup-python interpreter cannot see it.
-      - name: Install the desktop the product expects
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            xvfb dbus dbus-daemon dbus-x11 at-spi2-core \
-            python3-gi gir1.2-atspi-2.0 python3-pyatspi \
-            libgtk-3-0t64 libatk-bridge2.0-0 fonts-dejavu-core \
-            libgl1 libegl1 libgles2 libgl1-mesa-dri \
-            libxkbcommon0 libxdamage1 libxfixes3 \
-            libxrandr2 libxcomposite1 libxrender1 libxtst6
-          # GL comes from the host, as on every desktop: WebKitGTK aborts at
-          # webview creation without libGLESv2 ("Couldn't open libGLESv2.so.2",
-          # nightly run 40870717737), and Mesa's software driver is what an X
-          # server with no GPU renders through.
-          # The driver sets GTK_MODULES=gail:atk-bridge, which GTK loads from
-          # the module directory compiled into the GTK the image bundles; the
-          # host's libgtk-3-0t64 is what puts a copy at that path. Without a
-          # bridge the window still draws and the tree the driver reads is
-          # empty, so this is a requirement, not an optimisation.
-
-      - name: Record whether this host can mount an AppImage at all
-        run: |
-          set -euo pipefail
-          if [ -e /dev/fuse ] && ldconfig -p | grep -q 'libfuse\.so\.2'; then
-            echo "FUSE is present: the runtime may mount, and the proof extracts anyway."
-          else
-            echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
-            echo "No FUSE here: every AppImage run below extracts instead of mounting."
-          fi
+      # The window is a real GTK/WebKit one and the verifier is Go: the
+      # action holds what the host needs, shared with the stable proof.
+      - uses: ./.github/actions/linux-update-proof-runtime
 
       - name: Refuse to prove anything but two published nightlies
         env:
@@ -327,6 +291,140 @@ jobs:
         if: always()
         with:
           name: linux-update-proof
+          path: proof-results/
+          if-no-files-found: error
+          retention-days: 30
+
+  # THE macOS HALF OF THE SAME QUESTION (nocx-1ebrs.35.5, nocx-vh2hr.1.6):
+  # can the person holding the previous macOS nightly be given this one? The
+  # Linux leg above answers it for the AppImage; this one installs the previous
+  # nightly's .app, lets ITS OWN updater reach the newest nightly, and asserts
+  # the same four things — verify, swap, relaunch, healthy — through the
+  # product's darwin platform (ditto, codesign, lipo, renameatx_np) and the pair
+  # check in internal/update/pair.go.
+  #
+  # Why the update is driven by the bundle's own `--apply-release-update` and not
+  # by a click: the Linux leg drives the real GTK window through AT-SPI, and
+  # macOS grants no scripted Accessibility permission to a hosted runner — no
+  # TCC entry can be added without a person at the machine. The diagnostic is
+  # the window's own updater (same placement, same compiled keyring, same
+  # transaction, release_diagnostics.go); the RELAUNCH and the health report are
+  # the real ones, because the driver starts the installed app afterwards and
+  # its renderer reports healthy. Nothing is mocked, and a failure names the
+  # step from the updater's own log lines.
+  #
+  # A hosted runner is the machine we can have, and it is a DIFFERENT one from
+  # the owner's Mac: what this proves is the packaged bundle, the signed
+  # channel, and every step of the transaction; what it cannot prove is
+  # Gatekeeper's first-run treatment and a person's own login session. Those
+  # stay with nocx-1ebrs.4's real-use pass, said here rather than implied.
+  prove-macos:
+    needs: [prepare, build, publish]
+    # After a real publication, or on demand through `proof-only`, which skips
+    # prepare, build and publish and proves the pair published right now. A
+    # skipped, failed or rehearsed (`dry-run`) publish proves nothing.
+    if: >-
+      always() && (
+        (github.event_name == 'workflow_dispatch' && inputs.proof-only) ||
+        (needs.publish.result == 'success' && (github.event_name == 'schedule' || !inputs.dry-run))
+      )
+    # macos-15 is the runner build-macos uses: Apple silicon, the platform the
+    # owner runs, and the one ci-mac already analyses. The bundle is universal,
+    # so either slice proves the payload; this picks the one users are on.
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The harness belongs to the commit that published. In `proof-only`
+          # there is no plan, and the dispatched ref is what gets proved.
+          ref: ${{ needs.prepare.outputs.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # The verifier is the release tool's own signature check, built from this
+      # checkout's compiled keyring: the proof never trusts an unsigned manifest.
+      - name: Build the verifier with this checkout's production keyring
+        run: go build -o "$RUNNER_TEMP/manifest-sign" ./cmd/manifest-sign
+
+      # THE PAIR, selected the way prove-linux selects it: the newest dated
+      # nightly and the one before it, by `published_at`, newest first. The
+      # moving `nightly` alias is not a dated tag, so selecting by it would
+      # prove whatever it served at download time rather than a publication.
+      # macOS's /bin/bash is 3.2: no mapfile, so the tags are read in a loop.
+      - name: Stage the two published nightlies
+        run: |
+          set -euo pipefail
+          mkdir -p proof-inputs/candidate proof-inputs/previous proof-results
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | select(.prerelease) | select(.tag_name | startswith("nightly-")) | "\(.published_at)\t\(.tag_name)"' \
+            | sort -r | cut -f2 > "$RUNNER_TEMP/dated.txt"
+          candidate="$(sed -n '1p' "$RUNNER_TEMP/dated.txt")"
+          previous="$(sed -n '2p' "$RUNNER_TEMP/dated.txt")"
+          if [ -z "$candidate" ] || [ -z "$previous" ]; then
+            echo "::error::fewer than two dated nightlies are published; there is no previous macOS nightly to update from"
+            exit 1
+          fi
+          if [ -n "${PUBLISHED_TAG:-}" ] && [ "$candidate" != "$PUBLISHED_TAG" ]; then
+            echo "::error::the newest dated nightly is $candidate, but this run published $PUBLISHED_TAG; refusing to prove another run's artifact"
+            exit 1
+          fi
+          for slot in candidate previous; do
+            case "$slot" in
+              candidate) tag="$candidate" ;;
+              previous) tag="$previous" ;;
+            esac
+            gh release download "$tag" \
+              --pattern 'manifest.json' --pattern 'manifest.json.sig' \
+              --dir "proof-inputs/$slot"
+          done
+          shasum -a 256 proof-inputs/*/manifest.json proof-inputs/*/manifest.json.sig \
+            > proof-results/inputs.sha256
+          printf 'candidate %s\nprevious %s\n' "$candidate" "$previous" > proof-results/inputs.txt
+          cat proof-results/inputs.sha256 >> proof-results/inputs.txt
+          cat proof-results/inputs.txt
+          { echo '### macOS update proof'; echo '```'; cat proof-results/inputs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          PUBLISHED_TAG: ${{ needs.prepare.outputs.tag }}
+
+      - name: Prove the previous nightly updates itself to this one
+        run: |
+          set -euo pipefail
+          # The driver creates its own disposable HOME under --work and never
+          # touches the runner's profile; the app, the coordinator and the
+          # helper it spawns all inherit it.
+          /usr/bin/python3 scripts/update-proof/prove-macos.py \
+            --previous-manifest proof-inputs/previous/manifest.json \
+            --previous-signature proof-inputs/previous/manifest.json.sig \
+            --candidate-manifest proof-inputs/candidate/manifest.json \
+            --candidate-signature proof-inputs/candidate/manifest.json.sig \
+            --verifier "$RUNNER_TEMP/manifest-sign" \
+            --work "$RUNNER_TEMP/nocx-macos-proof" \
+            --evidence proof-results/macos.json
+
+      # THE EVIDENCE OF A FAILURE IS THE POINT of this job (nocx-vh2hr.1.6):
+      # the driver has already printed the failing step and the updater's own
+      # lines, and the app's log is where the relaunch and the pair check speak.
+      - name: Keep the application log with the evidence
+        if: always()
+        run: |
+          mkdir -p proof-results
+          cp "$RUNNER_TEMP/nocx-macos-proof/app.log" proof-results/ 2>/dev/null || true
+          cp "$RUNNER_TEMP/nocx-macos-proof/home/Library/Logs/nocx/nocx.log" proof-results/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: macos-update-proof
           path: proof-results/
           if-no-files-found: error
           retention-days: 30

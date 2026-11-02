@@ -1651,6 +1651,76 @@ func TestBlockClearBoundary_AnEndedBlockIsHiddenEvenBeforeItSeals(t *testing.T) 
 	}
 }
 
+// TestBlockClearBoundary_SuccessorOutputMarkEndsTheCurrentInterval
+// (nocx-atpw5.1.12): the erase a `clear` makes is sighted on the rows plane,
+// and so is `clear`'s own output-start mark (OSC 133 C, written by the shell's
+// preexec hook before any of its output) — in that order, on the one ordered
+// carrier. The previous command's end reaches the block stream on two other
+// carriers: the lifecycle completion (behind a frame commit that is a store
+// write) and the fence's sighting (behind the join). Either can still be in
+// flight when the erase lands, because a person may type `clear` while the
+// previous command runs and the shell then runs it the instant the prompt is
+// back — which is exactly what the e2e does, its promptReady waits for the
+// editor and not for the prompt. The successor's own output mark has arrived
+// by then, and it says the interval that follows has begun its output: the
+// current block is over for attribution, so the erase hides it instead of
+// naming it as the block to keep.
+func TestBlockClearBoundary_SuccessorOutputMarkEndsTheCurrentInterval(t *testing.T) {
+	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	before := startsACommand(t, e, pub, lane, h, 2, "make watch")
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("working")}, ""); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	// Its own output-start mark, then the next command's: one mark per
+	// interval, in the order the shell wrote them.
+	e.ws.BlockOutputStartRow(session.ID(sid), 1)
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 1, 0, []emulator.Row{aStreamRow("")}, ""); !confirm {
+		t.Fatal("the streamed row was not confirmed")
+	}
+	e.ws.BlockOutputStartRow(session.ID(sid), 2)
+
+	e.ws.BlockClearBoundary(session.ID(sid))
+
+	msg, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("block.cleared"))
+	if err != nil {
+		t.Fatalf("no block.cleared reached the subscriber: %v", err)
+	}
+	frame, ok := decodeFrame(msg)
+	if !ok {
+		t.Fatalf("block.cleared frame did not decode: %s", msg)
+	}
+	var params struct {
+		KeepEntryID *string `json:"keepEntryId"`
+	}
+	if err = json.Unmarshal(frame.Params, &params); err != nil {
+		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.KeepEntryID != nil {
+		t.Fatalf("keepEntryId = %q, want null: the interval after %q had already written its output-start mark when the erase was sighted, so %q is one of the blocks the erase hides",
+			*params.KeepEntryID, before, before)
+	}
+
+	// The durable half agrees: the block is hidden from an ordinary pane
+	// read, and its record is still there (nocx-zg3k3.10.3).
+	page, err := db.Ledger().QueryEntries(context.Background(), content.LedgerQuery{
+		Scope: content.ScopePane, PaneID: "01930000-0000-7000-8000-0000000000a1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	for _, entry := range page.Entries {
+		if entry.ID == before {
+			t.Fatalf("the block %q before the erase is still shown after the clear boundary: %+v", before, page.Entries)
+		}
+	}
+	if _, err := db.Ledger().Entry(context.Background(), before); err != nil {
+		t.Fatalf("the hidden entry is no longer readable by id — it must never be deleted: %v", err)
+	}
+}
+
 // TestBlockClearBoundary_KeepsTheIntervalQueuedBehindAnEndedBlock is the
 // same interleaving with the interval that follows already open: the ended
 // block's close is still writing to the store when `clear` is submitted and

@@ -92,7 +92,12 @@ import {
 } from './recovery-notice'
 import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
-import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
+import {
+  mountReconnectOffer,
+  mountAttachOffer,
+  type ReconnectOfferHandle,
+  type AttachOfferHandle,
+} from './reconnect-offer'
 import {
   autoReconnectDelayMs,
   AUTO_RECONNECT_ATTEMPTS,
@@ -168,7 +173,7 @@ import { getCurrentTheme, subscribeThemeChanges } from './renderers/theme-adapte
 import { subscribeTerminalFontChanges } from './terminal-font'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { BlockClosed } from './generated/block.closed'
-import type { WSClient, SessionHandle, OpenAnchor, SessionSize } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSize, SessionAttachment } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -1803,6 +1808,8 @@ export class TerminalContent extends BasePaneContent {
   private _reconnecting = false
   private _reconnectAbort: AbortController | null = null
   private _offer: ReconnectOfferHandle | null = null
+  private _attachment: SessionAttachment = { kind: 'attached' }
+  private _attachOffer: AttachOfferHandle | null = null
   private _autoAttempts = 0
   private _autoTimer: number | undefined
 
@@ -1863,6 +1870,28 @@ export class TerminalContent extends BasePaneContent {
     this.scheduleLiveResize()
   }
 
+  private _syncAttachOffer(): void {
+    const target = this._paneTarget
+    if (!target) return
+    if (
+      this._attachment.kind === 'attached' ||
+      !this.session ||
+      this._sessionLost ||
+      this._sessionExited
+    ) {
+      if (!this._attachOffer) return
+      this._attachOffer?.dispose()
+      this._attachOffer = null
+    } else if (this._attachOffer) {
+      this._attachOffer.set(this._attachment)
+    } else {
+      this._attachOffer = mountAttachOffer(target, this._attachment, () => {
+        void this.session?.retryAttach()
+      })
+    }
+    this.scheduleLiveResize()
+  }
+
   /** What this pane looks like right now, for the wake diagnostic
    *  (wake-report.ts). Measurements only — nothing here decides or repairs,
    *  and nothing in the product may branch on it. */
@@ -1905,6 +1934,7 @@ export class TerminalContent extends BasePaneContent {
     this._connectionMark?.set(facts)
     this._connection = connectionCondition(facts)
     this._syncReconnectOffer()
+    this._syncAttachOffer()
     this.hooks.onConnectionConditionChange?.(this._connection)
     this._publishTabMark()
   }
@@ -1929,6 +1959,10 @@ export class TerminalContent extends BasePaneContent {
   private _publishTabMark(): void {
     if (this._sessionLost) {
       this.hooks.onWarningChange?.(true, 'Connection lost')
+      return
+    }
+    if (this._attachment.kind !== 'attached') {
+      this.hooks.onWarningChange?.(true, 'Session not attached')
       return
     }
     if (this._connection === 'unreachable') {
@@ -3413,6 +3447,7 @@ export class TerminalContent extends BasePaneContent {
           // masked row is refused first: the draft stays and resolution
           // opens on the first chip (ADR-0021's consequence).
           beforeSubmit: (doc) => {
+            if (this._attachment.kind !== 'attached') return false
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
             if (sync) {
@@ -3783,6 +3818,15 @@ export class TerminalContent extends BasePaneContent {
         return
       }
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
+        // The running fact makes the command the owner (hasRunningCommand);
+        // the prompt_ready fact ends it. Either one closes the interval a
+        // submitted command's write opened (nocx-atpw5.1.20).
+        if (
+          this.lifecycle.state.kind === 'running' ||
+          this.lifecycle.state.kind === 'prompt_ready'
+        ) {
+          this._submittedAwaitingStart = false
+        }
         if (this.lifecycle.state.kind === 'running') {
           this._screenHandbackAwaitingBoundary = true
         }
@@ -4952,6 +4996,16 @@ export class TerminalContent extends BasePaneContent {
     // the person closed is not resurrected by a revision.
     session.onRecoveryChanged(() => this._showRecoveryNotice(session, target))
     session.onProtocolError((message) => showToast({ level: 'danger', message }))
+    session.onAttachment((attachment) => {
+      if (this._disposed || this.session !== session) return
+      const changed = this._attachment.kind !== attachment.kind
+      this._attachment = attachment
+      if (this._intentInput) this._intentInput.element.disabled = attachment.kind !== 'attached'
+      if (attachment.kind !== 'attached') this._cancelDeferredShellSubmissions()
+      this._syncAttachOffer()
+      if (changed) this._syncLifecycleOwnership()
+      this._publishTabMark()
+    })
     historySubscription.bindSession(session.sessionId)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
@@ -5356,6 +5410,7 @@ export class TerminalContent extends BasePaneContent {
       // The session is gone: an origin naming it would name a machine
       // that no longer exists (B.9). True for a clean exit AND a loss.
       this._sessionExited = true
+      this._submittedAwaitingStart = false
       // Nothing this pane asks for can be applied by a session that has
       // ended, and the transport answers a resize cancelled by a close with
       // the same supersession code it answers a newer one — which is not a
@@ -6867,6 +6922,7 @@ export class TerminalContent extends BasePaneContent {
   private deferShellSubmissionUntilReady(
     plan: SubmitPlan,
   ): SubmitPlan | Promise<SubmitPlan | false> {
+    if (this._attachment.kind !== 'attached') return Promise.resolve(false)
     if (this.inputTargets?.active().routesToShell !== true) return plan
     if (!this._awaitsFirstPrompt()) return plan
     if (this.lifecycle.state.kind === 'prompt_ready' || isDegraded(this._integration)) return plan
@@ -8795,7 +8851,7 @@ export class TerminalContent extends BasePaneContent {
     if (this.editor?.isVisible !== false) return false
     if (e.metaKey) return false
     if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) return false
-    return this._heldRaw !== null || this.hasRunningCommand()
+    return this._heldRaw !== null || this._submittedAwaitingStart || this.hasRunningCommand()
   }
 
   /** Raw bytes the grid produced after the keyboard changed hands but before
@@ -8818,6 +8874,22 @@ export class TerminalContent extends BasePaneContent {
    *  behind it (see HeldWindow, and onSessionIntent, which arms this). */
   private _heldRaw: HeldWindow | null = null
 
+  /** A person's submitted command has been handed to the pty queue and its
+   *  running fact has not been applied yet (nocx-atpw5.1.20).
+   *
+   *  `_heldRaw` covers the window BEFORE that write: the keys belong after
+   *  the command and wait here for it. It covers nothing after the write —
+   *  the window is taken, the command is on the queue — and `hasRunningCommand`
+   *  covers nothing until the lifecycle fact the runtime sends behind the
+   *  bytes is applied to this pane. Between the two is a real interval in
+   *  which the command is ahead of every key and nobody says so: a keyboard
+   *  dropped by the same DOM operations 66.1.19 names refuses the keys as
+   *  unclaimed, the letters are lost and the Enter that follows the fact is
+   *  kept, so the program reading stdin is answered with an empty line. This
+   *  is the statement that interval needs, and it is cleared at the fact that
+   *  makes the command the running owner. */
+  private _submittedAwaitingStart = false
+
   /** The pane's input element (nocx-zg3k3.3.1): a real focusable textarea that
    *  the keyboard, the IME and the focus are read from, and whose position
    *  follows the caret the painter draws. Null until mount, and again after
@@ -8838,6 +8910,7 @@ export class TerminalContent extends BasePaneContent {
    *  whatever the person does next arrives on its own and is delivered on its
    *  own. That was the point of the tail, and it is preserved by construction. */
   private onSessionIntent(intent: SessionIntent): boolean {
+    if (this._attachment.kind !== 'attached') return false
     if (isAwaitingIntegration(this._integration, this._awaitsIntegration)) return false
     // THE SWITCH'S FENCE COMES FIRST (nocx-1ebrs.10). Everything the person
     // produces after an alternate-screen switch waits for the resize receipt,
@@ -8899,6 +8972,7 @@ export class TerminalContent extends BasePaneContent {
    *  swallowed: a keystroke that reached nobody is a fact the person is owed,
    *  and printing it to a console would be the silent version of it. */
   private sendIntent(intent: SessionIntent): boolean {
+    if (this._attachment.kind !== 'attached') return false
     const session = this.session
     if (!session) return false
     const tail = this._sessionCallQueue[this._sessionCallQueue.length - 1]
@@ -9017,6 +9091,10 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
+    if (this._attachment.kind !== 'attached') {
+      editor.hide()
+      return
+    }
     // A non-terminal summoned answer is the turn's ownership fact. While it
     // exists, a lifecycle completion for a child command is only an
     // intermediate result: the assistant turn still owns the overlay and the
@@ -9066,6 +9144,10 @@ export class TerminalContent extends BasePaneContent {
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
     const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
+      // The composer is back, so no submitted command can still be waiting
+      // for its start: a conventional shell may never publish one, and the
+      // next prompt is the end of the interval regardless (nocx-atpw5.1.20).
+      this._submittedAwaitingStart = false
       if (summoned) {
         // The attribute is set before show/focus and CSS takes the editor out
         // of flow, so this branch never settles or measures the scrollback.
@@ -9319,6 +9401,8 @@ export class TerminalContent extends BasePaneContent {
     this._reconnectAbort?.abort()
     this._offer?.dispose()
     this._offer = null
+    this._attachOffer?.dispose()
+    this._attachOffer = null
     // The painter dies before the input layer that sits above it: the
     // batch's pending frame is cancelled (a callback landing on a disposed
     // pane is a leak, not a paint), the fit's probe and font listener leave
@@ -9511,6 +9595,9 @@ export class TerminalContent extends BasePaneContent {
      *  immediately before the bytes are handed to the renderer. */
     beforeWrite?: () => boolean
   }): { ledgerId: number | null; submitId: string | null } {
+    if (this._attachment.kind !== 'attached') {
+      throw new Error('Session is not attached. Retry attachment before submitting a command.')
+    }
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
     // The pending prompt prediction flushes HERE (nocx-2v80t.3.55): the
     // last moment that is both synchronous with the person's Enter and
@@ -9578,6 +9665,12 @@ export class TerminalContent extends BasePaneContent {
           focusGrid: () => this.takeKeyboardToGridAfterSubmit(),
           sendDoc: sendLine,
         })
+        // The command is on the pane's intent queue, ahead of any key that
+        // follows it, and the running fact has not been applied yet. That is
+        // not the held window and not the running command: it is the
+        // interval an unclaimed keyboard must still be read in
+        // (nocx-atpw5.1.20).
+        if (takeKeys) this._submittedAwaitingStart = true
       } finally {
         // In a `finally`, and fail-open: a write that threw sent nothing,
         // and holding the keys anyway would swallow them for the rest of

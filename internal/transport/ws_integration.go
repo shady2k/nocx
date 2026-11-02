@@ -695,6 +695,18 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 	if st.status == IntegrationConventional && !st.everLive {
 		return "", "", false
 	}
+	// THE STARTUP BOUND ANSWERS A SESSION THAT IS STILL STARTING
+	// (nocx-n85cu). Its timer is a net armed at registration, and the callback
+	// it schedules runs on its own goroutine: Timer.Stop does not join a
+	// callback that has already started, so one can reach this function AFTER
+	// noteIntegrationLive answered the axis. Reading everLive then — true,
+	// because the session came back — would publish `lost` for a session that
+	// is live, one bound into every slow start. The check is under the same
+	// lock as the answer it guards, so whichever of the note and the callback
+	// runs first decides the other; no wall-clock order is assumed.
+	if cause == LossCauseStartupBound && st.status != IntegrationStarting {
+		return "", "", false
+	}
 	next := integrationStatus{shell: st.shell, shellVersion: st.shellVersion, everLive: st.everLive, observedProcess: st.observedProcess}
 	switch {
 	case st.everLive:

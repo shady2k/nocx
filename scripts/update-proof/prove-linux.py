@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Run two published nightly AppImages through the real desktop update controls.
+"""Run two published AppImages through the real desktop update controls.
+
+--channel nightly (the default) proves the previous dated nightly updates to
+this run's nightly. --channel stable proves the previous stable AppImage
+updates to the stable release this run promoted. The assertions are the same
+on both channels: verify the signed bytes, swap them, and report healthy.
 
 Run ONLY through nocx-sky-test --e2e, under dbus-run-session and xvfb-run.
 Requires distro python3-pyatspi. No app build, fake bridge or fixture updater.
@@ -9,6 +14,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -16,11 +22,11 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
-from common import (ProofError, artifact, command, download_artifact, nightly_pair,
-                    read_pending, require, sha256, verify_manifest)
+from common import (ProofError, channel_pair, command, download_artifact,
+                    plain_version, read_pending, require, sha256, verify_manifest)
 from controls import (ACTIVATE, FOCUS, REFUSE, Channel, Option, Rail, Reveal,
                       channel_settled)
-from transport import BASE, Relay
+from transport import Relay
 
 
 def wait_for(description, probe, timeout=120, describe=None):
@@ -183,7 +189,9 @@ class Desktop:
         actions = node.queryAction()
         require(actions.nActions > 0 and actions.doAction(0), "control refused activation: " + name)
 
-    def nightly(self):
+    def select_channel(self, channel):
+        """Set the update channel through the shipped select, by its own value."""
+        label = {"nightly": "Nightly", "stable": "Stable"}[channel]
         self.click("Settings")
         self.click("Updates")
         combo = wait_for("Update channel", lambda: self.named("Update channel", "combo box"))
@@ -191,10 +199,10 @@ class Desktop:
                 "channel select did not accept its press")
         # Every option is a menu item in the tree whether or not it is the
         # value, so the row is addressed without requiring it to be on screen.
-        option = wait_for("the Nightly option",
-                          lambda: self.named("Nightly", "menu item", showing=False))
-        require(option.queryAction().doAction(0), "Nightly option refused selection")
-        self.wait_for_channel("nightly")
+        option = wait_for("the " + label + " option",
+                          lambda: self.named(label, "menu item", showing=False))
+        require(option.queryAction().doAction(0), label + " option refused selection")
+        self.wait_for_channel(channel)
         # About is the last row of the rail and starts below the fold.
         self.rail_click("About")
         wait_for("the About page", lambda: self.named("Check for updates", "push button"))
@@ -331,6 +339,42 @@ class RestartObservation:
                 f"journal exists={self.journal.exists()}; backup exists={self.backup.exists()}")
 
 
+def require_lower_probe(channel, lower, previous, candidate):
+    """The downgrade probe must be a version the installed app can refuse.
+
+    The nightly workflow's probe is `releases/latest`, which after a promotion
+    can equal the previous nightly's version, so nightly keeps the check it has
+    always had — below the candidate. A stable proof has three published
+    stables and therefore a probe strictly below the app it installs; assert
+    that too, because "below the candidate" alone would accept a probe newer
+    than the installed app and prove nothing about downgrades.
+    """
+    lower_version = plain_version(lower, "lower", "stable")
+    require(lower_version < plain_version(candidate, "candidate", channel),
+            "lower-version refusal needs a signed lower semver below the candidate")
+    if channel == "stable":
+        require(lower_version < plain_version(previous, "previous", "stable"),
+                "the stable downgrade probe must be below the installed previous stable")
+
+
+def require_promoted(args, candidate):
+    """A stable proof must be proving the tag this run published (nocx-86e2f).
+
+    Without it the driver would happily prove the newest stable pair that
+    happens to exist — before v0.8.1, v0.7.2 -> v0.8.0 — and a release job
+    would report a pass belonging to an earlier promotion. The nightly channel
+    has no promoted tag of its own to name: its candidate is this run's
+    nightly, selected by the job.
+    """
+    if args.channel != "stable":
+        return
+    require(args.promoted is not None,
+            "the stable channel needs --promoted naming the tag this run published")
+    require("v" + candidate["version"] == args.promoted,
+            "candidate manifest is v" + candidate["version"] + ", but this run promoted "
+            + args.promoted)
+
+
 def run(args, evidence):
     require(sys.platform == "linux", "this is the Linux proof")
     require(os.environ.get("DISPLAY") and os.environ.get("DBUS_SESSION_BUS_ADDRESS"),
@@ -338,11 +382,11 @@ def run(args, evidence):
     previous = verify_manifest(args.previous_manifest, args.previous_signature, args.verifier)
     candidate = verify_manifest(args.candidate_manifest, args.candidate_signature, args.verifier)
     lower = verify_manifest(args.lower_manifest, args.lower_signature, args.verifier)
-    before, after = nightly_pair(previous, candidate, "linux", "amd64")
+    require_promoted(args, candidate)
+    before, after = channel_pair(args.channel, previous, candidate, "linux", "amd64")
     version = candidate["version"]
-    require(tuple(map(int, lower["version"].split("."))) < tuple(map(int, version.split("."))),
-            "lower-version refusal needs a signed lower-semver manifest")
-    evidence.update(previous=previous, candidate=candidate, lower=lower,
+    require_lower_probe(args.channel, lower, previous, candidate)
+    evidence.update(channel=args.channel, previous=previous, candidate=candidate, lower=lower,
                     manifestDigests={"previous": sha256(args.previous_manifest),
                                      "candidate": sha256(args.candidate_manifest)})
     root = args.work.resolve()
@@ -361,12 +405,13 @@ def run(args, evidence):
     previous_identities = extract_identities(install, root / "inspect-previous")
     identities = extract_identities(pristine, root / "inspect-candidate")
     require(previous_identities["window"] != identities["window"],
-            "nightlies must contain different window executables, not only packaging differences")
+            "the two AppImages must contain different window executables, "
+            "not only packaging differences")
     evidence["previousExecutables"] = previous_identities
     evidence["candidateExecutables"] = identities
     relay = Relay(root, (args.previous_manifest, args.previous_signature),
                   (args.candidate_manifest, args.candidate_signature),
-                  (args.lower_manifest, args.lower_signature))
+                  (args.lower_manifest, args.lower_signature), channel=args.channel)
     try:
         relay.verify_live()
     except Exception:
@@ -404,7 +449,7 @@ def run(args, evidence):
     desktop = None
     try:
         desktop = Desktop(relay, home)
-        desktop.nightly()
+        desktop.select_channel(args.channel)
         initial = profile_processes(home)
         evidence["initialProcesses"] = initial
         require(any(p["appimage"] == str(install) and p["sha256"] == previous_identities["window"]
@@ -469,11 +514,12 @@ def run(args, evidence):
         desktop.check()
         require("You're up to date" in desktop.text(), "already-current artifact offered itself again")
         evidence["alreadyCurrentRefused"] = True
-        # Replay yesterday's signed nightly: requires producer's monotonic
-        # identity (.66.1.8), not a harness-only timestamp comparison.
+        # Replay the previously published signed release: requires the
+        # producer's monotonic identity (.66.1.8), not a harness-only
+        # timestamp comparison.
         relay.mode = "stale"
         desktop.check()
-        require("You're up to date" in desktop.text(), "stale signed nightly was offered")
+        require("You're up to date" in desktop.text(), "stale signed release was offered")
         require(sha256(install) == after["sha256"] and not journal.exists(),
                 "stale manifest changed installed artifact")
         evidence["staleRefused"] = True
@@ -511,11 +557,75 @@ def run(args, evidence):
         evidence["initialLauncherExit"] = process.returncode
 
 
-def publication_status():
-    request = Request("https://api.github.com/repos/shady2k/nocx/releases?per_page=100",
-                      headers={"User-Agent": "nocx-update-proof"})
+RELEASE_LIST = "https://api.github.com/repos/shady2k/nocx/releases?per_page=100"
+
+# A stable release tag, and only that: vMAJOR.MINOR.PATCH with no leading zero.
+STABLE_TAG = re.compile(r"v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))")
+
+
+def stable_releases(tags):
+    """The three stable releases a stable proof needs, ordered by semver.
+
+    Version decides, never publication order: the updater compares semver, and
+    a re-dispatched promotion can be published out of order. A non-prerelease
+    release whose tag is not vMAJOR.MINOR.PATCH fails closed, as ADR-79b6cy61
+    decides for the same question elsewhere: skipping an unreadable tag would
+    silently prove an older pair.
+    """
+    numbered = []
+    for tag in tags:
+        match = STABLE_TAG.fullmatch(tag)
+        if match is None:
+            raise ProofError("a stable-channel release tag is not vMAJOR.MINOR.PATCH: " + tag)
+        numbered.append((tuple(int(part) for part in match.group(1).split(".")), tag))
+    numbered.sort()
+    return [tag for _, tag in numbered]
+
+
+def stable_status(tags, promoted=None):
+    """Readiness for a stable proof: the exit code and the JSON result.
+
+    Blocked (exit 2) means the releases a proof needs do not exist yet — a
+    state to wait for, never a pass. Failed (exit 1) means the newest stable is
+    not the tag this run promoted, so a pass would belong to another run's
+    bytes.
+    """
+    try:
+        ordered = stable_releases(tags)
+    except ProofError as error:
+        # A malformed tag is a broken release set, not a state to wait for.
+        return 1, {"result": "failed", "reason": str(error), "channel": "stable",
+                   "tags": list(tags)}
+    if len(ordered) < 3:
+        return 2, {"result": "blocked",
+                   "reason": "fewer than three stable releases are published; the pair and a "
+                             "below-previous downgrade probe need three",
+                   "channel": "stable", "tags": list(tags)}
+    lower, previous, candidate = ordered[-3:]
+    if promoted is not None and promoted != candidate:
+        return 1, {"result": "failed",
+                   "reason": "the newest stable release is " + candidate + ", but this run "
+                             "promoted " + promoted + "; refusing to prove another run's artifact",
+                   "channel": "stable", "tags": list(tags)}
+    return 0, {"result": "ready",
+               "reason": "the promoted stable and two releases below it are published",
+               "channel": "stable", "candidate": candidate, "previous": previous,
+               "lower": lower, "tags": list(tags)}
+
+
+def publication_status(channel="nightly", promoted=None):
+    request = Request(RELEASE_LIST, headers={"User-Agent": "nocx-update-proof"})
     with urlopen(request, timeout=60) as response:
         releases = json.load(response)
+    if channel == "stable":
+        # Stable is what GitHub's `latest` redirect follows: neither a
+        # prerelease nor a draft. The nightly tags are excluded by that rule,
+        # so stable_releases only ever sees release tags.
+        tags = [release["tag_name"] for release in releases
+                if not release["prerelease"] and not release["draft"]]
+        code, result = stable_status(tags, promoted)
+        print(json.dumps(result))
+        return code
     tags = [release["tag_name"] for release in releases
             if release["prerelease"] and not release["draft"]
             and release["tag_name"].startswith("nightly-")]
@@ -528,17 +638,35 @@ def publication_status():
     return 0 if len(tags) >= 2 else 2
 
 
+PROOF_INPUTS = ["previous-manifest", "previous-signature", "candidate-manifest",
+                "candidate-signature", "lower-manifest", "lower-signature", "verifier",
+                "appimage", "work", "evidence"]
+
+
 def main():
-    if sys.argv[1:] == ["--publication-status"]:
-        sys.exit(publication_status())
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ["previous-manifest", "previous-signature", "candidate-manifest", "candidate-signature",
-                 "lower-manifest", "lower-signature", "verifier", "appimage", "work", "evidence"]:
-        parser.add_argument("--" + name, required=True, type=Path)
+    parser.add_argument("--channel", choices=["nightly", "stable"], default="nightly",
+                        help="which published pair to prove (default: nightly)")
+    parser.add_argument("--publication-status", action="store_true",
+                        help="report readiness and exit; proves nothing")
+    parser.add_argument("--promoted",
+                        help="the stable tag this run promoted; it must be the newest stable")
+    for name in PROOF_INPUTS:
+        parser.add_argument("--" + name, type=Path)
     args = parser.parse_args()
+    if args.promoted is not None and args.channel != "stable":
+        parser.error("--promoted names a stable tag and requires --channel stable")
+    if args.publication_status:
+        sys.exit(publication_status(args.channel, args.promoted))
+    missing = [name for name in PROOF_INPUTS
+               if getattr(args, name.replace("-", "_")) is None]
+    if missing:
+        parser.error("missing required arguments: " + ", ".join("--" + name for name in missing))
     for key, value in vars(args).items():
-        setattr(args, key, value.resolve())
-    evidence = {"result": "failed", "proof": "nocx-1ebrs.35.6"}
+        if isinstance(value, Path):
+            setattr(args, key, value.resolve())
+    evidence = {"result": "failed", "channel": args.channel,
+                "proof": "nocx-1ebrs.35.6" if args.channel == "nightly" else "nocx-86e2f"}
     try:
         run(args, evidence)
     except Exception as error:

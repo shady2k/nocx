@@ -164,7 +164,7 @@ func fixtureRepo(t *testing.T) string {
 // the factory released the lane.
 type fakeLaneConn struct {
 	stdin  io.WriteCloser
-	stdout io.Reader
+	stdout io.ReadCloser
 	stderr io.Reader
 
 	exited   chan struct{}
@@ -203,16 +203,94 @@ func (f *fakeLaneConn) Stderr() io.Reader     { return f.stderr }
 // client.LaneConn refuses one — so the fake records nothing, and its startErr
 // stands in for "the helper could not open the lane at all", which is the state
 // it was always modelling.
-func (f *fakeLaneConn) Start(string) error    { return f.startErr }
-func (f *fakeLaneConn) Wait() (int, error)    { <-f.exited; return f.exitCode, nil }
-func (f *fakeLaneConn) Done() <-chan struct{} { return make(chan struct{}) }
-func (f *fakeLaneConn) LostErr() error        { return nil }
+func (f *fakeLaneConn) Start(string) error { return f.startErr }
+func (f *fakeLaneConn) Wait() (int, error) { <-f.exited; return f.exitCode, nil }
 
+// Done reports the lane's own end, and this fake IS the helper process: the
+// connection dies when the process does, so Done is the same event Wait
+// watches. A fresh channel that never closes models a lane nobody can lose,
+// and the client's loss watcher (client.Dial's `<-c.conn.Done()` goroutine,
+// one per lane) parked on it for the rest of the package's run — 179 of them
+// in the package's own goroutine dump (nocx-1ebrs.66.1.29).
+func (f *fakeLaneConn) Done() <-chan struct{} { return f.exited }
+
+func (f *fakeLaneConn) LostErr() error { return nil }
+
+// Close releases BOTH halves of the wire, which is what a real lane's Close
+// does. Closing stdin alone leaves a peer parked in a write to the stdout pipe
+// with nobody left to read it: an io.Pipe write blocks until somebody reads,
+// so the peer never returned, Wait never returned, and the goroutine dump
+// showed it "chan receive, 5 minutes" inside Wait while the test that opened
+// the lane was long gone.
 func (f *fakeLaneConn) Close() error {
 	f.mu.Lock()
 	f.closed++
 	f.mu.Unlock()
-	return f.stdin.Close()
+	stdinErr := f.stdin.Close()
+	if outErr := f.stdout.Close(); stdinErr == nil {
+		stdinErr = outErr
+	}
+	return stdinErr
+}
+
+// endSessions detaches every session reg holds, in the order the map gives:
+// Reg.Close is the product's own word for a coordinator ending, so a stand
+// that uses it models a process exit rather than leaking a write loop.
+func endSessions(reg *session.Reg) {
+	if reg == nil {
+		return
+	}
+	for _, s := range reg.List() {
+		_ = reg.Close(s.ID())
+	}
+}
+
+// endSessionsOnCleanup detaches every session reg holds when the test ends.
+// It is endSessions at the one moment a stand's process exit is: the test's
+// own end (nocx-1ebrs.66.1.29).
+func endSessionsOnCleanup(t *testing.T, reg *session.Reg) {
+	t.Helper()
+	t.Cleanup(func() { endSessions(reg) })
+}
+
+// endHelperChannels closes every helper channel reg holds. A method was not
+// added to helperRegistry because this IS what a coordinator's process exit
+// does and nothing in the product needs it: the registry is closed from the
+// composition root's shutdown, which walks its own hosts.
+func endHelperChannels(reg *helperRegistry) {
+	if reg == nil {
+		return
+	}
+	reg.mu.Lock()
+	helpers := make([]*hostHelper, 0, len(reg.hosts))
+	for _, h := range reg.hosts {
+		helpers = append(helpers, h)
+	}
+	reg.mu.Unlock()
+	for _, h := range helpers {
+		h.mu.Lock()
+		h.closeLocked()
+		h.mu.Unlock()
+	}
+}
+
+// endStandOnCleanup ends a test stand the way its coordinator's process would:
+// its sessions detach, the helper channels it holds close, and every lane it
+// closed has its helper waited for. It is coordinator.quit in cleanup form,
+// for the stands that are not built on a coordinator — without it those stands
+// left a session's write loop and a lane's watchers running for the rest of
+// the package's run (nocx-1ebrs.66.1.29).
+func endStandOnCleanup(t *testing.T, provider *fakeLaneProvider, reg *helperRegistry) {
+	t.Helper()
+	t.Cleanup(func() {
+		if reg != nil {
+			endSessions(reg.registry)
+		}
+		endHelperChannels(reg)
+		if provider != nil {
+			provider.awaitClosedPeers(t)
+		}
+	})
 }
 
 func (f *fakeLaneConn) closeCount() int {
@@ -275,8 +353,14 @@ func (p *fakeLaneProvider) awaitClosedPeers(t *testing.T) {
 		}
 		select {
 		case <-c.exited:
-		case <-t.Context().Done():
-			t.Fatalf("a closed lane's helper never ended: %v", t.Context().Err())
+		case <-time.After(30 * time.Second):
+			// A HANG LIMIT, not a duration the assertion depends on — the
+			// same 30 s bound the stands' shell wait uses, and it fires only
+			// on a lane whose helper should have ended and did not
+			// (nocx-1ebrs.66.1.29). t.Context() cannot be the bound here any
+			// more: it is cancelled BEFORE the test's cleanups run, and a
+			// stand now ends its coordinator in one.
+			t.Errorf("a closed lane's helper never ended: 30 s after its lane closed, the peer is still running")
 		}
 	}
 }
@@ -559,9 +643,13 @@ func realHelperPeer(t testing.TB) func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger(t))
 		h.Register(hostsvc.New(localgit.NewFactory()))
-		h.Register(helpersession.New(helpersession.Options{
+		sessions := helpersession.New(helpersession.Options{
 			Generation: proto.GenerationID(contentHash),
-		}))
+		})
+		// The peer IS this test's helper process, so its sessions end with the
+		// connection that served them (nocx-1ebrs.66.1.29).
+		defer sessions.Close()
+		h.Register(sessions)
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}

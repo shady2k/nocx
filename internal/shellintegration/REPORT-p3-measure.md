@@ -7,7 +7,7 @@ the filesystem seam and counts calls across publish paths.
 ## Current maximum
 
 - Maximum filesystem-seam calls per publish: **63**.
-- Maximum bytes written per publish: **92,336**.
+- Maximum bytes written per publish: **92,357**.
 - Measured worst path: replacement plus sweep, with the launch carrier absent.
 - Fault position used for the reported worst case: `remove#4`.
 
@@ -110,3 +110,12 @@ slicing it out, because a refused grant OMITS the field on the wire
 whole frame to eval - the parse error that ate every typed ssh. Both tiers
 carry the same guard; `nocx.posix` was already correct, and the worst path is
 unchanged.
+
+The zsh agent-launch cancel wait's MONITOR-off guard (nocx-6o5xe) measured
+**92,357 bytes**, 21 above the 92,336 figure, and keeps the **63**-call
+maximum. The growth is one published line, `unsetopt monitor`, in
+`scripts/nocx.zsh`: with job control on, the terminal's foreground group
+during the wait is the `sleep` child, and an interrupt in the gap after that
+child exits reached no process, leaving the open-question wait (which has no
+deadline) unended. The Bash tier already had its equivalent (`set +m`); only
+the zsh tier moved, and the worst path is unchanged.

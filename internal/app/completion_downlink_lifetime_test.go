@@ -156,6 +156,9 @@ func startLifecycleLocalEndpoint(t *testing.T, dir, generation string) *lifecycl
 		Spawner:    spawner,
 		Log:        discardLogger(t),
 	})
+	// The daemon ends with the test, so the sessions it holds do too
+	// (nocx-1ebrs.66.1.29).
+	t.Cleanup(svc.Close)
 	rec := &recordingCompletions{Service: svc, arrived: make(chan struct{}, 16)}
 	ep := &lifecycleLocalEndpoint{ln: ln, svc: svc, spawner: spawner, rec: rec}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -429,6 +432,7 @@ func TestACompletionOnAFreshFarHelperPaneReachesTheHelperRuntime(t *testing.T) {
 	source := stubArtifacts(t)
 	store, installs := testConsentStores(t)
 	_, reg := helperGitFactory(provider, source, store, installs, discardLogger(t))
+	endStandOnCleanup(t, provider, reg)
 	reg.registry = session.New(log.NewSlogAdapter(discardLogger(t)), nil)
 	pub := lifecyclepub.New(lifecycle.New(lifecycle.Options{}))
 	emitter := &recordingEmitter{}

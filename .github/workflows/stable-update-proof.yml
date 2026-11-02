@@ -1,0 +1,173 @@
+# nocx-86e2f: the stable-channel AppImage update proof, as a workflow of its
+# own rather than a job in Release.
+#
+# ADR-0097 and ADR-79b6cy61 make a promotion a byte-identical copy of a tried
+# nightly: it tags and signs, and it builds nothing. The promotion test holds
+# that (`scripts/release/promotion-github.test.mjs` refuses any build command in
+# release.yml), so this proof gets its verifier the same way the nightly proof
+# does — in a job that checks out the publishing tree and builds
+# cmd/manifest-sign — one workflow over.
+#
+# `workflow_run` keeps the ordering Release's `needs: promote` had: this starts
+# only after the whole Release run finished, so the stable tag, the published
+# release and the cask all exist. A dry-run or refused Release run publishes no
+# stable and leaves no promotion evidence; the decide job says so and the proof
+# job is skipped rather than failing.
+name: Stable update proof
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  decide:
+    # A failed Release run proves nothing. Its artifact is also where the
+    # promoted tag comes from, so this job is the only one that needs it.
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      prove: ${{ steps.read.outputs.prove }}
+      tag: ${{ steps.read.outputs.tag }}
+    steps:
+      - name: Read the stable this Release run promoted
+        id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          # The promotion uploads its own plan.json with `if: always()`. A dry
+          # run promotes nothing and has no such artifact: skip, do not fail.
+          count=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.name == "stable-promotion-evidence" and .expired == false)] | length')
+          if [ "$count" -eq 0 ]; then
+            echo "::notice::this Release run published no stable release (dry run or refusal); nothing to prove"
+            echo "prove=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mkdir -p promotion
+          gh run download "$RUN_ID" --repo "$GH_REPO" \
+            --name stable-promotion-evidence --dir promotion
+          if [ ! -f promotion/plan.json ]; then
+            echo "::notice::the promotion evidence carries no plan.json; nothing to prove"
+            echo "prove=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version=$(/usr/bin/python3 -c 'import json; print(json.load(open("promotion/plan.json"))["version"])')
+          echo "prove=true" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  prove:
+    needs: decide
+    if: needs.decide.outputs.prove == 'true'
+    # The artifact is linux/amd64 and the host must be newer than the 22.04
+    # the image was built on — the same host the nightly proof uses.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The tree the promotion ran on and signed with — the Release run's
+          # commit, not the promoted tag's tree. The tag names the tried
+          # nightly's commit; the keyring that signed the stable manifest is
+          # this one.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/linux-update-proof-runtime
+
+      - name: Refuse to prove anything but the stable this run promoted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PROMOTED_TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof-results
+          # Readiness owns the version selection: newest stable, the one below
+          # it for the pair, and one below that for the downgrade probe.
+          set +e
+          /usr/bin/python3 scripts/update-proof/prove-linux.py --publication-status \
+            --channel stable --promoted "$PROMOTED_TAG" > proof-results/status.json
+          status=$?
+          set -e
+          cat proof-results/status.json
+          if [ "$status" -ne 0 ]; then
+            reason=$(/usr/bin/python3 -c 'import json; print(json.load(open("proof-results/status.json"))["reason"])' 2>/dev/null || echo "readiness exited $status")
+            if [ "$status" -eq 2 ]; then
+              echo "::error::publication blocked: $reason — blocked is not a pass"
+            else
+              echo "::error::$reason"
+            fi
+            exit 1
+          fi
+
+      - name: Stage the promoted stable, the previous stable and a lower stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PROMOTED_TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          read -r candidate previous lower < <(
+            /usr/bin/python3 -c 'import json; d=json.load(open("proof-results/status.json")); print(d["candidate"], d["previous"], d["lower"])'
+          )
+          if [ "$candidate" != "$PROMOTED_TAG" ]; then
+            echo "::error::the newest stable is $candidate, but this run promoted $PROMOTED_TAG; refusing to prove another run's artifact"
+            exit 1
+          fi
+          mkdir -p proof-inputs/candidate proof-inputs/previous proof-inputs/lower
+          for slot in candidate previous lower; do
+            gh release download "${!slot}" \
+              --pattern 'manifest.json' --pattern 'manifest.json.sig' \
+              --dir "proof-inputs/$slot"
+          done
+          sha256sum proof-inputs/*/manifest.json proof-inputs/*/manifest.json.sig > proof-results/inputs.sha256
+          printf 'candidate %s\nprevious %s\nlower %s\n' "$candidate" "$previous" "$lower" > proof-results/inputs.txt
+          cat proof-results/inputs.sha256 >> proof-results/inputs.txt
+          cat proof-results/inputs.txt
+          { echo '### Linux stable update proof'; echo '```'; cat proof-results/inputs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build the verifier with this checkout's production keyring
+        run: go build -o "$RUNNER_TEMP/manifest-sign" ./cmd/manifest-sign
+
+      - name: Prove the previous stable updates itself to the promoted stable
+        env:
+          PROMOTED_TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Same driver and same assertions as the nightly proof; only the
+          # channel and the three staged manifests differ.
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 scripts/update-proof/prove-linux.py \
+            --channel stable --promoted "$PROMOTED_TAG" \
+            --previous-manifest proof-inputs/previous/manifest.json \
+            --previous-signature proof-inputs/previous/manifest.json.sig \
+            --candidate-manifest proof-inputs/candidate/manifest.json \
+            --candidate-signature proof-inputs/candidate/manifest.json.sig \
+            --lower-manifest proof-inputs/lower/manifest.json \
+            --lower-signature proof-inputs/lower/manifest.json.sig \
+            --verifier "$RUNNER_TEMP/manifest-sign" \
+            --work "$RUNNER_TEMP/nocx-stable-proof" \
+            --appimage "$RUNNER_TEMP/nocx-stable-proof/nocx.AppImage" \
+            --evidence proof-results/linux-stable.json
+
+      - name: Keep the application log with the evidence
+        if: always()
+        run: |
+          mkdir -p proof-results
+          cp "$RUNNER_TEMP/nocx-stable-proof/app.log" proof-results/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: linux-stable-update-proof
+          path: proof-results/

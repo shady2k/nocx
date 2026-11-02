@@ -205,7 +205,7 @@ jobs:
           node-version: '24'
       - name: Workflow decision and refusal tests
         run: |
-          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs
+          node --test scripts/publish-nightly.test.mjs scripts/product-change.test.mjs scripts/quarantine.test.mjs scripts/changed-tests.test.mjs scripts/import-branch-beads.test.mjs
           python3 -m unittest discover -s scripts -p 'verify_built_artifact_test.py'
           node --test .githooks/check-log-context.test.mjs
       - name: Promotion and cask fixtures by path
@@ -793,6 +793,12 @@ jobs:
       - name: Test Linux installer refusals
         run: dash scripts/install/test-install.sh
 
+      # The macOS LAN diagnosis is POSIX sh with every macOS tool stubbed, so
+      # its argument handling, output shape and missing-tool behaviour are
+      # checked here; the real reading happens on the owner's Mac.
+      - name: Test the macOS LAN-after-update diagnosis
+        run: dash scripts/diagnose/test-macos-lan-after-update.sh
+
       # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
       # selects the 4.1 surface this product ships (ADR-0007). `go build ./...`
       # below compiles the whole tree including the adapter.
@@ -1012,19 +1018,18 @@ jobs:
 
   # ci-backlog — the backlog is still a queue, not a dump.
   #
-  # The one gate here that reads no code. It applies the rules in
-  # .githooks/backlog-gate/check.mjs — vendored verbatim from the
-  # shady2k-skills plugin, project-blind by construction — to .beads/issues.jsonl
-  # through this repository's own adapter. `block-new`, so what fails is what
-  # this branch introduced; everything already wrong is printed and fails
-  # nothing, which is the only setting that stays worth passing on a backlog
-  # with history.
+  # THIS JOB NO LONGER RUNS THE BACKLOG'S RULES (nocx-fg79x.3). A code pull
+  # request carries no tracker state: the store lives on refs/tracker/state and
+  # is published outside any branch, so applying check.mjs here judged other
+  # agents' writes against this branch. The rules run on the published delta in
+  # .github/workflows/tracker-gate.yml, with the same block-new strength.
   #
-  # Its second step is the commit check, check-commits.mjs from the same
-  # plugin fed by commit-links.mjs: every commit the change introduces names a
-  # leaf task that exists. It has no strength setting and is never relaxed.
+  # What is here is what a code change owes: the commit check,
+  # check-commits.mjs from the same plugin fed by commit-links.mjs — every
+  # commit the change introduces names a leaf task that exists. It has no
+  # strength setting and is never relaxed.
   #
-  # Its third step, on a pull request only, is the present-documents check,
+  # Its next step, on a pull request only, is the present-documents check,
   # check-present.mjs from the same plugin: the documents the config lists as
   # describing the present (`presentDocuments`) may not be left naming a path
   # the change removed, nor carry a link that no longer resolves. Drift older
@@ -1039,9 +1044,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # The baseline is another revision of the tracked export, so the
-          # history it lives in has to be here. A shallow clone has no
-          # merge-base and the gate would call every old violation new.
+          # The commit check reads the commits a pull request introduced, from
+          # the event's base, and the present-documents check needs the merge
+          # base. A shallow clone can name neither.
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
@@ -1067,7 +1072,9 @@ jobs:
         run: bash scripts/connect-tracker-ci.sh
 
       # A code pull request carries no tracker state: the store is published on
-      # refs/tracker/state. The backlog gate belongs to that publish, not here.
+      # refs/tracker/state, and the backlog's own rules are checked there
+      # (.github/workflows/tracker-gate.yml, nocx-fg79x.3). This step checks
+      # only the links the commits introduce.
       - name: Every new commit names a task
         env:
           # The event's own base sha, not the tip of the base branch: on a rerun

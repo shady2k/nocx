@@ -88,6 +88,7 @@ import {
   openControlPlane,
   promptReady,
   showSidebarView,
+  watchClient,
   type BackendEndpoint,
   type DisposableRoot,
   VaultBackend,
@@ -481,6 +482,14 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
 
       // ── STAGE 1: the pane, and Files, on the same password host ──────────
       const first = await freshClient(browser, endpoint)
+      // THIS SPEC DRIVES ITS OWN CONTEXT, so the failure-context block the rest
+      // of the suite prints was empty for its failures: `-- no browser page was
+      // on this report --`, no DOM, no console, no frames. nocx-atpw5.1.14 is
+      // what that costs — the failing poll could say the probe never wrote its
+      // trace, and not one word about the command the pane recorded or the
+      // error row it produced, which is the whole diagnosis. Registering the
+      // page puts those sections on the next failure.
+      watchClient(first, 'ssh-happy')
       await promptReady(first)
 
       // The pane the application opened for itself, before anything of ours.
@@ -714,6 +723,7 @@ test.describe('one ssh connection per host, answered unwatched, surviving the co
 
       // ── the pane is back, and it still takes input ───────────────────────
       const returned = await freshClient(browser, endpoint)
+      watchClient(returned, 'ssh-happy-returned')
       const pane = returned.locator(`.pane[data-session-id="${paneSessionId}"]`)
       await expect(pane).toBeVisible({ timeout: 180_000 })
       await promptReady(returned)

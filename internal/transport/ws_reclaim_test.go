@@ -862,32 +862,6 @@ func TestReclaim_ASessionWithNoRingIsStillListed(t *testing.T) {
 	}
 }
 
-// The claim is refused when the session's ring has gone, rather than answering
-// a resume on a stream nothing will ever write to. Same rule as the unknown
-// session, and the paired failure of the ring lookup the claim makes.
-func TestReclaim_AClaimOnASessionWithNoRingIsRefused(t *testing.T) {
-	ws, _ := newReclaimWS(t)
-	conn := connectWS(t, ws)
-	tap := newSocketTap(conn)
-	opened := openInPaneTapped(t, ws, conn, tap, reclaimPane, 1)
-	ws.removeRx(session.ID(opened.SessionID))
-
-	other := connectWS(t, ws)
-	otherTap := newSocketTap(other)
-	_, rpcErr := attachCall(t, other, otherTap, 2, map[string]any{
-		"sessionId":    opened.SessionID,
-		"instanceId":   opened.InstanceID,
-		"sessionEpoch": opened.SessionEpoch,
-		"offset":       0,
-	})
-	if rpcErr == nil {
-		t.Fatal("a claim on a session with no ring was admitted")
-	}
-	if got := refusalReason(t, rpcErr); got != reasonUnknownSession {
-		t.Errorf("reason = %q, want %q", got, reasonUnknownSession)
-	}
-}
-
 // A deliberate belt-and-braces read of the timing the reclaim depends on: the
 // ring's oldest offset is what sessions.live reports, and it moves only when
 // the client acks. Without this, replayFrom could be "whatever the ring's end

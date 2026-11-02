@@ -347,7 +347,14 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		return lifecyclepub.GrantBootstrap{Bootstrap: composeSSHLine(ssh.TypedWrap{}, nil, inv, "")}, nil
 	}
 
-	ln, err := lifecyclechannel.NewListener(lg, sshChildKernel(pub, req.Lane, observers))
+	var listenerOpts []lifecyclechannel.Option
+	if typed.helloTimeout > 0 {
+		listenerOpts = append(listenerOpts, lifecyclechannel.WithHelloTimeout(typed.helloTimeout))
+	}
+	if typed.lossReporter != nil {
+		listenerOpts = append(listenerOpts, lifecyclechannel.WithLossReporter(typed.lossReporter))
+	}
+	ln, err := lifecyclechannel.NewListener(lg, sshChildKernel(pub, req.Lane, observers), listenerOpts...)
 	if err != nil {
 		return lifecyclepub.GrantBootstrap{}, err
 	}
@@ -440,7 +447,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 
 	line := composeSSHLine(wrap, []string{"-t"}, inv, carrier)
 
-	go delivery.run(context.Background())
+	go delivery.run(typed.runContext())
 
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
 }

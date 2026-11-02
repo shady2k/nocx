@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/remoteprobe"
 	"github.com/shady2k/nocx/internal/session"
@@ -193,11 +194,33 @@ type typedRunner struct {
 	// assembly proof connect a candidate to the exact listener the grant
 	// established; it cannot affect delivery.
 	reportListenerPort func(port int)
+	// helloTimeout bounds the child-domain listener's wait for the far
+	// shell's hello. Zero uses lifecycle.HelloTimeout (the production
+	// value); a test states a short bound instead of sleeping through it.
+	// lossReporter, when set, receives the listener's loss causes so a test
+	// can wait on the hello-timeout event rather than on a wall clock.
+	helloTimeout time.Duration
+	lossReporter lifecyclechannel.LossReporter
+	// deliveryContext is the context one armed delivery's run is bounded
+	// by. Nil means context.Background, which is production's answer: the
+	// user's ssh client owns the session's lifetime, not this call. A test
+	// supplies a cancellable context so the ownership wait can end at the
+	// test's own event instead of at typedOwnershipDeadline.
+	deliveryContext func() context.Context
 	//
 	// Nil reports nowhere, which is the state before this and the safe
 	// direction: a delivery driven without a composition root still runs.
 	reportIntegration      func(sid, shell, status string, reason ssh.RefusalReason)
 	reportBootstrapOutcome func(lane string, reason ssh.RefusalReason)
+}
+
+// runContext is the context one delivery runs under: production's background,
+// or a test's cancellable stand-in.
+func (r *typedRunner) runContext() context.Context {
+	if r.deliveryContext != nil {
+		return r.deliveryContext()
+	}
+	return context.Background()
 }
 
 // bindTypedIntegrationAxis routes the two facts a typed delivery produces into

@@ -90,6 +90,23 @@ const LIVE = (s) => ['open', 'active', 'submitted', 'implemented'].includes(s);
 const isContainer = (m, i) =>
   !!i && (i.type === 'epic' || (m.children.get(i.id) || []).some((c) => LIVE(m.by.get(c)?.status)));
 
+// A stage is told from a feature by where it sits, never by its own type: a
+// project whose tracker gives stages the feature's native type is a supported
+// shape, and the gate would then read every stage as a feature.
+const underFeature = (m, i) => !!i && !!i.parent && m.by.get(i.parent)?.type === 'epic';
+const isFeature = (m, i) => !!i && i.type === 'epic' && !underFeature(m, i);
+
+// An order between two stages that are not broken down yet has nowhere else to
+// live: the later stage has no task to carry it, and a comment the ready list
+// does not read is an order the tracker does not have. Such a stage may wait —
+// on another stage, or on a task whose result is what it needs — while it has
+// no tasks of its own; the step that breaks it down moves the order onto its
+// tasks, and the container refusal comes back with them. A feature is never one
+// of the two, and a container that is neither a stage nor a leaf is not a
+// result at all.
+const waitingStage = (m, i) => underFeature(m, i) && !carries(m, i);
+const concreteBlocker = (m, b) => !!b && (underFeature(m, b) || !isContainer(m, b));
+
 // A stage is a container of work: it either carries leaves under it, or it is
 // the one and only child of its feature. A leaf that is one of several
 // children of a feature is one step of the feature's work, not the place its
@@ -202,6 +219,19 @@ const forecastOf = (i) => (isPlaceholder(afterMarker(i, 'forecast')) ? '' : afte
 const statedOf = (i) => [{ kind: 'Target', value: targetOf(i) }, { kind: 'Forecast', value: forecastOf(i) }]
   .filter((x) => x.value);
 
+// The owner's agreement, as the feature item records it: when it was given and
+// their own words, one line each for the direction and the plan. A line with no
+// time, or with no quotation of what the person said, records a decision the
+// agent took alone wearing the person's name: it declares nothing, and a
+// feature that has one is refused exactly like a feature that has none.
+const QUOTED_WORDS = /"[^"\n]*[\p{L}\p{N}][^"\n]*"|“[^”\n]*[\p{L}\p{N}][^”\n]*”|«[^»\n]*[\p{L}\p{N}][^»\n]*»/u;
+const agreedOf = (i, what) => {
+  const value = afterMarker(i, `agreed ${what}`);
+  if (isPlaceholder(value)) return null;
+  const at = Date.parse(value.split(/\s+/)[0]);
+  return Number.isFinite(at) && QUOTED_WORDS.test(value) ? { at, value } : null;
+};
+
 // Three word characters is the least a reason can carry and still be one;
 // an empty or bracketed placeholder declares nothing.
 const preparatoryOf = (i) =>
@@ -216,7 +246,7 @@ const criterionTextOf = (i) => {
   for (const mk of CRITERION_MARKERS) {
     const at = b.indexOf(mk);
     if (at >= 0) return b.slice(at + mk.length).split(/\n\s*#/)[0]
-      .split('\n').filter((l) => !/^\s*[-*>]?\s*(?:serves|seen at|preparatory)\s*:/i.test(l)).join('\n');
+      .split('\n').filter((l) => !/^\s*[-*>]?\s*(?:serves|seen at|preparatory|agreed direction|agreed plan)\s*:/i.test(l)).join('\n');
   }
   return '';
 };
@@ -355,11 +385,30 @@ function unreceipted(m) {
   });
 }
 
-// Work in flight when time records were adopted was begun by sessions that
-// could not write a claim. Setup lists it, and the exemption follows the task
-// tree, so a task split afterwards keeps it.
-function exemptFromRecords(m, cfg, id) {
-  const listed = new Set(cfg.timeRecordsExempt || []);
+// What a run leaves behind on the work it began: a status only a session sets, a
+// claim the run script posted, or a commit of the main line that names it. A
+// closed item is the same evidence while the feature is still held — finished
+// inside a run that is under way — and not otherwise: a feature whose work is
+// all closed is a close-out, and a gate cannot unpick a plan it never saw from
+// what is already history.
+const CLAIM_RECORD = /^\[shady2k-time\b[^\]]*\]\s*claim\b/im;
+const startedRun = (m, f) =>
+  f.status === 'active' || (f.comments || []).some((c) => CLAIM_RECORD.test(c.body || ''));
+
+function beganBy(m, i, held) {
+  if (['active', 'submitted', 'implemented'].includes(i.status)) return `is ${i.status}`;
+  if ((i.comments || []).some((c) => CLAIM_RECORD.test(c.body || ''))) return 'carries the claim of a run';
+  const landed = m.landedBy.get(i.id);
+  if (landed) return `is named by the landed commit ${landed[0]}`;
+  return held && i.status === 'closed' ? 'was closed inside a run' : null;
+}
+
+// Work already in flight when a project adopted a rule that asks something new
+// of it — a claim for the time records, an agreement for the plan — is listed
+// once by setup, and the exemption follows the task tree, so a task split
+// afterwards keeps it.
+function listedAbove(m, list, id) {
+  const listed = new Set(list || []);
   const seen = new Set();
   for (let cur = id; cur && !seen.has(cur); cur = m.by.get(cur)?.parent) {
     if (listed.has(cur)) return true;
@@ -367,6 +416,7 @@ function exemptFromRecords(m, cfg, id) {
   }
   return false;
 }
+const exemptFromRecords = (m, cfg, id) => listedAbove(m, cfg.timeRecordsExempt, id);
 
 // A run's time is its coordinator's clock: a claim on the feature or stage
 // covers every leaf its workers hand in under it. A worker's own claim adds
@@ -708,11 +758,51 @@ const CHECKS = [
   {
     id: 'nonleaf-dependency',
     severity: 'error',
-    why: 'Blocking entire containers hides the concrete prerequisite and serializes unrelated work.',
-    fix: 'Point it at the leaf whose result releases it, with the result or conflict it represents. Where a whole outcome is awaited, that leaf is the one putting the awaited thing in the person\'s hands; where it does not exist yet, write it first as that outcome\'s acceptance and point at it. Leaving the prerequisite in a comment instead is not the cheaper answer: what ready does not read, the next run does not know.',
+    why: 'Blocking entire containers hides the concrete prerequisite and serializes unrelated work. A stage that will be broken down is the one exception: it has no task to carry the order yet, and the order between two stages is what the ready list needs until it does.',
+    fix: 'Point it at the leaf whose result releases it, with the result or conflict it represents. Where a whole outcome is awaited, that leaf is the one putting the awaited thing in the person\'s hands; where it does not exist yet, write it first as that outcome\'s acceptance and point at it. Where the waiting side is a stage with no tasks yet, the order goes on that stage — and moves onto its tasks in the step that breaks it down. Leaving the prerequisite in a comment instead is not the cheaper answer: what ready does not read, the next run does not know.',
     run: (m) => m.issues.filter((i) => LIVE(i.status)).flatMap((i) =>
-      (i.blockedBy || []).filter((id) => isContainer(m, i) || isContainer(m, m.by.get(id)))
-        .map((id) => ({ id: i.id, ref: id, note: 'dependency uses a container rather than a leaf' }))),
+      (i.blockedBy || []).flatMap((id) => {
+        const b = m.by.get(id);
+        // A waiting stage takes an order onto a stage or a leaf, and nothing else.
+        if (waitingStage(m, i) && concreteBlocker(m, b)) return [];
+        if (!isContainer(m, i) && !isContainer(m, b)) return [];
+        return [{
+          id: i.id, ref: id,
+          note: isFeature(m, b) || isFeature(m, i)
+            ? `names the feature ${(isFeature(m, b) ? b : i).id}: a feature\'s outcome is not a result that lands, so a prerequisite is a task or a stage that finishes something`
+            : 'dependency uses a container rather than a leaf, and an order between a stage and its work belongs on the task',
+        }];
+      })),
+  },
+  {
+    id: 'started-without-agreement',
+    severity: 'error',
+    why: 'Autonomous work starts on an agreement about what the owner was shown, and on nothing else. A run that starts without one breaks the feature into stages nobody agreed, writes their criteria itself and takes the first task: a plan becomes work, and the first the owner sees of it is a pull request that rewrites the core of the product, or a failure much later in the path their decision said should not exist. Every step that should have caught it was a step inside a skill, and a step is what a run skips without anyone seeing it skipped.',
+    fix: 'Green looks like this: the feature carries two lines in its body, each with when the owner agreed it and their own words — `Agreed direction: <time> — "<their words>"` for how the system will meet the outcome, with the inventory of what already does that job, and `Agreed plan: <time> — "<their words>"` for the stages, what each makes true, their DONE WHEN and their order — and the direction was agreed first. Where the work is already under way, put the plan to the owner before the next stage is taken and record it as it is given; scope they have not seen goes back to them as a proposal. A feature already under way when a project adopted this rule cannot honestly acquire the record afterwards: it is listed once in the config\'s `agreementExempt`, as work in flight is listed for the time records, so the rule judges what starts after it; under `block-new` an unlisted one is old debt against the baseline and is printed without blocking.',
+    run: (m, cfg) => m.issues.flatMap((f) => {
+      if (f.type !== 'epic' || !LIVE(f.status)) return [];
+      // A leaf under a feature, or a feature never broken down, is the shortest
+      // path: there is no plan to agree, so there is no record of one to demand.
+      // A stage is a child carrying live work of its own; a leaf whose sub-task
+      // is closed is a leaf again, so a repair filed under one is no breakdown.
+      if (!(m.children.get(f.id) || []).some((id) => carries(m, m.by.get(id)) &&
+        (m.children.get(id) || []).some((c) => LIVE(m.by.get(c)?.status)))) return [];
+      // Work that was already under way when a project adopted the rule cannot
+      // honestly acquire the record afterwards: setup lists those features once,
+      // and the exemption follows the tree they carry.
+      if (listedAbove(m, cfg.agreementExempt, f.id)) return [];
+      const began = subtree(m, f.id).map((id) => m.by.get(id)).filter(Boolean)
+        .map((i) => [i, beganBy(m, i, startedRun(m, f))]).filter(([, how]) => how);
+      if (!began.length) return [];
+      const work = `the work on ${began[0][0].id} ${began[0][1]}`;
+      const direction = agreedOf(f, 'direction');
+      const plan = agreedOf(f, 'plan');
+      const out = [];
+      if (!direction) out.push({ id: f.id, ref: 'direction', note: `${work}, and the feature records no agreed direction: an "Agreed direction:" line with the time and the owner's own words is what a plan is built on` });
+      if (!plan) out.push({ id: f.id, ref: 'plan', note: `${work}, and the feature records no agreed plan: the stages, what each makes true and their DONE WHEN were never shown to the owner, so the run is building a plan they have not seen` });
+      else if (direction && plan.at < direction.at) out.push({ id: f.id, ref: 'plan', note: `${work}, and the plan was agreed at ${plan.value.split(/\s+/)[0]}, before the direction at ${direction.value.split(/\s+/)[0]}: the plan was shown against a direction the owner had not yet agreed` });
+      return out;
+    }),
   },
   {
     id: 'submitted-without-evidence',
@@ -825,14 +915,14 @@ function bulkClusters(m, threshold) {
 
 // The version of the set these rules shipped with. A project holds a COPY of
 // this file, and this is how anybody tells that the copy has fallen behind.
-const RULES_VERSION = '0.59.0';
+const RULES_VERSION = '0.61.0';
 
 const STRENGTHS = ['block', 'block-new', 'report'];
 
 /** Thrown for anything that is the caller's mistake; main turns it into exit 2. */
 class Misuse extends Error {}
 
-const LIST_KEYS = ['areaLabels', 'milestoneLabels', 'roadmapLabels', 'triageLabels', 'ideaLabels', 'ideaTitlePrefixes', 'findingLabels', 'timeRecordsExempt'];
+const LIST_KEYS = ['areaLabels', 'milestoneLabels', 'roadmapLabels', 'triageLabels', 'ideaLabels', 'ideaTitlePrefixes', 'findingLabels', 'timeRecordsExempt', 'agreementExempt'];
 const NUMBER_KEYS = { staleDays: 14, holdDays: 2, bulkCluster: 20 };
 
 /**
@@ -1215,6 +1305,13 @@ function runSelftest(cfg, projectConfigPath) {
   const unclaimed = load('bad', 'time-work-unclaimed.json');
   const named = (exempt) => evaluate(unclaimed, { ...cfg, timeRecordsExempt: exempt }, ['time-work-unclaimed']).results[0].violations.length;
   say(named(['A']) === 0 && named(['S']) === 0 && named(['B']) === 1, 'time records: work listed at adoption, and its descendants, are exempt; nothing else is');
+  // Work already in flight when a project adopted the agreement rule is listed
+  // once, and the exemption follows the feature down to its work; nothing else
+  // is exempt, at any strength.
+  const unagreed = load('bad', 'started-without-agreement.json');
+  const agreeFires = (exempt) => evaluate(unagreed, { ...cfg, agreementExempt: exempt }, ['started-without-agreement'])
+    .results[0].violations.length;
+  say(agreeFires(['F1']) === 0 && agreeFires([]) === 2, 'the agreement rule: a feature listed at adoption, and the work under it, are exempt; nothing else is');
   // A bulk edit made every issue look touched today, which hides the stale
   // hold. Ages from the snapshot taken before it bring the violation back.
   const edited = { ...dirty, issues: dirty.issues.map((i) => ({ ...i, updatedAt: dirty.generatedAt })) };

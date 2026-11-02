@@ -1,9 +1,11 @@
 # Backlog integration
 
-Maintained by `setup-shady2k-skills`. The installed checks carry setup protocol
-0.59.0 (plugin 0.130.0), installed by nocx-fg79x.6, which owns the proof evidence
-and any unperformed checks. Protocol 0.56.0 was installed by nocx-gkpwp and
-protocol 0.51.0 by nocx-fs95y.
+Maintained by `setup-shady2k-skills`. This branch carries an **unaccepted update**
+to setup protocol 0.61.0 (plugin 0.132.0), tracked by nocx-7z1zj. Merge is blocked
+by wrong-state recording recovery (nocx-zjpwl), unchanged legacy hooks on reconnect
+(nocx-hm9qc), and an unsynchronized candidate-size proof (nocx-9v4x0).
+Protocol 0.59.0, installed by nocx-fg79x.6, remains the accepted installation;
+protocol 0.56.0 was installed by nocx-gkpwp and protocol 0.51.0 by nocx-fs95y.
 Protocol 0.46.0 was installed by nocx-q8yjf.25,
 whose record — with nocx-q8yjf.26–.28 and root nocx-nl23a — the published
 export carries but this tracker's database has lost, so `br` cannot show them.
@@ -182,8 +184,8 @@ keeps every later change.
   `check-present.mjs` and `check-product.mjs`, with `time-format.mjs`,
   `document-format.mjs`, `regular-file.mjs` and `argv.mjs`, in [`.githooks/backlog-gate/`](../../.githooks/backlog-gate/).
   These are byte-for-byte copies of the plugin files under
-  `skills/backlog/setup-shady2k-skills/` of plugin 0.130.0 (setup protocol
-  0.59.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them. Compare each copy with that source. Run all five `--selftest`
+  `skills/backlog/setup-shady2k-skills/` of plugin 0.132.0 (setup protocol
+  0.61.0), never edited here; the tracker recipe is `trackers/br.mjs` beside them. Compare each copy with that source. Run all five `--selftest`
   commands from the plugin directory, where their fixtures live; `check.mjs`
   additionally takes `--config <repo>/.githooks/backlog-gate/config.json` for
   portability.
@@ -206,6 +208,16 @@ keeps every later change.
   existing link/incoming-history behavior; older commits retain their date
   exemption. This is a structural check, not a judgment of comment prose or
   commit titles, and it does not detect bookkeeping outside that export.
+- **Owner agreements:** setup 0.61 reads a feature's dated, quoted
+  `Agreed direction:` and `Agreed plan:` from its existing description once
+  work under its stages starts. The adapter already exports that description,
+  hierarchy, claims and main-line task links; no new adapter field is needed.
+  No agreement exemptions were added. Under `block-new`, an agreement finding
+  present in both the last accepted tracker baseline and the new state is old
+  debt; a newly started feature without those records is a new error. A leaf
+  with no stages needs no invented plan. The upstream checker now permits
+  dependencies on undecomposed stages, but this repository's stricter rule in
+  AGENTS.md still puts prerequisites on leaves, not feature roots or stages.
 - **Present documents:** the config's `presentDocuments` lists what describes the present
   here — AGENTS.md, README.md, `docs/architecture.md`, `docs/agents/`, the frontend state
   ownership and lifecycle protocol documents, `contracts/README.md` and the UI kit's README.
@@ -302,15 +314,17 @@ connect` runs this connector before it checks the backlog inputs.
   (`--interval 60`). The user systemd unit
   (`~/.config/systemd/user/tracker-sync.service`) keeps it running; its copied
   mechanism — `tracker-sync.mjs`, `trackers/br.mjs`, `argv.mjs`, `regular-file.mjs`
-  from plugin 0.130.0, with `tracker-sync.version` beside them — lives under
-  `~/.local/state/nocx/mechanism/` so removing a worktree does not stop it;
-  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version <plugin>`
-  says whether it lags the set. Pushing `refs/tracker/state` starts no code CI, so the
+  from plugin 0.132.0, with `tracker-sync.version` beside them — is installed under
+  `~/.local/state/nocx/mechanism/` by `make connect`, so removing a worktree does
+  not stop it. Run that command after merging an update; a newer repository
+  copy does not itself update an already-running watcher. Check each machine with
+  `node ~/.local/state/nocx/mechanism/tracker-sync.mjs status --expect-version 0.132.0`.
+  Pushing `refs/tracker/state` starts no code CI, so the
   backlog's own rules are checked on that ref's delta by
   `.github/workflows/tracker-gate.yml` rather than by a code push.
-  Measured 2026-11-01 on the coordinator machine: the watcher's publish loop runs
-  `br sync --flush-only` every second to see whether anything changed, about one
-  second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
+  Measured 2026-11-01 on the coordinator machine under 0.130.0: the watcher's
+  publish loop ran `br sync --flush-only` every second to see whether anything
+  changed, about one second of CPU per flush on a 4,550-issue store, so the unit carries a drop-in
   (`tracker-sync.service.d/limit-cpu.conf`: `Nice=19`, `CPUQuota=50%`): about 34% CPU.
   The flush holds the store lock, so a tighter quota starves the record hooks, which
   swallow their own failure: at 25% a post-commit recording timed out and the push of
@@ -318,6 +332,12 @@ connect` runs this connector before it checks the backlog inputs.
   once the watcher's startup sync has finished (records in its first minute can still
   time out). Memory under 0.130.0 is about 50 MB, against 1.3–1.7 GB under the
   hand-patched 0.128 copy it replaced.
+  Version 0.132.0 adds a database/WAL change signal to avoid exports while idle.
+  The earlier CPU figures are not measurements of the new version; this update
+  neither removes the machine's existing CPU policy nor installs a supervisor.
+  Recipe commands retain their 120-second default deadline. The published launch
+  uses `tracker-sync.mjs watch --repo <checkout> --recipe <recipe> --interval 60
+--debounce 2 --max-age 5`; those paths are machine-local, not shared settings.
 - **Document gate: not installed yet.** Its task is "The document gate checks product
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
@@ -405,9 +425,10 @@ connect` runs this connector before it checks the backlog inputs.
   runtime: both scope classification and formatter arguments preserve NUL-delimited paths.
   Missing root formatter/linter binaries
   are installed from the locked root dependencies without install scripts; no Go,
-  frontend or product build is started. It reports missing files together and imports
-  the tracker successfully before connecting git hooks or clearing the retired driver.
-  Failure does not leave a half-connected clone. Safe to rerun.
+  frontend or product build is started. It reports preflight missing files together,
+  then connects the tracker and external hooks before the final export/import and
+  permission checks. A later failure can leave the tracker connection in place;
+  the error names the unfinished step. Fix that prerequisite and rerun.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml` checks commit links and the
   present documents on a code pull request; it does not compare backlog states, since a
   code pull request carries none (nocx-fg79x.3). Pull requests use the merge base and

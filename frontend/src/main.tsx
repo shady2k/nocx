@@ -2151,7 +2151,13 @@ function main(): void {
         .openInitialPane()
         .then(() => ReportHealthy())
         .catch((err) => {
-          console.warn('nocx: initial tab failed — not reporting healthy', err)
+          // NOT A CONSOLE LINE (nocx-vh2hr.1.13). This is the only account of
+          // a window that never reported healthy — the shape of an update that
+          // never finalises — and the webview's console reaches no file. The
+          // window's own log does, and that is the file the proof collects.
+          log.warn('nocx: the first pane did not come up; the update cannot be reported healthy', {
+            error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+          })
         })
     })()
   })

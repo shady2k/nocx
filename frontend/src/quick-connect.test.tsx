@@ -1063,6 +1063,42 @@ describe('free-form connect entry', () => {
     expect(newPaneByHost).not.toHaveBeenCalled()
   })
 
+  /**
+   * A provider that THREW is not an empty list. `loadItems` skips a failed
+   * provider silently, and the ad-hoc fallback then read that silence as "you
+   * know this host and we do not": a saved profile whose NAME the person typed
+   * became `Connect to e2e-reconnect-<n>`, dialled `root@<the profile name>`
+   * and died in DNS — with the profile's real host, port and key sitting in the
+   * list that never answered (nocx-atpw5.1.31).
+   */
+  it('offers nothing — not the ad-hoc row — when the saved list failed to answer', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const newPaneByHost = vi.fn()
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockRejectedValue(new Error('the wire went away')) } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(newPaneByHost),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    // The name of the profile the person saved, which the failed list owed.
+    typeQuery(input!, 'e2e-reconnect-1750000000000')
+
+    expect(container.querySelectorAll('.quick-connect__item')).toHaveLength(0)
+
+    // Enter on an unknown list is a no-op, never a dial of the typed name.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newPaneByHost).not.toHaveBeenCalled()
+  })
+
   it('ranks a matching alias above the ad-hoc entry — suppresses it', async () => {
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())

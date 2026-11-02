@@ -40,11 +40,13 @@ afterwards, its renderer reports healthy, and finalisation certifies the pair
 ## When it fails
 
 The driver prints `FAILED STEP: <step>` and the updater's own log lines, and the
-job uploads `macos.json` (the evidence), `app.log` (the relaunch) and the
+job uploads `macos.json` (the evidence), `app.log` (the relaunch), the
 application's `nocx.log` at `<HOME>/Library/Application Support/nocx/nocx.log`
 — the file `internal/app` opens, which is the only path this product writes on
-macOS. The steps are named from the updater's vocabulary in `internal/update`
-and in the diagnostic that enters it:
+macOS — and the window's own `nocx-window.log` beside it: the update and the
+pair check run in the window process, so that is where their lines are
+(nocx-vh2hr.1.12). The steps are named from the updater's vocabulary in
+`internal/update` and in the diagnostic that enters it:
 
 start the updater · download the release manifest · signature verification
 (manifest) · artifact selection · preflight (Applications not writable) ·

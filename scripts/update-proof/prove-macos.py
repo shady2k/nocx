@@ -126,7 +126,11 @@ def install_layout(home):
         "applications": home / "Applications",
         "install": home / "Applications" / "nocx.app",
         "journal": home / "Library/Application Support/nocx/.nocx-update-journal.json",
-        "log": home / "Library/Logs/nocx/nocx.log",
+        # internal/app opens <DataDir>/nocx.log, and on darwin internal/storage
+        # makes DataDir the profile under Application Support. There is no
+        # ~/Library/Logs/nocx entry in this product; the old path here was a
+        # guess, and the copy step kept finding nothing (nocx-vh2hr.1.11).
+        "log": home / "Library/Application Support/nocx/nocx.log",
         "profile": home / "Library/Application Support/nocx",
     }
 

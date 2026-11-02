@@ -141,7 +141,11 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(str(layout["journal"]),
                          "/Users/runner/proof/home/Library/Application Support/nocx/"
                          ".nocx-update-journal.json")
-        self.assertEqual(str(layout["log"]), "/Users/runner/proof/home/Library/Logs/nocx/nocx.log")
+        # internal/app opens <DataDir>/nocx.log; on darwin DataDir is the
+        # profile under Application Support. ~/Library/Logs/nocx is not a path
+        # this product writes, and copying it collected nothing.
+        self.assertEqual(str(layout["log"]),
+                         "/Users/runner/proof/home/Library/Application Support/nocx/nocx.log")
         self.assertEqual(proof.bundle_binary(layout["install"]).name, "nocx")
 
     def test_the_bundle_identifier_is_the_one_the_release_build_stamps(self):

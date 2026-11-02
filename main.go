@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -64,6 +65,18 @@ func main() {
 	// (the updater and the diagnostics) and bare slog.Default (the
 	// constructors that take no logger).
 	installProcessLogger(logger)
+
+	// THE HANDOVER WAITER IS NOT A WINDOW (nocx-vh2hr.1.13): it is started by
+	// the window that is quitting, waits for that process to exit, and execs
+	// the installed build. Read before every other mode so it can never open
+	// one.
+	if pid, installPath, waiter := relaunchRequest(os.Args[1:]); waiter {
+		if err := runRelaunchWaiter(pid, installPath, logger, syscall.Exec); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if handled, err := releaseDiagnostic(context.Background(), os.Args[1:], os.Stdout); handled {
 		if err != nil {
@@ -449,10 +462,15 @@ func (w *WailsApp) RestartWindow() error {
 }
 
 // startInstalledApplication starts the bundle or AppImage exchanged by the
-// updater. macOS waits for Launch Services to accept the `open` request. On
-// Linux, successful process creation is the launch boundary: it does not prove
-// the new AppImage stayed healthy. The child is waited asynchronously so its
-// process resources are reaped if it exits after this app quits.
+// updater. macOS waits for Launch Services to accept the `open` request, whose
+// `-n` is what makes the launch a NEW instance while this one is still alive.
+//
+// LINUX STARTS A WAITER, NOT THE BUILD (nocx-vh2hr.1.13). This platform loads
+// a window's webview on activation, so a build started while this window still
+// owns the GTK application id can be handed that activation and never paint —
+// services and coordinator running, renderer absent, and therefore no
+// ReportHealthy ever, which is an update that never finalises (nocx-vh2hr.1.8).
+// The waiter waits for THIS PROCESS to be gone and then execs the build.
 func startInstalledApplication(installPath string) error {
 	if runtime.GOOS == "darwin" {
 		return exec.Command("/usr/bin/open", "-n", installPath).Run()
@@ -460,29 +478,16 @@ func startInstalledApplication(installPath string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("restart after update is not supported on %s", runtime.GOOS)
 	}
-	cmd := installedApplicationCommand(runtime.GOOS, installPath)
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve this window's executable for the handover: %w", err)
+	}
+	cmd := relaunchWaiterCommand(self, installPath, os.Getpid())
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
-}
-
-// installedApplicationCommand is the launch of the build an update exchanged
-// in, and it carries THIS window's output because the new window is the only
-// account of what happens next: the reconciliation that counts a launch
-// attempt, the pair certification that refuses one, and whether the first
-// pane ever opened (nocx-vh2hr.1.8). A nil Stdout is /dev/null — the restarted
-// window wrote its whole startup to nothing, so a nightly that stopped
-// finalizing said so nowhere while the person watched a window that looked
-// fine. The proof reads the launcher's own stream; the restart must stay on it.
-func installedApplicationCommand(goos, installPath string) *exec.Cmd {
-	cmd := exec.Command(installPath)
-	if goos == "linux" {
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-	}
-	return cmd
 }
 
 // LogFilePath reports where the backend log file lives. "" means

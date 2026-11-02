@@ -170,3 +170,38 @@ func TestAPendingItemAfterDetachResolvesInsteadOfHanging(t *testing.T) {
 		t.Fatal("run() deadlocked handing the pending item to the detached writer (nocx-q502e)")
 	}
 }
+
+// TestAForcedStopWithNothingInFlightReportsNoDetach pins the OTHER end of the
+// same interval (nocx-atpw5.1.22), and it is the half a test that demands a
+// detach cannot see: writerDetached is a claim that a stuck WRITE was given up
+// on, so a forced stop against an idle writer must answer false (owner_ssh.go's
+// performDetach returns without setting it when nothing was in flight). Before
+// this test existed only the true case was pinned — by
+// TestContinuousReadableOutputAllowsWriterDetach above — so the end-to-end ssh
+// proof asserted true unconditionally, and a run in which the write had already
+// resolved failed for doing the honest thing.
+//
+// Invariant, both ends: from the moment the stop is asked for until the owner
+// has returned, the owner either detaches a write it cannot finish, or reports
+// no detach — never a detach it did not make, and never a caller left waiting.
+func TestAForcedStopWithNothingInFlightReportsNoDetach(t *testing.T) {
+	proc := newOwnerFakeProcess()
+	owner, _ := newTestOwner(t, proc)
+	go owner.run()
+
+	// A deadline already in the past makes stop take its forced path at once.
+	// No item was ever submitted, so there is nothing in flight to detach.
+	stopped := make(chan struct{})
+	go func() {
+		owner.stop(false, time.Now().Add(-time.Second))
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a forced stop against an idle owner never returned")
+	}
+	if owner.writerDetached() {
+		t.Fatal("a forced stop with nothing in flight reported a detach: writerDetached is a claim about a stalled WRITE, and there was none")
+	}
+}

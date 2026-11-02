@@ -23,6 +23,7 @@
  * vocabulary beside the one every other value field in the product uses.
  */
 import { Show, createMemo, type Component, type JSX } from 'solid-js'
+import { t } from './i18n/locale-model'
 import { AUTH_SEGMENTS } from './auth-methods'
 import type { AuthMode } from './profiles'
 import { boundSecret, secretReference } from './secret-reference'
@@ -87,7 +88,11 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
   const options = createMemo(() =>
     props.inherit
       ? [
-          { value: INHERIT_AUTH, label: 'Inherit', title: 'Not set — inherit from parent' },
+          {
+            value: INHERIT_AUTH,
+            label: t('connections.auth.inherit', 'Inherit'),
+            title: t('connections.auth.inheritTitle', 'Not set — inherit from parent'),
+          },
           ...AUTH_SEGMENTS,
         ]
       : AUTH_SEGMENTS,
@@ -95,14 +100,14 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
 
   return (
     <>
-      <Field for={`${props.id}-method`} label="Method">
+      <Field for={`${props.id}-method`} label={t('connections.auth.method', 'Method')}>
         <SegmentedControl
           options={options()}
           value={props.inherit && props.auth === undefined ? INHERIT_AUTH : (props.auth ?? '')}
           onChange={(value) =>
             props.onAuthChange(value === INHERIT_AUTH ? undefined : (value as AuthMode))
           }
-          ariaLabel="Authentication method"
+          ariaLabel={t('connections.auth.methodAria', 'Authentication method')}
         />
       </Field>
       {props.suffix}
@@ -150,10 +155,12 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
     <Stack>
       <TextField
         id={`${props.id}-user`}
-        label="User"
+        label={t('connections.auth.user', 'User')}
         value={props.username ?? ''}
         placeholder={
-          props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 Your local username \u2014'
+          props.inherit
+            ? t('connections.auth.notSetInherit', '\u2014 Not set (inherit) \u2014')
+            : t('connections.auth.yourUsername', '\u2014 Your local username \u2014')
         }
         onInput={(value) => props.onUsernameChange(value || undefined)}
       />
@@ -168,7 +175,7 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
       <Show when={props.auth === 'password'}>
         <SecretTextField
           id={`${props.id}-password`}
-          label="Password"
+          label={t('connections.auth.password', 'Password')}
           // Masked while it holds a password, plain once it holds a
           // reference. A typed password is material and belongs behind dots
           // — the dialog this replaced masked it too — while a reference is
@@ -180,7 +187,11 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
           description={props.passwordDescription}
           source={props.passwordSource}
           marks={secretMarks(passwordText(), props.passwordEntries, props.vaultState ?? 'unknown')}
-          placeholder={props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 None \u2014'}
+          placeholder={
+            props.inherit
+              ? t('connections.auth.notSetInherit', '\u2014 Not set (inherit) \u2014')
+              : t('connections.auth.none', '\u2014 None \u2014')
+          }
         />
       </Show>
     </Stack>

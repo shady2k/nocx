@@ -45,6 +45,7 @@ import type { BadgeTone } from '../ui/badge'
 import type { FeedStore } from './feed-store'
 import type { Kind, NotifyCatalogue } from '../generated/notify.catalogue'
 import type { NotifyFeedRead } from '../generated/notify.feed.read'
+import { t } from '../i18n/locale-model'
 
 type Occurrence = NotifyFeedRead['occurrences'][number]
 type RunMember = Occurrence['run'][number]
@@ -134,15 +135,25 @@ function catalogueKind(
   return catalogue?.kinds.find((entry) => entry.kind === kind)
 }
 
+/** A kind's label, in the person's locale when the catalogue entry carries
+ *  its minted key and a translation exists (nocx-dej6.2), the backend's
+ *  English label as the fallback, and the human-readable split of the kind id
+ *  before the catalogue has arrived at all. */
 function kindLabel(kind: string, catalogue: NotifyCatalogue | null | undefined): string {
-  return catalogueKind(kind, catalogue)?.label ?? fallbackKindLabel(kind)
+  const entry = catalogueKind(kind, catalogue)
+  if (entry) return entry.labelKey ? t(entry.labelKey, entry.label) : entry.label
+  return fallbackKindLabel(kind)
 }
 
+/** A kind's description through the same resolution, or undefined: an entry
+ *  with no description promises nothing and shows nothing. */
 function kindDescription(
   kind: string,
   catalogue: NotifyCatalogue | null | undefined,
 ): string | undefined {
-  return catalogueKind(kind, catalogue)?.description
+  const entry = catalogueKind(kind, catalogue)
+  if (!entry) return undefined
+  return entry.descriptionKey ? t(entry.descriptionKey, entry.description) : entry.description
 }
 
 type Picked = Record<Axis['id'], string>

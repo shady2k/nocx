@@ -38,7 +38,15 @@ export interface Declaration {
    */
   section: string
   label: string
+  /**
+   * Translation key the label resolves through (localisation design Q2, Option B): settings.<key>.label, minted in Go. Optional so payloads from before the keys existed still validate; the English label is the fallback.
+   */
+  labelKey?: string
   description: string
+  /**
+   * Translation key the description resolves through: settings.<key>.description, minted in Go. Optional for the same reason as labelKey.
+   */
+  descriptionKey?: string
   control: 'toggle' | 'text' | 'number' | 'select' | 'secret'
   dataClass: 'publicConfig' | 'privateMetadata' | 'privateContent' | 'secretAuthenticator'
   /**
@@ -51,6 +59,10 @@ export interface Declaration {
   options?: {
     value: string
     label: string
+    /**
+     * Translation key the option's label resolves through: settings.<key>.option.<value>, minted in Go. Optional so old payloads validate.
+     */
+    labelKey?: string
   }[]
   min?: number
   /**
@@ -74,6 +86,10 @@ export interface SettingsGroup {
    */
   id: string
   title: string
+  /**
+   * Translation key the title resolves through: settings.group.<lowercased-with-dashes title>, minted in Go. Optional so old payloads validate.
+   */
+  key?: string
   /**
    * Rail position; the rail sorts groups by it. Distinct per group.
    */

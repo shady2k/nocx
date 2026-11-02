@@ -74,6 +74,15 @@ func CentreSettingKey(kindID string) string {
 // a default names a pair the catalogue does not offer.
 var ErrCatalogue = errors.New("notify: catalogue")
 
+// KindLabelKey mints a kind's label translation key (localisation design Q2,
+// Option B): a pure function of the kind id, so the wire and the catalogue
+// agree by construction and no declaration site mints a key by hand. The
+// English label beside it on the wire is the visible fallback.
+func KindLabelKey(kindID string) string { return "notify.kind." + kindID + ".label" }
+
+// KindDescriptionKey mints a kind's description translation key.
+func KindDescriptionKey(kindID string) string { return "notify.kind." + kindID + ".description" }
+
 // RoutableKind is one routable event kind: the Kind the pipeline stamps, a
 // stable id for keys, a human label and description for the settings surface,
 // and the trust classes this kind can carry.

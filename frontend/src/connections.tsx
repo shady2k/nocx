@@ -20,6 +20,7 @@ import { Stack } from './ui/stack'
 import { Tabs } from './ui/tabs'
 import type { FootprintClient } from './footprint-client'
 import { FootprintSection } from './footprint-section'
+import { t } from './i18n/locale-model'
 import { EmptyState } from './ui/empty-state'
 import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
@@ -36,14 +37,7 @@ import {
 import type { KeyInputMode } from './key-material-input'
 import type { DialogClient } from './dialog-client'
 import { CheckCircleIcon, ChevronDownIcon, PencilIcon, PlugIcon, TrashIcon } from './ui/icons'
-import {
-  createFormValidation,
-  required,
-  hostname,
-  port as portRule,
-  nonNegativeInteger,
-  combine,
-} from './ui/validation'
+import { createFormValidation, hostname, port as portRule, combine } from './ui/validation'
 import { createSubmitGate } from './ui/submit-gate'
 import type {
   SSHProfile,
@@ -211,11 +205,27 @@ const PORT_DISCOVERY_MODES = ['auto', 'ask', 'off'] as const
  *  is never offered; raw adds nothing; helper allows the Tier-B binary
  *  outright. auto leads because it is what an unedited connection already
  *  is — the list starts where the user starts. */
-const DESIRED_MODES: { value: DesiredMode; label: string }[] = [
-  { value: 'auto', label: 'Auto — install scripts, ask before the helper' },
-  { value: 'script', label: 'Script — scripts only, never the helper' },
-  { value: 'raw', label: 'Raw — no integration' },
-  { value: 'helper', label: 'Helper — deploy the nocx binary' },
+const DESIRED_MODES: { value: DesiredMode; labelKey: string; labelFallback: string }[] = [
+  {
+    value: 'auto',
+    labelKey: 'connections.mode.desiredAuto',
+    labelFallback: 'Auto — install scripts, ask before the helper',
+  },
+  {
+    value: 'script',
+    labelKey: 'connections.mode.desiredScript',
+    labelFallback: 'Script — scripts only, never the helper',
+  },
+  {
+    value: 'raw',
+    labelKey: 'connections.mode.desiredRaw',
+    labelFallback: 'Raw — no integration',
+  },
+  {
+    value: 'helper',
+    labelKey: 'connections.mode.desiredHelper',
+    labelFallback: 'Helper — deploy the nocx binary',
+  },
 ]
 
 // THE HELPER-CONSENT CONTROL IS GONE (ADR-0105, nocx-1kejz.3), and this is
@@ -246,16 +256,17 @@ export function firstForwardError(rows: ForwardSpec[]): string | undefined {
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i]
     if (!FORWARD_DIRECTIONS.includes(r.direction)) {
-      return `Forward ${i + 1}: unknown direction`
+      return `${t('connections.forward.head', 'Forward')} ${i + 1}: ${t('connections.forward.unknownDirection', 'unknown direction')}`
     }
     if (r.direction === 'local' || r.direction === 'remote') {
-      if (!r.destination) return `Forward ${i + 1}: destination is required for ${r.direction}`
+      if (!r.destination)
+        return `${t('connections.forward.head', 'Forward')} ${i + 1}: ${t('connections.forward.destinationRequired', 'destination is required for')} ${r.direction}${t('connections.forward.directionTail', '')}`
       if (!validForwardDestination(r.destination)) {
-        return `Forward ${i + 1}: destination must be "host:port"`
+        return `${t('connections.forward.head', 'Forward')} ${i + 1}: ${t('connections.forward.destinationFormat', 'destination must be "host:port"')}`
       }
     }
     if (r.bindPort != null && (r.bindPort < 0 || r.bindPort > 65535)) {
-      return `Forward ${i + 1}: bind port must be 0–65535`
+      return `${t('connections.forward.head', 'Forward')} ${i + 1}: ${t('connections.forward.bindPortRange', 'bind port must be 0–65535')}`
     }
   }
   return undefined
@@ -466,7 +477,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * validation, answered by editing the field, and it clears as you type.
    */
   const groupValidation = createFormValidation(
-    { name: () => required('Name')(groupDraft()?.name ?? '') },
+    {
+      // Not kit `required('Name')`: that validator hardcodes the English word
+      // order ("X is required"), which cannot be reassembled for Russian. The
+      // whole sentence is one catalogue key instead; en stays byte-identical.
+      name: () => {
+        const value = groupDraft()?.name ?? ''
+        return value.trim() === ''
+          ? t('connections.group.nameRequired', 'Name is required')
+          : undefined
+      },
+    },
     { controlId: (field) => (field === 'name' ? 'group-name' : field) },
   )
 
@@ -491,7 +512,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       log.error('Failed to load connections', { message })
       showToast({
         level: 'danger',
-        message: `Could not load connections: ${message}. The list may be out of date`,
+        message: `${t('connections.load.failedHead', 'Could not load connections:')} ${message}${t('connections.load.failedTail', '. The list may be out of date')}`,
       })
     }
   }
@@ -604,7 +625,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           log.error('Failed to persist the password binding', { message })
           showToast({
             level: 'danger',
-            message: `The password was stored but this connection was not updated to use it: ${message}. Save Connection to retry.`,
+            message: `${t('connections.password.bindingFailedHead', 'The password was stored but this connection was not updated to use it:')} ${message}${t('connections.password.bindingFailedTail', '. Save Connection to retry.')}`,
           })
         }
       }
@@ -617,13 +638,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         log.warn('Password save cancelled: the vault prompt was closed', {})
         showToast({
           level: 'warning',
-          message: 'Password was not saved — the vault prompt was cancelled.',
+          message: t(
+            'connections.password.cancelled',
+            'Password was not saved — the vault prompt was cancelled.',
+          ),
         })
         return
       }
       const message = (err as Error).message
       log.error('Failed to save password', { message })
-      showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.password.saveFailedHead', 'Could not save the password:')} ${message}`,
+      })
     }
     const mint = (async (): Promise<SecretEntry | undefined> => {
       try {
@@ -714,23 +741,43 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return [
       // The path is the backend's answer, not a guess. Until it arrives the
       // option is named without one rather than with a plausible fiction.
-      { value: 'sshConfig', label: cfg?.path ? `SSH config (${cfg.path})` : 'SSH config' },
-      { value: 'tabby', label: 'Tabby config (.yml/.yaml)' },
+      {
+        value: 'sshConfig',
+        label: cfg?.path
+          ? `SSH config (${cfg.path})`
+          : t('connections.import.sshConfig', 'SSH config'),
+      },
+      { value: 'tabby', label: t('connections.import.tabbyConfig', 'Tabby config (.yml/.yaml)') },
     ]
   })
+
+  // Delivery-mode options, tracked so a locale switch re-renders the label.
+  // Serves both Selects that offer the modes — the group editor's default and
+  // the connection editor's Advanced section — so the two never drift.
+  const desiredModeOptions = createMemo(() =>
+    DESIRED_MODES.map((m) => ({ value: m.value, label: t(m.labelKey, m.labelFallback) })),
+  )
 
   const importHint = createMemo(() => {
     switch (importSource()) {
       case 'sshConfig': {
         const cfg = sshConfigPath()
         if (cfg && !cfg.available) {
-          return 'This build has no SSH config reader wired, so there is nothing to import from.'
+          return t(
+            'connections.import.noSshReaderHint',
+            'This build has no SSH config reader wired, so there is nothing to import from.',
+          )
         }
-        const where = cfg?.path ? `this machine’s ${cfg.path}` : 'this machine’s SSH config'
-        return `Reads ${where} and saves its aliases as connections. An alias whose name or host is already saved is skipped, so running it twice is safe.`
+        const where = cfg?.path
+          ? `${t('connections.import.thisMachine', 'this machine’s')} ${cfg.path}`
+          : t('connections.import.thisMachineSsh', 'this machine’s SSH config')
+        return `${t('connections.import.sshHintReads', 'Reads')} ${where} ${t('connections.import.sshHintTail', 'and saves its aliases as connections. An alias whose name or host is already saved is skipped, so running it twice is safe.')}`
       }
       case 'tabby':
-        return 'Connections, groups and secrets from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
+        return t(
+          'connections.import.tabbyHint',
+          'Connections, groups and secrets from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.',
+        )
     }
   })
 
@@ -763,7 +810,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     const source = importSource()
     const file = importFile()
     if (source !== 'sshConfig' && !file) {
-      showToast({ level: 'warning', message: 'Choose a file to import' })
+      showToast({
+        level: 'warning',
+        message: t('connections.import.chooseFile', 'Choose a file to import'),
+      })
       return
     }
 
@@ -773,7 +823,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         case 'sshConfig': {
           const { profilesImported, skipped } = await props.client.importSSHConfig()
           if (profilesImported === 0 && skipped === 0) {
-            showToast({ level: 'info', message: 'No SSH config aliases to import' })
+            showToast({
+              level: 'info',
+              message: t('connections.import.nothingToImport', 'No SSH config aliases to import'),
+            })
           } else if (skipped > 0) {
             // Sticky: "12 imported" alone reads as everything, and the
             // skipped ones are the part the user may want to go look at.
@@ -781,13 +834,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               level: 'warning',
               duration: 0,
               message:
-                `Imported ${profilesImported} connections from ~/.ssh/config, ` +
-                `${skipped} skipped (name or host already saved)`,
+                `${t('connections.import.importedFromSsh', 'Imported connections from ~/.ssh/config:')} ${profilesImported}, ` +
+                `${t('connections.import.skippedHead', 'skipped (name or host already saved):')} ${skipped}`,
             })
           } else {
             showToast({
               level: 'success',
-              message: `Imported ${profilesImported} connections from ~/.ssh/config`,
+              message: `${t('connections.import.importedFromSsh', 'Imported connections from ~/.ssh/config:')} ${profilesImported}`,
             })
           }
           break
@@ -809,7 +862,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Import failed', { source, message })
-      showToast({ level: 'danger', message: `Import failed: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.import.failedHead', 'Import failed:')} ${message}`,
+      })
     } finally {
       setImportBusy(false)
     }
@@ -830,7 +886,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setPreviewResult(null)
       showToast({
         level: 'success',
-        message: `Imported ${result.profilesImported} connections, ${result.groupsImported} groups`,
+        message: `${t('connections.import.importedProfilesHead', 'Imported connections:')} ${result.profilesImported}, ${t('connections.import.importedGroupsHead', 'groups:')} ${result.groupsImported}`,
       })
       await loadAll()
     }
@@ -844,7 +900,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         if (err instanceof VaultOperationCancelledError) return
         const message = (err as Error).message
         log.error('Tabby import failed', { message })
-        showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
+        showToast({
+          level: 'danger',
+          message: `${t('connections.import.tabbyFailedHead', 'Tabby import failed:')} ${message}`,
+        })
       }
     } else {
       try {
@@ -852,7 +911,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       } catch (err) {
         const message = (err as Error).message
         log.error('Tabby import failed', { message })
-        showToast({ level: 'danger', message: `Tabby import failed: ${message}` })
+        showToast({
+          level: 'danger',
+          message: `${t('connections.import.tabbyFailedHead', 'Tabby import failed:')} ${message}`,
+        })
       }
     }
   }
@@ -940,7 +1002,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           if (err instanceof VaultOperationCancelledError) return
           const message = (err as Error).message
           log.error('Failed to save key material for group defaults', { message })
-          showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+          showToast({
+            level: 'danger',
+            message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${message}`,
+          })
           return
         }
         const saved = result!
@@ -983,7 +1048,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
       closeGroupEditor()
       await loadAll()
-      showToast({ level: 'success', message: `Saved group "${draft.name}"` })
+      showToast({
+        level: 'success',
+        message: `${t('connections.toasts.savedGroup', 'Saved group')} "${draft.name}"`,
+      })
     } catch (err) {
       if (
         err instanceof RpcError &&
@@ -994,14 +1062,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       ) {
         const detail = (err as Error).message
         setGroupKeyTextError(detail)
-        showToast({ level: 'danger', message: `Could not save the key: ${detail}` })
+        showToast({
+          level: 'danger',
+          message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${detail}`,
+        })
         log.error('Invalid key material in group defaults', { message: detail })
         setGroupApplyBusy(false)
         return
       }
       const message = (err as Error).message
       log.error('Failed to save group', { message })
-      showToast({ level: 'danger', message: `Could not save group: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.saveGroupFailedHead', 'Could not save group:')} ${message}`,
+      })
     } finally {
       setGroupApplyBusy(false)
     }
@@ -1022,7 +1096,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const message = (err as Error).message
       log.error('Failed to compute delete impact', { message })
       setDeleteImpact(null)
-      showToast({ level: 'danger', message: `Could not preview deletion: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.previewDeleteFailedHead', 'Could not preview deletion:')} ${message}`,
+      })
     } finally {
       setDeleteBusy(false)
     }
@@ -1038,11 +1115,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setDeleteGroupId(null)
       setDeleteImpact(null)
       await loadAll()
-      showToast({ level: 'success', message: 'Group deleted' })
+      showToast({
+        level: 'success',
+        message: t('connections.toasts.groupDeleted', 'Group deleted'),
+      })
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to delete group', { message })
-      showToast({ level: 'danger', message: `Could not delete group: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.deleteGroupFailedHead', 'Could not delete group:')} ${message}`,
+      })
     } finally {
       setDeleteBusy(false)
     }
@@ -1099,32 +1182,38 @@ export function ConnectionsView(props: ConnectionsViewProps) {
    * interval are not read at the same moment.
    */
   const CONNECTION_DEFAULTS: { key: string; label: string }[] = [
-    { key: 'port', label: 'Port' },
-    { key: 'jumpHost', label: 'Jump server' },
+    { key: 'port', label: t('connections.group.fieldPort', 'Port') },
+    { key: 'jumpHost', label: t('connections.group.fieldJumpServer', 'Jump server') },
   ]
 
   const ADVANCED_DEFAULTS: { key: string; label: string }[] = [
-    { key: 'keepaliveInterval', label: 'Keepalive interval (ms)' },
-    { key: 'keepaliveCountMax', label: 'Keepalive count max' },
-    { key: 'readyTimeout', label: 'Ready timeout (ms)' },
-    { key: 'agentForward', label: 'Agent forward' },
-    { key: 'portDiscovery', label: 'Port discovery' },
-    { key: 'desiredMode', label: 'Delivery mode' },
+    {
+      key: 'keepaliveInterval',
+      label: t('connections.group.fieldKeepaliveInterval', 'Keepalive interval (ms)'),
+    },
+    {
+      key: 'keepaliveCountMax',
+      label: t('connections.group.fieldKeepaliveCountMax', 'Keepalive count max'),
+    },
+    { key: 'readyTimeout', label: t('connections.group.fieldReadyTimeout', 'Ready timeout (ms)') },
+    { key: 'agentForward', label: t('connections.group.fieldAgentForward', 'Agent forward') },
+    { key: 'portDiscovery', label: t('connections.group.fieldPortDiscovery', 'Port discovery') },
+    { key: 'desiredMode', label: t('connections.group.fieldDeliveryMode', 'Delivery mode') },
   ]
 
   /** Human-readable field labels for the impact summary. */
   function fieldLabel(key: string): string {
     const m: Record<string, string> = {
-      port: 'port',
-      user: 'username',
-      auth: 'auth mode',
-      jumpHost: 'jump server',
-      keepaliveInterval: 'keepalive interval',
-      keepaliveCountMax: 'keepalive count max',
-      readyTimeout: 'ready timeout',
-      agentForward: 'agent forwarding',
-      portDiscovery: 'port discovery',
-      desiredMode: 'delivery mode',
+      port: t('connections.impact.fieldPort', 'port'),
+      user: t('connections.impact.fieldUsername', 'username'),
+      auth: t('connections.impact.fieldAuth', 'auth mode'),
+      jumpHost: t('connections.impact.fieldJumpServer', 'jump server'),
+      keepaliveInterval: t('connections.impact.fieldKeepaliveInterval', 'keepalive interval'),
+      keepaliveCountMax: t('connections.impact.fieldKeepaliveCountMax', 'keepalive count max'),
+      readyTimeout: t('connections.impact.fieldReadyTimeout', 'ready timeout'),
+      agentForward: t('connections.impact.fieldAgentForwarding', 'agent forwarding'),
+      portDiscovery: t('connections.impact.fieldPortDiscovery', 'port discovery'),
+      desiredMode: t('connections.impact.fieldDeliveryMode', 'delivery mode'),
     }
     return m[key] ?? key
   }
@@ -1132,22 +1221,34 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function renderImpactSummary(impact: GroupImpactResponse): JSX.Element {
     const profiles = impact.affectedProfiles ?? []
     const dangerous = impact.dangerous
-    if (profiles.length === 0) return <p class="cm-impact-none">No connections affected</p>
+    if (profiles.length === 0)
+      return <p class="cm-impact-none">{t('connections.impact.none', 'No connections affected')}</p>
 
     const dangerousCount = profiles.filter((p) => p.diffs.some((d) => d.dangerous)).length
 
     return (
       <div class="cm-impact">
         <p class="cm-impact-count" role="status">
-          Affects <strong>{profiles.length}</strong> connection{profiles.length === 1 ? '' : 's'}
+          {t('connections.impact.affectsHead', 'Affects')} <strong>{profiles.length}</strong>{' '}
+          {profiles.length === 1
+            ? t('connections.impact.connectionOne', 'connection')
+            : t('connections.impact.connectionMany', 'connections')}
           <Show when={dangerous}>
-            <span class="cm-impact-dangerous"> &middot; includes auth-affecting changes</span>
+            <span class="cm-impact-dangerous">
+              {' '}
+              &middot;{' '}
+              {t('connections.impact.includesAuthChanges', 'includes auth-affecting changes')}
+            </span>
           </Show>
         </p>
         <Show when={dangerous}>
           <div class="cm-impact-danger-badge" role="alert">
-            This change affects authentication for {dangerousCount} connection
-            {dangerousCount === 1 ? '' : 's'} and requires explicit confirmation.
+            {t('connections.impact.authChangeHead', 'This change affects authentication for')}{' '}
+            {dangerousCount}{' '}
+            {dangerousCount === 1
+              ? t('connections.impact.authChangeConnOne', 'connection')
+              : t('connections.impact.authChangeConnMany', 'connections')}{' '}
+            {t('connections.impact.authChangeTail', 'and requires explicit confirmation.')}
           </div>
         </Show>
         <table class="cm-impact-table" role="list">
@@ -1162,8 +1263,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                         class="cm-impact-diff"
                         classList={{ 'cm-impact-diff-dangerous': d.dangerous }}
                       >
-                        <Show when={d.dangerous} fallback={<Badge tone="warning">changed</Badge>}>
-                          <Badge tone="danger">dangerous</Badge>
+                        <Show
+                          when={d.dangerous}
+                          fallback={
+                            <Badge tone="warning">
+                              {t('connections.impact.diffChanged', 'changed')}
+                            </Badge>
+                          }
+                        >
+                          <Badge tone="danger">
+                            {t('connections.impact.diffDangerous', 'dangerous')}
+                          </Badge>
                         </Show>
                         {fieldLabel(d.field)}:{' '}
                         {typeof d.oldValue === 'string'
@@ -1248,7 +1358,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 value={(gv(key) as string) ?? ''}
                 onChange={(v) => setG(key, v || '')}
                 options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
-                placeholder="&mdash; Not set (inherit) &mdash;"
+                placeholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
               />
             </div>
           </Field>
@@ -1261,8 +1371,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               <Select
                 value={(gv(key) as string) ?? ''}
                 onChange={(v) => setG(key, v || '')}
-                options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
-                placeholder="&mdash; Not set (inherit) &mdash;"
+                options={desiredModeOptions()}
+                placeholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
               />
             </div>
           </Field>
@@ -1282,7 +1392,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               : 'text'
           }
           onInput={(v) => setG(key, v)}
-          placeholder="&mdash; Not set (inherit) &mdash;"
+          placeholder={t('connections.group.notSetInherit', '— Not set (inherit) —')}
         />
       )
     }
@@ -1291,8 +1401,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return (
         <Stack>
           <p class="cm-hint">
-            Inherited by every connection in this group and its subgroups, unless the connection
-            overrides it.
+            {t(
+              'connections.group.inheritedHint',
+              'Inherited by every connection in this group and its subgroups, unless the connection overrides it.',
+            )}
           </p>
           <For each={fields}>{(f) => renderDefault(f)}</For>
         </Stack>
@@ -1315,8 +1427,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return (
         <Stack>
           <p class="cm-hint">
-            Inherited by every connection in this group and its subgroups, unless the connection
-            overrides it.
+            {t(
+              'connections.group.inheritedHint',
+              'Inherited by every connection in this group and its subgroups, unless the connection overrides it.',
+            )}
           </p>
           <AuthenticationEditor
             id="group-default-auth"
@@ -1338,7 +1452,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             passwordSecret={(gv('passwordSecret') as string | undefined) || undefined}
             onPasswordSecretChange={(value) => setGroupDefaultsField('passwordSecret', value)}
             publicKeyAction={
-              <Field for="group-default-key" label="Private Key">
+              <Field
+                for="group-default-key"
+                label={t('connections.group.privateKey', 'Private Key')}
+              >
                 <KeyMaterialInput
                   id="group-default-key"
                   mode={groupKeyMode()}
@@ -1409,12 +1526,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           items={[
             {
               id: 'general',
-              label: 'General',
+              label: t('connections.group.tabGeneral', 'General'),
               content: () => (
                 <Stack>
                   <TextField
                     id="group-name"
-                    label="Name"
+                    label={t('connections.group.fieldName', 'Name')}
                     required
                     value={gv('name') as string}
                     error={groupValidation.error('name')}
@@ -1426,7 +1543,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   />
                   <TextField
                     id="group-description"
-                    label="Description"
+                    label={t('connections.group.fieldDescription', 'Description')}
                     value={gv('description') as string}
                     onInput={(v) => setG('description', v)}
                   />
@@ -1435,18 +1552,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             },
             {
               id: 'connection',
-              label: 'Connection',
+              label: t('connections.group.tabConnection', 'Connection'),
               content: renderConnectionDefaults,
             },
             {
               id: 'advanced',
-              label: 'Advanced',
+              label: t('connections.group.tabAdvanced', 'Advanced'),
               content: () => renderDefaults(ADVANCED_DEFAULTS),
             },
           ]}
           active={groupSection()}
           onChange={setGroupSection}
-          ariaLabel="Group sections"
+          ariaLabel={t('connections.group.sectionsAria', 'Group sections')}
         />
 
         {/* Pinned under the pane, not filed as a section. What a change is
@@ -1459,12 +1576,18 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         <Show when={groupImpactWorthShowing()}>
           {(i) => (
             <div class="cm-group-impact">
-              <Show when={!groupImpactBusy()} fallback={<p>Computing impact…</p>}>
+              <Show
+                when={!groupImpactBusy()}
+                fallback={<p>{t('connections.impact.computing', 'Computing impact…')}</p>}
+              >
                 {renderImpactSummary(i())}
                 <Show when={i().dangerous}>
                   <div class="cm-danger-confirm">
                     <Checkbox
-                      label="I understand this will change authentication for affected connections"
+                      label={t(
+                        'connections.impact.confirmAuthChange',
+                        'I understand this will change authentication for affected connections',
+                      )}
                       checked={dangerConfirmed()}
                       onChange={(v) => {
                         setDangerConfirmed(v)
@@ -1534,7 +1657,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           } catch (err) {
             const message = (err as Error).message
             log.error('Failed to save the key passphrase binding', { message })
-            showToast({ level: 'danger', message: `Could not save the passphrase: ${message}` })
+            showToast({
+              level: 'danger',
+              message: `${t('connections.toasts.savePassphraseFailedHead', 'Could not save the passphrase:')} ${message}`,
+            })
             return
           }
           return handleTest(bound)
@@ -1563,7 +1689,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Connection test failed', { profileId: profile.id, message })
-      showToast({ level: 'danger', message: `Test failed: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.testFailedHead', 'Test failed:')} ${message}`,
+      })
     } finally {
       setProbeBusy((prev) => {
         const next = new Set(prev)
@@ -1589,7 +1718,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to trust host key', { host: pending.evidence.host, message })
-      showToast({ level: 'danger', message: `Could not trust the host key: ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.trustHostKeyFailedHead', 'Could not trust the host key:')} ${message}`,
+      })
     } finally {
       setHostKeyBusy(false)
     }
@@ -1641,7 +1773,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   function handleQuickConnect() {
     const q = quickConnectValue().trim()
     if (!q) {
-      showToast({ level: 'warning', message: 'Enter a host, alias, or connection string' })
+      showToast({
+        level: 'warning',
+        message: t('connections.toasts.enterHost', 'Enter a host, alias, or connection string'),
+      })
       return
     }
 
@@ -1665,7 +1800,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     if (!parsed.options.host && hadAtOrColon) {
       showToast({
         level: 'warning',
-        message: `Could not parse "${q}": try "user@host:port" or "ssh://user@host:port"`,
+        message: `${t('connections.toasts.parseFailedHead', 'Could not parse')} "${q}": ${t('connections.toasts.parseFailedTail', 'try "user@host:port" or "ssh://user@host:port"')}`,
       })
     }
 
@@ -1781,9 +1916,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   const profileValidation = createFormValidation(
     {
-      name: () => required('Name')(formProfile()?.name ?? ''),
-      host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
-      port: () => combine(required('Port'), portRule())(fieldText('port')),
+      // Not kit `required`/`nonNegativeInteger`: those hardcode the English
+      // word order ("X is required"), which cannot be reassembled for
+      // Russian. Each rule is one whole-sentence catalogue key instead; en
+      // stays byte-identical.
+      name: () =>
+        (formProfile()?.name ?? '').trim() === ''
+          ? t('connections.editor.nameRequired', 'Name is required')
+          : undefined,
+      host: () =>
+        combine(
+          (value) =>
+            value.trim() === ''
+              ? t('connections.editor.hostRequired', 'Host is required')
+              : undefined,
+          hostname(),
+        )(formProfile()?.options.host ?? ''),
+      port: () =>
+        combine(
+          (value) =>
+            value.trim() === ''
+              ? t('connections.editor.portRequired', 'Port is required')
+              : undefined,
+          portRule(),
+        )(fieldText('port')),
       // A Public Key connection with no key is a dead end: nothing to offer
       // at connect time. The key may come from a stored secret, a path, or
       // pasted material — whichever it is, a missing key blocks save.
@@ -1795,15 +1951,23 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         return 'Choose a private key: a file, a path, pasted material, or a stored secret'
       },
       keepaliveInterval: () =>
-        nonNegativeInteger('Keepalive interval')(
-          String(formProfile()?.options.keepaliveInterval ?? ''),
-        ),
+        String(formProfile()?.options.keepaliveInterval ?? '').trim() === '' ||
+        /^\d+$/.test(String(formProfile()?.options.keepaliveInterval ?? '').trim())
+          ? undefined
+          : t('connections.editor.keepaliveInvalid', 'Keepalive interval must be a whole number'),
       keepaliveCountMax: () =>
-        nonNegativeInteger('Keepalive count max')(
-          String(formProfile()?.options.keepaliveCountMax ?? ''),
-        ),
+        String(formProfile()?.options.keepaliveCountMax ?? '').trim() === '' ||
+        /^\d+$/.test(String(formProfile()?.options.keepaliveCountMax ?? '').trim())
+          ? undefined
+          : t(
+              'connections.editor.keepaliveCountInvalid',
+              'Keepalive count max must be a whole number',
+            ),
       readyTimeout: () =>
-        nonNegativeInteger('Ready timeout')(String(formProfile()?.options.readyTimeout ?? '')),
+        String(formProfile()?.options.readyTimeout ?? '').trim() === '' ||
+        /^\d+$/.test(String(formProfile()?.options.readyTimeout ?? '').trim())
+          ? undefined
+          : t('connections.editor.readyTimeoutInvalid', 'Ready timeout must be a whole number'),
       // The stored forwards must be a list the connect-time replay accepts —
       // the editor and the backend ask the same question (firstForwardError
       // mirrors ValidForwards). An invalid row blocks save, never ships.
@@ -1897,13 +2061,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           // PEM-encrypted key needing conversion.
           const detail = (err as Error).message
           setProfileKeyTextError(detail)
-          showToast({ level: 'danger', message: `Could not save the key: ${detail}` })
+          showToast({
+            level: 'danger',
+            message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${detail}`,
+          })
           log.error('Invalid key material', { message: detail })
           return
         }
         const message = (err as Error).message
         log.error('Failed to save key material', { message })
-        showToast({ level: 'danger', message: `Could not save the key: ${message}` })
+        showToast({
+          level: 'danger',
+          message: `${t('connections.toasts.saveKeyFailedHead', 'Could not save the key:')} ${message}`,
+        })
         return
       }
       const saved = result!
@@ -1977,11 +2147,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         await loadAll()
         void loadSessionStatuses()
         void loadEffective([saved.id])
-        showToast({ level: 'success', message: `Saved "${saved.name}"` })
+        showToast({
+          level: 'success',
+          message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
+        })
       } catch (err) {
         const message = (err as Error).message
         log.error('Failed to save', { message })
-        showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+        showToast({
+          level: 'danger',
+          message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+        })
       }
       return
     }
@@ -2006,11 +2182,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           await loadAll()
           await loadEffective([saved.id])
           void loadSessionStatuses()
-          showToast({ level: 'success', message: `Saved "${saved.name}"` })
+          showToast({
+            level: 'success',
+            message: `${t('connections.toasts.saved', 'Saved')} "${saved.name}"`,
+          })
         } catch (err) {
           const message = (err as Error).message
           log.error('Failed to save', { message })
-          showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+          showToast({
+            level: 'danger',
+            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+          })
         }
         return
 
@@ -2034,11 +2216,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             : props.client.patchProfile({ id: profile.id, set: route.patchSet }))
           setEffectiveData((prev) => ({ ...prev, [profile.id]: eff }))
           closeDialog()
-          showToast({ level: 'success', message: `Saved "${profile.name}"` })
+          showToast({
+            level: 'success',
+            message: `${t('connections.toasts.saved', 'Saved')} "${profile.name}"`,
+          })
         } catch (err) {
           const message = (err as Error).message
           log.error('Failed to save', { message })
-          showToast({ level: 'danger', message: `Could not save the connection: ${message}` })
+          showToast({
+            level: 'danger',
+            message: `${t('connections.toasts.saveFailedHead', 'Could not save the connection:')} ${message}`,
+          })
         }
         return
     }
@@ -2057,17 +2245,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   async function deleteProfile(profile: SSHProfile) {
-    if (!(await showConfirm(`Delete "${profile.name}"?`))) return
+    if (
+      !(await showConfirm(
+        `${t('connections.editor.deleteConfirmHead', 'Delete')} "${profile.name}"?`,
+        t('connections.editor.deleteConfirmOk', 'Delete'),
+        t('connections.common.cancel', 'Cancel'),
+      ))
+    )
+      return
     try {
       await props.client.deleteProfile(profile.id)
       closeDialog()
       await loadAll()
       void loadSessionStatuses()
-      showToast({ level: 'success', message: `Deleted "${profile.name}"` })
+      showToast({
+        level: 'success',
+        message: `${t('connections.toasts.deleted', 'Deleted')} "${profile.name}"`,
+      })
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to delete profile', { message })
-      showToast({ level: 'danger', message: `Could not delete "${profile.name}": ${message}` })
+      showToast({
+        level: 'danger',
+        message: `${t('connections.toasts.deleteFailedHead', 'Could not delete')} "${profile.name}": ${message}`,
+      })
     }
   }
 
@@ -2111,11 +2312,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const st = status()
       if (!st) return undefined
       const lastUsed = st.lastUsed
-        ? ` · last used ${new Date(st.lastUsed).toLocaleDateString()}`
+        ? ` ${t('connections.list.lastUsed', '· last used')} ${new Date(st.lastUsed).toLocaleDateString()}`
         : ''
       return {
         tone: st.live ? ('ok' as const) : ('neutral' as const),
-        text: `${st.live ? 'Connected' : 'Disconnected'}${lastUsed}`,
+        text: `${st.live ? t('connections.list.connected', 'Connected') : t('connections.list.disconnected', 'Disconnected')}${lastUsed}`,
       }
     }
     return (
@@ -2128,8 +2329,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <>
             <IconButton
               size="sm"
-              title="Edit"
-              ariaLabel={`Edit ${p.name}`}
+              title={t('connections.actions.edit', 'Edit')}
+              ariaLabel={`${t('connections.actions.edit', 'Edit')} ${p.name}`}
               onClick={() => openEditDialog(p)}
             >
               <PencilIcon />
@@ -2139,20 +2340,22 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               size="sm"
               disabled={isTesting()}
               onClick={() => void handleTest(p)}
-              ariaLabel={`Test connection to ${p.name}`}
+              ariaLabel={`${t('connections.actions.testConnectionTo', 'Test connection to')} ${p.name}`}
             >
               <CheckCircleIcon />
-              {isTesting() ? 'Testing...' : 'Test'}
+              {isTesting()
+                ? t('connections.actions.testing', 'Testing...')
+                : t('connections.actions.test', 'Test')}
             </Button>
             <Button
               variant="ghost"
               size="sm"
-              title="Connect"
-              ariaLabel={`Connect to ${p.name}`}
+              title={t('connections.actions.connect', 'Connect')}
+              ariaLabel={`${t('connections.actions.connectTo', 'Connect to')} ${p.name}`}
               onClick={() => props.onConnect?.(p)}
             >
               <PlugIcon />
-              Connect
+              {t('connections.actions.connect', 'Connect')}
             </Button>
           </>
         }
@@ -2192,8 +2395,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
         >
           <IconButton
             size="sm"
-            title={collapsed() ? 'Expand group' : 'Collapse group'}
-            ariaLabel={`${collapsed() ? 'Expand' : 'Collapse'} group ${node.name}`}
+            title={
+              collapsed()
+                ? `${t('connections.group.expand', 'Expand')} ${t('connections.group.groupWord', 'group')}`
+                : `${t('connections.group.collapse', 'Collapse')} ${t('connections.group.groupWord', 'group')}`
+            }
+            ariaLabel={`${collapsed() ? t('connections.group.expand', 'Expand') : t('connections.group.collapse', 'Collapse')} ${t('connections.group.groupWord', 'group')} ${node.name}`}
             aria-expanded={!collapsed()}
             onClick={toggleCollapse}
           >
@@ -2203,16 +2410,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <span class="cm-group-actions">
             <IconButton
               size="sm"
-              title="Edit group"
-              ariaLabel={`Edit group ${node.name}`}
+              title={t('connections.group.edit', 'Edit group')}
+              ariaLabel={`${t('connections.group.edit', 'Edit group')} ${node.name}`}
               onClick={() => openGroupEditor(node)}
             >
               <PencilIcon />
             </IconButton>
             <IconButton
               size="sm"
-              title="Delete group"
-              ariaLabel={`Delete group ${node.name}`}
+              title={t('connections.group.delete', 'Delete group')}
+              ariaLabel={`${t('connections.group.delete', 'Delete group')} ${node.name}`}
               onClick={() => confirmDeleteGroup(node)}
             >
               <TrashIcon />
@@ -2290,7 +2497,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     function renderForwardRow(row: () => ForwardSpec, index: number): JSX.Element {
       return (
         <div class="cm-forward-row">
-          <Field for={`forward-${index}-direction`} label="Direction">
+          <Field
+            for={`forward-${index}-direction`}
+            label={t('connections.forward.direction', 'Direction')}
+          >
             <Select
               value={row().direction}
               onChange={(v) => updateForward(index, { direction: v as ForwardDirection })}
@@ -2299,14 +2509,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           </Field>
           <TextField
             id={`forward-${index}-bindhost`}
-            label="Bind host"
+            label={t('connections.forward.bindHost', 'Bind host')}
             value={row().bindHost ?? ''}
             placeholder="127.0.0.1"
             onInput={(v) => updateForward(index, { bindHost: v || undefined })}
           />
           <TextField
             id={`forward-${index}-bindport`}
-            label="Bind port"
+            label={t('connections.forward.bindPort', 'Bind port')}
             type="number"
             min={0}
             value={row().bindPort != null ? String(row().bindPort) : '0'}
@@ -2318,7 +2528,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Show when={row().direction !== 'dynamic'}>
             <TextField
               id={`forward-${index}-destination`}
-              label="Destination"
+              label={t('connections.forward.destination', 'Destination')}
               value={row().destination ?? ''}
               placeholder="host:port"
               onInput={(v) => updateForward(index, { destination: v })}
@@ -2388,12 +2598,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           items={[
             {
               id: 'general',
-              label: 'General',
+              label: t('connections.editor.tabGeneral', 'General'),
               content: () => (
                 <Stack>
                   <TextField
                     id="profile-name"
-                    label="Name"
+                    label={t('connections.editor.fieldName', 'Name')}
                     required
                     value={profile().name}
                     error={profileValidation.error('name')}
@@ -2407,7 +2617,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     'host',
                     <TextField
                       id="profile-host"
-                      label="Host"
+                      label={t('connections.editor.fieldHost', 'Host')}
                       required
                       value={fvStr('host')}
                       error={profileValidation.error('host')}
@@ -2422,7 +2632,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     'port',
                     <TextField
                       id="profile-port"
-                      label="Port"
+                      label={t('connections.editor.fieldPort', 'Port')}
                       required
                       value={fvNum('port')}
                       type="number"
@@ -2436,7 +2646,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     />,
                   )}
                   <Show when={isSaved()}>
-                    <Field for="profile-group" label="Group">
+                    <Field for="profile-group" label={t('connections.editor.fieldGroup', 'Group')}>
                       <Select
                         value={profile().group ?? ''}
                         onChange={(v) => {
@@ -2446,7 +2656,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                           if (profile().id) void computeMoveImpact(profile().id, targetGroupId)
                         }}
                         options={groupOptions()}
-                        placeholder="&mdash; No group &mdash;"
+                        placeholder={t('connections.editor.noGroup', '&mdash; No group &mdash;')}
                       />
                     </Field>
                   </Show>
@@ -2455,7 +2665,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             },
             {
               id: 'auth',
-              label: 'Authentication',
+              label: t('connections.editor.tabAuthentication', 'Authentication'),
               content: () => (
                 <Stack>
                   <AuthenticationEditor
@@ -2467,7 +2677,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     passwordEntries={passwordEntries()}
                     vaultState={vaultState()}
                     passwordSource={profilePasswordSource()}
-                    passwordDescription="Storing a password saves it to the connection immediately — closing this editor afterwards won't undo it."
+                    passwordDescription={t(
+                      'connections.editor.passwordDescription',
+                      "Storing a password saves it to the connection immediately — closing this editor afterwards won't undo it.",
+                    )}
                     passwordDraft={profilePasswordValue()}
                     onPasswordDraftChange={setProfilePasswordValue}
                     passwordSecret={fvStr('passwordSecret') || undefined}
@@ -2481,7 +2694,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     publicKeyAction={
                       <Field
                         for="profile-key"
-                        label="Private Key"
+                        label={t('connections.editor.privateKey', 'Private Key')}
                         error={profileValidation.error('key')}
                       >
                         <KeyMaterialInput
@@ -2552,14 +2765,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             },
             {
               id: 'advanced',
-              label: 'Advanced',
+              label: t('connections.editor.tabAdvanced', 'Advanced'),
               content: () => (
                 <Stack>
                   {fieldRow(
                     'keepaliveInterval',
                     <TextField
                       id="profile-keepalive-interval"
-                      label="Keepalive interval (ms)"
+                      label={t(
+                        'connections.editor.fieldKeepaliveInterval',
+                        'Keepalive interval (ms)',
+                      )}
                       value={fvNum('keepaliveInterval')}
                       type="number"
                       min={0}
@@ -2576,7 +2792,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     'keepaliveCountMax',
                     <TextField
                       id="profile-keepalive-count"
-                      label="Keepalive count max"
+                      label={t('connections.editor.fieldKeepaliveCountMax', 'Keepalive count max')}
                       value={fvNum('keepaliveCountMax')}
                       type="number"
                       min={0}
@@ -2593,7 +2809,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     'readyTimeout',
                     <TextField
                       id="profile-ready-timeout"
-                      label="Ready timeout (ms)"
+                      label={t('connections.editor.fieldReadyTimeout', 'Ready timeout (ms)')}
                       value={fvNum('readyTimeout')}
                       type="number"
                       min={0}
@@ -2606,51 +2822,64 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       onBlur={() => profileValidation.touch('readyTimeout')}
                     />,
                   )}
-                  <Field for="jump-host" label="Jump server">
+                  <Field
+                    for="jump-host"
+                    label={t('connections.editor.fieldJumpServer', 'Jump server')}
+                  >
                     <div class="cm-field-row">
                       <Select
                         value={fvStr('jumpHost')}
                         onChange={(v) => setOption('jumpHost', v || undefined)}
                         options={jumpOptions()}
-                        placeholder="&mdash; None &mdash;"
+                        placeholder={t('connections.editor.none', '&mdash; None &mdash;')}
                       />
                     </div>
                   </Field>
-                  <Field for="port-discovery" label="Port discovery">
+                  <Field
+                    for="port-discovery"
+                    label={t('connections.editor.fieldPortDiscovery', 'Port discovery')}
+                  >
                     <div class="cm-field-row">
                       <Select
                         value={fvStr('portDiscovery')}
                         onChange={(v) => setOption('portDiscovery', v || undefined)}
                         options={PORT_DISCOVERY_MODES.map((m) => ({ value: m, label: m }))}
-                        placeholder="&mdash; Inherited &mdash;"
+                        placeholder={t('connections.editor.inherited', '&mdash; Inherited &mdash;')}
                       />
                     </div>
                   </Field>
-                  <Field for="desired-mode" label="Delivery mode">
+                  <Field
+                    for="desired-mode"
+                    label={t('connections.editor.fieldDeliveryMode', 'Delivery mode')}
+                  >
                     <div class="cm-field-row">
                       <Select
                         value={fvStr('desiredMode')}
                         onChange={(v) => setOption('desiredMode', v || undefined)}
-                        options={DESIRED_MODES.map((m) => ({ value: m.value, label: m.label }))}
-                        placeholder="&mdash; Inherited &mdash;"
+                        options={desiredModeOptions()}
+                        placeholder={t('connections.editor.inherited', '&mdash; Inherited &mdash;')}
                       />
                     </div>
                   </Field>
                   <Show when={fvStr('desiredMode') === 'helper'}>
                     <p class="cm-hint">
-                      The helper is a binary nocx deploys on the destination. Permission to deploy
-                      it belongs to the machine, not to this connection: nocx asks the first time it
-                      connects, and every connection to that host reuses the answer.
+                      {t(
+                        'connections.editor.helperHint',
+                        'The helper is a binary nocx deploys on the destination. Permission to deploy it belongs to the machine, not to this connection: nocx asks the first time it connects, and every connection to that host reuses the answer.',
+                      )}
                     </p>
                   </Show>
                   <div class="cm-check-group">
                     <Checkbox
-                      label="Agent forward"
+                      label={t('connections.editor.fieldAgentForward', 'Agent forward')}
                       checked={fvBool('agentForward')}
                       onChange={(v) => setOption('agentForward', v)}
                     />
                     <Checkbox
-                      label="Can be used as jump server"
+                      label={t(
+                        'connections.editor.fieldCanBeJumpServer',
+                        'Can be used as jump server',
+                      )}
                       checked={fvBool('canBeJumpServer')}
                       onChange={(v) => setOption('canBeJumpServer', v)}
                     />
@@ -2660,20 +2889,26 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             },
             {
               id: 'forwards',
-              label: 'Forwards',
+              label: t('connections.editor.tabForwards', 'Forwards'),
               content: () => (
                 <Stack>
                   <p class="cm-hint">
-                    Forwards opened automatically when this connection comes up. A forward that
-                    fails — a busy local port, a refused acquire — fails its row only; the session
-                    and every other forward still establish.
+                    {t(
+                      'connections.forward.hint',
+                      'Forwards opened automatically when this connection comes up. A forward that fails — a busy local port, a refused acquire — fails its row only; the session and every other forward still establish.',
+                    )}
                   </p>
                   <EditableRowList
                     rows={forwards()}
-                    ariaLabel="Stored forwards"
-                    addLabel="Add forward"
-                    emptyLabel="No forwards — add one to open it automatically on connect."
-                    removeLabel={(i) => `Remove forward ${i + 1}`}
+                    ariaLabel={t('connections.forward.storedAria', 'Stored forwards')}
+                    addLabel={t('connections.forward.add', 'Add forward')}
+                    emptyLabel={t(
+                      'connections.forward.empty',
+                      'No forwards — add one to open it automatically on connect.',
+                    )}
+                    removeLabel={(i) =>
+                      `${t('connections.forward.removeHead', 'Remove forward')} ${i + 1}`
+                    }
                     onRemove={removeForward}
                     onAdd={addForward}
                     renderRow={(row, i) => renderForwardRow(row, i)}
@@ -2685,7 +2920,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           ]}
           active={profileSection()}
           onChange={setProfileSection}
-          ariaLabel="Connection sections"
+          ariaLabel={t('connections.editor.sectionsAria', 'Connection sections')}
         />
 
         {/* Pinned under the pane, like the group editor's blast radius: what a
@@ -2711,44 +2946,51 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <CollectionView
         searchValue={searchQuery()}
         onSearch={setSearchQuery}
-        searchPlaceholder="Filter connections"
-        searchLabel="Filter connections"
+        searchPlaceholder={t('connections.list.searchPlaceholder', 'Filter connections')}
+        searchLabel={t('connections.list.searchPlaceholder', 'Filter connections')}
         actions={
           <>
             <Button variant="default" onClick={openImportDialog}>
-              Import…
+              {t('connections.list.import', 'Import…')}
             </Button>
             <Button variant="default" onClick={startNewGroup}>
-              New group
+              {t('connections.list.newGroup', 'New group')}
             </Button>
             <Button variant="primary" onClick={startNewProfile}>
-              + New connection
+              {t('connections.list.newConnection', '+ New connection')}
             </Button>
           </>
         }
         hasItems={profiles().length > 0 || groups().length > 0}
         empty={
           <EmptyState
-            title="No connections yet"
-            description="Add one by hand, or import from ~/.ssh/config, Tabby, or an export."
+            title={t('connections.list.emptyTitle', 'No connections yet')}
+            description={t(
+              'connections.list.emptyDescription',
+              'Add one by hand, or import from ~/.ssh/config, Tabby, or an export.',
+            )}
             action={
               <>
                 <Button variant="primary" onClick={startNewProfile}>
-                  + New connection
+                  {t('connections.list.newConnection', '+ New connection')}
                 </Button>
                 <Button variant="default" onClick={openImportDialog}>
-                  Import…
+                  {t('connections.list.import', 'Import…')}
                 </Button>
               </>
             }
           />
         }
       >
-        <div role="list" aria-label="Connection list">
+        <div role="list" aria-label={t('connections.list.ariaLabel', 'Connection list')}>
           <For each={tree()}>{(node) => renderGroupSection(node)}</For>
           <Show when={ungrouped().length > 0}>
             <div class="cm-group-header" role="heading" aria-level={2}>
-              <span class="cm-group-name">{groups().length > 0 ? 'Ungrouped' : 'Connections'}</span>
+              <span class="cm-group-name">
+                {groups().length > 0
+                  ? t('connections.list.ungrouped', 'Ungrouped')
+                  : t('connections.list.connections', 'Connections')}
+              </span>
             </div>
             <For each={ungrouped()}>{(p) => renderRow(p)}</For>
           </Show>
@@ -2758,8 +3000,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               to load. */}
         <Show when={searchQuery().trim() !== '' && filteredProfiles().length === 0}>
           <EmptyState
-            title="Nothing matches this filter"
-            description={`No connection's name, host or user contains "${searchQuery().trim()}".`}
+            title={t('connections.filter.emptyTitle', 'Nothing matches this filter')}
+            description={`${t('connections.filter.emptyHead', "No connection's name, host or user contains")} "${searchQuery().trim()}".`}
           />
         </Show>
       </CollectionView>
@@ -2775,21 +3017,27 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Dialog
             open={dialogOpen()}
             onClose={closeDialog}
-            title={profile().id ? `Edit Connection: ${profile().name}` : 'New Connection'}
+            title={
+              profile().id
+                ? `${t('connections.editor.title', 'Edit Connection:')} ${profile().name}`
+                : t('connections.quick.title', 'New Connection')
+            }
             size="lg"
             onSubmit={() => void saveProfile(profile())}
             footer={
               <>
                 <Button variant="primary" onClick={() => void saveProfile(profile())}>
-                  {profile().id ? 'Save Connection' : 'Create Connection'}
+                  {profile().id
+                    ? t('connections.editor.save', 'Save Connection')
+                    : t('connections.editor.create', 'Create Connection')}
                 </Button>
                 <Show when={profile().id}>
                   <Button variant="danger" onClick={() => void deleteProfile(profile())}>
-                    Delete Connection
+                    {t('connections.editor.delete', 'Delete Connection')}
                   </Button>
                 </Show>
                 <Button variant="default" onClick={closeDialog}>
-                  Cancel
+                  {t('connections.common.cancel', 'Cancel')}
                 </Button>
               </>
             }
@@ -2807,8 +3055,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             <PasswordEditor
               open={profilePasswordOpen()}
               value={profilePasswordValue()}
-              prompt={`Password for ${
-                editing()?.options.user || editing()?.options.host || 'connection'
+              prompt={`${t('connections.editor.passwordForHead', 'Password for')} ${
+                editing()?.options.user ||
+                editing()?.options.host ||
+                t('connections.editor.connectionWord', 'connection')
               }`}
               onClose={() => closePasswordAsk()}
               onSave={(password) => {
@@ -2823,30 +3073,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <Dialog
         open={quickConnectOpen()}
         onClose={closeQuickConnect}
-        title="New Connection"
+        title={t('connections.quick.title', 'New Connection')}
         size="lg"
         onSubmit={handleQuickConnect}
         footer={
           <>
             <Button variant="primary" onClick={handleQuickConnect}>
-              Next
+              {t('connections.quick.next', 'Next')}
             </Button>
             <Button variant="default" onClick={closeQuickConnect}>
-              Cancel
+              {t('connections.common.cancel', 'Cancel')}
             </Button>
           </>
         }
       >
         <TextField
           id="quick-connect-input"
-          label="Host or connection string"
+          label={t('connections.quick.hostLabel', 'Host or connection string')}
           value={quickConnectValue()}
           onInput={(v) => setQuickConnectValue(v)}
-          placeholder="deploy@host:2222 or ssh://user@host:2222"
+          placeholder={t(
+            'connections.quick.hostPlaceholder',
+            'deploy@host:2222 or ssh://user@host:2222',
+          )}
         />
         <p class="cm-hint">
-          Paste a host, alias, or connection string above. Parsed fields will be filled into the
-          form.
+          {t(
+            'connections.quick.hint',
+            'Paste a host, alias, or connection string above. Parsed fields will be filled into the form.',
+          )}
         </p>
       </Dialog>
 
@@ -2854,20 +3109,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       <Dialog
         open={importOpen()}
         onClose={closeImportDialog}
-        title="Import Connections"
+        title={t('connections.import.title', 'Import Connections')}
         size="lg"
         footer={
           <>
             <Button variant="primary" disabled={importBusy()} onClick={() => void runImport()}>
-              {importBusy() ? 'Importing…' : importSource() === 'tabby' ? 'Preview' : 'Import'}
+              {importBusy()
+                ? t('connections.import.importing', 'Importing…')
+                : importSource() === 'tabby'
+                  ? t('connections.import.previewButton', 'Preview')
+                  : t('connections.import.importButton', 'Import')}
             </Button>
             <Button variant="default" disabled={importBusy()} onClick={closeImportDialog}>
-              Cancel
+              {t('connections.common.cancel', 'Cancel')}
             </Button>
           </>
         }
       >
-        <Field for="cm-import-source" label="Source">
+        <Field for="cm-import-source" label={t('connections.import.sourceLabel', 'Source')}>
           <div class="cm-radio-group">
             <For each={IMPORT_SOURCES()}>
               {(src) => (
@@ -2896,7 +3155,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             otherwise still display a file we have just discarded. */}
         <Show when={importSource()} keyed>
           {(src) => (
-            <Field for="cm-import-file" label="File">
+            <Field for="cm-import-file" label={t('connections.import.fileLabel', 'File')}>
               <FileInput
                 id="cm-import-file"
                 accept={src === 'tabby' ? '.yml,.yaml' : '.json'}
@@ -2909,13 +3168,19 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
         {/* Passphrase field for encrypted Tabby vaults. */}
         <Show when={importSource() === 'tabby'}>
-          <Field for="cm-import-passphrase" label="Vault passphrase (if encrypted)">
+          <Field
+            for="cm-import-passphrase"
+            label={t('connections.import.passphraseLabel', 'Vault passphrase (if encrypted)')}
+          >
             <TextField
               id="cm-import-passphrase"
               type="password"
               value={importPassphrase()}
               onInput={(v) => setImportPassphrase(v)}
-              placeholder="Leave blank unless the Tabby vault is encrypted"
+              placeholder={t(
+                'connections.import.passphrasePlaceholder',
+                'Leave blank unless the Tabby vault is encrypted',
+              )}
             />
           </Field>
         </Show>
@@ -2929,7 +3194,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <Dialog
             open={previewOpen()}
             onClose={closePreview}
-            title="Tabby Import Preview"
+            title={t('connections.preview.title', 'Tabby Import Preview')}
             size="lg"
             footer={
               <>
@@ -2938,37 +3203,48 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   disabled={importBusy()}
                   onClick={() => void executeImport()}
                 >
-                  {importBusy() ? 'Importing…' : 'Import'}
+                  {importBusy()
+                    ? t('connections.import.importing', 'Importing…')
+                    : t('connections.import.importButton', 'Import')}
                 </Button>
                 <Button variant="default" onClick={closePreview}>
-                  Cancel
+                  {t('connections.common.cancel', 'Cancel')}
                 </Button>
               </>
             }
           >
             <Stack gap="default">
               <p>
-                The Tabby configuration contains <strong>{preview().profilesToImport}</strong>{' '}
-                {preview().profilesToImport === 1 ? 'profile' : 'profiles'},{' '}
-                <strong>{preview().groupsToImport}</strong>{' '}
-                {preview().groupsToImport === 1 ? 'group' : 'groups'}, and{' '}
+                {t('connections.preview.summaryHead', 'The Tabby configuration contains')}{' '}
+                <strong>{preview().profilesToImport}</strong>{' '}
+                {preview().profilesToImport === 1
+                  ? t('connections.preview.profileOne', 'profile')
+                  : t('connections.preview.profileMany', 'profiles')}
+                , <strong>{preview().groupsToImport}</strong>{' '}
+                {preview().groupsToImport === 1
+                  ? t('connections.preview.groupOne', 'group')
+                  : t('connections.preview.groupMany', 'groups')}
+                , {t('connections.preview.summaryAnd', 'and')}{' '}
                 <strong>{preview().secretsToImport}</strong>{' '}
-                {preview().secretsToImport === 1 ? 'secret' : 'secrets'}.
+                {preview().secretsToImport === 1
+                  ? t('connections.preview.secretOne', 'secret')
+                  : t('connections.preview.secretMany', 'secrets')}
+                .
               </p>
 
               <Show when={preview().profileEntries && preview().profileEntries!.length > 0}>
                 <p>
-                  <strong>Profiles</strong>
+                  <strong>{t('connections.preview.profilesHeading', 'Profiles')}</strong>
                 </p>
                 <For each={preview().profileEntries || []}>
                   {(entry) => (
                     <p>
                       {entry.name} —{' '}
                       {entry.action === 'new'
-                        ? 'new'
+                        ? t('connections.preview.actionNew', 'new')
                         : entry.action === 'overwrite'
-                          ? 'will overwrite existing'
-                          : 'needs review'}
+                          ? t('connections.preview.actionOverwrite', 'will overwrite existing')
+                          : t('connections.preview.actionNeedsReview', 'needs review')}
                     </p>
                   )}
                 </For>
@@ -2976,14 +3252,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
               <Show when={preview().groupNames && preview().groupNames!.length > 0}>
                 <p>
-                  <strong>Groups</strong>
+                  <strong>{t('connections.preview.groupsHeading', 'Groups')}</strong>
                 </p>
                 <For each={preview().groupNames || []}>{(name) => <p>{name}</p>}</For>
               </Show>
 
               <Show when={preview().secretEntries && preview().secretEntries!.length > 0}>
                 <p>
-                  <strong>Secrets</strong>
+                  <strong>{t('connections.preview.secretsHeading', 'Secrets')}</strong>
                 </p>
                 <For each={preview().secretEntries || []}>
                   {(entry) => (
@@ -2996,17 +3272,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
               <Show when={preview().collisions && preview().collisions!.length > 0}>
                 <p>
-                  <strong>Collisions</strong>
+                  <strong>{t('connections.preview.collisionsHeading', 'Collisions')}</strong>
                 </p>
                 <For each={preview().collisions || []}>
                   {(c) => (
                     <p>
                       {c.kind} "{c.name}" —{' '}
                       {c.policy === 'overwrite'
-                        ? 'will be overwritten'
+                        ? t('connections.preview.policyOverwrite', 'will be overwritten')
                         : c.policy === 'refuse'
-                          ? 'import refused (already exists)'
-                          : 'needs review'}
+                          ? t('connections.preview.policyRefuse', 'import refused (already exists)')
+                          : t('connections.preview.actionNeedsReview', 'needs review')}
                     </p>
                   )}
                 </For>
@@ -3014,7 +3290,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
               <Show when={preview().skippedSecrets && preview().skippedSecrets!.length > 0}>
                 <p>
-                  <strong>Skipped secrets</strong>
+                  <strong>{t('connections.preview.skippedHeading', 'Skipped secrets')}</strong>
                 </p>
                 <For each={preview().skippedSecrets || []}>
                   {(s) => (
@@ -3026,7 +3302,8 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               </Show>
 
               <p>
-                <strong>Destination:</strong> {preview().secretProvider}
+                <strong>{t('connections.preview.destination', 'Destination:')}</strong>{' '}
+                {preview().secretProvider}
               </p>
             </Stack>
           </Dialog>
@@ -3045,10 +3322,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             // General field shows a new one is worse than no title at all.
             title={
               group().id
-                ? `Edit Group: ${groupDraft()?.name || group().name}`
+                ? `${t('connections.group.editTitle', 'Edit Group:')} ${groupDraft()?.name || group().name}`
                 : groupDraft()?.name
-                  ? `New Group: ${groupDraft()!.name}`
-                  : 'New Group'
+                  ? `${t('connections.group.newTitleNamed', 'New Group:')} ${groupDraft()!.name}`
+                  : t('connections.group.newTitle', 'New Group')
             }
             size="lg"
             onSubmit={() => void saveGroup()}
@@ -3059,10 +3336,14 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   disabled={groupApplyBusy() || (groupImpact()?.dangerous && !dangerConfirmed())}
                   onClick={() => void saveGroup()}
                 >
-                  {groupApplyBusy() ? 'Applying…' : group().id ? 'Save Group' : 'Create Group'}
+                  {groupApplyBusy()
+                    ? t('connections.group.applying', 'Applying…')
+                    : group().id
+                      ? t('connections.group.saveGroup', 'Save Group')
+                      : t('connections.group.createGroup', 'Create Group')}
                 </Button>
                 <Button variant="default" onClick={closeGroupEditor} disabled={groupApplyBusy()}>
-                  Cancel
+                  {t('connections.common.cancel', 'Cancel')}
                 </Button>
               </>
             }
@@ -3079,7 +3360,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           onClose={cancelDeleteGroup}
           // Which group. A confirmation that does not name what it is about to
           // destroy is asking the user to remember which row they clicked.
-          title={deleteGroupName() ? `Delete Group: ${deleteGroupName()}` : 'Delete Group'}
+          title={
+            deleteGroupName()
+              ? `${t('connections.delete.titleNamed', 'Delete Group:')} ${deleteGroupName()}`
+              : t('connections.delete.title', 'Delete Group')
+          }
           footer={
             <>
               <Button
@@ -3088,10 +3373,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 onClick={() => void executeDeleteGroup()}
               >
                 {deleteBusy()
-                  ? 'Deleting…'
+                  ? t('connections.delete.deleting', 'Deleting…')
                   : deleteImpact()?.deleteImpact?.action === 'refuse'
-                    ? 'Cannot Delete'
-                    : 'Delete Group'}
+                    ? t('connections.delete.cannotDelete', 'Cannot Delete')
+                    : t('connections.delete.deleteGroupButton', 'Delete Group')}
               </Button>
               {/* autofocus on Cancel, deliberately. A native showModal()
                   focuses the first focusable descendant, and this dialog's
@@ -3105,13 +3390,13 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 disabled={deleteBusy()}
                 autofocus
               >
-                Cancel
+                {t('connections.common.cancel', 'Cancel')}
               </Button>
             </>
           }
         >
           <Show when={deleteBusy() && !deleteImpact()}>
-            <p>Computing impact…</p>
+            <p>{t('connections.impact.computing', 'Computing impact…')}</p>
           </Show>
           <Show when={deleteImpact()?.deleteImpact} keyed>
             {(di) => (
@@ -3120,15 +3405,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   <div class="cm-impact-danger-badge" role="alert">
                     {di.reason}
                   </div>
-                  <p>This group cannot be deleted through this dialog.</p>
+                  <p>
+                    {t(
+                      'connections.delete.cannotDeleteHere',
+                      'This group cannot be deleted through this dialog.',
+                    )}
+                  </p>
                 </Show>
                 <Show when={di.action === 'promote_to_root'}>
                   {/* The written sentence first, the backend's rationale after
                       it. "group has no children" is why the backend chose this
                       action, not what the user is agreeing to. */}
                   <p>
-                    Delete the group <strong>{deleteGroupName()}</strong>? Its connections and
-                    subgroups move to the top level; nothing is deleted with it.
+                    {t('connections.delete.promoteHead', 'Delete the group')}{' '}
+                    <strong>{deleteGroupName()}</strong>{' '}
+                    {t(
+                      'connections.delete.promoteTail',
+                      '? Its connections and subgroups move to the top level; nothing is deleted with it.',
+                    )}
                   </p>
                   <p class="cm-delete-reason">{di.reason}</p>
                   <Show
@@ -3137,7 +3431,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       deleteImpact()!.affectedProfiles!.length > 0
                     }
                   >
-                    <Section title="Affected Connections">
+                    <Section title={t('connections.impact.affectedTitle', 'Affected Connections')}>
                       {renderImpactSummary(deleteImpact()!)}
                     </Section>
                   </Show>

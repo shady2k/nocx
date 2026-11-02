@@ -449,12 +449,29 @@ func startInstalledApplication(installPath string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("restart after update is not supported on %s", runtime.GOOS)
 	}
-	cmd := exec.Command(installPath)
+	cmd := installedApplicationCommand(runtime.GOOS, installPath)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// installedApplicationCommand is the launch of the build an update exchanged
+// in, and it carries THIS window's output because the new window is the only
+// account of what happens next: the reconciliation that counts a launch
+// attempt, the pair certification that refuses one, and whether the first
+// pane ever opened (nocx-vh2hr.1.8). A nil Stdout is /dev/null — the restarted
+// window wrote its whole startup to nothing, so a nightly that stopped
+// finalizing said so nowhere while the person watched a window that looked
+// fine. The proof reads the launcher's own stream; the restart must stay on it.
+func installedApplicationCommand(goos, installPath string) *exec.Cmd {
+	cmd := exec.Command(installPath)
+	if goos == "linux" {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
+	return cmd
 }
 
 // LogFilePath reports where the backend log file lives. "" means

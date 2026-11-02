@@ -16,18 +16,37 @@ type flock struct {
 	path string
 }
 
-// acquireLock acquires an exclusive advisory flock, blocking until
-// the lock is available.
-func acquireLock(path string) (*flock, error) {
+// acquireLock acquires an exclusive advisory flock, waiting no longer than ctx
+// allows.
+//
+// IT WAITED FOREVER BEFORE (nocx-vh2hr.1.11). A plain LOCK_EX blocks until the
+// descriptor's holder exits, and the one process that could hold this lock is
+// an update another window started — or, on a headless runner, an earlier
+// invocation that is stuck. The diagnostic's whole run is bounded by its
+// context, so the wait is bounded by the same deadline: a lock that cannot be
+// taken in time is an answer ("another process is updating"), never a hang with
+// no output. There is no retry of the update behind it.
+func acquireLock(ctx context.Context, path string) (*flock, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o644) //nolint:gosec // path is caller-controlled, permission is read-only
 	if err != nil {
 		return nil, fmt.Errorf("open lock file %s: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("flock LOCK_EX %s: %w", path, err)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return &flock{f: f, path: path}, nil
+		}
+		if !isWouldBlock(err) {
+			_ = f.Close()
+			return nil, fmt.Errorf("flock LOCK_EX %s: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, fmt.Errorf("another process holds the update lock %s: %w", path, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
-	return &flock{f: f, path: path}, nil
 }
 
 // tryLock attempts to acquire an exclusive advisory flock with a

@@ -19,6 +19,66 @@ proof = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(proof)
 
 
+class VanishingAccessibleTests(unittest.TestCase):
+    """The accessibility tree moves under the reader: rows and children go away
+    between the listing and the read. A live desktop is exactly that race, and
+    on 2026-10-31 it killed the proof with
+    `'NoneType' object has no attribute 'getRoleName'` (nocx-vh2hr.1.8)."""
+
+    class Node:
+        def __init__(self, name="", role="push button", children=()):
+            self.name, self.role = name, role
+            self._children = list(children)
+
+        @property
+        def childCount(self):
+            return len(self._children)
+
+        def getChildAtIndex(self, index):
+            # The toolkit answers None for a row it has already dropped.
+            if index >= len(self._children):
+                return None
+            return self._children[index]
+
+        def getRoleName(self):
+            return self.role
+
+        def getState(self):
+            raise RuntimeError("accessible is defunct")
+
+    def test_a_vanished_child_is_skipped_not_yielded(self):
+        tree = self.Node("root", children=[self.Node("kept"), None])
+        names = [node.name for node in proof.descendants(tree)]
+        self.assertEqual(names, ["root", "kept"])
+
+    def test_a_none_root_is_no_nodes(self):
+        self.assertEqual(list(proof.descendants(None)), [])
+
+    def test_a_defunct_node_ends_its_own_branch_only(self):
+        tree = self.Node("root", children=[self.Node("kept"), self.Node("gone")])
+        tree._children[1].getRoleName = lambda: (_ for _ in ()).throw(RuntimeError("defunct"))
+        tree._children[1].getState = lambda: (_ for _ in ()).throw(RuntimeError("defunct"))
+        names = [node.name for node in proof.descendants(tree)]
+        self.assertEqual(names, ["root", "kept", "gone"])
+
+    def test_the_channel_reading_survives_a_row_that_vanished_mid_read(self):
+        class Collapsed:
+            def contains(self, flag):
+                return False
+
+        combo = self.Node("Update channel", role="combo box", children=[
+            self.Node("Nightly", role="menu item"),  # getState raises RuntimeError
+        ])
+        combo.getState = Collapsed
+        desktop = proof.Desktop.__new__(proof.Desktop)
+        desktop.named = lambda *args, **kwargs: combo
+        desktop.atspi = mock.Mock(STATE_EXPANDED="expanded", STATE_SELECTED="selected",
+                                  STATE_SHOWING="showing")
+        reading = desktop.channel()
+        self.assertIsNotNone(reading)
+        self.assertEqual(reading.options, ())
+
+
 class CoordinatorTests(unittest.TestCase):
     def test_version_increase_requires_candidate_coordinator(self):
         initial = [{"executable": "/old/nocx-server", "sha256": "old-server"}]

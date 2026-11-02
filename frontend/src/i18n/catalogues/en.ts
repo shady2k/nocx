@@ -7,19 +7,165 @@
  * runtime. Every user-visible string the localisation epic translates gets
  * its key minted here first, namespaced by surface (`settings.ui.language.*`,
  * `connections.title`, …) per the design §"Frontend catalogue shape".
+ *
+ * The Go-minted keys (localisation design Q2, Option B) follow the spellings
+ * LabelKeyFor/DescriptionKeyFor/OptionLabelKeyFor/GroupKeyFor pin in
+ * internal/settings/settings.go and KindLabelKey/KindDescriptionKey pin in
+ * internal/notify/catalogue.go: settings.<key>.label/.description/.option.<v>,
+ * settings.group.<slug>, notify.kind.<id>.label/.description. The values here
+ * are the English prose Go ships beside the keys — copied exactly, so a key
+ * and its fallback can never disagree.
  */
 import type { CatalogueEntry } from '../locale-model'
 
-/**
- * Flat key → string (or plural object) map. This stage carries only the
- * `ui.language` setting chrome plus one key per mechanism the model must
- * prove (a plain string, a plural object); surface translation is stage 3.
- */
 export const en: Readonly<Record<string, CatalogueEntry>> = {
   // ── Settings → Interface → Language chrome ──────────────────────────────
   'settings.ui.language.label': 'Language',
   'settings.ui.language.description':
     'The language nocx speaks in its own screens — settings, prompts and notices. Terminal output is never translated.',
+  'settings.ui.language.option.en': 'English',
+  'settings.ui.language.option.ru': 'Русский',
+
+  // ── Settings declarations (Go: internal/settings/settings.go) ───────────
+  // Order follows the declaration sites in settings.go.
+  'settings.history.enabled.label': 'Keep command history',
+  'settings.history.enabled.description':
+    'Record commands for recall after a restart. When off, new commands are not stored and the recall panel shows only the current session; existing history stays until its retention limit.',
+  'settings.skills.enabled.label': 'Enable skills',
+  'settings.skills.enabled.description': 'Allow the assistant to discover and use local skills.',
+  'settings.skills.idleDays.label': 'Switch off unused skills after',
+  'settings.skills.idleDays.description':
+    'A skill nobody has used for this long is switched off, and the row says nocx did it. Turning it back on clears that mark. Built-in skills are never switched off this way.',
+  'settings.worktrees.idleDays.label': 'Remove unused worker checkouts after',
+  'settings.worktrees.idleDays.description':
+    'A worker checkout nocx created that nothing has used for this long is removed by the daily sweep. Only the checkout goes — its branch and every commit on it stay — and one holding uncommitted work is never removed.',
+  'settings.skills.readingMinutes.label': 'Give up on a skill reading after',
+  'settings.skills.readingMinutes.description':
+    'The longest one check of a skill may take, counted over every file it reads and the conclusion it draws. When it is reached the check stops and says so, and nothing is stored. A local model on a large skill can need several minutes; a hosted one is usually done inside one.',
+  'settings.history.retentionDays.label': 'Keep history for',
+  'settings.history.retentionDays.description':
+    "How long a completed command is kept. Older commands are removed from nocx — removal is not secure erasure, deleted rows can remain in the database file's free space.",
+  'settings.history.retentionMiB.label': 'Command history size',
+  'settings.history.retentionMiB.description':
+    'How much command text to keep. When it is reached the oldest commands are removed from nocx (again, not securely erased). The on-disk footprint is larger than this number: measured ~3.2x — 256 MiB of content is about 811 MiB on disk — because of the search index and encrypted pages.',
+  'settings.history.diskCeilingMiB.label': 'Disk space limit',
+  'settings.history.diskCeilingMiB.description':
+    'Physical ceiling for the history database plus its write-ahead log. A separate number from the content size: deleting content shrinks what you keep, not necessarily the file. When this is reached the store compacts rather than deleting more.',
+  'settings.history.outputEnabled.label': 'Keep command output',
+  'settings.history.outputEnabled.description':
+    'Whether the text commands printed is kept alongside the commands. Output is larger and more sensitive than the command line; commands are kept without output when this is off.',
+  'settings.history.outputCapKB.label': 'Keep per command, at most',
+  'settings.history.outputCapKB.description':
+    "How much of one command's output is kept. Past this the beginning and the end are kept, the middle is dropped, and the block says so.",
+  'settings.history.helperBufferMB.label': "Output buffer on the shell's machine",
+  'settings.history.helperBufferMB.description':
+    'How much command output the machine running the shell holds for nocx while the connection is slow, per session. Past it the command running at that moment is kept as "Output incomplete", and output is kept again from the next command. Applies to sessions opened after the change.',
+  'settings.history.coordinatorBufferMB.label': 'Output buffer in nocx',
+  'settings.history.coordinatorBufferMB.description':
+    'How much command output nocx holds in memory while saving it to history is slow, per session. Past it the command running at that moment is kept as "Output incomplete", and output is kept again from the next command. Applies to sessions opened after the change.',
+  'settings.clipboard.osc52Suppressed.label': 'Suppress OSC 52 clipboard warnings',
+  'settings.clipboard.osc52Suppressed.description':
+    'When enabled, the permission banner for OSC 52 clipboard writes is permanently suppressed. The clipboard stays protected — this only hides the repeated prompt.',
+  'settings.update.channel.label': 'Update channel',
+  'settings.update.channel.description':
+    'Stable checks the signed manifest of the latest release. Nightly checks the nightly channel — a build made from main every night it moved, not tried by anyone before you. Switching back to stable never downgrades: you wait for the next stable release or install it by hand.',
+  'settings.update.channel.option.stable': 'Stable',
+  'settings.update.channel.option.nightly': 'Nightly',
+  'settings.tab.placement.label': 'Tab placement',
+  'settings.tab.placement.description':
+    'Horizontal displays tabs across the top of the window, as in a traditional terminal. Vertical lists tabs on the side, as in an IDE.',
+  'settings.tab.placement.option.horizontal': 'Horizontal',
+  'settings.tab.placement.option.vertical': 'Vertical',
+  'settings.ssh.reconnect.label': 'When an SSH connection is lost',
+  'settings.ssh.reconnect.description':
+    'Ask offers a button on the tab. Automatically opens a new shell at the same endpoint by itself, and falls back to the button when the attempts are spent. Never leaves the tab alone with the button. In every case the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.',
+  'settings.ssh.reconnect.option.ask': 'Ask',
+  'settings.ssh.reconnect.option.auto': 'Automatically',
+  'settings.ssh.reconnect.option.never': 'Never',
+  'settings.restore.onStartup.label': 'Reopen tabs and panes on startup',
+  'settings.restore.onStartup.description':
+    'Reopen the workspaces, tabs and panes you left, each with the commands it ran. The shells themselves are new: a local pane starts a fresh shell in the same directory, and nothing that was running comes back. Off opens on an empty window: the tabs you had are closed, not deleted, and the commands they ran stay in your history — but they are not waiting for you if you turn this back on.',
+  'settings.terminal.wrapOutput.label': 'Wrap long output lines',
+  'settings.terminal.wrapOutput.description':
+    "Wrap a command's output at the width of the block instead of scrolling it sideways. Any block can be switched the other way from its own ⋮ menu; this is what a block does until you do.",
+  'settings.ui.theme.label': 'Theme',
+  'settings.ui.theme.description':
+    'The colour theme applied to the UI and terminal panes. Changing the theme repaints all open terminals in place without restarting them.',
+  'settings.ui.theme.option.graphite': 'Graphite',
+  'settings.ui.theme.option.tokyo-night': 'Tokyo Night',
+  'settings.ui.theme.option.light': 'Light',
+  'settings.ui.theme.option.ayu-dark': 'Ayu Dark',
+  'settings.ui.theme.option.catppuccin-latte': 'Catppuccin Latte',
+  'settings.ui.theme.option.catppuccin-mocha': 'Catppuccin Mocha',
+  'settings.ui.theme.option.dracula': 'Dracula',
+  'settings.ui.theme.option.gruvbox-dark': 'Gruvbox Dark',
+  'settings.ui.theme.option.nord': 'Nord',
+  'settings.ui.theme.option.one-dark': 'One Dark',
+  'settings.ui.theme.option.rose-pine': 'Rosé Pine',
+  'settings.ui.theme.option.solarized-dark': 'Solarized Dark',
+  'settings.ui.theme.option.solarized-light': 'Solarized Light',
+  'settings.assistant.personalInstructions.label': 'Your instructions to the assistant',
+  'settings.assistant.personalInstructions.description':
+    "Standing instructions added to the end of every question you ask the assistant — how you like answers, what this machine is, anything you would otherwise repeat. They come last, so where they contradict nocx's own instructions yours win. They are not permissions: what the assistant may do is decided on the Assistant permissions page, and nothing written here changes it.",
+  'settings.assistant.expandReasoning.label': "Always show the model's thinking",
+  'settings.assistant.expandReasoning.description':
+    'Open the thinking note on every answer instead of leaving it collapsed. You can still close any single note by clicking it, and a model that returns no thinking still shows nothing at all.',
+  'settings.assistant.runWallClockMinutes.label': "Stop an assistant's command after",
+  'settings.assistant.runWallClockMinutes.description':
+    'The longest one command the assistant runs may take, counted from when it starts and reset by nothing. When it is reached the command is stopped and the assistant is told which bound ended it. The assistant can ask for less on a single command; it can never ask for more than this.',
+  'settings.assistant.runQuietMinutes.label': 'Ask about a silent command after',
+  'settings.assistant.runQuietMinutes.description':
+    'How long a command the assistant runs may print nothing before nocx asks the assistant whether it is still worth waiting for. The command is not stopped: the assistant answers, and it is the assistant — not you — that is interrupted. The timer restarts on every line the command prints, so a slow but talkative command never reaches it.',
+  'settings.terminal.scrollbackLines.label': 'Scroll back, at most',
+  'settings.terminal.scrollbackLines.description':
+    "How many lines of output the live terminal keeps above the current screen. Pruning happens in whole pages (about 400 KB each), so the terminal usually keeps somewhat more than this — by dozens of lines, sometimes a hundred. Heavily styled output keeps fewer, because the emulator's internal memory ceiling is reached first. Lowering the value prunes live scrollback immediately. Set to 0 for no live scrollback; output remains available to durable capture.",
+  'settings.terminal.fontFamily.label': 'Font family',
+  'settings.terminal.fontFamily.description':
+    "The monospace font for terminal output and the command editor. Nordwand Mono is bundled and works offline; System default uses the theme's original font stack.",
+  'settings.terminal.fontFamily.option.system': 'System default',
+  'settings.terminal.fontFamily.option.nordwand-mono': 'Nordwand Mono',
+  'settings.pets.enabled.label': 'Keep a pet',
+  'settings.pets.enabled.description':
+    'A small animal lives on the top edges of your finished command blocks and reacts to how each command turned out. It cannot be clicked, never takes focus, and covers nothing you can interact with.',
+  'settings.pets.size.label': 'Pet size',
+  'settings.pets.size.description':
+    'How tall the animal is drawn. It also decides which command blocks it can stand on: a block with less clear space above it than the animal is tall is not offered as ground.',
+  'settings.pets.pack.label': 'Pet',
+  'settings.pets.pack.description':
+    'Which animal lives in your terminal. All of them behave the same; a colour that is missing a drawing simply does not do that one thing.',
+  'settings.pets.pack.option.cat-1': 'Ginger cat',
+  'settings.pets.pack.option.cat-2': 'Black cat',
+  'settings.pets.pack.option.cat-3': 'Brown cat',
+  'settings.pets.pack.option.cat-4': 'Sphynx cat',
+  'settings.pets.pack.option.cat-5': 'White longhair cat',
+  'settings.pets.pack.option.cat-6': 'Grey cat',
+
+  // ── Settings rail groups (Go: RegisterGroup titles) ─────────────────────
+  'settings.group.assistant': 'Assistant',
+  'settings.group.vault': 'Vault',
+  'settings.group.application': 'Application',
+  'settings.group.developer': 'Developer',
+
+  // ── Notification kinds (Go: internal/notify/catalogue.go) ───────────────
+  'notify.kind.blockFinished.label': 'Command finished',
+  'notify.kind.blockFinished.description':
+    "nocx's own block ledger recorded that a command finished.",
+  'notify.kind.sessionEnded.label': 'Session ended',
+  'notify.kind.sessionEnded.description':
+    "nocx's own session registry recorded that a session ended.",
+  'notify.kind.transferFinished.label': 'File transfer finished',
+  'notify.kind.transferFinished.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end.",
+  'notify.kind.programNotify.label': 'Program notification request',
+  'notify.kind.programNotify.description': 'A program printed OSC 9 or OSC 777 to ask for one.',
+  'notify.kind.bell.label': 'Terminal bell',
+  'notify.kind.bell.description': 'A program printed BEL.',
+  'notify.kind.coordinatorStalled.label': 'A coordinator is not reading its workers',
+  'notify.kind.coordinatorStalled.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live.",
+  'notify.kind.paneWorkFinished.label': 'Work seems to have finished',
+  'notify.kind.paneWorkFinished.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine.",
 
   // ── Mechanism samples ───────────────────────────────────────────────────
   // A plain string: the base case every translated surface will use.

@@ -562,4 +562,68 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'endpoints.saveFailed': 'Не удалось сохранить эндпоинт:',
   'endpoints.deleted': 'Удалено',
   'endpoints.deleteFailedHead': 'Не удалось удалить',
+  // ── Quick connect surface (frontend/src/quick-connect.tsx) ──────────────
+  // The palette's type vocabulary — the badge on the right of each row.
+  'quickConnect.kind.command': 'Команда',
+  'quickConnect.kind.host': 'Хост',
+  'quickConnect.kind.setting': 'Настройка',
+  'quickConnect.kind.secret': 'Секрет',
+  'quickConnect.kind.snippet': 'Сниппет',
+  // Provider group headings.
+  'quickConnect.group.commands': 'Команды',
+  'quickConnect.group.ssh': 'SSH-подключения',
+  'quickConnect.group.sshAliases': 'Алиасы SSH',
+  'quickConnect.group.secrets': 'Секреты',
+  'quickConnect.group.quickConnect': 'Быстрое подключение',
+  // The commands provider's rows.
+  'quickConnect.actions.localShell': 'Локальная оболочка',
+  'quickConnect.actions.localShellDetail': 'Открыть новую вкладку локального терминала',
+  'quickConnect.actions.newConnection': 'Новое подключение',
+  'quickConnect.actions.newConnectionDetail': 'Настройте SSH-подключение в настройках',
+  // The alias provider's degraded-resolver row.
+  'quickConnect.aliases.configHead': 'SSH-конфиг:',
+  // The ad-hoc fallback row.
+  'quickConnect.adhoc.connectTo': 'Подключиться к',
+  'quickConnect.adhoc.portDetail': 'порт',
+  // Vault kinds, as the secrets provider subtitles them.
+  'quickConnect.secretKind.password': 'Пароль',
+  'quickConnect.secretKind.keyPassphrase': 'Парольная фраза',
+  'quickConnect.secretKind.privateKey': 'Приватный ключ',
+  'quickConnect.secretKind.publicKey': 'Публичный ключ',
+  'quickConnect.secretKind.otpSeed': 'Seed одноразового пароля',
+  // Empty and degraded states.
+  'quickConnect.state.loading': 'Загрузка…',
+  'quickConnect.state.noMatches': 'Ничего не найдено',
+  'quickConnect.state.noMatchingHead': 'Не найдено:',
+  'quickConnect.state.parseFailedHead': 'Не удалось разобрать',
+  'quickConnect.state.parseFailedHint':
+    'используйте формат «user@host:port» или «ssh://user@host:port»',
+  // Drill-in.
+  'quickConnect.drill.stepLoadFailedHead': 'Не удалось загрузить:',
+  // Russian folds step names into the genitive without a suffix, so the
+  // English plural tail is empty here.
+  'quickConnect.drill.pluralTail': '',
+  // Search field.
+  'quickConnect.search.filterHead': 'Фильтр:',
+  'quickConnect.search.hosts': 'Введите для фильтрации…',
+  'quickConnect.search.secrets': 'Введите для фильтрации секретов…',
+  'quickConnect.search.snippets': 'Введите для фильтрации сниппетов…',
+  'quickConnect.search.palette': 'Поиск команд и хостов…',
+  // Accessible names.
+  'quickConnect.aria.drillPath': 'Путь детализации',
+  'quickConnect.aria.connectionList': 'Список подключений',
+  'quickConnect.aria.filterHosts': 'Фильтр быстрого подключения',
+  'quickConnect.aria.filterSecrets': 'Фильтр секретов',
+  'quickConnect.aria.filterSnippets': 'Фильтр сниппетов',
+  'quickConnect.aria.filterPalette': 'Фильтр палитры команд',
+  // Row fallbacks.
+  'quickConnect.item.aliasBadge': 'алиас',
+  // The vault offers, keyed at this surface — the words themselves are the
+  // picker's exported sentences (ui/secret-picker.ts), which never imports
+  // i18n.
+  'quickConnect.vault.offerSetup': 'Настройте хранилище, чтобы хранить секреты',
+  'quickConnect.vault.offerUnseal': 'Разблокируйте хранилище, чтобы использовать секреты',
+  'quickConnect.vault.addSecret': 'Добавить секрет…',
+  'quickConnect.vault.addNamedSecretHead': 'Добавить',
+  'quickConnect.vault.addNamedSecretTail': 'в хранилище…',
 }

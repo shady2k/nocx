@@ -539,4 +539,67 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'endpoints.saveFailed': 'Could not save the endpoint:',
   'endpoints.deleted': 'Deleted',
   'endpoints.deleteFailedHead': 'Could not delete',
+  // ── Quick connect surface (frontend/src/quick-connect.tsx) ──────────────
+  // The palette's type vocabulary — the badge on the right of each row.
+  'quickConnect.kind.command': 'Command',
+  'quickConnect.kind.host': 'Host',
+  'quickConnect.kind.setting': 'Setting',
+  'quickConnect.kind.secret': 'Secret',
+  'quickConnect.kind.snippet': 'Snippet',
+  // Provider group headings.
+  'quickConnect.group.commands': 'Commands',
+  'quickConnect.group.ssh': 'SSH Connections',
+  'quickConnect.group.sshAliases': 'SSH Aliases',
+  'quickConnect.group.secrets': 'Secrets',
+  'quickConnect.group.quickConnect': 'Quick Connect',
+  // The commands provider's rows.
+  'quickConnect.actions.localShell': 'Local shell',
+  'quickConnect.actions.localShellDetail': 'Open a new local terminal tab',
+  'quickConnect.actions.newConnection': 'New connection',
+  'quickConnect.actions.newConnectionDetail': 'Define an SSH connection in Settings',
+  // The alias provider's degraded-resolver row.
+  'quickConnect.aliases.configHead': 'SSH config:',
+  // The ad-hoc fallback row.
+  'quickConnect.adhoc.connectTo': 'Connect to',
+  'quickConnect.adhoc.portDetail': 'port',
+  // Vault kinds, as the secrets provider subtitles them.
+  'quickConnect.secretKind.password': 'Password',
+  'quickConnect.secretKind.keyPassphrase': 'Key passphrase',
+  'quickConnect.secretKind.privateKey': 'Private key',
+  'quickConnect.secretKind.publicKey': 'Public key',
+  'quickConnect.secretKind.otpSeed': 'One-time-password seed',
+  // Empty and degraded states.
+  'quickConnect.state.loading': 'Loading…',
+  'quickConnect.state.noMatches': 'No matches',
+  'quickConnect.state.noMatchingHead': 'No matching',
+  'quickConnect.state.parseFailedHead': 'Could not parse',
+  'quickConnect.state.parseFailedHint': 'try "user@host:port" or "ssh://user@host:port"',
+  // Drill-in.
+  'quickConnect.drill.stepLoadFailedHead': 'Could not load',
+  // English plural tail for drill step names ("servers", "ports"); locales
+  // without one carry the empty string.
+  'quickConnect.drill.pluralTail': 's',
+  // Search field.
+  'quickConnect.search.filterHead': 'Filter',
+  'quickConnect.search.hosts': 'Type to filter…',
+  'quickConnect.search.secrets': 'Type to filter secrets…',
+  'quickConnect.search.snippets': 'Type to filter snippets…',
+  'quickConnect.search.palette': 'Search commands and hosts…',
+  // Accessible names.
+  'quickConnect.aria.drillPath': 'Drill-in path',
+  'quickConnect.aria.connectionList': 'Connection list',
+  'quickConnect.aria.filterHosts': 'Quick connect filter',
+  'quickConnect.aria.filterSecrets': 'Secret filter',
+  'quickConnect.aria.filterSnippets': 'Snippet filter',
+  'quickConnect.aria.filterPalette': 'Command palette filter',
+  // Row fallbacks.
+  'quickConnect.item.aliasBadge': 'alias',
+  // The vault offers, keyed at this surface — the words themselves are the
+  // picker's exported sentences (ui/secret-picker.ts), which never imports
+  // i18n.
+  'quickConnect.vault.offerSetup': 'Set up the vault to store secrets',
+  'quickConnect.vault.offerUnseal': 'Unlock the vault to use its secrets',
+  'quickConnect.vault.addSecret': 'Add a secret…',
+  'quickConnect.vault.addNamedSecretHead': 'Add',
+  'quickConnect.vault.addNamedSecretTail': 'to the vault…',
 }

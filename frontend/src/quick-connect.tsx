@@ -69,6 +69,7 @@ import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
 import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
 import { aliasRows, profileRows } from './quick-connect-assembly'
+import { t } from './i18n/locale-model'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public interfaces
@@ -78,12 +79,22 @@ import { aliasRows, profileRows } from './quick-connect-assembly'
  *  each row in palette mode (nocx-4t37). */
 export type QuickConnectItemKind = 'command' | 'host' | 'setting' | 'secret' | 'snippet'
 
-const KIND_LABELS: Record<QuickConnectItemKind, string> = {
-  command: 'Command',
-  host: 'Host',
-  setting: 'Setting',
-  secret: 'Secret',
-  snippet: 'Snippet',
+/** The palette's type vocabulary — rendered as the badge on the right of
+ *  each row in palette mode (nocx-4t37). Display-only, so the words are
+ *  looked up at the render site and a locale switch re-renders them. */
+function kindLabel(kind: QuickConnectItemKind): string {
+  switch (kind) {
+    case 'command':
+      return t('quickConnect.kind.command', 'Command')
+    case 'host':
+      return t('quickConnect.kind.host', 'Host')
+    case 'setting':
+      return t('quickConnect.kind.setting', 'Setting')
+    case 'secret':
+      return t('quickConnect.kind.secret', 'Secret')
+    case 'snippet':
+      return t('quickConnect.kind.snippet', 'Snippet')
+  }
 }
 
 export interface QuickConnectItem {
@@ -245,7 +256,10 @@ function drillItem(cmd: DrillCommand): QuickConnectItem {
 
 export class ActionsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'actions'
-  readonly label = 'Commands'
+  /** Display-only; a getter so a locale switch is picked up. */
+  get label(): string {
+    return t('quickConnect.group.commands', 'Commands')
+  }
   readonly kinds = ['command', 'host'] as const
 
   constructor(
@@ -261,8 +275,8 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
       {
         id: '__local__',
         kind: 'command',
-        label: 'Local shell',
-        detail: 'Open a new local terminal tab',
+        label: t('quickConnect.actions.localShell', 'Local shell'),
+        detail: t('quickConnect.actions.localShellDetail', 'Open a new local terminal tab'),
         run: () => void this.newPane(),
       },
       {
@@ -274,8 +288,11 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         allowInHosts: true,
         id: '__new_connection__',
         kind: 'command',
-        label: 'New connection',
-        detail: 'Define an SSH connection in Settings',
+        label: t('quickConnect.actions.newConnection', 'New connection'),
+        detail: t(
+          'quickConnect.actions.newConnectionDetail',
+          'Define an SSH connection in Settings',
+        ),
         run: () => this.newConnection(),
       },
     ]
@@ -342,7 +359,10 @@ export class SSHQuickConnectProvider<
   F extends SSHPaneOpener = SSHPaneOpener,
 > implements QuickConnectProvider {
   readonly id = 'ssh'
-  readonly label = 'SSH Connections'
+  /** Display-only; a getter so a locale switch is picked up. */
+  get label(): string {
+    return t('quickConnect.group.ssh', 'SSH Connections')
+  }
   readonly kinds = ['host'] as const
 
   constructor(
@@ -378,7 +398,10 @@ export class SSHAliasQuickConnectProvider<
   F extends HostPaneOpener = HostPaneOpener,
 > implements QuickConnectProvider {
   readonly id = 'ssh-aliases'
-  readonly label = 'SSH Aliases'
+  /** Display-only; a getter so a locale switch is picked up. */
+  get label(): string {
+    return t('quickConnect.group.sshAliases', 'SSH Aliases')
+  }
   readonly kinds = ['host'] as const
 
   constructor(
@@ -401,7 +424,7 @@ export class SSHAliasQuickConnectProvider<
         {
           id: '__ssh_aliases_unavailable__',
           kind: 'host' as const,
-          label: `SSH config: ${response.unavailable.reason}`,
+          label: `${t('quickConnect.aliases.configHead', 'SSH config:')} ${response.unavailable.reason}`,
           detail: response.unavailable.detail,
           system: true,
           run: () => {},
@@ -470,7 +493,10 @@ export interface SecretsProviderDeps {
 
 export class SecretsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'secrets'
-  readonly label = 'Secrets'
+  /** Display-only; a getter so a locale switch is picked up. */
+  get label(): string {
+    return t('quickConnect.group.secrets', 'Secrets')
+  }
   readonly kinds = ['secret'] as const
 
   /** Whether the last getItems saw a vault that can hold a new secret. The
@@ -496,7 +522,8 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
         {
           id: SETUP_VAULT_ROW_ID,
           kind: 'secret',
-          label: VAULT_OFFER_SETUP,
+          // Same keying-at-the-consumer rule as the unseal offer above.
+          label: t('quickConnect.vault.offerSetup', VAULT_OFFER_SETUP),
           run: () => this.deps.requestSetup(),
         },
       ]
@@ -514,7 +541,7 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
         id: e.id,
         kind: 'secret' as const,
         label: e.name,
-        detail: SECRET_KIND_DETAIL[e.kind] ?? e.kind,
+        detail: secretKindDetail(e.kind),
         run: () => this.deps.insert(e.name),
       }))
     } catch {
@@ -522,7 +549,11 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
         {
           id: UNSEAL_VAULT_ROW_ID,
           kind: 'secret',
-          label: VAULT_OFFER_UNSEAL,
+          // The offer's words are the picker's exported sentences, keyed
+          // here — this surface's catalogue entry — rather than in ui/,
+          // which never imports i18n. The constant stays the English
+          // fallback.
+          label: t('quickConnect.vault.offerUnseal', VAULT_OFFER_UNSEAL),
           run: () => this.deps.requestUnseal(),
         },
       ]
@@ -541,7 +572,13 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
       {
         id: CREATE_SECRET_ROW_ID,
         kind: 'secret',
-        label: addSecretLabel(typed),
+        // The picker's create sentence, keyed at this consumer: the
+        // English head comes from addSecretLabel's own shape, the
+        // catalogue carries the translation around the typed name.
+        label:
+          typed === ''
+            ? t('quickConnect.vault.addSecret', addSecretLabel(typed))
+            : `${t('quickConnect.vault.addNamedSecretHead', 'Add')} "${typed}" ${t('quickConnect.vault.addNamedSecretTail', 'to the vault…')}`,
         run: () => this.deps.create(typed),
       },
     ]
@@ -555,13 +592,23 @@ const SETUP_VAULT_ROW_ID = '__setup_vault__'
 const UNSEAL_VAULT_ROW_ID = '__unseal_vault__'
 
 /** What each vault kind is, in the words a person picking one would use.
- *  The vocabulary is the registry's closed set (contracts/vault.inventory). */
-const SECRET_KIND_DETAIL: Record<string, string> = {
-  password: 'Password',
-  'key-passphrase': 'Key passphrase',
-  'private-key': 'Private key',
-  'public-key': 'Public key',
-  'otp-seed': 'One-time-password seed',
+ *  The vocabulary is the registry's closed set (contracts/vault.inventory).
+ *  Display-only, so the words are looked up per call. */
+function secretKindDetail(kind: string): string {
+  switch (kind) {
+    case 'password':
+      return t('quickConnect.secretKind.password', 'Password')
+    case 'key-passphrase':
+      return t('quickConnect.secretKind.keyPassphrase', 'Key passphrase')
+    case 'private-key':
+      return t('quickConnect.secretKind.privateKey', 'Private key')
+    case 'public-key':
+      return t('quickConnect.secretKind.publicKey', 'Public key')
+    case 'otp-seed':
+      return t('quickConnect.secretKind.otpSeed', 'One-time-password seed')
+    default:
+      return kind
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -579,7 +626,10 @@ export class AdHocQuickConnectProvider<
   F extends HostPaneOpener = HostPaneOpener,
 > implements QuickConnectProvider {
   readonly id = 'ad-hoc'
-  readonly label = 'Quick Connect'
+  /** Display-only; a getter so a locale switch is picked up. */
+  get label(): string {
+    return t('quickConnect.group.quickConnect', 'Quick Connect')
+  }
   readonly kinds = ['host'] as const
 
   constructor(private newPaneByHost: F & CallableWith<F, 3>) {}
@@ -605,8 +655,11 @@ export class AdHocQuickConnectProvider<
       {
         id: '__ad_hoc_connect__',
         kind: 'host',
-        label: `Connect to ${user ? `${user}@` : ''}${host}`,
-        detail: port != null && port !== 22 ? `port ${port}` : undefined,
+        label: `${t('quickConnect.adhoc.connectTo', 'Connect to')} ${user ? `${user}@` : ''}${host}`,
+        detail:
+          port != null && port !== 22
+            ? `${t('quickConnect.adhoc.portDetail', 'port')} ${port}`
+            : undefined,
         system: true,
         badge: 'ad-hoc',
         run: () => void this.newPaneByHost(host, user, port),
@@ -761,7 +814,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
       choices = [
         {
           id: '__step_error__',
-          label: `Could not load ${step.name}s`,
+          label: `${t('quickConnect.drill.stepLoadFailedHead', 'Could not load')} ${step.name}${t('quickConnect.drill.pluralTail', 's')}`,
           detail: msg,
           system: true,
         },
@@ -946,7 +999,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     if (!hadAtOrColon) return null
     const parsed = parseQuickConnect(q)
     if (parsed.options.host != null && parsed.options.host.trim() !== '') return null
-    return `Could not parse "${q}": try "user@host:port" or "ssh://user@host:port"`
+    return `${t('quickConnect.state.parseFailedHead', 'Could not parse')} "${q}": ${t('quickConnect.state.parseFailedHint', 'try "user@host:port" or "ssh://user@host:port"')}`
   })
 
   // Clamp selected index when the filtered list changes.
@@ -1021,10 +1074,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   }
 
   const emptyMessage = createMemo(() => {
-    if (loadingItems()) return 'Loading…'
+    if (loadingItems()) return t('quickConnect.state.loading', 'Loading…')
     if (parseFailureMessage() != null) return parseFailureMessage()
-    if (drill()) return `No matching ${currentStep()?.name}s`
-    return 'No matches'
+    if (drill())
+      return `${t('quickConnect.state.noMatchingHead', 'No matching')} ${currentStep()?.name}${t('quickConnect.drill.pluralTail', 's')}`
+    return t('quickConnect.state.noMatches', 'No matches')
   })
 
   return (
@@ -1033,7 +1087,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
         {/* Drill-in breadcrumbs: the command's path, walked back one step at
             a time with Backspace or Escape. */}
         <Show when={drill()}>
-          <div class="quick-connect__drill" role="presentation" aria-label="Drill-in path">
+          <div
+            class="quick-connect__drill"
+            role="presentation"
+            aria-label={t('quickConnect.aria.drillPath', 'Drill-in path')}
+          >
             <span class="quick-connect__drill-step">{drill()!.command.label}</span>
             <For each={drill()!.selections}>
               {(sel) => (
@@ -1059,25 +1117,25 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
             onInput={setQuery}
             placeholder={
               drill()
-                ? `Filter ${currentStep()?.name}s…`
+                ? `${t('quickConnect.search.filterHead', 'Filter')} ${currentStep()?.name}${t('quickConnect.drill.pluralTail', 's')}…`
                 : props.variant === 'hosts'
-                  ? 'Type to filter…'
+                  ? t('quickConnect.search.hosts', 'Type to filter…')
                   : props.variant === 'secrets'
-                    ? 'Type to filter secrets…'
+                    ? t('quickConnect.search.secrets', 'Type to filter secrets…')
                     : props.variant === 'snippets'
-                      ? 'Type to filter snippets…'
-                      : 'Search commands and hosts…'
+                      ? t('quickConnect.search.snippets', 'Type to filter snippets…')
+                      : t('quickConnect.search.palette', 'Search commands and hosts…')
             }
             ariaLabel={
               drill()
-                ? `Filter ${currentStep()?.name}s`
+                ? `${t('quickConnect.search.filterHead', 'Filter')} ${currentStep()?.name}${t('quickConnect.drill.pluralTail', 's')}`
                 : props.variant === 'hosts'
-                  ? 'Quick connect filter'
+                  ? t('quickConnect.aria.filterHosts', 'Quick connect filter')
                   : props.variant === 'secrets'
-                    ? 'Secret filter'
+                    ? t('quickConnect.aria.filterSecrets', 'Secret filter')
                     : props.variant === 'snippets'
-                      ? 'Snippet filter'
-                      : 'Command palette filter'
+                      ? t('quickConnect.aria.filterSnippets', 'Snippet filter')
+                      : t('quickConnect.aria.filterPalette', 'Command palette filter')
             }
           />
         </div>
@@ -1097,7 +1155,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
           when={filteredItems().length > 0}
           fallback={<div class="quick-connect__empty">{emptyMessage()}</div>}
         >
-          <div class="quick-connect__list" role="listbox" aria-label="Connection list">
+          <div
+            class="quick-connect__list"
+            role="listbox"
+            aria-label={t('quickConnect.aria.connectionList', 'Connection list')}
+          >
             <For each={filteredItems()}>
               {(item, index) => (
                 <>
@@ -1126,13 +1188,15 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                   >
                     <span class="quick-connect__item-label">{item.label}</span>
                     <Show when={item.system === true}>
-                      <span class="quick-connect__item-badge">{item.badge ?? 'alias'}</span>
+                      <span class="quick-connect__item-badge">
+                        {item.badge ?? t('quickConnect.item.aliasBadge', 'alias')}
+                      </span>
                     </Show>
                     <Show when={item.detail !== undefined}>
                       <span class="quick-connect__item-detail">{item.detail}</span>
                     </Show>
                     <Show when={props.variant === 'palette' && drill() === null}>
-                      <span class="quick-connect__item-kind">{KIND_LABELS[item.kind]}</span>
+                      <span class="quick-connect__item-kind">{kindLabel(item.kind)}</span>
                     </Show>
                     <Show when={item.action !== undefined} keyed>
                       <span class="quick-connect__item-action">

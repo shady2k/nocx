@@ -32,11 +32,17 @@ type SessionOperation interface {
 	Run(context.Context, func(context.Context, SessionService) error) error
 }
 
-// SessionEndOperation retires one authoritative ID under the session gate,
-// then ends its process under the execution lane alone. Before runs after
+// SessionEndOperation retires one authoritative ID under the session gate and
+// the execution lane, and releases BOTH at retirement. Before runs after
 // retirement and before teardown, so transport can mark the expected exit and
 // cancel the session's resize lane without exposing the ID to another attach.
 // A non-nil returned session means retirement committed even if teardown failed.
+//
+// The lane's interval ends at the retirement commit, not at process completion.
+// A teardown can wait on a helper or an ssh channel, and a lane permit held
+// across that wait is a slow holder of the control plane: it refuses unrelated
+// work while the session is already retired. The close still does not RETURN
+// until teardown settles, so its caller still learns the teardown's outcome.
 type SessionEndOperation interface {
 	AssistantOperation
 	Run(context.Context, func(session.Session)) (session.Session, error)
@@ -161,10 +167,19 @@ func (op *sessionEndOperation) Run(ctx context.Context, before func(session.Sess
 	if err != nil {
 		return nil, err
 	}
-	// Retirement is the commit point. Cancellation or a failing callback may
-	// not strand the removed process; completion precedes releasing the lane.
-	defer func() { err = finish() }()
+	// Retirement is the commit point, and it is where BOTH intervals close:
+	// before it the close may still be refused and leave the session live;
+	// after it the identity is gone and nothing can conflict with it. The
+	// teardown below may wait on a helper or an ssh channel, and holding a
+	// lane permit across that wait refuses unrelated control work while the
+	// session is already retired. The deferred releases remain the failure
+	// path's answer; Release is idempotent.
+	lanePermit.Release()
 	sessionPermit.Release()
+	// Cancellation or a failing callback may not strand the removed process;
+	// completion still runs before this call returns, so the caller is told
+	// the teardown's outcome.
+	defer func() { err = finish() }()
 	before(sess)
 	return sess, nil
 }

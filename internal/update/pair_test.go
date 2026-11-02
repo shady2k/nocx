@@ -1,14 +1,18 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -98,6 +102,54 @@ func assertNotFinalised(t *testing.T, installPath, jp string) {
 // health report from a pre-existing pair must still preserve rollback until
 // the installed coordinator runs. This is updater acceptance, not permission
 // for the current launcher to reuse an older Version.
+// The one outcome that changes no file used to leave no trace: a health report
+// that finds the installed bundle is not the exchanged one says "nothing to
+// report" and returns, which to a person, a log and the proof is
+// indistinguishable from having finalised. That is the state the nightly's
+// Linux proof was left in — journal present, no backup, not one word about why
+// (nocx-vh2hr.1.8).
+func TestReportHealthy_SaysWhenTheExchangeIsNotOnDisk(t *testing.T) {
+	useStampedTestBuild(t)
+	dir := t.TempDir()
+	install := filepath.Join(dir, "nocx.AppImage")
+	makeMinimalAppImage(t, install)
+	jp := testJournalPath(t, install)
+	rec := &journalRecord{
+		TxID:        "0.8.1",
+		InstallPath: install,
+		OldBundleID: bundleID{Dev: 1, Ino: 1},
+		// The identity the exchange would have produced. The install path does
+		// not hold it, so this window has nothing to finalise — and must say so.
+		NewBundleID:    bundleID{Dev: 2, Ino: 2},
+		FromVersion:    "0.8.1",
+		ToVersion:      "0.8.1",
+		ToBuild:        version.Identity(),
+		ArtifactSHA256: "abc",
+		LaunchAttempts: 1,
+	}
+	if err := writeJournal(jp, rec); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	u := NewUpdater(UpdaterConfig{
+		Platform:       newFakePlatform(),
+		CurrentVersion: "0.8.1",
+		InstallPath:    install,
+		StateDir:       filepath.Dir(jp),
+		Coordinator:    &stubProbe{},
+		Logger:         log.NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, nil))),
+	})
+	if err := u.ReportHealthy(context.Background()); err != nil {
+		t.Fatalf("ReportHealthy = %v; an unmade exchange is not an error", err)
+	}
+	if !strings.Contains(buf.String(), "the exchanged bundle is not at the install path") {
+		t.Fatalf("the silent outcome was silent again; log was:\n%s", buf.String())
+	}
+	if _, err := os.Stat(jp); err != nil {
+		t.Fatalf("the journal must survive a report that finalised nothing: %v", err)
+	}
+}
+
 func TestReportHealthy_OldCompatibleCoordinator_HoldsTheUpdateWithoutRollback(t *testing.T) {
 	ctx := context.Background()
 	installPath, jp := pendingUpdate(t, "0.1.0", "0.2.0")

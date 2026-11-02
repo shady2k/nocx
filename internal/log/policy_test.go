@@ -58,21 +58,21 @@ func TestOpenFile_AppendsWithoutTruncating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
 	}
-	if _, err := first.WriteString("first line\n"); err != nil {
-		t.Fatal(err)
+	if _, writeErr := first.WriteString("first line\n"); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := first.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	second, err := OpenFile(path)
 	if err != nil {
 		t.Fatalf("second OpenFile: %v", err)
 	}
-	if _, err := second.WriteString("second line\n"); err != nil {
-		t.Fatal(err)
+	if _, writeErr := second.WriteString("second line\n"); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := second.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := second.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	body, err := os.ReadFile(path) //nolint:gosec // this test's own temp directory
 	if err != nil {

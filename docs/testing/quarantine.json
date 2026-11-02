@@ -32,6 +32,14 @@
     {
       "test": "job:ci-mac#575",
       "bead": "nocx-1ebrs.66.1.29"
+    },
+    {
+      "test": "e2e:e2e/running-block-shows-its-own-rows.spec.ts › a running block › that waits keeps its own line and none of the previous output after the pane gets shorter",
+      "bead": "nocx-atpw5.1.23"
+    },
+    {
+      "test": "go:TestAnAttachWithNoSizeReceivesTheScreenTheRuntimeHolds",
+      "bead": "nocx-atpw5.1.24"
     }
   ]
 }

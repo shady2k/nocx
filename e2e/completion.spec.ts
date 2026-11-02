@@ -28,7 +28,7 @@ const fixtureDir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), 'nocx-e2e
 /** cd the session into a fixture dir and wait for the prompt (OSC 7 brings
  *  the new cwd with it). */
 const cdInto = async (page: Page, dir: string) => {
-  await page.keyboard.type(`cd ${dir}`)
+  await typeDraft(page, `cd ${dir}`)
   await page.keyboard.press('Enter')
   await promptReady(page)
 }
@@ -87,6 +87,30 @@ const draft = (page: Page) =>
     for (const ghost of copy.querySelectorAll('.nocx-editor-ghost')) ghost.remove()
     return copy.textContent ?? ''
   })
+
+/**
+ * Type a burst, then wait until the editor's line IS that text.
+ *
+ * `keyboard.type` leaves the characters in the content DOM; CM6 applies them
+ * to the document it answers questions about when its mutation observer runs,
+ * one microtask later. On a loaded webkit worker the whole synthetic burst and
+ * the Tab (or Enter) that follows can be delivered in ONE task, so the gesture
+ * asks about the line one keystroke behind: `cd ` was answered with the
+ * completion for `c` — "c_rehash command" where the test expected `alpha/`
+ * (nocx-atpw5.1.30). The product is right about the document it has; the
+ * reader fired inside the task that made the edit.
+ *
+ * Waiting on the draft is waiting on the observable the typing produces — not
+ * a sleep and not a retry — and it also fails AT THE TYPING LINE when a key
+ * never arrived, instead of three assertions later in the language of the
+ * completion panel. Measured at the editor seam in editor.test.ts
+ * ("the completion asks about the document the person typed, once that edit
+ * has been applied").
+ */
+const typeDraft = async (page: Page, text: string) => {
+  await page.keyboard.type(text)
+  await expect.poll(() => draft(page), { timeout: 5_000, intervals: [50] }).toBe(text)
+}
 
 /**
  * Backspace until the draft is OBSERVED empty, rather than as many times as
@@ -148,7 +172,7 @@ const offeredAsCommand = async (page: Page, probe: { prefix: string; name: strin
     .filter({ hasText: probe.name })
     .filter({ has: page.locator('.ui-floating-panel__source', { hasText: 'command' }) })
     .first()
-  await page.keyboard.type(probe.prefix)
+  await typeDraft(page, probe.prefix)
   await page.keyboard.press('Tab')
   // A BOUNDED WAIT, not isVisible(). isVisible() answers about this instant,
   // and the instant after Tab is before the panel has rendered — so it
@@ -180,7 +204,7 @@ const commandSnapshotReady = async (page: Page) => {
         // Run a no-op so the next prompt carries the payload, exactly as the
         // panel tells the user to. The shared half needs no prompt; the poll
         // interval is what waits for it.
-        await page.keyboard.type('true')
+        await typeDraft(page, 'true')
         await page.keyboard.press('Enter')
         await promptReady(page)
         return 'pending'
@@ -206,7 +230,7 @@ test.describe('tab completion', () => {
     // `pri` is a prefix of `printf` — a bash BUILTIN, so the session-local
     // half of the OSC 636 snapshot always contains it on this shell. History
     // may add rows; whatever the ranking, `printf` is in the list.
-    await page.keyboard.type('pri')
+    await typeDraft(page, 'pri')
     await page.keyboard.press('Tab')
 
     // The dropdown opens and the row list includes a command the shell
@@ -241,7 +265,7 @@ test.describe('tab completion', () => {
     // without the snapshot there are no command candidates to be top of.
     await commandSnapshotReady(page)
 
-    await page.keyboard.type('pri')
+    await typeDraft(page, 'pri')
 
     // The inline ghost (the completion tail of the top candidate) appears at
     // the caret. Its content is ranking-dependent; the accept is not.
@@ -307,7 +331,7 @@ test.describe('tab completion', () => {
       // backend (fs.complete) and lists both. The typed prefix carries the
       // run's own random, so a previous run's recorded history line can
       // never start with it — no cross-provider pollution.
-      await page.keyboard.type(`cd ./${stem}`)
+      await typeDraft(page, `cd ./${stem}`)
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
@@ -350,7 +374,7 @@ test.describe('tab completion', () => {
     await commandSnapshotReady(page)
 
     const nope = `zzznocxe2enope${Date.now().toString(36)}`
-    await page.keyboard.type(nope)
+    await typeDraft(page, nope)
 
     const dropdown = page.locator(DROPDOWN).first()
     await page.keyboard.press('Tab')
@@ -390,7 +414,7 @@ test.describe('tab completion', () => {
       await promptReady(page)
       await cdInto(page, fixture)
 
-      await page.keyboard.type(`cd ${downloads}/`)
+      await typeDraft(page, `cd ${downloads}/`)
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
@@ -421,7 +445,7 @@ test.describe('tab completion', () => {
       await promptReady(page)
       await cdInto(page, fixture)
 
-      await page.keyboard.type('cd ')
+      await typeDraft(page, 'cd ')
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 5000 })
@@ -457,7 +481,7 @@ test.describe('tab completion', () => {
 
       // `cd ` + Tab — the empty token, the case that used to offer history
       // rows only, every one labelled "history".
-      await page.keyboard.type('cd ')
+      await typeDraft(page, 'cd ')
       // The ghost shows the top candidate BEFORE the Tab: what the user is
       // looking at is what the first Tab must settle on (completion pass
       // 4's "the first Tab takes what is shown").
@@ -582,7 +606,7 @@ test.describe('tab completion', () => {
       //    prefix repeated — `graphify-output/`, not
       //    `repos/meshynet/graphify-output/`. Typing a PARTIAL segment
       //    (`gr`) also leaves a match to assert report 2 against. ──
-      await page.keyboard.type('cd repos/meshynet/gr')
+      await typeDraft(page, 'cd repos/meshynet/gr')
       await page.keyboard.press('Tab')
       const dropdown = page.locator(DROPDOWN).first()
       await expect(dropdown).toBeVisible({ timeout: 8000 })

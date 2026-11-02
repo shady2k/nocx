@@ -28,6 +28,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -85,6 +86,11 @@ func (e *ValidationError) Unwrap() error { return ErrValidation }
 type SelectOption struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
+	// LabelKey is the translation key the option's label resolves through
+	// (localisation design Q2, Option B): minted in toDeclaration from the
+	// setting key and the option value, never declared by hand. The label
+	// beside it is the visible English fallback.
+	LabelKey string `json:"labelKey,omitempty"`
 }
 
 // ── Descriptor — non-generic interface for enumeration ─────────────────
@@ -110,18 +116,25 @@ type Descriptor interface {
 // Declaration is the JSON-RPC wire shape matching the frozen contract at
 // .internal/plans/settings-rpc-contract.md.
 type Declaration struct {
-	Key         string         `json:"key"`
-	Section     string         `json:"section"`
-	Label       string         `json:"label"`
-	Description string         `json:"description"`
-	Control     ControlKind    `json:"control"`
-	DataClass   DataClass      `json:"dataClass"`
-	Default     any            `json:"default,omitempty"`
-	Options     []SelectOption `json:"options,omitempty"`
-	Min         *float64       `json:"min,omitempty"`
-	Max         *float64       `json:"max,omitempty"`
-	Unit        string         `json:"unit,omitempty"`
-	ZeroLabel   string         `json:"zeroLabel,omitempty"`
+	Key         string `json:"key"`
+	Section     string `json:"section"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+	// LabelKey and DescriptionKey are the translation keys the label and
+	// description resolve through (localisation design Q2, Option B):
+	// minted by labelKeyFor from the setting key, never declared by hand.
+	// The English strings above stay on the wire — they are the fallback a
+	// key with no catalogue entry renders (the epic's "never blank" rule).
+	LabelKey       string         `json:"labelKey,omitempty"`
+	DescriptionKey string         `json:"descriptionKey,omitempty"`
+	Control        ControlKind    `json:"control"`
+	DataClass      DataClass      `json:"dataClass"`
+	Default        any            `json:"default,omitempty"`
+	Options        []SelectOption `json:"options,omitempty"`
+	Min            *float64       `json:"min,omitempty"`
+	Max            *float64       `json:"max,omitempty"`
+	Unit           string         `json:"unit,omitempty"`
+	ZeroLabel      string         `json:"zeroLabel,omitempty"`
 	// Multiline is the text control's paragraph variant (nocx-avogl.4):
 	// present only on control "text", and the screen renders the kit's
 	// multiline TextField for it. Max then bounds the text in characters
@@ -143,6 +156,49 @@ type Declaration struct {
 	// somebody types deliberately: a retention age of 90 days is a decision,
 	// and dragging past it to 91 is an accident waiting to be saved.
 	Slider bool `json:"slider,omitempty"`
+}
+
+// ── Translation keys (localisation design Q2, Option B) ─────────────────
+
+// LabelKeyFor mints a setting's label translation key. Pure function of the
+// setting key, so a declaration site can neither misspell a key nor invent a
+// second spelling for one string — the wire and the catalogue agree by
+// construction. Exported for the settings test's catalogue-parity check.
+func LabelKeyFor(settingKey string) string { return "settings." + settingKey + ".label" }
+
+// descriptionKeyFor mints a setting's description translation key.
+func DescriptionKeyFor(settingKey string) string {
+	return "settings." + settingKey + ".description"
+}
+
+// optionKeyFor mints a select option's label translation key from the setting
+// key and the option value.
+func OptionLabelKeyFor(settingKey, optionValue string) string {
+	return "settings." + settingKey + ".option." + optionValue
+}
+
+// groupKeyFor mints a rail group's title translation key: the group label,
+// lowercased with dashes ("Application" → "settings.group.application"). A
+// pure function of the title, so two groups cannot mint one key between them
+// without also sharing a title.
+func GroupKeyFor(groupTitle string) string {
+	var b strings.Builder
+	b.WriteString("settings.group.")
+	for _, r := range groupTitle {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a')
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			// A space, an ampersand, any punctuation between two words: one
+			// dash, never two.
+			if b.Len() > 0 && !strings.HasSuffix(b.String(), "-") {
+				b.WriteByte('-')
+			}
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
 }
 
 // ── Group catalogue ────────────────────────────────────────────────────
@@ -174,6 +230,10 @@ type SettingsGroup struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 	Order int    `json:"order"`
+	// Key is the translation key the title resolves through (localisation
+	// design Q2, Option B): minted in Groups from the title, never declared
+	// by hand. The title beside it is the visible English fallback.
+	Key string `json:"key,omitempty"`
 }
 
 // groupCatalogue is the declared rail group catalogue, in registration
@@ -337,13 +397,15 @@ func (b *Bool) Max() *float64           { return nil }
 
 func (b *Bool) toDeclaration() Declaration {
 	return Declaration{
-		Key:         b.key,
-		Section:     b.section,
-		Label:       b.label,
-		Description: b.description,
-		Control:     ControlToggle,
-		DataClass:   b.dataClass,
-		Default:     b.default_,
+		Key:            b.key,
+		Section:        b.section,
+		Label:          b.label,
+		Description:    b.description,
+		LabelKey:       LabelKeyFor(b.key),
+		DescriptionKey: DescriptionKeyFor(b.key),
+		Control:        ControlToggle,
+		DataClass:      b.dataClass,
+		Default:        b.default_,
 	}
 }
 
@@ -388,15 +450,17 @@ func (s *String) Multiline() bool { return s.multiline }
 
 func (s *String) toDeclaration() Declaration {
 	d := Declaration{
-		Key:         s.key,
-		Section:     s.section,
-		Label:       s.label,
-		Description: s.description,
-		Control:     ControlText,
-		DataClass:   s.dataClass,
-		Default:     s.default_,
-		Multiline:   s.Multiline(),
-		Max:         s.Max(),
+		Key:            s.key,
+		Section:        s.section,
+		Label:          s.label,
+		Description:    s.description,
+		LabelKey:       LabelKeyFor(s.key),
+		DescriptionKey: DescriptionKeyFor(s.key),
+		Control:        ControlText,
+		DataClass:      s.dataClass,
+		Default:        s.default_,
+		Multiline:      s.Multiline(),
+		Max:            s.Max(),
 	}
 	if s.maxLength > 0 {
 		// Filled here rather than at the declaration site: a text bound is
@@ -442,18 +506,20 @@ func (n *Number) DefaultValue() float64 { return n.default_ }
 
 func (n *Number) toDeclaration() Declaration {
 	return Declaration{
-		Key:         n.key,
-		Section:     n.section,
-		Label:       n.label,
-		Description: n.description,
-		Control:     ControlNumber,
-		DataClass:   n.dataClass,
-		Default:     n.default_,
-		Min:         n.min,
-		Max:         n.max,
-		Unit:        n.unit,
-		ZeroLabel:   n.zeroLabel,
-		Slider:      n.slider,
+		Key:            n.key,
+		Section:        n.section,
+		Label:          n.label,
+		Description:    n.description,
+		LabelKey:       LabelKeyFor(n.key),
+		DescriptionKey: DescriptionKeyFor(n.key),
+		Control:        ControlNumber,
+		DataClass:      n.dataClass,
+		Default:        n.default_,
+		Min:            n.min,
+		Max:            n.max,
+		Unit:           n.unit,
+		ZeroLabel:      n.zeroLabel,
+		Slider:         n.slider,
 	}
 }
 
@@ -480,15 +546,25 @@ func (s *Select) Min() *float64           { return nil }
 func (s *Select) Max() *float64           { return nil }
 
 func (s *Select) toDeclaration() Declaration {
+	// Options carry their minted labelKeys; the typed key holds the options
+	// as declared (no keys), and the wire copy is keyed here so the
+	// declaration sites never mint a key by hand.
+	opts := make([]SelectOption, len(s.options))
+	for i, o := range s.options {
+		o.LabelKey = OptionLabelKeyFor(s.key, o.Value)
+		opts[i] = o
+	}
 	return Declaration{
-		Key:         s.key,
-		Section:     s.section,
-		Label:       s.label,
-		Description: s.description,
-		Control:     ControlSelect,
-		DataClass:   s.dataClass,
-		Default:     s.default_,
-		Options:     s.options,
+		Key:            s.key,
+		Section:        s.section,
+		Label:          s.label,
+		Description:    s.description,
+		LabelKey:       LabelKeyFor(s.key),
+		DescriptionKey: DescriptionKeyFor(s.key),
+		Control:        ControlSelect,
+		DataClass:      s.dataClass,
+		Default:        s.default_,
+		Options:        opts,
 	}
 }
 
@@ -515,12 +591,14 @@ func (s *Secret) Max() *float64           { return nil }
 
 func (s *Secret) toDeclaration() Declaration {
 	return Declaration{
-		Key:         s.key,
-		Section:     s.section,
-		Label:       s.label,
-		Description: s.description,
-		Control:     ControlSecret,
-		DataClass:   s.dataClass,
+		Key:            s.key,
+		Section:        s.section,
+		Label:          s.label,
+		Description:    s.description,
+		LabelKey:       LabelKeyFor(s.key),
+		DescriptionKey: DescriptionKeyFor(s.key),
+		Control:        ControlSecret,
+		DataClass:      s.dataClass,
 	}
 }
 
@@ -1427,9 +1505,14 @@ func (r *Registry) Declarations() []Declaration {
 
 // Groups returns the rail group catalogue for settings.describe: the
 // (id, title, order) catalogue declared by RegisterGroup, in registration
-// order.
+// order, each group carrying its minted translation key.
 func (r *Registry) Groups() []SettingsGroup {
-	return groupCatalogue
+	out := make([]SettingsGroup, len(groupCatalogue))
+	for i, g := range groupCatalogue {
+		g.Key = GroupKeyFor(g.Title)
+		out[i] = g
+	}
+	return out
 }
 
 // SectionGroups returns the section→group mapping for settings.describe:
@@ -1458,12 +1541,14 @@ func descriptorToDeclaration(d Descriptor) Declaration {
 		return t.toDeclaration()
 	default:
 		return Declaration{
-			Key:         d.Key(),
-			Section:     d.Section(),
-			Label:       d.Label(),
-			Description: d.Description(),
-			Control:     d.Control(),
-			DataClass:   d.DataClass(),
+			Key:            d.Key(),
+			Section:        d.Section(),
+			Label:          d.Label(),
+			Description:    d.Description(),
+			LabelKey:       LabelKeyFor(d.Key()),
+			DescriptionKey: DescriptionKeyFor(d.Key()),
+			Control:        d.Control(),
+			DataClass:      d.DataClass(),
 		}
 	}
 }

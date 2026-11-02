@@ -70,6 +70,7 @@ import { mountWindowGeometry } from './window-geometry'
 import type { ApprovalFacts } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
+import { bootstrapLocale, reconcileLocaleFromGo } from './i18n/bootstrap'
 import { bootstrapPlatform, currentPlatform } from './platform'
 import {
   QuickConnectController,
@@ -185,6 +186,10 @@ function main(): void {
   // uses the correct palette from its first accepted frame.
   // ADR-0013 §8, §8.1; design spec §5.4.
   const appliedThemeId = bootstrapTheme()
+  // Seed the locale the same way: synchronously from localStorage so the
+  // first frame already speaks the person's language, with the Go snapshot
+  // reconciling afterwards (design story 6).
+  bootstrapLocale()
   // Publishes data-platform for the chrome that differs by host — currently the
   // macOS traffic-light reservation in the tab bar. Not awaited: the attribute
   // only adds a notch, so a frame without it is correct on every platform that
@@ -591,6 +596,10 @@ function main(): void {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
+  // The locale selector is a consumed setting in the same sense as the theme:
+  // named here, deliberately, and only here (the comment above THEME_KEY is
+  // the whole argument). The i18n module itself never names a settings key.
+  const LANGUAGE_KEY = 'ui.language'
   // The update channel is one more consumed setting (nocx-1ebrs.35.1): the
   // same rule as PLACEMENT_KEY above — named here, deliberately, and only
   // here, because a consumer names what it consumes.
@@ -1289,6 +1298,9 @@ function main(): void {
         }
         // Theme setting changed — reconcile against Go's value (ADR-0013 §8.1).
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined)
+        // The language changed — every surface reading t() re-renders through
+        // the locale signal, with no restart and no reload.
+        reconcileLocaleFromGo(snap.values[LANGUAGE_KEY] as string | undefined)
         // The update channel changed — apply it to the window and look at
         // the channel the person just chose, rather than making them wait
         // up to 24 hours for the interval to notice (nocx-1ebrs.35.1).
@@ -2109,6 +2121,7 @@ function main(): void {
           tm.replaceStrip(newStrip)
         }
         reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
+        reconcileLocaleFromGo(snap.values[LANGUAGE_KEY] as string | undefined)
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
         await applyTerminalFont(snap.values[TERMINAL_FONT_KEY])
         if (generation !== connectionGeneration || !dispatcher.connected) return

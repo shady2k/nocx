@@ -1023,6 +1023,29 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// UILanguage selects the language nocx speaks on its own screens. It follows
+// the ui.theme flow exactly: declared here, shipped by settings.describe,
+// consumed by frontend/src/main.tsx through LANGUAGE_KEY and the locale
+// model (frontend/src/i18n/locale-model.ts), which holds the catalogues.
+//
+// Option labels are ENDONYMS — each language named in itself, English and
+// «Русский» alike — so the two labels are the same string in both locales
+// and no catalogue entry is needed for the picker itself (design Q4, the
+// owner's endonym decision of 2026-10-27). Adding a language is a new
+// option here plus a new catalogue file; no code change.
+var UILanguage = MustRegisterSelect(SelectSpec{
+	Key:         "ui.language",
+	Section:     "Interface",
+	Label:       "Language",
+	Description: "The language nocx speaks in its own screens — settings, prompts and notices. Terminal output is never translated.",
+	DataClass:   PublicConfig,
+	Default:     "en",
+	Options: []SelectOption{
+		{Value: "en", Label: "English"},
+		{Value: "ru", Label: "Русский"},
+	},
+})
+
 // AssistantPersonalInstructions is the person's own paragraph, appended to
 // the assistant's system prompt (design §1 item 6, nocx-avogl.4).
 //

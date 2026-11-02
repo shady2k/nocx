@@ -749,6 +749,10 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
    *  Read by the list: an ad-hoc row may not be offered while the saved list
    *  is still unknown (see filteredItems). */
   const [loadingItems, setLoadingItems] = createSignal(false)
+  /** True when a provider that owns saved hosts FAILED to answer, so the
+   *  absence of a matching row says nothing about the saved profiles. Read by
+   *  the list: the free-form fallback may not be offered on an unknown list. */
+  const [hostListUnknown, setHostListUnknown] = createSignal(false)
   const [selectedIndex, setSelectedIndex] = createSignal(0)
   const [drill, setDrill] = createSignal<DrillState | null>(null)
   /** Choices per drill depth, so walking back restores a step without
@@ -786,7 +790,12 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
         if (currentGen !== gen) return
         all.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
       } catch {
-        // Provider failure is not user-visible — skip silently.
+        // Provider failure is not user-visible — skip silently. It is not
+        // "nothing matched" either, and the one thing that must not follow is
+        // the free-form fallback pretending the list was consulted.
+        if (provider.id !== 'ad-hoc' && provider.kinds.includes('host')) {
+          setHostListUnknown(true)
+        }
       }
     }
     if (currentGen !== gen) return
@@ -831,6 +840,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
 
     if (!props.open) {
       setLoadingItems(false)
+      setHostListUnknown(false)
       return
     }
 
@@ -839,6 +849,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     const providers = props.providers
 
     setLoadingItems(true)
+    setHostListUnknown(false)
     setItems([])
     setQuery('')
     setSelectedIndex(0)
@@ -972,6 +983,13 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     // has not been asked yet, so the list is empty and Enter is a no-op
     // (nocx-k1691).
     if (loadingItems()) return []
+    // A provider that THREW is not an empty list either: its rows are unknown,
+    // not absent. `loadItems` skips a failed provider silently, and the
+    // fallback below then read the silence as "you know this host and we do
+    // not" — so a saved profile whose name the person typed became
+    // "Connect to e2e-reconnect-<n>", dialled root@<the profile name>, and
+    // died in DNS (nocx-atpw5.1.31). Withheld until the list is really known.
+    if (hostListUnknown()) return []
 
     // Nothing static matched — consult the query-dependent providers (the
     // ad-hoc "Connect to <host>" fallback). Only reached when every real

@@ -2312,11 +2312,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const st = status()
       if (!st) return undefined
       const lastUsed = st.lastUsed
-        ? ` · last used ${new Date(st.lastUsed).toLocaleDateString()}`
+        ? ` ${t('connections.list.lastUsed', '· last used')} ${new Date(st.lastUsed).toLocaleDateString()}`
         : ''
       return {
         tone: st.live ? ('ok' as const) : ('neutral' as const),
-        text: `${st.live ? 'Connected' : 'Disconnected'}${lastUsed}`,
+        text: `${st.live ? t('connections.list.connected', 'Connected') : t('connections.list.disconnected', 'Disconnected')}${lastUsed}`,
       }
     }
     return (

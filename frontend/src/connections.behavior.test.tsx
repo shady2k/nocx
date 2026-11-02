@@ -1246,6 +1246,16 @@ function findDialogByTitle(container: HTMLElement, titleText: string): HTMLEleme
   return null
 }
 
+/** The box showConfirm mounts on document.body — outside the view's container. */
+function findConfirmDialog(message: string): HTMLElement | null {
+  for (const dialog of Array.from(document.body.querySelectorAll('dialog'))) {
+    if (dialog.querySelector('.nocx-dialog__message')?.textContent === message) {
+      return dialog
+    }
+  }
+  return null
+}
+
 function findDialogByTitleContaining(container: HTMLElement, partial: string): HTMLElement | null {
   const titles = container.querySelectorAll('.nocx-dialog__title')
   for (const t of titles) {
@@ -2254,6 +2264,43 @@ describe('group editor', () => {
 
     // groupApply should never be called
     expect(applySpy).not.toHaveBeenCalled()
+  })
+
+  it('confirms a connection delete with the English words the box always had (nocx-5dqdm)', async () => {
+    const { container } = mount({
+      profiles: MOCK_PROFILES,
+      groups: MOCK_GROUPS,
+    })
+    await waitForProfiles(container, 3)
+
+    const row = Array.from(container.querySelectorAll('.ui-collection-row')).find((r) =>
+      r.textContent?.includes('prod-web'),
+    )
+    expect(row, 'the prod-web row is not in the list').toBeTruthy()
+    ;(row!.querySelector('[aria-label^="Edit "]') as HTMLElement).click()
+    await vi.waitFor(() => {
+      expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+    })
+    const editor = findDialogByTitleContaining(container, 'prod-web')!
+    const deleteBtn = Array.from(editor.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Delete Connection',
+    )
+    expect(deleteBtn, 'Delete Connection button not found').toBeTruthy()
+    ;(deleteBtn! as HTMLElement).click()
+
+    // The confirmation is the box the person answers, mounted on document.body
+    // by showConfirm. Its message and its default confirm button are what the
+    // English surface had before the catalogue existed, and the localisation
+    // promise is that English did not move: the e2e walk clicks the button by
+    // the name "OK" and lost it to a catalogue entry that said "Delete".
+    await vi.waitFor(() => {
+      expect(findConfirmDialog('Delete "prod-web"?')).toBeTruthy()
+    })
+    const confirm = findConfirmDialog('Delete "prod-web"?')!
+    expect(confirm.querySelector('.nocx-dialog__message')?.textContent).toBe('Delete "prod-web"?')
+    const names = Array.from(confirm.querySelectorAll('button')).map((b) => b.textContent?.trim())
+    expect(names).toContain('OK')
+    expect(names).toContain('Cancel')
   })
 
   it('delete states what happens to children before confirming', async () => {

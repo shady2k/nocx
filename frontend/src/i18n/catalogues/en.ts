@@ -4,7 +4,11 @@
  * A key that exists nowhere in `en` is dead: a missing `en` entry fails the
  * parity lint fixture (lint-fixtures/check-i18n-catalogues.mjs), while a
  * missing `ru` entry only warns and falls back to the English value at
- * runtime. Every user-visible string the localisation epic translates gets
+ * runtime. The same fixture also extracts the literal keys of every
+ * t()/tPlural() call site under src/ (tests and generated code excluded) and
+ * fails on one absent from `en` — a call whose key exists in NEITHER
+ * catalogue can never render anything but its fallback. Every user-visible
+ * string the localisation epic translates gets
  * its key minted here first, namespaced by surface (`settings.ui.language.*`,
  * `connections.title`, …) per the design §"Frontend catalogue shape".
  *
@@ -272,6 +276,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.deleted': 'Deleted',
   'connections.toasts.deleteFailedHead': 'Could not delete',
   'connections.actions.edit': 'Edit',
+  'connections.actions.test': 'Test',
+  'connections.actions.testing': 'Testing…',
   'connections.actions.testConnectionTo': 'Test connection to',
   'connections.actions.connect': 'Connect',
   'connections.actions.connectTo': 'Connect to',
@@ -483,6 +489,7 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'endpoints.name': 'Name',
   'endpoints.namePlaceholder': 'My provider',
   'endpoints.baseUrl': 'Base URL',
+  'endpoints.noKey': 'No key',
   'endpoints.noKeyRequired': 'This endpoint does not require an API key',
   'endpoints.apiKey': 'API key',
   'endpoints.apiKeyDescription':

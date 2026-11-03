@@ -23,9 +23,10 @@
  *
  * Invocation: node lint-fixtures/check-i18n-catalogues.mjs   (from frontend/)
  */
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse } from '@typescript-eslint/parser'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const FRONTEND_DIR = resolve(__dirname, '..')
@@ -73,6 +74,100 @@ function loadCatalogue(path, name) {
   return keys
 }
 
+// ─── Call-site extraction ────────────────────────────────────────────────
+//
+// The catalogues' own parity is not enough: a t('x.y', 'Fallback') call whose
+// key exists in NEITHER catalogue renders its fallback forever and can never
+// gain a ru entry (measured as nocx-dej6.3.8: three such keys shipped). This
+// direction is an error: en.ts's header promises every user-visible key is
+// minted in en first, so a call-site key absent from en is a bug.
+//
+// Dynamic first arguments (a variable, a `?? ''` expression) are not
+// extracted — they are Go-minted keys arriving as data (labelKey,
+// descriptionKey, group keys) and are pinned by catalogue-parity.test.ts
+// witnesses instead. The extracted set is exactly the literal call sites.
+//
+// Exclusions mirror check-glyph-icons.mjs's tree walk: tests, generated code
+// and the i18n module itself (whose catalogues legitimately contain keys no
+// call site uses).
+
+const CALLSITE_EXCLUDED_DIRS = new Set(['node_modules', 'dist', 'generated', 'i18n'])
+
+function walkAst(node, visit) {
+  if (!node || typeof node !== 'object') return
+  visit(node)
+  for (const key of Object.keys(node)) {
+    if (key === 'parent' || key === 'tokens' || key === 'comments') continue
+    const child = node[key]
+    if (Array.isArray(child)) {
+      for (const c of child) if (c && typeof c.type === 'string') walkAst(c, visit)
+    } else if (child && typeof child.type === 'string') {
+      walkAst(child, visit)
+    }
+  }
+}
+
+/** The key of a `t(...)`/`tPlural(...)` call: the first argument when it is a
+ * plain string literal, otherwise null (dynamic — not extracted). */
+function tCallKey(callNode) {
+  const callee = callNode.callee
+  const name =
+    callee?.type === 'Identifier' ? callee.name : callee?.property?.name ?? null
+  if (name !== 't' && name !== 'tPlural') return null
+  const first = callNode.arguments[0]
+  if (first?.type === 'Literal' && typeof first.value === 'string') return first.value
+  return null
+}
+
+/**
+ * Extract the literal keys of t()/tPlural() calls in one source file.
+ * @returns {Array<{file:string,line:number,key:string}>}
+ *   A file that fails to parse yields one `key: 'PARSE'` entry — fail closed.
+ */
+export function extractCallSiteKeys(file, source) {
+  let ast
+  try {
+    ast = parse(source, {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      ecmaFeatures: { jsx: file.endsWith('.tsx') },
+      loc: true,
+      range: true,
+    })
+  } catch (err) {
+    return [{ file, line: 0, key: 'PARSE' }]
+  }
+  const hits = []
+  walkAst(ast, (node) => {
+    if (node.type !== 'CallExpression') return
+    const key = tCallKey(node)
+    if (key !== null) hits.push({ file, line: node.loc.start.line, key })
+  })
+  return hits
+}
+
+export function scanCallSites(dir, base) {
+  const hits = []
+  const walkDir = (d) => {
+    for (const entry of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, entry.name)
+      if (entry.isDirectory()) {
+        if (CALLSITE_EXCLUDED_DIRS.has(entry.name)) continue
+        walkDir(full)
+      } else if (
+        (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) &&
+        !entry.name.endsWith('.test.ts') &&
+        !entry.name.endsWith('.test.tsx') &&
+        !entry.name.endsWith('.d.ts')
+      ) {
+        hits.push(...extractCallSiteKeys(relative(base, full), readFileSync(full, 'utf8')))
+      }
+    }
+  }
+  walkDir(dir)
+  return hits
+}
+
 // ─── CLI entry point ──────────────────────────────────────────────────────
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const enKeys = loadCatalogue(EN_PATH, 'en')
@@ -82,6 +177,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const missingFromEn = [...ruKeys].filter((k) => !enKeys.has(k)).sort()
   // Warning direction: ru may be partial, runtime falls back to en.
   const missingFromRu = [...enKeys].filter((k) => !ruKeys.has(k)).sort()
+
+  // Error direction: every literal t()/tPlural() call-site key must be minted.
+  const callSiteHits = scanCallSites(resolve(FRONTEND_DIR, 'src'), FRONTEND_DIR)
+  const unminted = callSiteHits.filter((h) => h.key !== 'PARSE' && !enKeys.has(h.key))
 
   let failed = false
 
@@ -100,8 +199,25 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     for (const key of missingFromRu) console.warn(`  untranslated in ru: ${key}`)
   }
 
+  if (callSiteHits.some((h) => h.key === 'PARSE')) {
+    failed = true
+    console.error('I18N CATALOGUES: a source file failed to parse while extracting t() call sites:')
+    for (const h of callSiteHits.filter((h) => h.key === 'PARSE'))
+      console.error(`  PARSE ERROR: ${h.file}`)
+  }
+
+  if (unminted.length > 0) {
+    failed = true
+    console.error(
+      `I18N CATALOGUES: ${unminted.length} t() call-site key(s) exist in neither catalogue — mint them in en first:`,
+    )
+    for (const h of unminted) console.error(`  UNMINTED: ${h.key} (${h.file}:${h.line})`)
+  }
+
   if (failed) process.exit(1)
 
   const warnNote = missingFromRu.length ? ` (${missingFromRu.length} untranslated in ru)` : ''
-  console.error(`I18N CATALOGUES: ${enKeys.size} keys, en complete${warnNote}.`)
+  console.error(
+    `I18N CATALOGUES: ${enKeys.size} keys, ${callSiteHits.length} call-site key(s), en complete${warnNote}.`,
+  )
 }

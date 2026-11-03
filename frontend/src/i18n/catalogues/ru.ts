@@ -284,6 +284,8 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'connections.toasts.deleted': 'Удалено:',
   'connections.toasts.deleteFailedHead': 'Не удалось удалить',
   'connections.actions.edit': 'Изменить',
+  'connections.actions.test': 'Проверить',
+  'connections.actions.testing': 'Проверяю…',
   'connections.actions.testConnectionTo': 'Проверить подключение к',
   'connections.actions.connect': 'Подключиться',
   'connections.actions.connectTo': 'Подключиться к',
@@ -501,6 +503,7 @@ export const ru: Readonly<Record<string, CatalogueEntry>> = {
   'endpoints.name': 'Имя',
   'endpoints.namePlaceholder': 'Мой провайдер',
   'endpoints.baseUrl': 'Базовый URL',
+  'endpoints.noKey': 'Нет ключа',
   'endpoints.noKeyRequired': 'Этому эндпоинту не нужен API-ключ',
   'endpoints.apiKey': 'API-ключ',
   'endpoints.apiKeyDescription':

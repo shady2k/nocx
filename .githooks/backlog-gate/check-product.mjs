@@ -63,7 +63,7 @@ import { fileURLToPath } from 'node:url';
 import { ValueNeeded, valueOf } from './argv.mjs';
 import { notRegularFileSaid } from './regular-file.mjs';
 
-export const RULES_VERSION = '0.61.0';
+export const RULES_VERSION = '0.63.0';
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 class Misuse extends Error {}

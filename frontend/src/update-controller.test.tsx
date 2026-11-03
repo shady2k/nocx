@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
-import { createUpdateController } from './update-controller'
+import { createUpdateController, downloadProgressLabel } from './update-controller'
 import { ToastHost } from './ui/toast'
 import { mountSidebar } from './sidebar'
 
@@ -555,5 +555,76 @@ describe('a nightly offer names the build (nocx-vh2hr.1.5)', () => {
 
     expect(document.querySelectorAll('.ui-toast')).toHaveLength(1)
     expect(screen.getByRole('status').textContent).toContain('build 202610310750')
+  })
+})
+
+// ── The notice says how far the download has got (nocx-vh2hr.1.15) ─────────
+//
+// The bead's other half: an update the person cannot see arriving. The bytes
+// are the backend's (UpdateState.Downloading/Downloaded/Total); the notice
+// reads them through the binding it already consults, shows percent and size
+// while they move, and forgets them the moment the apply lands or fails.
+describe('the notice shows the download (nocx-vh2hr.1.15)', () => {
+  const progress = (downloaded: number, total: number) => ({
+    Downloading: true,
+    Downloaded: downloaded,
+    Total: total,
+  })
+
+  it('reports percent and size while the body arrives, then says it is installed', async () => {
+    let finishApply!: () => void
+    const apply = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishApply = resolve
+        }),
+    )
+    const readings = [progress(0, 150_000_000), progress(63_000_000, 150_000_000)]
+    const getState = vi.fn(() => Promise.resolve(readings.shift() ?? { Downloading: false }))
+    const controller = createUpdateController({ apply, getState })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.9.0', '')
+
+    void controller.apply()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('Downloading 42%')
+    })
+    expect(screen.getByRole('status').textContent).toContain('63 of 150 MB')
+    expect(screen.getByRole('status').textContent).toContain('nocx 0.9.0')
+
+    finishApply()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('restart to apply')
+    })
+    expect(screen.getByRole('status').textContent).not.toContain('Downloading')
+  })
+
+  it('keeps the failure, not the progress, when the apply refuses', async () => {
+    const apply = vi.fn(() => Promise.reject(new Error('download sha256 mismatch')))
+    const getState = vi.fn(() => Promise.resolve(progress(15_000_000, 150_000_000)))
+    const controller = createUpdateController({ apply, getState })
+    render(() => <ToastHost />)
+    mountIndicator(controller)
+    controller.showAvailable('0.9.0', '')
+
+    await controller.apply()
+    await vi.waitFor(() => {
+      expect(screen.getByRole('status').textContent).toContain('could not be downloaded')
+    })
+    expect(screen.getByRole('status').textContent).not.toContain('Downloading')
+  })
+})
+
+// The label itself: floored percent, decimal megabytes, never 100% early.
+describe('downloadProgressLabel (nocx-vh2hr.1.15)', () => {
+  it('reads as a person would say it', () => {
+    expect(downloadProgressLabel({ downloaded: 63_000_000, total: 150_000_000 })).toBe(
+      'Downloading 42% · 63 of 150 MB',
+    )
+    expect(downloadProgressLabel({ downloaded: 149_999_999, total: 150_000_000 })).toBe(
+      'Downloading 99% · 150 of 150 MB',
+    )
+    expect(downloadProgressLabel({ downloaded: 0, total: 0 })).toBe('Downloading…')
   })
 })

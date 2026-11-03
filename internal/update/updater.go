@@ -3,13 +3,13 @@ package update
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -139,6 +139,12 @@ type UpdateState struct {
 	// while reports keep arriving. This is the state the update surface
 	// must offer to finish, never force.
 	HeldByOlderCoordinator bool
+	// Downloading is true while an artefact body is arriving, and Downloaded
+	// and Total are its bytes against the signed manifest's size. The notice
+	// reads them as percent and size (nocx-vh2hr.1.15).
+	Downloading bool
+	Downloaded  int64
+	Total       int64
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +173,12 @@ type UpdaterConfig struct {
 
 	// StateDir holds the profile's update lock and transaction journal.
 	StateDir string
+
+	// Progress, when set, is called as the artefact's bytes arrive: how many
+	// are on disk and how many the signed manifest declared. It is called from
+	// the download goroutine and must not block; the window turns it into the
+	// number a person reads (nocx-vh2hr.1.15).
+	Progress func(done, total int64)
 
 	// Coordinator answers which backend build is actually serving this
 	// client. [Updater.ReportHealthy] refuses to finalise without it:
@@ -197,13 +209,19 @@ type updater struct {
 	httpClient     *http.Client
 	log            log.Logger
 	lockPath       string // path to the flock file
+	progress       func(done, total int64)
+	stallOverride  time.Duration
+	progressMu     sync.Mutex
+	downloading    bool
+	downloaded     int64
+	downloadTotal  int64
 }
 
 // NewUpdater constructs a concrete Updater.
 func NewUpdater(cfg UpdaterConfig) Updater {
 	hc := cfg.HTTPClient
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = DownloadClient()
 	}
 	l := cfg.Logger
 	if l == nil {
@@ -222,6 +240,7 @@ func NewUpdater(cfg UpdaterConfig) Updater {
 		httpClient:     hc,
 		log:            l,
 		lockPath:       lockPath,
+		progress:       cfg.Progress,
 	}
 }
 
@@ -314,57 +333,172 @@ func (f *GitHubManifestFetcher) get(ctx context.Context, url string) ([]byte, er
 
 // downloadVerified fetches url, writes to destPath, and verifies the
 // declared sha256 and size against the downloaded bytes.
+//
+// IT RESUMES (nocx-vh2hr.1.15): a body that stops arriving, or a connection
+// that drops mid-body, leaves what was written on disk and asks again with a
+// Range request. The server's own `ETag` is sent back with `If-Range`, so a
+// file that changed under us is re-downloaded rather than stitched into a
+// corrupt whole, and a server that ignores Range (answering 200) restarts the
+// transfer from zero. The declared SHA-256 is still the only acceptance: a
+// resume that produced one wrong byte fails here.
 func (u *updater) downloadVerified(ctx context.Context, url, sha256Hex string, size int64, destPath string) error {
+	u.noteProgress(0, size)
+	defer u.endDownload()
+	var lastErr error
+	for attempt := 0; attempt < downloadAttempts; attempt++ {
+		written, etag, err := u.downloadAttempt(ctx, url, size, destPath)
+		if err == nil {
+			if written != size {
+				return fmt.Errorf("download size mismatch: declared %d bytes, got %d", size, written)
+			}
+			got, hashErr := hashFile(destPath)
+			if hashErr != nil {
+				return hashErr
+			}
+			if got != sha256Hex {
+				return fmt.Errorf("download sha256 mismatch: declared %s, got %s", sha256Hex, got)
+			}
+			return nil
+		}
+		lastErr = err
+		// A stall and a dropped body are the same thing to a resume: bytes on
+		// disk, more to come. Anything else (a status, a write fault) is the
+		// answer.
+		if !errors.Is(err, ErrDownloadStalled) && !errors.Is(err, io.ErrUnexpectedEOF) && !isTruncated(err) {
+			return err
+		}
+		if written == 0 || etag == "" {
+			// Nothing to resume from, or nothing to validate a resume
+			// against: the next attempt starts the body again.
+			continue
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("download: no attempt was made")
+	}
+	return fmt.Errorf("download %s: %w", url, lastErr)
+}
+
+// downloadAttempt performs one GET (or one ranged continuation) and reports how
+// many bytes sit on disk and the entity tag that describes them.
+func (u *updater) downloadAttempt(ctx context.Context, url string, size int64, destPath string) (int64, string, error) {
+	have, err := fileSize(destPath)
+	if err != nil {
+		return 0, "", err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return fmt.Errorf("download request: %w", err)
+		return 0, "", fmt.Errorf("download request: %w", err)
 	}
-
+	etag := readETag(destPath)
+	if have > 0 && etag != "" {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		req.Header.Set("If-Range", etag)
+	}
 	resp, err := u.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
+		return have, etag, fmt.Errorf("download %s: %w", url, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: unexpected status %d", url, resp.StatusCode)
+	resumed := resp.StatusCode == http.StatusPartialContent && have > 0
+	if resp.StatusCode != http.StatusOK && !resumed {
+		return have, "", fmt.Errorf("download %s: unexpected status %d", url, resp.StatusCode)
 	}
-
-	// Bound the response size to the declared size + 1 MiB headroom.
-	limit := size + 1<<20
-	if limit < 0 {
-		limit = size
+	offset := int64(0)
+	if resumed {
+		offset = have
 	}
-	f, err := os.Create(destPath) //nolint:gosec // destPath is constructed in the extraction dir
+	if !resumed {
+		// The server ignored the range, or this is the first attempt: the
+		// body is the whole file.
+		offset = 0
+	}
+	var flag int
+	if resumed {
+		flag = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	} else {
+		flag = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	}
+	f, err := os.OpenFile(destPath, flag, 0o600) //nolint:gosec // destPath is inside the extraction dir
 	if err != nil {
-		return fmt.Errorf("create download file %s: %w", destPath, err)
+		return offset, "", fmt.Errorf("create download file %s: %w", destPath, err)
 	}
 	ok := false
 	defer func() {
-		if !ok {
-			_ = os.Remove(destPath)
+		_ = f.Close()
+		if !ok && resumed {
+			// Keep what arrived: the next attempt continues from it.
+			return
 		}
 	}()
 
-	h := sha256.New()
-	written, err := io.Copy(f, io.TeeReader(io.LimitReader(resp.Body, limit), h))
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("download write: %w", err)
+	limit := size - offset + 1<<20
+	if limit < 0 {
+		limit = size + 1<<20
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close download file: %w", err)
+	body := &stallReader{body: io.LimitReader(resp.Body, limit), stall: u.stallWindow()}
+	var src io.Reader = body
+	if u.progress != nil {
+		src = &progressReader{r: body, done: offset, total: size, report: u.progress}
 	}
-
-	if written != size {
-		return fmt.Errorf("download size mismatch: declared %d bytes, got %d", size, written)
-	}
-
-	got := hex.EncodeToString(h.Sum(nil))
-	if got != sha256Hex {
-		return fmt.Errorf("download sha256 mismatch: declared %s, got %s", sha256Hex, got)
-	}
-
+	written, copyErr := io.Copy(f, src)
 	ok = true
-	return nil
+	if entity := resp.Header.Get("ETag"); entity != "" {
+		writeETag(destPath, entity)
+	}
+	if copyErr != nil {
+		return offset + written, etag, fmt.Errorf("download write: %w", copyErr)
+	}
+	return offset + written, etag, nil
+}
+
+func isTruncated(err error) bool {
+	// A body cut short by the server is io.ErrUnexpectedEOF (or a bare EOF
+	// when nothing arrived). Anything else is a real fault.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// progressReader reports the running total as bytes pass.
+type progressReader struct {
+	r      io.Reader
+	done   int64
+	total  int64
+	report func(done, total int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.done += int64(n)
+		p.report(p.done, p.total)
+	}
+	return n, err
+}
+
+// startDownload and endDownload are the download's own progress state: the
+// same numbers the callback carries, kept so a surface that asks LATER (the
+// notice is rebuilt on every render) can still say where the transfer is.
+func (u *updater) noteProgress(done, total int64) {
+	u.progressMu.Lock()
+	u.downloading, u.downloaded, u.downloadTotal = true, done, total
+	u.progressMu.Unlock()
+	if u.progress != nil {
+		u.progress(done, total)
+	}
+}
+
+func (u *updater) endDownload() {
+	u.progressMu.Lock()
+	u.downloading = false
+	u.progressMu.Unlock()
+}
+
+// stallWindow is the silence this updater calls a stall: the build's default,
+// or the shorter one a test states explicitly.
+func (u *updater) stallWindow() time.Duration {
+	if u.stallOverride > 0 {
+		return u.stallOverride
+	}
+	return downloadStallTimeout
 }

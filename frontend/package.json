@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint . --max-warnings 0 && npm run lint:static",
-    "lint:static": "node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs && node lint-fixtures/check-row-grammar.mjs && node lint-fixtures/check-error-vocabulary.mjs && node lint-fixtures/check-menu-icons.mjs && node lint-fixtures/check-glyph-icons.mjs && node lint-fixtures/check-i18n-catalogues.mjs",
+    "lint:static": "node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs && node lint-fixtures/check-row-grammar.mjs && node lint-fixtures/check-error-vocabulary.mjs && node lint-fixtures/check-menu-icons.mjs && node lint-fixtures/check-glyph-icons.mjs && node lint-fixtures/check-i18n-catalogues.mjs && node lint-fixtures/check-i18n-hardcoded.mjs",
     "lint:dead-exports": "node lint-fixtures/check-dead-exports.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -29,7 +29,8 @@
     "lint:menu-icons": "node lint-fixtures/check-menu-icons.mjs",
     "baseline:menu-icons-update": "node lint-fixtures/update-menu-icons-baseline.mjs",
     "lint:glyph-icons": "node lint-fixtures/check-glyph-icons.mjs",
-    "baseline:glyph-icons-update": "node lint-fixtures/update-glyph-icons-baseline.mjs"
+    "baseline:glyph-icons-update": "node lint-fixtures/update-glyph-icons-baseline.mjs",
+    "baseline:i18n-hardcoded-update": "node lint-fixtures/update-i18n-hardcoded-baseline.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",

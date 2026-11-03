@@ -1,0 +1,56 @@
+{
+  "//": [
+    "The reviewed register of permanently-English user-facing strings (nocx-dej6",
+    "stage 3, owner decision 2026-11-03): example values a person replaces",
+    "(\"gpt-4o\", \"X-Title\", sample URLs, charset symbols) and single technical",
+    "terms that are the protocol's own name (\"tls\", \"resolve\" in the timing",
+    "legend). Every entry states its reason and is reviewed when touched.",
+    "Anything else belongs in the baseline (which only shrinks) or in t().",
+    "Keys are the checker's: file:context:first-words — keep them in sync with",
+    "the source when editing a file around one."
+  ],
+  "violations": [
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "resolve",
+      "reason": "technical term — the timing phase's own protocol name"
+    },
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "connect",
+      "reason": "technical term — the timing phase's own protocol name"
+    },
+    {
+      "file": "src/api/timing-bar.tsx",
+      "context": "prop:label",
+      "snippet": "tls",
+      "reason": "technical term — the protocol's own name"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "gpt-4o",
+      "reason": "example value — a model name the person replaces"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "X-Title",
+      "reason": "example value — a header name the person replaces"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "nocx",
+      "reason": "example value — the product's own name"
+    },
+    {
+      "file": "src/endpoints-section.tsx",
+      "context": "attr:placeholder",
+      "snippet": "https://api.example.com/v1",
+      "reason": "example value — a sample URL"
+    }
+  ]
+}

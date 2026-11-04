@@ -119,7 +119,7 @@ func (p *darwinPlatform) VerifyExtracted(ctx context.Context, bundlePath string)
 // this code is considering deleting.
 func (p *darwinPlatform) InspectBundle(ctx context.Context, path string) (BundleReport, error) {
 	plist := filepath.Join(path, "Contents", "Info.plist")
-	out, err := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", plist).Output()
+	out, err := exec.CommandContext(ctx, "/usr/bin/plutil", "-convert", "json", "-o", "-", plist).Output() //nolint:gosec // fixed argv; plist is Contents/Info.plist under one of reconcile's own managed names, never outside input
 	if err != nil {
 		return BundleReport{}, nil
 	}

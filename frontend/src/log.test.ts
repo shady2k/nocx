@@ -62,22 +62,36 @@ describe('log — a keydown, as the browser reported it (nocx-1ebrs.32)', () => 
     expect(debug).not.toHaveBeenCalled()
   })
 
-  it('names the surface and carries key, code, keyCode and location', () => {
+  it('names the surface and the key class, and never a typed character', () => {
     const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
     setDecisionTracing(true)
     logKeydown('grid', keyEvent({ code: 'NumpadEnter', keyCode: 13, location: 3 }))
     expect(debug).toHaveBeenCalledTimes(1)
     const line = debug.mock.calls[0][0] as string
     expect(line).toContain('nocx:decide keydown')
-    expect(line).toContain(
-      JSON.stringify({
-        where: 'grid',
-        key: 'Enter',
-        code: 'NumpadEnter',
-        keyCode: 13,
-        location: 3,
-      }),
-    )
+    // A NAMED KEY IS NOT A CHARACTER (nocx-atpw5.1.39): `NumpadEnter` stays,
+    // because it is the macOS defect's own discriminator and carries nothing
+    // a person typed.
+    expect(line).toContain(JSON.stringify({ where: 'grid', class: 'named', key: 'Enter' }))
+    expect(line).not.toContain('NumpadEnter')
+    expect(line).not.toContain('keyCode')
+  })
+
+  it('says char and nothing else for a character typed into the pane', () => {
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    setDecisionTracing(true)
+    // A password is letters too: this is the line that must never carry one.
+    for (const key of ['h', 'Z', '7', ' ', 'é', '🙂']) {
+      logKeydown('composer', keyEvent({ key }))
+    }
+    const lines = debug.mock.calls.map((call) => String(call[0]))
+    expect(lines).toHaveLength(6)
+    // EXACT, because the point is that the line has nothing else in it: a
+    // `toContain` on the fields would still pass with the character beside
+    // them.
+    for (const line of lines) {
+      expect(line).toBe('nocx:decide keydown {"where":"composer","class":"char"}')
+    }
   })
 })
 

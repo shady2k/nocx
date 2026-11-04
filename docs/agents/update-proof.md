@@ -31,7 +31,8 @@ Supply these downloaded, unmodified release assets as file paths:
   verifies every update check with its own compiled keyring.
 
 Both nightlies must stamp plain next-stable versions, name different immutable
-`nightly-YYYYMMDD-RUNID` tags, have increasing RFC3339 `released` instants, and
+`v<version>-nightly.<build>` tags (the older `nightly-YYYYMMDD-RUNID` copies are
+still read while they are published), have increasing RFC3339 `released` instants, and
 name different AppImage SHA-256 values. A higher-version successor is expected
 after a stable promotion: a nightly installed at 0.8.0 must update to 0.8.1.
 A lower version is always refused. At equal versions, the candidate must have a
@@ -185,7 +186,10 @@ that needs `publish`, so the pair it proves is the nightly this run published
 and the one before it. It reads, and writes, only this:
 
 - **The two dated nightlies** — `gh api repos/{owner}/{repo}/releases`, newest
-  first by `published_at`, `nightly-` tags only, `prerelease` and not `draft`.
+  first by `published_at`, dated-nightly tags only (`v<version>-nightly.<build>`
+  or the older `nightly-<date>-<run>`), `prerelease` and not `draft`. The
+  selection is `node scripts/publish-nightly.mjs dated-tags <releases.json>`, the
+  same rule the pruner counts, so the pair proved is the pair kept.
 - **Their `manifest.json` and `.sig`** — `gh release download <dated tag>`.
 - **The lower probe** — `releases/latest`, the newest non-prerelease release,
   refused unless its `version` is strictly below the nightly's.

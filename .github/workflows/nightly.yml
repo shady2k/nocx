@@ -35,7 +35,8 @@ jobs:
       moved: ${{ steps.plan.outputs.moved }}
       sha: ${{ steps.plan.outputs.sha }}
       version: ${{ steps.plan.outputs.version }}
-      tag: ${{ steps.plan.outputs.tag }}
+      previous: ${{ steps.plan.outputs.previous }}
+      commits: ${{ steps.plan.outputs.commits }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,7 +52,6 @@ jobs:
       - id: plan
         name: Compare main with the last published nightly using CI's product predicate
         env:
-          RUN_ID: ${{ github.run_id }}
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
@@ -79,12 +79,29 @@ jobs:
           const files = previous ? git(['diff', '--name-only', previous, sha]).split('\n').filter(Boolean) : [];
           // The version is read from the stable tags this commit can reach, by
           // nextVersion in the module: one owner, no VERSION file, no describe.
+          // Dated nightly tags are reachable here too — both spellings — and the
+          // module skips them, so a nightly tag never counts as a release.
           const tags = git(['tag', '--list', '--merged', sha]).split('\n').filter(Boolean);
-          const plan = prepare({ sha, previous, files, tags,
-            date: new Date().toISOString().slice(0, 10).replaceAll('-', ''), runId: process.env.RUN_ID });
+          const plan = prepare({ sha, previous, files, tags });
+          // The tag is NOT decided here: its suffix is the build's own signed
+          // instant, which release-build chooses and signs (nocx-vh2hr.1.17).
+          // What a person reads in the release is the first-parent history since
+          // the previous nightly, so it is collected here, where git and that
+          // commit are both in hand, and carried to publication.
+          const commits = previous
+            ? git(['log', '--first-parent', '--format=%H%x09%s', `${previous}..${sha}`])
+                .split('\n').filter(Boolean)
+                .map(line => {
+                  const [commit, ...subject] = line.split('\t');
+                  return { sha: commit, subject: subject.join('\t') };
+                })
+            : [];
           if (process.env.DRY_RUN === 'true') plan.moved = true;
-          for (const [key, value] of Object.entries(plan)) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
-          console.log(JSON.stringify(plan));
+          // A null (no previous nightly) is written as an empty output, not as
+          // the four characters `null`, which a step would read as a tag.
+          for (const [key, value] of Object.entries(plan)) appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value ?? ''}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `commits=${JSON.stringify(commits)}\n`);
+          console.log(JSON.stringify({ ...plan, commits: commits.length }));
           JS
   build:
     needs: prepare
@@ -93,7 +110,6 @@ jobs:
     with:
       version: ${{ needs.prepare.outputs.version }}
       sha: ${{ needs.prepare.outputs.sha }}
-      release-tag: ${{ needs.prepare.outputs.tag }}
       linux-only: ${{ github.event_name == 'workflow_dispatch' && inputs.linux-only }}
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
     secrets: inherit
@@ -133,7 +149,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_SHA: ${{ needs.prepare.outputs.sha }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          # The build names its own tag from its signed instant; reading it from
+          # the build rather than the plan is what keeps the release, the title
+          # and About's build number one fact (nocx-vh2hr.1.17).
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          PREVIOUS: ${{ needs.prepare.outputs.previous }}
+          COMMITS: ${{ needs.prepare.outputs.commits }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           PUBLISH: ${{ github.event_name == 'schedule' || !inputs.dry-run }}
@@ -143,6 +164,7 @@ jobs:
           import { decide, publish, releaseKeys } from './scripts/publish-nightly.mjs';
           const input = { moved: true, sha: process.env.BUILD_SHA, version: process.env.VERSION,
             tag: process.env.RELEASE_TAG, runId: process.env.RUN_ID, runAttempt: process.env.RUN_ATTEMPT,
+            previous: process.env.PREVIOUS || null, commits: JSON.parse(process.env.COMMITS || '[]'),
             dir: 'dist', keyring: releaseKeys('internal/update/keyring.go') };
           if (process.env.PUBLISH === 'true') console.log(await publish(input));
           else console.log({ rehearsal: true, ...decide(input) });
@@ -184,6 +206,12 @@ jobs:
       # action holds what the host needs, shared with the stable proof.
       - uses: ./.github/actions/linux-update-proof-runtime
 
+      # The dated-tag reader is the publication module itself, so the pair this
+      # job picks is the pair the pruner counts (nocx-vh2hr.1.17).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
       - name: Refuse to prove anything but two published nightlies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -206,18 +234,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PUBLISHED_TAG: ${{ needs.prepare.outputs.tag }}
+          PUBLISHED_TAG: ${{ needs.build.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p proof-inputs/candidate proof-inputs/previous proof-inputs/lower proof-results
           # The pair is the newest dated nightly and the one before it, newest
-          # first by `published_at`. The moving `nightly` alias is not a dated
-          # tag: the harness requires it separately to serve the candidate's
-          # exact bytes, so selecting by it here would check nothing.
+          # first by `published_at`. WHICH TAGS COUNT IS NOT WRITTEN HERE: the
+          # module's datedNightlyTags decides it, so this selection and the
+          # pruner that deletes old copies cannot disagree about what a dated
+          # nightly is (nocx-vh2hr.1.17 names a new tag; the old ones are still
+          # published). The moving `nightly` alias is not a dated tag: the
+          # harness requires it separately to serve the candidate's exact bytes,
+          # so selecting by it here would check nothing.
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
           mapfile -t dated < <(
-            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-              --jq '.[] | select(.draft | not) | select(.prerelease) | select(.tag_name | startswith("nightly-")) | "\(.published_at)\t\(.tag_name)"' \
-              | sort -r | cut -f2
+            node scripts/publish-nightly.mjs dated-tags "$RUNNER_TEMP/releases.json" | cut -f1
           )
           candidate="${dated[0]:-}"
           previous="${dated[1]:-}"
@@ -376,9 +407,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p proof-inputs/candidate proof-inputs/previous proof-results
-          gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
-            --jq '.[] | select(.draft | not) | select(.prerelease) | select(.tag_name | startswith("nightly-")) | "\(.published_at)\t\(.tag_name)"' \
-            | sort -r | cut -f2 > "$RUNNER_TEMP/dated.txt"
+          # Both tag spellings, newest first, by the module that also prunes old
+          # copies; the moving alias is never a dated nightly (see the Linux leg).
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          node scripts/publish-nightly.mjs dated-tags "$RUNNER_TEMP/releases.json" \
+            | cut -f1 > "$RUNNER_TEMP/dated.txt"
           candidate="$(sed -n '1p' "$RUNNER_TEMP/dated.txt")"
           previous="$(sed -n '2p' "$RUNNER_TEMP/dated.txt")"
           if [ -z "$candidate" ] || [ -z "$previous" ]; then
@@ -405,7 +438,7 @@ jobs:
           cat proof-results/inputs.txt
           { echo '### macOS update proof'; echo '```'; cat proof-results/inputs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
         env:
-          PUBLISHED_TAG: ${{ needs.prepare.outputs.tag }}
+          PUBLISHED_TAG: ${{ needs.build.outputs.tag }}
 
       - name: Prove the previous nightly updates itself to this one
         run: |

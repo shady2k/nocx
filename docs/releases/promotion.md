@@ -35,9 +35,12 @@ nocx-sky-test "$PWD" 'node --test --test-reporter=tap scripts/release/promotion*
    its verified publication to finish successfully.
 2. Install and try that dated nightly. As the repository owner, dispatch
    **Release** on `main`, set `dry-run=false`, name its immutable
-   `nightly-YYYYMMDD-RUNID` tag, and confirm `tried=true`. Never use the moving
-   `nightly` alias. Promotion derives the version from the authenticated nightly;
-   there is no arbitrary stable-version input and no rebuilding to change it.
+   `vX.Y.Z-nightly.<build>` tag (the title in the releases list spells the same
+   build number), and confirm `tried=true`. The older `nightly-YYYYMMDD-RUNID`
+   copies are still promotable until the nightly pruner retires them. Never use
+   the moving `nightly` alias. Promotion derives the version from the
+   authenticated nightly; there is no arbitrary stable-version input and no
+   rebuilding to change it.
 3. Observe **Release** finish: provenance and PR-head CI green; original digests
    verified; stable manifest signed and checked against the candidate's keyring;
    draft upload downloaded and compared; stable published and downloaded again;
@@ -125,7 +128,7 @@ The nightly publishes `manifest.json`, its raw detached base64
   "schema": 1,
   "sha": "full forty-character commit SHA",
   "version": "0.8.0",
-  "tag": "nightly-20261027-42",
+  "tag": "v0.8.1-nightly.202610270317",
   "runId": 42,
   "runAttempt": 1,
   "artifacts": [{ "name": "asset basename", "sha256": "64 lower-case hex", "size": 123 }]

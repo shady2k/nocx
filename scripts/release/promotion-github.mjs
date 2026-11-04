@@ -239,7 +239,7 @@ async function collect(directory, github) {
   } = process.env
   authorize({ actor, triggeringActor, owner, ref, tried: tried === 'true' })
   fail(
-    repo === 'shady2k/nocx' && /^nightly-\d{8}-\d+$/.test(tag),
+    repo === 'shady2k/nocx' && /^(?:nightly-\d{8}-\d+|v\d+\.\d+\.\d+-nightly\.\d{12})$/.test(tag),
     'name a dated nightly from shady2k/nocx',
   )
   mkdirSync(directory)

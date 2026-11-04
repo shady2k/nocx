@@ -28,16 +28,14 @@ package main
 // reconcile on the next launch.
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
-	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/shady2k/nocx/internal/procwatch"
 )
 
 const (
@@ -88,33 +86,14 @@ func relaunchWaiterCommand(self, installPath string, pid int) *exec.Cmd {
 
 // waitForProcessExit blocks until pid is gone.
 //
-// THE KERNEL'S OWN ANSWER FIRST, WHERE IT EXISTS. waitForProcessExitPidfd
-// (relaunch_linux.go) is one descriptor that becomes readable only when the
-// process it names has exited, so there is no polling window and no pid reuse
-// to get wrong. The split is a build constraint because pidfd_open lives only
-// in x/sys/unix's Linux half; every other platform — macOS, whose restart goes
-// through `open -n` and never starts a waiter — answers supported=false and
-// takes the poll below (relaunch_other.go).
-//
-// The poll is the same fact at a coarser grain — asking whether the pid still
-// exists, never a sleep that assumes the answer.
+// The waiting is procwatch's, not this package's: "is this pid gone yet?" is a
+// kernel observation about a process, and procwatch is the package that asks
+// those. It answers with pidfd_open on Linux and with a poll elsewhere, which
+// is where a platform split belongs — a GOOS in the root package would move
+// every one of its tests into the OS jobs and leave the `!unix` halves of this
+// program compiled by nothing (nocx-vh2hr.1.13).
 func waitForProcessExit(pid int) error {
-	if supported, err := waitForProcessExitPidfd(pid); supported {
-		return err
-	}
-	return pollProcessExit(pid)
-}
-
-// pollProcessExit asks whether pid still exists, until it does not.
-func pollProcessExit(pid int) error {
-	for {
-		if killErr := unix.Kill(pid, 0); errors.Is(killErr, unix.ESRCH) {
-			return nil
-		} else if killErr != nil && !errors.Is(killErr, unix.EPERM) {
-			return fmt.Errorf("poll pid %d: %w", pid, killErr)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	return procwatch.WaitForExit(pid)
 }
 
 // runRelaunchWaiter is the waiter: wait for the window that started it, then

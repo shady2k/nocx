@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package procwatch
 
 import (
 	"errors"
@@ -9,14 +9,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// waitForProcessExitPidfd waits for pid to exit through the kernel's pidfd.
+// waitForExitPidfd waits for pid to exit through the kernel's pidfd.
 //
 // supported is false when this kernel has no pidfd_open, or refuses one for a
-// process this one may not signal; waitForProcessExit then polls the pid
-// instead. A pidfd is one descriptor that becomes readable only when the
-// process it names has exited, so there is no polling window and no pid reuse
-// to get wrong.
-func waitForProcessExitPidfd(pid int) (supported bool, err error) {
+// process this one may not signal; WaitForExit then polls the pid instead. A
+// pidfd is one descriptor that becomes readable only when the process it names
+// has exited, so there is no polling window and no pid reuse to get wrong.
+func waitForExitPidfd(pid int) (supported bool, err error) {
 	fd, err := unix.PidfdOpen(pid, 0)
 	if err != nil {
 		if errors.Is(err, unix.ESRCH) {

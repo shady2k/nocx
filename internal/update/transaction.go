@@ -291,11 +291,7 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	if rec == nil {
-		swap, backup := swapPath(u.installPath), backupPath(u.installPath)
-		if u.pathExists(swap) || u.pathExists(backup) {
-			return fmt.Errorf("reconcile: no journal but managed debris exists at %s and/or %s — these files may hold a rollback copy. Remove them by hand if they are stale, or consult the README rollback procedures.", swap, backup)
-		}
-		return nil
+		return u.settleUnjournaledDebris(ctx)
 	}
 	currentID, err := statBundleID(rec.InstallPath)
 	if err != nil {
@@ -331,6 +327,81 @@ func (u *updater) reconcileLocked(ctx context.Context) error {
 	default:
 		return fmt.Errorf("reconcile: install bundle at %s has unexpected identity %v — the journal recorded old=%v new=%v. The bundle was replaced by hand or by another process. Remove %s and consult the README rollback procedures.", rec.InstallPath, currentID, rec.OldBundleID, rec.NewBundleID, jp)
 	}
+}
+
+// settleUnjournaledDebris resolves the managed names when no journal explains
+// them (nocx-vh2hr.1.14).
+//
+// THE INTERVAL EACH MANAGED NAME LIVES IN. .nocx-swap.app exists from the
+// instant Apply renames its staged bundle onto it (step 9) until reconcile
+// removes it — the exchange never happened — or until ReportHealthy renames it
+// to .nocx-backup.app after the exchange. .nocx-backup.app exists from that
+// rename until a LATER update's finalisation removes it, and that interval
+// deliberately outlives the journal: finalisation renames swap to backup and
+// only then deletes the record, so a completed update leaves one file nothing
+// names. The extraction directory .nocx-update-<txID> lives from Apply step 5
+// until reconcile or ReportHealthy removes it, and it never blocks an update.
+//
+// THE PARTIAL FAILURES THAT LEAVE DEBRIS WITH NO JOURNAL:
+//   - ReportHealthy's swap→backup rename fails (a permission, a name it cannot
+//     replace). It logs a warning and deletes the journal anyway, so the swap
+//     survives with nothing naming it.
+//   - A crash between that rename and the journal's deletion leaves both
+//     files, but the journal is still there: that is the ordinary pending
+//     path, not this one.
+//   - Every COMPLETED update leaves .nocx-backup.app behind with no journal.
+//     This is the common case, and refusing it is what made the second update
+//     of a machine permanently impossible.
+//   - A build from before the placement split kept its journal beside the
+//     install path; a person who removed the state directory deleted the only
+//     record of debris the disk still holds.
+//
+// So a missing journal cannot mean "these files are not mine". It means no
+// live transaction names them, and the only question left is whether nocx can
+// PROVE they are its own — the fixed name says nothing by itself. Proven
+// debris is removed unless it is another name for the running install or holds
+// a release newer than the one running; anything else is refused with the path
+// and the step to take, because deleting another application is not recovery.
+func (u *updater) settleUnjournaledDebris(ctx context.Context) error {
+	installID, err := statBundleID(u.installPath)
+	if err != nil {
+		return fmt.Errorf("reconcile: stat install bundle %s: %w", u.installPath, err)
+	}
+	for _, managed := range []struct{ name, path string }{
+		{"swap", swapPath(u.installPath)},
+		{"backup", backupPath(u.installPath)},
+	} {
+		if !u.pathExists(managed.path) {
+			continue
+		}
+		id, statErr := statBundleID(managed.path)
+		if statErr != nil {
+			return fmt.Errorf("reconcile: stat the %s at %s: %w", managed.name, managed.path, statErr)
+		}
+		if !installID.isZero() && id.equal(installID) {
+			u.log.Info("reconcile: a managed name is another name for the running install; leaving it",
+				"path", managed.path)
+			continue
+		}
+		report, inspectErr := u.platform.InspectBundle(ctx, managed.path)
+		if inspectErr != nil {
+			return fmt.Errorf("reconcile: inspect the %s at %s: %w — move it aside, then try again", managed.name, managed.path, inspectErr)
+		}
+		if !report.Nocx {
+			return fmt.Errorf("reconcile: the %s at %s is not nocx's own bundle, and this update will not delete another application's copy — move or remove it, then try again", managed.name, managed.path)
+		}
+		if IsNewer(u.currentVersion, report.Version) {
+			u.log.Warn("reconcile: keeping a managed copy newer than the running install",
+				"path", managed.path, "version", report.Version, "running", u.currentVersion)
+			continue
+		}
+		if removeErr := os.RemoveAll(managed.path); removeErr != nil {
+			return fmt.Errorf("reconcile: remove the stale %s at %s: %w — remove it by hand, then try again", managed.name, managed.path, removeErr)
+		}
+		u.log.Info("reconcile: removed managed debris that no journal explains",
+			"path", managed.path)
+	}
+	return nil
 }
 
 // State implements [Updater.State]: what a window can tell a person about

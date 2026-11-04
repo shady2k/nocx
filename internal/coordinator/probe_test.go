@@ -49,6 +49,12 @@ func (fakePlatform) Preflight(context.Context, string) error { return nil }
 
 func (fakePlatform) VerifyExtracted(context.Context, string) error { return nil }
 
+// InspectBundle claims nothing: this double exists for the coordinator probe,
+// which never reconciles debris.
+func (fakePlatform) InspectBundle(context.Context, string) (update.BundleReport, error) {
+	return update.BundleReport{}, nil
+}
+
 // Extract copies the downloaded archive into destDir under its own name —
 // the single-file behaviour the linux implementation has.
 func (fakePlatform) Extract(_ context.Context, archivePath, destDir string) error {

@@ -340,3 +340,52 @@ func TestArtifactID_MatchesManifestEntry(t *testing.T) {
 		t.Errorf("URL: got %q, want linux.AppImage", got.URL)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// InspectBundle — ownership of a managed name (nocx-vh2hr.1.14)
+// ---------------------------------------------------------------------------
+
+// A managed name is a claim by whoever created it, not by nocx, so reconcile
+// asks the artefact what it is before deleting anything.
+func TestInspectBundle_AppImageIsNocxOwned(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".nocx-swap.app")
+	makeMinimalAppImage(t, path)
+
+	report, err := NewPlatform().InspectBundle(context.Background(), path)
+	if err != nil {
+		t.Fatalf("InspectBundle: %v", err)
+	}
+	if !report.Nocx {
+		t.Error("a well-formed AppImage at a managed name is not recognised as nocx's")
+	}
+	if report.Version != "" {
+		t.Errorf("version: got %q, want none — an AppImage declares no version a reader can reach", report.Version)
+	}
+}
+
+func TestInspectBundle_PlainFileIsNotNocxOwned(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".nocx-backup.app")
+	if err := os.WriteFile(path, []byte("somebody else's application"), 0o755); err != nil { //nolint:gosec // fixture must be executable to reach the magic check
+		t.Fatal(err)
+	}
+
+	report, err := NewPlatform().InspectBundle(context.Background(), path)
+	if err != nil {
+		t.Fatalf("InspectBundle: %v", err)
+	}
+	if report.Nocx {
+		t.Error("an arbitrary file was accepted as nocx's own")
+	}
+}
+
+func TestInspectBundle_MissingPathIsNotNocxOwned(t *testing.T) {
+	report, err := NewPlatform().InspectBundle(context.Background(), filepath.Join(t.TempDir(), ".nocx-swap.app"))
+	if err != nil {
+		t.Fatalf("InspectBundle of a missing path: %v", err)
+	}
+	if report.Nocx {
+		t.Error("a missing path was accepted as nocx's own")
+	}
+}

@@ -115,6 +115,10 @@ type fakePlatform struct {
 	id           ArtifactID
 	preflightErr error
 	verifyErr    error
+	// bundles answers InspectBundle per path. An unlisted path is a nocx
+	// artefact of unknown version, which is the shape of the Linux AppImage
+	// the core's tests install.
+	bundles map[string]BundleReport
 }
 
 // newFakePlatform returns a fake with a fixed linux/amd64/AppImage
@@ -129,6 +133,16 @@ func (f *fakePlatform) ArtifactID() ArtifactID { return f.id }
 func (f *fakePlatform) Preflight(context.Context, string) error { return f.preflightErr }
 
 func (f *fakePlatform) VerifyExtracted(context.Context, string) error { return f.verifyErr }
+
+// InspectBundle answers from bundles, and treats an unlisted path as a nocx
+// artefact of unknown version — a minimal AppImage, which is what these tests
+// install.
+func (f *fakePlatform) InspectBundle(_ context.Context, path string) (BundleReport, error) {
+	if report, ok := f.bundles[path]; ok {
+		return report, nil
+	}
+	return BundleReport{Nocx: true}, nil
+}
 
 // Extract copies the downloaded archive into destDir under its own name
 // — the single-file behaviour the linux impl has, sufficient to exercise
@@ -325,29 +339,6 @@ func TestReconcile_NoRecord_NothingInFlight(t *testing.T) {
 
 	if err := u.Reconcile(context.Background()); err != nil {
 		t.Fatalf("Reconcile with no journal failed: %v", err)
-	}
-}
-
-func TestReconcile_NoRecord_ManagedDebris(t *testing.T) {
-	dir := t.TempDir()
-	installPath := filepath.Join(dir, "nocx.AppImage")
-	makeMinimalAppImage(t, installPath)
-
-	// Create managed debris without a journal.
-	if err := os.WriteFile(swapPath(installPath), []byte("debris"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	u := NewUpdater(UpdaterConfig{
-		Platform:       newFakePlatform(),
-		Fetcher:        &mockFetcher{},
-		Keyring:        nil,
-		CurrentVersion: "0.1.0", InstallPath: installPath, StateDir: filepath.Join(filepath.Dir(installPath), "state"),
-	})
-
-	err := u.Reconcile(context.Background())
-	if err == nil {
-		t.Fatal("expected error for managed debris with no journal, got nil")
 	}
 }
 

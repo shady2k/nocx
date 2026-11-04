@@ -402,17 +402,28 @@ func TestWSServer_Resize(t *testing.T) {
 	_ = conn.WriteMessage(websocket.BinaryMessage, f.Encode())
 
 	reader := newWSReader(conn)
+	// WHAT THIS SESSION ACTUALLY SENT, for the failure below (nocx-atpw5.1.37).
+	// The two outcomes this loop can end on are different findings — the
+	// shell never answered, or the answer was not the size the resize asked
+	// for — and neither was visible: the test said "nothing arrived" whether
+	// the pty was still 80x24 or the write never reached it.
+	var seen int
+	var said []byte
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for stty size output")
+			t.Fatalf("timed out waiting for stty size output: %d data frame(s) for this session said %q", seen, clipPayload(said))
 		case frame, ok := <-reader.frames:
 			if !ok {
-				t.Fatal("connection closed before stty output arrived")
+				t.Fatalf("connection closed before stty output arrived: %d data frame(s) for this session said %q", seen, clipPayload(said))
 			}
 			if string(session.IDFromBytes(frame.SessionID)) != sid {
 				continue
+			}
+			seen++
+			if len(said) < 512 {
+				said = append(said, frame.Payload...)
 			}
 			output := string(frame.Payload)
 			if strings.Contains(output, "30 100") || strings.Contains(output, "30\t100") {
@@ -420,6 +431,16 @@ func TestWSServer_Resize(t *testing.T) {
 			}
 		}
 	}
+}
+
+// clipPayload bounds what a failure quotes of a session's own output (its
+// command echo and its replies), so a report stays a line.
+func clipPayload(p []byte) string {
+	const max = 80
+	if len(p) > max {
+		return string(p[:max]) + "…"
+	}
+	return string(p)
 }
 
 func TestWSServer_CloseSession(t *testing.T) {

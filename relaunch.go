@@ -88,32 +88,25 @@ func relaunchWaiterCommand(self, installPath string, pid int) *exec.Cmd {
 
 // waitForProcessExit blocks until pid is gone.
 //
-// pidfd_open is the kernel's own answer: one descriptor that becomes readable
-// only when the process it names has exited, so there is no polling window and
-// no pid reuse to get wrong. Kernels without it fall back to asking whether
-// the pid still exists, which is the same fact at a coarser grain — a poll,
-// never a sleep that assumes the answer.
+// THE KERNEL'S OWN ANSWER FIRST, WHERE IT EXISTS. waitForProcessExitPidfd
+// (relaunch_linux.go) is one descriptor that becomes readable only when the
+// process it names has exited, so there is no polling window and no pid reuse
+// to get wrong. The split is a build constraint because pidfd_open lives only
+// in x/sys/unix's Linux half; every other platform — macOS, whose restart goes
+// through `open -n` and never starts a waiter — answers supported=false and
+// takes the poll below (relaunch_other.go).
+//
+// The poll is the same fact at a coarser grain — asking whether the pid still
+// exists, never a sleep that assumes the answer.
 func waitForProcessExit(pid int) error {
-	fd, err := unix.PidfdOpen(pid, 0)
-	if err == nil {
-		defer func() { _ = unix.Close(fd) }()
-		// A pidfd is a small non-negative int; the cast is the syscall's own
-		// type, not a narrowing that can lose a real descriptor.
-		fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}} //nolint:gosec // pidfd fits int32
-		for {
-			_, pollErr := unix.Poll(fds, -1)
-			if errors.Is(pollErr, unix.EINTR) {
-				continue
-			}
-			return pollErr
-		}
+	if supported, err := waitForProcessExitPidfd(pid); supported {
+		return err
 	}
-	if errors.Is(err, unix.ESRCH) {
-		return nil // already gone
-	}
-	if !errors.Is(err, unix.ENOSYS) && !errors.Is(err, unix.EPERM) {
-		return fmt.Errorf("pidfd_open %d: %w", pid, err)
-	}
+	return pollProcessExit(pid)
+}
+
+// pollProcessExit asks whether pid still exists, until it does not.
+func pollProcessExit(pid int) error {
 	for {
 		if killErr := unix.Kill(pid, 0); errors.Is(killErr, unix.ESRCH) {
 			return nil

@@ -124,6 +124,14 @@ func (p *linuxPlatform) VerifyExtracted(_ context.Context, bundlePath string) er
 		return fmt.Errorf("staged AppImage %s is not executable (missing +x bit)", bundlePath)
 	}
 
+	return verifyAppImageShape(bundlePath)
+}
+
+// verifyAppImageShape checks the one thing an AppImage can be recognised by
+// without running it: ELF magic followed by the AppImage type-2 magic at
+// offset 8. VerifyExtracted and InspectBundle ask the same question of the
+// same file, so they ask it here once.
+func verifyAppImageShape(bundlePath string) error {
 	// Read the first 11 bytes to check ELF + AppImage magic.
 	f, err := os.Open(bundlePath) //nolint:gosec // bundlePath is caller-controlled, integrity already verified
 	if err != nil {
@@ -144,6 +152,30 @@ func (p *linuxPlatform) VerifyExtracted(_ context.Context, bundlePath string) er
 	}
 
 	return nil
+}
+
+// InspectBundle implements [Platform.InspectBundle] for a Linux install.
+//
+// The artefact is the AppImage itself, so ownership is the same shape check
+// VerifyExtracted makes and nothing more: a file that is executable and starts
+// with the ELF header plus the AppImage type-2 magic. A bare AppImage carries
+// no bundle identifier and no version a reader can reach without executing it,
+// so the version is empty and the caller compares nothing.
+func (p *linuxPlatform) InspectBundle(_ context.Context, path string) (BundleReport, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return BundleReport{}, nil
+		}
+		return BundleReport{}, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return BundleReport{}, nil
+	}
+	if err := verifyAppImageShape(path); err != nil {
+		return BundleReport{Nocx: false}, nil
+	}
+	return BundleReport{Nocx: true}, nil
 }
 
 // Exchange implements [Platform.Exchange] via renameat2(RENAME_EXCHANGE).

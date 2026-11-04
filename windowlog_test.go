@@ -42,6 +42,12 @@ func (windowTestPlatform) Preflight(context.Context, string) error { return nil 
 
 func (windowTestPlatform) VerifyExtracted(context.Context, string) error { return nil }
 
+// InspectBundle answers like the Linux platform: these tests never leave
+// debris, so nothing is inspected, and the zero report claims nothing.
+func (windowTestPlatform) InspectBundle(context.Context, string) (update.BundleReport, error) {
+	return update.BundleReport{}, nil
+}
+
 func (windowTestPlatform) Extract(_ context.Context, archivePath, destDir string) error {
 	data, err := os.ReadFile(archivePath) //nolint:gosec // this test's own temp directory
 	if err != nil {

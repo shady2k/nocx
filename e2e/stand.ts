@@ -61,11 +61,12 @@
  * about, and it needs the real window.go rather than a stub.
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { awaitCoordinator } from './coordinator.mjs'
 import { createHomeIsolation } from './home-isolation'
+import { appendCapped, STAND_LOG_BYTES } from './log-tail.mts'
 
 const repoRoot = path.resolve(__dirname, '..')
 
@@ -386,7 +387,11 @@ export async function startStand(): Promise<StandManifest> {
   const onBackendOutput = (b: Buffer): void => {
     backendLog += b.toString()
     try {
-      appendFileSync(liveBackendLogPath, b)
+      // BOUNDED (nocx-atpw5.1.40): the run's debug log is the one log a whole
+      // shard writes, and nothing reads more than its tail — the failure
+      // report filters the last 20 000 characters by the test's trace id.
+      // Unbounded it was ~0.6 MB per minute of run, kept in the artifact.
+      appendCapped(liveBackendLogPath, b, STAND_LOG_BYTES)
     } catch {
       /* a failure report reading a log a byte short of the truth is still
        * better than a crashed stand; this is a courtesy write. */

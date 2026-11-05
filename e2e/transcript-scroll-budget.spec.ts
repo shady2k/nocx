@@ -238,7 +238,13 @@ const test = base
 // block — the harness was making each command cost more than the last. The
 // failure-context block (e2e/failure-context.ts) takes its own ARIA snapshot at
 // the moment of failure, so nothing a failure needs is lost.
-test.use({ trace: { mode: 'retain-on-failure', snapshots: false } })
+// NO SCREENCAST EITHER (nocx-atpw5.1.40). This file's own test.use replaces the
+// config's trace options wholesale, so the config's screenshots:false did not
+// reach it: measured on the 500-block case, the live trace held 723 MB in 14 438
+// screenshots while the .trace file itself was 1 MB — a screenshot per action,
+// and there are thousands here. What a failure of this spec needs is the block
+// DOM it attaches itself below, on its own failure path.
+test.use({ trace: { mode: 'retain-on-failure', snapshots: false, screenshots: false } })
 
 test.describe('long transcript scroll budget', () => {
   // 500 blocks means 500 real PTY round trips (fill, Enter, wait for freeze),

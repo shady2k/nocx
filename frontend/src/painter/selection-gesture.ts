@@ -131,7 +131,10 @@ export function installLiveSelectionGesture(
     const artifactVersion = row.dataset.artifactVersion
     const logicalLine = Number(row.dataset.logicalLine)
     if (!blockId || !artifactVersion || !Number.isInteger(logicalLine)) return null
-    const stored = storedBlockRowsForSelection(blockId, artifactVersion)
+    // The rows belong to the block element that painted them, and that
+    // element is the `.cmd-output`'s parent (block-rows.ts `paintOutput`).
+    const painted = row.closest<HTMLElement>('.cmd-output')?.parentElement ?? null
+    const stored = painted === null ? null : storedBlockRowsForSelection(painted, artifactVersion)
     if (!stored) return null
     const rowIndex = stored.lines.findIndex((line) => line.from === logicalLine)
     const snapshot = snapshotForRows(stored.lines)

@@ -45,38 +45,60 @@ import type {
 
 export { VaultOperationCancelledError } from './dispatcher'
 
-const REASON_MESSAGES: Record<string, string> = {
-  'no-service': 'No system keyring available. Use a passphrase to unlock.',
-  locked: 'Your login keychain is locked. Unlock it and try again.',
-  denied: 'Access to the system keyring was denied.',
-  timeout: 'The operation timed out. Please try again.',
-  'unsupported-platform': 'System keyring is not supported on this platform.',
+// The values are thunks, not strings: t() reads the locale signal, and the
+// locale can flip after this module has been imported (the Go reconcile can
+// switch it post-launch), so the sentence must be resolved at read time. A
+// plain table would pin the import-time language forever.
+const REASON_MESSAGES: Record<string, () => string> = {
+  'no-service': () =>
+    t('vault.reason.noService', 'No system keyring available. Use a passphrase to unlock.'),
+  locked: () => t('vault.reason.locked', 'Your login keychain is locked. Unlock it and try again.'),
+  denied: () => t('vault.reason.denied', 'Access to the system keyring was denied.'),
+  timeout: () => t('vault.reason.timeout', 'The operation timed out. Please try again.'),
+  'unsupported-platform': () =>
+    t('vault.reason.unsupportedPlatform', 'System keyring is not supported on this platform.'),
   // Not "no keyring here" — nobody looked. This build declared the OS keystore
   // out of play, because the only way to ask is a keychain write and on a host
   // with no keychain that write is a modal nobody can dismiss (design D10).
-  excluded:
-    'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
-  'unknown-provider': 'This secret reference names a provider not available in this build.',
+  excluded: () =>
+    t(
+      'vault.reason.excluded',
+      'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
+    ),
+  'unknown-provider': () =>
+    t(
+      'vault.reason.unknownProvider',
+      'This secret reference names a provider not available in this build.',
+    ),
   // Without this entry the reason fell through to the backend's own words and
   // the user was shown "unseal failed" — an internal phrase, in lower case,
   // naming an operation no interface mentions. Every reason the transport can
   // send needs a line here; that is what makes this table the single owner of
   // user-facing wording rather than a partial one.
-  'unseal-failed': 'That did not unlock the vault. Check what you entered and try again.',
-  'vault-changed': 'The vault changed while this was open. Try again.',
-  'vault-sealed': 'The vault is locked.',
-  'vault-uninitialized': 'Protection has not been set up yet.',
+  'unseal-failed': () =>
+    t(
+      'vault.reason.unsealFailed',
+      'That did not unlock the vault. Check what you entered and try again.',
+    ),
+  'vault-changed': () =>
+    t('vault.reason.vaultChanged', 'The vault changed while this was open. Try again.'),
+  'vault-sealed': () => t('vault.reason.vaultSealed', 'The vault is locked.'),
+  'vault-uninitialized': () =>
+    t('vault.reason.vaultUninitialized', 'Protection has not been set up yet.'),
 }
 
-function vaultErrorMessage(err: unknown): string {
+/** The sentence a failed vault RPC becomes. Exported for the i18n test, which
+ *  proves the reason table resolves under the active locale, not the import
+ *  locale. */
+export function vaultErrorMessage(err: unknown): string {
   if (err instanceof RpcError && err.data && typeof err.data === 'object') {
     const d = err.data as { reason?: string }
     if (d.reason && REASON_MESSAGES[d.reason]) {
-      return REASON_MESSAGES[d.reason]
+      return REASON_MESSAGES[d.reason]()
     }
   }
   if (err instanceof Error) return err.message
-  return 'Operation failed'
+  return t('vault.reason.operationFailed', 'Operation failed')
 }
 
 // ── Store display helpers ───────────────────────────────────────────────
@@ -84,13 +106,14 @@ function vaultErrorMessage(err: unknown): string {
 // sentences from provider status using REASON_MESSAGES as the single owner
 // of user-facing wording.
 
-const STORE_NAMES: Record<string, string> = {
-  system: 'System keychain',
-  file: 'Encrypted nocx storage',
+// Thunks, for the same reason REASON_MESSAGES are — see the note above.
+const STORE_NAMES: Record<string, () => string> = {
+  system: () => t('vault.store.system', 'System keychain'),
+  file: () => t('vault.store.file', 'Encrypted nocx storage'),
 }
 
 function storeLabelName(id: string): string {
-  return STORE_NAMES[id] ?? id
+  return STORE_NAMES[id]?.() ?? id
 }
 
 /** The fallback sentence shown when a store is not answering and its reason
@@ -102,9 +125,9 @@ function storeStateSentence(p: ProviderStatus): string {
   // "excluded" is the one not-ready reason that is not a failure: nothing was
   // asked, so "Not answering" would describe a question nobody put. It gets
   // its own sentence rather than the failure prefix (design D10).
-  if (p.reason === 'excluded') return REASON_MESSAGES.excluded
+  if (p.reason === 'excluded') return REASON_MESSAGES.excluded()
   const msg = p.reason
-    ? (REASON_MESSAGES[p.reason] ?? UNKNOWN_REASON_SENTENCE)
+    ? (REASON_MESSAGES[p.reason]?.() ?? UNKNOWN_REASON_SENTENCE)
     : UNKNOWN_REASON_SENTENCE
   return `Not answering: ${msg}`
 }
@@ -121,14 +144,21 @@ function storeRowStatus(p: ProviderStatus): StoreRowStatus {
     // A store this build deliberately never asked is not broken, and an error
     // dot next to a decision somebody made reads as a fault to fix.
     if (p.reason === 'excluded') {
-      return { tone: 'warning', accessibleName: 'Not used by this build' }
+      return {
+        tone: 'warning',
+        accessibleName: t('vault.provider.notInBuild', 'Not used by this build'),
+      }
     }
-    const label = p.reason ? (REASON_MESSAGES[p.reason] ?? 'Not available') : 'Not available'
+    const label = p.reason
+      ? (REASON_MESSAGES[p.reason]?.() ?? t('vault.provider.unavailable', 'Not available'))
+      : t('vault.provider.unavailable', 'Not available')
     return { tone: 'error', accessibleName: label }
   }
   return {
     tone: p.writable ? 'ok' : 'warning',
-    accessibleName: p.writable ? 'Available' : 'Read-only',
+    accessibleName: p.writable
+      ? t('vault.provider.available', 'Available')
+      : t('vault.provider.readonly', 'Read-only'),
   }
 }
 
@@ -708,7 +738,10 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
       await navigator.clipboard.writeText(recoveryCode())
       setCopied(true)
       setTimeout(() => setCopied(false), 3000)
-      showToast({ level: 'success', message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.') })
+      showToast({
+        level: 'success',
+        message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.'),
+      })
     } catch {
       showToast({
         level: 'danger',
@@ -821,7 +854,9 @@ export const SetupDialog: Component<SetupDialogProps> = (props) => {
                   void handleSetup()
                 }}
               >
-                {saving() ? 'Setting up…' : 'Set Up'}
+                {saving()
+                  ? t('vault.setup.submitting', 'Setting up…')
+                  : t('vault.setup.submit', 'Set Up')}
               </Button>
               <Button variant="default" disabled={saving()} onClick={props.onClose}>
                 {t('vault.setup.cancel', 'Cancel')}
@@ -953,7 +988,9 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
               void handleReset()
             }}
           >
-            {resetting() ? 'Resetting…' : t('vault.reset.title', 'Reset the vault')}
+            {resetting()
+              ? t('vault.setup.resetBusy', 'Resetting…')
+              : t('vault.reset.title', 'Reset the vault')}
           </Button>
           <Button variant="default" disabled={resetting()} onClick={props.onClose}>
             {t('vault.setup.cancel', 'Cancel')}
@@ -990,8 +1027,10 @@ export const ResetVaultDialog: Component<ResetVaultDialogProps> = (props) => {
                   than a decision. */}
               <Show when={!p().systemKeychainReachable}>
                 <p class="ui-vault-reset-warning">
-                  The system keychain is not answering, so secrets stored there cannot be removed.
-                  They will remain readable until it is available and you reset again.
+                  {t(
+                    'vault.keychain.unanswered',
+                    'The system keychain is not answering, so secrets stored there cannot be removed. They will remain readable until it is available and you reset again.',
+                  )}
                 </p>
               </Show>
             </>
@@ -1074,9 +1113,10 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
    *  which of the two it was. */
   const refusalMessage = (m: UnlockMeans, e: unknown): string => {
     const generic = vaultErrorMessage(e)
-    if (generic !== REASON_MESSAGES['unseal-failed']) return generic
-    if (m === 'passphrase') return 'That passphrase does not unlock this vault.'
-    return 'That recovery code does not unlock this vault.'
+    if (generic !== REASON_MESSAGES['unseal-failed']()) return generic
+    if (m === 'passphrase')
+      return t('vault.unlock.passphraseWrong', 'That passphrase does not unlock this vault.')
+    return t('vault.unlock.recoveryWrong', 'That recovery code does not unlock this vault.')
   }
 
   const handleUnseal = async (overrideMeans?: UnlockMeans) => {
@@ -1086,6 +1126,8 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     // anything. The OUTCOME of the call is a different kind of message and
     // goes where every other outcome on these surfaces goes — a toast.
     if (!secret()) {
+      // Lowercase on purpose — this completes the sentence "Enter your …",
+      // it is not the field label above.
       const lbl = m === 'passphrase' ? 'vault passphrase' : 'vault recovery code'
       setError(`Enter your ${lbl}`)
       return
@@ -1126,7 +1168,10 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
 
   const meansForm = () => {
     const m = currentMeans()
-    const label = m === 'passphrase' ? 'Vault passphrase' : 'Vault recovery code'
+    const label =
+      m === 'passphrase'
+        ? t('vault.unlock.passphraseLabel', 'Vault passphrase')
+        : t('vault.unlock.recoveryLabel', 'Vault recovery code')
     const placeholder = m === 'passphrase' ? 'Your vault passphrase' : 'Your vault recovery code'
     const inputId = m === 'passphrase' ? 'vault-unlock-passphrase' : 'vault-unlock-recovery'
     return (
@@ -1158,9 +1203,17 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
       // The title says WHICH password and WHY (nocx-s8jn): a bare "Unlock the
       // vault" cannot be told apart from the key and connection prompts, and
       // the reason names the operation that made the app ask now.
-      ariaLabel={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
+      ariaLabel={
+        props.reason
+          ? `${t('vault.unlock.titleReasonHead', 'Unlock the vault to')} ${props.reason}`
+          : t('vault.unlock.title', 'Unlock the vault')
+      }
       placement="top-sheet"
-      title={props.reason ? `Unlock the vault to ${props.reason}` : 'Unlock the vault'}
+      title={
+        props.reason
+          ? `${t('vault.unlock.titleReasonHead', 'Unlock the vault to')} ${props.reason}`
+          : t('vault.unlock.title', 'Unlock the vault')
+      }
       // Enter unlocks, supplied by the Prompt's onSubmit — the same contract
       // Dialog offered. The one control a user reaches for reflexively in a
       // passphrase prompt must not do nothing.
@@ -1177,7 +1230,9 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
               void handleUnseal()
             }}
           >
-            {unlocking() ? 'Unlocking…' : 'Unlock'}
+            {unlocking()
+              ? t('vault.unlock.busy', 'Unlocking…')
+              : t('vault.unlock.submit', 'Unlock')}
           </Button>
           <Button variant="default" disabled={unlocking()} onClick={props.onClose}>
             {t('vault.setup.cancel', 'Cancel')}
@@ -1421,7 +1476,10 @@ export const RecoveryCodeDialog: Component<RecoveryCodeDialogProps> = (props) =>
     void navigator.clipboard.writeText(code).then(
       () => {
         setCopied(true)
-        showToast({ level: 'success', message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.') })
+        showToast({
+          level: 'success',
+          message: t('vault.recovery.copied', 'Recovery code copied to the clipboard.'),
+        })
       },
       () => {
         showToast({
@@ -1558,7 +1616,10 @@ export function VaultSection(props: VaultSectionProps) {
   const handleDefaultProvider = async (provider: string) => {
     try {
       await props.vaultController.setDefaultProvider({ provider })
-      showToast({ level: 'success', message: t('vault.provider.updated', 'Default provider updated.') })
+      showToast({
+        level: 'success',
+        message: t('vault.provider.updated', 'Default provider updated.'),
+      })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     }
@@ -1582,26 +1643,33 @@ export function VaultSection(props: VaultSectionProps) {
     // here answered a question nobody had asked and left the actual one —
     // what do I do about it — unanswered.
     if (s.state === 'uninitialized')
-      return 'Set up protection first; there is nothing to change yet.'
-    if (s.state === 'sealed') return 'Unlock the vault to change how it is protected.'
+      return t('vault.change.notSetUp', 'Set up protection first; there is nothing to change yet.')
+    if (s.state === 'sealed')
+      return t('vault.change.lockedHead', 'Unlock the vault to change how it is protected.')
     // Unsealed, but the vault has no passphrase envelope: it is held by an
     // OS key alone, and both of these actions are about a passphrase.
-    return 'This vault is held by an OS key alone, so there is no passphrase to change or recover.'
+    return t(
+      'vault.change.osKeyOnly',
+      'This vault is held by an OS key alone, so there is no passphrase to change or recover.',
+    )
   }
 
   const AUTO_LOCK_OPTIONS = [
     { value: 0, label: t('vault.autolock.never', 'Never') },
-    { value: 5, label: '5 min' },
-    { value: 15, label: '15 min' },
-    { value: 30, label: '30 min' },
-    { value: 60, label: '60 min' },
+    { value: 5, label: t('vault.autolock.min.5', '5 min') },
+    { value: 15, label: t('vault.autolock.min.15', '15 min') },
+    { value: 30, label: t('vault.autolock.min.30', '30 min') },
+    { value: 60, label: t('vault.autolock.min.60', '60 min') },
   ]
 
   const handleSetAutoLock = async (minutes: number) => {
     try {
       await props.vaultClient.setAutoSeal(minutes)
       await props.vaultController.refresh()
-      showToast({ level: 'success', message: t('vault.autolock.updated', 'Auto-lock timeout updated.') })
+      showToast({
+        level: 'success',
+        message: t('vault.autolock.updated', 'Auto-lock timeout updated.'),
+      })
     } catch (e: unknown) {
       showToast({ level: 'danger', message: vaultErrorMessage(e) })
     }
@@ -1656,8 +1724,8 @@ export function VaultSection(props: VaultSectionProps) {
     const s = status()
     if (!s) return ''
     if (s.state === 'unsealed') return 'Vault is unlocked'
-    if (s.state === 'sealed') return 'Vault is locked'
-    return 'Protection is not set up yet'
+    if (s.state === 'sealed') return t('secrets.locked.title', 'Vault is locked')
+    return t('vault.protection.notSetUp.title', 'Protection is not set up yet')
   }
 
   const cardDescription = (): string => {
@@ -1666,7 +1734,10 @@ export function VaultSection(props: VaultSectionProps) {
     if (s.state === 'unsealed') {
       return s.autoSealMinutes > 0
         ? `Saved passwords and key passphrases are available to your connections, and lock again after ${s.autoSealMinutes} minutes idle.`
-        : 'Saved passwords and key passphrases are available to your connections.'
+        : t(
+            'vault.protection.availableNote',
+            'Saved passwords and key passphrases are available to your connections.',
+          )
     }
     if (s.state === 'sealed') {
       return 'Saved passwords and key passphrases stay encrypted until you unlock. Connections that need one will ask.'
@@ -1685,8 +1756,13 @@ export function VaultSection(props: VaultSectionProps) {
   const cardActionLabel = (): string => {
     const s = status()
     if (!s) return ''
-    if (s.state === 'unsealed') return sealing() ? 'Locking…' : 'Lock now'
-    return s.state === 'sealed' ? 'Unlock' : 'Set up protection'
+    if (s.state === 'unsealed')
+      return sealing()
+        ? t('vault.protection.locking', 'Locking…')
+        : t('vault.protection.lockNow', 'Lock now')
+    return s.state === 'sealed'
+      ? t('vault.unlock.submit', 'Unlock')
+      : t('vault.protection.setUp', 'Set up protection')
   }
 
   // ── The store list ──────────────────────────────────────────────────
@@ -1878,7 +1954,11 @@ export function VaultSection(props: VaultSectionProps) {
               directly against that. The tone carries it: `success` says
               nothing to do here, which is the whole reason Badge grew one. */}
           <Stack>
-            <Field for="vault-state-raw" label={t('vault.state.label', 'State')} orientation="horizontal">
+            <Field
+              for="vault-state-raw"
+              label={t('vault.state.label', 'State')}
+              orientation="horizontal"
+            >
               <Badge tone={diagStateTone()}>{status()!.state}</Badge>
             </Field>
             <Show when={status()!.providers.length > 0}>

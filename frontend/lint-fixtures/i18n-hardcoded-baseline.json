@@ -6918,51 +6918,21 @@
     },
     {
       "file": "src/vault.tsx",
-      "line": 977,
+      "line": 1014,
       "context": "jsx-text",
       "snippet": "will be deleted."
     },
     {
       "file": "src/vault.tsx",
-      "line": 992,
-      "context": "jsx-text",
-      "snippet": "The system keychain is not answering, so secrets stored ther"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1367,
+      "line": 1422,
       "context": "jsx-text",
       "snippet": "Changing the passphrase requires your current passphrase or"
     },
     {
       "file": "src/vault.tsx",
-      "line": 1500,
+      "line": 1558,
       "context": "jsx-text",
       "snippet": "Your new recovery code is shown below. Copy it now — it will"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1594,
-      "context": "prop:label",
-      "snippet": "5 min"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1595,
-      "context": "prop:label",
-      "snippet": "15 min"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1596,
-      "context": "prop:label",
-      "snippet": "30 min"
-    },
-    {
-      "file": "src/vault.tsx",
-      "line": 1597,
-      "context": "prop:label",
-      "snippet": "60 min"
     },
     {
       "file": "src/workspace-chip.tsx",

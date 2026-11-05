@@ -9,9 +9,17 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render } from '@solidjs/testing-library'
-import { VaultSection, SetupDialog, createVaultState } from './vault'
+import {
+  VaultSection,
+  SetupDialog,
+  UnlockDialog,
+  createVaultState,
+  vaultErrorMessage,
+} from './vault'
 import type { VaultClient, VaultStatus } from './vault-client'
 import { setActiveLocale } from './i18n/locale-model'
+import { RpcError } from './dispatcher'
+import { clearStack } from './ui/overlay/stack'
 
 const UNINITIALIZED: VaultStatus = {
   state: 'uninitialized',
@@ -25,7 +33,12 @@ function mountVaultSection() {
   const vaultClient = {
     status: () => Promise.resolve(UNINITIALIZED),
     resetPreview: () =>
-      Promise.resolve({ secretCount: 0, profileCount: 0, systemKeychainReachable: true, residue: [] }),
+      Promise.resolve({
+        secretCount: 0,
+        profileCount: 0,
+        systemKeychainReachable: true,
+        residue: [],
+      }),
     setAutoSeal: () => Promise.resolve(),
     setDefaultProvider: () => Promise.resolve(),
   } as unknown as VaultClient
@@ -82,5 +95,49 @@ describe('vault surface renders through the catalogue', () => {
     })
     const prompt = document.querySelector('[aria-modal][aria-label]')
     expect(prompt?.getAttribute('aria-label')).toBe('Настроить хранилище')
+  })
+
+  it('renders the state card and unlock titles through the ru catalogue', async () => {
+    setActiveLocale('ru')
+    const { container } = mountVaultSection()
+    // The uninitialized card's title is the same string the Secrets page
+    // shows for its unset state; the section's own action names it in Russian.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Защита ещё не настроена')
+    })
+    expect(container.textContent).toContain('Настроить защиту')
+
+    // The unlock prompt's bare title — what the card's Unlock button opens —
+    // resolves through vault.unlock.title, not the call-site literal.
+    const vaultClient = {
+      unseal: () => Promise.resolve(),
+    } as unknown as VaultClient
+    // The overlay stack is module state the afterEach DOM wipe cannot reach:
+    // the setup test's Prompt entry survives it, and a new prompt would portal
+    // into that dead element instead of its own mount. Clear it first.
+    clearStack()
+    const dlg = document.body.appendChild(document.createElement('div'))
+    render(
+      () => <UnlockDialog open vaultClient={vaultClient} vaultStatus={null} onClose={() => {}} />,
+      { container: dlg },
+    )
+    await vi.waitFor(() => {
+      const prompt = dlg.querySelector('[aria-modal][aria-label]')
+      expect(prompt?.getAttribute('aria-label')).toBe('Разблокировать хранилище')
+    })
+    expect(dlg.textContent).toContain('Разблокировать хранилище')
+  })
+
+  it('speaks vault reason codes in Russian', () => {
+    setActiveLocale('ru')
+    // A store that did not answer: the reason table resolves the code under
+    // the active locale at read time — a module-level table of plain strings
+    // would have pinned the import-time (English) wording forever.
+    const err = new RpcError('sealed', undefined, { reason: 'locked' })
+    expect(vaultErrorMessage(err)).toBe(
+      'Связка ключей заблокирована. Разблокируйте её и повторите.',
+    )
+    setActiveLocale('en')
+    expect(vaultErrorMessage(err)).toBe('Your login keychain is locked. Unlock it and try again.')
   })
 })

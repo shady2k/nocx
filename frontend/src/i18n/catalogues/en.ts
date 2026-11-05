@@ -647,11 +647,14 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'vault.storage.title': 'Where it is stored',
   'vault.protection.title': 'Protection',
   'vault.protection.passphrase.label': 'Change passphrase',
-  'vault.protection.passphrase.desc': 'The passphrase that unlocks the vault on a machine with no OS-held key.',
+  'vault.protection.passphrase.desc':
+    'The passphrase that unlocks the vault on a machine with no OS-held key.',
   'vault.protection.recovery.label': 'Recovery code',
-  'vault.protection.recovery.desc': 'The one-time code that recovers the vault when the passphrase is lost.',
+  'vault.protection.recovery.desc':
+    'The one-time code that recovers the vault when the passphrase is lost.',
   'vault.protection.reset.label': 'Reset the vault',
-  'vault.protection.reset.desc': 'Delete every saved password and key passphrase and start again. Cannot be undone.',
+  'vault.protection.reset.desc':
+    'Delete every saved password and key passphrase and start again. Cannot be undone.',
   'vault.state.label': 'State',
   'vault.diagnostics': 'Diagnostics',
   'vault.empty.newHere': 'New secrets go here',
@@ -669,6 +672,55 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'vault.setup.deleteWarnHead':
     'This deletes every password and key passphrase nocx has saved, and cannot be undone. There is no way to recover them afterwards.',
   'vault.reset.chainTail': 'will ask for a password again.',
+  // ── Vault stage 3c residual (vault.tsx only) ──
+  'vault.reason.noService': 'No system keyring available. Use a passphrase to unlock.',
+  'vault.reason.locked': 'Your login keychain is locked. Unlock it and try again.',
+  'vault.reason.denied': 'Access to the system keyring was denied.',
+  'vault.reason.timeout': 'The operation timed out. Please try again.',
+  'vault.reason.unsupportedPlatform': 'System keyring is not supported on this platform.',
+  'vault.reason.excluded':
+    'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
+  'vault.reason.unknownProvider':
+    'This secret reference names a provider not available in this build.',
+  'vault.reason.unsealFailed':
+    'That did not unlock the vault. Check what you entered and try again.',
+  'vault.reason.vaultChanged': 'The vault changed while this was open. Try again.',
+  'vault.reason.vaultSealed': 'The vault is locked.',
+  'vault.reason.vaultUninitialized': 'Protection has not been set up yet.',
+  'vault.reason.operationFailed': 'Operation failed',
+  'vault.store.system': 'System keychain',
+  'vault.store.file': 'Encrypted nocx storage',
+  'vault.provider.notInBuild': 'Not used by this build',
+  'vault.provider.unavailable': 'Not available',
+  'vault.provider.available': 'Available',
+  'vault.provider.readonly': 'Read-only',
+  'vault.setup.submit': 'Set Up',
+  'vault.setup.submitting': 'Setting up…',
+  'vault.setup.resetBusy': 'Resetting…',
+  'vault.unlock.title': 'Unlock the vault',
+  'vault.unlock.titleReasonHead': 'Unlock the vault to',
+  'vault.unlock.submit': 'Unlock',
+  'vault.unlock.busy': 'Unlocking…',
+  'vault.unlock.passphraseWrong': 'That passphrase does not unlock this vault.',
+  'vault.unlock.recoveryWrong': 'That recovery code does not unlock this vault.',
+  'vault.unlock.passphraseLabel': 'Vault passphrase',
+  'vault.unlock.recoveryLabel': 'Vault recovery code',
+  'vault.change.notSetUp': 'Set up protection first; there is nothing to change yet.',
+  'vault.change.lockedHead': 'Unlock the vault to change how it is protected.',
+  'vault.change.osKeyOnly':
+    'This vault is held by an OS key alone, so there is no passphrase to change or recover.',
+  'vault.protection.notSetUp.title': 'Protection is not set up yet',
+  'vault.protection.availableNote':
+    'Saved passwords and key passphrases are available to your connections.',
+  'vault.protection.lockNow': 'Lock now',
+  'vault.protection.locking': 'Locking…',
+  'vault.protection.setUp': 'Set up protection',
+  'vault.autolock.min.5': '5 min',
+  'vault.autolock.min.15': '15 min',
+  'vault.autolock.min.30': '30 min',
+  'vault.autolock.min.60': '60 min',
+  'vault.keychain.unanswered':
+    'The system keychain is not answering, so secrets stored there cannot be removed. They will remain readable until it is available and you reset again.',
 
   'secrets.load.failedHead': 'Could not load secrets:',
   'secrets.add.kindPassword': 'Password',
@@ -728,7 +780,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'secrets.delete.checkFailedHead': 'Could not check which connections use this secret:',
   'secrets.delete.usersHead': 'These connections use this secret and will stop using it:',
   'secrets.delete.usersUnresolvedTail': 'use it, but the connection name could not be resolved.',
-  'secrets.delete.noUsers': 'No connection uses this secret. The stored value is destroyed and cannot be recovered.',
+  'secrets.delete.noUsers':
+    'No connection uses this secret. The stored value is destroyed and cannot be recovered.',
   'secrets.delete.irreversible': 'This cannot be undone.',
 
   'keymat.mode.aria': 'Key input mode',
@@ -736,7 +789,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'keymat.mode.path': 'Path',
   'keymat.mode.paste': 'Paste key',
   'keymat.mode.secret': 'Secret',
-  'keymat.picker.unavailable': 'The native file picker is not available here. Type the path by hand.',
+  'keymat.picker.unavailable':
+    'The native file picker is not available here. Type the path by hand.',
   'keymat.path.label': 'Private Key Path',
   'keymat.browse.aria': 'Browse for a private key file',
   'keymat.browse.title': 'Choose a file with the system picker',
@@ -749,7 +803,8 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'keymat.none.ph': '— None —',
   'keymat.passphrase.saved': 'Key passphrase stored.',
   'keymat.passphrase.saveFailedHead': 'Could not save the key passphrase:',
-  'keymat.passphrase.none': 'No passphrase stored — the connection will ask for it when it connects.',
+  'keymat.passphrase.none':
+    'No passphrase stored — the connection will ask for it when it connects.',
   'keymat.passphrase.label': 'Key passphrase',
   'keymat.passphrase.ph': 'The passphrase that protects this key',
   'keymat.passphrase.notNow': 'Not now',
@@ -768,63 +823,88 @@ export const en: Readonly<Record<string, CatalogueEntry>> = {
   'pw.cancel': 'Cancel',
 
   // ── Go-minted, no call site: sections, sentinel-zero sentences and the notifications routing family (internal/settings, internal/notify, internal/app) ──
-  "notifications.route.blockFinished.banner": "Command finished → OS banner",
-  "notifications.route.blockFinished.banner.description": "nocx's own block ledger recorded that a command finished. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.blockFinished.toast": "Command finished → In-app toast",
-  "notifications.route.blockFinished.toast.description": "nocx's own block ledger recorded that a command finished. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.blockFinished": "Command finished → Центр уведомлений",
-  "notifications.centre.blockFinished.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.sessionEnded.banner": "Session ended → OS banner",
-  "notifications.route.sessionEnded.banner.description": "nocx's own session registry recorded that a session ended. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.sessionEnded.toast": "Session ended → In-app toast",
-  "notifications.route.sessionEnded.toast.description": "nocx's own session registry recorded that a session ended. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.sessionEnded": "Session ended → Центр уведомлений",
-  "notifications.centre.sessionEnded.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.transferFinished.banner": "File transfer finished → OS banner",
-  "notifications.route.transferFinished.banner.description": "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.transferFinished.toast": "File transfer finished → In-app toast",
-  "notifications.route.transferFinished.toast.description": "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.transferFinished": "File transfer finished → Центр уведомлений",
-  "notifications.centre.transferFinished.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.programNotify.banner": "Program notification request → OS banner",
-  "notifications.route.programNotify.banner.description": "A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.programNotify.toast": "Program notification request → In-app toast",
-  "notifications.route.programNotify.toast.description": "A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.programNotify": "Program notification request → Центр уведомлений",
-  "notifications.centre.programNotify.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.bell.banner": "Terminal bell → OS banner",
-  "notifications.route.bell.banner.description": "A program printed BEL. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.bell.toast": "Terminal bell → In-app toast",
-  "notifications.route.bell.toast.description": "A program printed BEL. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.bell": "Terminal bell → Центр уведомлений",
-  "notifications.centre.bell.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.coordinatorStalled.banner": "A coordinator is not reading its workers → OS banner",
-  "notifications.route.coordinatorStalled.banner.description": "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.coordinatorStalled.toast": "A coordinator is not reading its workers → In-app toast",
-  "notifications.route.coordinatorStalled.toast.description": "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.coordinatorStalled": "A coordinator is not reading its workers → Центр уведомлений",
-  "notifications.centre.coordinatorStalled.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.route.paneWorkFinished.banner": "Work seems to have finished → OS banner",
-  "notifications.route.paneWorkFinished.banner.description": "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.route.paneWorkFinished.toast": "Work seems to have finished → In-app toast",
-  "notifications.route.paneWorkFinished.toast.description": "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
-  "notifications.centre.paneWorkFinished": "Work seems to have finished → Центр уведомлений",
-  "notifications.centre.paneWorkFinished.description": "Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.",
-  "notifications.debounceSeconds.label": "Collapse repeats for",
-  "notifications.debounceSeconds.description": "After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.",
-  "settings.section.answers": "Answers",
-  "settings.section.clipboard": "Clipboard",
-  "settings.section.history": "History",
-  "settings.section.instructions": "Instructions",
-  "settings.section.interface": "Interface",
-  "settings.section.pets": "Pets",
-  "settings.section.skills": "Skills",
-  "settings.section.terminal": "Terminal",
-  "settings.section.updates": "Updates",
-  "settings.section.worktrees": "Worktrees",
-  "settings.section.notifications": "Notifications",
-  "settings.history.retentionDays.zeroLabel": "Never switched off automatically",
-  "settings.worktrees.idleDays.zeroLabel": "Never removed automatically",
-  "settings.history.diskCeilingMiB.zeroLabel": "Kept until the size limit is reached",
-  "settings.terminal.scrollbackLines.zeroLabel": "No scrollback — only the current screen",
+  'notifications.route.blockFinished.banner': 'Command finished → OS banner',
+  'notifications.route.blockFinished.banner.description':
+    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.route.blockFinished.toast': 'Command finished → In-app toast',
+  'notifications.route.blockFinished.toast.description':
+    "nocx's own block ledger recorded that a command finished. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.centre.blockFinished': 'Command finished → Центр уведомлений',
+  'notifications.centre.blockFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.sessionEnded.banner': 'Session ended → OS banner',
+  'notifications.route.sessionEnded.banner.description':
+    "nocx's own session registry recorded that a session ended. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.route.sessionEnded.toast': 'Session ended → In-app toast',
+  'notifications.route.sessionEnded.toast.description':
+    "nocx's own session registry recorded that a session ended. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.centre.sessionEnded': 'Session ended → Центр уведомлений',
+  'notifications.centre.sessionEnded.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.transferFinished.banner': 'File transfer finished → OS banner',
+  'notifications.route.transferFinished.banner.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.route.transferFinished.toast': 'File transfer finished → In-app toast',
+  'notifications.route.transferFinished.toast.description':
+    "nocx's own transfer registry recorded that an upload or a download reached its end. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.centre.transferFinished': 'File transfer finished → Центр уведомлений',
+  'notifications.centre.transferFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.programNotify.banner': 'Program notification request → OS banner',
+  'notifications.route.programNotify.banner.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
+  'notifications.route.programNotify.toast': 'Program notification request → In-app toast',
+  'notifications.route.programNotify.toast.description':
+    'A program printed OSC 9 or OSC 777 to ask for one. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
+  'notifications.centre.programNotify': 'Program notification request → Центр уведомлений',
+  'notifications.centre.programNotify.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.bell.banner': 'Terminal bell → OS banner',
+  'notifications.route.bell.banner.description':
+    'A program printed BEL. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
+  'notifications.route.bell.toast': 'Terminal bell → In-app toast',
+  'notifications.route.bell.toast.description':
+    'A program printed BEL. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.',
+  'notifications.centre.bell': 'Terminal bell → Центр уведомлений',
+  'notifications.centre.bell.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.coordinatorStalled.banner':
+    'A coordinator is not reading its workers → OS banner',
+  'notifications.route.coordinatorStalled.banner.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.route.coordinatorStalled.toast':
+    'A coordinator is not reading its workers → In-app toast',
+  'notifications.route.coordinatorStalled.toast.description':
+    "nocx wrote to a coordinator about its workers' mail and the coordinator did not read it, or the coordinator is blocked on its own screen while its workers are live. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.centre.coordinatorStalled':
+    'A coordinator is not reading its workers → Центр уведомлений',
+  'notifications.centre.coordinatorStalled.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.route.paneWorkFinished.banner': 'Work seems to have finished → OS banner',
+  'notifications.route.paneWorkFinished.banner.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до the desktop notification banner. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.route.paneWorkFinished.toast': 'Work seems to have finished → In-app toast',
+  'notifications.route.paneWorkFinished.toast.description':
+    "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine. Когда включено, доходит до a transient message in the nocx window. Если у вида выключены все каналы, он не доходит ни до одного — но всё равно попадает в центр уведомлений.",
+  'notifications.centre.paneWorkFinished': 'Work seems to have finished → Центр уведомлений',
+  'notifications.centre.paneWorkFinished.description':
+    'Событие записывается в любом случае; это решает, показывает ли панель его и считает ли колокольчик; повторное включение возвращает то, что ещё держит лента.',
+  'notifications.debounceSeconds.label': 'Collapse repeats for',
+  'notifications.debounceSeconds.description':
+    'After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.',
+  'settings.section.answers': 'Answers',
+  'settings.section.clipboard': 'Clipboard',
+  'settings.section.history': 'History',
+  'settings.section.instructions': 'Instructions',
+  'settings.section.interface': 'Interface',
+  'settings.section.pets': 'Pets',
+  'settings.section.skills': 'Skills',
+  'settings.section.terminal': 'Terminal',
+  'settings.section.updates': 'Updates',
+  'settings.section.worktrees': 'Worktrees',
+  'settings.section.notifications': 'Notifications',
+  'settings.history.retentionDays.zeroLabel': 'Never switched off automatically',
+  'settings.worktrees.idleDays.zeroLabel': 'Never removed automatically',
+  'settings.history.diskCeilingMiB.zeroLabel': 'Kept until the size limit is reached',
+  'settings.terminal.scrollbackLines.zeroLabel': 'No scrollback — only the current screen',
 }

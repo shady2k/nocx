@@ -57,7 +57,7 @@ jobs:
         run: |
           set -eu
           ref=$(node --input-type=module -e '
-            const m = await import("./.githooks/backlog-gate/br-tracker.mjs");
+            const m = await import("./.githooks/backlog-gate/trackers/br.mjs");
             if (!m.default || !m.default.ref) process.exit(2);
             process.stdout.write(m.default.ref);
           ')

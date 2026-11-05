@@ -9237,6 +9237,30 @@ export class TerminalContent extends BasePaneContent {
       // is the jitter it was meant to remove.
       this._setEditorPlacement('inline')
       const keyboardWasInEditor = editor.root.contains(document.activeElement)
+      // A KEYSTROKE IS NEVER THE PRICE OF A FLICKER (nocx-atpw5.1.41). A
+      // non-ready fact with nothing of this pane's running is not a command:
+      // it is a state that moved for a reason the person did not cause (a
+      // late prompt mark over a submitted attempt did exactly this, and the
+      // real start then hid the box for one keystroke). Hiding here hands the
+      // keyboard to the pty, so a character the person had already typed
+      // lands in the shell instead of their line — measured as `printf`
+      // losing its `E` into readline. The line keeps the keyboard until a
+      // command this pane can name is actually running.
+      // NO RUNNING BLOCK IS CONSULTED, deliberately: a `running` fact opens
+      // its card, so `hasRunningCommand()` is already true by the time this
+      // runs, and it was true for the spurious interval too. The line is the
+      // evidence — a submit hides this composer synchronously, so a visible
+      // composer holding text and the keyboard means nobody submitted.
+      const typedLineKept = keyboardWasInEditor && editor.getDoc().length > 0
+      if (typedLineKept) {
+        log.debug('nocx: editor kept at a non-ready fact with no command running', {
+          sid: this.session?.sessionId,
+          lifecycle: this.lifecycle.state.kind,
+          chars: editor.getDoc().length,
+        })
+        this._updateCapability()
+        return
+      }
       editor.hide()
       // A delayed start can withdraw the ready composer after submit's
       // handoff already ran. Transfer only its keyboard, never a control's.

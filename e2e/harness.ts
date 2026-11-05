@@ -206,6 +206,64 @@ async function injectWailsShim(page: Page, traceparent?: string): Promise<void> 
  * its snapshot by then, and every backend and client the test registered is
  * in.
  */
+/**
+ * THE DISPOSABLE ROOTS A TEST CREATED ARE REMOVED WHEN IT ENDS
+ * (nocx-atpw5.1.40).
+ *
+ * Every spec that runs a backend of its own makes a root for it — a fresh
+ * `mkdtempSync(join(tmpdir(), …))` — and nothing ever removed one. Measured on
+ * this machine after seven test runs: 31 roots left in /tmp, 683 MiB together,
+ * 21 MB for an ordinary one and 51 MB for the heaviest (the home keeps a copy of
+ * the helper binary, which is 21 MB of it, and a dev build's debug logs are the
+ * rest). A `nocx-helper serve` daemon was still running for each of them. CI pays
+ * this on the runner's disk, inside the container's overlay, once per test that
+ * starts a backend — the one thing in this suite that grows with the test count
+ * and never shrinks, and the shape the ci-e2e leg died in on 2026-11-05.
+ *
+ * THE SCOPE THE ROOT WAS CREATED IN IS THE SCOPE THAT REMOVES IT. A root made in
+ * `beforeAll` belongs to the file and goes at the end of it; one made inside a
+ * test (or its beforeEach) goes at the end of that test. The scope is read off
+ * the test fixture: it is set up before any `beforeEach` runs, so a root created
+ * from a hook or a test body is counted against that test, and a root from
+ * `beforeAll` — which runs before fixtures exist — is not.
+ *
+ * AFTER the failure report, never before: the report reads this backend's log and
+ * its helper's out of that very directory (e2e/failure-context.ts), so removing
+ * it first would turn every failure into one that names no log.
+ */
+const rootsCreatedByTest: string[] = []
+const rootsCreatedByFile: string[] = []
+let testInFlight = false
+
+/** Record a disposable root so the teardown below can remove it. Called by
+ *  VaultBackend, which every spec that owns a backend builds on one. */
+function rememberDisposableRoot(root: string): void {
+  ;(testInFlight ? rootsCreatedByTest : rootsCreatedByFile).push(root)
+}
+
+/** Stop whatever serves this root, then remove it.
+ *
+ *  The helper daemon outlives the backend on purpose — it serves the pane's
+ *  session across backend restarts — so the directory cannot just be unlinked
+ *  under it. `helperDaemonPids` is the harness's existing answer to "which
+ *  daemon serves this home"; it reads /proc, so on a host without one this is a
+ *  no-op and the removal still happens. Best effort throughout: a tidy-up that
+ *  throws while a test is failing replaces one failure with another. */
+function removeDisposableRoot(root: string): void {
+  for (const pid of helperDaemonPids(join(root, 'home'))) {
+    try {
+      process.kill(pid, 'SIGTERM')
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    rmSync(root, { recursive: true, force: true })
+  } catch {
+    /* the run's own exit removes it */
+  }
+}
+
 const failureContextFixture: [
   (args: object, use: () => Promise<void>, info: TestInfo) => Promise<void>,
   { auto: true },
@@ -214,8 +272,14 @@ const failureContextFixture: [
   // destructuring pattern, so "none" has to be spelled as an empty one.
   // eslint-disable-next-line no-empty-pattern
   async ({}, use, info) => {
-    await use()
+    testInFlight = true
+    try {
+      await use()
+    } finally {
+      testInFlight = false
+    }
     await reportFailureContext(info, traceIdForTest(info.testId))
+    for (const root of rootsCreatedByTest.splice(0)) removeDisposableRoot(root)
   },
   { auto: true },
 ]
@@ -343,6 +407,17 @@ export const test = base.extend<{ failureContext: void }, { appReady: void }>({
  * what keeps this a one-line change per spec rather than a rename sweep across
  * files that also use `base` as a local for something else.
  */
+/**
+ * THE FILE'S OWN DISPOSABLE ROOTS GO WHEN ITS LAST TEST DOES (nocx-atpw5.1.40):
+ * the ones a `beforeAll` made, which the per-test teardown above must not touch
+ * because every test in the file shares them. Registered here, at the module
+ * every spec imports, so no spec needs a line of its own; a file's own hooks run
+ * before this one, so a home they still want to read is still there.
+ */
+base.afterAll(() => {
+  for (const root of rootsCreatedByFile.splice(0)) removeDisposableRoot(root)
+})
+
 export const standalone = base.extend<{ failureContext: void }>({
   failureContext: failureContextFixture,
 
@@ -666,7 +741,15 @@ function uuidv7(): string {
 //   const { port: p2, token: t2 } = await backend.restart()
 
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, openSync, mkdirSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  openSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 
 import { awaitCoordinator } from './coordinator.mjs'
@@ -1415,6 +1498,9 @@ export class VaultBackend {
       overrideEnv,
       root: this.disposable.root,
     })
+    // This root is the harness's to remove once the test (or the file) that
+    // made it is over — see rememberDisposableRoot (nocx-atpw5.1.40).
+    rememberDisposableRoot(this.disposable.root)
     const env = this.isolation.env as Record<string, string>
 
     this.proc = spawn(this.binary, [], { env, stdio: ['ignore', logFd, logFd], detached: false })

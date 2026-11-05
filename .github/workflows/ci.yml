@@ -1282,6 +1282,47 @@ jobs:
       # `docker` driver takes the flags and does nothing with them.
       - uses: docker/setup-buildx-action@v4
 
+      # THE RUNNER'S OWN IMAGE IS NOT THE SAME ON EVERY MACHINE (nocx-atpw5.1.40).
+      # Measured 2026-11-05, run 41978458044: one ci-e2e leg ran on a 72 G root
+      # disk with 61 G used and 12 G free at the end, while its three siblings ran
+      # on 145 G disks with 64 G used — one workflow, one job, two hardware
+      # classes, and the 72 G one died of ENOSPC at test 213 of 227. Its
+      # end-of-job guard read 12 G free and stayed silent, because free space at
+      # the end does not describe the peak; the step's own sampler is what now
+      # records the peak (scripts/e2e-disk-watch.mjs).
+      #
+      # So the job makes its own room before it spends any, and prints what it
+      # frees so the log carries the numbers. What the HOST does in this job is
+      # git, node (the actions and scripts/quarantine-gate.mjs), docker and
+      # buildx — every shell, browser and toolchain the suite runs is inside the
+      # e2e image, which carries its own Go, browsers and shells. So only
+      # toolchain directories are removed, never a PATH entry: node, git, curl,
+      # tar, sudo, docker and buildx stay.
+      #
+      # A directory that is not on this image class is skipped, and a removal
+      # that fails is not the step's business: `|| true`, because a runner whose
+      # layout moved is a runner that still has its disk, and this step exists to
+      # buy room, not to gate.
+      - name: Reclaim the runner's unused toolchains
+        run: |
+          echo "disk before:"
+          df -h /
+          for dir in \
+            "${ANDROID_HOME:-/usr/local/lib/android}" \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /usr/share/swift \
+            /opt/microsoft \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/powershell; do
+            [ -e "$dir" ] || continue
+            echo "  $(du -sm "$dir" 2>/dev/null | cut -f1) MiB  $dir"
+            sudo rm -rf "$dir" || true
+          done
+          echo "disk after:"
+          df -h /
+
       # THE IMAGE IS REBUILT IN EVERY JOB, and "cached after the first run" was
       # only ever true on a developer's machine. Measured, run 35205572891 on
       # 2026-09-17: `docker build -f e2e/Dockerfile` took 09:31:32 → 09:53:50,

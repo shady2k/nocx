@@ -298,7 +298,14 @@ else
 fi
 
 run_one() {
-  docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
+  # NO CORE DUMPS (nocx-atpw5.1.40). playwright.config.ts says a crashing
+  # browser "can write a multi-gigabyte core dump in seconds ... handled outside
+  # the repo by capping dump size". Nothing in the repo did, and the container's
+  # writable layer is exactly the place a run holds gigabytes and gives them back
+  # when it exits — the shape the ci-e2e leg died in: 12 G free at the end, a
+  # run that hit ENOSPC at test 213 of 227. The browsers are the only processes
+  # in this container that dump, and their failure is still their exit status.
+  docker run --rm -i --ulimit core=0 ${tty_flag[@]+"${tty_flag[@]}"} \
     ${cpu_flag[@]+"${cpu_flag[@]}"} \
     ${mem_flag[@]+"${mem_flag[@]}"} \
     ${git_flag[@]+"${git_flag[@]}"} \

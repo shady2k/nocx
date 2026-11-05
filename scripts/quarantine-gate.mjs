@@ -50,7 +50,7 @@ import {
 const prefix = 'quarantine:'
 
 /** The evidence one gated step left: its name, its command's status, its output. */
-export function readStepLogs(dir, expectedSteps) {
+export function readStepLogs(dir, expectedSteps, job = 'this job') {
   if (
     !Array.isArray(expectedSteps) ||
     expectedSteps.length === 0 ||
@@ -58,7 +58,22 @@ export function readStepLogs(dir, expectedSteps) {
     expectedSteps.some((name) => !/^[a-zA-Z0-9_-]+$/.test(name))
   )
     throw new Error('invalid or empty expected-step evidence manifest')
+  // A JOB THAT DIED BEFORE ITS FIRST TEST STEP (nocx-atpw5.1.44). The gate runs
+  // `always()`, so it is reached when a build step above it failed and no test
+  // step ran at all: on 2026-11-05 that was `make vt-archives` answering 504,
+  // and what a reader saw was "ENOENT scandir /tmp/nocx-test-logs" — a
+  // directory, where the answer is the failing step above. The gate cannot
+  // judge a test that never ran, so it says that instead of describing its own
+  // missing input.
+  if (!existsSync(dir))
+    throw new Error(
+      `${job}: no test step ran — ${dir} was never created, so the job failed before any gated test step. Read the failing step above this one; the quarantine judges tests and there are none to judge.`,
+    )
   const names = readdirSync(dir)
+  if (!names.some((file) => file.endsWith('.status')))
+    throw new Error(
+      `${job}: no test step ran — ${dir} holds no evidence, so the job failed before any gated test step. Read the failing step above this one; the quarantine judges tests and there are none to judge.`,
+    )
   if (
     names.some(
       (file) =>
@@ -141,7 +156,7 @@ export function gate({
     attempt < 1
   )
     throw new Error('invalid quarantine run/attempt identity')
-  const steps = readStepLogs(logs, expectedSteps)
+  const steps = readStepLogs(logs, expectedSteps, job)
   const manifestDigest = stepManifestDigest(expectedSteps)
   write(
     `NOCX_QUARANTINE_EVIDENCE_V1 ${JSON.stringify({ schema: 1, job, pull: pull || '', runId, attempt, manifestDigest, steps })}`,

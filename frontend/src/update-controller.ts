@@ -8,6 +8,15 @@ import {
 import { showToast, dismissToast, type ToastOptions } from './ui/toast'
 import { log } from './log'
 import { updateFailureMessage } from './update-failure'
+import {
+  downloadProgressLabel,
+  updateFailureDetails,
+  updateStateLine,
+  type DownloadProgress,
+  type RunningBuild,
+  type UpdateStateReading,
+} from './update-details'
+import type { ClipboardAccess } from './clipboard'
 
 /** What an offer says about the build behind it (nocx-vh2hr.1.5).
  *
@@ -18,7 +27,7 @@ import { updateFailureMessage } from './update-failure'
  *  that named no build, and the notice then says only what it can. */
 /** What the window's update state offers a surface that asks: the held pair a
  *  restore needs, and the bytes a download is moving. */
-interface DownloadReading {
+interface DownloadReading extends UpdateStateReading {
   Downloading?: boolean
   Downloaded?: number
   Total?: number
@@ -57,25 +66,11 @@ type UpdateState =
         AvailableOffer | { kind: 'held'; version: string } | { kind: 'pending'; version: string }
     }
 
-/** What the download has done so far, as the backend reports it. */
-export interface DownloadProgress {
-  downloaded: number
-  total: number
-}
+/** Which binding the person's click reached — the step a failure is reported
+ *  against, the same word the backend logs (`logUpdateFailure` in main.go). */
+type UpdateFailureStage = 'apply' | 'restart' | 'finish'
 
-/** The notice's words for a download in flight (nocx-vh2hr.1.15):
- *  "Downloading 42% · 63 of 150 MB". Decimal megabytes, because the manifest
- *  declares bytes and every release page quotes the same size; the percent is
- *  floored so it never reads 100% before the last byte. */
-export function downloadProgressLabel(progress: DownloadProgress): string {
-  if (progress.total <= 0) return 'Downloading…'
-  const percent = Math.min(100, Math.floor((progress.downloaded * 100) / progress.total))
-  return `Downloading ${percent}% · ${megabytes(progress.downloaded)} of ${megabytes(progress.total)} MB`
-}
-
-function megabytes(bytes: number): string {
-  return (Math.max(0, bytes) / 1_000_000).toFixed(0)
-}
+type UpdateFailureRetry = Extract<UpdateState, { kind: 'available' | 'held' | 'pending' }>
 
 export interface UpdateControllerDeps {
   apply?: () => Promise<void>
@@ -84,6 +79,16 @@ export interface UpdateControllerDeps {
   getState?: () => Promise<DownloadReading>
   finish?: () => void | Promise<void>
   restart?: () => void | Promise<void>
+  /** Where a failed update's "Copy details" writes (nocx-vh2hr.1.16). The
+   *  product's own clipboard seam (frontend/src/clipboard.ts), injected like
+   *  every other platform capability: a stand without one then offers no
+   *  action rather than a button that does nothing. */
+  clipboard?: Pick<ClipboardAccess, 'writeText'>
+  /** The running build, as `app.about` states it: the details quote its
+   *  platform, and its build number stands in when the failed update named
+   *  none. Absent in an embedding without a backend, where the details say
+   *  `unknown`. */
+  about?: () => Promise<RunningBuild>
 }
 
 export interface UpdateController {
@@ -145,6 +150,12 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
   const finishUpdate = deps.finish ?? (() => FinishPendingUpdate())
   const restartWindow = deps.restart ?? (() => RestartWindow())
   let toastId: number | null = null
+  /** The failure the "Copy details" action reads: which binding the person's
+   *  click reached, the backend's own words, and the state to retry from. Kept
+   *  out of the visible state — the toast and the indicator carry the safe
+   *  sentence, and the cause belongs behind the action (nocx-vh2hr.1.16). */
+  let lastFailure: { stage: UpdateFailureStage; error: string; retry: UpdateFailureRetry } | null =
+    null
   // Per-run memory, never localStorage: both Later and the kit close button
   // silence the announcement, not the persistent indicator.
   const announced = new Set<string>()
@@ -153,16 +164,94 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     if (toastId !== null) dismissToast(toastId)
     toastId = showToast({ ...options, duration: 0 })
   }
+
+  /** The running build the details quote. A failed read is not a failed copy:
+   *  the fields it would have filled say `unknown`, which is the honest answer
+   *  and still worth pasting. */
+  const runningBuild = async (): Promise<RunningBuild> => {
+    const unknown: RunningBuild = { build: 'unknown', platform: 'unknown' }
+    if (!deps.about) return unknown
+    try {
+      const about = await deps.about()
+      return { build: about.build, platform: about.platform }
+    } catch (error) {
+      log.warn('reading the running build for update details failed', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return unknown
+    }
+  }
+
+  /** The transaction's own state at the moment of copying — `Pending` is the
+   *  rollback journal. `null` when the read failed, which the details say as
+   *  `unknown` rather than inventing "nothing is pending". */
+  const transactionState = async (): Promise<UpdateStateReading | null> => {
+    try {
+      return await (deps.getState ?? (() => GetUpdateState()))()
+    } catch {
+      return null
+    }
+  }
+
+  /** Everything the copied text holds, from the failure and the window's own
+   *  facts. No user input, no window content, no token: the fields are named
+   *  here and nothing else is read (frontend/src/update-details.ts). */
+  const failureDetailsText = async (failure: NonNullable<typeof lastFailure>): Promise<string> => {
+    const about = await runningBuild()
+    const retry = failure.retry
+    const offer = retry.kind === 'available' ? retry.offer : null
+    const reading = await transactionState()
+    return updateFailureDetails({
+      stage: failure.stage,
+      error: failure.error,
+      version: retry.version,
+      build: offer ? offeredBuildLabel(offer) : about.build,
+      channel: offer ? offer.channel : 'unknown',
+      platform: about.platform,
+      state: reading === null ? 'unknown' : updateStateLine(reading),
+    })
+  }
+
+  /** The failed toast's one action. The kit dismisses the toast when an action
+   *  runs, so the answer is a toast of its own: what happened to the copy. */
+  const copyFailureDetails = async (): Promise<void> => {
+    const failure = lastFailure
+    const clipboard = deps.clipboard
+    if (!failure || !clipboard) return
+    try {
+      await clipboard.writeText(await failureDetailsText(failure))
+      present({ message: 'Update details copied' })
+    } catch (error) {
+      // A clipboard is a platform capability that can refuse — a non-secure
+      // context, a platform that declined the write — and a button that
+      // silently does nothing is worse than one that is not there.
+      present({
+        level: 'danger',
+        message: `Could not copy the update details: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
   const fail = (
     error: unknown,
     retry: Extract<UpdateState, { kind: 'available' | 'held' | 'pending' }>,
+    stage: UpdateFailureStage,
   ): void => {
-    log.warn('update action failed', {
-      error: error instanceof Error ? error.message : String(error),
-    })
+    const raw = error instanceof Error ? error.message : String(error)
+    log.warn('update action failed', { error: raw })
     const message = updateFailureMessage(error)
     setState({ kind: 'error', message, retry })
-    present({ level: 'danger', message })
+    lastFailure = { stage, error: raw, retry }
+    // THE SAFE SENTENCE STAYS THE SENTENCE (nocx-vh2hr.1.16): the toast is what
+    // a person glancing at it must be able to read, and the cause is one click
+    // away rather than in a log they cannot reach. No clipboard seam, no
+    // action — a stand without a platform clipboard offers the sentence alone.
+    present({
+      level: 'danger',
+      message,
+      ...(deps.clipboard && deps.about
+        ? { actions: [{ label: 'Copy details', onClick: () => void copyFailureDetails() }] }
+        : {}),
+    })
   }
   const restart = (): void => {
     const current = state()
@@ -171,7 +260,7 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     showOffer()
     void Promise.resolve()
       .then(restartWindow)
-      .catch((error: unknown) => fail(error, current))
+      .catch((error: unknown) => fail(error, current, 'restart'))
   }
   const finish = (): void => {
     const current = state()
@@ -180,7 +269,7 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
     showOffer()
     void Promise.resolve()
       .then(finishUpdate)
-      .catch((error: unknown) => fail(error, current))
+      .catch((error: unknown) => fail(error, current, 'finish'))
   }
   const showOffer = (installLabel = 'Install'): void => {
     const before = state()
@@ -266,7 +355,7 @@ export function createUpdateController(deps: UpdateControllerDeps = {}): UpdateC
       showOffer()
     } catch (error) {
       stop()
-      fail(error, current)
+      fail(error, current, 'apply')
     }
   }
 

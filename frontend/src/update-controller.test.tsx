@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
-import { createUpdateController, downloadProgressLabel } from './update-controller'
+import { createUpdateController } from './update-controller'
+import { downloadProgressLabel } from './update-details'
 import { ToastHost } from './ui/toast'
 import { mountSidebar } from './sidebar'
 
@@ -626,5 +627,144 @@ describe('downloadProgressLabel (nocx-vh2hr.1.15)', () => {
       'Downloading 99% · 150 of 150 MB',
     )
     expect(downloadProgressLabel({ downloaded: 0, total: 0 })).toBe('Downloading…')
+  })
+})
+
+// 'COPY DETAILS' ON A FAILED UPDATE (nocx-vh2hr.1.16, the owner's decision of
+// 2026-11-02). The toast stays the safe sentence; the action beside it puts the
+// cause on the clipboard, which is where somebody filing a bug can reach it.
+// The path is the real one: a click on the toast's own button, through the kit.
+describe('copy details on a failed update (nocx-vh2hr.1.16)', () => {
+  const RAW =
+    'update apply: download write: context deadline exceeded: /Users/ada/Library/Caches/nocx/update.zip'
+  const OFFER = {
+    channel: 'nightly',
+    build: { commit: 'a'.repeat(40), builtAt: '2026-11-02T11:01:00Z', number: '202611021101' },
+  }
+  const ABOUT = { version: '0.8.0', build: '202610311830', platform: 'darwin/arm64' }
+
+  function failed() {
+    const controller = createUpdateController({
+      apply: vi.fn().mockRejectedValue(new Error(RAW)),
+      about: () => Promise.resolve(ABOUT),
+      getState: () => Promise.resolve({ Pending: true, Downloaded: 0, Total: 0 }),
+    })
+    render(() => <ToastHost />)
+    controller.showAvailable('0.8.1', NOTES, OFFER)
+    fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
+    return controller
+  }
+
+  it('copies the error, its stage, the build and the platform, and the toast stays safe', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const controller = createUpdateController({
+      apply: vi.fn().mockRejectedValue(new Error(RAW)),
+      about: () => Promise.resolve(ABOUT),
+      getState: () => Promise.resolve({ Pending: true, Downloaded: 0, Total: 0 }),
+      clipboard: { writeText },
+    })
+    render(() => <ToastHost />)
+    controller.showAvailable('0.8.1', NOTES, OFFER)
+    fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast[data-level="danger"]')).not.toBeNull(),
+    )
+
+    // The toast itself is still the sentence a person can read at a glance.
+    const shown = screen.getByRole('status').textContent ?? ''
+    expect(shown).toContain('could not be downloaded')
+    expect(shown).not.toContain('context deadline')
+    expect(shown).not.toContain('/Users/ada')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const text = writeText.mock.calls[0][0] as string
+    expect(text).toContain('stage: apply')
+    expect(text).toContain(
+      'error: update apply: download write: context deadline exceeded: ~/Library/Caches/nocx/update.zip',
+    )
+    expect(text).toContain('version: 0.8.1')
+    expect(text).toContain('build: 202611021101')
+    expect(text).toContain('channel: nightly')
+    expect(text).toContain('platform: darwin/arm64')
+    expect(text).toContain('a rollback journal is present')
+    expect(text).not.toContain('/Users/ada')
+
+    // The kit answers the action by dismissing its toast; the copy answers for
+    // itself, and that new toast offers no second copy.
+    await vi.waitFor(() => expect(screen.getByRole('status').textContent).toContain('copied'))
+    expect(screen.queryByRole('button', { name: 'Copy details' })).toBeNull()
+  })
+
+  it('says the clipboard refused, rather than doing nothing', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('clipboard refused'))
+    const controller = createUpdateController({
+      apply: vi.fn().mockRejectedValue(new Error(RAW)),
+      about: () => Promise.resolve(ABOUT),
+      clipboard: { writeText },
+    })
+    render(() => <ToastHost />)
+    controller.showAvailable('0.8.1', NOTES, OFFER)
+    fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast[data-level="danger"]')).not.toBeNull(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+    await vi.waitFor(() =>
+      expect(screen.getByRole('status').textContent).toContain(
+        'Could not copy the update details: clipboard refused',
+      ),
+    )
+    expect(document.querySelector('.ui-toast[data-level="danger"]')).not.toBeNull()
+  })
+
+  it('is not offered anywhere but a failed update', () => {
+    const controller = createUpdateController({
+      finish: vi.fn(),
+      about: () => Promise.resolve(ABOUT),
+      clipboard: { writeText: vi.fn() },
+    })
+    render(() => <ToastHost />)
+    // An available update, and the held state that asks to be finished: both
+    // are outcomes of an update, and neither is a failure to diagnose.
+    controller.showAvailable('0.8.1', NOTES, OFFER)
+    expect(screen.queryByRole('button', { name: 'Copy details' })).toBeNull()
+    controller.showHeldByCoordinator('0.8.0')
+    expect(screen.queryByRole('button', { name: 'Copy details' })).toBeNull()
+  })
+
+  it('still copies when the build and the transaction state cannot be read', async () => {
+    // Rule 3, the partial failures: the details are the point, and a read that
+    // fails fills its field with `unknown` rather than failing the copy.
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    const controller = createUpdateController({
+      apply: vi.fn().mockRejectedValue(new Error(RAW)),
+      about: () => Promise.reject(new Error('app.about: backend unreachable')),
+      getState: () => Promise.reject(new Error('GetUpdateState: no updater')),
+      clipboard: { writeText },
+    })
+    render(() => <ToastHost />)
+    controller.showAvailable('0.8.1', NOTES, OFFER)
+    fireEvent.click(screen.getByRole('button', { name: 'Install now' }))
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast[data-level="danger"]')).not.toBeNull(),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Copy details' }))
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const text = writeText.mock.calls[0][0] as string
+    // The offer still names the build and the channel; the platform and the
+    // journal are what could not be read.
+    expect(text).toContain('build: 202611021101')
+    expect(text).toContain('platform: unknown')
+    expect(text).toContain('update state: unknown')
+  })
+
+  it('offers no action at all in a stand without a clipboard', async () => {
+    const controller = failed()
+    await vi.waitFor(() =>
+      expect(document.querySelector('.ui-toast[data-level="danger"]')).not.toBeNull(),
+    )
+    expect(screen.queryByRole('button', { name: 'Copy details' })).toBeNull()
+    expect(controller.state().kind).toBe('error')
   })
 })

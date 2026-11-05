@@ -21,6 +21,7 @@ import { RefreshIcon } from '../ui/icons'
 import { SearchField } from '../ui/search-field'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
 import { createUrlOpener, type UrlOpener } from '../open-url'
+import { t } from '../i18n/locale-model'
 import type { GitPanelServices } from './git-client'
 import { createGitStore, type GitStore } from './git-store'
 import { GitPanel, type GitDiffOpener } from './git-panel'
@@ -105,8 +106,8 @@ export function createGitView(deps: GitViewDeps): SidebarViewDescriptor {
         <SearchField
           value={store.filter()}
           onInput={(v) => store.setFilter(v)}
-          placeholder="Filter files…"
-          ariaLabel="Filter changed files"
+          placeholder={t('git.view.filterPh', 'Filter files…')}
+          ariaLabel={t('git.view.filterAria', 'Filter changed files')}
           onKeyDown={(e) => {
             if (e.key === 'Escape' && store.filter() !== '') {
               e.stopPropagation()
@@ -120,15 +121,15 @@ export function createGitView(deps: GitViewDeps): SidebarViewDescriptor {
 
   return {
     id: GIT_VIEW_ID,
-    title: 'Git',
+    title: t('git.view.title', 'Git'),
     icon: GitBranchIcon,
     filter: GitFilter,
     actions: () => (
       <IconButton
         data-testid="git-refresh"
         size="sm"
-        ariaLabel="Refresh git status"
-        title="Refresh git status"
+        ariaLabel={t('git.view.refresh', 'Refresh git status')}
+        title={t('git.view.refresh', 'Refresh git status')}
         disabled={store.origin() === null}
         onClick={() => store.refresh()}
       >

@@ -25,6 +25,7 @@ import type { GitDiffSide } from '../git-client'
 import type { ActiveOrigin, PaneHost } from '../../pane-content'
 import { BasePaneContent } from '../../pane-content'
 import { ReadOnlyHost } from '../../ui/cm-host'
+import { t } from '../../i18n/locale-model'
 import { gitDiffDecoration } from './diff-decoration'
 import type { GitDiffTarget } from './open-git-diff'
 import './git-diff.css'
@@ -348,8 +349,8 @@ export class GitDiffContent extends BasePaneContent {
             lines,
             reload: {
               disabled: this.dead,
-              label: 'Reload',
-              reason: 'Re-read the diff from the repository',
+              label: t('git.diff.reload', 'Reload'),
+              reason: t('git.diff.reload.reason', 'Re-read the diff from the repository'),
             },
           }
         }
@@ -360,16 +361,20 @@ export class GitDiffContent extends BasePaneContent {
           lines: [
             { state: 'error', text: `Could not load diff: ${this.state.message}`, tone: 'danger' },
           ],
-          reload: { disabled: this.dead, label: 'Reload', reason: 'Try loading the diff again' },
+          reload: {
+            disabled: this.dead,
+            label: t('git.diff.reload', 'Reload'),
+            reason: 'Try loading the diff again',
+          },
         }
       case 'unavailable':
         return {
           lines: [{ state: 'unavailable', text: UNAVAILABLE_LINE }],
           reload: {
             disabled: this.dead,
-            label: 'Reload',
+            label: t('git.diff.reload', 'Reload'),
             reason: this.dead
-              ? 'The terminal or connection that provided this diff is gone'
+              ? t('git.diff.gone', 'The terminal or connection that provided this diff is gone')
               : 'The source is back — re-read the diff',
           },
         }

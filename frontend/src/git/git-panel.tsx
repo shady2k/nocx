@@ -50,6 +50,7 @@
 // (design §5.5).
 
 import { createEffect, createMemo, For, Match, on, onCleanup, Show, Switch } from 'solid-js'
+import { t } from '../i18n/locale-model'
 import type { ActiveOrigin } from '../pane-content'
 import { relativeTime } from '../recall'
 import { Badge } from '../ui/badge'
@@ -363,7 +364,10 @@ export function GitPanel(props: GitPanelProps) {
    *  only the failure report is a promise. */
   const openExternal = (url: string): void => {
     props.urlOpener.open(url).catch(() => {
-      showToast({ level: 'danger', message: "Couldn't open the link in your browser" })
+      showToast({
+        level: 'danger',
+        message: t('git.link.failedHead', "Couldn't open the link in your browser"),
+      })
     })
   }
 
@@ -374,8 +378,12 @@ export function GitPanel(props: GitPanelProps) {
     const name = branchToCopy()
     if (name === null) return
     props.clipboard.writeText(name).then(
-      () => showToast({ level: 'success', message: 'Branch name copied' }),
-      () => showToast({ level: 'danger', message: "Couldn't copy the branch name" }),
+      () => showToast({ level: 'success', message: t('git.branch.copied', 'Branch name copied') }),
+      () =>
+        showToast({
+          level: 'danger',
+          message: t('git.branch.copyFailed', "Couldn't copy the branch name"),
+        }),
     )
   }
 
@@ -407,8 +415,8 @@ export function GitPanel(props: GitPanelProps) {
       <IconButton
         size="xs"
         data-testid="git-open-commit"
-        ariaLabel={`Open commit ${entry.shortHash} on its hosting`}
-        title="Open commit on its hosting"
+        ariaLabel={`${t('git.commit.openAria.head', 'Open commit')} ${entry.shortHash} ${t('git.commit.openAria.tail', 'on its hosting')}`}
+        title={t('git.commit.open.title', 'Open commit on its hosting')}
         onClick={(e: MouseEvent) => {
           e.stopPropagation()
           openCommit(entry.hash)
@@ -452,8 +460,8 @@ export function GitPanel(props: GitPanelProps) {
         <IconButton
           data-testid="git-row-unstage"
           size="xs"
-          ariaLabel={`Unstage ${row.entry.path}`}
-          title="Unstage"
+          ariaLabel={`${t('git.row.unstage.head', 'Unstage')} ${row.entry.path}`}
+          title={t('git.row.unstage.title', 'Unstage')}
           onClick={(e: MouseEvent) => {
             e.stopPropagation()
             props.store.unstage([row.entry.path])
@@ -468,8 +476,8 @@ export function GitPanel(props: GitPanelProps) {
         <IconButton
           data-testid="git-row-stage"
           size="xs"
-          ariaLabel={`Stage ${row.entry.path}`}
-          title="Stage"
+          ariaLabel={`${t('git.row.stage.head', 'Stage')} ${row.entry.path}`}
+          title={t('git.row.stage.title', 'Stage')}
           onClick={(e: MouseEvent) => {
             e.stopPropagation()
             props.store.stage([row.entry.path])
@@ -562,7 +570,7 @@ export function GitPanel(props: GitPanelProps) {
    *  section must own its button. Three sections, one recovery. */
   const clearFilterAction = () => (
     <Button size="sm" data-testid="git-filter-clear" onClick={() => props.store.setFilter('')}>
-      Clear filter
+      {t('git.clearFilter', 'Clear filter')}
     </Button>
   )
 
@@ -573,14 +581,14 @@ export function GitPanel(props: GitPanelProps) {
       <Switch>
         <Match when={props.store.phase() === 'opening'}>
           <div class="git-loading" data-testid="git-loading">
-            <Spinner label="Opening repository" />
+            <Spinner label={t('git.opening.label', 'Opening repository')} />
           </div>
         </Match>
         <Match when={props.store.phase() === 'failed'}>
           <div class="git-error" data-testid="git-error">
             <StatusCard
               tone="danger"
-              title="Could not reach git"
+              title={t('git.unreachable.title', 'Could not reach git')}
               description={props.store.openError() ?? undefined}
               action={
                 <Button
@@ -588,7 +596,7 @@ export function GitPanel(props: GitPanelProps) {
                   data-testid="git-retry-open"
                   onClick={() => props.store.refresh()}
                 >
-                  Retry
+                  {t('git.retry', 'Retry')}
                 </Button>
               }
             />
@@ -596,14 +604,17 @@ export function GitPanel(props: GitPanelProps) {
         </Match>
         <Match when={props.store.state() === 'noPane'}>
           <EmptyState
-            title="No repository to show"
-            description="Focus a terminal tab to see the repository your shell is standing in."
+            title={t('git.empty.title', 'No repository to show')}
+            description={t(
+              'git.empty.desc',
+              'Focus a terminal tab to see the repository your shell is standing in.',
+            )}
           />
         </Match>
         <Match when={props.store.state() === 'unsupportedPlatform'}>
           <StatusCard
             tone="warning"
-            title="This platform can't run the nocx helper"
+            title={t('git.platform.title', "This platform can't run the nocx helper")}
             description={
               props.store.refusalMessage() ??
               'nocx builds no helper for this machine, so the repository cannot be opened here.'
@@ -613,7 +624,7 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'deployFailed'}>
           <StatusCard
             tone="warning"
-            title="Couldn't install the nocx helper"
+            title={t('git.deployFailed.title', "Couldn't install the nocx helper")}
             description={
               props.store.refusalMessage() ??
               'Uploading or installing the helper on this host failed. Check the host and refresh to retry.'
@@ -623,17 +634,20 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'execForbidden'}>
           <StatusCard
             tone="warning"
-            title="The host refused the nocx helper"
+            title={t('git.execForbidden.title', 'The host refused the nocx helper')}
             description={
               props.store.refusalMessage() ??
-              'The host refused the command that would run the helper, or answered with something else. Check the host and refresh to retry.'
+              t(
+                'git.helper.refusedDesc',
+                'The host refused the command that would run the helper, or answered with something else. Check the host and refresh to retry.',
+              )
             }
           />
         </Match>
         <Match when={props.store.state() === 'helperVersionMismatch'}>
           <StatusCard
             tone="danger"
-            title="The nocx helper needs reinstalling"
+            title={t('git.versionMismatch.title', 'The nocx helper needs reinstalling')}
             description={
               props.store.refusalMessage() ??
               'The helper on this host answered with a different version than nocx installed. Reinstall it, then refresh.'
@@ -643,14 +657,17 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'noCwd'}>
           <StatusCard
             tone="neutral"
-            title="No verified working directory"
-            description="This session has no shell integration, so nocx does not know where the shell is standing. Start the shell in a repository to see its status here."
+            title={t('git.noWorkdir.title', 'No verified working directory')}
+            description={t(
+              'git.noWorkdir.desc',
+              'This session has no shell integration, so nocx does not know where the shell is standing. Start the shell in a repository to see its status here.',
+            )}
           />
         </Match>
         <Match when={props.store.state() === 'notARepository'}>
           <StatusCard
             tone="neutral"
-            title="Not a git repository"
+            title={t('git.notRepo.title', 'Not a git repository')}
             description={
               props.store.origin()?.cwd !== null && props.store.origin()?.cwd !== undefined
                 ? `${props.store.origin()?.cwd} is not inside a git repository.`
@@ -661,15 +678,18 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'gitUnavailable'}>
           <StatusCard
             tone="warning"
-            title="git is not installed"
-            description="Install git (or add it to PATH) and refresh — the panel runs the same git your terminal would."
+            title={t('git.noGit.title', 'git is not installed')}
+            description={t(
+              'git.noGit.desc',
+              'Install git (or add it to PATH) and refresh — the panel runs the same git your terminal would.',
+            )}
           />
         </Match>
         <Match when={props.store.state() === 'gitTooOld'}>
           <StatusCard
             tone="warning"
-            title="git is too old"
-            description={`Found ${props.store.gitVersion() ?? 'an unknown version'} — the panel needs git 2.25 or newer.`}
+            title={t('git.tooOld.title', 'git is too old')}
+            description={`${t('git.tooOld.descHead', 'Found')} ${props.store.gitVersion() ?? 'an unknown version'} ${t('git.tooOld.descTail', '— the panel needs git 2.25 or newer.')}`}
           />
         </Match>
         <Match when={props.store.state() === 'ready' || props.store.state() === 'tooManyChanges'}>
@@ -697,8 +717,8 @@ export function GitPanel(props: GitPanelProps) {
                   <IconButton
                     size="xs"
                     data-testid="git-copy-branch"
-                    ariaLabel="Copy branch name"
-                    title="Copy branch name"
+                    ariaLabel={t('git.branch.copy.aria', 'Copy branch name')}
+                    title={t('git.branch.copy.title', 'Copy branch name')}
                     onClick={copyBranch}
                   >
                     <CopyIcon />
@@ -723,8 +743,8 @@ export function GitPanel(props: GitPanelProps) {
                     <IconButton
                       size="xs"
                       data-testid="git-open-branch"
-                      ariaLabel="Open branch on its hosting"
-                      title="Open branch on its hosting"
+                      ariaLabel={t('git.branch.open.title', 'Open branch on its hosting')}
+                      title={t('git.branch.open.title', 'Open branch on its hosting')}
                       onClick={openBranch}
                     >
                       <ExternalLinkIcon />
@@ -733,7 +753,7 @@ export function GitPanel(props: GitPanelProps) {
                 </div>
               </Show>
               <span class="git-header__count" data-testid="git-changed-count">
-                {status()!.total} changed
+                {`${status()!.total} ${t('git.changed.word', 'changed')}`}
               </span>
             </div>
           </Show>
@@ -747,13 +767,13 @@ export function GitPanel(props: GitPanelProps) {
           {/* ── A failed poll/mutation status read: stale, never fresh. ── */}
           <Show when={props.store.statusStale()}>
             <div class="git-stale" data-testid="git-status-stale">
-              <span>Status may be stale — the last refresh failed.</span>
+              <span>{t('git.stale', 'Status may be stale — the last refresh failed.')}</span>
               <Button
                 size="sm"
                 data-testid="git-stale-refresh"
                 onClick={() => props.store.refresh()}
               >
-                Refresh
+                {t('git.refresh', 'Refresh')}
               </Button>
             </div>
           </Show>
@@ -769,26 +789,28 @@ export function GitPanel(props: GitPanelProps) {
             <Button
               data-testid="git-stage-all"
               size="sm"
-              title="Stage all changes"
+              title={t('git.stageAll.title', 'Stage all changes')}
               disabled={mutationBusy() || props.store.conflictsPresent()}
               onClick={() => props.store.stageAll()}
             >
-              Stage all
+              {t('git.stageAll', 'Stage all')}
             </Button>
             <Button
               data-testid="git-unstage-all"
               size="sm"
-              title="Unstage all changes"
+              title={t('git.unstageAll.title', 'Unstage all changes')}
               disabled={mutationBusy() || props.store.conflictsPresent()}
               onClick={() => props.store.unstageAll()}
             >
-              Unstage all
+              {t('git.unstageAll', 'Unstage all')}
             </Button>
           </div>
           <Show when={props.store.conflictsPresent()}>
             <p class="git-conflict-refusal" data-testid="git-conflict-refusal">
-              Unresolved merge conflicts — stage-all and unstage-all are disabled until the conflict
-              is resolved.
+              {t(
+                'git.conflicts.warn',
+                'Unresolved merge conflicts — stage-all and unstage-all are disabled until the conflict is resolved.',
+              )}
             </p>
           </Show>
           {/* THE FILTER IS NOT HERE. It stood exactly at this point, above
@@ -804,7 +826,7 @@ export function GitPanel(props: GitPanelProps) {
                them (nocx-nak2). */}
           {/* ── The two lists ─────────────────────────────────────────── */}
           <Section
-            title={`Staged (${filteredStaged().length})`}
+            title={t('git.staged.head', 'Staged (') + filteredStaged().length + ')'}
             dense
             collapsible
             open={props.store.sectionOpen('staged')}
@@ -813,13 +835,16 @@ export function GitPanel(props: GitPanelProps) {
             <Show when={stagedEmptyState()}>
               {/* A filter that matches nothing is a state, never a blank:
                   the section says so, and offers the one recovery. */}
-              <EmptyState title="No staged files match" action={clearFilterAction()} />
+              <EmptyState
+                title={t('git.staged.nomatch', 'No staged files match')}
+                action={clearFilterAction()}
+              />
             </Show>
             <Show when={!stagedEmptyState()}>
               <div
                 class="git-list"
                 role="list"
-                aria-label="Staged changes"
+                aria-label={t('git.staged.aria', 'Staged changes')}
                 data-testid="git-staged-list"
               >
                 <For each={filteredStaged()}>{(row) => renderRow(row)}</For>
@@ -827,20 +852,23 @@ export function GitPanel(props: GitPanelProps) {
             </Show>
           </Section>
           <Section
-            title={`Unstaged (${filteredUnstaged().length})`}
+            title={t('git.unstaged.head', 'Unstaged (') + filteredUnstaged().length + ')'}
             dense
             collapsible
             open={props.store.sectionOpen('unstaged')}
             onToggle={() => props.store.toggleSection('unstaged')}
           >
             <Show when={unstagedEmptyState()}>
-              <EmptyState title="No unstaged files match" action={clearFilterAction()} />
+              <EmptyState
+                title={t('git.unstaged.nomatch', 'No unstaged files match')}
+                action={clearFilterAction()}
+              />
             </Show>
             <Show when={!unstagedEmptyState()}>
               <div
                 class="git-list"
                 role="list"
-                aria-label="Unstaged changes"
+                aria-label={t('git.unstaged.aria', 'Unstaged changes')}
                 data-testid="git-unstaged-list"
               >
                 <For each={filteredUnstaged()}>{(row) => renderRow(row)}</For>
@@ -852,15 +880,21 @@ export function GitPanel(props: GitPanelProps) {
                 hides its rows — a conflict is a state that must stay in
                 sight (nocx-nak2) — while the filter still applies to it
                 like any other list. */}
-            <Section title={`Conflicted (${filteredConflicted().length})`} dense>
+            <Section
+              title={t('git.conflicted.head', 'Conflicted (') + filteredConflicted().length + ')'}
+              dense
+            >
               <Show when={conflictedEmptyState()}>
-                <EmptyState title="No conflicted files match" action={clearFilterAction()} />
+                <EmptyState
+                  title={t('git.conflicted.nomatch', 'No conflicted files match')}
+                  action={clearFilterAction()}
+                />
               </Show>
               <Show when={!conflictedEmptyState()}>
                 <div
                   class="git-list"
                   role="list"
-                  aria-label="Conflicted files"
+                  aria-label={t('git.conflicted.aria', 'Conflicted files')}
                   data-testid="git-conflicted-list"
                 >
                   <For each={filteredConflicted()}>{(row) => renderRow(row)}</For>
@@ -869,7 +903,7 @@ export function GitPanel(props: GitPanelProps) {
             </Section>
           </Show>
           {/* ── The commit form (design §5.4, D11, D6) ─────────────────── */}
-          <Section title="Commit" dense>
+          <Section title={t('git.commit.title', 'Commit')} dense>
             {/* The form is a form, not a list. `dense` gives Section's Stack
                 `gap: 0`, which is right for rows that carry their own padding
                 and wrong for a column of fields, a checkbox, a warning and a
@@ -878,27 +912,27 @@ export function GitPanel(props: GitPanelProps) {
             <div class="git-commit-form">
               <TextField
                 id="git-commit-subject"
-                label="Subject"
-                placeholder="Commit subject"
+                label={t('git.commit.subject', 'Subject')}
+                placeholder={t('git.commit.subjectPh', 'Commit subject')}
                 value={props.store.commitSubject()}
                 onInput={(v) => props.store.setCommitSubject(v)}
               />
               <TextField
                 id="git-commit-body"
-                label="Body"
+                label={t('git.commit.body', 'Body')}
                 multiline
-                placeholder="Commit body"
+                placeholder={t('git.commit.bodyPh', 'Commit body')}
                 value={props.store.commitBody()}
                 onInput={(v) => props.store.setCommitBody(v)}
               />
               <Checkbox
                 checked={props.store.amend()}
                 onChange={() => props.store.toggleAmend()}
-                label="Amend last commit"
+                label={t('git.commit.amend', 'Amend last commit')}
               />
               <Show when={props.store.envState() === 'degraded'}>
                 <div class="git-env-warning" data-testid="git-env-degraded">
-                  Hooks will run in a degraded environment:{' '}
+                  {t('git.commit.hooksWarnHead', 'Hooks will run in a degraded environment:')}{' '}
                   {props.store.envReason() ?? 'the shell environment could not be resolved'}
                 </div>
               </Show>
@@ -908,7 +942,9 @@ export function GitPanel(props: GitPanelProps) {
                 <div class="git-commit-output" data-testid="git-commit-output">
                   <pre>{props.store.commitOutput()!.output}</pre>
                   <Show when={props.store.commitOutput()!.truncated}>
-                    <span data-testid="git-commit-output-truncated">(output truncated)</span>
+                    <span data-testid="git-commit-output-truncated">
+                      {t('git.commit.truncated', '(output truncated)')}
+                    </span>
                   </Show>
                 </div>
               </Show>
@@ -918,7 +954,7 @@ export function GitPanel(props: GitPanelProps) {
                 disabled={commitDisabled()}
                 onClick={() => props.store.commit()}
               >
-                Commit
+                {t('git.commit.button', 'Commit')}
               </Button>
             </div>
           </Section>
@@ -928,27 +964,34 @@ export function GitPanel(props: GitPanelProps) {
                leaving the panel. Read when the panel opens, on refresh and
                after a commit — never on the poll (D13). ─────────────── */}
           <Section
-            title="Commits"
+            title={t('git.log.title', 'Commits')}
             dense
             collapsible
             open={props.store.sectionOpen('commits')}
             onToggle={() => props.store.toggleSection('commits')}
           >
-            <div class="git-log" role="list" aria-label="Recent commits" data-testid="git-log">
+            <div
+              class="git-log"
+              role="list"
+              aria-label={t('git.log.aria', 'Recent commits')}
+              data-testid="git-log"
+            >
               <Show when={props.store.logState() === 'loading'}>
                 <p class="git-log__state" data-testid="git-log-loading">
-                  Loading commits…
+                  {t('git.log.loading', 'Loading commits…')}
                 </p>
               </Show>
               <Show when={props.store.logState() === 'failed' && props.store.logError() !== null}>
                 <div class="git-log__state" data-testid="git-log-failed">
-                  <span>Couldn't load commits — {props.store.logError()}</span>
+                  <span>
+                    {`${t('git.log.failedHead', "Couldn't load commits —")} ${props.store.logError()}`}
+                  </span>
                   <Button
                     size="sm"
                     data-testid="git-log-retry"
                     onClick={() => props.store.refresh()}
                   >
-                    Retry
+                    {t('git.retry', 'Retry')}
                   </Button>
                 </div>
               </Show>
@@ -965,7 +1008,7 @@ export function GitPanel(props: GitPanelProps) {
                 }
               >
                 <p class="git-log__state" data-testid="git-log-empty">
-                  No commits yet
+                  {t('git.log.empty', 'No commits yet')}
                 </p>
               </Show>
               <For each={props.store.log()?.entries ?? []}>{(entry) => renderCommit(entry)}</For>

@@ -60,6 +60,7 @@ import {
   isSettingModified,
   monotonicRevisionPolicy,
   numberRangeCaption,
+  numberRangeCaptionResolved,
   numberRangeError,
   textLengthCaption,
   textLengthError,
@@ -531,12 +532,32 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return result
   })
 
+  /** Section title → its minted translation key (settings.describe ships it
+   * on every declaration of the section; the first declaration wins — the
+   * registry guarantees they agree, the key is a pure function of the
+   * title). */
+  const sectionKeys = createMemo(() => {
+    const m = new Map<string, string>()
+    for (const d of declarations()) {
+      if (d.sectionKey !== undefined && !m.has(d.section)) m.set(d.section, d.sectionKey)
+    }
+    return m
+  })
+
+  /** The section's display title: its Russian entry under ru, the English
+   * section name otherwise. */
+  const sectionTitle = (s: string): string => {
+    const key = sectionKeys().get(s)
+    return key !== undefined ? t(key, s) : s
+  }
+
   /** The typed page registry — generated sections + component pages. */
   const settingsPages = createMemo<SettingsPage[]>(() => {
     const generated: SettingsPage[] = sections().map((s) => ({
       kind: 'generated' as const,
       id: s,
       title: s,
+      titleKey: sectionKeys().get(s),
       groupId: sectionGroups()[s],
     }))
     const backupPage: SettingsPage = {
@@ -941,7 +962,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const railItems = createMemo<GroupedRailItem[]>(() =>
     settingsPages().map((page) => ({
       id: page.id,
-      title: page.title,
+      title:
+        page.kind === 'generated' && page.titleKey
+          ? t(page.titleKey, page.title)
+          : page.title,
       groupId: page.groupId,
       // Accessors, not values: the row objects stay stable across navigation
       // and the rail updates them in place (Solid fine-grained updates).
@@ -1702,7 +1726,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 min={decl.min}
                 max={decl.max}
                 unit={decl.unit}
-                caption={numberRangeCaption(decl, numeric())}
+                caption={numberRangeCaptionResolved(decl, numeric(), t)}
                 captionAlign="end"
                 error={numberRangeError(decl, numeric())}
                 onInput={(v) => {
@@ -1831,7 +1855,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 {(section) => (
                   <PageSection
                     id={'st-section-' + encodeURIComponent(section())}
-                    title={section()}
+                    title={sectionTitle(section())}
                     divided
                   >
                     <For each={declarations().filter((d) => d.section === section())}>
@@ -1890,7 +1914,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
                 return (
                   <PageSection
                     id={'st-section-' + encodeURIComponent(section)}
-                    title={section}
+                    title={sectionTitle(section)}
                     divided
                   >
                     {/* The prompt artifact is generated from the Go renderer and

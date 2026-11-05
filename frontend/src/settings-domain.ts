@@ -46,6 +46,21 @@ export function numberRangeCaption(decl: Declaration, value?: number): string | 
   return undefined
 }
 
+/** The sentinel-0 caption resolved for the active locale. The plain caption
+ * above stays framework-neutral (this domain module imports no Solid, and
+ * t() reads a signal); the surface calls this one where the caption renders,
+ * and the range suffixes need no translation — they are numbers and units. */
+export function numberRangeCaptionResolved(
+  decl: Declaration,
+  value?: number,
+  resolve: (key: string, english: string) => string = (_key, english) => english,
+): string | undefined {
+  if (value === 0 && decl.zeroLabel !== undefined && decl.zeroLabelKey !== undefined) {
+    return resolve(decl.zeroLabelKey, decl.zeroLabel)
+  }
+  return numberRangeCaption(decl, value)
+}
+
 /** The out-of-range error for a numeric value, derived from the declaration's
  *  Min/Max. Returns undefined when the value is inside the bounds. */
 export function numberRangeError(decl: Declaration, value: number): string | undefined {

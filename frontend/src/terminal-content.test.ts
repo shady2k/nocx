@@ -88,7 +88,13 @@ import { fixedEndpoint } from './endpoint'
 import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import type { SessionIntentResult } from './generated/session.intent'
 import type { SessionSignal } from './generated/session.signal'
-import { blockOutputText, createCommandBlock, type RunningBlockActions } from './scrollback/blocks'
+import {
+  blockOutputText,
+  createCommandBlock,
+  type BlockRecord,
+  type RunningBlockActions,
+} from './scrollback/blocks'
+import { storedBlockRowsForSelection } from './scrollback/block-rows'
 import type { AgentRunCompletion } from './run-command'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
@@ -5281,8 +5287,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
       client,
     )
     const handler = factHandler(client)
-    let outputObserver: MutationObserver | null = null
-    const outputMutations: MutationRecord[] = []
     try {
       content.setVisible(true)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -5311,8 +5315,6 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const block = scrollbackFor(content).blockManager.blockForAttempt('att-1')
       expect(block).toBeDefined()
       if (!block) throw new Error('running attempt did not open its command block')
-      outputObserver = new MutationObserver((records) => outputMutations.push(...records))
-      outputObserver.observe(block.el, { childList: true })
       grew?.({ entryId: 'att-1', from: 0, count: 1 })
       await vi.waitFor(() => expect(artifactReads).toBe(1))
 
@@ -5329,22 +5331,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       await vi.waitFor(() => expect(blockOutputText(block.el)).toBe('latest rows'))
       expect(entryReads).toBe(2)
       expect(artifactReads).toBe(2)
-      // paintStoredRows replaces the whole .cmd-output node once per paint;
-      // count those real subtree replacements, not a timer or a helper call.
-      if (!outputObserver) throw new Error('output mutation observer was not installed')
-      const outputPaints = [...outputMutations, ...outputObserver.takeRecords()].reduce(
-        (count, mutation) =>
-          count +
-          Array.from(mutation.addedNodes).filter(
-            (node) =>
-              node.nodeType === Node.ELEMENT_NODE &&
-              (node as HTMLElement).classList.contains('cmd-output'),
-          ).length,
-        0,
-      )
-      expect(outputPaints).toBe(2)
     } finally {
-      outputObserver?.disconnect()
       teardown()
     }
   })
@@ -5634,104 +5621,114 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
-  it("fetches a frozen block's stored rows itself when it froze before any block.grew/closed notification named it, and reports the real output (nocx-2v80t.3.19)", async () => {
-    // The render fence that drives a freeze is a local, data-plane read; the
-    // block.grew/block.closed notification that would otherwise start the
-    // rows fetch crosses the control-plane socket, with no ordering promised
-    // between the two. This drives the freeze with NEITHER notification ever
-    // dispatched, so `_ensureBlockRows` has nothing to wait on and must start
-    // the fetch itself — the run tool's result is the one place this
-    // reaches: an unmarked `.cmd-output` still had `blockOutputText` fall
-    // back to an empty read, so the model saw no output at all far more
-    // often than not.
-    const client = makeClient()
-    client.call.mockImplementation((method: string) => {
-      if (method === 'ledger.get') {
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+  it.each([false, true])(
+    "fetches a frozen block's stored rows and reports the real output with hidden pane %s (nocx-2v80t.3.19)",
+    async (hidden) => {
+      // The render fence that drives a freeze is a local, data-plane read; the
+      // block.grew/block.closed notification that would otherwise start the
+      // rows fetch crosses the control-plane socket, with no ordering promised
+      // between the two. This drives the freeze with NEITHER notification ever
+      // dispatched, so `_ensureBlockRows` has nothing to wait on and must start
+      // the fetch itself — the run tool's result is the one place this
+      // reaches: an unmarked `.cmd-output` still had `blockOutputText` fall
+      // back to an empty read, so the model saw no output at all far more
+      // often than not.
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'art-rows', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          const line = JSON.stringify({
+            from: 0,
+            row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
+          })
+          return Promise.resolve({
+            id: 'art-rows',
+            mediaType: 'application/x-nocx-rows',
+            body: `${line}\n`,
+            truncated: null,
+            byteLen: line.length,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const handler = factHandler(client)
+      /* eslint-disable @typescript-eslint/unbound-method */
+      const protoScrollTo = Element.prototype.scrollTo
+      const protoScrollIntoView = Element.prototype.scrollIntoView
+      /* eslint-enable @typescript-eslint/unbound-method */
+      Element.prototype.scrollTo = () => {}
+      Element.prototype.scrollIntoView = () => {}
+      try {
+        content.setVisible(true)
+        handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+        const pending = content.submitAgentCommand('printf the-real-output')
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'open',
+            origin: 'app',
+            submitId: submitToken(client),
+            command: 'printf the-real-output',
+          },
         })
+        if (hidden) content.setVisible(false)
+        handler({
+          lane: 'lane-1',
+          lifecycle: 'running',
+          domain: 'd1',
+          epoch: 1,
+          attempt: {
+            id: 'att-1',
+            state: 'completed',
+            exitCode: 0,
+            fence: 'a'.repeat(64),
+            completedAt: '2026-08-08T12:00:02Z',
+          },
+        })
+        historyRecordedHandler(client)({
+          sessionId: client._sessions[0].sessionId,
+          attemptId: 'att-1',
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          source: 'assistant',
+          redactions: [],
+          maskedCommand: 'printf the-real-output',
+          captures: [],
+        })
+        // The fence — nothing else — settles the visual boundary; no
+        // block.grew or block.closed notification is ever dispatched here.
+        blockClosedHandler(client)('att-1')
+        const run = await pending
+        expect(run.text).toBe('the real output')
+        if (hidden) {
+          const rec = scrollbackFor(content).blockManager.blockForAttempt('att-1')!
+          expect(rec.el.querySelector('.cmd-output')).toBeNull()
+          content.setVisible(true)
+          expect(blockOutputText(rec.el)).toBe('the real output')
+        }
+      } finally {
+        Element.prototype.scrollTo = protoScrollTo
+        Element.prototype.scrollIntoView = protoScrollIntoView
+        teardown()
       }
-      if (method === 'ledger.artifact') {
-        const line = JSON.stringify({
-          from: 0,
-          row: wireRowOf(Array.from('the real output', (ch) => [ch, 1, true] as CellSpec)),
-        })
-        return Promise.resolve({
-          id: 'art-rows',
-          mediaType: 'application/x-nocx-rows',
-          body: `${line}\n`,
-          truncated: null,
-          byteLen: line.length,
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const handler = factHandler(client)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      const pending = content.submitAgentCommand('printf the-real-output')
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'open',
-          origin: 'app',
-          submitId: submitToken(client),
-          command: 'printf the-real-output',
-        },
-      })
-      handler({
-        lane: 'lane-1',
-        lifecycle: 'running',
-        domain: 'd1',
-        epoch: 1,
-        attempt: {
-          id: 'att-1',
-          state: 'completed',
-          exitCode: 0,
-          fence: 'a'.repeat(64),
-          completedAt: '2026-08-08T12:00:02Z',
-        },
-      })
-      historyRecordedHandler(client)({
-        sessionId: client._sessions[0].sessionId,
-        attemptId: 'att-1',
-        maskedCount: 0,
-        maskedKinds: [],
-        entryId: 'e1',
-        source: 'assistant',
-        redactions: [],
-        maskedCommand: 'printf the-real-output',
-        captures: [],
-      })
-      // The fence — nothing else — settles the visual boundary; no
-      // block.grew or block.closed notification is ever dispatched here.
-      blockClosedHandler(client)('att-1')
-      const run = await pending
-      expect(run.text).toBe('the real output')
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-      teardown()
-    }
-  })
+    },
+  )
 
   // ── the block closes on the backend's block.closed, and on nothing else ──
   // (nocx-2v80t.3.27, ADR-0066). The renderer's own fence sighting used to
@@ -10778,6 +10775,78 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
 // Visibility gates live painting, never acceptance or correlated processing.
 describe('TerminalContent visibility preserves the accepted painter frame', () => {
+  it.each([false, true])(
+    'applies initial visibility %s to retained rows and resumes unfocused with the latest model',
+    async (visibleBeforeMount) => {
+      let text = 'first'
+      const client = makeClient()
+      client.call.mockImplementation((method: string) => {
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry: {},
+            edges: [],
+            artifacts: [{ id: 'retained-artifact', mediaType: 'application/x-nocx-rows' }],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          const body = `${JSON.stringify({
+            from: 0,
+            row: wireRowOf(Array.from(text, (char) => [char, 1, true] as CellSpec)),
+          })}\n`
+          return Promise.resolve({
+            id: 'retained-artifact',
+            mediaType: 'application/x-nocx-rows',
+            body,
+            byteLen: body.length,
+            truncated: null,
+          })
+        }
+        return Promise.reject(new Error('no store wired (fake)'))
+      })
+      const { content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true, visibleBeforeMount },
+        client,
+      )
+      const sb = scrollbackFor(content)
+      const refresh = content as unknown as {
+        _refreshBlockRows(entryId: string, final?: boolean): Promise<void>
+        _ensureBlockRows(entryId: string, rec: BlockRecord): Promise<void>
+      }
+      const other = document.createElement('button')
+      document.body.append(other)
+      try {
+        const rec = sb.blockManager.startBlock('produce', '~', 0)
+        sb.blockManager.bindAttempt('retained-entry')
+        const settle = vi.spyOn(sb, 'settleAround')
+        await refresh._refreshBlockRows('retained-entry')
+        expect(rec.storedRows?.lines).toHaveLength(1)
+        expect(blockOutputText(rec.el)).toBe(visibleBeforeMount ? 'first' : '')
+        if (!visibleBeforeMount) expect(settle).not.toHaveBeenCalled()
+        content.setVisible(false)
+        settle.mockClear()
+        text = 'latest'
+        await refresh._refreshBlockRows('retained-entry', true)
+        await refresh._ensureBlockRows('retained-entry', rec)
+        expect(rec.storedRows?.lines[0].row).toEqual(
+          wireRowOf(Array.from('latest', (char) => [char, 1, true] as CellSpec)),
+        )
+        expect(blockOutputText(rec.el)).toBe(visibleBeforeMount ? 'first' : '')
+        expect(settle).not.toHaveBeenCalled()
+        other.focus()
+        content.setVisible(true)
+        expect(document.activeElement).toBe(other)
+        expect(blockOutputText(rec.el)).toBe('latest')
+        text = 'visible unfocused'
+        await refresh._refreshBlockRows('retained-entry')
+        expect(blockOutputText(rec.el)).toBe('visible unfocused')
+      } finally {
+        other.remove()
+        teardown()
+      }
+    },
+  )
+
   async function controlledPaintPane() {
     const cwd = vi.fn()
     const mounted = await mountTerminal(makeClipboard(), {
@@ -10805,11 +10874,14 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
     const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
       queued.delete(id)
     })
+    const frame = (): void => {
+      const callbacks = [...queued.values()]
+      queued.clear()
+      for (const cb of callbacks) cb(0)
+    }
     const flush = (): void => {
       for (let pass = 0; queued.size > 0 && pass < 50; pass++) {
-        const callbacks = [...queued.values()]
-        queued.clear()
-        for (const cb of callbacks) cb(0)
+        frame()
       }
       expect(queued.size).toBe(0)
     }
@@ -10823,6 +10895,7 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
       settled,
       cwd,
       cancel,
+      frame,
       flush,
       teardown: () => {
         mounted.teardown()
@@ -10831,6 +10904,58 @@ describe('TerminalContent visibility preserves the accepted painter frame', () =
       },
     }
   }
+
+  it('defers font measurement and retained-row refresh while hidden and catches up on show', async () => {
+    const p = await controlledPaintPane()
+    const sb = scrollbackFor(p.content)
+    const previousTheme = getCurrentTheme()
+    try {
+      // Both palette colors exceed the painter's 3:1 floor on black, so
+      // contrast correction cannot obscure whether the new palette painted.
+      setCurrentTheme({ ...previousTheme, background: '#000000', red: '#ff0000' })
+      p.content.setVisible(true)
+      // Supply the published cell pitch so the real font-refresh path has a
+      // measurable metric rather than taking its unmeasured-surface fallback.
+      sb.scrollbackInner.style.setProperty('--term-cell-width', '10px')
+      const rec = sb.blockManager.startBlock('font output', '~', 0)
+      sb.blockManager.bindAttempt('font-entry')
+      sb.blockManager.applyStoredRows('font-entry', {
+        artifactVersion: 'font-artifact-v1',
+        lines: [{ from: 0, row: { text: 'x', runs: [[[2, 0, 0, 0, 0], 1]] } }],
+        droppedRows: 0,
+        lostRows: 0,
+        truncated: null,
+      })
+      // A running block deliberately keeps the controller's painted-position
+      // watcher alive. Advance a frame, not that unrelated perpetual queue.
+      p.frame()
+      const before = rec.el.querySelector('.term-grid-row')
+      const inkBefore = before?.querySelector('span')?.style.color
+      expect(inkBefore).toBeTruthy()
+      expect(storedBlockRowsForSelection(rec.el, 'font-artifact-v1')).toBe(rec.storedRows)
+      const metrics = vi.spyOn(sb, 'cellMetricsChanged')
+      p.content.setVisible(false)
+      setCurrentTheme({ ...previousTheme, background: '#000000', red: '#00ff00' })
+      const root = document.createElement('div')
+      root.dataset.terminalFont = 'nordwand-mono'
+      await applyTerminalFont('default', root)
+      p.frame()
+      expect(metrics).not.toHaveBeenCalled()
+      expect(rec.el.querySelector('.term-grid-row')).toBe(before)
+      expect(before?.querySelector('span')?.style.color).toBe(inkBefore)
+      p.content.setVisible(true)
+      p.frame()
+      expect(metrics).toHaveBeenCalledOnce()
+      expect(blockOutputText(rec.el)).toBe('x')
+      expect(rec.el.querySelector<HTMLElement>('.term-grid-row span')?.style.color).toBe(
+        'rgb(0, 255, 0)',
+      )
+      expect(storedBlockRowsForSelection(rec.el, 'font-artifact-v1')).toBe(rec.storedRows)
+    } finally {
+      p.teardown()
+      setCurrentTheme(previousTheme)
+    }
+  })
 
   it('cancels a pending paint on hide and paints only the latest hidden state on show', async () => {
     const p = await controlledPaintPane()

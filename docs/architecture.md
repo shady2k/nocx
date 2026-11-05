@@ -98,12 +98,20 @@ composition, preserving the bridge's no-child-process boundary
 
 **Frontend**:
 
-The live painter follows pane visibility, not keyboard focus (`nocx-4y8mb`).
-Hidden terminal panes continue accepting frames and processing correlated effects,
+Live and retained-output painters follow pane visibility, not keyboard focus
+(`nocx-4y8mb`, `nocx-aqrem`). Hidden terminal panes continue accepting frames and
+stored-row artifacts, advancing cursors, and processing correlated effects,
 title/cwd, selection invalidation, buffer transitions and history/reflow bookkeeping.
-Only the live painter pass is deferred: hiding cancels its pending animation callback,
-and showing schedules the latest accepted snapshot. Theme and font repaint requests
-use the same visibility gate; visible unfocused splits still paint.
+Command completion reads accepted stored rows, independently of their presentation.
+Hiding cancels the live painter's pending animation callback; retained rows, notices,
+and font measurement/repaint wait until the pane is shown. Showing paints the latest
+accepted state. Visible unfocused splits still paint.
+
+Retained output reconciles rows by ledger position and compact contents, preserving
+unchanged row DOM and invalidating painted rows when geometry or palette changes.
+Output and notices are inserted before the stationary live region: appending output
+must not move the focused input or manufacture blur/focus intents (`nocx-nxww4`).
+Actual focus changes and live-region ownership changes retain their existing behavior.
 
 | Module     | SRP responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

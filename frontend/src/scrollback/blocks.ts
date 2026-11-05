@@ -2083,8 +2083,15 @@ export class BlockManager {
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: (rec: BlockRecord) => void
   private _paintStoredRows?: (block: HTMLElement, rows: StoredBlockRows) => void
+  private _visible = true
+  /** Hidden paints belong to their DOM owner, not a second block registry.
+   *  Removed/replaced owners can be collected without draining a strong queue. */
+  private _deferredStoredPaint = new WeakMap<
+    HTMLElement,
+    { rows?: StoredBlockRows; unreadable?: boolean }
+  >()
   private _pendingStoredRows = new Map<string, StoredBlockRows>()
-  /** The highest row cursor `applyStoredRows` has painted per entry — the
+  /** The highest row cursor `applyStoredRows` has accepted per entry — the
    *  last stored line's `from` (block.grew.schema.json: absolute row index,
    *  strictly increasing across deliveries, and never lower after a close,
    *  which appends the closing rows before sealing). terminal-content.ts
@@ -2182,6 +2189,13 @@ export class BlockManager {
     this._scrollbackInner.insertBefore(el, before)
     this._owned.add(el)
     this._refreshFirstEntry()
+    // A restore can cross a visibility change before its elements are owned.
+    if (this._visible) {
+      this._flushStoredPaint(el)
+      for (const block of el.querySelectorAll<HTMLElement>('.cmd-block')) {
+        this._flushStoredPaint(block)
+      }
+    }
   }
 
   /** Keep exactly one top-level entry marked as the transcript's FIRST
@@ -2307,15 +2321,14 @@ export class BlockManager {
     if (heldFocus && document.activeElement !== focused) focused.focus({ preventScroll: true })
   }
 
-  /** The body's order is header, the rows the record holds, then the live
-   *  region — and `paintStoredRows` REPLACES `.cmd-output` on every growth, so
-   *  each paint appends it after the region and the order has to be restored
-   *  here. One rule, one place: the manager paints and the manager holds the
-   *  region's seat. */
+  /** Output and notices may be appended after the live region. Move those
+   *  siblings ahead of it, never the region itself: removing its focused
+   *  textarea would emit blur/focus intents even if focus is restored. */
   private _keepLiveBodyLast(block: HTMLElement): void {
     if (this._liveContainer.parentElement !== block) return
-    if (block.lastElementChild === this._liveContainer) return
-    this._moveLive(block, null)
+    while (this._liveContainer.nextSibling) {
+      block.insertBefore(this._liveContainer.nextSibling, this._liveContainer)
+    }
   }
 
   /** The last element belonging to `el`: its live output when the live
@@ -2600,8 +2613,7 @@ export class BlockManager {
       if (pending) {
         this._runningBlock.storedRows = pending
         this._pendingStoredRows.delete(attemptId)
-        this._paintStoredRows?.(this._runningBlock.el, pending)
-        this._keepLiveBodyLast(this._runningBlock.el)
+        this.paintStoredRows(this._runningBlock.el, pending)
       }
     }
   }
@@ -2736,6 +2748,43 @@ export class BlockManager {
     return this._blocks.find((b) => b.attemptId === attemptId) ?? null
   }
 
+  /** Pane visibility, independent of which visible split holds the keyboard. */
+  setVisible(visible: boolean): void {
+    if (this._visible === visible) return
+    this._visible = visible
+    if (!visible) return
+    for (const owned of this._owned) {
+      this._flushStoredPaint(owned)
+      for (const block of owned.querySelectorAll<HTMLElement>('.cmd-block')) {
+        this._flushStoredPaint(block)
+      }
+    }
+  }
+
+  private _flushStoredPaint(block: HTMLElement): void {
+    const pending = this._deferredStoredPaint.get(block)
+    if (!pending) return
+    this._deferredStoredPaint.delete(block)
+    if (pending.rows) this.paintStoredRows(block, pending.rows)
+    if (pending.unreadable) {
+      paintUnreadableRows(block)
+      this._keepLiveBodyLast(block)
+    }
+  }
+
+  /** The stored-row paint door for both live records and restored elements.
+   *  Model acceptance precedes this call; hidden panes retain only its latest
+   *  presentation until the same owner is shown. */
+  paintStoredRows(block: HTMLElement, rows: StoredBlockRows): void {
+    if (!this._visible) {
+      this._deferredStoredPaint.set(block, { rows })
+      return
+    }
+    this._deferredStoredPaint.delete(block)
+    this._paintStoredRows?.(block, rows)
+    this._keepLiveBodyLast(block)
+  }
+
   /** Apply the latest durable rows to the matching block — unless a
    *  response already applied (or pending) covers MORE of the stream, in
    *  which case this one arrived late and is dropped. */
@@ -2760,8 +2809,7 @@ export class BlockManager {
     }
     rec.storedRows = rows
     rec.rowsUnreadable = undefined
-    this._paintStoredRows?.(rec.el, rows)
-    this._keepLiveBodyLast(rec.el)
+    this.paintStoredRows(rec.el, rows)
   }
 
   /** The latest read of an entry's stored rows FAILED (nocx-2v80t.3.27):
@@ -2773,7 +2821,13 @@ export class BlockManager {
     const rec = this.blockForAttempt(entryId)
     if (!rec) return
     rec.rowsUnreadable = reason
+    if (!this._visible) {
+      const pending = this._deferredStoredPaint.get(rec.el)
+      this._deferredStoredPaint.set(rec.el, { ...pending, unreadable: true })
+      return
+    }
     paintUnreadableRows(rec.el)
+    this._keepLiveBodyLast(rec.el)
   }
 
   /**
@@ -3113,9 +3167,11 @@ export class BlockManager {
     )
 
     this._reown(rec.el, newEl)
-    if (rec.storedRows) this._paintStoredRows?.(newEl, rec.storedRows)
-    if (rec.rowsUnreadable !== undefined) paintUnreadableRows(newEl)
     rec.el = newEl
+    if (rec.storedRows) this.paintStoredRows(newEl, rec.storedRows)
+    if (rec.rowsUnreadable !== undefined && rec.attemptId) {
+      this.markRowsUnreadable(rec.attemptId, rec.rowsUnreadable)
+    }
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
     // shot, cleared before it runs so a callback that re-enters cannot loop.
@@ -3626,6 +3682,7 @@ export class BlockManager {
     this._pendingStoredRows.clear()
     this._pendingOutputAnchors.clear()
     this._storedRowsCursor.clear()
+    this._deferredStoredPaint = new WeakMap()
     this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
